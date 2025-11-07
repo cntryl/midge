@@ -1,0 +1,15 @@
+name: Bench
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: rust-bench-runner
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Bench
+        run: cargo bench
