@@ -459,6 +459,82 @@ impl Drop for Transaction {
 // Re-export common types so downstream code can `use midge::Transaction;`
 pub use Transaction as Tx;
 
+/// Transaction wrapper that provides read access via engine reference.
+/// Used internally when transactions are created through the KvStore trait.
+pub(crate) struct EngineTransaction {
+    txn: Transaction,
+    engine: std::sync::Arc<crate::core::engine::MidgeEngine>,
+}
+
+impl EngineTransaction {
+    pub(crate) fn new(txn: Transaction, engine: std::sync::Arc<crate::core::engine::MidgeEngine>) -> Self {
+        Self { txn, engine }
+    }
+
+    pub(crate) fn into_inner(self) -> Transaction {
+        self.txn
+    }
+}
+
+// Implement the public KvTransaction trait for EngineTransaction
+impl super::kv_store::KvTransaction for EngineTransaction {
+    fn put(&mut self, key: Bytes, value: Bytes) -> crate::MidgeResult<()> {
+        self.txn.put(key, value, None)
+    }
+
+    fn get(&mut self, key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
+        self.engine.transaction_get(&mut self.txn, key)
+    }
+
+    fn delete(&mut self, key: Bytes) -> crate::MidgeResult<()> {
+        self.txn.delete(key)
+    }
+
+    fn scan(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<Vec<(Bytes, Bytes)>> {
+        // Use engine's scan with transaction's snapshot
+        let q = crate::api::query::Query::new()
+            .start_key(Bytes::copy_from_slice(start))
+            .end_key(Bytes::copy_from_slice(end));
+        
+        // TODO: Implement transaction-aware scan in engine
+        // For now, use regular scan which may not respect transaction isolation
+        self.engine.scan(q)
+    }
+
+    fn delete_range(&mut self, start: Bytes, end: Bytes) -> crate::MidgeResult<()> {
+        self.txn.delete_range(start, end)
+    }
+}
+
+// Implement the public KvTransaction trait for the crate Transaction so that the
+// crate-local Transaction can be used wherever the generic KvTransaction trait
+// is expected by external integrations (though reads won't work without engine reference).
+impl super::kv_store::KvTransaction for Transaction {
+    fn put(&mut self, key: Bytes, value: Bytes) -> crate::MidgeResult<()> {
+        Transaction::put(self, key, value, None)
+    }
+
+    fn get(&mut self, _key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
+        Err(crate::MidgeError::internal(
+            "Transaction reads require engine context. Use KvStore::begin_transaction() instead."
+        ))
+    }
+
+    fn delete(&mut self, key: Bytes) -> crate::MidgeResult<()> {
+        Transaction::delete(self, key)
+    }
+
+    fn scan(&mut self, _start: &[u8], _end: &[u8]) -> crate::MidgeResult<Vec<(Bytes, Bytes)>> {
+        Err(crate::MidgeError::internal(
+            "Transaction scans require engine context. Use KvStore::begin_transaction() instead."
+        ))
+    }
+
+    fn delete_range(&mut self, start: Bytes, end: Bytes) -> crate::MidgeResult<()> {
+        Transaction::delete_range(self, start, end)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

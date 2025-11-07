@@ -2757,6 +2757,153 @@ impl MidgeEngine {
     }
 }
 
+// Implement the external KvStore trait for Arc<MidgeEngine> so external callers
+// can use the engine via the `DynKvStore = Arc<dyn KvStore>` abstraction.
+// Using Arc allows transactions to hold a reference to the engine for reads.
+impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
+    fn insert(&self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+        self.as_ref().insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
+            .map(|_| ())
+    }
+
+    fn put(&self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+        self.as_ref().put(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
+    }
+
+    fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+        self.as_ref().get(key)
+    }
+
+    fn scan(&self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<(Bytes, Bytes)>> {
+        let q = crate::api::query::Query::new()
+            .start_key(Bytes::copy_from_slice(start))
+            .end_key(Bytes::copy_from_slice(end));
+        self.as_ref().scan(q)
+    }
+
+    fn delete(&self, key: &[u8]) -> MidgeResult<()> {
+        self.as_ref().delete(Bytes::copy_from_slice(key))
+    }
+
+    fn batch(&self, operations: Vec<crate::api::kv_store::BatchOperation>) -> MidgeResult<()> {
+        let mut batch = crate::api::WriteBatch::new();
+        for op in operations {
+            match op {
+                crate::api::kv_store::BatchOperation::Insert { key, value } => {
+                    // WriteBatch doesn't have insert, so we'll use put
+                    // TODO: Add insert support to WriteBatch
+                    batch.put(Bytes::from(key), Bytes::from(value));
+                }
+                crate::api::kv_store::BatchOperation::Put { key, value } => {
+                    batch.put(Bytes::from(key), Bytes::from(value));
+                }
+                crate::api::kv_store::BatchOperation::Delete { key } => {
+                    batch.delete(Bytes::from(key));
+                }
+            }
+        }
+        self.as_ref().write_batch(&batch)
+    }
+
+    fn delete_range(&self, start: &[u8], end: &[u8]) -> MidgeResult<()> {
+        self.as_ref().delete_range(
+            Bytes::copy_from_slice(start),
+            Bytes::copy_from_slice(end)
+        )
+    }
+
+    fn begin_transaction(&self) -> MidgeResult<Box<dyn crate::api::kv_store::KvTransaction>> {
+        let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
+        let begin_sequence = self.seq.load(Ordering::SeqCst);
+        let txn = crate::api::Transaction::new(txn_id, begin_sequence);
+        let engine_txn = crate::api::transaction::EngineTransaction::new(txn, Arc::clone(self));
+        Ok(Box::new(engine_txn))
+    }
+    
+    fn commit_transaction(
+        &self,
+        txn: Box<dyn crate::api::kv_store::KvTransaction>,
+        opts: crate::api::WriteOptions,
+    ) -> MidgeResult<()> {
+        self.check_read_only()?;
+
+        // Downcast to EngineTransaction to extract the Transaction
+        let engine_txn = (txn as Box<dyn std::any::Any>)
+            .downcast::<crate::api::transaction::EngineTransaction>()
+            .map_err(|_| MidgeError::internal("Failed to downcast transaction"))?;
+
+        let txn = engine_txn.into_inner();
+
+        // Check if transaction is expired (timeout)
+        if txn.is_expired() {
+            return Err(MidgeError::transaction_conflict("transaction timed out"));
+        }
+
+        // Register transaction with manager (tracks read/write sets)
+        if let Err(e) = self.txn_manager.begin(
+            txn.txn_id(),
+            txn.begin_sequence(),
+            txn.write_set().clone(),
+            txn.read_set().clone(),
+            txn.read_versions().clone(),
+        ) {
+            return Err(MidgeError::transaction_conflict(e));
+        }
+
+        // Update wait-for graph and check for deadlocks before commit
+        if let Err(e) = self.txn_manager.update_wait_for_graph(txn.txn_id()) {
+            self.txn_manager.abort(txn.txn_id());
+            return Err(MidgeError::transaction_conflict(e));
+        }
+
+        // Check for deadlocks in wait-for graph
+        if let Some((victim_id, cycle)) = self.txn_manager.check_for_deadlock() {
+            // If this transaction is the victim, abort it
+            if victim_id == txn.txn_id() {
+                self.txn_manager.abort(txn.txn_id());
+                return Err(MidgeError::deadlock(victim_id, cycle));
+            }
+            // Otherwise, abort the victim transaction (it will fail when it tries to commit)
+        }
+
+        // Allocate commit sequence for conflict detection
+        let commit_seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // Check for conflicts using transaction manager
+        let txn_id = txn.txn_id();
+        match self.txn_manager.try_commit(txn_id, commit_seq) {
+            Ok(()) => {
+                // No conflicts, proceed with commit
+                let muts = txn.commit()?;
+                self.batch_internal(muts, opts.sync)
+            }
+            Err(e) => {
+                // Conflict detected, abort transaction
+                self.txn_manager.abort(txn_id);
+                Err(MidgeError::transaction_conflict(e))
+            }
+        }
+    }
+
+    fn rollback_transaction(
+        &self,
+        txn: Box<dyn crate::api::kv_store::KvTransaction>,
+    ) -> MidgeResult<()> {
+        // Downcast to EngineTransaction to extract the Transaction
+        let engine_txn = (txn as Box<dyn std::any::Any>)
+            .downcast::<crate::api::transaction::EngineTransaction>()
+            .map_err(|_| MidgeError::internal("Failed to downcast transaction"))?;
+
+        let txn = engine_txn.into_inner();
+        
+        // Abort the transaction in the transaction manager
+        self.txn_manager.abort(txn.txn_id());
+        
+        // Transaction is dropped here, releasing its resources
+        Ok(())
+    }
+}
+
 impl Drop for MidgeEngine {
     fn drop(&mut self) {
         // Flush WAL to ensure all writes are persisted

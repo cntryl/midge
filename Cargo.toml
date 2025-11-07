@@ -13,6 +13,9 @@ documentation = "https://docs.rs/midge"
 keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
 
+[lib]
+name = "midge"
+
 [dependencies]
 # Error handling
 anyhow = "1.0"
