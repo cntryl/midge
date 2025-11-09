@@ -22,8 +22,8 @@ fn should_insert_key_given_nonexistent_key() {
     let value = Bytes::from("value1");
 
     // Act
-    let inserted = engine.insert(key.clone(), value.clone()).unwrap();
-    let result = engine.get(&cf, &key).unwrap();
+    let inserted = engine.insert(&cf, key.as_ref(), value.as_ref()).unwrap();
+    let result = engine.get(&cf, key.as_ref()).unwrap();
 
     // Assert
     assert!(inserted, "First insert should return true");
@@ -32,21 +32,21 @@ fn should_insert_key_given_nonexistent_key() {
 
 #[test]
 fn should_not_insert_given_existing_key() {
-    let cf = engine.default_column_family();
     // Arrange
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("key1");
     let value1 = Bytes::from("value1");
     let value2 = Bytes::from("value2");
-    engine.put(&cf, key.clone(), value1.clone()).unwrap();
+    engine.put(&cf, key.as_ref(), value1.as_ref()).unwrap();
 
     // Act
-    let inserted = engine.insert(key.clone(), value2).unwrap();
-    let result = engine.get(&cf, &key).unwrap();
+    let inserted = engine.insert(&cf, key.as_ref(), value2.as_ref()).unwrap();
+    let result = engine.get(&cf, key.as_ref()).unwrap();
 
     // Assert
     assert!(!inserted, "Insert should return false for existing key");
@@ -63,16 +63,17 @@ fn should_return_existing_value_given_insert_with_value() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("key1");
     let value1 = Bytes::from("value1");
     let value2 = Bytes::from("value2");
 
     // Act
     let result1 = engine
-        .insert_with_value(key.clone(), value1.clone())
+        .insert_with_value(&cf, key.as_ref(), value1.as_ref())
         .unwrap();
-    let result2 = engine.insert_with_value(key.clone(), value2).unwrap();
-    let stored = engine.get(&cf, &key).unwrap();
+    let result2 = engine.insert_with_value(&cf, key.as_ref(), value2.as_ref()).unwrap();
+    let stored = engine.get(&cf, key.as_ref()).unwrap();
 
     // Assert
     assert_eq!(result1, InsertResult::Inserted);
@@ -94,12 +95,12 @@ fn should_swap_value_given_matching_expected() {
 
     // Act
     let result1 = engine
-        .compare_and_swap(key.clone(), None, Bytes::from("0"))
+        .compare_and_swap(&cf, key.as_ref(), None, b"0")
         .unwrap();
     let result2 = engine
-        .compare_and_swap(key.clone(), Some(Bytes::from("0")), Bytes::from("1"))
+        .compare_and_swap(&cf, key.as_ref(), Some(Bytes::from("0")), b"1")
         .unwrap();
-    let value = engine.get(&cf, &key).unwrap();
+    let value = engine.get(&cf, key.as_ref()).unwrap();
 
     // Assert
     assert_eq!(result1, CasResult::Swapped);
@@ -109,20 +110,20 @@ fn should_swap_value_given_matching_expected() {
 
 #[test]
 fn should_handle_concurrent_inserts_given_race_simulation() {
-    let cf = engine.default_column_family();
     // Arrange
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("shared_key");
 
     // Act
-    let result1 = engine.insert(key.clone(), Bytes::from("value1")).unwrap();
-    let result2 = engine.insert(key.clone(), Bytes::from("value2")).unwrap();
-    let result3 = engine.insert(key.clone(), Bytes::from("value3")).unwrap();
-    let value = engine.get(&cf, &key).unwrap();
+    let result1 = engine.insert(&cf, key.as_ref(), b"value1").unwrap();
+    let result2 = engine.insert(&cf, key.as_ref(), b"value2").unwrap();
+    let result3 = engine.insert(&cf, key.as_ref(), b"value3").unwrap();
+    let value = engine.get(&cf, key.as_ref()).unwrap();
 
     // Assert
     assert!(result1, "First insert should succeed");
@@ -133,7 +134,6 @@ fn should_handle_concurrent_inserts_given_race_simulation() {
 
 #[test]
 fn should_handle_concurrent_cas_given_race_simulation() {
-    let cf = engine.default_column_family();
     // Arrange
     use cntryl_midge::CasResult;
     let opts = MidgeOptions {
@@ -141,20 +141,21 @@ fn should_handle_concurrent_cas_given_race_simulation() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("counter");
-    engine.put(&cf, key.clone(), Bytes::from("0")).unwrap();
+    engine.put(&cf, key.as_ref(), b"0").unwrap();
 
     // Act
     let result1 = engine
-        .compare_and_swap(key.clone(), Some(Bytes::from("0")), Bytes::from("1"))
+        .compare_and_swap(&cf, key.as_ref(), Some(Bytes::from("0")), b"1")
         .unwrap();
     let result2 = engine
-        .compare_and_swap(key.clone(), Some(Bytes::from("0")), Bytes::from("2"))
+        .compare_and_swap(&cf, key.as_ref(), Some(Bytes::from("0")), b"2")
         .unwrap();
     let result3 = engine
-        .compare_and_swap(key.clone(), Some(Bytes::from("1")), Bytes::from("3"))
+        .compare_and_swap(&cf, key.as_ref(), Some(Bytes::from("1")), b"3")
         .unwrap();
-    let value = engine.get(&cf, &key).unwrap();
+    let value = engine.get(&cf, key.as_ref()).unwrap();
 
     // Assert
     assert_eq!(result1, CasResult::Swapped);
@@ -178,36 +179,36 @@ fn should_respect_snapshot_isolation_given_insert() {
     let snap1 = engine.snapshot();
 
     // Act
-    let inserted1 = engine.insert(key.clone(), value1.clone()).unwrap();
+    let inserted1 = engine.insert(&cf, key.as_ref(), value1.as_ref()).unwrap();
     let snap2 = engine.snapshot();
-    let inserted2 = engine.insert(key.clone(), value2).unwrap();
+    let inserted2 = engine.insert(&cf, key.as_ref(), value2.as_ref()).unwrap();
 
     // Assert
     assert!(inserted1);
     assert!(!inserted2);
-    assert_eq!(engine.get_at(&key, &snap1).unwrap(), None);
-    assert_eq!(engine.get_at(&key, &snap2).unwrap(), Some(value1.clone()));
-    assert_eq!(engine.get(&cf, &key).unwrap(), Some(value1));
+    assert_eq!(engine.get_at(key.as_ref(), &snap1).unwrap(), None);
+    assert_eq!(engine.get_at(key.as_ref(), &snap2).unwrap(), Some(value1.clone()));
+    assert_eq!(engine.get(&cf, key.as_ref()).unwrap(), Some(value1));
 }
 
 #[test]
 fn should_handle_insert_after_delete() {
-    let cf = engine.default_column_family();
     // Arrange
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("key1");
     let value1 = Bytes::from("value1");
     let value2 = Bytes::from("value2");
-    engine.put(&cf, key.clone(), value1).unwrap();
-    engine.delete(&cf, key.clone()).unwrap();
+    engine.put(&cf, key.as_ref(), value1.as_ref()).unwrap();
+    engine.delete(&cf, key.as_ref()).unwrap();
 
     // Act
-    let inserted = engine.insert(key.clone(), value2.clone()).unwrap();
-    let result = engine.get(&cf, &key).unwrap();
+    let inserted = engine.insert(&cf, key.as_ref(), value2.as_ref()).unwrap();
+    let result = engine.get(&cf, key.as_ref()).unwrap();
 
     // Assert
     assert!(inserted, "Insert should succeed after delete");
@@ -225,13 +226,13 @@ fn should_use_latest_value_given_cas_after_concurrent_put() {
     let engine = MidgeEngine::open(opts).unwrap();
     let cf = engine.default_column_family();
     let key = Bytes::from("key1");
-    engine.put(&cf, key.clone(), Bytes::from("A")).unwrap();
+    engine.put(&cf, key.as_ref(), b"A").unwrap();
     let snap = engine.snapshot();
 
     // Act
-    engine.put(&cf, key.clone(), Bytes::from("B")).unwrap();
+    engine.put(&cf, key.as_ref(), b"B").unwrap();
     let result = engine
-        .compare_and_swap(key.clone(), Some(Bytes::from("A")), Bytes::from("C"))
+        .compare_and_swap(&cf, key.as_ref(), Some(Bytes::from("A")), b"C")
         .unwrap();
 
     // Assert
