@@ -150,7 +150,7 @@ fn should_handle_scan_given_files_being_merged() {
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     let cf = engine.default_column_family();
-    populate_multi_level_data(&engine);
+    populate_multi_level_data(&engine, &cf);
 
     // Act - Trigger compaction in background
     let engine_clone = Arc::clone(&engine);
@@ -258,7 +258,7 @@ fn should_maintain_read_consistency_given_compaction_updates_manifest() {
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     let cf = engine.default_column_family();
-    populate_multi_level_data(&engine);
+    populate_multi_level_data(&engine, &cf);
 
     // Record expected values before compaction
     let mut expected_values = std::collections::HashMap::new();

@@ -22,15 +22,15 @@ fn should_read_at_begin_sequence_given_transaction_when_using_transaction_get() 
         .put(&cf, b"key", b"initial")
         .expect("put");
 
-    let mut txn = engine.begin_transaction(&cf);
-    let begin_value = engine.transaction_get(&mut txn, b"key").expect("get");
+    let mut txn = engine.begin_transaction(&cf).expect("begin_transaction");
+    let begin_value = txn.get(b"key").expect("get");
 
     // Act
     engine
         .put(&cf, b"key", b"updated")
         .expect("put");
 
-    let second_value = engine.transaction_get(&mut txn, b"key").expect("get");
+    let second_value = txn.get(b"key").expect("get");
 
     // Assert
     assert_eq!(begin_value, Some(Bytes::from("initial")));
@@ -41,23 +41,24 @@ fn should_read_at_begin_sequence_given_transaction_when_using_transaction_get() 
 fn should_not_see_concurrent_writes_given_transaction_when_snapshot_isolated() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("key1"), Bytes::from("v1"))
+        .put(&cf, b"key1", b"v1")
         .expect("put");
 
-    let mut txn1 = engine.begin_transaction(&cf);
+    let mut txn1 = engine.begin_transaction(&cf).expect("begin_transaction");
 
     // Act
-    let mut txn2 = engine.begin_transaction(&cf);
-    txn2.put(Bytes::from("key2"), Bytes::from("v2"), None)
+    let mut txn2 = engine.begin_transaction(&cf).expect("begin_transaction");
+    txn2.put(b"key2", b"v2")
         .unwrap();
     engine
         .commit_transaction(txn2, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
-    let value = engine.transaction_get(&mut txn1, b"key2").expect("get");
+    let value = txn1.get(b"key2").expect("get");
 
     // Assert
     assert_eq!(
@@ -70,15 +71,16 @@ fn should_not_see_concurrent_writes_given_transaction_when_snapshot_isolated() {
 fn should_see_own_writes_given_transaction_when_reading_staged_mutations() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     // Act
-    let mut txn = engine.begin_transaction(&cf);
-    txn.put(Bytes::from("new_key"), Bytes::from("new_value"), None)
+    let mut txn = engine.begin_transaction(&cf).expect("begin_transaction");
+    txn.put(b"new_key", b"new_value")
         .unwrap();
 
     // Read own write
-    let value = engine.transaction_get(&mut txn, b"new_key").expect("get");
+    let value = txn.get(b"new_key").expect("get");
 
     // Assert
     assert_eq!(value, Some(Bytes::from("new_value")));
@@ -88,24 +90,25 @@ fn should_see_own_writes_given_transaction_when_reading_staged_mutations() {
 fn should_track_reads_given_transaction_get_when_validating_conflicts() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("key"), Bytes::from("v1"))
+        .put(&cf, b"key", b"v1")
         .expect("put");
 
-    let mut txn1 = engine.begin_transaction(&cf);
-    let _ = engine.transaction_get(&mut txn1, b"key").expect("get");
+    let mut txn1 = engine.begin_transaction(&cf).expect("begin_transaction");
+    let _ = txn1.get(b"key").expect("get");
 
     // Act
-    let mut txn2 = engine.begin_transaction(&cf);
-    txn2.put(Bytes::from("key"), Bytes::from("v2"), None)
+    let mut txn2 = engine.begin_transaction(&cf).expect("begin_transaction");
+    txn2.put(b"key", b"v2")
         .unwrap();
     engine
         .commit_transaction(txn2, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
-    txn1.put(Bytes::from("other_key"), Bytes::from("value"), None)
+    txn1.put(b"other_key", b"value")
         .unwrap();
     let result = engine.commit_transaction(txn1, cntryl_midge::WriteOptions::default());
 
@@ -117,28 +120,29 @@ fn should_track_reads_given_transaction_get_when_validating_conflicts() {
 fn should_provide_consistent_view_given_multiple_reads_when_snapshot_isolated() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("key1"), Bytes::from("v1"))
+        .put(&cf, b"key1", b"v1")
         .expect("put");
     engine
-        .put(&cf, Bytes::from("key2"), Bytes::from("v2"))
+        .put(&cf, b"key2", b"v2")
         .expect("put");
 
-    let mut txn = engine.begin_transaction(&cf);
-    let first_read = engine.transaction_get(&mut txn, b"key1").expect("get");
+    let mut txn = engine.begin_transaction(&cf).expect("begin_transaction");
+    let first_read = txn.get(b"key1").expect("get");
 
     // Act
     engine
-        .put(&cf, Bytes::from("key1"), Bytes::from("updated1"))
+        .put(&cf, b"key1", b"updated1")
         .expect("put");
     engine
-        .put(&cf, Bytes::from("key2"), Bytes::from("updated2"))
+        .put(&cf, b"key2", b"updated2")
         .expect("put");
 
-    let second_read = engine.transaction_get(&mut txn, b"key1").expect("get");
-    let key2_read = engine.transaction_get(&mut txn, b"key2").expect("get");
+    let second_read = txn.get(b"key1").expect("get");
+    let key2_read = txn.get(b"key2").expect("get");
 
     // Assert
     assert_eq!(first_read, Some(Bytes::from("v1")));

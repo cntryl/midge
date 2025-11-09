@@ -38,14 +38,17 @@ fn should_serialize_wal_writes_given_concurrent_put_operations() {
     let num_threads = 20;
     let writes_per_thread = 50;
 
+    let cf = engine.default_column_family();
+
     // Act
     let handles: Vec<_> = (0..num_threads)
         .map(|thread_id| {
             let engine = Arc::clone(&engine);
+            let cf = cf.clone();
             thread::spawn(move || {
                 for i in 0..writes_per_thread {
                     let key = format!("wal_{}_{}", thread_id, i);
-                    engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
+                    engine.put(&cf, key.as_bytes(), b"value").unwrap();
                 }
             })
         })
@@ -69,11 +72,11 @@ fn should_serialize_wal_writes_given_concurrent_put_operations() {
 
 #[test]
 fn should_maintain_wal_order_given_concurrent_batches() {
-    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_batches = 10;
     let batch_size = 20;
 
@@ -81,6 +84,7 @@ fn should_maintain_wal_order_given_concurrent_batches() {
     let handles: Vec<_> = (0..num_batches)
         .map(|batch_id| {
             let engine = Arc::clone(&engine);
+            let cf = cf.clone();
             thread::spawn(move || {
                 for i in 0..batch_size {
                     let key = format!("batch_{}_item_{}", batch_id, i);
@@ -110,12 +114,12 @@ fn should_maintain_wal_order_given_concurrent_batches() {
 
 #[test]
 fn should_handle_wal_rotation_during_concurrent_writes() {
-    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let db_path = dir.path().to_path_buf();
     let opts = durability_opts(db_path.clone());
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_writers = 15;
     let writes_per_writer = 100;
 
@@ -123,11 +127,12 @@ fn should_handle_wal_rotation_during_concurrent_writes() {
     let handles: Vec<_> = (0..num_writers)
         .map(|writer_id| {
             let engine = Arc::clone(&engine);
+            let cf = cf.clone();
             thread::spawn(move || {
                 for i in 0..writes_per_writer {
                     let key = format!("rotate_{}_{}", writer_id, i);
                     let value = vec![0u8; 1024]; // 1KB per write
-                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
                 }
             })
         })

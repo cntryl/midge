@@ -5,11 +5,12 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use tempfile::TempDir;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, KvStore};
+use std::sync::Arc;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::test_temp_dir;
+
 #[test]
 fn should_persist_transaction_given_commit_when_crash_after() {
     // Arrange
@@ -21,16 +22,12 @@ fn should_persist_transaction_given_commit_when_crash_after() {
         },
         ..Default::default()
     };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
     let cf = engine.default_column_family();
 
-    let mut durable_txn = engine.begin_transaction(&cf);
+    let mut durable_txn = engine.begin_transaction(&cf).expect("begin_transaction");
     durable_txn
-        .put(
-            Bytes::from("durable_key"),
-            Bytes::from("durable_value"),
-            None,
-        )
+        .put(b"durable_key", b"durable_value")
         .unwrap();
     engine
         .commit_transaction(durable_txn, cntryl_midge::WriteOptions::default())
@@ -65,16 +62,12 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
         },
         ..Default::default()
     };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
     let cf = engine.default_column_family();
 
-    let mut aborted_txn = engine.begin_transaction(&cf);
+    let mut aborted_txn = engine.begin_transaction(&cf).expect("begin_transaction");
     aborted_txn
-        .put(
-            Bytes::from("aborted_key"),
-            Bytes::from("aborted_value"),
-            None,
-        )
+        .put(b"aborted_key", b"aborted_value")
         .unwrap();
     drop(aborted_txn);
 
@@ -104,17 +97,15 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         },
         ..Default::default()
     };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
     let cf = engine.default_column_family();
 
     for i in 0..10 {
-        let mut wal_txn = engine.begin_transaction(&cf);
+        let mut wal_txn = engine.begin_transaction(&cf).expect("begin_transaction");
+        let key = format!("wal_key_{}", i);
+        let value = format!("wal_val_{}", i);
         wal_txn
-            .put(
-                Bytes::from(format!("wal_key_{}", i)),
-                Bytes::from(format!("wal_val_{}", i)),
-                None,
-            )
+            .put(key.as_bytes(), value.as_bytes())
             .unwrap();
         engine
             .commit_transaction(wal_txn, cntryl_midge::WriteOptions::default())

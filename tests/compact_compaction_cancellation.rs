@@ -54,7 +54,7 @@ fn should_stop_compaction_given_shutdown_signal() {
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     let cf = engine.default_column_family();
-    populate_multi_level_data(&engine);
+    populate_multi_level_data(&engine, &cf);
 
     // Act - Start compaction in background
     let engine_clone = Arc::clone(&engine);
@@ -81,8 +81,9 @@ fn should_cleanup_resources_given_cancelled_compaction() {
     let cf = engine.default_column_family();
 
     for i in 0..50 {
+        let key = format!("cancel_k{}", i);
         engine
-            .put(Bytes::from(format!("cancel_k{}", i)), Bytes::from("v"))
+            .put(&cf, key.as_bytes(), b"v")
             .unwrap();
     }
     engine.flush().unwrap();
@@ -103,8 +104,9 @@ fn should_not_update_manifest_given_incomplete_compaction_when_shutdown() {
     let cf = engine.default_column_family();
 
     for i in 0..30 {
+        let key = format!("incomplete{}", i);
         engine
-            .put(Bytes::from(format!("incomplete{}", i)), Bytes::from("val"))
+            .put(&cf, key.as_bytes(), b"val")
             .unwrap();
     }
     engine.flush().unwrap();

@@ -35,21 +35,24 @@ fn should_allow_writes_given_flush_in_progress() {
     let _dir = test_temp_dir();
     let opts = memory_opts_with_memtable_size(10 * 1024 * 1024);
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     // Act - Trigger flush with large writes, then write concurrently
     let flush_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
             for i in 0..500 {
                 let key = format!("flush_key_{}", i);
                 let value = vec![0u8; 4096]; // 4KB values
-                engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+                engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
             }
         })
     };
 
     let write_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
             for i in 0..100 {
                 let key = format!("concurrent_key_{}", i);
@@ -74,13 +77,14 @@ fn should_block_writes_given_too_many_immutable_memtables() {
     let _dir = test_temp_dir();
     let opts = memory_opts_with_memtable_size(8 * 1024 * 1024);
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act - Write enough to create multiple immutable memtables
     let num_writes = 2000;
     for i in 0..num_writes {
         let key = format!("stall_test_{}", i);
         let value = vec![0u8; 2048];
-        let result = engine.put(&cf, key.as_bytes(), value.as_bytes());
+        let result = engine.put(&cf, key.as_bytes(), value.as_slice());
         assert!(
             result.is_ok(),
             "Write should eventually succeed (may stall)"

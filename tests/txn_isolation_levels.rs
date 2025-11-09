@@ -5,20 +5,22 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use tempfile::TempDir;
+use cntryl_midge::KvStore;
+use std::sync::Arc;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::new_engine;
+
 #[test]
 fn should_prevent_dirty_read_given_uncommitted_write_when_read_committed() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut uncommitted_txn = engine.begin_transaction(&cf);
+    let mut uncommitted_txn = engine.begin_transaction(&cf).expect("begin_transaction");
     uncommitted_txn
-        .put(Bytes::from("key"), Bytes::from("uncommitted"), None)
+        .put(b"key", b"uncommitted")
         .unwrap();
 
     // Act
@@ -39,20 +41,21 @@ fn should_prevent_dirty_read_given_uncommitted_write_when_read_committed() {
 fn should_prevent_dirty_write_given_uncommitted_update_when_read_committed() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("key"), Bytes::from("v1"))
+        .put(&cf, b"key", b"v1")
         .expect("put");
 
-    let mut first_txn = engine.begin_transaction(&cf);
+    let mut first_txn = engine.begin_transaction(&cf).expect("begin_transaction");
     first_txn
-        .put(Bytes::from("key"), Bytes::from("txn1_value"), None)
+        .put(b"key", b"txn1_value")
         .unwrap();
 
-    let mut second_txn = engine.begin_transaction(&cf);
+    let mut second_txn = engine.begin_transaction(&cf).expect("begin_transaction");
     second_txn
-        .put(Bytes::from("key"), Bytes::from("txn2_value"), None)
+        .put(b"key", b"txn2_value")
         .unwrap();
 
     // Act
@@ -71,35 +74,37 @@ fn should_prevent_dirty_write_given_uncommitted_update_when_read_committed() {
 fn should_see_own_writes_given_transaction_when_get_after_put() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut writing_txn = engine.begin_transaction(&cf);
+    let mut writing_txn = engine.begin_transaction(&cf).expect("begin_transaction");
     writing_txn
-        .put(Bytes::from("key"), Bytes::from("my_value"), None)
+        .put(b"key", b"my_value")
         .unwrap();
 
     // Act
-    let local_read = writing_txn.get_local(b"key");
+    let local_read = writing_txn.get(b"key").expect("get");
 
     // Assert
-    assert_eq!(local_read, Some(Some(Bytes::from("my_value"))));
+    assert_eq!(local_read, Some(Bytes::from("my_value")));
 }
 
 #[test]
 fn should_not_see_other_uncommitted_writes_given_concurrent_transactions() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut writing_txn = engine.begin_transaction(&cf);
-    let reading_txn = engine.begin_transaction(&cf);
+    let mut writing_txn = engine.begin_transaction(&cf).expect("begin_transaction");
+    let mut reading_txn = engine.begin_transaction(&cf).expect("begin_transaction");
 
     writing_txn
-        .put(Bytes::from("key"), Bytes::from("txn1_value"), None)
+        .put(b"key", b"txn1_value")
         .unwrap();
 
     // Act
-    let read_result = reading_txn.get_local(b"key");
+    let read_result = reading_txn.get(b"key").expect("get");
 
     // Assert
     assert_eq!(
@@ -112,17 +117,18 @@ fn should_not_see_other_uncommitted_writes_given_concurrent_transactions() {
 fn should_maintain_snapshot_view_given_transaction_when_external_writes_occur() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("key"), Bytes::from("v1"))
+        .put(&cf, b"key", b"v1")
         .expect("put");
 
-    let snapshot_txn = engine.begin_transaction(&cf);
+    let snapshot_txn = engine.begin_transaction(&cf).expect("begin_transaction");
     let begin_seq = snapshot_txn.begin_sequence();
 
     engine
-        .put(&cf, Bytes::from("key"), Bytes::from("v2"))
+        .put(&cf, b"key", b"v2")
         .expect("external put");
 
     // Act
@@ -140,10 +146,11 @@ fn should_maintain_snapshot_view_given_transaction_when_external_writes_occur() 
 fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("key1"), Bytes::from("v1"))
+        .put(&cf, b"key1", b"v1")
         .expect("put");
 
     let snap = engine.snapshot();
@@ -158,7 +165,7 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
         .expect("scan");
 
     engine
-        .put(&cf, Bytes::from("key2"), Bytes::from("v2"))
+        .put(&cf, b"key2", b"v2")
         .expect("put new key");
 
     // Act
