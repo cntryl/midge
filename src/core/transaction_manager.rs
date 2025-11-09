@@ -21,6 +21,7 @@ impl From<(u32, Bytes)> for Key {
 }
 
 type KeySet = HashSet<Key>;
+type KeyMap = HashMap<Key, u64>;
 
 /// Tracks active transactions and detects conflicts
 pub struct TransactionManager {
