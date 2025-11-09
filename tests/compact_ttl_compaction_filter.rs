@@ -59,7 +59,7 @@ fn should_remove_expired_keys_given_ttl_exceeded_when_compacting() {
     for i in 0..20 {
         let key = format!("ttl_key{}", i);
         engine
-            .put_with_ttl(Bytes::from(key), Bytes::from("expire_me"), 1)
+            .put_with_ttl(&cf, key.as_bytes(), b"expire_me", 1)
             .unwrap();
     }
     engine.flush().unwrap();
@@ -91,7 +91,7 @@ fn should_preserve_non_expired_keys_given_ttl_not_reached() {
     for i in 0..20 {
         let key = format!("long_ttl{}", i);
         engine
-            .put_with_ttl(Bytes::from(key), Bytes::from("keep_me"), 3600)
+            .put_with_ttl(&cf, key.as_bytes(), b"keep_me", 3600)
             .unwrap();
     }
     engine.flush().unwrap();
@@ -113,14 +113,11 @@ fn should_respect_cf_ttl_setting_given_column_family_config() {
     // Arrange - Uses default CF which may have TTL config
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Write mix of TTL and non-TTL keys
-    engine
-        .put(Bytes::from("no_ttl"), Bytes::from("permanent"))
-        .unwrap();
-    engine
-        .put_with_ttl(Bytes::from("with_ttl"), Bytes::from("temp"), 1)
-        .unwrap();
+    engine.put(&cf, b"no_ttl", b"permanent").unwrap();
+    engine.put_with_ttl(&cf, b"with_ttl", b"temp", 1).unwrap();
     engine.flush().unwrap();
 
     thread::sleep(Duration::from_secs(2));
@@ -137,11 +134,12 @@ fn should_update_metrics_given_ttl_filtered_keys() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Write keys with short TTL
     for i in 0..30 {
         engine
-            .put_with_ttl(Bytes::from(format!("metric_k{}", i)), Bytes::from("v"), 1)
+            .put_with_ttl(&cf, format!("metric_k{}", i).as_bytes(), b"v", 1)
             .unwrap();
     }
     engine.flush().unwrap();

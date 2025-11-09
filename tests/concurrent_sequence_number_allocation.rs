@@ -40,6 +40,7 @@ fn should_allocate_unique_sequences_given_concurrent_writes() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_threads = 50;
     let puts_per_thread = 20;
 
@@ -47,10 +48,11 @@ fn should_allocate_unique_sequences_given_concurrent_writes() {
     let handles: Vec<_> = (0..num_threads)
         .map(|thread_id| {
             let engine = Arc::clone(&engine);
+            let cf_clone = cf.clone();
             thread::spawn(move || {
                 for i in 0..puts_per_thread {
                     let key = format!("seq_test_{}_{}", thread_id, i);
-                    engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
+                    engine.put(&cf_clone, key.as_bytes(), "value".as_bytes()).unwrap();
                 }
             })
         })
@@ -82,6 +84,7 @@ fn should_maintain_sequence_monotonicity_given_1000_concurrent_writes() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let initial_seq = engine.current_sequence();
     let num_writes = 1000;
 
@@ -89,9 +92,10 @@ fn should_maintain_sequence_monotonicity_given_1000_concurrent_writes() {
     let handles: Vec<_> = (0..num_writes)
         .map(|i| {
             let engine = Arc::clone(&engine);
+            let cf_clone = cf.clone();
             thread::spawn(move || {
                 let key = format!("mono_key_{}", i);
-                engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
+                engine.put(&cf_clone, key.as_bytes(), "value".as_bytes()).unwrap();
             })
         })
         .collect();
@@ -126,6 +130,7 @@ fn should_not_skip_sequences_given_aborted_writes() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let initial_seq = engine.current_sequence();
 
     // Act
@@ -155,6 +160,7 @@ fn should_preserve_sequence_order_given_concurrent_batches() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_batches = 10;
     let batch_size = 10;
 
@@ -162,10 +168,11 @@ fn should_preserve_sequence_order_given_concurrent_batches() {
     let handles: Vec<_> = (0..num_batches)
         .map(|batch_id| {
             let engine = Arc::clone(&engine);
+            let cf_clone = cf.clone();
             thread::spawn(move || {
                 for i in 0..batch_size {
                     let key = format!("batch_{}_item_{}", batch_id, i);
-                    engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
+                    engine.put(&cf_clone, key.as_bytes(), "value".as_bytes()).unwrap();
                 }
             })
         })

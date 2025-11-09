@@ -12,7 +12,6 @@ mod common;
 use common::{test_temp_dir, new_engine};
 #[test]
 fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
-    let cf = engine.default_column_family();
     // Arrange: write a couple keys, then force WAL rotation to flush memtable -> SST
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -26,14 +25,12 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
     };
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
-        eng.put(&cf, b"a", b"1")
-            .unwrap();
-        eng.put(&cf, b"b", b"2")
-            .unwrap();
+        let cf = eng.default_column_family();
+        eng.put(&cf, b"a", b"1").unwrap();
+        eng.put(&cf, b"b", b"2").unwrap();
         // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
         let big = vec![b'v'; 128];
-        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(big))
-            .unwrap();
+        eng.put(&cf, &Bytes::from_static(b"zz"), &Bytes::from(big)).unwrap();
         // Give background flush a moment to materialize SST and update manifest
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
@@ -42,8 +39,9 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
     let eng2 = MidgeEngine::open(opts.clone()).expect("reopen");
 
     // Assert: engine.get should fall back to SST when not found in memtable
-    let got_a = eng2.get(&cf, b"a").expect("get a from sst");
-    let got_b = eng2.get(&cf, b"b").expect("get b from sst");
+    let cf2 = eng2.default_column_family();
+    let got_a = eng2.get(&cf2, b"a").expect("get a from sst");
+    let got_b = eng2.get(&cf2, b"b").expect("get b from sst");
     assert_eq!(got_a, Some(Bytes::from_static(b"1")));
     assert_eq!(got_b, Some(Bytes::from_static(b"2")));
 }
@@ -51,7 +49,6 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
 
 #[test]
 fn should_respect_tombstone_from_sst_when_point_lookup() {
-    let cf = engine.default_column_family();
     // Arrange: write k->v, rotate/flush, then delete and rotate/flush, so SST set has a tombstone
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
@@ -63,16 +60,14 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
     opts.memtable_size = 1024 * 1024;
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
-        eng.put(&cf, b"k", b"v1")
-            .unwrap();
+        let cf = eng.default_column_family();
+        eng.put(&cf, b"k", b"v1").unwrap();
         // rotate to flush first version
-        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'v'; 128]))
-            .unwrap();
+        eng.put(&cf, &Bytes::from_static(b"zz"), &Bytes::from(vec![b'v'; 128])).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         // delete and rotate again to flush tombstone
         eng.delete(&cf, b"k").unwrap();
-        eng.put(&cf, Bytes::from_static(b"zz2"), Bytes::from(vec![b'v'; 128]))
-            .unwrap();
+        eng.put(&cf, &Bytes::from_static(b"zz2"), &Bytes::from(vec![b'v'; 128])).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(120));
     }
 
@@ -87,7 +82,6 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
 
 #[test]
 fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
-    let cf = engine.default_column_family();
     // Arrange: seed SST with a,b,c; then in memtable update b, delete c, add d.
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
@@ -100,25 +94,21 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
                                       // Phase 1: open with tiny WAL to force rotation and flush SST
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
-        eng.put(&cf, b"a", b"1")
-            .unwrap();
-        eng.put(&cf, b"b", b"2")
-            .unwrap();
-        eng.put(&cf, b"c", b"3")
-            .unwrap();
-        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'v'; 256]))
-            .unwrap();
+        let cf1 = eng.default_column_family();
+        eng.put(&cf1, b"a", b"1").unwrap();
+        eng.put(&cf1, b"b", b"2").unwrap();
+        eng.put(&cf1, b"c", b"3").unwrap();
+        eng.put(&cf1, &Bytes::from_static(b"zz"), &Bytes::from(vec![b'v'; 256])).unwrap();
     }
     // Wait for background flush
     std::thread::sleep(std::time::Duration::from_millis(150));
     // Phase 2: reopen with large WAL so overlay remains in memtable
     opts.wal_buffer_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
-    eng.put(&cf, b"b", b"2'")
-        .unwrap();
+    let cf = eng.default_column_family();
+    eng.put(&cf, b"b", b"2'").unwrap();
     eng.delete(&cf, b"c").unwrap();
-    eng.put(&cf, b"d", b"4")
-        .unwrap();
+    eng.put(&cf, b"d", b"4").unwrap();
 
     // Act: scan full range
     let rows = eng
@@ -152,6 +142,7 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable() {
     opts.wal_buffer_size = 1024 * 1024;
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
+    let cf = eng.default_column_family();
 
     eng.put(&cf, b"a", b"1")
         .unwrap();
@@ -192,6 +183,7 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable_limited() {
     opts.wal_buffer_size = 1024 * 1024;
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
+    let cf = eng.default_column_family();
 
     eng.put(&cf, b"a", b"1")
         .unwrap();
@@ -229,6 +221,7 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     opts.wal_buffer_size = 1024 * 1024;
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
+    let cf = eng.default_column_family();
 
     eng.put(&cf, b"k", b"v1")
         .unwrap();
@@ -288,6 +281,7 @@ fn should_scan_reverse_respects_tombstones() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     // Write and delete keys
     eng.put(&cf, b"k1", b"v1")
