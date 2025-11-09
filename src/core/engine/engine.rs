@@ -782,7 +782,15 @@ impl MidgeEngine {
 
         let mut manifest = Manifest::load(&self.db_path).unwrap_or_default();
         manifest.add_cf(cf_id, name.to_string(), Some(config));
-        manifest.save_atomic(&self.db_path)?;
+
+        // Persist manifest. If persistence fails, roll back the in-memory CF registration
+        if let Err(e) = manifest.save_atomic(&self.db_path) {
+            // Best-effort rollback of in-memory state inserted by create_cf
+            let id_u32 = cf_id.as_u32();
+            let _ = self.cf_set.cfs.remove(&id_u32);
+            let _ = self.cf_set.name_to_id.remove(handle.name());
+            return Err(e);
+        }
 
         // Update cached manifest after successful save
         self.update_manifest_cache(manifest);
@@ -815,23 +823,59 @@ impl MidgeEngine {
             ));
         }
 
-        // Remove from manifest (this also deletes all SST files for this CF)
+        // Check for unflushed data - refuse to drop if memtable or immutables are non-empty
+        let cf_id_u32 = cf_id.as_u32();
+        if let Some(cf) = self.cf_set.cfs.get(&cf_id_u32) {
+            // Check if active memtable has any data
+            let memtable = cf.memtable.read();
+            let is_empty = memtable.is_empty();
+            drop(memtable);
+            
+            if !is_empty {
+                return Err(crate::error::MidgeError::invalid_config(format!(
+                    "Cannot drop column family '{}' with unflushed data in active memtable. \
+                     Please flush the column family first.",
+                    handle.name()
+                )));
+            }
+            
+            // Check if there are any immutable memtables
+            let immutable_count = cf.immutable_count();
+            if immutable_count > 0 {
+                return Err(crate::error::MidgeError::invalid_config(format!(
+                    "Cannot drop column family '{}' with {} unflushed immutable memtable(s). \
+                     Please flush the column family first.",
+                    handle.name(),
+                    immutable_count
+                )));
+            }
+        }
+
+        // Remove from manifest. Collect SST file names first so we can delete them
+        // after the manifest is updated.
         let mut manifest = Manifest::load(&self.db_path).unwrap_or_default();
+
+        let cf_id_u32 = cf_id.as_u32();
+        let files_to_delete: Vec<String> = manifest
+            .files
+            .iter()
+            .filter(|f| f.cf_id == cf_id_u32)
+            .map(|f| f.name.clone())
+            .collect();
+
         manifest.remove_cf(cf_id);
         manifest.save_atomic(&self.db_path)?;
 
         // Update cached manifest after successful save
         self.update_manifest_cache(manifest.clone());
 
-        // Delete SST files for this CF
-        let cf_id_u32 = cf_id.as_u32();
-        for file in &manifest.files {
-            if file.cf_id == cf_id_u32 {
-                let path = self.sst_dir.join(&file.name);
-                let _ = std::fs::remove_file(path); // Best effort
-            }
+        // Delete SST files for this CF (best-effort)
+        for name in files_to_delete {
+            let path = self.sst_dir.join(&name);
+            let _ = std::fs::remove_file(path);
         }
 
+        // Remove in-memory CF metadata
         self.cf_set.cfs.remove(&cf_id_u32);
         self.cf_set.name_to_id.remove(handle.name());
 
