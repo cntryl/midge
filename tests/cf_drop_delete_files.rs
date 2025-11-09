@@ -84,10 +84,10 @@ fn should_preserve_other_cfs_when_dropping_one_cf() {
     
     // Write to default CF
     let default_cf = engine.default_column_family();
-    engine.put(&cf, &default_cf, b"default_key", b"default_value").expect("put");
-    
+    engine.put(&default_cf, b"default_key", b"default_value").expect("put");
+
     // Write to cf2 only (cf1 stays empty)
-    engine.put(&cf, &cf2, b"cf2_key", b"cf2_value").expect("put");
+    engine.put(&cf2, b"cf2_key", b"cf2_value").expect("put");
 
     // Act - Drop empty cf1
     engine.drop_column_family(&cf1).expect("drop cf1");
