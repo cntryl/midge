@@ -43,11 +43,12 @@ fn should_freeze_memtable_atomically_given_concurrent_writes_when_size_exceeded(
     let handles: Vec<_> = (0..num_threads)
         .map(|thread_id| {
             let engine = Arc::clone(&engine);
+            let cf_clone = cf.clone();
             thread::spawn(move || {
                 for i in 0..writes_per_thread {
                     let key = format!("freeze_test_{}_{}", thread_id, i);
                     let value = vec![0u8; 1024]; // 1KB values
-                    engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
+                    engine.put(&cf_clone, key.as_bytes(), value.as_slice()).unwrap();
                 }
             })
         })
@@ -81,10 +82,11 @@ fn should_route_writes_to_new_memtable_given_freeze_in_progress() {
     let handles: Vec<_> = (0..num_writes)
         .map(|i| {
             let engine = Arc::clone(&engine);
+            let cf_clone = cf.clone();
             thread::spawn(move || {
                 let key = format!("routing_key_{}", i);
                 let value = vec![0u8; 2048]; // 2KB values
-                engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
+                engine.put(&cf_clone, key.as_bytes(), value.as_slice()).unwrap();
             })
         })
         .collect();
@@ -115,11 +117,12 @@ fn should_not_lose_writes_given_memtable_freeze_race() {
         .map(|thread_id| {
             let engine = Arc::clone(&engine);
             let counter = Arc::clone(&write_count);
+            let cf_clone = cf.clone();
             thread::spawn(move || {
                 for i in 0..200 {
                     let key = format!("preserve_{}_{}", thread_id, i);
                     let value = vec![0u8; 1024];
-                    engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
+                    engine.put(&cf_clone, key.as_bytes(), value.as_slice()).unwrap();
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -161,11 +164,12 @@ fn should_maintain_write_order_given_freeze_during_batch() {
     let handles: Vec<_> = (0..num_batches)
         .map(|batch_id| {
             let engine = Arc::clone(&engine);
+            let cf_clone = engine.default_column_family();
             thread::spawn(move || {
                 for i in 0..batch_size {
                     let key = format!("order_batch_{}_seq_{:04}", batch_id, i);
                     let value = format!("{}", i);
-                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+                    engine.put(&cf_clone, key.as_bytes(), value.as_bytes()).unwrap();
                 }
             })
         })

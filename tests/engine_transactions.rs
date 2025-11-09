@@ -20,14 +20,16 @@ fn should_commit_transaction_atomically_given_multiple_operations() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
+    let cf = engine.default_column_family();
 
-    // Act: create transaction and stage operations (as shown in README)
-    let mut txn = engine.begin_transaction();
-    txn.put(&cf, Bytes::from("key3"), Bytes::from("value3"), None)
+    // Act: create transaction and stage operations (use crate Transaction API)
+    let snap = engine.snapshot();
+    let mut txn = cntryl_midge::Transaction::with_options(1, snap.seq, None, 100 * 1024 * 1024);
+    txn.put(Bytes::from("key3"), Bytes::from("value3"), None)
         .expect("put");
     txn.insert(Bytes::from("key4"), Bytes::from("value4"), None)
         .expect("insert");
-    txn.delete(&cf, "key5".as_bytes()).expect("delete");
+    txn.delete(Bytes::from("key5")).expect("delete");
     engine
         .commit_transaction(txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
@@ -56,15 +58,14 @@ fn should_rollback_transaction_on_drop_given_uncommitted() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
+    let cf = engine.default_column_family();
 
     // Act: create transaction, stage operations, then drop without committing
     {
-        let mut txn = engine.begin_transaction();
-        txn.put(&cf, 
-            Bytes::from("rollback_key"), Bytes::from("rollback_value"),
-            None,
-        )
-        .expect("put");
+        let snap = engine.snapshot();
+        let mut txn = cntryl_midge::Transaction::with_options(2, snap.seq, None, 100 * 1024 * 1024);
+        txn.put(Bytes::from("rollback_key"), Bytes::from("rollback_value"), None)
+            .expect("put");
         // txn dropped here without commit
     }
 
@@ -75,7 +76,6 @@ fn should_rollback_transaction_on_drop_given_uncommitted() {
 
 #[test]
 fn should_provide_snapshot_isolation_in_transaction() {
-    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -85,15 +85,13 @@ fn should_provide_snapshot_isolation_in_transaction() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    engine
-        .put(Bytes::from("k1"), Bytes::from("v1"))
-        .expect("put");
+    let cf = engine.default_column_family();
+    engine.put(&cf, b"k1", b"v1").expect("put");
 
     // Act: start transaction, then modify key externally
-    let txn = engine.begin_transaction();
-    engine
-        .put(Bytes::from("k1"), Bytes::from("v2"))
-        .expect("put");
+    let snap = engine.snapshot();
+    let txn = cntryl_midge::Transaction::with_options(3, snap.seq, None, 100 * 1024 * 1024);
+    engine.put(&cf, b"k1", b"v2").expect("put");
 
     // Assert: transaction has consistent view (begin_sequence captured)
     let begin_seq = txn.begin_sequence();
@@ -115,19 +113,22 @@ fn should_stage_delete_range_in_transaction() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
+    let cf = engine.default_column_family();
 
     // Pre-populate some keys
     for i in 0..5 {
         engine
             .put(
-                Bytes::from(format!("key{}", i)),
-                Bytes::from(format!("val{}", i)),
+                &cf,
+                format!("key{}", i).as_bytes(),
+                format!("val{}", i).as_bytes(),
             )
             .expect("put");
     }
 
     // Act: use transaction to delete range
-    let mut txn = engine.begin_transaction();
+    let snap = engine.snapshot();
+    let mut txn = cntryl_midge::Transaction::with_options(4, snap.seq, None, 100 * 1024 * 1024);
     txn.delete_range(Bytes::from("key1"), Bytes::from("key4"))
         .expect("delete_range");
     engine

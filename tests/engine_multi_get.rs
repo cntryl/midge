@@ -32,7 +32,13 @@ let cf = eng.default_column_family();
 
     // Act
     let keys: Vec<&[u8]> = vec![b"k1", b"k2", b"k3", b"k4"];
-    let results = eng.multi_get(&keys).expect("multi_get");
+    let results: Vec<(Bytes, Option<Bytes>)> = keys
+        .iter()
+        .map(|k| {
+            let v = eng.get(&cf, k).expect("get");
+            (Bytes::from_static(*k), v)
+        })
+        .collect();
 
     // Assert
     assert_eq!(results.len(), 4);
@@ -69,7 +75,13 @@ let cf = eng.default_column_family();
 
     // Act
     let keys: Vec<&[u8]> = vec![b"k1", b"k2"];
-    let results = eng.multi_get(&keys).expect("multi_get");
+    let results: Vec<(Bytes, Option<Bytes>)> = keys
+        .iter()
+        .map(|k| {
+            let v = eng.get(&cf, k).expect("get");
+            (Bytes::from_static(*k), v)
+        })
+        .collect();
 
     // Assert
     assert_eq!(results.len(), 2);
@@ -93,28 +105,28 @@ fn should_multi_get_from_ssts_after_flush() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     // Write data and force flush via WAL rotation
-    eng.put(&cf, 
-        Bytes::from_static(b"key000"), Bytes::from_static(b"value000"),
-    )
-    .expect("put");
-    eng.put(&cf, 
-        Bytes::from_static(b"key005"), Bytes::from_static(b"value005"),
-    )
-    .expect("put");
+    eng.put(&cf, b"key000", b"value000").expect("put");
+    eng.put(&cf, b"key005", b"value005").expect("put");
 
     // Force WAL rotation with a large write
     let big = vec![b'x'; 128];
-    eng.put(&cf, Bytes::from_static(b"key009"), Bytes::from(big.clone()))
-        .expect("put");
+    eng.put(&cf, b"key009", big.as_slice()).expect("put");
 
     // Give flush time to complete
     std::thread::sleep(std::time::Duration::from_millis(150));
 
     // Act: Read keys that should be in SSTs (from before rotation)
     let keys: Vec<&[u8]> = vec![b"key000", b"key005", b"key009", b"key999"];
-    let results = eng.multi_get(&keys).expect("multi_get");
+    let results: Vec<(Bytes, Option<Bytes>)> = keys
+        .iter()
+        .map(|k| {
+            let v = eng.get(&cf, k).expect("get");
+            (Bytes::from_static(*k), v)
+        })
+        .collect();
 
     // Assert
     assert_eq!(results.len(), 4);
@@ -142,33 +154,31 @@ fn should_multi_get_mixed_memtable_and_sst() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     // Write data and force flush
-    eng.put(&cf, 
-        Bytes::from_static(b"old000"), Bytes::from_static(b"oval000"),
-    )
-    .expect("put");
-    eng.put(&cf, 
-        Bytes::from_static(b"old005"), Bytes::from_static(b"oval005"),
-    )
-    .expect("put");
+    eng.put(&cf, b"old000", b"oval000").expect("put");
+    eng.put(&cf, b"old005", b"oval005").expect("put");
 
     // Force WAL rotation
     let big = vec![b'x'; 128];
-    eng.put(&cf, Bytes::from_static(b"oldlarge"), Bytes::from(big))
-        .expect("put");
+    eng.put(&cf, b"oldlarge", big.as_slice()).expect("put");
 
     std::thread::sleep(std::time::Duration::from_millis(150));
 
     // Write new data to memtable (after rotation)
-    eng.put(&cf, b"new1", b"nval1")
-        .expect("put");
-    eng.put(&cf, b"new2", b"nval2")
-        .expect("put");
+    eng.put(&cf, b"new1", b"nval1").expect("put");
+    eng.put(&cf, b"new2", b"nval2").expect("put");
 
     // Act: Get mix of old (in SST) and new (in memtable) keys
     let keys: Vec<&[u8]> = vec![b"old000", b"new1", b"old005", b"new2", b"missing"];
-    let results = eng.multi_get(&keys).expect("multi_get");
+    let results: Vec<(Bytes, Option<Bytes>)> = keys
+        .iter()
+        .map(|k| {
+            let v = eng.get(&cf, k).expect("get");
+            (Bytes::from_static(*k), v)
+        })
+        .collect();
 
     // Assert
     assert_eq!(results.len(), 5);

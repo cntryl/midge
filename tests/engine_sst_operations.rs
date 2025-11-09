@@ -28,9 +28,9 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         let cf = eng.default_column_family();
         eng.put(&cf, b"a", b"1").unwrap();
         eng.put(&cf, b"b", b"2").unwrap();
-        // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
-        let big = vec![b'v'; 128];
-        eng.put(&cf, &Bytes::from_static(b"zz"), &Bytes::from(big)).unwrap();
+    // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
+    let big = vec![b'v'; 128];
+    eng.put(&cf, b"zz", big.as_slice()).unwrap();
         // Give background flush a moment to materialize SST and update manifest
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
@@ -61,13 +61,15 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
-        eng.put(&cf, b"k", b"v1").unwrap();
-        // rotate to flush first version
-        eng.put(&cf, &Bytes::from_static(b"zz"), &Bytes::from(vec![b'v'; 128])).unwrap();
+    eng.put(&cf, b"k", b"v1").unwrap();
+    // rotate to flush first version
+    let big = vec![b'v'; 128];
+    eng.put(&cf, b"zz", big.as_slice()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
-        // delete and rotate again to flush tombstone
-        eng.delete(&cf, b"k").unwrap();
-        eng.put(&cf, &Bytes::from_static(b"zz2"), &Bytes::from(vec![b'v'; 128])).unwrap();
+    // delete and rotate again to flush tombstone
+    eng.delete(&cf, b"k").unwrap();
+    let big2 = vec![b'v'; 128];
+    eng.put(&cf, b"zz2", big2.as_slice()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(120));
     }
 
@@ -75,7 +77,8 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
     let eng2 = MidgeEngine::open(opts.clone()).expect("reopen");
 
     // Assert: engine should not resurrect deleted key; get returns None
-    let got = eng2.get(&cf, b"k").expect("get");
+    let cf2 = eng2.default_column_family();
+    let got = eng2.get(&cf2, b"k").expect("get");
     assert_eq!(got, None);
 }
 
@@ -95,10 +98,11 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf1 = eng.default_column_family();
-        eng.put(&cf1, b"a", b"1").unwrap();
-        eng.put(&cf1, b"b", b"2").unwrap();
-        eng.put(&cf1, b"c", b"3").unwrap();
-        eng.put(&cf1, &Bytes::from_static(b"zz"), &Bytes::from(vec![b'v'; 256])).unwrap();
+    eng.put(&cf1, b"a", b"1").unwrap();
+    eng.put(&cf1, b"b", b"2").unwrap();
+    eng.put(&cf1, b"c", b"3").unwrap();
+    let big = vec![b'v'; 256];
+    eng.put(&cf1, b"zz", big.as_slice()).unwrap();
     }
     // Wait for background flush
     std::thread::sleep(std::time::Duration::from_millis(150));

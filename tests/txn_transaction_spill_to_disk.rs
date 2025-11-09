@@ -135,7 +135,7 @@ fn should_cleanup_spill_file_given_transaction_commit_when_completed() {
     }
 
     // Count temp files before commit (may have spill files)
-    let temp_dir = std::env::test_temp_dir();
+    let temp_dir = test_temp_dir();
     let before_count = std::fs::read_dir(&temp_dir)
         .ok()
         .map(|entries| {
@@ -200,7 +200,7 @@ fn should_cleanup_spill_file_given_transaction_abort_when_rolled_back() {
     }
 
     // Count temp files before abort
-    let temp_dir = std::env::test_temp_dir();
+    let temp_dir = test_temp_dir();
     let _before_count = std::fs::read_dir(&temp_dir)
         .ok()
         .map(|entries| {

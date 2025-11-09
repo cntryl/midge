@@ -55,7 +55,6 @@ fn should_not_insert_given_existing_key() {
 
 #[test]
 fn should_return_existing_value_given_insert_with_value() {
-    let cf = engine.default_column_family();
     // Arrange
     use cntryl_midge::InsertResult;
     let opts = MidgeOptions {
