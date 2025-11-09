@@ -54,10 +54,10 @@ fn should_scan_by_prefix_memtable() {
     };
     opts.enable_compaction = false;
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     for k in [b"user:1:a", b"user:1:b", b"user:1:c", b"user:2:a"] {
-        eng.put(&cf, Bytes::from_static(k), Bytes::from_static(b"v"))
-            .unwrap();
+        eng.put(&cf, k, b"v").unwrap();
     }
 
     // Act: prefix only
@@ -85,10 +85,10 @@ fn should_scan_by_prefix_and_limit_memtable() {
     };
     opts.enable_compaction = false;
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     for k in [b"user:1:a", b"user:1:b", b"user:1:c", b"user:2:a"] {
-        eng.put(&cf, Bytes::from_static(k), Bytes::from_static(b"v"))
-            .unwrap();
+        eng.put(&cf, k, b"v").unwrap();
     }
 
     // Act: prefix + limit
@@ -115,6 +115,7 @@ fn should_scan_reverse_from_memtable() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     // Write keys in forward order
     eng.put(&cf, b"k1", b"v1")
@@ -154,6 +155,7 @@ fn should_scan_reverse_with_bounds() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     // Write keys
     eng.put(&cf, b"a", b"va")
@@ -199,6 +201,7 @@ fn should_scan_reverse_with_limit() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     // Write keys
     for i in 1..=10 {
@@ -230,12 +233,13 @@ fn should_scan_with_lower_and_upper_bounds() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
 
     // Write keys
     for c in b'a'..=b'z' {
         let key = vec![c];
         let val = vec![c + 32]; // lowercase + 32 offset
-        eng.put(&cf, key.as_bytes(), val.as_bytes()).expect("put");
+        eng.put(&cf, key.as_slice(), val.as_slice()).expect("put");
     }
 
     // Act: Scan from 'f' to 'k' (exclusive)

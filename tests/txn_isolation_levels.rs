@@ -124,7 +124,7 @@ fn should_maintain_snapshot_view_given_transaction_when_external_writes_occur() 
         .put(&cf, b"key", b"v1")
         .expect("put");
 
-    let snapshot_txn = engine.begin_transaction(&cf).expect("begin_transaction");
+    let begin_seq = engine.snapshot().seq;
 
     engine
         .put(&cf, b"key", b"v2")

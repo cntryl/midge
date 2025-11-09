@@ -20,28 +20,17 @@ fn should_delete_keys_in_range_given_delete_range() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
+    let cf = engine.default_column_family();
 
     // Insert multiple keys
-    engine
-        .put(&cf, "a".as_bytes(), "1".as_bytes())
-        .expect("put");
-    engine
-        .put(&cf, "b".as_bytes(), "2".as_bytes())
-        .expect("put");
-    engine
-        .put(&cf, "c".as_bytes(), "3".as_bytes())
-        .expect("put");
-    engine
-        .put(&cf, "d".as_bytes(), "4".as_bytes())
-        .expect("put");
-    engine
-        .put(&cf, "e".as_bytes(), "5".as_bytes())
-        .expect("put");
+    engine.put(&cf, b"a", b"1").expect("put");
+    engine.put(&cf, b"b", b"2").expect("put");
+    engine.put(&cf, b"c", b"3").expect("put");
+    engine.put(&cf, b"d", b"4").expect("put");
+    engine.put(&cf, b"e", b"5").expect("put");
 
     // Act: delete range [b, d)
-    engine
-        .delete_range(Bytes::from("b"), Bytes::from("d"))
-        .expect("delete_range");
+    engine.delete_range(&cf, b"b", b"d").expect("delete_range");
 
     // Assert: keys b and c are deleted, others remain
     assert_eq!(engine.get(&cf, b"a").expect("get"), Some(Bytes::from("1")));
@@ -75,7 +64,7 @@ fn should_affect_scan_results_given_delete_range() {
 
     // Act: delete range [key03, key07)
     engine
-        .delete_range(Bytes::from("key03"), Bytes::from("key07"))
+        .delete_range(&cf, b"key03", b"key07")
         .expect("delete_range");
 
     // Assert: scan shows deleted keys are missing
@@ -123,8 +112,10 @@ fn should_reject_delete_range_given_read_only_mode() {
     };
     let engine_ro = MidgeEngine::open(opts_ro).expect("open");
 
+    let cf = engine_ro.default_column_family();
+
     // Act
-    let result = engine_ro.delete_range(Bytes::from("a"), Bytes::from("z"));
+    let result = engine_ro.delete_range(&cf, b"a", b"z");
 
     // Assert
     assert!(result.is_err());
@@ -136,14 +127,13 @@ fn should_reject_delete_range_given_read_only_mode() {
 
 #[test]
 fn should_persist_delete_range_in_wal() {
-    let cf = engine.default_column_family();
     // Arrange
     use bytes::Bytes;
     use tempfile::TempDir;
 
     let tmp_dir = TempDir::new().unwrap();
     let db_path = tmp_dir.path().to_path_buf();
-
+    
     {
         let opts = cntryl_midge::MidgeOptions {
             storage_mode: cntryl_midge::StorageMode::LocalDisk {
@@ -154,43 +144,23 @@ fn should_persist_delete_range_in_wal() {
             ..Default::default()
         };
         let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
+        let cf = engine.default_column_family();
 
-        engine
-            .put(Bytes::from("key1"), Bytes::from("value1"))
-            .unwrap();
-        engine
-            .put(Bytes::from("key2"), Bytes::from("value2"))
-            .unwrap();
-        engine
-            .put(Bytes::from("key3"), Bytes::from("value3"))
-            .unwrap();
-        engine
-            .put(Bytes::from("key4"), Bytes::from("value4"))
-            .unwrap();
-        engine
-            .put(Bytes::from("key5"), Bytes::from("value5"))
-            .unwrap();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        engine.put(&cf, b"key2", b"value2").unwrap();
+        engine.put(&cf, b"key3", b"value3").unwrap();
+        engine.put(&cf, b"key4", b"value4").unwrap();
+        engine.put(&cf, b"key5", b"value5").unwrap();
 
         // Act
-        engine
-            .delete_range(Bytes::from("key2"), Bytes::from("key4"))
-            .unwrap();
+        engine.delete_range(&cf, b"key2", b"key4").unwrap();
 
-        // Assert (before crash)
-        assert_eq!(
-            engine.get(&cf, &Bytes::from("key1")).unwrap(),
-            Some(Bytes::from("value1"))
-        );
-        assert_eq!(engine.get(&cf, &Bytes::from("key2")).unwrap(), None);
-        assert_eq!(engine.get(&cf, &Bytes::from("key3")).unwrap(), None);
-        assert_eq!(
-            engine.get(&cf, &Bytes::from("key4")).unwrap(),
-            Some(Bytes::from("value4"))
-        );
-        assert_eq!(
-            engine.get(&cf, &Bytes::from("key5")).unwrap(),
-            Some(Bytes::from("value5"))
-        );
+    // Assert (before crash)
+    assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
+    assert_eq!(engine.get(&cf, b"key2").unwrap(), None);
+    assert_eq!(engine.get(&cf, b"key3").unwrap(), None);
+    assert_eq!(engine.get(&cf, b"key4").unwrap(), Some(Bytes::from("value4")));
+    assert_eq!(engine.get(&cf, b"key5").unwrap(), Some(Bytes::from("value5")));
 
         drop(engine);
     }
@@ -208,20 +178,12 @@ fn should_persist_delete_range_in_wal() {
         let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
         // Assert (after recovery)
-        assert_eq!(
-            engine.get(&cf, &Bytes::from("key1")).unwrap(),
-            Some(Bytes::from("value1"))
-        );
-        assert_eq!(engine.get(&cf, &Bytes::from("key2")).unwrap(), None);
-        assert_eq!(engine.get(&cf, &Bytes::from("key3")).unwrap(), None);
-        assert_eq!(
-            engine.get(&cf, &Bytes::from("key4")).unwrap(),
-            Some(Bytes::from("value4"))
-        );
-        assert_eq!(
-            engine.get(&cf, &Bytes::from("key5")).unwrap(),
-            Some(Bytes::from("value5"))
-        );
+        let cf = engine.default_column_family();
+        assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
+        assert_eq!(engine.get(&cf, b"key2").unwrap(), None);
+        assert_eq!(engine.get(&cf, b"key3").unwrap(), None);
+        assert_eq!(engine.get(&cf, b"key4").unwrap(), Some(Bytes::from("value4")));
+        assert_eq!(engine.get(&cf, b"key5").unwrap(), Some(Bytes::from("value5")));
     }
 
     drop(tmp_dir);

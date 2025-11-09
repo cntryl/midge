@@ -26,7 +26,7 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 
     // Act
-    let result = engine.commit_transaction(timeout_txn, cntryl_midge::WriteOptions::default());
+    let result = engine.commit_transaction(Box::new(timeout_txn), cntryl_midge::WriteOptions::default());
 
     // Assert
     // No timeout mechanism currently
