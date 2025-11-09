@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::test_temp_dir;
 #[test]
 fn should_streaming_scan_match_regular_scan() {
     // Arrange: create a database with multiple keys across memtable and SSTs

@@ -9,7 +9,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 use std::fs;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::test_temp_dir;
 #[test]
 fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
     // Arrange: write a couple keys, then force WAL rotation to flush memtable -> SST

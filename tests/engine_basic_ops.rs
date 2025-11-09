@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::test_temp_dir;
 #[test]
 fn should_get_value_given_existing_key_when_put() {
     // Arrange

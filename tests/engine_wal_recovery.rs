@@ -9,7 +9,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::fs;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::test_temp_dir;
 #[test]
 fn should_rotate_wal_given_small_buffer_when_multiple_puts() {
     // Arrange

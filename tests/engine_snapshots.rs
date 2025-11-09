@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::test_temp_dir;
 #[test]
 #[ignore = "Snapshot isolation not fully implemented - documents expected behavior"]
 fn should_hide_newer_writes_given_snapshot_when_get_at() {

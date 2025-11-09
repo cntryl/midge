@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::test_temp_dir;
 #[test]
 fn should_compact_all_merge_newest_and_drop_tombstones() {
     // Arrange: create multiple SSTs with overlapping keys and tombstones

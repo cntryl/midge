@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 
 mod common;
-use common::{new_engine, test_temp_dir};
+use common::test_temp_dir;
 #[test]
 fn should_delete_keys_in_range_given_delete_range() {
     // Arrange
