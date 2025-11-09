@@ -104,13 +104,14 @@ fn should_stall_writes_given_l0_file_count_exceeded() {
     let _dir = test_temp_dir();
     let opts = memory_opts_with_memtable_size(5 * 1024 * 1024);
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act - Write a lot of data to create L0 files
     let num_writes = 1500;
     for i in 0..num_writes {
         let key = format!("l0_key_{}", i);
         let value = vec![0u8; 3072];
-        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
     }
 
     // Assert - Despite potential stalls, all writes complete
@@ -127,12 +128,13 @@ fn should_resume_writes_given_compaction_caught_up() {
     let _dir = test_temp_dir();
     let opts = memory_opts_with_memtable_size(10 * 1024 * 1024);
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act - Burst writes, wait for compaction, then verify writes work
     for i in 0..1000 {
         let key = format!("burst_key_{}", i);
         let value = vec![0u8; 2048];
-        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
     }
 
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -155,6 +157,7 @@ fn should_measure_write_stall_duration_given_backpressure() {
     let _dir = test_temp_dir();
     let opts = memory_opts_with_memtable_size(6 * 1024 * 1024);
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
     let start = std::time::Instant::now();
@@ -163,7 +166,7 @@ fn should_measure_write_stall_duration_given_backpressure() {
     for i in 0..num_writes {
         let key = format!("measure_key_{}", i);
         let value = vec![0u8; 4096];
-        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
     }
 
     let elapsed = start.elapsed();

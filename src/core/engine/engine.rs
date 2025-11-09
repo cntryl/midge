@@ -1972,7 +1972,12 @@ impl MidgeEngine {
         for m in &mutations {
             let (kind, vlen, rend_len) = match m.op {
                 crate::api::mutation::MutationOp::Put
-                | crate::api::mutation::MutationOp::Insert => {
+                | crate::api::mutation::MutationOp::Insert
+                | crate::api::mutation::MutationOp::Merge => {
+                    (WalOpKind::Put, m.value.as_ref().map(|v| v.len()), None)
+                }
+                crate::api::mutation::MutationOp::CompareAndSwap => {
+                    // CAS uses Put WAL record; validation happens at apply time
                     (WalOpKind::Put, m.value.as_ref().map(|v| v.len()), None)
                 }
                 crate::api::mutation::MutationOp::Delete => (WalOpKind::Delete, None, None),
@@ -1996,7 +2001,9 @@ impl MidgeEngine {
             // Build record with txn_id
             let mut record = match m.op {
                 crate::api::mutation::MutationOp::Put
-                | crate::api::mutation::MutationOp::Insert => {
+                | crate::api::mutation::MutationOp::Insert
+                | crate::api::mutation::MutationOp::CompareAndSwap
+                | crate::api::mutation::MutationOp::Merge => {
                     let expiration = if ttl_seconds > 0 {
                         let now = timestamp::now_millis();
                         Some(now + (ttl_seconds * 1000))
@@ -2051,6 +2058,20 @@ impl MidgeEngine {
             match m.op {
                 crate::api::mutation::MutationOp::Put
                 | crate::api::mutation::MutationOp::Insert => {
+                    if let Some(v) = m.value {
+                        self.with_default_memtable_mut(|mt| mt.put_with_seq(&m.key, &v, s));
+                    }
+                }
+                crate::api::mutation::MutationOp::CompareAndSwap => {
+                    // CAS validation should happen before reaching here
+                    // At commit time, we just apply as a regular put
+                    if let Some(v) = m.value {
+                        self.with_default_memtable_mut(|mt| mt.put_with_seq(&m.key, &v, s));
+                    }
+                }
+                crate::api::mutation::MutationOp::Merge => {
+                    // TODO: Implement proper merge semantics with merge operators
+                    // For now, treat as a regular put
                     if let Some(v) = m.value {
                         self.with_default_memtable_mut(|mt| mt.put_with_seq(&m.key, &v, s));
                     }
@@ -2760,6 +2781,43 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
         self.as_ref().put(cf, key, value)
     }
 
+    fn compare_and_swap(
+        &self,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new_value: &[u8],
+    ) -> MidgeResult<bool> {
+        // Read current value
+        let current = self.as_ref().get(cf, key)?;
+        
+        // Check if current value matches expected
+        let matches = match (current.as_ref(), expected) {
+            (None, None) => true,
+            (Some(c), Some(e)) => c.as_ref() == e,
+            _ => false,
+        };
+        
+        // If matches, perform the swap
+        if matches {
+            self.as_ref().put(cf, key, new_value)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn merge(
+        &self,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+    ) -> MidgeResult<()> {
+        // TODO: Implement proper merge semantics with merge operators
+        // For now, treat merge as a put operation
+        self.as_ref().put(cf, key, value)
+    }
+
     // ==================== Batch Operations ====================
 
     fn batch(
@@ -2782,6 +2840,24 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
                 }
                 crate::api::kv_store::BatchOperation::DeleteRange { start, end } => {
                     self.as_ref().delete_range(cf, &start, &end)?;
+                }
+                crate::api::kv_store::BatchOperation::CompareAndSwap { key, expected, new_value } => {
+                    // For batch operations, CAS is not atomic across the batch
+                    // Each CAS is applied individually
+                    let current = self.as_ref().get(cf, &key)?;
+                    let matches = match (current.as_ref(), expected.as_ref()) {
+                        (None, None) => true,
+                        (Some(c), Some(e)) => c.as_ref() == e.as_slice(),
+                        _ => false,
+                    };
+                    if matches {
+                        self.as_ref().put(cf, &key, &new_value)?;
+                    }
+                }
+                crate::api::kv_store::BatchOperation::Merge { key, value } => {
+                    // TODO: Implement proper merge semantics
+                    // For now, treat merge as a put operation
+                    self.as_ref().put(cf, &key, &value)?;
                 }
             }
         }

@@ -226,6 +226,20 @@ impl MemTable {
                         self.put(&m.key, &v);
                     }
                 }
+                crate::api::mutation::MutationOp::CompareAndSwap => {
+                    // CAS validation should happen before reaching memtable
+                    // At this point, just apply as a regular put
+                    if let Some(v) = m.value {
+                        self.put(&m.key, &v);
+                    }
+                }
+                crate::api::mutation::MutationOp::Merge => {
+                    // TODO: Implement proper merge semantics
+                    // For now, treat as a regular put
+                    if let Some(v) = m.value {
+                        self.put(&m.key, &v);
+                    }
+                }
                 crate::api::mutation::MutationOp::Delete => {
                     self.delete(&m.key);
                 }

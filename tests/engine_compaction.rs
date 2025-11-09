@@ -23,27 +23,29 @@ fn should_compact_all_merge_newest_and_drop_tombstones() {
     opts.memtable_size = 1024 * 1024;
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
+        let cf = eng.default_column_family();
         // SST1: a=1, b=2
         eng.put(&cf, b"a", b"1")
             .unwrap();
-        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'x'; 256]))
+        eng.put(&cf, b"zz", &vec![b'x'; 256])
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         // SST2: b=2', c=3
         eng.put(&cf, b"b", b"2' ")
             .unwrap();
-        eng.put(&cf, Bytes::from_static(b"zz2"), Bytes::from(vec![b'x'; 256]))
+        eng.put(&cf, b"zz2", &vec![b'x'; 256])
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         // SST3: delete a
         eng.delete(&cf, b"a").unwrap();
-        eng.put(&cf, Bytes::from_static(b"zz3"), Bytes::from(vec![b'x'; 256]))
+        eng.put(&cf, b"zz3", &vec![b'x'; 256])
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(120));
         // leave eng in scope to ensure flush thread has time
     }
 
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
+    let cf = eng.default_column_family();
     // Sanity before compaction: get pulls latest view with tombstone respected
     assert_eq!(eng.get(&cf, b"a").unwrap(), None);
     let b = eng.get(&cf, b"b").unwrap().unwrap();
@@ -62,7 +64,6 @@ fn should_compact_all_merge_newest_and_drop_tombstones() {
 
 #[test]
 fn should_preserve_snapshot_visibility_across_compaction() {
-    let cf = engine.default_column_family();
     // Arrange: create value, take snapshot, delete value, then compact
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
@@ -73,6 +74,7 @@ fn should_preserve_snapshot_visibility_across_compaction() {
     opts.wal_buffer_size = 64;
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
+    let cf = eng.default_column_family();
 
     eng.put(&cf, b"a", b"v1")
         .expect("put v1");
@@ -110,20 +112,21 @@ fn should_background_compact_when_threshold_exceeded() {
     opts.memtable_size = 1024 * 1024;
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
+        let cf = eng.default_column_family();
         // Create 3 SSTs quickly
         eng.put(&cf, b"a", b"1")
             .unwrap();
-        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'x'; 128]))
+        eng.put(&cf, b"zz", &vec![b'x'; 128])
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
         eng.put(&cf, b"b", b"2")
             .unwrap();
-        eng.put(&cf, Bytes::from_static(b"zz2"), Bytes::from(vec![b'x'; 128]))
+        eng.put(&cf, b"zz2", &vec![b'x'; 128])
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
         eng.put(&cf, b"c", b"3")
             .unwrap();
-        eng.put(&cf, Bytes::from_static(b"zz3"), Bytes::from(vec![b'x'; 128]))
+        eng.put(&cf, b"zz3", &vec![b'x'; 128])
             .unwrap();
     }
     // Act: wait for background compaction to kick in
@@ -131,6 +134,7 @@ fn should_background_compact_when_threshold_exceeded() {
 
     // Assert: only one SST remains and reads intact
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
+    let cf = eng.default_column_family();
     let m = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
     assert_eq!(m.ssts.len(), 1);
     assert_eq!(eng.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));

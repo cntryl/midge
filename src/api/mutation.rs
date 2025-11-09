@@ -7,6 +7,8 @@ pub enum MutationOp {
     Insert,
     Delete,
     DeleteRange,
+    CompareAndSwap,
+    Merge,
 }
 
 /// Represents a single mutation against the key/value store.
@@ -79,6 +81,28 @@ impl Mutation {
             value: None,
             ttl: None,
             range_end: Some(end),
+        }
+    }
+
+    #[inline]
+    pub fn compare_and_swap(key: Bytes, expected: Option<Bytes>, new_value: Bytes) -> Self {
+        Self {
+            op: MutationOp::CompareAndSwap,
+            key,
+            value: Some(new_value),
+            ttl: None,
+            range_end: expected,
+        }
+    }
+
+    #[inline]
+    pub fn merge(key: Bytes, value: Bytes) -> Self {
+        Self {
+            op: MutationOp::Merge,
+            key,
+            value: Some(value),
+            ttl: None,
+            range_end: None,
         }
     }
 }

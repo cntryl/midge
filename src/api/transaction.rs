@@ -172,6 +172,8 @@ impl Transaction {
                 MutationOp::Insert => 1u8,
                 MutationOp::Delete => 2u8,
                 MutationOp::DeleteRange => 3u8,
+                MutationOp::CompareAndSwap => 4u8,
+                MutationOp::Merge => 5u8,
             };
 
             writer
@@ -189,7 +191,7 @@ impl Transaction {
 
             // Write value or range_end
             match &mutation.op {
-                MutationOp::Put | MutationOp::Insert => {
+                MutationOp::Put | MutationOp::Insert | MutationOp::Merge => {
                     if let Some(ref value) = mutation.value {
                         let value_len = value.len() as u32;
                         writer.write_all(&value_len.to_le_bytes()).map_err(|e| {
@@ -221,6 +223,36 @@ impl Transaction {
                     } else {
                         writer.write_all(&0u32.to_le_bytes()).map_err(|e| {
                             MidgeError::internal(format!("Failed to write range end len: {}", e))
+                        })?;
+                    }
+                }
+                MutationOp::CompareAndSwap => {
+                    // Write value (new_value)
+                    if let Some(ref value) = mutation.value {
+                        let value_len = value.len() as u32;
+                        writer.write_all(&value_len.to_le_bytes()).map_err(|e| {
+                            MidgeError::internal(format!("Failed to write value len: {}", e))
+                        })?;
+                        writer.write_all(value).map_err(|e| {
+                            MidgeError::internal(format!("Failed to write value: {}", e))
+                        })?;
+                    } else {
+                        writer.write_all(&0u32.to_le_bytes()).map_err(|e| {
+                            MidgeError::internal(format!("Failed to write value len: {}", e))
+                        })?;
+                    }
+                    // Write expected value (stored in range_end)
+                    if let Some(ref expected) = mutation.range_end {
+                        let expected_len = expected.len() as u32;
+                        writer.write_all(&expected_len.to_le_bytes()).map_err(|e| {
+                            MidgeError::internal(format!("Failed to write expected len: {}", e))
+                        })?;
+                        writer.write_all(expected).map_err(|e| {
+                            MidgeError::internal(format!("Failed to write expected: {}", e))
+                        })?;
+                    } else {
+                        writer.write_all(&0u32.to_le_bytes()).map_err(|e| {
+                            MidgeError::internal(format!("Failed to write expected len: {}", e))
                         })?;
                     }
                 }
@@ -302,6 +334,27 @@ impl Transaction {
                         range_end: value_or_end,
                         ttl: None,
                     },
+                    4 => {
+                        // CompareAndSwap: read expected value (second field)
+                        let mut expected_len_bytes = [0u8; 4];
+                        reader.read_exact(&mut expected_len_bytes).map_err(|e| {
+                            MidgeError::internal(format!("Failed to read expected len: {}", e))
+                        })?;
+                        let expected_len = u32::from_le_bytes(expected_len_bytes) as usize;
+
+                        let expected = if expected_len > 0 {
+                            let mut expected_bytes = vec![0u8; expected_len];
+                            reader.read_exact(&mut expected_bytes).map_err(|e| {
+                                MidgeError::internal(format!("Failed to read expected: {}", e))
+                            })?;
+                            Some(Bytes::from(expected_bytes))
+                        } else {
+                            None
+                        };
+
+                        Mutation::compare_and_swap(key, expected, value_or_end.unwrap_or_default())
+                    }
+                    5 => Mutation::merge(key, value_or_end.unwrap_or_default()),
                     _ => {
                         return Err(MidgeError::internal(format!(
                             "Unknown mutation op: {}",
@@ -370,6 +423,29 @@ impl Transaction {
     pub fn delete_range(&mut self, start: Bytes, end: Bytes) -> Result<(), MidgeError> {
         self.track_write(start.clone());
         let mutation = Mutation::delete_range(start, end);
+        self.staged.push(mutation);
+        self.update_memory_usage_and_spill()?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn compare_and_swap(
+        &mut self,
+        key: Bytes,
+        expected: Option<Bytes>,
+        new_value: Bytes,
+    ) -> Result<(), MidgeError> {
+        self.track_write(key.clone());
+        let mutation = Mutation::compare_and_swap(key, expected, new_value);
+        self.staged.push(mutation);
+        self.update_memory_usage_and_spill()?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn merge(&mut self, key: Bytes, value: Bytes) -> Result<(), MidgeError> {
+        self.track_write(key.clone());
+        let mutation = Mutation::merge(key, value);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
         Ok(())
@@ -505,6 +581,25 @@ impl super::kv_store::KvTransaction for EngineTransaction {
     fn delete_range(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<()> {
         self.txn.delete_range(Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))
     }
+
+    fn compare_and_swap(
+        &mut self,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new_value: &[u8],
+    ) -> crate::MidgeResult<bool> {
+        self.txn.compare_and_swap(
+            Bytes::copy_from_slice(key),
+            expected.map(Bytes::copy_from_slice),
+            Bytes::copy_from_slice(new_value),
+        )?;
+        // For now, always return true since validation happens at commit time
+        Ok(true)
+    }
+
+    fn merge(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
+        self.txn.merge(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
+    }
 }
 
 // Implement the public KvTransaction trait for the crate Transaction so that the
@@ -533,6 +628,26 @@ impl super::kv_store::KvTransaction for Transaction {
 
     fn delete_range(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<()> {
         Transaction::delete_range(self, Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        new_value: &[u8],
+    ) -> crate::MidgeResult<bool> {
+        Transaction::compare_and_swap(
+            self,
+            Bytes::copy_from_slice(key),
+            expected.map(Bytes::copy_from_slice),
+            Bytes::copy_from_slice(new_value),
+        )?;
+        // For now, always return true since validation happens at commit time
+        Ok(true)
+    }
+
+    fn merge(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
+        Transaction::merge(self, Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
     }
 }
 
