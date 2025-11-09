@@ -7,7 +7,7 @@ mod ycsb_common;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
-use midge::{MidgeEngine, WriteBatch};
+use cntryl_midge::{MidgeEngine, WriteBatch};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;

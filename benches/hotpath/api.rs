@@ -13,7 +13,7 @@ mod criterion_helper;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
-use midge::{MidgeEngine, MidgeOptions, Mutation, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, Mutation, StorageMode};
 use std::hint::black_box;
 
 fn setup_db(name: &str) -> MidgeEngine {

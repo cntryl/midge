@@ -9,12 +9,12 @@
 fn should_scan_across_1000_ssts_given_large_database() {
     // Smoke test: create many small SSTs and scan across them
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 256,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     // Act - create multiple flushes to produce many SST files
     let mut expected = 0usize;
@@ -40,7 +40,7 @@ fn should_scan_across_1000_ssts_given_large_database() {
 
     // Assert - scan entire range returns all keys
     let results = engine
-        .scan(midge::Query::new().start_key(bytes::Bytes::from("k000")))
+        .scan(cntryl_midge::Query::new().start_key(bytes::Bytes::from("k000")))
         .unwrap();
     assert_eq!(results.len(), expected);
 }
@@ -48,12 +48,12 @@ fn should_scan_across_1000_ssts_given_large_database() {
 #[test]
 fn should_not_exhaust_memory_given_scan_over_millions_of_keys() {
     // Arrange - create a large-ish dataset in memory (smoke sized)
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 1024,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     // Act - insert many keys and flush periodically
     let total = 2000usize;
@@ -68,7 +68,7 @@ fn should_not_exhaust_memory_given_scan_over_millions_of_keys() {
     }
 
     // Assert - scanning returns expected count (allow >= in case of implementation differences)
-    let results = engine.scan(midge::Query::new()).unwrap();
+    let results = engine.scan(cntryl_midge::Query::new()).unwrap();
     assert!(
         results.len() >= total,
         "expected at least {} results, got {}",
@@ -80,12 +80,12 @@ fn should_not_exhaust_memory_given_scan_over_millions_of_keys() {
 #[test]
 fn should_handle_scan_with_many_tombstones_efficiently() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 512,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     // Act - insert and then tombstone many keys
     let total = 200usize;
@@ -105,7 +105,7 @@ fn should_handle_scan_with_many_tombstones_efficiently() {
     engine.flush().unwrap();
 
     // Assert - scanning returns remaining keys only
-    let results = engine.scan(midge::Query::new()).unwrap();
+    let results = engine.scan(cntryl_midge::Query::new()).unwrap();
     assert_eq!(results.len(), 50);
 }
 
@@ -116,12 +116,12 @@ fn should_handle_scan_with_many_tombstones_efficiently() {
 #[test]
 fn should_maintain_consistency_given_compaction_during_scan() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 256,
         ..Default::default()
     };
-    let engine = std::sync::Arc::new(midge::MidgeEngine::open(opts).unwrap());
+    let engine = std::sync::Arc::new(cntryl_midge::MidgeEngine::open(opts).unwrap());
 
     // Populate data across flushes
     for batch in 0..10 {
@@ -144,7 +144,7 @@ fn should_maintain_consistency_given_compaction_during_scan() {
 
     // Perform scans while compaction may be running
     for _ in 0..20 {
-        let results = engine.scan(midge::Query::new()).unwrap();
+        let results = engine.scan(cntryl_midge::Query::new()).unwrap();
         assert!(!results.is_empty());
     }
 
@@ -158,12 +158,12 @@ fn should_maintain_consistency_given_compaction_during_scan() {
 #[test]
 fn should_not_skip_keys_given_files_being_compacted_when_scanning() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 256,
         ..Default::default()
     };
-    let engine = std::sync::Arc::new(midge::MidgeEngine::open(opts).unwrap());
+    let engine = std::sync::Arc::new(cntryl_midge::MidgeEngine::open(opts).unwrap());
 
     // Create overlapping key sets across multiple SSTs
     for batch in 0..8 {
@@ -182,7 +182,7 @@ fn should_not_skip_keys_given_files_being_compacted_when_scanning() {
         let _ = e.compact_all();
     });
 
-    let results = engine.scan(midge::Query::new()).unwrap();
+    let results = engine.scan(cntryl_midge::Query::new()).unwrap();
     comp.join().unwrap();
 
     // Assert - all keys present
@@ -192,12 +192,12 @@ fn should_not_skip_keys_given_files_being_compacted_when_scanning() {
 #[test]
 fn should_handle_iterator_invalidation_given_compaction_completes_mid_scan() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 256,
         ..Default::default()
     };
-    let engine = std::sync::Arc::new(midge::MidgeEngine::open(opts).unwrap());
+    let engine = std::sync::Arc::new(cntryl_midge::MidgeEngine::open(opts).unwrap());
 
     for i in 0..200 {
         let key = format!("it{:04}", i);
@@ -214,7 +214,7 @@ fn should_handle_iterator_invalidation_given_compaction_completes_mid_scan() {
         let _ = e.compact_all();
     });
 
-    let results = engine.scan(midge::Query::new()).unwrap();
+    let results = engine.scan(cntryl_midge::Query::new()).unwrap();
     // Iterate to simulate long-lived iterator consumption
     let mut seen = 0usize;
     for _ in results.iter() {
@@ -234,12 +234,12 @@ fn should_handle_iterator_invalidation_given_compaction_completes_mid_scan() {
 #[test]
 fn should_limit_iterator_memory_given_buffering_threshold() {
     // Smoke: ensure large scans can be consumed incrementally without panicking
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 1024,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     let total = 1500usize;
     for i in 0..total {
@@ -253,19 +253,19 @@ fn should_limit_iterator_memory_given_buffering_threshold() {
     }
 
     // Act & Assert - consume results in streaming-like fashion
-    let results = engine.scan(midge::Query::new()).unwrap();
+    let results = engine.scan(cntryl_midge::Query::new()).unwrap();
     assert_eq!(results.len(), total);
 }
 
 #[test]
 fn should_release_blocks_given_iterator_advanced_beyond_range() {
     // Smoke: iterating and dropping prefixes should not leak or crash
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 512,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     for i in 0..500 {
         let key = format!("b{:04}", i);
@@ -279,7 +279,7 @@ fn should_release_blocks_given_iterator_advanced_beyond_range() {
     for start in (0..500).step_by(100) {
         let start_key = format!("b{:04}", start);
         let results = engine
-            .scan(midge::Query::new().start_key(bytes::Bytes::from(start_key)))
+            .scan(cntryl_midge::Query::new().start_key(bytes::Bytes::from(start_key)))
             .unwrap();
         assert!(!results.is_empty());
     }
@@ -292,12 +292,12 @@ fn should_release_blocks_given_iterator_advanced_beyond_range() {
 #[test]
 fn should_seek_efficiently_given_large_skip_forward() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 512,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     for i in 0..1000 {
         let key = format!("s{:06}", i);
@@ -309,7 +309,7 @@ fn should_seek_efficiently_given_large_skip_forward() {
 
     // Act - seek forward to a far key and scan a small range
     let start_key = bytes::Bytes::from("s000900");
-    let q = midge::Query::new()
+    let q = cntryl_midge::Query::new()
         .start_key(start_key)
         .end_key(bytes::Bytes::from("s001000"));
     let results = engine.scan(q).unwrap();
@@ -321,12 +321,12 @@ fn should_seek_efficiently_given_large_skip_forward() {
 #[test]
 fn should_seek_backward_efficiently_given_reverse_iterator() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 512,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     for i in 0..500 {
         let key = format!("r{:04}", i);
@@ -337,7 +337,7 @@ fn should_seek_backward_efficiently_given_reverse_iterator() {
     engine.flush().unwrap();
 
     // Act - reverse scan a tail range
-    let q = midge::Query::new()
+    let q = cntryl_midge::Query::new()
         .start_key(bytes::Bytes::from("r0490"))
         .end_key(bytes::Bytes::from("r0500"))
         .reverse();
@@ -350,12 +350,12 @@ fn should_seek_backward_efficiently_given_reverse_iterator() {
 #[test]
 fn should_use_bloom_filters_given_seek_to_nonexistent_key() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 512,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     // Insert sparse keys
     for i in (0..1000).step_by(10) {
@@ -367,7 +367,7 @@ fn should_use_bloom_filters_given_seek_to_nonexistent_key() {
     engine.flush().unwrap();
 
     // Act - seek to a key that does not exist
-    let q = midge::Query::new()
+    let q = cntryl_midge::Query::new()
         .start_key(bytes::Bytes::from("bf00007"))
         .end_key(bytes::Bytes::from("bf00009"));
     let results = engine.scan(q).unwrap();
@@ -383,12 +383,12 @@ fn should_use_bloom_filters_given_seek_to_nonexistent_key() {
 #[test]
 fn should_not_see_new_writes_given_snapshot_iterator_when_concurrent_puts() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 512,
         ..Default::default()
     };
-    let engine = std::sync::Arc::new(midge::MidgeEngine::open(opts).unwrap());
+    let engine = std::sync::Arc::new(cntryl_midge::MidgeEngine::open(opts).unwrap());
 
     for i in 0..100 {
         engine
@@ -401,7 +401,7 @@ fn should_not_see_new_writes_given_snapshot_iterator_when_concurrent_puts() {
     engine.flush().unwrap();
 
     // Act - take a snapshot-like scan (scan returns snapshot) and then write more
-    let results_before = engine.scan(midge::Query::new()).unwrap();
+    let results_before = engine.scan(cntryl_midge::Query::new()).unwrap();
 
     // Concurrent writes
     let e = std::sync::Arc::clone(&engine);
@@ -425,12 +425,12 @@ fn should_not_see_new_writes_given_snapshot_iterator_when_concurrent_puts() {
 #[test]
 fn should_maintain_consistent_view_given_snapshot_scan_when_compaction_runs() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 256,
         ..Default::default()
     };
-    let engine = std::sync::Arc::new(midge::MidgeEngine::open(opts).unwrap());
+    let engine = std::sync::Arc::new(cntryl_midge::MidgeEngine::open(opts).unwrap());
 
     for i in 0..200 {
         engine
@@ -449,7 +449,7 @@ fn should_maintain_consistent_view_given_snapshot_scan_when_compaction_runs() {
         let _ = e.compact_all();
     });
 
-    let snap = engine.scan(midge::Query::new()).unwrap();
+    let snap = engine.scan(cntryl_midge::Query::new()).unwrap();
     comp.join().unwrap();
 
     // Assert - snapshot view remains consistent
@@ -459,12 +459,12 @@ fn should_maintain_consistent_view_given_snapshot_scan_when_compaction_runs() {
 #[test]
 fn should_see_all_keys_at_snapshot_sequence_given_range_scan() {
     // Arrange
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 512,
         ..Default::default()
     };
-    let engine = midge::MidgeEngine::open(opts).unwrap();
+    let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     for i in 0..150 {
         engine
@@ -477,7 +477,7 @@ fn should_see_all_keys_at_snapshot_sequence_given_range_scan() {
     engine.flush().unwrap();
 
     // Act
-    let results = engine.scan(midge::Query::new()).unwrap();
+    let results = engine.scan(cntryl_midge::Query::new()).unwrap();
 
     // Assert
     assert_eq!(results.len(), 150);
@@ -486,12 +486,12 @@ fn should_see_all_keys_at_snapshot_sequence_given_range_scan() {
 #[test]
 fn should_handle_expired_snapshot_given_long_running_scan() {
     // Arrange - long-running scan simulated by many iterations
-    let opts = midge::MidgeOptions {
-        storage_mode: midge::StorageMode::Memory,
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::Memory,
         memtable_size: 512,
         ..Default::default()
     };
-    let engine = std::sync::Arc::new(midge::MidgeEngine::open(opts).unwrap());
+    let engine = std::sync::Arc::new(cntryl_midge::MidgeEngine::open(opts).unwrap());
 
     for i in 0..300 {
         engine
@@ -514,7 +514,7 @@ fn should_handle_expired_snapshot_given_long_running_scan() {
     let mut total_seen = 0usize;
     for i in 0..10 {
         let start = format!("ls{:03}", i * 30);
-        let q = midge::Query::new().start_key(bytes::Bytes::from(start));
+        let q = cntryl_midge::Query::new().start_key(bytes::Bytes::from(start));
         let res = engine.scan(q).unwrap();
         total_seen += res.len();
     }

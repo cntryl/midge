@@ -16,7 +16,7 @@ use crate::wal::cloud::CloudStorageBackend;
 /// # Example
 ///
 /// ```rust,no_run
-/// use midge::config::{ConfigBuilder, Goal, Durability, WorkloadProfile};
+/// use cntryl_midge::config::{ConfigBuilder, Goal, Durability, WorkloadProfile};
 ///
 /// let config = ConfigBuilder::new("./my_db")
 ///     .goal(Goal::Latency)

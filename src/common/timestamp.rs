@@ -28,7 +28,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use midge::common::timestamp;
+//! use cntryl_midge::common::timestamp;
 //!
 //! // Get timestamp in different units
 //! let millis = timestamp::now_millis();  // Milliseconds since epoch

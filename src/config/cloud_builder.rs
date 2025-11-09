@@ -6,8 +6,8 @@
 //! # Examples
 //!
 //! ```rust,no_run
-//! use midge::config::cloud_builder::CloudConfigBuilder;
-//! use midge::cloud::MockCloudBackend;
+//! use cntryl_midge::config::cloud_builder::CloudConfigBuilder;
+//! use cntryl_midge::cloud::MockCloudBackend;
 //! use std::sync::Arc;
 //!
 //! // Strict durability (fsync + verified cloud upload)

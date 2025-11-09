@@ -1,7 +1,7 @@
 // Minimal test to debug WAL replay issue
 
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use tempfile::tempdir;
 
 #[test]

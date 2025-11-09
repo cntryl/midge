@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// # Examples
 ///
 /// ```rust
-/// # use midge::fs::numbered_file_path;
+/// # use cntryl_midge::fs::numbered_file_path;
 /// use std::path::Path;
 ///
 /// let path = numbered_file_path(Path::new("/data"), 1, "wal");
@@ -35,7 +35,7 @@ pub fn numbered_file_path(dir: &Path, number: u64, extension: &str) -> PathBuf {
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use midge::fs::find_latest_numbered_file;
+/// # use cntryl_midge::fs::find_latest_numbered_file;
 /// use std::path::Path;
 ///
 /// // Find highest WAL file number
@@ -83,7 +83,7 @@ pub fn find_latest_numbered_file(dir: &Path, extension: &str) -> MidgeResult<u64
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use midge::fs::list_numbered_files;
+/// # use cntryl_midge::fs::list_numbered_files;
 /// use std::path::Path;
 ///
 /// let files = list_numbered_files(Path::new("/sst"), "sst").unwrap();

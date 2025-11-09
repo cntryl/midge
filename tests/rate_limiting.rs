@@ -8,7 +8,7 @@
 #[test]
 fn should_throttle_writes_given_compaction_falling_behind() {
     // Arrange
-    use midge::common::rate_limiter::RateLimiter;
+    use cntryl_midge::common::rate_limiter::RateLimiter;
     use std::time::{Duration, Instant};
 
     // Configure a tiny rate (1 KB/s) with a 1KB burst so initial writes can
@@ -34,7 +34,7 @@ fn should_throttle_writes_given_compaction_falling_behind() {
 #[test]
 fn should_slow_writes_given_l0_approaching_threshold() {
     // Arrange
-    use midge::common::rate_limiter::RateLimiter;
+    use cntryl_midge::common::rate_limiter::RateLimiter;
     use std::time::{Duration, Instant};
 
     // Low sustained rate and modest burst to simulate gradual slowdown
@@ -55,7 +55,7 @@ fn should_slow_writes_given_l0_approaching_threshold() {
 #[test]
 fn should_resume_normal_speed_given_compaction_caught_up() {
     // Arrange
-    use midge::common::rate_limiter::RateLimiter;
+    use cntryl_midge::common::rate_limiter::RateLimiter;
     use std::time::{Duration, Instant};
 
     // Use a smaller burst so the first request consumes it and the *second*
@@ -89,7 +89,7 @@ fn should_resume_normal_speed_given_compaction_caught_up() {
 #[test]
 fn should_limit_scan_rate_given_rate_limiter_configured() {
     // Arrange
-    use midge::common::rate_limiter::RateLimiter;
+    use cntryl_midge::common::rate_limiter::RateLimiter;
     use std::time::Duration;
 
     let limiter = RateLimiter::new(500, 500); // 0.5 KB/s
@@ -107,7 +107,7 @@ fn should_limit_scan_rate_given_rate_limiter_configured() {
 #[test]
 fn should_allow_point_reads_given_scan_throttled() {
     // Arrange
-    use midge::common::rate_limiter::RateLimiter;
+    use cntryl_midge::common::rate_limiter::RateLimiter;
     use std::time::{Duration, Instant};
 
     // Configure a low rate but allow a tiny point read to succeed quickly
@@ -131,7 +131,7 @@ fn should_allow_point_reads_given_scan_throttled() {
 #[test]
 fn should_limit_upload_bandwidth_given_cloud_rate_limit() {
     // Arrange
-    use midge::common::rate_limiter::RateLimiter;
+    use cntryl_midge::common::rate_limiter::RateLimiter;
     use std::time::{Duration, Instant};
 
     let limiter = RateLimiter::new(1_000, 1_000); // 1KB/s
@@ -149,7 +149,7 @@ fn should_limit_upload_bandwidth_given_cloud_rate_limit() {
 #[test]
 fn should_limit_download_bandwidth_given_cloud_rate_limit() {
     // Arrange
-    use midge::common::rate_limiter::RateLimiter;
+    use cntryl_midge::common::rate_limiter::RateLimiter;
     use std::time::Duration;
 
     let limiter = RateLimiter::new(200, 200);
@@ -167,7 +167,7 @@ fn should_limit_download_bandwidth_given_cloud_rate_limit() {
 #[test]
 fn should_queue_uploads_given_bandwidth_limit_exceeded() {
     // Arrange
-    use midge::common::rate_limiter::RateLimiter;
+    use cntryl_midge::common::rate_limiter::RateLimiter;
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};

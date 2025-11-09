@@ -1,7 +1,7 @@
 //! Integration tests for health management system
 
-use midge::health::{HealthConfig, HealthManager, LifecycleState};
-use midge::manifest::Manifest;
+use cntryl_midge::health::{HealthConfig, HealthManager, LifecycleState};
+use cntryl_midge::manifest::Manifest;
 use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
 
@@ -11,12 +11,12 @@ struct MockEngine {
     checkpoint_seq: u64,
 }
 
-impl midge::health::manager::EngineHealth for MockEngine {
+impl cntryl_midge::health::manager::EngineHealth for MockEngine {
     fn current_sequence(&self) -> u64 {
         self.current_seq
     }
 
-    fn flush_memtable(&self) -> midge::error::MidgeResult<()> {
+    fn flush_memtable(&self) -> cntryl_midge::error::MidgeResult<()> {
         Ok(())
     }
 
@@ -38,8 +38,8 @@ fn should_start_in_stopped_state_given_new_manager() {
         current_seq: 0,
         checkpoint_seq: 0,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
 
     // Act
@@ -58,8 +58,8 @@ fn should_transition_to_starting_given_valid_state() {
         current_seq: 100,
         checkpoint_seq: 90,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
     let manager = HealthManager::new(engine_weak, manifest, config);
 
@@ -79,8 +79,8 @@ fn should_reject_invalid_transition_given_stopped_to_ready() {
         current_seq: 100,
         checkpoint_seq: 90,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
     let manager = HealthManager::new(engine_weak, manifest, config);
 
@@ -100,8 +100,8 @@ fn should_return_not_ready_given_starting_state() {
         current_seq: 100,
         checkpoint_seq: 90,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
     let manager = HealthManager::new(engine_weak, manifest, config);
     manager.set_state(LifecycleState::Starting).unwrap();
@@ -124,8 +124,8 @@ fn should_return_ready_given_complete_rehydration() {
         current_seq: 100,
         checkpoint_seq: 90,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
     let manager = HealthManager::new(engine_weak, manifest, config);
 
@@ -153,8 +153,8 @@ fn should_track_rehydration_progress_given_updates() {
         current_seq: 100,
         checkpoint_seq: 90,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
     let manager = HealthManager::new(engine_weak, manifest, config);
 
@@ -184,8 +184,8 @@ fn should_return_syncpoint_given_engine_state() {
         current_seq: 1000,
         checkpoint_seq: 900,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
     let manager = HealthManager::new(engine_weak, manifest, config);
 
@@ -206,8 +206,8 @@ fn should_seal_engine_given_drain_called() {
         current_seq: 1000,
         checkpoint_seq: 900,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
     let manager = HealthManager::new(engine_weak, manifest, config);
 
@@ -232,8 +232,8 @@ fn should_validate_state_against_cloud_checkpoint() {
         current_seq: 1000,
         checkpoint_seq: 900,
     });
-    let engine_weak: Weak<dyn midge::health::manager::EngineHealth> =
-        Arc::downgrade(&engine) as Weak<dyn midge::health::manager::EngineHealth>;
+    let engine_weak: Weak<dyn cntryl_midge::health::manager::EngineHealth> =
+        Arc::downgrade(&engine) as Weak<dyn cntryl_midge::health::manager::EngineHealth>;
     let config = HealthConfig::default();
     let manager = HealthManager::new(engine_weak, manifest, config);
 

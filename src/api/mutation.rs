@@ -23,7 +23,7 @@ pub struct Mutation {
     ///
     /// # Examples
     /// ```no_run
-    /// # use midge::api::mutation::Mutation;
+    /// # use cntryl_midge::api::mutation::Mutation;
     /// # use bytes::Bytes;
     /// # use std::time::Duration;
     /// // Create a put with 60 second TTL

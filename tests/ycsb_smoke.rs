@@ -4,7 +4,7 @@
 //! the benchmark infrastructure works correctly without the full 30-second runs.
 
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;

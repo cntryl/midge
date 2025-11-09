@@ -2,8 +2,8 @@
 //!
 //! This module provides utilities for testing cloud storage integration.
 
-use midge::cloud::MockCloudBackend;
-use midge::manifest::Manifest;
+use cntryl_midge::cloud::MockCloudBackend;
+use cntryl_midge::manifest::Manifest;
 use parking_lot::Mutex;
 use std::fs;
 use std::path::{Path, PathBuf};

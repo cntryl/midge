@@ -1,6 +1,6 @@
 // Memory Pressure & Resource Limits tests - P1 Priority
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::time::Duration;
 
 #[test]

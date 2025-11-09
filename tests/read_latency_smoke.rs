@@ -3,7 +3,7 @@
 //! Quick validation that read latency profiling works across all three paths
 
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::time::Instant;
 use tempfile::TempDir;
 

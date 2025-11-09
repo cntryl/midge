@@ -17,7 +17,7 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
 
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use rand::seq::IndexedRandom;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;

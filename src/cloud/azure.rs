@@ -9,7 +9,7 @@
 //!
 //! ## 1. Storage Account Key (Current Default)
 //! ```rust,ignore
-//! # use midge::cloud::azure::AzureBlobBackend;
+//! # use cntryl_midge::cloud::azure::AzureBlobBackend;
 //! let backend = AzureBlobBackend::new(
 //!     "mystorageaccount".to_string(),
 //!     Some("base64encodedkey...".to_string()),  // From Azure Portal
@@ -22,7 +22,7 @@
 //! Ideal for production deployments on Azure VMs, App Service, or AKS:
 //!
 //! ```rust,ignore
-//! # use midge::cloud::azure::AzureBlobBackend;
+//! # use cntryl_midge::cloud::azure::AzureBlobBackend;
 //! // On Azure VM or App Service with Managed Identity enabled:
 //! let backend = AzureBlobBackend::new(
 //!     "mystorageaccount".to_string(),

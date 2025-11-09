@@ -2,7 +2,7 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use tempfile::TempDir;
 
 fn temp_dir() -> TempDir {
@@ -38,12 +38,12 @@ fn should_detect_write_write_conflict_given_concurrent_updates_to_same_key() {
         .put(Bytes::from("key"), Bytes::from("v2"), None)
         .unwrap();
 
-    let first_result = engine.commit_transaction(first_txn, midge::WriteOptions::default());
+    let first_result = engine.commit_transaction(first_txn, cntryl_midge::WriteOptions::default());
     assert!(first_result.is_ok(), "First transaction should succeed");
 
     // Act
     let conflicting_result =
-        engine.commit_transaction(conflicting_txn, midge::WriteOptions::default());
+        engine.commit_transaction(conflicting_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(
@@ -76,11 +76,11 @@ fn should_abort_second_transaction_given_write_conflict_when_both_commit() {
         .put(Bytes::from("conflict_key"), Bytes::from("txn2_value"), None)
         .unwrap();
 
-    let winner_result = engine.commit_transaction(winning_txn, midge::WriteOptions::default());
+    let winner_result = engine.commit_transaction(winning_txn, cntryl_midge::WriteOptions::default());
     assert!(winner_result.is_ok(), "First transaction should commit");
 
     // Act
-    let loser_result = engine.commit_transaction(losing_txn, midge::WriteOptions::default());
+    let loser_result = engine.commit_transaction(losing_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(
@@ -111,7 +111,7 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
         .put(Bytes::from("key"), Bytes::from("first_value"), None)
         .unwrap();
     engine
-        .commit_transaction(first_txn, midge::WriteOptions::default())
+        .commit_transaction(first_txn, cntryl_midge::WriteOptions::default())
         .expect("first commit");
 
     let mut aborted_txn = engine.begin_transaction();
@@ -152,14 +152,14 @@ fn should_handle_write_conflict_on_delete_given_concurrent_delete_and_put() {
         .put(Bytes::from("key"), Bytes::from("updated"), None)
         .unwrap();
 
-    let delete_result = engine.commit_transaction(delete_txn, midge::WriteOptions::default());
+    let delete_result = engine.commit_transaction(delete_txn, cntryl_midge::WriteOptions::default());
     assert!(
         delete_result.is_ok(),
         "Delete transaction should commit first"
     );
 
     // Act
-    let put_result = engine.commit_transaction(put_txn, midge::WriteOptions::default());
+    let put_result = engine.commit_transaction(put_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(
@@ -198,11 +198,11 @@ fn should_detect_conflict_on_delete_range_given_overlapping_keys() {
         .put(Bytes::from("key5"), Bytes::from("new_value"), None)
         .unwrap();
 
-    let range_result = engine.commit_transaction(range_txn, midge::WriteOptions::default());
+    let range_result = engine.commit_transaction(range_txn, cntryl_midge::WriteOptions::default());
 
     // Act
     let overlapping_result =
-        engine.commit_transaction(overlapping_txn, midge::WriteOptions::default());
+        engine.commit_transaction(overlapping_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(range_result.is_ok());
@@ -238,7 +238,7 @@ fn should_validate_version_given_read_set_when_committing_transaction() {
         .expect("external put");
 
     // Act
-    let result = engine.commit_transaction(reading_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(reading_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // Currently no read-set validation, transaction commits
@@ -273,7 +273,7 @@ fn should_abort_transaction_given_stale_read_when_key_modified_by_other() {
         .unwrap();
 
     // Act
-    let result = engine.commit_transaction(stale_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(stale_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // No stale read detection currently
@@ -332,7 +332,7 @@ fn should_allow_commit_given_no_conflicts_when_validation_succeeds() {
         .unwrap();
 
     // Act
-    let result = engine.commit_transaction(clean_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(clean_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(result.is_ok());
@@ -403,7 +403,7 @@ fn should_prevent_dirty_write_given_uncommitted_update_when_read_committed() {
         .unwrap();
 
     // Act
-    let second_result = engine.commit_transaction(second_txn, midge::WriteOptions::default());
+    let second_result = engine.commit_transaction(second_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // second_txn should be able to commit (no locking currently)
@@ -517,7 +517,7 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
     let snap = engine.snapshot();
     let first_scan = engine
         .scan_at(
-            midge::Query {
+            cntryl_midge::Query {
                 prefix: Some(Bytes::from("key")),
                 ..Default::default()
             },
@@ -532,7 +532,7 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
     // Act
     let second_scan = engine
         .scan_at(
-            midge::Query {
+            cntryl_midge::Query {
                 prefix: Some(Bytes::from("key")),
                 ..Default::default()
             },
@@ -607,7 +607,7 @@ fn should_not_see_concurrent_writes_given_transaction_when_snapshot_isolated() {
     txn2.put(Bytes::from("key2"), Bytes::from("v2"), None)
         .unwrap();
     engine
-        .commit_transaction(txn2, midge::WriteOptions::default())
+        .commit_transaction(txn2, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     let value = engine.transaction_get(&mut txn1, b"key2").expect("get");
@@ -667,12 +667,12 @@ fn should_track_reads_given_transaction_get_when_validating_conflicts() {
     txn2.put(Bytes::from("key"), Bytes::from("v2"), None)
         .unwrap();
     engine
-        .commit_transaction(txn2, midge::WriteOptions::default())
+        .commit_transaction(txn2, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     txn1.put(Bytes::from("other_key"), Bytes::from("value"), None)
         .unwrap();
-    let result = engine.commit_transaction(txn1, midge::WriteOptions::default());
+    let result = engine.commit_transaction(txn1, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(result.is_err(), "Should detect read-write conflict");
@@ -770,11 +770,11 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
         .unwrap();
 
     engine
-        .commit_transaction(first_increment_txn, midge::WriteOptions::default())
+        .commit_transaction(first_increment_txn, cntryl_midge::WriteOptions::default())
         .expect("commit first");
 
     // Act
-    let result = engine.commit_transaction(second_increment_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(second_increment_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // With read tracking and snapshot isolation, lost update is now PREVENTED
@@ -825,7 +825,7 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
         .unwrap();
 
     // Act
-    let result = engine.commit_transaction(cas_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(cas_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // No CAS validation currently
@@ -857,12 +857,12 @@ fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commi
         .unwrap();
 
     engine
-        .commit_transaction(first_key_txn, midge::WriteOptions::default())
+        .commit_transaction(first_key_txn, cntryl_midge::WriteOptions::default())
         .expect("commit first");
 
     // Act
     engine
-        .commit_transaction(second_key_txn, midge::WriteOptions::default())
+        .commit_transaction(second_key_txn, cntryl_midge::WriteOptions::default())
         .expect("commit second");
 
     // Assert
@@ -916,11 +916,11 @@ fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
         .unwrap();
 
     let first_result =
-        engine.commit_transaction(first_circular_txn, midge::WriteOptions::default());
+        engine.commit_transaction(first_circular_txn, cntryl_midge::WriteOptions::default());
 
     // Act
     let second_result =
-        engine.commit_transaction(second_circular_txn, midge::WriteOptions::default());
+        engine.commit_transaction(second_circular_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // With write-write conflict detection, one transaction succeeds and the other fails
@@ -965,9 +965,9 @@ fn should_abort_victim_transaction_given_deadlock_when_detected() {
 
     // Act
     let first_deadlock_result =
-        engine.commit_transaction(first_deadlock_txn, midge::WriteOptions::default());
+        engine.commit_transaction(first_deadlock_txn, cntryl_midge::WriteOptions::default());
     let second_deadlock_result =
-        engine.commit_transaction(second_deadlock_txn, midge::WriteOptions::default());
+        engine.commit_transaction(second_deadlock_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // One transaction should be chosen as victim and aborted
@@ -995,7 +995,7 @@ fn should_allow_retry_given_deadlock_victim_when_aborted() {
         .unwrap();
 
     // Act
-    let result = engine.commit_transaction(initial_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(initial_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     if result.is_err() {
@@ -1003,7 +1003,7 @@ fn should_allow_retry_given_deadlock_victim_when_aborted() {
         retry_txn
             .put(Bytes::from("key"), Bytes::from("retry_value"), None)
             .unwrap();
-        let retry_result = engine.commit_transaction(retry_txn, midge::WriteOptions::default());
+        let retry_result = engine.commit_transaction(retry_txn, cntryl_midge::WriteOptions::default());
         assert!(retry_result.is_ok(), "Retry should succeed");
     } else {
         assert!(result.is_ok());
@@ -1048,11 +1048,11 @@ fn should_detect_deadlock_given_three_way_circular_dependency() {
 
     // Act
     let first_three_way_result =
-        engine.commit_transaction(first_three_way_txn, midge::WriteOptions::default());
+        engine.commit_transaction(first_three_way_txn, cntryl_midge::WriteOptions::default());
     let second_three_way_result =
-        engine.commit_transaction(second_three_way_txn, midge::WriteOptions::default());
+        engine.commit_transaction(second_three_way_txn, cntryl_midge::WriteOptions::default());
     let third_three_way_result =
-        engine.commit_transaction(third_three_way_txn, midge::WriteOptions::default());
+        engine.commit_transaction(third_three_way_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // Should detect 3-way deadlock: txn1->r2, txn2->r3, txn3->r1
@@ -1086,7 +1086,7 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 
     // Act
-    let result = engine.commit_transaction(timeout_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(timeout_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // No timeout mechanism currently
@@ -1119,7 +1119,7 @@ fn should_release_locks_given_transaction_timeout_when_aborted() {
         .unwrap();
 
     // Act
-    let result = engine.commit_transaction(subsequent_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(subsequent_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // No locking currently, so always succeeds
@@ -1179,7 +1179,7 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
         .unwrap();
 
     // Act
-    let result = engine.commit_transaction(aborted_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(aborted_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(
@@ -1207,7 +1207,7 @@ fn should_reject_operations_given_committed_transaction_when_reused() {
 
     // Act
     engine
-        .commit_transaction(committed_txn, midge::WriteOptions::default())
+        .commit_transaction(committed_txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert
@@ -1234,7 +1234,7 @@ fn should_spill_to_disk_given_exceed_threshold_when_staging_writes() {
 
     // Create transaction with small threshold (1MB) to force spilling
     let snap = engine.snapshot();
-    let mut large_txn = midge::Transaction::with_options(
+    let mut large_txn = cntryl_midge::Transaction::with_options(
         1,
         snap.seq,
         None,
@@ -1256,7 +1256,7 @@ fn should_spill_to_disk_given_exceed_threshold_when_staging_writes() {
     // Assert
     // Transaction should have spilled to disk
     // Verify by committing and checking all data is present
-    let result = engine.commit_transaction(large_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(large_txn, cntryl_midge::WriteOptions::default());
     assert!(
         result.is_ok(),
         "Transaction with spilled data should commit"
@@ -1288,7 +1288,7 @@ fn should_read_from_spill_file_given_large_transaction_when_get() {
 
     // Create transaction with small threshold to force spilling
     let snap = engine.snapshot();
-    let mut spilled_txn = midge::Transaction::with_options(
+    let mut spilled_txn = cntryl_midge::Transaction::with_options(
         2,
         snap.seq,
         None,
@@ -1307,7 +1307,7 @@ fn should_read_from_spill_file_given_large_transaction_when_get() {
     }
 
     // Act
-    let result = engine.commit_transaction(spilled_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(spilled_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(result.is_ok(), "Should commit spilled transaction");
@@ -1344,7 +1344,7 @@ fn should_cleanup_spill_file_given_transaction_commit_when_completed() {
 
     // Create transaction with small threshold
     let snap = engine.snapshot();
-    let mut committed_spill_txn = midge::Transaction::with_options(
+    let mut committed_spill_txn = cntryl_midge::Transaction::with_options(
         3,
         snap.seq,
         None,
@@ -1376,7 +1376,7 @@ fn should_cleanup_spill_file_given_transaction_commit_when_completed() {
 
     // Act
     engine
-        .commit_transaction(committed_spill_txn, midge::WriteOptions::default())
+        .commit_transaction(committed_spill_txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert
@@ -1412,7 +1412,7 @@ fn should_cleanup_spill_file_given_transaction_abort_when_rolled_back() {
 
     // Create transaction with small threshold
     let snap = engine.snapshot();
-    let mut aborted_spill_txn = midge::Transaction::with_options(
+    let mut aborted_spill_txn = cntryl_midge::Transaction::with_options(
         4,
         snap.seq,
         None,
@@ -1477,7 +1477,7 @@ fn should_handle_multiple_spill_files_given_very_large_transaction() {
 
     // Create transaction with small threshold to force multiple spills
     let snap = engine.snapshot();
-    let mut huge_txn = midge::Transaction::with_options(
+    let mut huge_txn = cntryl_midge::Transaction::with_options(
         5,
         snap.seq,
         None,
@@ -1496,7 +1496,7 @@ fn should_handle_multiple_spill_files_given_very_large_transaction() {
     }
 
     // Act
-    let result = engine.commit_transaction(huge_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(huge_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(
@@ -1546,7 +1546,7 @@ fn should_commit_all_or_nothing_given_multi_key_transaction() {
 
     // Act
     engine
-        .commit_transaction(atomic_txn, midge::WriteOptions::default())
+        .commit_transaction(atomic_txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert
@@ -1581,7 +1581,7 @@ fn should_be_atomic_given_transaction_with_100_operations() {
 
     // Act
     engine
-        .commit_transaction(batch_txn, midge::WriteOptions::default())
+        .commit_transaction(batch_txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert
@@ -1649,7 +1649,7 @@ fn should_not_expose_partial_writes_given_concurrent_readers_when_committing() {
 
     // Act
     engine
-        .commit_transaction(partial_write_txn, midge::WriteOptions::default())
+        .commit_transaction(partial_write_txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert
@@ -1686,7 +1686,7 @@ fn should_persist_transaction_given_commit_when_crash_after() {
         )
         .unwrap();
     engine
-        .commit_transaction(durable_txn, midge::WriteOptions::default())
+        .commit_transaction(durable_txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     drop(engine);
@@ -1766,7 +1766,7 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
             )
             .unwrap();
         engine
-            .commit_transaction(wal_txn, midge::WriteOptions::default())
+            .commit_transaction(wal_txn, cntryl_midge::WriteOptions::default())
             .expect("commit");
     }
 
@@ -1812,7 +1812,7 @@ fn should_handle_empty_transaction_given_commit_without_operations() {
     let empty_txn = engine.begin_transaction();
 
     // Act
-    let result = engine.commit_transaction(empty_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(empty_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(
@@ -1841,7 +1841,7 @@ fn should_handle_read_only_transaction_given_no_writes_when_commit() {
     let _value = engine.get_at(b"key", &snap).expect("get_at");
 
     // Act
-    let result = engine.commit_transaction(readonly_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(readonly_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(result.is_ok(), "Read-only transaction should commit");
@@ -1891,7 +1891,7 @@ fn should_handle_transaction_on_dropped_cf_given_cf_deleted_during_transaction()
         .unwrap();
 
     // Act
-    let result = engine.commit_transaction(cf_txn, midge::WriteOptions::default());
+    let result = engine.commit_transaction(cf_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // Default CF cannot be dropped, transaction should succeed

@@ -17,7 +17,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use midge::core::metrics::{PerformanceMetrics, Metrics};
+//! use cntryl_midge::core::metrics::{PerformanceMetrics, Metrics};
 //!
 //! // Component-level metrics
 //! let perf = PerformanceMetrics::new();

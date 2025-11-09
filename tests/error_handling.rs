@@ -3,7 +3,7 @@
 // Tests for corruption detection, I/O errors, and error propagation
 
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 // ============================================================================
 // Corruption Detection (5 tests)
@@ -295,7 +295,7 @@ fn should_detect_torn_page_in_wal() {
 #[ignore = "Cloud WAL upload retry logic needs proper integration test - current test expectations don't match async segment upload behavior"]
 fn should_retry_failed_cloud_uploads() {
     // Arrange
-    use midge::cloud::MockCloudBackend;
+    use cntryl_midge::cloud::MockCloudBackend;
     use std::sync::Arc;
     use uuid::Uuid;
 

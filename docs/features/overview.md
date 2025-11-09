@@ -92,7 +92,7 @@ Logical partitioning of the keyspace with independent configuration and manageme
 
 **Usage:**
 ```rust
-use midge::column_family::ColumnFamilyId;
+use cntryl_midge::column_family::ColumnFamilyId;
 
 // Use default CF (ID: 0)
 engine.put(Bytes::from("key"), Bytes::from("value"))?;
@@ -145,7 +145,7 @@ txn.delete(Bytes::from("key3"));
 engine.commit_transaction(txn)?;
 
 // Or use batch API (equivalent)
-use midge::api::mutation::Mutation;
+use cntryl_midge::api::mutation::Mutation;
 engine.batch(vec![
     Mutation::put(Bytes::from("key1"), Bytes::from("value1"), None),
     Mutation::delete(Bytes::from("key3")),
@@ -307,7 +307,7 @@ Multi-level compaction strategy that merges SSTs and reclaims space.
 
 **Compaction Filters:**
 ```rust
-use midge::compaction::compaction_filter::{CompactionFilter, FilterDecision};
+use cntryl_midge::compaction::compaction_filter::{CompactionFilter, FilterDecision};
 
 struct MyFilter;
 
@@ -505,7 +505,7 @@ Multi-cloud support for SST and WAL storage.
 
 **Usage (Experimental):**
 ```rust
-use midge::StorageMode;
+use cntryl_midge::StorageMode;
 
 let options = MidgeOptions {
     storage_mode: StorageMode::Cloud {

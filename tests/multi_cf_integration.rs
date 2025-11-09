@@ -1,7 +1,7 @@
 // Multi-Column Family Integration tests - P2 Priority
 use bytes::Bytes;
-use midge::api::column_family::ColumnFamilyConfig;
-use midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
+use cntryl_midge::api::column_family::ColumnFamilyConfig;
+use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 use std::sync::Arc;
 
 // ============================================================================

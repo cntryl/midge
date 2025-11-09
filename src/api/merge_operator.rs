@@ -10,8 +10,8 @@
 //! # Example
 //!
 //! ```
-//! use midge::{MidgeEngine, MidgeOptions};
-//! use midge::merge_operator::IntegerAddOperator;
+//! use cntryl_midge::{MidgeEngine, MidgeOptions};
+//! use cntryl_midge::merge_operator::IntegerAddOperator;
 //! use bytes::Bytes;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,8 +70,8 @@ pub trait MergeOperator: Send + Sync {
     /// # Example
     ///
     /// ```
-    /// # use midge::merge_operator::MergeOperator;
-    /// # use midge::error::MidgeError;
+    /// # use cntryl_midge::merge_operator::MergeOperator;
+    /// # use cntryl_midge::error::MidgeError;
     /// struct CounterOperator;
     ///
     /// impl MergeOperator for CounterOperator {
@@ -141,7 +141,7 @@ pub type DynMergeOperator = Arc<dyn MergeOperator>;
 /// # Example
 ///
 /// ```
-/// use midge::merge_operator::{IntegerAddOperator, MergeOperator};
+/// use cntryl_midge::merge_operator::{IntegerAddOperator, MergeOperator};
 ///
 /// let op = IntegerAddOperator;
 /// let result = op.merge(b"key", Some(b"10"), b"5").unwrap();
@@ -181,7 +181,7 @@ impl MergeOperator for IntegerAddOperator {
 /// # Example
 ///
 /// ```
-/// use midge::merge_operator::{StringAppendOperator, MergeOperator};
+/// use cntryl_midge::merge_operator::{StringAppendOperator, MergeOperator};
 ///
 /// let op = StringAppendOperator::new(b",");
 /// let result = op.merge(b"key", Some(b"hello"), b"world").unwrap();
@@ -252,7 +252,7 @@ impl MergeOperator for StringAppendOperator {
 /// # Example
 ///
 /// ```
-/// use midge::merge_operator::{BytesAppendOperator, MergeOperator};
+/// use cntryl_midge::merge_operator::{BytesAppendOperator, MergeOperator};
 ///
 /// let op = BytesAppendOperator;
 /// let result = op.merge(b"key", Some(&[1, 2, 3]), &[4, 5, 6]).unwrap();

@@ -1,8 +1,8 @@
 //! Common utilities for YCSB benchmarks
 
 use bytes::Bytes;
-use midge::cloud::mock::MockCloudBackend;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::cloud::mock::MockCloudBackend;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::sync::Arc;

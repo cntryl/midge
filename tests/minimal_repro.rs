@@ -1,7 +1,7 @@
 // Minimal reproduction of the duplicate key bug from compact_all benchmark
 
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 #[test]
 fn should_not_create_duplicate_keys_when_compacting_50k_entries() {

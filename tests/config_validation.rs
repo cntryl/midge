@@ -2,8 +2,8 @@
 //
 // Tests for config validation, persistence, edge cases, and runtime updates
 
-use midge::config::{ConfigBuilder, Durability, Goal};
-use midge::MidgeEngine;
+use cntryl_midge::config::{ConfigBuilder, Durability, Goal};
+use cntryl_midge::MidgeEngine;
 
 mod common;
 use common::test_temp_dir;

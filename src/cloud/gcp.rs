@@ -24,8 +24,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use midge::cloud::gcp::GcpStorageBackend;
-//! use midge::cloud::StorageBackend;
+//! use cntryl_midge::cloud::gcp::GcpStorageBackend;
+//! use cntryl_midge::cloud::StorageBackend;
 //!
 //! let backend = GcpStorageBackend::new("my-bucket").unwrap();
 //! // Use backend for WAL/SST operations

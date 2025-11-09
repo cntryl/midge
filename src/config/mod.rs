@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use midge::config::{ConfigBuilder, Goal, Durability};
+//! use cntryl_midge::config::{ConfigBuilder, Goal, Durability};
 //!
 //! // Simple latency-optimized configuration
 //! let config = ConfigBuilder::new("./my_db")
@@ -275,7 +275,7 @@ impl Config {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use midge::config::{ConfigBuilder, Goal, Durability};
+    /// use cntryl_midge::config::{ConfigBuilder, Goal, Durability};
     ///
     /// let config = ConfigBuilder::new("./my_db")
     ///     .goal(Goal::Latency)

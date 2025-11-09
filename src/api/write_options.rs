@@ -13,7 +13,7 @@
 /// # Examples
 ///
 /// ```rust
-/// use midge::WriteOptions;
+/// use cntryl_midge::WriteOptions;
 ///
 /// // Critical transaction - sync immediately
 /// let sync_opts = WriteOptions { sync: true };

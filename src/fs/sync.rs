@@ -17,7 +17,7 @@ use std::io;
 ///
 /// ```rust,no_run
 /// use std::fs::File;
-/// # use midge::fs::sync_data_only;
+/// # use cntryl_midge::fs::sync_data_only;
 ///
 /// let file = File::create("data.db").unwrap();
 /// // ... write data ...

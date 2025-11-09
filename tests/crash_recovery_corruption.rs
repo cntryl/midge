@@ -71,7 +71,7 @@ fn should_recover_from_truncated_tail_given_power_loss() {
 
     // Write data and find WAL file
     let wal_path = {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         // Write 100 records
         for i in 0..100 {
@@ -106,9 +106,9 @@ fn should_recover_from_truncated_tail_given_power_loss() {
 
     // Assert - Engine with TolerateCorruptedTail should recover partial data
     let mut opts_tolerant = opts.clone();
-    opts_tolerant.wal_recovery_mode = midge::WalRecoveryMode::TolerateCorruptedTail;
+    opts_tolerant.wal_recovery_mode = cntryl_midge::WalRecoveryMode::TolerateCorruptedTail;
 
-    match midge::MidgeEngine::open(opts_tolerant) {
+    match cntryl_midge::MidgeEngine::open(opts_tolerant) {
         Ok(eng) => {
             // At least the first 95 records should be recoverable
             // (last few might be in the truncated tail)
@@ -144,8 +144,8 @@ fn should_recover_from_truncated_tail_given_power_loss() {
     // Also verify strict mode still fails
     println!("\nTesting AbsoluteConsistency mode with same truncated WAL:");
     let mut opts_strict = opts.clone();
-    opts_strict.wal_recovery_mode = midge::WalRecoveryMode::AbsoluteConsistency;
-    match midge::MidgeEngine::open(opts_strict) {
+    opts_strict.wal_recovery_mode = cntryl_midge::WalRecoveryMode::AbsoluteConsistency;
+    match cntryl_midge::MidgeEngine::open(opts_strict) {
         Ok(eng) => {
             // If it opened, it should have 0 records (rejected the corrupted WAL)
             let mut count = 0;
@@ -176,7 +176,7 @@ fn should_detect_middle_corruption_given_checksum_mismatch() {
 
     // Write data and find WAL file
     let wal_path = {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         // Write 100 records so we have enough data
         for i in 0..100 {
@@ -206,7 +206,7 @@ fn should_detect_middle_corruption_given_checksum_mismatch() {
     // 2. Open but stop recovery at corruption point
     // 3. Skip corrupted record and continue (tolerant mode)
 
-    match midge::MidgeEngine::open(opts) {
+    match cntryl_midge::MidgeEngine::open(opts) {
         Ok(eng) => {
             // If it opened, verify it didn't silently accept corrupt data
             // At least some early records should be present
@@ -245,7 +245,7 @@ fn should_handle_empty_wal_file_given_crash_during_creation() {
 
     // Create engine to establish directory structure
     {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
         eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
         drop(eng);
     }
@@ -256,7 +256,7 @@ fn should_handle_empty_wal_file_given_crash_during_creation() {
     File::create(&empty_wal).expect("Failed to create empty WAL");
 
     // Assert - Engine should handle empty WAL gracefully
-    let eng = midge::MidgeEngine::open(opts).unwrap();
+    let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
     assert_get_equals(&eng, b"key1", b"value1");
 }
 
@@ -268,7 +268,7 @@ fn should_handle_partially_written_record_given_crash() {
 
     // Write some complete records
     let wal_path = {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         for i in 0..50 {
             let key = format!("key{:03}", i);
@@ -290,7 +290,7 @@ fn should_handle_partially_written_record_given_crash() {
     }
 
     // Assert - Should recover the 50 complete records, ignore partial
-    let eng = midge::MidgeEngine::open(opts).unwrap();
+    let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     for i in 0..50 {
         let key = format!("key{:03}", i);
@@ -312,7 +312,7 @@ fn should_maintain_consistency_given_restart_during_flush() {
 
     // Act - Write enough data to trigger flush, then restart mid-flush
     {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         // Write enough to trigger flush
         for i in 0..100 {
@@ -326,7 +326,7 @@ fn should_maintain_consistency_given_restart_during_flush() {
     }
 
     // Assert - After restart, database should be consistent
-    let eng = midge::MidgeEngine::open(opts).unwrap();
+    let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     // All committed writes should be present
     let mut found_count = 0;
@@ -352,7 +352,7 @@ fn should_not_lose_data_given_manifest_and_wal_mismatch() {
 
     // Write initial data
     {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
         eng.put(Bytes::from("persistent"), Bytes::from("data"))
             .unwrap();
         drop(eng);
@@ -360,7 +360,7 @@ fn should_not_lose_data_given_manifest_and_wal_mismatch() {
 
     // Act - Write more data but simulate crash before manifest update
     {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
         eng.put(Bytes::from("new_key"), Bytes::from("new_value"))
             .unwrap();
 
@@ -369,7 +369,7 @@ fn should_not_lose_data_given_manifest_and_wal_mismatch() {
     }
 
     // Assert - After restart, at minimum the persistent data should be there
-    let eng = midge::MidgeEngine::open(opts).unwrap();
+    let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
     assert_get_equals(&eng, b"persistent", b"data");
 
     // new_key may or may not be present depending on timing, but no corruption
@@ -387,7 +387,7 @@ fn should_recover_from_crash_during_compaction() {
 
     // Act - Write enough data to trigger multiple flushes and potential compaction
     {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         // Write data in multiple batches
         for batch in 0..5 {
@@ -406,7 +406,7 @@ fn should_recover_from_crash_during_compaction() {
     }
 
     // Assert - Database should recover and all data should be accessible
-    let eng = midge::MidgeEngine::open(opts).unwrap();
+    let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     let mut total_found = 0;
     for batch in 0..5 {
@@ -437,7 +437,7 @@ fn should_handle_multiple_wal_files_given_recovery() {
 
     // Act - Create multiple sessions (each may create new WAL)
     for session in 0..3 {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         for i in 0..20 {
             let key = format!("session{}_key{}", session, i);
@@ -449,7 +449,7 @@ fn should_handle_multiple_wal_files_given_recovery() {
     }
 
     // Assert - All data from all sessions should be recoverable
-    let eng = midge::MidgeEngine::open(opts).unwrap();
+    let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     for session in 0..3 {
         for i in 0..20 {
@@ -468,7 +468,7 @@ fn should_preserve_sequence_order_across_corrupted_recovery() {
 
     // Write data with specific order
     let wal_path = {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         // Write, overwrite, delete pattern
         eng.put(Bytes::from("key"), Bytes::from("v1")).unwrap();
@@ -489,7 +489,7 @@ fn should_preserve_sequence_order_across_corrupted_recovery() {
     // Assert - Whatever we recover should be consistent
     // If "final" is lost, we should see nothing (due to delete)
     // If "final" is present, we should see "final"
-    let eng = midge::MidgeEngine::open(opts).unwrap();
+    let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
     match eng.get(b"key") {
         Ok(Some(value)) => {
@@ -518,7 +518,7 @@ fn should_handle_zero_byte_wal_file() {
 
     // Create initial data
     {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
         eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
         drop(eng);
     }
@@ -529,7 +529,7 @@ fn should_handle_zero_byte_wal_file() {
     File::create(&zero_wal).expect("Failed to create zero-byte WAL");
 
     // Assert - Should handle gracefully
-    let eng = midge::MidgeEngine::open(opts).unwrap();
+    let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
     assert_get_equals(&eng, b"key1", b"value1");
 }
 
@@ -541,7 +541,7 @@ fn should_recover_correct_count_after_batch_write_truncation() {
 
     // Write data in batch
     let wal_path = {
-        let eng = midge::MidgeEngine::open(opts.clone()).unwrap();
+        let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         // Write exactly 100 records
         for i in 0..100 {
@@ -569,7 +569,7 @@ fn should_recover_correct_count_after_batch_write_truncation() {
     );
 
     // Assert - Count recovered records
-    match midge::MidgeEngine::open(opts) {
+    match cntryl_midge::MidgeEngine::open(opts) {
         Ok(eng) => {
             let mut count = 0;
             for i in 0..100 {

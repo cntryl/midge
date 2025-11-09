@@ -18,7 +18,7 @@ use crate::wal::cloud::CloudStorageBackend;
 /// # Examples
 ///
 /// ```rust,no_run
-/// use midge::{MidgeEngine, MidgeOptions, StorageMode};
+/// use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 ///
 /// // Pure in-memory (no persistence)
 /// let opts = MidgeOptions {

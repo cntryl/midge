@@ -26,7 +26,7 @@ Midge follows a **strict separation** between unit tests and integration tests:
 
 - Located in this `tests/` directory as **flat, root-level files**
 - Test **multiple modules working together** or the public API only
-- Only have access to public interfaces (`use midge::*`)
+- Only have access to public interfaces (`use cntryl_midge::*`)
 - Test cross-cutting concerns and end-to-end scenarios
 - Run with: `cargo test --tests`
 

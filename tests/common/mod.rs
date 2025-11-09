@@ -15,7 +15,7 @@
 //!
 //! ## Basic test with engine restart:
 //! ```rust,no_run
-//! # use midge::*;
+//! # use cntryl_midge::*;
 //! # use bytes::Bytes;
 //! # fn test_persistence() {
 //!     let dir = test_temp_dir();
@@ -32,7 +32,7 @@
 pub mod cloud;
 
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -71,7 +71,7 @@ pub fn durability_opts(db_path: PathBuf) -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path },
         wal_sync: true,
-        wal_recovery_mode: midge::WalRecoveryMode::TolerateCorruptedTail,
+        wal_recovery_mode: cntryl_midge::WalRecoveryMode::TolerateCorruptedTail,
         ..Default::default()
     }
 }
@@ -95,7 +95,7 @@ pub fn flush_test_opts(db_path: PathBuf, memtable_size: usize) -> MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path },
         memtable_size,
         wal_sync: true,
-        wal_recovery_mode: midge::WalRecoveryMode::TolerateCorruptedTail,
+        wal_recovery_mode: cntryl_midge::WalRecoveryMode::TolerateCorruptedTail,
         ..Default::default()
     }
 }

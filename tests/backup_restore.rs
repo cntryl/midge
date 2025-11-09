@@ -5,8 +5,8 @@ mod common;
 
 use bytes::Bytes;
 use common::*;
-use midge::backup::{BackupEngine, BackupOptions, BackupType, RestoreEngine, RestoreOptions};
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::backup::{BackupEngine, BackupOptions, BackupType, RestoreEngine, RestoreOptions};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 // ============================================================================
 // End-to-End Backup (4 tests)

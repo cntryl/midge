@@ -5,16 +5,14 @@ edition = "2021"
 rust-version = "1.91"
 authors = ["Midge Contributors"]
 description = "A high-performance embedded key-value database with LSM-tree storage"
-license = "BSL"
+license = "BSL-1.1"
+license-file = "LICENSE"
 repository = "https://github.com/cntryl/midge"
 readme = "README.md"
 homepage = "https://github.com/cntryl/midge#readme"
-documentation = "https://docs.rs/midge"
+documentation = "https://docs.rs/cntryl-midge"
 keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
-
-[lib]
-name = "midge"
 
 [dependencies]
 # Error handling

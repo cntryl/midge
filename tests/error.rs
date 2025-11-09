@@ -1,4 +1,4 @@
-use midge::error::MidgeError;
+use cntryl_midge::error::MidgeError;
 
 #[test]
 fn should_display_key_not_found_with_key() {

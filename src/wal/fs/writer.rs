@@ -516,18 +516,18 @@ fn parse_wal_record_tlv(body: &[u8]) -> MidgeResult<WalRecord> {
 /// # Examples
 ///
 /// ```rust,no_run
-/// use midge::WalRecoveryMode;
+/// use cntryl_midge::WalRecoveryMode;
 /// # use std::path::Path;
-/// # fn example(path: &Path) -> midge::MidgeResult<Vec<midge::wal::WalRecord>> {
+/// # fn example(path: &Path) -> cntryl_midge::MidgeResult<Vec<cntryl_midge::wal::WalRecord>> {
 ///
 /// // Strict mode - fail on any corruption
-/// let records = midge::wal::fs::replay_wal_file_with_mode(
+/// let records = cntryl_midge::wal::fs::replay_wal_file_with_mode(
 ///     path,
 ///     WalRecoveryMode::AbsoluteConsistency
 /// )?;
 ///
 /// // Tolerant mode - recover partial data
-/// let records = midge::wal::fs::replay_wal_file_with_mode(
+/// let records = cntryl_midge::wal::fs::replay_wal_file_with_mode(
 ///     path,
 ///     WalRecoveryMode::TolerateCorruptedTail
 /// )?;

@@ -343,7 +343,7 @@ RUST_LOG=midge=debug cargo run
 Use the high-level Config API for optimal parameter derivation:
 
 ```rust
-use midge::config::{ConfigBuilder, Goal, Durability};
+use cntryl_midge::config::{ConfigBuilder, Goal, Durability};
 
 let config = ConfigBuilder::new("./db")
     .goal(Goal::Throughput)  // Optimizes for write throughput

@@ -5,9 +5,9 @@
 //! - Steady durability (async cloud uploads with intervals)
 //! - Cloud-replicated durability (cloud-first with optional local cache)
 
-use midge::cloud::MockCloudBackend;
-use midge::config::cloud_builder::CloudConfigBuilder;
-use midge::config::{CloudMode, Durability};
+use cntryl_midge::cloud::MockCloudBackend;
+use cntryl_midge::config::cloud_builder::CloudConfigBuilder;
+use cntryl_midge::config::{CloudMode, Durability};
 use std::sync::Arc;
 
 #[test]
@@ -224,8 +224,8 @@ fn should_validate_storage_mode_types() {
     let backend = Arc::new(MockCloudBackend::new());
 
     // Act
-    let memory_mode = midge::core::storage_mode::StorageMode::Memory;
-    let local_mode = midge::core::storage_mode::StorageMode::LocalDisk {
+    let memory_mode = cntryl_midge::core::storage_mode::StorageMode::Memory;
+    let local_mode = cntryl_midge::core::storage_mode::StorageMode::LocalDisk {
         db_path: "./test".into(),
     };
     let cloud_mode = CloudConfigBuilder::balanced_durability(backend, "./tmp/type_test").build();

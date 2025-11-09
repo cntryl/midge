@@ -125,7 +125,7 @@ impl VerifyResult {
 ///
 /// # Example
 /// ```no_run
-/// use midge::backup::{BackupEngine, BackupOptions, BackupType};
+/// use cntryl_midge::backup::{BackupEngine, BackupOptions, BackupType};
 /// use std::path::Path;
 ///
 /// let db_path = Path::new("/path/to/db");
@@ -144,7 +144,7 @@ impl VerifyResult {
 ///     ..Default::default()
 /// };
 /// let info2 = engine.create_backup(opts)?;
-/// # Ok::<(), midge::error::MidgeError>(())
+/// # Ok::<(), cntryl_midge::error::MidgeError>(())
 /// ```
 pub struct BackupEngine {
     /// Path to the database directory
@@ -532,7 +532,7 @@ impl BackupEngine {
 ///
 /// # Example
 /// ```no_run
-/// use midge::backup::{RestoreEngine, RestoreOptions};
+/// use cntryl_midge::backup::{RestoreEngine, RestoreOptions};
 /// use std::path::Path;
 ///
 /// let backup_dir = Path::new("/path/to/backups");
@@ -543,7 +543,7 @@ impl BackupEngine {
 /// // Restore latest backup
 /// let opts = RestoreOptions::default();
 /// engine.restore_latest(target_dir, opts)?;
-/// # Ok::<(), midge::error::MidgeError>(())
+/// # Ok::<(), cntryl_midge::error::MidgeError>(())
 /// ```
 pub struct RestoreEngine {
     /// Path to backup storage directory

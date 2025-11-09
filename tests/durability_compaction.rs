@@ -8,8 +8,8 @@ mod common;
 
 use bytes::Bytes;
 use common::*;
-use midge::MidgeEngine;
-use midge::{MidgeOptions, StorageMode};
+use cntryl_midge::MidgeEngine;
+use cntryl_midge::{MidgeOptions, StorageMode};
 
 #[test]
 fn should_preserve_source_ssts_until_manifest_updated() {

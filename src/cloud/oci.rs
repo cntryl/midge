@@ -22,8 +22,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use midge::cloud::oci::OciObjectStorageBackend;
-//! use midge::cloud::StorageBackend;
+//! use cntryl_midge::cloud::oci::OciObjectStorageBackend;
+//! use cntryl_midge::cloud::StorageBackend;
 //!
 //! let backend = OciObjectStorageBackend::new(
 //!     "my-namespace",

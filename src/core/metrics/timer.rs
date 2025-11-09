@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 /// # Example
 ///
 /// ```rust,ignore
-/// use midge::core::metrics::Timer;
+/// use cntryl_midge::core::metrics::Timer;
 ///
 /// let timer = Timer::new();
 /// // ... perform operation ...

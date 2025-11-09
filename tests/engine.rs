@@ -2,7 +2,7 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, Mutation, MutationOp, Query, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, Mutation, MutationOp, Query, StorageMode};
 use std::fs;
 
 fn temp_dir() -> tempfile::TempDir {
@@ -677,7 +677,7 @@ fn should_background_compact_when_threshold_exceeded() {
 
     // Assert: only one SST remains and reads intact
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
-    let m = midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
+    let m = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
     assert_eq!(m.ssts.len(), 1);
     assert_eq!(eng.get(b"a").unwrap(), Some(Bytes::from_static(b"1")));
     assert_eq!(eng.get(b"b").unwrap(), Some(Bytes::from_static(b"2")));
@@ -734,15 +734,15 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     // Flush so v1 is persisted to SST
     eng.flush().unwrap();
     let snap = eng.snapshot();
-    let manifest = midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
+    let manifest = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
     println!("manifest ssts after flush: {:?}", manifest.ssts);
     let sst_path = opts
         .storage_mode
         .local_path()
         .join("sst")
         .join(&manifest.ssts[0]);
-    let sst = midge::sst::fs::SstFile::open(&sst_path).unwrap();
-    let rows = midge::sst::SstStateReader::scan_range_state(&sst, None, None).unwrap();
+    let sst = cntryl_midge::sst::fs::SstFile::open(&sst_path).unwrap();
+    let rows = cntryl_midge::sst::SstStateReader::scan_range_state(&sst, None, None).unwrap();
     println!("sst rows: {:?}", rows);
     println!("snapshot seq={} ", snap.seq);
     // Newer write stays in memtable with higher seq
@@ -1292,7 +1292,7 @@ fn should_not_insert_given_existing_key() {
 #[test]
 fn should_return_existing_value_given_insert_with_value() {
     // Arrange
-    use midge::InsertResult;
+    use cntryl_midge::InsertResult;
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         ..Default::default()
@@ -1318,7 +1318,7 @@ fn should_return_existing_value_given_insert_with_value() {
 #[test]
 fn should_swap_value_given_matching_expected() {
     // Arrange
-    use midge::CasResult;
+    use cntryl_midge::CasResult;
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         ..Default::default()
@@ -1344,7 +1344,7 @@ fn should_swap_value_given_matching_expected() {
 #[test]
 fn should_return_mismatch_given_unexpected_value() {
     // Arrange
-    use midge::CasResult;
+    use cntryl_midge::CasResult;
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         ..Default::default()
@@ -1391,7 +1391,7 @@ fn should_handle_concurrent_inserts_given_race_simulation() {
 #[test]
 fn should_handle_concurrent_cas_given_race_simulation() {
     // Arrange
-    use midge::CasResult;
+    use cntryl_midge::CasResult;
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         ..Default::default()
@@ -1473,7 +1473,7 @@ fn should_fail_insert_given_read_only_mode() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        midge::error::MidgeError::ReadOnly
+        cntryl_midge::error::MidgeError::ReadOnly
     ));
 }
 
@@ -1503,7 +1503,7 @@ fn should_handle_insert_after_delete() {
 #[test]
 fn should_use_latest_value_given_cas_after_concurrent_put() {
     // Arrange
-    use midge::CasResult;
+    use cntryl_midge::CasResult;
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         ..Default::default()
@@ -1617,7 +1617,7 @@ fn should_commit_transaction_atomically_given_multiple_operations() {
         .expect("insert");
     txn.delete(Bytes::from("key5")).expect("delete");
     engine
-        .commit_transaction(txn, midge::WriteOptions::default())
+        .commit_transaction(txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert: all operations applied
@@ -1716,7 +1716,7 @@ fn should_stage_delete_range_in_transaction() {
     txn.delete_range(Bytes::from("key1"), Bytes::from("key4"))
         .expect("delete_range");
     engine
-        .commit_transaction(txn, midge::WriteOptions::default())
+        .commit_transaction(txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert: keys in range are deleted, boundaries preserved
@@ -1882,7 +1882,7 @@ fn should_reject_delete_range_given_read_only_mode() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        midge::error::MidgeError::ReadOnly
+        cntryl_midge::error::MidgeError::ReadOnly
     ));
 }
 
@@ -1896,15 +1896,15 @@ fn should_persist_delete_range_in_wal() {
     let db_path = tmp_dir.path().to_path_buf();
 
     {
-        let opts = midge::MidgeOptions {
-            storage_mode: midge::StorageMode::LocalDisk {
+        let opts = cntryl_midge::MidgeOptions {
+            storage_mode: cntryl_midge::StorageMode::LocalDisk {
                 db_path: db_path.clone(),
             },
             wal_buffer_size: 1024 * 1024,
             wal_sync: true,
             ..Default::default()
         };
-        let engine = midge::MidgeEngine::open(opts).unwrap();
+        let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
         engine
             .put(Bytes::from("key1"), Bytes::from("value1"))
@@ -1948,15 +1948,15 @@ fn should_persist_delete_range_in_wal() {
 
     // Act (recovery)
     {
-        let opts = midge::MidgeOptions {
-            storage_mode: midge::StorageMode::LocalDisk {
+        let opts = cntryl_midge::MidgeOptions {
+            storage_mode: cntryl_midge::StorageMode::LocalDisk {
                 db_path: db_path.clone(),
             },
             wal_buffer_size: 1024 * 1024,
             wal_sync: true,
             ..Default::default()
         };
-        let engine = midge::MidgeEngine::open(opts).unwrap();
+        let engine = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
         // Assert (after recovery)
         assert_eq!(

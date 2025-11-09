@@ -62,7 +62,7 @@ awesome—let’s turn “build Midge from scratch” into a crisp, end-to-end i
 
 - **Config**
 
-  - `midge::Options` with sensible defaults, TOML/ENV overrides.
+  - `cntryl_midge::Options` with sensible defaults, TOML/ENV overrides.
 
 - **Public API (Rust, sync)**
 

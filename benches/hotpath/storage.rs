@@ -15,9 +15,9 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
 
-use midge::common::codec::{Compressor, Lz4Codec};
-use midge::core::memtable::MemTable;
-use midge::core::skiplist::SkipList;
+use cntryl_midge::common::codec::{Compressor, Lz4Codec};
+use cntryl_midge::core::memtable::MemTable;
+use cntryl_midge::core::skiplist::SkipList;
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;

@@ -7,8 +7,8 @@ This document shows how trivially you can swap cloud backends in Midge. **ONLY t
 ### Development/Testing (MockCloudBackend)
 
 ```rust
-use midge::cloud::MockCloudBackend;
-use midge::config::cloud_builder::CloudConfigBuilder;
+use cntryl_midge::cloud::MockCloudBackend;
+use cntryl_midge::config::cloud_builder::CloudConfigBuilder;
 
 let backend = Arc::new(MockCloudBackend::new());
 
@@ -21,8 +21,8 @@ let storage_mode = CloudConfigBuilder::strict_durability(backend, "./cache")
 ### Production - AWS S3
 
 ```rust
-use midge::cloud::AwsS3Backend;  // ← ONLY THIS LINE CHANGES
-use midge::config::cloud_builder::CloudConfigBuilder;
+use cntryl_midge::cloud::AwsS3Backend;  // ← ONLY THIS LINE CHANGES
+use cntryl_midge::config::cloud_builder::CloudConfigBuilder;
 
 let backend = Arc::new(AwsS3Backend::new(
     "us-east-1",           // AWS region
@@ -39,8 +39,8 @@ let storage_mode = CloudConfigBuilder::strict_durability(backend, "./cache")
 ### Production - Azure Blob Storage
 
 ```rust
-use midge::cloud::AzureBlobBackend;  // ← ONLY THIS LINE CHANGES
-use midge::config::cloud_builder::CloudConfigBuilder;
+use cntryl_midge::cloud::AzureBlobBackend;  // ← ONLY THIS LINE CHANGES
+use cntryl_midge::config::cloud_builder::CloudConfigBuilder;
 
 let backend = Arc::new(AzureBlobBackend::new(
     "mystorageaccount",    // Azure storage account
@@ -57,8 +57,8 @@ let storage_mode = CloudConfigBuilder::strict_durability(backend, "./cache")
 ### Production - GCP Cloud Storage
 
 ```rust
-use midge::cloud::GcpStorageBackend;  // ← ONLY THIS LINE CHANGES
-use midge::config::cloud_builder::CloudConfigBuilder;
+use cntryl_midge::cloud::GcpStorageBackend;  // ← ONLY THIS LINE CHANGES
+use cntryl_midge::config::cloud_builder::CloudConfigBuilder;
 
 let backend = Arc::new(GcpStorageBackend::new(
     "my-gcs-bucket",       // GCS bucket name

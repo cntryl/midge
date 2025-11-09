@@ -22,8 +22,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use midge::cloud::aws::AwsS3Backend;
-//! use midge::cloud::StorageBackend;
+//! use cntryl_midge::cloud::aws::AwsS3Backend;
+//! use cntryl_midge::cloud::StorageBackend;
 //!
 //! let backend = AwsS3Backend::new("my-bucket", "us-west-2").unwrap();
 //! // Use backend for WAL/SST operations

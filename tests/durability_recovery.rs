@@ -5,7 +5,7 @@ mod common;
 
 use bytes::Bytes;
 use common::*;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 #[test]
 fn should_replay_wal_exactly_once_after_crash() {

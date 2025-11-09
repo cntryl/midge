@@ -1,6 +1,6 @@
 // Compaction During Concurrent Operations tests - P1 Priority
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;

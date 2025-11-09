@@ -7,8 +7,8 @@
 //! - Cloud recovery after restart
 
 use bytes::Bytes;
-use midge::cloud::{MockCloudBackend, StorageBackend};
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::cloud::{MockCloudBackend, StorageBackend};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::sync::Arc;
 use tempfile::TempDir;
 

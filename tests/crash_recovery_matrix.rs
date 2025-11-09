@@ -17,7 +17,7 @@
 //! - Results reproducible via seed
 
 use bytes::Bytes;
-use midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;

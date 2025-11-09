@@ -47,8 +47,8 @@ Midge provides two APIs for initialization:
 The easiest way to get started is with the high-level Config API. Just answer three questions:
 
 ```rust
-use midge::MidgeEngine;
-use midge::config::{ConfigBuilder, Goal, Durability};
+use cntryl_midge::MidgeEngine;
+use cntryl_midge::config::{ConfigBuilder, Goal, Durability};
 use bytes::Bytes;
 
 // Build configuration by answering 3 questions:
@@ -99,7 +99,7 @@ let value = engine.get(b"key1")?;
 **Cloud-Native Example:**
 
 ```rust
-use midge::config::{ConfigBuilder, CloudMode, Goal, Durability};
+use cntryl_midge::config::{ConfigBuilder, CloudMode, Goal, Durability};
 
 // Configure for cloud-backed storage (S3, GCS, Azure)
 let config = ConfigBuilder::new("./local_cache")
@@ -120,7 +120,7 @@ See `examples/config_complete.rs` for comprehensive configuration examples.
 For fine-grained control, use the traditional MidgeOptions API:
 
 ```rust
-use midge::{MidgeEngine, MidgeOptions};
+use cntryl_midge::{MidgeEngine, MidgeOptions};
 use bytes::Bytes;
 
 // Open database with manual configuration
@@ -150,7 +150,7 @@ txn.insert(Bytes::from("key4"), Bytes::from("value4"), None);
 txn.commit()?;
 
 // Range scans
-use midge::Query;
+use cntryl_midge::Query;
 let results = engine.scan(Query::new().prefix(Bytes::from("user:")))?;
 for (key, value) in results {
     println!("{:?} => {:?}", key, value);

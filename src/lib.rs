@@ -58,75 +58,75 @@ pub use crate::sst::bloom::Filter;
 pub use crate::storage_mode::{CloudStorageBuilder, StorageMode};
 
 // Legacy module re-exports for backward compatibility
-// These allow existing code to continue using `midge::bloom::Filter` etc.
-// DEPRECATED: Use proper module paths like `midge::index::bloom` instead
-#[deprecated(since = "0.2.0", note = "Use `midge::api::column_family` instead")]
+// These allow existing code to continue using `cntryl_midge::bloom::Filter` etc.
+// DEPRECATED: Use proper module paths like `cntryl_midge::index::bloom` instead
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::column_family` instead")]
 pub use api::column_family;
-#[deprecated(since = "0.2.0", note = "Use `midge::api::merge_operator` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::merge_operator` instead")]
 pub use api::merge_operator;
-#[deprecated(since = "0.2.0", note = "Use `midge::api::mutation` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::mutation` instead")]
 pub use api::mutation as mutation_compat;
-#[deprecated(since = "0.2.0", note = "Use `midge::api::query` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::query` instead")]
 pub use api::query as query_compat;
-#[deprecated(since = "0.2.0", note = "Use `midge::api::snapshot` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::snapshot` instead")]
 pub use api::snapshot as snapshot_compat;
-#[deprecated(since = "0.2.0", note = "Use `midge::api::transaction` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::transaction` instead")]
 pub use api::transaction;
-#[deprecated(since = "0.2.0", note = "Use `midge::api::write_batch` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::write_batch` instead")]
 pub use api::write_batch;
 #[cfg(feature = "cloud-aws")]
-#[deprecated(since = "0.2.0", note = "Use `midge::cloud::aws` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::aws` instead")]
 pub use cloud::aws as cloud_wal_aws;
 #[cfg(feature = "cloud-azure")]
-#[deprecated(since = "0.2.0", note = "Use `midge::cloud::azure` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::azure` instead")]
 pub use cloud::azure as cloud_wal_azure;
 // cloud::cloud module removed during migration - cloud implementations now under wal::cloud
-// #[deprecated(since = "0.2.0", note = "Use `midge::cloud::wal` instead")]
+// #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::wal` instead")]
 // pub use cloud::cloud as cloud_wal;
 #[cfg(feature = "cloud-gcp")]
-#[deprecated(since = "0.2.0", note = "Use `midge::cloud::gcp` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::gcp` instead")]
 pub use cloud::gcp as cloud_wal_gcp;
-#[deprecated(since = "0.2.0", note = "Use `midge::cloud::mock` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::mock` instead")]
 pub use cloud::mock as cloud_wal_mock;
-#[deprecated(since = "0.2.0", note = "Use `midge::common::range_tombstone` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::range_tombstone` instead")]
 pub use common::range_tombstone;
 #[deprecated(
     since = "0.2.0",
-    note = "Use `midge::core::compaction::filter` instead"
+    note = "Use `cntryl_midge::core::compaction::filter` instead"
 )]
 pub use core::compaction::filter as compaction_filter;
-#[deprecated(since = "0.2.0", note = "Use `midge::core::compactor` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::core::compactor` instead")]
 pub use core::compaction::strategy as compactor;
-#[deprecated(since = "0.2.0", note = "Use `midge::core::memtable` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::core::memtable` instead")]
 pub use core::memtable;
-#[deprecated(since = "0.2.0", note = "Use `midge::sst::bloom` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::bloom` instead")]
 pub use sst::bloom;
-#[deprecated(since = "0.2.0", note = "Use `midge::sst::file_manager` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::file_manager` instead")]
 pub use sst::file_manager;
-#[deprecated(since = "0.2.0", note = "Use `midge::sst::sparse_index` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::sparse_index` instead")]
 pub use sst::sparse_index;
 // NOTE: `crate::sst` is provided as the new top-level SST module. The old
 // `storage::sst` re-export was removed to avoid symbol conflicts during the
 // migration to the `src/sst/*` layout.
-#[deprecated(since = "0.2.0", note = "Use `midge::common::codec` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::codec` instead")]
 pub use common::codec;
-#[deprecated(since = "0.2.0", note = "Use `midge::common::internal_key` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::internal_key` instead")]
 pub use common::internal_key;
-#[deprecated(since = "0.2.0", note = "Use `midge::common::rate_limiter` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::rate_limiter` instead")]
 pub use common::rate_limiter;
-#[deprecated(since = "0.2.0", note = "Use `midge::common::tlv` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::tlv` instead")]
 pub use common::tlv;
-#[deprecated(since = "0.2.0", note = "Use `midge::sst::block_cache` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::block_cache` instead")]
 pub use sst::block_cache as cache;
-#[deprecated(since = "0.2.0", note = "Use `midge::sst::format` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::format` instead")]
 pub use sst::format;
-#[deprecated(since = "0.2.0", note = "Use `midge::sst::fs` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::fs` instead")]
 pub use sst::fs as sst_fs;
-#[deprecated(since = "0.2.0", note = "Use `midge::sst::mem` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::mem` instead")]
 pub use sst::mem as sst_mem;
-#[deprecated(since = "0.2.0", note = "Use `midge::wal::fs` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::wal::fs` instead")]
 pub use wal::fs as wal_fs;
-#[deprecated(since = "0.2.0", note = "Use `midge::wal::mem` instead")]
+#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::wal::mem` instead")]
 pub use wal::mem as wal_mem;
 
 /// Common entry metadata used across memtable/flush paths.
@@ -202,7 +202,7 @@ pub enum WalRecoveryMode {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use midge::{MidgeOptions, WalRecoveryMode};
+    /// use cntryl_midge::{MidgeOptions, WalRecoveryMode};
     ///
     /// let opts = MidgeOptions {
     ///     wal_recovery_mode: WalRecoveryMode::AbsoluteConsistency,
@@ -224,7 +224,7 @@ pub enum WalRecoveryMode {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use midge::{MidgeOptions, WalRecoveryMode};
+    /// use cntryl_midge::{MidgeOptions, WalRecoveryMode};
     ///
     /// let opts = MidgeOptions {
     ///     wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
@@ -244,7 +244,7 @@ pub struct MidgeOptions {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use midge::{MidgeOptions, StorageMode};
+    /// use cntryl_midge::{MidgeOptions, StorageMode};
     ///
     /// // Pure in-memory
     /// let opts = MidgeOptions {
@@ -325,7 +325,7 @@ pub struct MidgeOptions {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use midge::MidgeOptions;
+    /// use cntryl_midge::MidgeOptions;
     ///
     /// // Configure 1-hour TTL (will be active once SST expiration metadata is added)
     /// let opts = MidgeOptions {
@@ -350,7 +350,7 @@ pub struct MidgeOptions {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use midge::MidgeOptions;
+    /// use cntryl_midge::MidgeOptions;
     ///
     /// // Trigger compaction when SSTs have >=40% tombstones
     /// let opts = MidgeOptions {
@@ -379,7 +379,7 @@ pub struct MidgeOptions {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use midge::{MidgeOptions, WalRecoveryMode};
+    /// use cntryl_midge::{MidgeOptions, WalRecoveryMode};
     ///
     /// // Strict mode (default) - fail on any corruption
     /// let opts = MidgeOptions {

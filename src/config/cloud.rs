@@ -27,7 +27,7 @@ impl StorageContext {
     ///
     /// # Examples
     /// ```
-    /// # use midge::config::cloud::StorageContext;
+    /// # use cntryl_midge::config::cloud::StorageContext;
     /// // Multi-tenancy
     /// let ctx = StorageContext::new("customer-123");
     ///

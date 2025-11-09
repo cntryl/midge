@@ -456,7 +456,7 @@ impl Drop for Transaction {
     }
 }
 
-// Re-export common types so downstream code can `use midge::Transaction;`
+// Re-export common types so downstream code can `use cntryl_midge::Transaction;`
 pub use Transaction as Tx;
 
 /// Transaction wrapper that provides read access via engine reference.

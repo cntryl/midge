@@ -14,7 +14,7 @@ mod criterion_helper;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use criterion_helper::criterion_config;
 
-use midge::common::tlv::{
+use cntryl_midge::common::tlv::{
     decode_varint32, decode_varint64, encode_varint32, encode_varint64, tags, TlvReader, TlvWriter,
 };
 use std::hint::black_box;

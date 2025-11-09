@@ -29,7 +29,7 @@ pub fn read_exact(file: &mut File, buf: &mut [u8]) -> MidgeResult<()> {
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use midge::fs::read_exact_at;
+/// # use cntryl_midge::fs::read_exact_at;
 /// use std::fs::File;
 ///
 /// let mut file = File::open("data.sst").unwrap();
@@ -51,7 +51,7 @@ pub fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> MidgeResul
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use midge::fs::read_range;
+/// # use cntryl_midge::fs::read_range;
 /// use std::fs::File;
 ///
 /// let mut file = File::open("data.sst").unwrap();
@@ -73,7 +73,7 @@ pub fn read_range(file: &mut File, start: u64, end: u64) -> MidgeResult<Vec<u8>>
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use midge::fs::read_file;
+/// # use cntryl_midge::fs::read_file;
 /// use std::path::Path;
 ///
 /// let data = read_file(Path::new("metadata.json")).unwrap();
@@ -94,7 +94,7 @@ pub fn read_file(path: &Path) -> MidgeResult<Vec<u8>> {
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use midge::fs::read_from_end;
+/// # use cntryl_midge::fs::read_from_end;
 /// use std::fs::File;
 ///
 /// // Read last 48 bytes (e.g., SST footer)
@@ -151,7 +151,7 @@ pub fn file_size(file: &mut File) -> MidgeResult<u64> {
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use midge::fs::write_vectored;
+/// # use cntryl_midge::fs::write_vectored;
 /// use std::fs::File;
 ///
 /// let mut file = File::create("output.dat").unwrap();
@@ -244,7 +244,7 @@ pub fn write_vectored_fallback(file: &mut File, buffers: &[&[u8]]) -> MidgeResul
 /// # Examples
 ///
 /// ```rust,no_run
-/// # use midge::fs::SequentialReader;
+/// # use cntryl_midge::fs::SequentialReader;
 /// use std::fs::File;
 ///
 /// let file = File::open("wal.log").unwrap();

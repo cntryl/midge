@@ -13,7 +13,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! use midge::cloud::{StorageBackend, MockCloudBackend};
+//! use cntryl_midge::cloud::{StorageBackend, MockCloudBackend};
 //! use bytes::Bytes;
 //!
 //! let backend = MockCloudBackend::new();

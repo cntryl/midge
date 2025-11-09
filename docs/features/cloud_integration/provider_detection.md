@@ -267,18 +267,18 @@ Credentials are detected automatically based on the runtime environment.
 Enable debug logging to trace credential discovery:
 
 ```bash
-RUST_LOG=midge::cloud=debug cargo run
+RUST_LOG=cntryl_midge::cloud=debug cargo run
 ```
 
 **AWS Example Output:**
 ```
-DEBUG midge::cloud::aws: Loaded AWS credentials from environment variables
+DEBUG cntryl_midge::cloud::aws: Loaded AWS credentials from environment variables
 ```
 
 **GCP Example Output:**
 ```
-DEBUG midge::cloud::gcp: Fetching credentials from GCE metadata server
-DEBUG midge::cloud::gcp: Successfully obtained access token (expires in 3600s)
+DEBUG cntryl_midge::cloud::gcp: Fetching credentials from GCE metadata server
+DEBUG cntryl_midge::cloud::gcp: Successfully obtained access token (expires in 3600s)
 ```
 
 **Troubleshooting:**

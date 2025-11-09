@@ -96,8 +96,8 @@ impl MidgeEngine {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use midge::MidgeEngine;
-    /// use midge::config::{ConfigBuilder, Goal, Durability};
+    /// use cntryl_midge::MidgeEngine;
+    /// use cntryl_midge::config::{ConfigBuilder, Goal, Durability};
     ///
     /// // Simple latency-optimized configuration
     /// let config = ConfigBuilder::new("./my_db")
@@ -1430,7 +1430,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     /// ```no_run
-    /// # use midge::{MidgeOptions, MidgeEngine};
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
     /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
@@ -1634,7 +1634,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     /// ```no_run
-    /// # use midge::{MidgeOptions, MidgeEngine};
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
     /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
@@ -1695,8 +1695,8 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```
-    /// # use midge::{MidgeOptions, MidgeEngine};
-    /// # use midge::merge_operator::IntegerAddOperator;
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
+    /// # use cntryl_midge::merge_operator::IntegerAddOperator;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
     /// // Register counter operator for default CF
@@ -1722,8 +1722,8 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use midge::{MidgeOptions, MidgeEngine};
-    /// # use midge::merge_operator::IntegerAddOperator;
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
+    /// # use cntryl_midge::merge_operator::IntegerAddOperator;
     /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
@@ -1752,8 +1752,8 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use midge::{MidgeOptions, MidgeEngine};
-    /// # use midge::merge_operator::IntegerAddOperator;
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
+    /// # use cntryl_midge::merge_operator::IntegerAddOperator;
     /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
@@ -1829,7 +1829,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     /// ```
-    /// # use midge::{MidgeOptions, MidgeEngine, StorageMode};
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine, StorageMode};
     /// # use bytes::Bytes;
     /// # let mut opts = MidgeOptions::default();
     /// # opts.storage_mode = StorageMode::Memory;
@@ -1854,7 +1854,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     /// ```no_run
-    /// # use midge::{MidgeOptions, MidgeEngine};
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
     /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
@@ -1892,7 +1892,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     /// ```
-    /// # use midge::{MidgeOptions, MidgeEngine, InsertResult};
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine, InsertResult};
     /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
@@ -1939,7 +1939,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     /// ```
-    /// # use midge::{MidgeOptions, MidgeEngine, CasResult};
+    /// # use cntryl_midge::{MidgeOptions, MidgeEngine, CasResult};
     /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
@@ -1999,8 +1999,8 @@ impl MidgeEngine {
     ///
     /// # Example
     /// ```no_run
-    /// # use midge::{MidgeEngine, MidgeOptions};
-    /// # use midge::api::Mutation;
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # use cntryl_midge::api::Mutation;
     /// # use bytes::Bytes;
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let mutations = vec![
@@ -2157,7 +2157,7 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use midge::{MidgeEngine, MidgeOptions, WriteOptions};
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, WriteOptions};
     /// # use bytes::Bytes;
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// // Critical transaction - sync immediately
@@ -2239,7 +2239,7 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use midge::{MidgeEngine, MidgeOptions};
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # use bytes::Bytes;
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// // Create a transaction
@@ -2250,7 +2250,7 @@ impl MidgeEngine {
     /// txn.delete(Bytes::from("key2"));
     ///
     /// // Commit atomically with default sync behavior
-    /// engine.commit_transaction(txn, midge::WriteOptions::default()).unwrap();
+    /// engine.commit_transaction(txn, cntryl_midge::WriteOptions::default()).unwrap();
     /// ```
     pub fn begin_transaction(&self) -> Transaction {
         let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
@@ -2276,7 +2276,7 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use midge::{MidgeEngine, MidgeOptions};
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # use bytes::Bytes;
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let mut txn = engine.begin_transaction();
@@ -2288,7 +2288,7 @@ impl MidgeEngine {
     ///
     /// // Reads are tracked for conflict detection
     /// txn.put(Bytes::from("other_key"), Bytes::from("value"), None).unwrap();
-    /// engine.commit_transaction(txn, midge::WriteOptions::default()).unwrap();
+    /// engine.commit_transaction(txn, cntryl_midge::WriteOptions::default()).unwrap();
     /// ```
     pub fn transaction_get(&self, txn: &mut Transaction, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         // First check transaction's local staged mutations
@@ -2710,7 +2710,7 @@ impl MidgeEngine {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use midge::MidgeEngine;
+    /// # use cntryl_midge::MidgeEngine;
     /// # let engine = MidgeEngine::open(Default::default()).unwrap();
     /// let metrics = engine.performance_metrics();
     /// println!("Cache hit rate: {:.2}%", metrics.cache.hit_rate() * 100.0);

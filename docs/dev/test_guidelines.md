@@ -253,7 +253,7 @@ mod tests {
 ```rust
 // tests/engine.rs
 
-use midge::{MidgeEngine, MidgeOptions};
+use cntryl_midge::{MidgeEngine, MidgeOptions};
 use bytes::Bytes;
 use tempfile::TempDir;
 
@@ -351,8 +351,8 @@ mod tests {
 
 ```rust
 // tests/engine.rs
-use midge::{MidgeEngine, MidgeOptions};  // Public API only
-use midge::error::MidgeError;
+use cntryl_midge::{MidgeEngine, MidgeOptions};  // Public API only
+use cntryl_midge::error::MidgeError;
 use bytes::Bytes;
 
 #[test]
@@ -1226,7 +1226,7 @@ Use this checklist when writing or reviewing tests:
 - [ ] **Unit test?** → Place in `src/<module>.rs` within `#[cfg(test)] mod tests { }`
 - [ ] **Integration test?** → Place in `tests/<name>.rs`
 - [ ] Uses `use super::*;` for unit tests
-- [ ] Uses `use midge::<module>::<Type>` for integration tests
+- [ ] Uses `use cntryl_midge::<module>::<Type>` for integration tests
 
 ### Test Structure
 

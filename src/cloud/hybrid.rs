@@ -38,8 +38,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use midge::cloud::hybrid::{HybridStorage, HybridStorageBackend};
-//! use midge::cloud::MockCloudBackend;
+//! use cntryl_midge::cloud::hybrid::{HybridStorage, HybridStorageBackend};
+//! use cntryl_midge::cloud::MockCloudBackend;
 //! use std::sync::Arc;
 //!
 //! let backend = Arc::new(MockCloudBackend::new());

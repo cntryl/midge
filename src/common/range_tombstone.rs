@@ -95,7 +95,7 @@ impl RangeTombstoneList {
     /// # Examples
     ///
     /// ```
-    /// # use midge::common::range_tombstone::{RangeTombstone, RangeTombstoneList};
+    /// # use cntryl_midge::common::range_tombstone::{RangeTombstone, RangeTombstoneList};
     /// # use bytes::Bytes;
     /// let mut list = RangeTombstoneList::new();
     /// list.add_with_coalesce(RangeTombstone::new(Bytes::from("a"), Bytes::from("b"), 1));

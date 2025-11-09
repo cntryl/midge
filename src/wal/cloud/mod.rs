@@ -53,9 +53,9 @@
 //! # Example
 //!
 //! ```no_run
-//! use midge::wal::cloud::{CloudWalWriter, WalBatchManager};
-//! use midge::cloud::MockCloudBackend;
-//! use midge::wal::WalWriter;
+//! use cntryl_midge::wal::cloud::{CloudWalWriter, WalBatchManager};
+//! use cntryl_midge::cloud::MockCloudBackend;
+//! use cntryl_midge::wal::WalWriter;
 //! use std::sync::Arc;
 //!
 //! let backend = Arc::new(MockCloudBackend::new());
@@ -63,7 +63,7 @@
 //! let writer = CloudWalWriter::new(backend, batch_size, None, None);
 //!
 //! // Append operations (buffered)
-//! writer.append_op(midge::wal::WalOpKind::Put, b"key", Some(b"value")).unwrap();
+//! writer.append_op(cntryl_midge::wal::WalOpKind::Put, b"key", Some(b"value")).unwrap();
 //!
 //! // Ensure durability
 //! writer.sync().unwrap();
