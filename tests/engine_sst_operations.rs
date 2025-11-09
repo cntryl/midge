@@ -1,0 +1,316 @@
+// SST Operations
+// Extracted from engine.rs
+
+#![allow(clippy::field_reassign_with_default)]
+// Engine integration tests consolidated per repo preference
+// Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
+use bytes::Bytes;
+use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
+use std::fs;
+
+mod common;
+use common::{test_temp_dir, new_engine};
+#[test]
+fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
+    let cf = engine.default_column_family();
+    // Arrange: write a couple keys, then force WAL rotation to flush memtable -> SST
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        enable_compaction: false,
+        wal_buffer_size: 64,
+        memtable_size: 1024 * 1024,
+        ..Default::default()
+    };
+    {
+        let eng = MidgeEngine::open(opts.clone()).expect("open");
+        eng.put(&cf, b"a", b"1")
+            .unwrap();
+        eng.put(&cf, b"b", b"2")
+            .unwrap();
+        // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
+        let big = vec![b'v'; 128];
+        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(big))
+            .unwrap();
+        // Give background flush a moment to materialize SST and update manifest
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+
+    // Act: reopen engine (memtable will only have post-rotation tail; 'a' should be in SST)
+    let eng2 = MidgeEngine::open(opts.clone()).expect("reopen");
+
+    // Assert: engine.get should fall back to SST when not found in memtable
+    let got_a = eng2.get(&cf, b"a").expect("get a from sst");
+    let got_b = eng2.get(&cf, b"b").expect("get b from sst");
+    assert_eq!(got_a, Some(Bytes::from_static(b"1")));
+    assert_eq!(got_b, Some(Bytes::from_static(b"2")));
+}
+
+
+#[test]
+fn should_respect_tombstone_from_sst_when_point_lookup() {
+    let cf = engine.default_column_family();
+    // Arrange: write k->v, rotate/flush, then delete and rotate/flush, so SST set has a tombstone
+    let dir = test_temp_dir();
+    let mut opts = MidgeOptions::default();
+    opts.storage_mode = StorageMode::LocalDisk {
+        db_path: dir.path().to_path_buf(),
+    };
+    opts.enable_compaction = false;
+    opts.wal_buffer_size = 64; // force rotation
+    opts.memtable_size = 1024 * 1024;
+    {
+        let eng = MidgeEngine::open(opts.clone()).expect("open");
+        eng.put(&cf, b"k", b"v1")
+            .unwrap();
+        // rotate to flush first version
+        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'v'; 128]))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // delete and rotate again to flush tombstone
+        eng.delete(&cf, b"k").unwrap();
+        eng.put(&cf, Bytes::from_static(b"zz2"), Bytes::from(vec![b'v'; 128]))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+
+    // Act: reopen
+    let eng2 = MidgeEngine::open(opts.clone()).expect("reopen");
+
+    // Assert: engine should not resurrect deleted key; get returns None
+    let got = eng2.get(&cf, b"k").expect("get");
+    assert_eq!(got, None);
+}
+
+
+#[test]
+fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
+    let cf = engine.default_column_family();
+    // Arrange: seed SST with a,b,c; then in memtable update b, delete c, add d.
+    let dir = test_temp_dir();
+    let mut opts = MidgeOptions::default();
+    opts.storage_mode = StorageMode::LocalDisk {
+        db_path: dir.path().to_path_buf(),
+    };
+    opts.enable_compaction = false;
+    opts.wal_buffer_size = 64; // force rotation-based flush
+    opts.memtable_size = 1024 * 1024; // avoid size-based flush
+                                      // Phase 1: open with tiny WAL to force rotation and flush SST
+    {
+        let eng = MidgeEngine::open(opts.clone()).expect("open");
+        eng.put(&cf, b"a", b"1")
+            .unwrap();
+        eng.put(&cf, b"b", b"2")
+            .unwrap();
+        eng.put(&cf, b"c", b"3")
+            .unwrap();
+        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'v'; 256]))
+            .unwrap();
+    }
+    // Wait for background flush
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    // Phase 2: reopen with large WAL so overlay remains in memtable
+    opts.wal_buffer_size = 1024 * 1024;
+    let eng = MidgeEngine::open(opts.clone()).expect("reopen");
+    eng.put(&cf, b"b", b"2'")
+        .unwrap();
+    eng.delete(&cf, b"c").unwrap();
+    eng.put(&cf, b"d", b"4")
+        .unwrap();
+
+    // Act: scan full range
+    let rows = eng
+        .scan(&cf, Query::new()
+                .start_key(Bytes::from_static(b"a"))
+                .end_key(Bytes::from_static(b"z")),
+        )
+        .expect("scan");
+
+    // Assert: a from SST; b updated in memtable; c deleted by memtable; d from memtable
+    assert_eq!(
+        rows,
+        vec![
+            (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
+            (Bytes::from_static(b"b"), Bytes::from_static(b"2'")),
+            (Bytes::from_static(b"d"), Bytes::from_static(b"4")),
+        ]
+    );
+}
+
+
+#[test]
+fn should_scan_by_prefix_and_limit_across_sst_and_memtable() {
+    // Arrange: seed SST with a, ab, ac; then add ad in memtable
+    let dir = test_temp_dir();
+    let mut opts = MidgeOptions::default();
+    opts.storage_mode = StorageMode::LocalDisk {
+        db_path: dir.path().to_path_buf(),
+    };
+    opts.enable_compaction = false;
+    opts.wal_buffer_size = 1024 * 1024;
+    opts.memtable_size = 1024 * 1024;
+    let eng = MidgeEngine::open(opts.clone()).expect("open");
+
+    eng.put(&cf, b"a", b"1")
+        .unwrap();
+    eng.put(&cf, b"ab", b"2")
+        .unwrap();
+    eng.put(&cf, b"ac", b"3")
+        .unwrap();
+    eng.flush().unwrap(); // persist above to SST
+                          // Now add a memtable overlay
+    eng.put(&cf, b"ad", b"4")
+        .unwrap();
+
+    // Act: prefix "a" should include a, ab, ac from SST and ad from memtable
+    let rows = eng
+        .scan(&cf, Query::new().prefix(Bytes::from_static(b"a")))
+        .expect("scan");
+
+    // Assert: full prefix returns 4 keys sorted
+    let expected_full = vec![
+        (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
+        (Bytes::from_static(b"ab"), Bytes::from_static(b"2")),
+        (Bytes::from_static(b"ac"), Bytes::from_static(b"3")),
+        (Bytes::from_static(b"ad"), Bytes::from_static(b"4")),
+    ];
+    assert_eq!(rows, expected_full);
+}
+
+
+#[test]
+fn should_scan_by_prefix_and_limit_across_sst_and_memtable_limited() {
+    // Arrange: seed SST with a, ab, ac; then add ad in memtable (same setup as previous test)
+    let dir = test_temp_dir();
+    let mut opts = MidgeOptions::default();
+    opts.storage_mode = StorageMode::LocalDisk {
+        db_path: dir.path().to_path_buf(),
+    };
+    opts.enable_compaction = false;
+    opts.wal_buffer_size = 1024 * 1024;
+    opts.memtable_size = 1024 * 1024;
+    let eng = MidgeEngine::open(opts.clone()).expect("open");
+
+    eng.put(&cf, b"a", b"1")
+        .unwrap();
+    eng.put(&cf, b"ab", b"2")
+        .unwrap();
+    eng.put(&cf, b"ac", b"3")
+        .unwrap();
+    eng.flush().unwrap(); // persist above to SST
+    eng.put(&cf, b"ad", b"4")
+        .unwrap();
+
+    // Act: limited prefix scan (limit 3)
+    let rows_limited = eng
+        .scan(&cf, Query::new().prefix(Bytes::from_static(b"a")).limit(3))
+        .expect("scan");
+
+    // Assert: limited returns first 3 keys
+    assert_eq!(rows_limited.len(), 3);
+    assert_eq!(rows_limited[0].0, Bytes::from_static(b"a"));
+    assert_eq!(rows_limited[1].0, Bytes::from_static(b"ab"));
+    assert_eq!(rows_limited[2].0, Bytes::from_static(b"ac"));
+}
+
+
+#[test]
+fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
+    // Arrange: write k->v1, flush to SST, snapshot, then write k->v2 in memtable
+    let dir = test_temp_dir();
+    let mut opts = MidgeOptions::default();
+    opts.storage_mode = StorageMode::LocalDisk {
+        db_path: dir.path().to_path_buf(),
+    };
+    opts.enable_compaction = false;
+    // Large wal buffer to avoid rotation; we'll use explicit flush
+    opts.wal_buffer_size = 1024 * 1024;
+    opts.memtable_size = 1024 * 1024;
+    let eng = MidgeEngine::open(opts.clone()).expect("open");
+
+    eng.put(&cf, b"k", b"v1")
+        .unwrap();
+    // Flush so v1 is persisted to SST
+    eng.flush().unwrap();
+    let snap = eng.snapshot();
+    let manifest = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
+    println!("manifest ssts after flush: {:?}", manifest.ssts);
+    let sst_path = opts
+        .storage_mode
+        .local_path()
+        .join("sst")
+        .join(&manifest.ssts[0]);
+    let sst = cntryl_midge::sst::fs::SstFile::open(&sst_path).unwrap();
+    let rows = cntryl_midge::sst::SstStateReader::scan_range_state(&sst, None, None).unwrap();
+    println!("sst rows: {:?}", rows);
+    println!("snapshot seq={} ", snap.seq);
+    // Newer write stays in memtable with higher seq
+    eng.put(&cf, b"k", b"v2")
+        .unwrap();
+
+    // Act: get_at and full get
+    let at = eng.get_at(b"k", &snap).unwrap();
+    let full = eng.get(&cf, b"k").unwrap();
+
+    // Assert: snapshot sees v1 from SST; latest sees v2 from memtable
+    assert_eq!(at, Some(Bytes::from_static(b"v1")));
+    assert_eq!(full, Some(Bytes::from_static(b"v2")));
+
+    // Act: scan_at separately to verify snapshot-scoped scan behavior
+    let rows_at = eng
+        .scan_at(
+            Query::new()
+                .start_key(Bytes::from_static(b"a"))
+                .end_key(Bytes::from_static(b"z")),
+            &snap,
+        )
+        .unwrap();
+
+    // Assert: scan_at returns the snapshot value
+    assert_eq!(
+        rows_at,
+        vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))]
+    );
+}
+
+
+#[test]
+fn should_scan_reverse_respects_tombstones() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        enable_compaction: false,
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("open");
+
+    // Write and delete keys
+    eng.put(&cf, b"k1", b"v1")
+        .expect("put");
+    eng.put(&cf, b"k2", b"v2")
+        .expect("put");
+    eng.put(&cf, b"k3", b"v3")
+        .expect("put");
+    eng.delete(&cf, b"k2").expect("delete");
+
+    // Act: Reverse scan
+    let results = eng.scan(&cf, Query::new().reverse()).expect("scan");
+
+    // Assert: k2 should be masked by tombstone
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0, Bytes::from_static(b"k3"));
+    assert_eq!(results[0].1, Bytes::from_static(b"v3"));
+    assert_eq!(results[1].0, Bytes::from_static(b"k1"));
+    assert_eq!(results[1].1, Bytes::from_static(b"v1"));
+}
+
+// ============================================================================
+// Insert-if-not-exists and CAS tests (consolidated from tests/insert.rs)
+// ============================================================================
+
+

@@ -52,6 +52,31 @@ pub fn test_temp_dir() -> TempDir {
     tempfile::tempdir().expect("Failed to create test temp directory")
 }
 
+/// Creates a new MidgeEngine in a fresh temporary directory.
+///
+/// Returns both the TempDir (to keep it alive) and the opened engine.
+/// Uses default MidgeOptions with LocalDisk storage mode.
+///
+/// # Examples
+///
+/// ```rust
+/// let (dir, engine) = new_engine();
+/// let cf = engine.default_column_family();
+/// engine.put(&cf, b"key", b"value").unwrap();
+/// ```
+#[allow(dead_code)]
+pub fn new_engine() -> (TempDir, MidgeEngine) {
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("Failed to open engine");
+    (dir, engine)
+}
+
 /// Create MidgeOptions for durability testing with fsync enabled
 ///
 /// Configured with:
