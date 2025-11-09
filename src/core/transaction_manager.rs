@@ -98,15 +98,30 @@ impl TransactionManager {
     }
 
     /// Register a new transaction
-    pub fn begin(
+    pub fn begin<WI, RI, RVI, WItem, RItem, RVItem>(
         &self,
         txn_id: u64,
         begin_seq: u64,
-        write_set: KeySet,
-        read_set: KeySet,
-        read_versions: HashMap<Key, u64>,
-    ) -> Result<(), String> {
+        write_set: WI,
+        read_set: RI,
+        read_versions: RVI,
+    ) -> Result<(), String>
+    where
+        WI: IntoIterator<Item = WItem>,
+        WItem: Into<Key>,
+        RI: IntoIterator<Item = RItem>,
+        RItem: Into<Key>,
+        RVI: IntoIterator<Item = (RVItem, u64)>,
+        RVItem: Into<Key>,
+    {
         let mut inner = self.inner.lock();
+
+        let write_set: KeySet = write_set.into_iter().map(|k| k.into()).collect();
+        let read_set: KeySet = read_set.into_iter().map(|k| k.into()).collect();
+        let read_versions: HashMap<Key, u64> = read_versions
+            .into_iter()
+            .map(|(k, v)| (k.into(), v))
+            .collect();
 
         let info = TransactionInfo {
             txn_id,
