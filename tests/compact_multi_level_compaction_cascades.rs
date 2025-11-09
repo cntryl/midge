@@ -66,7 +66,7 @@ fn should_trigger_l2_compaction_given_l1_compaction_exceeded_l2_capacity() {
         for i in 0..40 {
             let key = format!("cascade_b{}_k{:03}", batch, i);
             engine
-                .put(Bytes::from(key), Bytes::from("cascade_value"))
+                .put(&cf, key.as_bytes(), b"cascade_value")
                 .unwrap();
         }
         engine.flush().unwrap();
@@ -100,7 +100,7 @@ fn should_propagate_compaction_to_l3_given_l2_overflow() {
     for round in 0..20 {
         for i in 0..25 {
             let key = format!("r{}_k{:02}", round, i);
-            engine.put(&cf, key.as_bytes(), "val".as_bytes()).unwrap();
+            engine.put(&cf, key.as_bytes(), b"val").unwrap();
         }
         engine.flush().unwrap();
         if round % 5 == 0 {
@@ -131,7 +131,7 @@ fn should_handle_cascading_compaction_to_max_level() {
     for i in 0..200 {
         let key = format!("deep_key{:04}", i);
         engine
-            .put(Bytes::from(key), Bytes::from("deep_value"))
+            .put(&cf, key.as_bytes(), b"deep_value")
             .unwrap();
         if i % 20 == 19 {
             engine.flush().unwrap();
@@ -157,7 +157,7 @@ fn should_not_trigger_cascade_given_sufficient_capacity_at_next_level() {
 
     for i in 0..50 {
         engine
-            .put(Bytes::from(format!("key{:02}", i)), Bytes::from("value"))
+            .put(&cf, format!("key{:02}", i).as_bytes(), b"value")
             .unwrap();
     }
     engine.flush().unwrap();

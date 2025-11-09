@@ -11,7 +11,6 @@ mod common;
 use common::{test_temp_dir, new_engine};
 #[test]
 fn should_return_ordered_pairs_given_range_when_scan() {
-    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -23,8 +22,7 @@ fn should_return_ordered_pairs_given_range_when_scan() {
     let eng = MidgeEngine::open(opts).expect("open");
     let cf = eng.default_column_family();
     for (k, v) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3"), (b"d", b"4")] {
-        eng.put(&cf, Bytes::from_static(k), Bytes::from_static(v))
-            .expect("put");
+        eng.put(&cf, k, v).expect("put");
     }
 
     // Act

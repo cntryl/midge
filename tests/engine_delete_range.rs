@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::{new_engine, test_temp_dir};
 #[test]
 fn should_delete_keys_in_range_given_delete_range() {
     // Arrange
@@ -22,11 +22,21 @@ fn should_delete_keys_in_range_given_delete_range() {
     let engine = MidgeEngine::open(opts).expect("open");
 
     // Insert multiple keys
-    engine.put(&cf, "a".as_bytes(), "1".as_bytes()).expect("put");
-    engine.put(&cf, "b".as_bytes(), "2".as_bytes()).expect("put");
-    engine.put(&cf, "c".as_bytes(), "3".as_bytes()).expect("put");
-    engine.put(&cf, "d".as_bytes(), "4".as_bytes()).expect("put");
-    engine.put(&cf, "e".as_bytes(), "5".as_bytes()).expect("put");
+    engine
+        .put(&cf, "a".as_bytes(), "1".as_bytes())
+        .expect("put");
+    engine
+        .put(&cf, "b".as_bytes(), "2".as_bytes())
+        .expect("put");
+    engine
+        .put(&cf, "c".as_bytes(), "3".as_bytes())
+        .expect("put");
+    engine
+        .put(&cf, "d".as_bytes(), "4".as_bytes())
+        .expect("put");
+    engine
+        .put(&cf, "e".as_bytes(), "5".as_bytes())
+        .expect("put");
 
     // Act: delete range [b, d)
     engine
@@ -41,10 +51,8 @@ fn should_delete_keys_in_range_given_delete_range() {
     assert_eq!(engine.get(&cf, b"e").expect("get"), Some(Bytes::from("5")));
 }
 
-
 #[test]
 fn should_affect_scan_results_given_delete_range() {
-    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -54,12 +62,15 @@ fn should_affect_scan_results_given_delete_range() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
+    let cf = engine.default_column_family();
 
     // Insert keys
     for i in 0..10 {
         let key = format!("key{:02}", i);
         let val = format!("val{}", i);
-        engine.put(&cf, key.as_bytes(), val.as_bytes()).expect("put");
+        engine
+            .put(&cf, key.as_bytes(), val.as_bytes())
+            .expect("put");
     }
 
     // Act: delete range [key03, key07)
@@ -69,7 +80,9 @@ fn should_affect_scan_results_given_delete_range() {
 
     // Assert: scan shows deleted keys are missing
     let rows = engine
-        .scan(&cf, Query::new()
+        .scan(
+            &cf,
+            Query::new()
                 .start_key(Bytes::from("key00"))
                 .end_key(Bytes::from("key10")),
         )
@@ -87,7 +100,6 @@ fn should_affect_scan_results_given_delete_range() {
 
     assert_eq!(rows, expected);
 }
-
 
 #[test]
 fn should_reject_delete_range_given_read_only_mode() {
@@ -121,7 +133,6 @@ fn should_reject_delete_range_given_read_only_mode() {
         cntryl_midge::error::MidgeError::ReadOnly
     ));
 }
-
 
 #[test]
 fn should_persist_delete_range_in_wal() {
@@ -215,4 +226,3 @@ fn should_persist_delete_range_in_wal() {
 
     drop(tmp_dir);
 }
-

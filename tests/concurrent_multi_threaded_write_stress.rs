@@ -40,6 +40,7 @@ fn should_handle_1000_concurrent_puts_given_separate_keys() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_threads = 100;
     let puts_per_thread = 10;
 
@@ -47,6 +48,7 @@ fn should_handle_1000_concurrent_puts_given_separate_keys() {
     let handles: Vec<_> = (0..num_threads)
         .map(|thread_id| {
             let engine = Arc::clone(&engine);
+            let cf = cf.clone();
             thread::spawn(move || {
                 for i in 0..puts_per_thread {
                     let key = format!("thread{}_key{}", thread_id, i);
@@ -82,6 +84,7 @@ fn should_handle_concurrent_puts_to_same_key_given_100_threads() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_threads = 100;
     let key = Bytes::from("hotspot_key");
 
@@ -89,10 +92,11 @@ fn should_handle_concurrent_puts_to_same_key_given_100_threads() {
     let handles: Vec<_> = (0..num_threads)
         .map(|thread_id| {
             let engine = Arc::clone(&engine);
+            let cf = cf.clone();
             let key = key.clone();
             thread::spawn(move || {
                 let value = format!("value_from_thread_{}", thread_id);
-                engine.put(&cf, key, Bytes::from(value)).unwrap();
+                engine.put(&cf, key.as_ref(), Bytes::from(value).as_ref()).unwrap();
             })
         })
         .collect();
@@ -122,26 +126,30 @@ fn should_maintain_consistency_given_concurrent_put_delete_to_same_key() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_iterations = 50;
     let key = Bytes::from("contested_key");
 
     // Act
     let put_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         let key = key.clone();
         thread::spawn(move || {
             for i in 0..num_iterations {
                 let value = format!("value_{}", i);
-                engine.put(&cf, key.clone(), Bytes::from(value)).unwrap();
+                engine.put(&cf, key.as_ref(), Bytes::from(value).as_ref()).unwrap();
             }
         })
     };
 
     let delete_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
+        let key = key.clone();
         thread::spawn(move || {
             for _ in 0..num_iterations {
-                let _ = engine.delete(&cf, key.clone());
+                let _ = engine.delete(&cf, key.as_ref());
             }
         })
     };
@@ -170,18 +178,20 @@ fn should_preserve_last_write_wins_given_concurrent_updates_when_no_transaction(
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let key = Bytes::from("lww_key");
-    engine.put(&cf, key.clone(), Bytes::from("initial")).unwrap();
+    engine.put(&cf, key.as_ref(), b"initial").unwrap();
 
     // Act
     let num_threads = 50;
     let handles: Vec<_> = (0..num_threads)
         .map(|thread_id| {
             let engine = Arc::clone(&engine);
+            let cf = cf.clone();
             let key = key.clone();
             thread::spawn(move || {
                 let value = format!("thread_{}", thread_id);
-                engine.put(&cf, key, Bytes::from(value)).unwrap();
+                engine.put(&cf, key.as_ref(), Bytes::from(value).as_ref()).unwrap();
             })
         })
         .collect();
@@ -211,23 +221,25 @@ fn should_handle_mixed_operations_given_concurrent_put_delete_get() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_keys = 100;
 
     for i in 0..num_keys {
         let key = format!("key_{}", i);
         engine
-            .put(Bytes::from(key), Bytes::from("initial"))
+            .put(&cf, key.as_bytes(), b"initial")
             .unwrap();
     }
 
     // Act
     let put_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
             for i in 0..num_keys {
                 let key = format!("key_{}", i);
                 engine
-                    .put(Bytes::from(key), Bytes::from("updated"))
+                    .put(&cf, key.as_bytes(), b"updated")
                     .unwrap();
             }
         })
@@ -235,6 +247,7 @@ fn should_handle_mixed_operations_given_concurrent_put_delete_get() {
 
     let delete_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
             for i in 0..num_keys {
                 if i % 2 == 0 {
@@ -247,6 +260,7 @@ fn should_handle_mixed_operations_given_concurrent_put_delete_get() {
 
     let get_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
             let mut read_count = 0;
             for i in 0..num_keys {
