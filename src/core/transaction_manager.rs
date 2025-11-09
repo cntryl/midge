@@ -3,6 +3,25 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Small wrapper for a column-family id + key bytes so we don't keep using
+/// raw tuple types throughout the transaction manager.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct Key(u32, Bytes);
+
+impl Key {
+    fn new(cf: u32, key: Bytes) -> Self {
+        Self(cf, key)
+    }
+}
+
+impl From<(u32, Bytes)> for Key {
+    fn from(t: (u32, Bytes)) -> Self {
+        Key::new(t.0, t.1)
+    }
+}
+
+type KeySet = HashSet<Key>;
+
 /// Tracks active transactions and detects conflicts
 pub struct TransactionManager {
     inner: Arc<Mutex<TransactionManagerInner>>,
@@ -10,9 +29,50 @@ pub struct TransactionManager {
 
 struct TransactionManagerInner {
     active_txns: HashMap<u64, TransactionInfo>,
-    committed_writes: HashMap<u64, (u64, HashSet<(u32, Bytes)>)>, // seq -> (txn_id, write_set)
+    committed_writes: CommittedWrites,
     max_retained_commits: usize,
     wait_for_graph: HashMap<u64, HashSet<u64>>, // txn_id -> set of txns it waits for
+}
+
+/// Encapsulates committed write sets keyed by commit sequence.
+/// Internally keeps a map seq -> (txn_id, write_set). Provides helpers
+/// for iteration, insertion and cleanup of old entries.
+struct CommittedWrites {
+    map: HashMap<u64, (u64, KeySet)>,
+}
+
+impl CommittedWrites {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, seq: u64, txn_id: u64, write_set: KeySet) {
+        self.map.insert(seq, (txn_id, write_set));
+    }
+
+    fn iter(&self) -> std::collections::hash_map::Iter<'_, u64, (u64, KeySet)> {
+        self.map.iter()
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Remove the oldest entries until only `max_retained` entries remain.
+    fn remove_oldest_excess(&mut self, max_retained: usize) {
+        if self.map.len() <= max_retained {
+            return;
+        }
+        let excess = self.map.len() - max_retained;
+        let mut keys: Vec<u64> = self.map.keys().copied().collect();
+        // commit sequences are monotonic; remove lowest (oldest) sequences
+        keys.sort_unstable();
+        for k in keys.into_iter().take(excess) {
+            self.map.remove(&k);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -20,9 +80,9 @@ struct TransactionInfo {
     #[allow(dead_code)]
     txn_id: u64,
     begin_seq: u64,
-    write_set: HashSet<(u32, Bytes)>,
-    read_set: HashSet<(u32, Bytes)>,
-    read_versions: HashMap<(u32, Bytes), u64>,
+    write_set: KeySet,
+    read_set: KeySet,
+    read_versions: HashMap<Key, u64>,
 }
 
 impl TransactionManager {
@@ -30,7 +90,7 @@ impl TransactionManager {
         Self {
             inner: Arc::new(Mutex::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
-                committed_writes: HashMap::new(),
+                    committed_writes: CommittedWrites::new(),
                 max_retained_commits: 1000,
                 wait_for_graph: HashMap::new(),
             })),
@@ -42,9 +102,9 @@ impl TransactionManager {
         &self,
         txn_id: u64,
         begin_seq: u64,
-        write_set: HashSet<(u32, Bytes)>,
-        read_set: HashSet<(u32, Bytes)>,
-        read_versions: HashMap<(u32, Bytes), u64>,
+        write_set: KeySet,
+        read_set: KeySet,
+        read_versions: HashMap<Key, u64>,
     ) -> Result<(), String> {
         let mut inner = self.inner.lock();
 
@@ -81,12 +141,9 @@ impl TransactionManager {
         }
 
         // Check for write-write conflicts with committed transactions after our begin
-        for (seq, (committed_txn_id, writes)) in &inner.committed_writes {
+        for (&seq, (committed_txn_id, writes)) in inner.committed_writes.iter() {
             // Conflict if: committed after our begin AND it's not our own transaction AND writes overlap
-            if *seq >= txn_info.begin_seq
-                && *committed_txn_id != txn_id
-                && !txn_info.write_set.is_disjoint(writes)
-            {
+            if seq >= txn_info.begin_seq && *committed_txn_id != txn_id && !txn_info.write_set.is_disjoint(writes) {
                 return Err(format!(
                     "Write-write conflict: key was modified by transaction {} at sequence {}",
                     committed_txn_id, seq
@@ -98,8 +155,8 @@ impl TransactionManager {
         // If a key was read by this txn, verify no writes occurred after read version
         for (key, read_ver) in &txn_info.read_versions {
             // Check if any committed transaction wrote to this key after our read
-            for (seq, (_committed_txn_id, writes)) in &inner.committed_writes {
-                if *seq > *read_ver && writes.contains(key) {
+            for (&seq, (_committed_txn_id, writes)) in inner.committed_writes.iter() {
+                if seq > *read_ver && writes.contains(key) {
                     return Err(format!(
                         "Read-write conflict: key modified after read at version {}",
                         read_ver
@@ -109,23 +166,12 @@ impl TransactionManager {
         }
 
         // Commit: record write set for future conflict detection
-        inner
-            .committed_writes
-            .insert(commit_seq, (txn_id, txn_info.write_set.clone()));
+        inner.committed_writes.insert(commit_seq, txn_id, txn_info.write_set.clone());
         inner.active_txns.remove(&txn_id);
 
         // Cleanup old commits to prevent unbounded growth
-        if inner.committed_writes.len() > inner.max_retained_commits {
-            let oldest_keys: Vec<u64> = inner
-                .committed_writes
-                .keys()
-                .copied()
-                .take(inner.committed_writes.len() - inner.max_retained_commits)
-                .collect();
-            for key in oldest_keys {
-                inner.committed_writes.remove(&key);
-            }
-        }
+        let max_retained = inner.max_retained_commits;
+        inner.committed_writes.remove_oldest_excess(max_retained);
 
         Ok(())
     }
