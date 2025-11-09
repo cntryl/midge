@@ -48,19 +48,6 @@ fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     engine.flush().unwrap();
 }
 
-/// Helper: create a new engine in a fresh temp dir and return both.
-fn new_engine() -> (tempfile::TempDir, cntryl_midge::MidgeEngine) {
-    let dir = test_temp_dir();
-    let opts = cntryl_midge::MidgeOptions {
-        storage_mode: cntryl_midge::StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = cntryl_midge::MidgeEngine::open(opts).expect("open");
-    (dir, engine)
-}
-
 #[test]
 fn should_trigger_l2_compaction_given_l1_compaction_exceeded_l2_capacity() {
     // Arrange - Create enough data to span multiple levels

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 mod common;
-use common::{assert_get_equals, assert_key_absent};
+use common::{assert_get_equals, assert_key_absent, new_engine, test_temp_dir};
 
 // Helper to create test options with small memtable for quick flushes
 fn compaction_test_opts() -> MidgeOptions {
@@ -46,19 +46,6 @@ fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
-}
-
-/// Helper: create a new engine in a fresh temp dir and return both.
-fn new_engine() -> (tempfile::TempDir, cntryl_midge::MidgeEngine) {
-    let dir = test_temp_dir();
-    let opts = cntryl_midge::MidgeOptions {
-        storage_mode: cntryl_midge::StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = cntryl_midge::MidgeEngine::open(opts).expect("open");
-    (dir, engine)
 }
 
 #[test]

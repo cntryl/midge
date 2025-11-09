@@ -10,19 +10,6 @@ use tempfile::TempDir;
 
 mod common;
 use common::{test_temp_dir, new_engine};
-/// Helper: create a new engine in a fresh temp dir and return both.
-fn new_engine() -> (tempfile::TempDir, cntryl_midge::MidgeEngine) {
-    let dir = test_temp_dir();
-    let opts = cntryl_midge::MidgeOptions {
-        storage_mode: cntryl_midge::StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = cntryl_midge::MidgeEngine::open(opts).expect("open");
-    (dir, engine)
-}
-
 #[test]
 fn should_detect_write_write_conflict_given_concurrent_updates_to_same_key() {
     // Arrange
