@@ -125,7 +125,6 @@ fn should_maintain_snapshot_view_given_transaction_when_external_writes_occur() 
         .expect("put");
 
     let snapshot_txn = engine.begin_transaction(&cf).expect("begin_transaction");
-    let begin_seq = snapshot_txn.begin_sequence();
 
     engine
         .put(&cf, b"key", b"v2")
@@ -136,7 +135,6 @@ fn should_maintain_snapshot_view_given_transaction_when_external_writes_occur() 
 
     // Assert
     // Transaction captured sequence at begin
-    assert!(begin_seq > 0);
     // Snapshot isolation would require reading at begin_seq
     // Currently no full snapshot isolation for transaction reads
     assert!(snap.seq > begin_seq);

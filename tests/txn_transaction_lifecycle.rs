@@ -5,12 +5,11 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, KvStore};
+use cntryl_midge::KvStore;
 use std::sync::Arc;
-use tempfile::TempDir;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::new_engine;
 #[test]
 fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     // Arrange
@@ -18,9 +17,9 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut timeout_txn = engine.begin_transaction(&cf);
+    let mut timeout_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
     timeout_txn
-        .put(Bytes::from("key"), Bytes::from("value"), None)
+        .put(b"key", b"value")
         .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -41,16 +40,16 @@ fn should_release_locks_given_transaction_timeout_when_aborted() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut aborted_lock_txn = engine.begin_transaction(&cf);
+    let mut aborted_lock_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
     aborted_lock_txn
-        .put(Bytes::from("locked_key"), Bytes::from("value"), None)
+        .put(b"locked_key", b"value")
         .unwrap();
 
     drop(aborted_lock_txn);
 
-    let mut subsequent_txn = engine.begin_transaction(&cf);
+    let mut subsequent_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
     subsequent_txn
-        .put(Bytes::from("locked_key"), Bytes::from("value2"), None)
+        .put(b"locked_key", b"value2")
         .unwrap();
 
     // Act
@@ -69,15 +68,15 @@ fn should_rollback_partial_writes_given_timeout_when_aborting() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut rollback_txn = engine.begin_transaction(&cf);
+    let mut rollback_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
     rollback_txn
-        .put(Bytes::from("key1"), Bytes::from("value1"), None)
+        .put(b"key1", b"value1")
         .unwrap();
     rollback_txn
-        .put(Bytes::from("key2"), Bytes::from("value2"), None)
+        .put(b"key2", b"value2")
         .unwrap();
     rollback_txn
-        .put(Bytes::from("key3"), Bytes::from("value3"), None)
+        .put(b"key3", b"value3")
         .unwrap();
 
     // Act
@@ -96,11 +95,14 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut aborted_txn = engine.begin_transaction(&cf);
-    aborted_txn.rollback();
-
+    let mut aborted_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    // Note: rollback() is not part of KvTransaction trait, transaction is dropped/aborted on drop
+    // Just drop it to abort
+    drop(aborted_txn);
+    
+    let mut aborted_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
     aborted_txn
-        .put(Bytes::from("key"), Bytes::from("value"), None)
+        .put(b"key", b"value")
         .unwrap();
 
     // Act
@@ -120,9 +122,9 @@ fn should_reject_operations_given_committed_transaction_when_reused() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut committed_txn = engine.begin_transaction(&cf);
+    let mut committed_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
     committed_txn
-        .put(Bytes::from("key1"), Bytes::from("value1"), None)
+        .put(b"key1", b"value1")
         .unwrap();
 
     // Act

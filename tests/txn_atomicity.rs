@@ -18,17 +18,13 @@ fn should_commit_all_or_nothing_given_multi_key_transaction() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut atomic_txn = engine.begin_transaction(&cf);
-    atomic_txn
-        .put(Bytes::from("k1"), Bytes::from("v1"), None)
-        .unwrap();
-    atomic_txn
-        .put(Bytes::from("k2"), Bytes::from("v2"), None)
-        .unwrap();
-    atomic_txn
-        .put(Bytes::from("k3"), Bytes::from("v3"), None)
-        .unwrap();
-    atomic_txn.delete(&cf, b"k4").unwrap();
+    let mut atomic_txn = engine
+        .begin_transaction(&cf)
+        .expect("begin transaction");
+    atomic_txn.put(b"k1", b"v1").unwrap();
+    atomic_txn.put(b"k2", b"v2").unwrap();
+    atomic_txn.put(b"k3", b"v3").unwrap();
+    atomic_txn.delete(b"k4").unwrap();
 
     // Act
     engine
@@ -58,13 +54,14 @@ fn should_be_atomic_given_transaction_with_100_operations() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut batch_txn = engine.begin_transaction(&cf);
+    let mut batch_txn = engine
+        .begin_transaction(&cf)
+        .expect("begin transaction");
     for i in 0..100 {
         batch_txn
             .put(
-                Bytes::from(format!("batch_key_{}", i)),
-                Bytes::from(format!("batch_val_{}", i)),
-                None,
+                format!("batch_key_{}", i).as_bytes(),
+                format!("batch_val_{}", i).as_bytes(),
             )
             .unwrap();
     }
@@ -92,13 +89,11 @@ fn should_rollback_all_writes_given_single_failure_when_committing() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut failed_txn = engine.begin_transaction(&cf);
-    failed_txn
-        .put(Bytes::from("k1"), Bytes::from("v1"), None)
-        .unwrap();
-    failed_txn
-        .put(Bytes::from("k2"), Bytes::from("v2"), None)
-        .unwrap();
+    let mut failed_txn = engine
+        .begin_transaction(&cf)
+        .expect("begin transaction");
+    failed_txn.put(b"k1", b"v1").unwrap();
+    failed_txn.put(b"k2", b"v2").unwrap();
 
     // Act
     drop(failed_txn);
@@ -116,13 +111,11 @@ fn should_not_expose_partial_writes_given_concurrent_readers_when_committing() {
     let cf = engine.default_column_family();
     let snap_before = engine.snapshot();
 
-    let mut partial_write_txn = engine.begin_transaction(&cf);
-    partial_write_txn
-        .put(Bytes::from("atomic_k1"), Bytes::from("v1"), None)
-        .unwrap();
-    partial_write_txn
-        .put(Bytes::from("atomic_k2"), Bytes::from("v2"), None)
-        .unwrap();
+    let mut partial_write_txn = engine
+        .begin_transaction(&cf)
+        .expect("begin transaction");
+    partial_write_txn.put(b"atomic_k1", b"v1").unwrap();
+    partial_write_txn.put(b"atomic_k2", b"v2").unwrap();
 
     let read_during = engine.get(&cf, b"atomic_k1").expect("get during");
 

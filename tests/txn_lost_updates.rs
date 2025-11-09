@@ -5,23 +5,24 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use tempfile::TempDir;
+use cntryl_midge::KvStore;
+use std::sync::Arc;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::new_engine;
 #[test]
 fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("counter"), Bytes::from("0"))
+        .put(&cf, b"counter", b"0")
         .expect("put");
 
-    let mut first_increment_txn = engine.begin_transaction(&cf);
-    let mut second_increment_txn = engine.begin_transaction(&cf);
+    let mut first_increment_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut second_increment_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
 
     let snap1 = engine.snapshot();
     let snap2 = engine.snapshot();
@@ -40,16 +41,14 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
 
     first_increment_txn
         .put(
-            Bytes::from("counter"),
-            Bytes::from((count1 + 1).to_string()),
-            None,
+            b"counter",
+            (count1 + 1).to_string().as_bytes(),
         )
         .unwrap();
     second_increment_txn
         .put(
-            Bytes::from("counter"),
-            Bytes::from((count2 + 1).to_string()),
-            None,
+            b"counter",
+            (count2 + 1).to_string().as_bytes(),
         )
         .unwrap();
 
@@ -86,22 +85,23 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
 fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("key"), Bytes::from("v1"))
+        .put(&cf, b"key", b"v1")
         .expect("put");
 
     let snap = engine.snapshot();
     let expected = engine.get_at(b"key", &snap).expect("get");
 
     engine
-        .put(&cf, Bytes::from("key"), Bytes::from("v2"))
+        .put(&cf, b"key", b"v2")
         .expect("concurrent update");
 
-    let mut cas_txn = engine.begin_transaction(&cf);
+    let mut cas_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
     cas_txn
-        .put(Bytes::from("key"), Bytes::from("v3"), None)
+        .put(b"key", b"v3")
         .unwrap();
 
     // Act
@@ -118,16 +118,17 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
 fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commits() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut first_key_txn = engine.begin_transaction(&cf);
-    let mut second_key_txn = engine.begin_transaction(&cf);
+    let mut first_key_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut second_key_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
 
     first_key_txn
-        .put(Bytes::from("key1"), Bytes::from("value1"), None)
+        .put(b"key1", b"value1")
         .unwrap();
     second_key_txn
-        .put(Bytes::from("key2"), Bytes::from("value2"), None)
+        .put(b"key2", b"value2")
         .unwrap();
 
     engine

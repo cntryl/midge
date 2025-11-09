@@ -5,39 +5,40 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use tempfile::TempDir;
+use cntryl_midge::KvStore;
+use std::sync::Arc;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::new_engine;
 #[test]
 fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("k1"), Bytes::from("v1"))
+        .put(&cf, b"k1", b"v1")
         .expect("put");
     engine
-        .put(&cf, Bytes::from("k2"), Bytes::from("v2"))
+        .put(&cf, b"k2", b"v2")
         .expect("put");
 
-    let mut first_circular_txn = engine.begin_transaction(&cf);
-    let mut second_circular_txn = engine.begin_transaction(&cf);
+    let mut first_circular_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut second_circular_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
 
     first_circular_txn
-        .put(Bytes::from("k1"), Bytes::from("txn1_k1"), None)
+        .put(b"k1", b"txn1_k1")
         .unwrap();
     second_circular_txn
-        .put(Bytes::from("k2"), Bytes::from("txn2_k2"), None)
+        .put(b"k2", b"txn2_k2")
         .unwrap();
 
     first_circular_txn
-        .put(Bytes::from("k2"), Bytes::from("txn1_k2"), None)
+        .put(b"k2", b"txn1_k2")
         .unwrap();
     second_circular_txn
-        .put(Bytes::from("k1"), Bytes::from("txn2_k1"), None)
+        .put(b"k1", b"txn2_k1")
         .unwrap();
 
     let first_result =
@@ -63,23 +64,24 @@ fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
 fn should_abort_victim_transaction_given_deadlock_when_detected() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut first_deadlock_txn = engine.begin_transaction(&cf);
-    let mut second_deadlock_txn = engine.begin_transaction(&cf);
+    let mut first_deadlock_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut second_deadlock_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
 
     first_deadlock_txn
-        .put(Bytes::from("resource_a"), Bytes::from("txn1"), None)
+        .put(b"resource_a", b"txn1")
         .unwrap();
     second_deadlock_txn
-        .put(Bytes::from("resource_b"), Bytes::from("txn2"), None)
+        .put(b"resource_b", b"txn2")
         .unwrap();
 
     first_deadlock_txn
-        .put(Bytes::from("resource_b"), Bytes::from("txn1_b"), None)
+        .put(b"resource_b", b"txn1_b")
         .unwrap();
     second_deadlock_txn
-        .put(Bytes::from("resource_a"), Bytes::from("txn2_a"), None)
+        .put(b"resource_a", b"txn2_a")
         .unwrap();
 
     // Act
@@ -100,11 +102,12 @@ fn should_abort_victim_transaction_given_deadlock_when_detected() {
 fn should_allow_retry_given_deadlock_victim_when_aborted() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut initial_txn = engine.begin_transaction(&cf);
+    let mut initial_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
     initial_txn
-        .put(Bytes::from("key"), Bytes::from("value"), None)
+        .put(b"key", b"value")
         .unwrap();
 
     // Act
@@ -112,9 +115,9 @@ fn should_allow_retry_given_deadlock_victim_when_aborted() {
 
     // Assert
     if result.is_err() {
-        let mut retry_txn = engine.begin_transaction(&cf);
+        let mut retry_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
         retry_txn
-            .put(Bytes::from("key"), Bytes::from("retry_value"), None)
+            .put(b"key", b"retry_value")
             .unwrap();
         let retry_result =
             engine.commit_transaction(retry_txn, cntryl_midge::WriteOptions::default());
@@ -128,30 +131,31 @@ fn should_allow_retry_given_deadlock_victim_when_aborted() {
 fn should_detect_deadlock_given_three_way_circular_dependency() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut first_three_way_txn = engine.begin_transaction(&cf);
-    let mut second_three_way_txn = engine.begin_transaction(&cf);
-    let mut third_three_way_txn = engine.begin_transaction(&cf);
+    let mut first_three_way_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut second_three_way_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut third_three_way_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
 
     first_three_way_txn
-        .put(Bytes::from("r1"), Bytes::from("t1"), None)
+        .put(b"r1", b"t1")
         .unwrap();
     second_three_way_txn
-        .put(Bytes::from("r2"), Bytes::from("t2"), None)
+        .put(b"r2", b"t2")
         .unwrap();
     third_three_way_txn
-        .put(Bytes::from("r3"), Bytes::from("t3"), None)
+        .put(b"r3", b"t3")
         .unwrap();
 
     first_three_way_txn
-        .put(Bytes::from("r2"), Bytes::from("t1_r2"), None)
+        .put(b"r2", b"t1_r2")
         .unwrap();
     second_three_way_txn
-        .put(Bytes::from("r3"), Bytes::from("t2_r3"), None)
+        .put(b"r3", b"t2_r3")
         .unwrap();
     third_three_way_txn
-        .put(Bytes::from("r1"), Bytes::from("t3_r1"), None)
+        .put(b"r1", b"t3_r1")
         .unwrap();
 
     // Act

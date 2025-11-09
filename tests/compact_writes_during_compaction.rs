@@ -146,7 +146,7 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     let cf = engine.default_column_family();
-    populate_multi_level_data(&engine);
+    populate_multi_level_data(&engine, &cf);
 
     // Act - Trigger compaction in background
     let engine_clone = Arc::clone(&engine);
@@ -156,6 +156,7 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
 
     // Write new data and flush during compaction
     let engine_clone = Arc::clone(&engine);
+    let cf_clone = cf.clone();
     let flush_handle = thread::spawn(move || {
         thread::sleep(Duration::from_millis(10)); // Let compaction start
 
@@ -200,12 +201,13 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
 
     // Flush new data shortly after compaction starts
     let engine_clone = Arc::clone(&engine);
+    let cf_clone = cf.clone();
     let flush_handle = thread::spawn(move || {
         // Write and flush new data
         for i in 300..350 {
             let key = format!("late_key{:03}", i);
             engine_clone
-                .put(Bytes::from(key), Bytes::from("late_value"))
+                .put(&cf_clone, key.as_bytes(), b"late_value")
                 .unwrap();
         }
         engine_clone.flush().unwrap();
