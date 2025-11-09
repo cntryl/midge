@@ -5,11 +5,10 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, Transaction};
-use tempfile::TempDir;
+use cntryl_midge::Transaction;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::new_engine;
 #[test]
 fn should_validate_version_given_read_set_when_committing_transaction() {
     // Arrange

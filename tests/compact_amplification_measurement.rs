@@ -1,13 +1,12 @@
 // Amplification Measurement
 // Extracted from compaction_concurrent.rs
 
-use cntryl_midge::{ColumnFamilyHandle, MidgeEngine, MidgeOptions, Query, StorageMode};
-use std::sync::Arc;
+use cntryl_midge::{ColumnFamilyHandle, MidgeEngine, MidgeOptions, StorageMode};
 
 mod common;
-use common::{assert_get_equals, assert_key_absent};
 
 // Helper to create test options with small memtable for quick flushes
+#[allow(dead_code)]
 fn compaction_test_opts() -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::Memory,
@@ -18,6 +17,7 @@ fn compaction_test_opts() -> MidgeOptions {
 }
 
 // Helper to populate engine with data spread across multiple L0 files
+#[allow(dead_code)]
 fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     // Write batch 1 and flush to L0
     for i in 0..50 {

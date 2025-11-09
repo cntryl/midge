@@ -5,7 +5,7 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 mod common;
 use common::test_temp_dir;
@@ -36,7 +36,7 @@ let cf = eng.default_column_family();
         .iter()
         .map(|k| {
             let v = eng.get(&cf, k).expect("get");
-            (Bytes::from_static(*k), v)
+            (Bytes::from_static(k), v)
         })
         .collect();
 
@@ -79,7 +79,7 @@ let cf = eng.default_column_family();
         .iter()
         .map(|k| {
             let v = eng.get(&cf, k).expect("get");
-            (Bytes::from_static(*k), v)
+            (Bytes::from_static(k), v)
         })
         .collect();
 
@@ -124,7 +124,7 @@ fn should_multi_get_from_ssts_after_flush() {
         .iter()
         .map(|k| {
             let v = eng.get(&cf, k).expect("get");
-            (Bytes::from_static(*k), v)
+            (Bytes::from_static(k), v)
         })
         .collect();
 
@@ -176,7 +176,7 @@ fn should_multi_get_mixed_memtable_and_sst() {
         .iter()
         .map(|k| {
             let v = eng.get(&cf, k).expect("get");
-            (Bytes::from_static(*k), v)
+            (Bytes::from_static(k), v)
         })
         .collect();
 

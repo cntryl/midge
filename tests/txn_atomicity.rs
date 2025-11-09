@@ -5,12 +5,11 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, KvStore};
+use cntryl_midge::KvStore;
 use std::sync::Arc;
-use tempfile::TempDir;
 
 mod common;
-use common::{new_engine, test_temp_dir};
+use common::new_engine;
 #[test]
 fn should_commit_all_or_nothing_given_multi_key_transaction() {
     // Arrange

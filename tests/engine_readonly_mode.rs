@@ -8,7 +8,6 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 mod common;
-use common::test_temp_dir;
 #[test]
 fn should_fail_insert_given_read_only_mode() {
     // Arrange

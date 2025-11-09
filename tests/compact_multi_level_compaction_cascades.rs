@@ -2,16 +2,12 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode, ColumnFamilyHandle};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, ColumnFamilyHandle};
 
 mod common;
-use common::{assert_get_equals, assert_key_absent};
 
 // Helper to create test options with small memtable for quick flushes
+#[allow(dead_code)]
 fn compaction_test_opts() -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::Memory,
@@ -22,6 +18,7 @@ fn compaction_test_opts() -> MidgeOptions {
 }
 
 // Helper to populate engine with data spread across multiple L0 files
+#[allow(dead_code)]
 fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     // Write batch 1 and flush to L0
     for i in 0..50 {

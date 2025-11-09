@@ -2,14 +2,11 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode, ColumnFamilyHandle};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, ColumnFamilyHandle};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 mod common;
-use common::{assert_get_equals, assert_key_absent};
 
 // Helper to create test options with small memtable for quick flushes
 fn compaction_test_opts() -> MidgeOptions {

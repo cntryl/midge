@@ -8,7 +8,6 @@ mod common;
 use bytes::Bytes;
 use common::*;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -21,6 +20,7 @@ fn memory_opts() -> MidgeOptions {
     }
 }
 
+#[allow(dead_code)]
 fn memory_opts_with_memtable_size(size: usize) -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::Memory,

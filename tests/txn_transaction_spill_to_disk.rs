@@ -5,8 +5,6 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use tempfile::TempDir;
 
 mod common;
 use common::{test_temp_dir, new_engine};
@@ -112,7 +110,7 @@ fn should_read_from_spill_file_given_large_transaction_when_get() {
 fn should_cleanup_spill_file_given_transaction_commit_when_completed() {
     // Arrange
     let (dir, engine) = new_engine();
-    let cf = engine.default_column_family();
+    let _cf = engine.default_column_family();
 
     // Create transaction with small threshold
     let snap = engine.snapshot();
@@ -177,7 +175,7 @@ fn should_cleanup_spill_file_given_transaction_commit_when_completed() {
 fn should_cleanup_spill_file_given_transaction_abort_when_rolled_back() {
     // Arrange
     let (_dir, engine) = new_engine();
-    let cf = engine.default_column_family();
+    let _cf = engine.default_column_family();
 
     // Create transaction with small threshold
     let snap = engine.snapshot();

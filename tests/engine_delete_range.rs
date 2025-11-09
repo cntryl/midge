@@ -129,9 +129,8 @@ fn should_reject_delete_range_given_read_only_mode() {
 fn should_persist_delete_range_in_wal() {
     // Arrange
     use bytes::Bytes;
-    use tempfile::TempDir;
 
-    let tmp_dir = TempDir::new().unwrap();
+    let tmp_dir = test_temp_dir();
     let db_path = tmp_dir.path().to_path_buf();
     
     {

@@ -15,7 +15,7 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let cf = engine.default_column_family();
+    let _cf = engine.default_column_family();
 
     let snap = engine.snapshot();
     let mut timeout_txn = cntryl_midge::Transaction::with_options(2001, snap.seq, None, 100 * 1024 * 1024);
@@ -39,7 +39,7 @@ fn should_release_locks_given_transaction_timeout_when_aborted() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let cf = engine.default_column_family();
+    let _cf = engine.default_column_family();
 
     let snap = engine.snapshot();
     let mut aborted_lock_txn = cntryl_midge::Transaction::with_options(2002, snap.seq, None, 100 * 1024 * 1024);
@@ -97,10 +97,10 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let cf = engine.default_column_family();
+    let _cf = engine.default_column_family();
 
     let snap = engine.snapshot();
-    let mut aborted_txn = cntryl_midge::Transaction::with_options(2005, snap.seq, None, 100 * 1024 * 1024);
+    let aborted_txn = cntryl_midge::Transaction::with_options(2005, snap.seq, None, 100 * 1024 * 1024);
     // Note: rollback() is not part of KvTransaction trait, transaction is dropped/aborted on drop
     // Just drop it to abort
     drop(aborted_txn);
@@ -126,7 +126,7 @@ fn should_reject_operations_given_committed_transaction_when_reused() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let cf = engine.default_column_family();
+    let _cf = engine.default_column_family();
 
     let snap = engine.snapshot();
     let mut committed_txn = cntryl_midge::Transaction::with_options(2007, snap.seq, None, 100 * 1024 * 1024);

@@ -246,6 +246,7 @@ pub(crate) fn apply_compaction_filter(
 /// * `Ok(Some((path, metadata)))` - Path to the created SST and its metadata
 /// * `Ok(None)` - No SST created (empty input)
 /// * `Err(_)` - I/O or encoding error
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_compacted_sst(
     sst_factory: &Arc<dyn crate::sst::SstFactory>,
     compression: crate::codec::CompressionType,

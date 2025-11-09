@@ -5,10 +5,9 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 mod common;
-use common::test_temp_dir;
 #[test]
 fn should_insert_key_given_nonexistent_key() {
     // Arrange

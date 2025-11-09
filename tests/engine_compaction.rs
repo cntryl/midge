@@ -5,7 +5,7 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 mod common;
 use common::test_temp_dir;
@@ -116,17 +116,17 @@ fn should_background_compact_when_threshold_exceeded() {
         // Create 3 SSTs quickly
         eng.put(&cf, b"a", b"1")
             .unwrap();
-        eng.put(&cf, b"zz", &vec![b'x'; 128])
+        eng.put(&cf, b"zz", &[b'x'; 128])
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
         eng.put(&cf, b"b", b"2")
             .unwrap();
-        eng.put(&cf, b"zz2", &vec![b'x'; 128])
+        eng.put(&cf, b"zz2", &[b'x'; 128])
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
         eng.put(&cf, b"c", b"3")
             .unwrap();
-        eng.put(&cf, b"zz3", &vec![b'x'; 128])
+        eng.put(&cf, b"zz3", &[b'x'; 128])
             .unwrap();
     }
     // Act: wait for background compaction to kick in

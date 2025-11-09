@@ -48,7 +48,7 @@ fn should_abort_second_transaction_given_write_conflict_when_both_commit() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let cf = engine.default_column_family();
+    let _cf = engine.default_column_family();
 
     let snap = engine.snapshot();
     let mut winner = cntryl_midge::Transaction::with_options(1003, snap.seq, None, 100 * 1024 * 1024);
@@ -80,7 +80,7 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let cf = engine.default_column_family();
+    let _cf = engine.default_column_family();
 
     let snap = engine.snapshot();
     let mut txn1 = cntryl_midge::Transaction::with_options(1005, snap.seq, None, 100 * 1024 * 1024);

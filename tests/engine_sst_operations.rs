@@ -6,7 +6,6 @@
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
-use std::fs;
 
 mod common;
 use common::test_temp_dir;
