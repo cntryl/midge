@@ -350,8 +350,8 @@ mod tests {
         // Arrange
         let tm = TransactionManager::new();
 
-        let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("key"));
+    let mut ws1 = HashSet::new();
+    ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key")));
         tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
             .unwrap();
         tm.try_commit(1, 110).unwrap();
@@ -569,11 +569,11 @@ mod tests {
         // Arrange
         let tm = TransactionManager::new();
 
-        let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("key1"));
+    let mut ws1 = HashSet::new();
+    ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1")));
 
-        let mut ws2 = HashSet::new();
-        ws2.insert(Bytes::from("key2"));
+    let mut ws2 = HashSet::new();
+    ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2")));
 
         tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
             .unwrap();
@@ -598,10 +598,10 @@ mod tests {
         // Arrange
         let tm = TransactionManager::new();
 
-        let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("key"));
-        let mut ws2 = HashSet::new();
-        ws2.insert(Bytes::from("key"));
+    let mut ws1 = HashSet::new();
+    ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key")));
+    let mut ws2 = HashSet::new();
+    ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key")));
 
         tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
             .unwrap();
