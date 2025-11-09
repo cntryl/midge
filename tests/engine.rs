@@ -24,11 +24,11 @@ fn should_get_value_given_existing_key_when_put() {
     let eng = MidgeEngine::open(opts).expect("open");
 
     // Act
-    eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+    eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"1"))
         .expect("put");
 
     // Assert
-    let got = eng.get(b"a").expect("get");
+    let got = eng.get(&cf, b"a").expect("get");
     assert_eq!(got, Some(Bytes::from_static(b"1")));
 
     // range scan sanity
@@ -56,19 +56,20 @@ fn should_return_none_given_deleted_key_when_delete() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
-    eng.put(Bytes::from_static(b"k"), Bytes::from_static(b"v"))
+    eng.put(&cf, Bytes::from_static(b"k"), Bytes::from_static(b"v"))
         .expect("put");
 
     // Act
-    eng.delete(Bytes::from_static(b"k")).expect("del");
+    eng.delete(&cf, Bytes::from_static(b"k")).expect("del");
 
     // Assert
-    let got = eng.get(b"k").expect("get");
+    let got = eng.get(&cf, b"k").expect("get");
     assert_eq!(got, None);
 }
 
 #[test]
 fn should_return_ordered_pairs_given_range_when_scan() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -79,7 +80,7 @@ fn should_return_ordered_pairs_given_range_when_scan() {
     };
     let eng = MidgeEngine::open(opts).expect("open");
     for (k, v) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3"), (b"d", b"4")] {
-        eng.put(Bytes::from_static(k), Bytes::from_static(v))
+        eng.put(&cf, Bytes::from_static(k), Bytes::from_static(v))
             .expect("put");
     }
 
@@ -142,8 +143,8 @@ fn should_apply_all_mutations_given_mixed_ops_when_batch() {
     eng.batch(muts).expect("batch");
 
     // Assert
-    assert_eq!(eng.get(b"a").unwrap(), None);
-    assert_eq!(eng.get(b"b").unwrap(), Some(Bytes::from_static(b"2")));
+    assert_eq!(eng.get(&cf, b"a").unwrap(), None);
+    assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
 }
 
 #[test]
@@ -156,15 +157,15 @@ fn should_hide_newer_writes_given_snapshot_when_get_at() {
     };
     let eng = MidgeEngine::open(opts).expect("open");
 
-    eng.put(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
         .unwrap();
     let snap = eng.snapshot();
-    eng.put(Bytes::from_static(b"k"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k"), Bytes::from_static(b"v2"))
         .unwrap();
 
     // Act
     let at = eng.get_at(b"k", &snap).unwrap();
-    let full = eng.get(b"k").unwrap();
+    let full = eng.get(&cf, b"k").unwrap();
 
     // Assert
     // With multi-version memtable, a snapshot created after v1 should still
@@ -183,10 +184,10 @@ fn should_scan_at_hides_newer_writes_given_snapshot() {
     };
     let eng = MidgeEngine::open(opts).expect("open");
 
-    eng.put(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
         .unwrap();
     let snap = eng.snapshot();
-    eng.put(Bytes::from_static(b"k"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k"), Bytes::from_static(b"v2"))
         .unwrap();
 
     // Act: scan_at should see the older version (v1) and hide v2
@@ -224,7 +225,7 @@ fn should_rotate_wal_given_small_buffer_when_multiple_puts() {
     for i in 0..10u8 {
         let k = [b"k"[0], i];
         let v = [b"v"[0], i];
-        eng.put(Bytes::copy_from_slice(&k), Bytes::copy_from_slice(&v))
+        eng.put(&cf, Bytes::copy_from_slice(&k), Bytes::copy_from_slice(&v))
             .unwrap();
     }
 
@@ -287,9 +288,9 @@ fn should_recover_state_given_unflushed_wal_when_reopening() {
 
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
-        eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+        eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"1"))
             .unwrap();
-        eng.put(Bytes::from_static(b"b"), Bytes::from_static(b"2"))
+        eng.put(&cf, Bytes::from_static(b"b"), Bytes::from_static(b"2"))
             .unwrap();
         // Intentionally drop without flushing to SST
     }
@@ -298,12 +299,13 @@ fn should_recover_state_given_unflushed_wal_when_reopening() {
     let eng2 = MidgeEngine::open(opts.clone()).expect("reopen");
 
     // Assert: state recovered
-    assert_eq!(eng2.get(b"a").unwrap(), Some(Bytes::from_static(b"1")));
-    assert_eq!(eng2.get(b"b").unwrap(), Some(Bytes::from_static(b"2")));
+    assert_eq!(eng2.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));
+    assert_eq!(eng2.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
 }
 
 #[test]
 fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
+    let cf = engine.default_column_family();
     // Arrange: write a couple keys, then force WAL rotation to flush memtable -> SST
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -317,13 +319,13 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
     };
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
-        eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+        eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"1"))
             .unwrap();
-        eng.put(Bytes::from_static(b"b"), Bytes::from_static(b"2"))
+        eng.put(&cf, Bytes::from_static(b"b"), Bytes::from_static(b"2"))
             .unwrap();
         // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
         let big = vec![b'v'; 128];
-        eng.put(Bytes::from_static(b"zz"), Bytes::from(big))
+        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(big))
             .unwrap();
         // Give background flush a moment to materialize SST and update manifest
         std::thread::sleep(std::time::Duration::from_millis(150));
@@ -333,14 +335,15 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
     let eng2 = MidgeEngine::open(opts.clone()).expect("reopen");
 
     // Assert: engine.get should fall back to SST when not found in memtable
-    let got_a = eng2.get(b"a").expect("get a from sst");
-    let got_b = eng2.get(b"b").expect("get b from sst");
+    let got_a = eng2.get(&cf, b"a").expect("get a from sst");
+    let got_b = eng2.get(&cf, b"b").expect("get b from sst");
     assert_eq!(got_a, Some(Bytes::from_static(b"1")));
     assert_eq!(got_b, Some(Bytes::from_static(b"2")));
 }
 
 #[test]
 fn should_respect_tombstone_from_sst_when_point_lookup() {
+    let cf = engine.default_column_family();
     // Arrange: write k->v, rotate/flush, then delete and rotate/flush, so SST set has a tombstone
     let dir = temp_dir();
     let mut opts = MidgeOptions::default();
@@ -352,15 +355,15 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
     opts.memtable_size = 1024 * 1024;
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
-        eng.put(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
+        eng.put(&cf, Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
             .unwrap();
         // rotate to flush first version
-        eng.put(Bytes::from_static(b"zz"), Bytes::from(vec![b'v'; 128]))
+        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'v'; 128]))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         // delete and rotate again to flush tombstone
-        eng.delete(Bytes::from_static(b"k")).unwrap();
-        eng.put(Bytes::from_static(b"zz2"), Bytes::from(vec![b'v'; 128]))
+        eng.delete(&cf, Bytes::from_static(b"k")).unwrap();
+        eng.put(&cf, Bytes::from_static(b"zz2"), Bytes::from(vec![b'v'; 128]))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(120));
     }
@@ -369,12 +372,13 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
     let eng2 = MidgeEngine::open(opts.clone()).expect("reopen");
 
     // Assert: engine should not resurrect deleted key; get returns None
-    let got = eng2.get(b"k").expect("get");
+    let got = eng2.get(&cf, b"k").expect("get");
     assert_eq!(got, None);
 }
 
 #[test]
 fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
+    let cf = engine.default_column_family();
     // Arrange: seed SST with a,b,c; then in memtable update b, delete c, add d.
     let dir = temp_dir();
     let mut opts = MidgeOptions::default();
@@ -387,13 +391,13 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
                                       // Phase 1: open with tiny WAL to force rotation and flush SST
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
-        eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+        eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"1"))
             .unwrap();
-        eng.put(Bytes::from_static(b"b"), Bytes::from_static(b"2"))
+        eng.put(&cf, Bytes::from_static(b"b"), Bytes::from_static(b"2"))
             .unwrap();
-        eng.put(Bytes::from_static(b"c"), Bytes::from_static(b"3"))
+        eng.put(&cf, Bytes::from_static(b"c"), Bytes::from_static(b"3"))
             .unwrap();
-        eng.put(Bytes::from_static(b"zz"), Bytes::from(vec![b'v'; 256]))
+        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'v'; 256]))
             .unwrap();
     }
     // Wait for background flush
@@ -401,10 +405,10 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
     // Phase 2: reopen with large WAL so overlay remains in memtable
     opts.wal_buffer_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
-    eng.put(Bytes::from_static(b"b"), Bytes::from_static(b"2'"))
+    eng.put(&cf, Bytes::from_static(b"b"), Bytes::from_static(b"2'"))
         .unwrap();
-    eng.delete(Bytes::from_static(b"c")).unwrap();
-    eng.put(Bytes::from_static(b"d"), Bytes::from_static(b"4"))
+    eng.delete(&cf, Bytes::from_static(b"c")).unwrap();
+    eng.put(&cf, Bytes::from_static(b"d"), Bytes::from_static(b"4"))
         .unwrap();
 
     // Act: scan full range
@@ -439,7 +443,7 @@ fn should_scan_by_prefix_memtable() {
     let eng = MidgeEngine::open(opts).expect("open");
 
     for k in [b"user:1:a", b"user:1:b", b"user:1:c", b"user:2:a"] {
-        eng.put(Bytes::from_static(k), Bytes::from_static(b"v"))
+        eng.put(&cf, Bytes::from_static(k), Bytes::from_static(b"v"))
             .unwrap();
     }
 
@@ -469,7 +473,7 @@ fn should_scan_by_prefix_and_limit_memtable() {
     let eng = MidgeEngine::open(opts).expect("open");
 
     for k in [b"user:1:a", b"user:1:b", b"user:1:c", b"user:2:a"] {
-        eng.put(Bytes::from_static(k), Bytes::from_static(b"v"))
+        eng.put(&cf, Bytes::from_static(k), Bytes::from_static(b"v"))
             .unwrap();
     }
 
@@ -497,15 +501,15 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable() {
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
 
-    eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+    eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"1"))
         .unwrap();
-    eng.put(Bytes::from_static(b"ab"), Bytes::from_static(b"2"))
+    eng.put(&cf, Bytes::from_static(b"ab"), Bytes::from_static(b"2"))
         .unwrap();
-    eng.put(Bytes::from_static(b"ac"), Bytes::from_static(b"3"))
+    eng.put(&cf, Bytes::from_static(b"ac"), Bytes::from_static(b"3"))
         .unwrap();
     eng.flush().unwrap(); // persist above to SST
                           // Now add a memtable overlay
-    eng.put(Bytes::from_static(b"ad"), Bytes::from_static(b"4"))
+    eng.put(&cf, Bytes::from_static(b"ad"), Bytes::from_static(b"4"))
         .unwrap();
 
     // Act: prefix "a" should include a, ab, ac from SST and ad from memtable
@@ -536,14 +540,14 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable_limited() {
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
 
-    eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+    eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"1"))
         .unwrap();
-    eng.put(Bytes::from_static(b"ab"), Bytes::from_static(b"2"))
+    eng.put(&cf, Bytes::from_static(b"ab"), Bytes::from_static(b"2"))
         .unwrap();
-    eng.put(Bytes::from_static(b"ac"), Bytes::from_static(b"3"))
+    eng.put(&cf, Bytes::from_static(b"ac"), Bytes::from_static(b"3"))
         .unwrap();
     eng.flush().unwrap(); // persist above to SST
-    eng.put(Bytes::from_static(b"ad"), Bytes::from_static(b"4"))
+    eng.put(&cf, Bytes::from_static(b"ad"), Bytes::from_static(b"4"))
         .unwrap();
 
     // Act: limited prefix scan (limit 3)
@@ -573,20 +577,20 @@ fn should_compact_all_merge_newest_and_drop_tombstones() {
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         // SST1: a=1, b=2
-        eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+        eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"1"))
             .unwrap();
-        eng.put(Bytes::from_static(b"zz"), Bytes::from(vec![b'x'; 256]))
+        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'x'; 256]))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         // SST2: b=2', c=3
-        eng.put(Bytes::from_static(b"b"), Bytes::from_static(b"2' "))
+        eng.put(&cf, Bytes::from_static(b"b"), Bytes::from_static(b"2' "))
             .unwrap();
-        eng.put(Bytes::from_static(b"zz2"), Bytes::from(vec![b'x'; 256]))
+        eng.put(&cf, Bytes::from_static(b"zz2"), Bytes::from(vec![b'x'; 256]))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         // SST3: delete a
-        eng.delete(Bytes::from_static(b"a")).unwrap();
-        eng.put(Bytes::from_static(b"zz3"), Bytes::from(vec![b'x'; 256]))
+        eng.delete(&cf, Bytes::from_static(b"a")).unwrap();
+        eng.put(&cf, Bytes::from_static(b"zz3"), Bytes::from(vec![b'x'; 256]))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(120));
         // leave eng in scope to ensure flush thread has time
@@ -594,22 +598,23 @@ fn should_compact_all_merge_newest_and_drop_tombstones() {
 
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
     // Sanity before compaction: get pulls latest view with tombstone respected
-    assert_eq!(eng.get(b"a").unwrap(), None);
-    let b = eng.get(b"b").unwrap().unwrap();
+    assert_eq!(eng.get(&cf, b"a").unwrap(), None);
+    let b = eng.get(&cf, b"b").unwrap().unwrap();
     assert!(b == Bytes::from_static(b"2' "));
 
     // Act: compact all
     eng.compact_all().unwrap();
 
     // Assert: only one SST remains and reads still correct
-    let got_a = eng.get(b"a").unwrap();
-    let got_b = eng.get(b"b").unwrap();
+    let got_a = eng.get(&cf, b"a").unwrap();
+    let got_b = eng.get(&cf, b"b").unwrap();
     assert_eq!(got_a, None);
     assert_eq!(got_b, Some(Bytes::from_static(b"2' ")));
 }
 
 #[test]
 fn should_preserve_snapshot_visibility_across_compaction() {
+    let cf = engine.default_column_family();
     // Arrange: create value, take snapshot, delete value, then compact
     let dir = temp_dir();
     let mut opts = MidgeOptions::default();
@@ -621,20 +626,20 @@ fn should_preserve_snapshot_visibility_across_compaction() {
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
 
-    eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"v1"))
         .expect("put v1");
     eng.flush().expect("flush v1");
 
     let snap = eng.snapshot();
 
-    eng.delete(Bytes::from_static(b"a")).expect("delete");
+    eng.delete(&cf, Bytes::from_static(b"a")).expect("delete");
     eng.flush().expect("flush tombstone");
 
     // Act: compact all SSTs into one file
     eng.compact_all().expect("compact_all");
 
     // Assert: current view sees deletion, snapshot still sees old value
-    let current = eng.get(b"a").expect("get current");
+    let current = eng.get(&cf, b"a").expect("get current");
     assert_eq!(current, None);
 
     let snapshot_view = eng.get_at(b"a", &snap).expect("get_at snapshot");
@@ -657,19 +662,19 @@ fn should_background_compact_when_threshold_exceeded() {
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         // Create 3 SSTs quickly
-        eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+        eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"1"))
             .unwrap();
-        eng.put(Bytes::from_static(b"zz"), Bytes::from(vec![b'x'; 128]))
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        eng.put(Bytes::from_static(b"b"), Bytes::from_static(b"2"))
-            .unwrap();
-        eng.put(Bytes::from_static(b"zz2"), Bytes::from(vec![b'x'; 128]))
+        eng.put(&cf, Bytes::from_static(b"zz"), Bytes::from(vec![b'x'; 128]))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
-        eng.put(Bytes::from_static(b"c"), Bytes::from_static(b"3"))
+        eng.put(&cf, Bytes::from_static(b"b"), Bytes::from_static(b"2"))
             .unwrap();
-        eng.put(Bytes::from_static(b"zz3"), Bytes::from(vec![b'x'; 128]))
+        eng.put(&cf, Bytes::from_static(b"zz2"), Bytes::from(vec![b'x'; 128]))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        eng.put(&cf, Bytes::from_static(b"c"), Bytes::from_static(b"3"))
+            .unwrap();
+        eng.put(&cf, Bytes::from_static(b"zz3"), Bytes::from(vec![b'x'; 128]))
             .unwrap();
     }
     // Act: wait for background compaction to kick in
@@ -679,13 +684,14 @@ fn should_background_compact_when_threshold_exceeded() {
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
     let m = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
     assert_eq!(m.ssts.len(), 1);
-    assert_eq!(eng.get(b"a").unwrap(), Some(Bytes::from_static(b"1")));
-    assert_eq!(eng.get(b"b").unwrap(), Some(Bytes::from_static(b"2")));
-    assert_eq!(eng.get(b"c").unwrap(), Some(Bytes::from_static(b"3")));
+    assert_eq!(eng.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));
+    assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
+    assert_eq!(eng.get(&cf, b"c").unwrap(), Some(Bytes::from_static(b"3")));
 }
 
 #[test]
 fn should_create_checkpoint_and_read_from_it() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let mut opts = MidgeOptions::default();
@@ -693,9 +699,9 @@ fn should_create_checkpoint_and_read_from_it() {
         db_path: dir.path().to_path_buf(),
     };
     let eng = MidgeEngine::open(opts.clone()).expect("open");
-    eng.put(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
         .unwrap();
-    eng.put(Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
         .unwrap();
     eng.flush().unwrap();
     // Create checkpoint
@@ -711,8 +717,8 @@ fn should_create_checkpoint_and_read_from_it() {
     let cp = MidgeEngine::open(cp_opts).expect("open checkpoint");
 
     // Assert: data is readable from checkpoint
-    assert_eq!(cp.get(b"k1").unwrap(), Some(Bytes::from_static(b"v1")));
-    assert_eq!(cp.get(b"k2").unwrap(), Some(Bytes::from_static(b"v2")));
+    assert_eq!(cp.get(&cf, b"k1").unwrap(), Some(Bytes::from_static(b"v1")));
+    assert_eq!(cp.get(&cf, b"k2").unwrap(), Some(Bytes::from_static(b"v2")));
 }
 
 #[test]
@@ -729,7 +735,7 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
 
-    eng.put(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
         .unwrap();
     // Flush so v1 is persisted to SST
     eng.flush().unwrap();
@@ -746,12 +752,12 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     println!("sst rows: {:?}", rows);
     println!("snapshot seq={} ", snap.seq);
     // Newer write stays in memtable with higher seq
-    eng.put(Bytes::from_static(b"k"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k"), Bytes::from_static(b"v2"))
         .unwrap();
 
     // Act: get_at and full get
     let at = eng.get_at(b"k", &snap).unwrap();
-    let full = eng.get(b"k").unwrap();
+    let full = eng.get(&cf, b"k").unwrap();
 
     // Assert: snapshot sees v1 from SST; latest sees v2 from memtable
     assert_eq!(at, Some(Bytes::from_static(b"v1")));
@@ -790,7 +796,7 @@ fn should_streaming_scan_match_regular_scan() {
 
     // Put some keys and force flush
     for i in 0..5u8 {
-        eng.put(Bytes::from(vec![b'a' + i]), Bytes::from(vec![b'1' + i]))
+        eng.put(&cf, vec![b'a' + i].as_bytes(), vec![b'1' + i].as_bytes())
             .expect("put");
     }
 
@@ -799,7 +805,7 @@ fn should_streaming_scan_match_regular_scan() {
 
     // Add more keys to memtable
     for i in 5..10u8 {
-        eng.put(Bytes::from(vec![b'a' + i]), Bytes::from(vec![b'1' + i]))
+        eng.put(&cf, vec![b'a' + i].as_bytes(), vec![b'1' + i].as_bytes())
             .expect("put");
     }
 
@@ -839,7 +845,7 @@ fn should_streaming_scan_respect_limit() {
 
     // Put 10 keys
     for i in 0..10u8 {
-        eng.put(
+        eng.put(&cf, 
             Bytes::from(vec![b'k', b'0' + i]),
             Bytes::from(vec![b'v', b'0' + i]),
         )
@@ -868,13 +874,13 @@ fn should_streaming_scan_apply_tombstones() {
     };
     let eng = MidgeEngine::open(opts).expect("open");
 
-    eng.put(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
         .expect("put");
 
     // Delete k1
-    eng.delete(Bytes::from_static(b"k1")).expect("delete");
+    eng.delete(&cf, Bytes::from_static(b"k1")).expect("delete");
 
     // Act
     let results = eng.scan_streaming(Query::new()).expect("scan_streaming");
@@ -898,11 +904,11 @@ fn should_multi_get_all_keys_from_memtable() {
     };
     let eng = MidgeEngine::open(opts).expect("open");
 
-    eng.put(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k3"), Bytes::from_static(b"v3"))
+    eng.put(&cf, Bytes::from_static(b"k3"), Bytes::from_static(b"v3"))
         .expect("put");
 
     // Act
@@ -934,11 +940,11 @@ fn should_multi_get_respect_tombstones() {
     };
     let eng = MidgeEngine::open(opts).expect("open");
 
-    eng.put(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
         .expect("put");
-    eng.delete(Bytes::from_static(b"k1")).expect("delete");
+    eng.delete(&cf, Bytes::from_static(b"k1")).expect("delete");
 
     // Act
     let keys: Vec<&[u8]> = vec![b"k1", b"k2"];
@@ -967,20 +973,18 @@ fn should_multi_get_from_ssts_after_flush() {
     let eng = MidgeEngine::open(opts).expect("open");
 
     // Write data and force flush via WAL rotation
-    eng.put(
-        Bytes::from_static(b"key000"),
-        Bytes::from_static(b"value000"),
+    eng.put(&cf, 
+        Bytes::from_static(b"key000"), Bytes::from_static(b"value000"),
     )
     .expect("put");
-    eng.put(
-        Bytes::from_static(b"key005"),
-        Bytes::from_static(b"value005"),
+    eng.put(&cf, 
+        Bytes::from_static(b"key005"), Bytes::from_static(b"value005"),
     )
     .expect("put");
 
     // Force WAL rotation with a large write
     let big = vec![b'x'; 128];
-    eng.put(Bytes::from_static(b"key009"), Bytes::from(big.clone()))
+    eng.put(&cf, Bytes::from_static(b"key009"), Bytes::from(big.clone()))
         .expect("put");
 
     // Give flush time to complete
@@ -1017,28 +1021,26 @@ fn should_multi_get_mixed_memtable_and_sst() {
     let eng = MidgeEngine::open(opts).expect("open");
 
     // Write data and force flush
-    eng.put(
-        Bytes::from_static(b"old000"),
-        Bytes::from_static(b"oval000"),
+    eng.put(&cf, 
+        Bytes::from_static(b"old000"), Bytes::from_static(b"oval000"),
     )
     .expect("put");
-    eng.put(
-        Bytes::from_static(b"old005"),
-        Bytes::from_static(b"oval005"),
+    eng.put(&cf, 
+        Bytes::from_static(b"old005"), Bytes::from_static(b"oval005"),
     )
     .expect("put");
 
     // Force WAL rotation
     let big = vec![b'x'; 128];
-    eng.put(Bytes::from_static(b"oldlarge"), Bytes::from(big))
+    eng.put(&cf, Bytes::from_static(b"oldlarge"), Bytes::from(big))
         .expect("put");
 
     std::thread::sleep(std::time::Duration::from_millis(150));
 
     // Write new data to memtable (after rotation)
-    eng.put(Bytes::from_static(b"new1"), Bytes::from_static(b"nval1"))
+    eng.put(&cf, Bytes::from_static(b"new1"), Bytes::from_static(b"nval1"))
         .expect("put");
-    eng.put(Bytes::from_static(b"new2"), Bytes::from_static(b"nval2"))
+    eng.put(&cf, Bytes::from_static(b"new2"), Bytes::from_static(b"nval2"))
         .expect("put");
 
     // Act: Get mix of old (in SST) and new (in memtable) keys
@@ -1073,13 +1075,13 @@ fn should_scan_reverse_from_memtable() {
     let eng = MidgeEngine::open(opts).expect("open");
 
     // Write keys in forward order
-    eng.put(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k3"), Bytes::from_static(b"v3"))
+    eng.put(&cf, Bytes::from_static(b"k3"), Bytes::from_static(b"v3"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k4"), Bytes::from_static(b"v4"))
+    eng.put(&cf, Bytes::from_static(b"k4"), Bytes::from_static(b"v4"))
         .expect("put");
 
     // Act: Scan in reverse
@@ -1111,15 +1113,15 @@ fn should_scan_reverse_with_bounds() {
     let eng = MidgeEngine::open(opts).expect("open");
 
     // Write keys
-    eng.put(Bytes::from_static(b"a"), Bytes::from_static(b"va"))
+    eng.put(&cf, Bytes::from_static(b"a"), Bytes::from_static(b"va"))
         .expect("put");
-    eng.put(Bytes::from_static(b"b"), Bytes::from_static(b"vb"))
+    eng.put(&cf, Bytes::from_static(b"b"), Bytes::from_static(b"vb"))
         .expect("put");
-    eng.put(Bytes::from_static(b"c"), Bytes::from_static(b"vc"))
+    eng.put(&cf, Bytes::from_static(b"c"), Bytes::from_static(b"vc"))
         .expect("put");
-    eng.put(Bytes::from_static(b"d"), Bytes::from_static(b"vd"))
+    eng.put(&cf, Bytes::from_static(b"d"), Bytes::from_static(b"vd"))
         .expect("put");
-    eng.put(Bytes::from_static(b"e"), Bytes::from_static(b"ve"))
+    eng.put(&cf, Bytes::from_static(b"e"), Bytes::from_static(b"ve"))
         .expect("put");
 
     // Act: Reverse scan from 'b' to 'e' (exclusive of e)
@@ -1159,7 +1161,7 @@ fn should_scan_reverse_with_limit() {
     for i in 1..=10 {
         let key = format!("k{:02}", i);
         let val = format!("v{:02}", i);
-        eng.put(Bytes::from(key), Bytes::from(val)).expect("put");
+        eng.put(&cf, key.as_bytes(), val.as_bytes()).expect("put");
     }
 
     // Act: Reverse scan with limit of 3
@@ -1189,7 +1191,7 @@ fn should_scan_with_lower_and_upper_bounds() {
     for c in b'a'..=b'z' {
         let key = vec![c];
         let val = vec![c + 32]; // lowercase + 32 offset
-        eng.put(Bytes::from(key), Bytes::from(val)).expect("put");
+        eng.put(&cf, key.as_bytes(), val.as_bytes()).expect("put");
     }
 
     // Act: Scan from 'f' to 'k' (exclusive)
@@ -1224,13 +1226,13 @@ fn should_scan_reverse_respects_tombstones() {
     let eng = MidgeEngine::open(opts).expect("open");
 
     // Write and delete keys
-    eng.put(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
+    eng.put(&cf, Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
+    eng.put(&cf, Bytes::from_static(b"k2"), Bytes::from_static(b"v2"))
         .expect("put");
-    eng.put(Bytes::from_static(b"k3"), Bytes::from_static(b"v3"))
+    eng.put(&cf, Bytes::from_static(b"k3"), Bytes::from_static(b"v3"))
         .expect("put");
-    eng.delete(Bytes::from_static(b"k2")).expect("delete");
+    eng.delete(&cf, Bytes::from_static(b"k2")).expect("delete");
 
     // Act: Reverse scan
     let results = eng.scan(Query::new().reverse()).expect("scan");
@@ -1260,7 +1262,7 @@ fn should_insert_key_given_nonexistent_key() {
 
     // Act
     let inserted = engine.insert(key.clone(), value.clone()).unwrap();
-    let result = engine.get(&key).unwrap();
+    let result = engine.get(&cf, &key).unwrap();
 
     // Assert
     assert!(inserted, "First insert should return true");
@@ -1269,6 +1271,7 @@ fn should_insert_key_given_nonexistent_key() {
 
 #[test]
 fn should_not_insert_given_existing_key() {
+    let cf = engine.default_column_family();
     // Arrange
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
@@ -1278,11 +1281,11 @@ fn should_not_insert_given_existing_key() {
     let key = Bytes::from("key1");
     let value1 = Bytes::from("value1");
     let value2 = Bytes::from("value2");
-    engine.put(key.clone(), value1.clone()).unwrap();
+    engine.put(&cf, key.clone(), value1.clone()).unwrap();
 
     // Act
     let inserted = engine.insert(key.clone(), value2).unwrap();
-    let result = engine.get(&key).unwrap();
+    let result = engine.get(&cf, &key).unwrap();
 
     // Assert
     assert!(!inserted, "Insert should return false for existing key");
@@ -1291,6 +1294,7 @@ fn should_not_insert_given_existing_key() {
 
 #[test]
 fn should_return_existing_value_given_insert_with_value() {
+    let cf = engine.default_column_family();
     // Arrange
     use cntryl_midge::InsertResult;
     let opts = MidgeOptions {
@@ -1307,7 +1311,7 @@ fn should_return_existing_value_given_insert_with_value() {
         .insert_with_value(key.clone(), value1.clone())
         .unwrap();
     let result2 = engine.insert_with_value(key.clone(), value2).unwrap();
-    let stored = engine.get(&key).unwrap();
+    let stored = engine.get(&cf, &key).unwrap();
 
     // Assert
     assert_eq!(result1, InsertResult::Inserted);
@@ -1333,7 +1337,7 @@ fn should_swap_value_given_matching_expected() {
     let result2 = engine
         .compare_and_swap(key.clone(), Some(Bytes::from("0")), Bytes::from("1"))
         .unwrap();
-    let value = engine.get(&key).unwrap();
+    let value = engine.get(&cf, &key).unwrap();
 
     // Assert
     assert_eq!(result1, CasResult::Swapped);
@@ -1352,13 +1356,13 @@ fn should_return_mismatch_given_unexpected_value() {
     let engine = MidgeEngine::open(opts).unwrap();
     let key = Bytes::from("counter");
     let initial = Bytes::from("5");
-    engine.put(key.clone(), initial.clone()).unwrap();
+    engine.put(&cf, key.clone(), initial.clone()).unwrap();
 
     // Act
     let result = engine
         .compare_and_swap(key.clone(), Some(Bytes::from("0")), Bytes::from("1"))
         .unwrap();
-    let value = engine.get(&key).unwrap();
+    let value = engine.get(&cf, &key).unwrap();
 
     // Assert
     assert_eq!(result, CasResult::Mismatch(Some(initial.clone())));
@@ -1367,6 +1371,7 @@ fn should_return_mismatch_given_unexpected_value() {
 
 #[test]
 fn should_handle_concurrent_inserts_given_race_simulation() {
+    let cf = engine.default_column_family();
     // Arrange
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
@@ -1379,7 +1384,7 @@ fn should_handle_concurrent_inserts_given_race_simulation() {
     let result1 = engine.insert(key.clone(), Bytes::from("value1")).unwrap();
     let result2 = engine.insert(key.clone(), Bytes::from("value2")).unwrap();
     let result3 = engine.insert(key.clone(), Bytes::from("value3")).unwrap();
-    let value = engine.get(&key).unwrap();
+    let value = engine.get(&cf, &key).unwrap();
 
     // Assert
     assert!(result1, "First insert should succeed");
@@ -1390,6 +1395,7 @@ fn should_handle_concurrent_inserts_given_race_simulation() {
 
 #[test]
 fn should_handle_concurrent_cas_given_race_simulation() {
+    let cf = engine.default_column_family();
     // Arrange
     use cntryl_midge::CasResult;
     let opts = MidgeOptions {
@@ -1398,7 +1404,7 @@ fn should_handle_concurrent_cas_given_race_simulation() {
     };
     let engine = MidgeEngine::open(opts).unwrap();
     let key = Bytes::from("counter");
-    engine.put(key.clone(), Bytes::from("0")).unwrap();
+    engine.put(&cf, key.clone(), Bytes::from("0")).unwrap();
 
     // Act
     let result1 = engine
@@ -1410,7 +1416,7 @@ fn should_handle_concurrent_cas_given_race_simulation() {
     let result3 = engine
         .compare_and_swap(key.clone(), Some(Bytes::from("1")), Bytes::from("3"))
         .unwrap();
-    let value = engine.get(&key).unwrap();
+    let value = engine.get(&cf, &key).unwrap();
 
     // Assert
     assert_eq!(result1, CasResult::Swapped);
@@ -1442,7 +1448,7 @@ fn should_respect_snapshot_isolation_given_insert() {
     assert!(!inserted2);
     assert_eq!(engine.get_at(&key, &snap1).unwrap(), None);
     assert_eq!(engine.get_at(&key, &snap2).unwrap(), Some(value1.clone()));
-    assert_eq!(engine.get(&key).unwrap(), Some(value1));
+    assert_eq!(engine.get(&cf, &key).unwrap(), Some(value1));
 }
 
 #[test]
@@ -1456,7 +1462,7 @@ fn should_fail_insert_given_read_only_mode() {
     let engine = MidgeEngine::open(opts).unwrap();
     let key = Bytes::from("key1");
     let value = Bytes::from("value1");
-    engine.put(key.clone(), value).unwrap();
+    engine.put(&cf, key.clone(), value).unwrap();
     drop(engine);
 
     let opts_ro = MidgeOptions {
@@ -1479,6 +1485,7 @@ fn should_fail_insert_given_read_only_mode() {
 
 #[test]
 fn should_handle_insert_after_delete() {
+    let cf = engine.default_column_family();
     // Arrange
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
@@ -1488,12 +1495,12 @@ fn should_handle_insert_after_delete() {
     let key = Bytes::from("key1");
     let value1 = Bytes::from("value1");
     let value2 = Bytes::from("value2");
-    engine.put(key.clone(), value1).unwrap();
-    engine.delete(key.clone()).unwrap();
+    engine.put(&cf, key.clone(), value1).unwrap();
+    engine.delete(&cf, key.clone()).unwrap();
 
     // Act
     let inserted = engine.insert(key.clone(), value2.clone()).unwrap();
-    let result = engine.get(&key).unwrap();
+    let result = engine.get(&cf, &key).unwrap();
 
     // Assert
     assert!(inserted, "Insert should succeed after delete");
@@ -1502,6 +1509,7 @@ fn should_handle_insert_after_delete() {
 
 #[test]
 fn should_use_latest_value_given_cas_after_concurrent_put() {
+    let cf = engine.default_column_family();
     // Arrange
     use cntryl_midge::CasResult;
     let opts = MidgeOptions {
@@ -1510,11 +1518,11 @@ fn should_use_latest_value_given_cas_after_concurrent_put() {
     };
     let engine = MidgeEngine::open(opts).unwrap();
     let key = Bytes::from("key1");
-    engine.put(key.clone(), Bytes::from("A")).unwrap();
+    engine.put(&cf, key.clone(), Bytes::from("A")).unwrap();
     let snap = engine.snapshot();
 
     // Act
-    engine.put(key.clone(), Bytes::from("B")).unwrap();
+    engine.put(&cf, key.clone(), Bytes::from("B")).unwrap();
     let result = engine
         .compare_and_swap(key.clone(), Some(Bytes::from("A")), Bytes::from("C"))
         .unwrap();
@@ -1544,7 +1552,7 @@ fn should_allow_reads_when_opened_read_only() {
         ..Default::default()
     };
     let db = MidgeEngine::open(opts.clone()).unwrap();
-    db.put(Bytes::from("k"), Bytes::from("v")).unwrap();
+    db.put(&cf, "k".as_bytes(), "v".as_bytes()).unwrap();
     db.flush().unwrap();
     drop(db);
 
@@ -1560,7 +1568,7 @@ fn should_allow_reads_when_opened_read_only() {
     let db_ro = MidgeEngine::open(ro).unwrap();
 
     // Assert: reads work
-    let got = db_ro.get(b"k").unwrap();
+    let got = db_ro.get(&cf, b"k").unwrap();
     assert_eq!(got, Some(Bytes::from("v")));
 }
 
@@ -1576,7 +1584,7 @@ fn should_reject_writes_when_opened_read_only() {
         ..Default::default()
     };
     let db = MidgeEngine::open(opts.clone()).unwrap();
-    db.put(Bytes::from("k"), Bytes::from("v")).unwrap();
+    db.put(&cf, "k".as_bytes(), "v".as_bytes()).unwrap();
     db.flush().unwrap();
     drop(db);
 
@@ -1590,7 +1598,7 @@ fn should_reject_writes_when_opened_read_only() {
         ..Default::default()
     };
     let db_ro = MidgeEngine::open(ro).unwrap();
-    let err = db_ro.put(Bytes::from("k2"), Bytes::from("v2")).unwrap_err();
+    let err = db_ro.put(&cf, "k2".as_bytes(), "v2".as_bytes()).unwrap_err();
 
     // Assert: error indicates read-only
     let msg = format!("{}", err);
@@ -1611,25 +1619,25 @@ fn should_commit_transaction_atomically_given_multiple_operations() {
 
     // Act: create transaction and stage operations (as shown in README)
     let mut txn = engine.begin_transaction();
-    txn.put(Bytes::from("key3"), Bytes::from("value3"), None)
+    txn.put(&cf, Bytes::from("key3"), Bytes::from("value3"), None)
         .expect("put");
     txn.insert(Bytes::from("key4"), Bytes::from("value4"), None)
         .expect("insert");
-    txn.delete(Bytes::from("key5")).expect("delete");
+    txn.delete(&cf, "key5".as_bytes()).expect("delete");
     engine
         .commit_transaction(txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert: all operations applied
     assert_eq!(
-        engine.get(b"key3").expect("get"),
+        engine.get(&cf, b"key3").expect("get"),
         Some(Bytes::from("value3"))
     );
     assert_eq!(
-        engine.get(b"key4").expect("get"),
+        engine.get(&cf, b"key4").expect("get"),
         Some(Bytes::from("value4"))
     );
-    assert_eq!(engine.get(b"key5").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"key5").expect("get"), None);
 }
 
 #[test]
@@ -1647,9 +1655,8 @@ fn should_rollback_transaction_on_drop_given_uncommitted() {
     // Act: create transaction, stage operations, then drop without committing
     {
         let mut txn = engine.begin_transaction();
-        txn.put(
-            Bytes::from("rollback_key"),
-            Bytes::from("rollback_value"),
+        txn.put(&cf, 
+            Bytes::from("rollback_key"), Bytes::from("rollback_value"),
             None,
         )
         .expect("put");
@@ -1657,11 +1664,12 @@ fn should_rollback_transaction_on_drop_given_uncommitted() {
     }
 
     // Assert: changes not persisted
-    assert_eq!(engine.get(b"rollback_key").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"rollback_key").expect("get"), None);
 }
 
 #[test]
 fn should_provide_snapshot_isolation_in_transaction() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1720,11 +1728,11 @@ fn should_stage_delete_range_in_transaction() {
         .expect("commit");
 
     // Assert: keys in range are deleted, boundaries preserved
-    assert_eq!(engine.get(b"key0").expect("get"), Some(Bytes::from("val0")));
-    assert_eq!(engine.get(b"key1").expect("get"), None);
-    assert_eq!(engine.get(b"key2").expect("get"), None);
-    assert_eq!(engine.get(b"key3").expect("get"), None);
-    assert_eq!(engine.get(b"key4").expect("get"), Some(Bytes::from("val4")));
+    assert_eq!(engine.get(&cf, b"key0").expect("get"), Some(Bytes::from("val0")));
+    assert_eq!(engine.get(&cf, b"key1").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"key2").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"key3").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"key4").expect("get"), Some(Bytes::from("val4")));
 }
 
 #[test]
@@ -1740,11 +1748,11 @@ fn should_delete_keys_in_range_given_delete_range() {
     let engine = MidgeEngine::open(opts).expect("open");
 
     // Insert multiple keys
-    engine.put(Bytes::from("a"), Bytes::from("1")).expect("put");
-    engine.put(Bytes::from("b"), Bytes::from("2")).expect("put");
-    engine.put(Bytes::from("c"), Bytes::from("3")).expect("put");
-    engine.put(Bytes::from("d"), Bytes::from("4")).expect("put");
-    engine.put(Bytes::from("e"), Bytes::from("5")).expect("put");
+    engine.put(&cf, "a".as_bytes(), "1".as_bytes()).expect("put");
+    engine.put(&cf, "b".as_bytes(), "2".as_bytes()).expect("put");
+    engine.put(&cf, "c".as_bytes(), "3".as_bytes()).expect("put");
+    engine.put(&cf, "d".as_bytes(), "4".as_bytes()).expect("put");
+    engine.put(&cf, "e".as_bytes(), "5".as_bytes()).expect("put");
 
     // Act: delete range [b, d)
     engine
@@ -1752,11 +1760,11 @@ fn should_delete_keys_in_range_given_delete_range() {
         .expect("delete_range");
 
     // Assert: keys b and c are deleted, others remain
-    assert_eq!(engine.get(b"a").expect("get"), Some(Bytes::from("1")));
-    assert_eq!(engine.get(b"b").expect("get"), None);
-    assert_eq!(engine.get(b"c").expect("get"), None);
-    assert_eq!(engine.get(b"d").expect("get"), Some(Bytes::from("4")));
-    assert_eq!(engine.get(b"e").expect("get"), Some(Bytes::from("5")));
+    assert_eq!(engine.get(&cf, b"a").expect("get"), Some(Bytes::from("1")));
+    assert_eq!(engine.get(&cf, b"b").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"c").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"d").expect("get"), Some(Bytes::from("4")));
+    assert_eq!(engine.get(&cf, b"e").expect("get"), Some(Bytes::from("5")));
 }
 
 #[test]
@@ -1781,11 +1789,12 @@ fn should_handle_empty_range_given_start_equals_end() {
         .expect("delete_range");
 
     // Assert: key still exists (empty range is no-op)
-    assert_eq!(engine.get(b"key").expect("get"), Some(Bytes::from("val")));
+    assert_eq!(engine.get(&cf, b"key").expect("get"), Some(Bytes::from("val")));
 }
 
 #[test]
 fn should_handle_inverted_range_given_start_greater_than_end() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1796,7 +1805,7 @@ fn should_handle_inverted_range_given_start_greater_than_end() {
     };
     let engine = MidgeEngine::open(opts).expect("open");
 
-    engine.put(Bytes::from("b"), Bytes::from("2")).expect("put");
+    engine.put(&cf, "b".as_bytes(), "2".as_bytes()).expect("put");
 
     // Act: delete inverted range (should be no-op)
     engine
@@ -1804,11 +1813,12 @@ fn should_handle_inverted_range_given_start_greater_than_end() {
         .expect("delete_range");
 
     // Assert: key still exists
-    assert_eq!(engine.get(b"b").expect("get"), Some(Bytes::from("2")));
+    assert_eq!(engine.get(&cf, b"b").expect("get"), Some(Bytes::from("2")));
 }
 
 #[test]
 fn should_affect_scan_results_given_delete_range() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1823,7 +1833,7 @@ fn should_affect_scan_results_given_delete_range() {
     for i in 0..10 {
         let key = format!("key{:02}", i);
         let val = format!("val{}", i);
-        engine.put(Bytes::from(key), Bytes::from(val)).expect("put");
+        engine.put(&cf, key.as_bytes(), val.as_bytes()).expect("put");
     }
 
     // Act: delete range [key03, key07)
@@ -1888,6 +1898,7 @@ fn should_reject_delete_range_given_read_only_mode() {
 
 #[test]
 fn should_persist_delete_range_in_wal() {
+    let cf = engine.default_column_family();
     // Arrange
     use bytes::Bytes;
     use tempfile::TempDir;
@@ -1929,17 +1940,17 @@ fn should_persist_delete_range_in_wal() {
 
         // Assert (before crash)
         assert_eq!(
-            engine.get(&Bytes::from("key1")).unwrap(),
+            engine.get(&cf, &Bytes::from("key1")).unwrap(),
             Some(Bytes::from("value1"))
         );
-        assert_eq!(engine.get(&Bytes::from("key2")).unwrap(), None);
-        assert_eq!(engine.get(&Bytes::from("key3")).unwrap(), None);
+        assert_eq!(engine.get(&cf, &Bytes::from("key2")).unwrap(), None);
+        assert_eq!(engine.get(&cf, &Bytes::from("key3")).unwrap(), None);
         assert_eq!(
-            engine.get(&Bytes::from("key4")).unwrap(),
+            engine.get(&cf, &Bytes::from("key4")).unwrap(),
             Some(Bytes::from("value4"))
         );
         assert_eq!(
-            engine.get(&Bytes::from("key5")).unwrap(),
+            engine.get(&cf, &Bytes::from("key5")).unwrap(),
             Some(Bytes::from("value5"))
         );
 
@@ -1960,17 +1971,17 @@ fn should_persist_delete_range_in_wal() {
 
         // Assert (after recovery)
         assert_eq!(
-            engine.get(&Bytes::from("key1")).unwrap(),
+            engine.get(&cf, &Bytes::from("key1")).unwrap(),
             Some(Bytes::from("value1"))
         );
-        assert_eq!(engine.get(&Bytes::from("key2")).unwrap(), None);
-        assert_eq!(engine.get(&Bytes::from("key3")).unwrap(), None);
+        assert_eq!(engine.get(&cf, &Bytes::from("key2")).unwrap(), None);
+        assert_eq!(engine.get(&cf, &Bytes::from("key3")).unwrap(), None);
         assert_eq!(
-            engine.get(&Bytes::from("key4")).unwrap(),
+            engine.get(&cf, &Bytes::from("key4")).unwrap(),
             Some(Bytes::from("value4"))
         );
         assert_eq!(
-            engine.get(&Bytes::from("key5")).unwrap(),
+            engine.get(&cf, &Bytes::from("key5")).unwrap(),
             Some(Bytes::from("value5"))
         );
     }

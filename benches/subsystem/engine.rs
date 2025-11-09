@@ -60,8 +60,9 @@ fn bench_put_variants(c: &mut Criterion) {
                 b.iter_batched(
                     || setup_db(&format!("put_seq_{}", sz), false),
                     |engine| {
+                        let cf = engine.default_column_family();
                         for i in 0..1_000 {
-                            engine.put(make_key(i), make_value(i, sz)).unwrap();
+                            engine.put(&cf, &make_key(i), &make_value(i, sz)).unwrap();
                         }
                         black_box(());
                     },
@@ -77,11 +78,12 @@ fn bench_put_variants(c: &mut Criterion) {
                 b.iter_batched(
                     || setup_db(&format!("put_rand_{}", sz), false),
                     |engine| {
+                        let cf = engine.default_column_family();
                         let mut keys: Vec<_> = (0..1_000).collect();
                         let mut rng = StdRng::seed_from_u64(42);
                         keys.shuffle(&mut rng);
                         for i in keys {
-                            engine.put(make_key(i), make_value(i, sz)).unwrap();
+                            engine.put(&cf, &make_key(i), &make_value(i, sz)).unwrap();
                         }
                         black_box(());
                     },
@@ -97,15 +99,16 @@ fn bench_put_variants(c: &mut Criterion) {
 fn bench_get_hit_miss(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_get");
     let engine = setup_db("get", false);
+    let cf = engine.default_column_family();
 
     for i in 0..5_000 {
-        engine.put(make_key(i), make_value(i, 800)).unwrap();
+        engine.put(&cf, &make_key(i), &make_value(i, 800)).unwrap();
     }
 
     group.bench_function("hit_mixed", |b| {
         b.iter(|| {
             for i in (0..5_000).step_by(5) {
-                let _ = engine.get(&make_key(i)).unwrap();
+                let _ = engine.get(&cf, &make_key(i)).unwrap();
             }
         })
     });
@@ -115,7 +118,7 @@ fn bench_get_hit_miss(c: &mut Criterion) {
         let misses: Vec<_> = (10_000..11_000).collect();
         b.iter(|| {
             for i in misses.choose_multiple(&mut rng, 500) {
-                let _ = engine.get(&make_key(*i)).unwrap();
+                let _ = engine.get(&cf, &make_key(*i)).unwrap();
             }
         })
     });
@@ -129,14 +132,16 @@ fn bench_delete(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let engine = setup_db("delete", false);
+                let cf = engine.default_column_family();
                 for i in 0..1_000 {
-                    engine.put(make_key(i), make_value(i, 120)).unwrap();
+                    engine.put(&cf, &make_key(i), &make_value(i, 120)).unwrap();
                 }
                 engine
             },
             |engine| {
+                let cf = engine.default_column_family();
                 for i in (0..1_000).step_by(2) {
-                    engine.delete(make_key(i)).unwrap();
+                    engine.delete(&cf, &make_key(i)).unwrap();
                 }
                 black_box(());
             },
@@ -157,10 +162,11 @@ fn bench_write_modes(c: &mut Criterion) {
         b.iter_batched(
             || setup_db("nosync_batch", false),
             |engine| {
+                let cf = engine.default_column_family();
                 for batch in 0..10 {
                     for i in 0..100 {
                         engine
-                            .put(make_key(batch * 100 + i), make_value(i, 100))
+                            .put(&cf, &make_key(batch * 100 + i), &make_value(i, 100))
                             .unwrap();
                     }
                 }
@@ -174,8 +180,9 @@ fn bench_write_modes(c: &mut Criterion) {
         b.iter_batched(
             || setup_db("sync", true),
             |engine| {
+                let cf = engine.default_column_family();
                 for i in 0..100 {
-                    engine.put(make_key(i), make_value(i, 100)).unwrap();
+                    engine.put(&cf, &make_key(i), &make_value(i, 100)).unwrap();
                 }
             },
             BatchSize::SmallInput,
@@ -186,10 +193,11 @@ fn bench_write_modes(c: &mut Criterion) {
         b.iter_batched(
             || setup_db("small_batch", false),
             |engine| {
+                let cf = engine.default_column_family();
                 for batch in 0..50 {
                     for i in 0..20 {
                         engine
-                            .put(make_key(batch * 20 + i), make_value(i, 200))
+                            .put(&cf, &make_key(batch * 20 + i), &make_value(i, 200))
                             .unwrap();
                     }
                 }
@@ -220,11 +228,12 @@ fn bench_memory_mode(c: &mut Criterion) {
                 MidgeEngine::open(opts).unwrap()
             },
             |engine| {
+                let cf = engine.default_column_family();
                 for i in 0..1_000 {
-                    engine.put(make_key(i), make_value(i, 150)).unwrap();
+                    engine.put(&cf, &make_key(i), &make_value(i, 150)).unwrap();
                 }
                 for i in (0..1_000).step_by(3) {
-                    let _ = engine.get(&make_key(i)).unwrap();
+                    let _ = engine.get(&cf, &make_key(i)).unwrap();
                 }
                 black_box(());
             },
@@ -246,10 +255,11 @@ fn bench_ttl(c: &mut Criterion) {
         b.iter_batched(
             || setup_db("ttl", false),
             |engine| {
+                let cf = engine.default_column_family();
                 let ttl = Duration::from_secs(1200);
                 for i in 0..500 {
                     engine
-                        .put_with_ttl(make_key(i), make_value(i, 80), ttl.as_secs())
+                        .put_with_ttl(&cf, &make_key(i), &make_value(i, 80), ttl.as_secs())
                         .unwrap();
                 }
             },
@@ -261,17 +271,19 @@ fn bench_ttl(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let engine = setup_db("ttl_read", false);
+                let cf = engine.default_column_family();
                 let ttl = Duration::from_secs(1200);
                 for i in 0..500 {
                     engine
-                        .put_with_ttl(make_key(i), make_value(i, 100), ttl.as_secs())
+                        .put_with_ttl(&cf, &make_key(i), &make_value(i, 100), ttl.as_secs())
                         .unwrap();
                 }
                 engine
             },
             |engine| {
+                let cf = engine.default_column_family();
                 for i in (0..500).step_by(4) {
-                    let _ = engine.get(&make_key(i)).unwrap();
+                    let _ = engine.get(&cf, &make_key(i)).unwrap();
                 }
             },
             BatchSize::SmallInput,

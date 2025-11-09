@@ -16,6 +16,7 @@ use std::thread;
 use ycsb_common::*;
 
 fn run_workload_d(engine: &MidgeEngine, operations: usize, record_count: usize) {
+    let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
     let mut insert_key_id = record_count;
@@ -25,12 +26,12 @@ fn run_workload_d(engine: &MidgeEngine, operations: usize, record_count: usize) 
             // Read latest - skewed towards recently inserted keys
             let key_id = zipfian.next(&mut rng);
             let key = generate_key(key_id);
-            let _ = black_box(engine.get(&key));
+            let _ = black_box(engine.get(&cf, &key));
         } else {
             // Insert new record
             let key = generate_key(insert_key_id);
             let value = generate_value(insert_key_id, rng.random());
-            engine.put(key, value).unwrap();
+            engine.put(&cf, &key, &value).unwrap();
             insert_key_id += 1;
         }
     }
@@ -92,9 +93,11 @@ fn bench_workload_d(c: &mut Criterion) {
             &threads,
             |b, &_threads| {
                 b.iter(|| {
+                    let cf = engine.default_column_family();
                     let handles: Vec<_> = (0..threads)
                         .map(|thread_id| {
                             let engine = Arc::clone(&engine);
+                            let cf = cf.clone();
                             thread::spawn(move || {
                                 let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
                                 let zipfian = ZipfianGenerator::new(RECORD_COUNT, 0.99);
@@ -106,12 +109,12 @@ fn bench_workload_d(c: &mut Criterion) {
                                         // Read latest - skewed towards recently inserted keys
                                         let key_id = zipfian.next(&mut rng);
                                         let key = generate_key(key_id);
-                                        let _ = black_box(engine.get(&key));
+                                        let _ = black_box(engine.get(&cf, &key));
                                     } else {
                                         // Insert new record
                                         let key = generate_key(insert_key_id);
                                         let value = generate_value(insert_key_id, rng.random());
-                                        engine.put(key, value).unwrap();
+                                        engine.put(&cf, &key, &value).unwrap();
                                         insert_key_id += 1;
                                     }
                                 }

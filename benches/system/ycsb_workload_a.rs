@@ -22,6 +22,8 @@ use ycsb_common::*;
 // ============================================================================
 
 fn run_workload_a(engine: &MidgeEngine, operations: usize, record_count: usize) {
+    let cf = engine.default_column_family();
+    let cf_id = cf.id();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
     let mut batch = WriteBatch::new();
@@ -32,11 +34,11 @@ fn run_workload_a(engine: &MidgeEngine, operations: usize, record_count: usize) 
 
         if rng.random_bool(0.5) {
             // Read operation
-            let _ = black_box(engine.get(&key));
+            let _ = black_box(engine.get(&cf, &key));
         } else {
             // Write operation - add to batch
             let value = generate_value(key_id, rng.random());
-            batch.put(key, value);
+            batch.put(cf_id, key, value);
 
             // Flush batch every BATCH_SIZE writes for realistic throughput
             if batch.len() >= BATCH_SIZE {
@@ -58,6 +60,8 @@ fn run_workload_a_concurrent(
     record_count: usize,
     thread_id: usize,
 ) {
+    let cf = engine.default_column_family();
+    let cf_id = cf.id();
     let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
     let mut batch = WriteBatch::new();
@@ -68,11 +72,11 @@ fn run_workload_a_concurrent(
 
         if rng.random_bool(0.5) {
             // Read operation
-            let _ = black_box(engine.get(&key));
+            let _ = black_box(engine.get(&cf, &key));
         } else {
             // Write operation - add to batch
             let value = generate_value(key_id, rng.random());
-            batch.put(key, value);
+            batch.put(cf_id, key, value);
 
             // Flush batch every BATCH_SIZE writes for realistic throughput
             if batch.len() >= BATCH_SIZE {

@@ -35,6 +35,7 @@ fn should_initialize_engine_with_cloud_backed_mode() {
 
     // Act
     let engine = MidgeEngine::open(opts);
+    let cf = engine.default_column_family();
 
     // Assert
     assert!(
@@ -65,12 +66,13 @@ fn should_upload_sst_to_cloud_after_flush() {
     };
 
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act - Write enough data to trigger flush
     for i in 0..100 {
         let key = Bytes::from(format!("key_{:04}", i));
         let value = Bytes::from(format!("value_{:04}", i));
-        engine.put(key, value).unwrap();
+        engine.put(&cf, key, value).unwrap();
     }
 
     // Force flush
@@ -109,17 +111,18 @@ fn should_write_and_read_from_cloud_backed_engine() {
     };
 
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act - Write data
-    engine.put(Bytes::from("apple"), Bytes::from("A")).unwrap();
-    engine.put(Bytes::from("banana"), Bytes::from("B")).unwrap();
-    engine.put(Bytes::from("cherry"), Bytes::from("C")).unwrap();
+    engine.put(&cf, "apple".as_bytes(), "A".as_bytes()).unwrap();
+    engine.put(&cf, "banana".as_bytes(), "B".as_bytes()).unwrap();
+    engine.put(&cf, "cherry".as_bytes(), "C".as_bytes()).unwrap();
 
     // Assert - Read data back
-    let val_a = engine.get(b"apple").unwrap();
-    let val_b = engine.get(b"banana").unwrap();
-    let val_c = engine.get(b"cherry").unwrap();
-    let val_x = engine.get(b"nonexistent").unwrap();
+    let val_a = engine.get(&cf, b"apple").unwrap();
+    let val_b = engine.get(&cf, b"banana").unwrap();
+    let val_c = engine.get(&cf, b"cherry").unwrap();
+    let val_x = engine.get(&cf, b"nonexistent").unwrap();
 
     assert_eq!(val_a, Some(Bytes::from("A")));
     assert_eq!(val_b, Some(Bytes::from("B")));
@@ -149,12 +152,13 @@ fn should_upload_wal_segments_to_cloud() {
     };
 
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act - Write enough data to trigger WAL segment upload
     for i in 0..100 {
         let key = Bytes::from(format!("key_{:04}", i));
         let value = Bytes::from(format!("value_with_padding_to_increase_size_{:04}", i));
-        engine.put(key, value).unwrap();
+        engine.put(&cf, key, value).unwrap();
     }
 
     // Wait for async WAL upload
@@ -195,10 +199,11 @@ fn should_handle_cloud_upload_errors_gracefully() {
     };
 
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act - Write operations should succeed even if background upload fails
     // (MockCloudBackend doesn't fail, but engine should be resilient)
-    let result = engine.put(Bytes::from("test_key"), Bytes::from("test_value"));
+    let result = engine.put(&cf, "test_key".as_bytes(), "test_value".as_bytes());
 
     // Assert
     assert!(

@@ -57,16 +57,18 @@ fn bench_concurrent_puts(c: &mut Criterion) {
                 b.iter_batched(
                     || Arc::new(setup_db(&format!("concurrent_{}", tcount), false)),
                     |engine| {
+                        let cf = engine.default_column_family();
                         let n_ops = 5_000;
                         let start = Instant::now();
                         thread::scope(|scope| {
                             for tid in 0..tcount {
                                 let engine = Arc::clone(&engine);
+                                let cf = cf.clone();
                                 scope.spawn(move || {
                                     let offset = tid * n_ops;
                                     for i in 0..n_ops {
                                         engine
-                                            .put(make_key(offset + i), make_value(128))
+                                            .put(&cf, &make_key(offset + i), &make_value(128))
                                             .expect("put failed");
                                     }
                                 });
@@ -94,9 +96,10 @@ fn bench_mixed_read_write(c: &mut Criterion) {
         b.iter_batched(
             || Arc::new(setup_db("mixed", false)),
             |engine| {
+                let cf = engine.default_column_family();
                 // prefill
                 for i in 0..10_000 {
-                    engine.put(make_key(i), make_value(64)).unwrap();
+                    engine.put(&cf, &make_key(i), &make_value(64)).unwrap();
                 }
 
                 let engine_r = Arc::clone(&engine);
@@ -104,18 +107,20 @@ fn bench_mixed_read_write(c: &mut Criterion) {
                     // writers
                     for t in 0..4 {
                         let e = Arc::clone(&engine);
+                        let cf = cf.clone();
                         scope.spawn(move || {
                             for i in (t * 1_000)..(t * 1_000 + 1_000) {
-                                e.put(make_key(i + 20_000), make_value(128)).unwrap();
+                                e.put(&cf, &make_key(i + 20_000), &make_value(128)).unwrap();
                             }
                         });
                     }
                     // readers
                     for _ in 0..4 {
                         let e = Arc::clone(&engine_r);
+                        let cf = cf.clone();
                         scope.spawn(move || {
                             for i in (0..10_000).step_by(3) {
-                                let _ = e.get(&make_key(i)).unwrap();
+                                let _ = e.get(&cf, &make_key(i)).unwrap();
                             }
                         });
                     }
@@ -140,10 +145,11 @@ fn bench_compaction_pressure(c: &mut Criterion) {
         b.iter_batched(
             || setup_db("compacting", true),
             |engine| {
+                let cf = engine.default_column_family();
                 for round in 0..5 {
                     for i in 0..5_000 {
                         engine
-                            .put(make_key(round * 5_000 + i), make_value(256))
+                            .put(&cf, &make_key(round * 5_000 + i), &make_value(256))
                             .unwrap();
                     }
                     // brief pause to let background compaction catch up
@@ -151,7 +157,7 @@ fn bench_compaction_pressure(c: &mut Criterion) {
                 }
                 // Verify a few reads during/after compaction
                 for i in (0..1_000).step_by(50) {
-                    let _ = engine.get(&make_key(i)).unwrap();
+                    let _ = engine.get(&cf, &make_key(i)).unwrap();
                 }
                 black_box(());
             },

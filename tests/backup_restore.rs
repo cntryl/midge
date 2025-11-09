@@ -3,7 +3,6 @@
 
 mod common;
 
-use bytes::Bytes;
 use common::*;
 use cntryl_midge::backup::{BackupEngine, BackupOptions, BackupType, RestoreEngine, RestoreOptions};
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
@@ -24,12 +23,9 @@ fn should_create_full_backup_given_live_database() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
-    engine
-        .put(Bytes::from("key1"), Bytes::from("value1"))
-        .unwrap();
-    engine
-        .put(Bytes::from("key2"), Bytes::from("value2"))
-        .unwrap();
+    let cf = engine.default_column_family();
+    engine.put(&cf, b"key1", b"value1").unwrap();
+    engine.put(&cf, b"key2", b"value2").unwrap();
     engine.flush().unwrap();
 
     // Act
@@ -57,10 +53,10 @@ fn should_include_all_ssts_given_full_backup_when_created() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     for i in 0..3 {
-        engine
-            .put(Bytes::from(format!("key_{}", i)), Bytes::from("value"))
-            .unwrap();
+        let key = format!("key_{}", i);
+        engine.put(&cf, key.as_bytes(), b"value").unwrap();
         engine.flush().unwrap();
     }
 
@@ -90,9 +86,8 @@ fn should_include_manifest_given_backup_when_created() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
-    engine
-        .put(Bytes::from("key"), Bytes::from("value"))
-        .unwrap();
+    let cf = engine.default_column_family();
+    engine.put(&cf, b"key", b"value").unwrap();
     engine.flush().unwrap();
 
     // Act
@@ -126,8 +121,9 @@ fn should_verify_backup_integrity_given_checksum_validation() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     engine
-        .put(Bytes::from("key"), Bytes::from("value"))
+        .put(&cf, b"key", b"value")
         .unwrap();
     engine.flush().unwrap();
     let mut backup_engine = BackupEngine::open(db_dir.path(), backup_dir.path()).unwrap();
@@ -159,9 +155,8 @@ fn should_restore_data_given_valid_backup() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
-    engine
-        .put(Bytes::from("key1"), Bytes::from("value1"))
-        .unwrap();
+    let cf = engine.default_column_family();
+    engine.put(&cf, b"key1", b"value1").unwrap();
     engine.flush().unwrap();
     drop(engine);
     let mut backup_engine = BackupEngine::open(db_dir.path(), backup_dir.path()).unwrap();
@@ -206,9 +201,10 @@ fn should_read_all_keys_given_restored_database() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let keys = vec!["alpha", "beta", "gamma"];
     for key in &keys {
-        engine.put(Bytes::from(*key), Bytes::from("value")).unwrap();
+        engine.put(&cf, key.as_bytes(), b"value").unwrap();
     }
     engine.flush().unwrap();
     drop(engine);
@@ -257,9 +253,8 @@ fn should_restore_to_different_path_given_backup_location() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
-    engine
-        .put(Bytes::from("key"), Bytes::from("value"))
-        .unwrap();
+    let cf = engine.default_column_family();
+    engine.put(&cf, b"key", b"value").unwrap();
     engine.flush().unwrap();
     drop(engine);
     let mut backup_engine = BackupEngine::open(db_dir.path(), backup_dir.path()).unwrap();
@@ -325,8 +320,9 @@ fn should_create_incremental_backup_given_previous_full_backup() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     engine
-        .put(Bytes::from("key1"), Bytes::from("value1"))
+        .put(&cf, b"key1", b"value1")
         .unwrap();
     engine.flush().unwrap();
     let mut backup_engine = BackupEngine::open(db_dir.path(), backup_dir.path()).unwrap();
@@ -334,7 +330,7 @@ fn should_create_incremental_backup_given_previous_full_backup() {
         .create_backup(BackupOptions::default())
         .unwrap();
     engine
-        .put(Bytes::from("key2"), Bytes::from("value2"))
+        .put(&cf, b"key2", b"value2")
         .unwrap();
     engine.flush().unwrap();
 
@@ -368,8 +364,9 @@ fn should_only_backup_new_ssts_given_incremental_when_created() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     engine
-        .put(Bytes::from("key1"), Bytes::from("value1"))
+        .put(&cf, b"key", b"value")
         .unwrap();
     engine.flush().unwrap();
     let mut backup_engine = BackupEngine::open(db_dir.path(), backup_dir.path()).unwrap();
@@ -378,12 +375,8 @@ fn should_only_backup_new_ssts_given_incremental_when_created() {
         .unwrap();
     let full_file_count = full_backup.file_count;
     for i in 0..100 {
-        engine
-            .put(
-                Bytes::from(format!("new_key_{}", i)),
-                Bytes::from("new_value"),
-            )
-            .unwrap();
+        let key = format!("new_key_{}", i);
+        engine.put(&cf, key.as_bytes(), b"new_value").unwrap();
     }
     engine.flush().unwrap();
 
@@ -414,8 +407,9 @@ fn should_restore_from_full_plus_incremental_given_backup_chain() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     engine
-        .put(Bytes::from("key1"), Bytes::from("value1"))
+        .put(&cf, b"key1", b"value1")
         .unwrap();
     engine.flush().unwrap();
     let mut backup_engine = BackupEngine::open(db_dir.path(), backup_dir.path()).unwrap();
@@ -423,7 +417,7 @@ fn should_restore_from_full_plus_incremental_given_backup_chain() {
         .create_backup(BackupOptions::default())
         .unwrap();
     engine
-        .put(Bytes::from("key2"), Bytes::from("value2"))
+        .put(&cf, b"key2", b"value2")
         .unwrap();
     engine.flush().unwrap();
     let incremental_backup = backup_engine
@@ -476,8 +470,9 @@ fn should_detect_corrupted_backup_given_invalid_checksum() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     engine
-        .put(Bytes::from("key"), Bytes::from("value"))
+        .put(&cf, b"key1", b"value1")
         .unwrap();
     engine.flush().unwrap();
     let mut backup_engine = BackupEngine::open(db_dir.path(), backup_dir.path()).unwrap();
@@ -515,9 +510,8 @@ fn should_fail_restore_given_missing_sst_in_backup() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
-    engine
-        .put(Bytes::from("key"), Bytes::from("value"))
-        .unwrap();
+    let cf = engine.default_column_family();
+    engine.put(&cf, b"key", b"value").unwrap();
     engine.flush().unwrap();
     let mut backup_engine = BackupEngine::open(db_dir.path(), backup_dir.path()).unwrap();
     let backup_info = backup_engine

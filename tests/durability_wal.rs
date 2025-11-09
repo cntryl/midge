@@ -16,8 +16,9 @@ fn should_persist_committed_transaction_across_restart() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
-            eng.put(Bytes::from("key2"), Bytes::from("value2")).unwrap();
+            let cf = eng.default_column_family();
+            eng.put(&cf, "key1".as_bytes(), "value1".as_bytes()).unwrap();
+            eng.put(&cf, "key2".as_bytes(), "value2".as_bytes()).unwrap();
         },
         |eng| {
             // Assert
@@ -37,10 +38,11 @@ fn should_recover_wal_entries_into_memtable_given_restart() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("a"), Bytes::from("1")).unwrap();
-            eng.put(Bytes::from("b"), Bytes::from("2")).unwrap();
-            eng.delete(Bytes::from("a")).unwrap();
-            eng.put(Bytes::from("c"), Bytes::from("3")).unwrap();
+            let cf = eng.default_column_family();
+            eng.put(&cf, "a".as_bytes(), "1".as_bytes()).unwrap();
+            eng.put(&cf, "b".as_bytes(), "2".as_bytes()).unwrap();
+            eng.delete(&cf, "a".as_bytes()).unwrap();
+            eng.put(&cf, "c".as_bytes(), "3".as_bytes()).unwrap();
         },
         |eng| {
             // Assert
@@ -61,9 +63,10 @@ fn should_preserve_write_order_across_restart() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("key"), Bytes::from("v1")).unwrap();
-            eng.put(Bytes::from("key"), Bytes::from("v2")).unwrap();
-            eng.put(Bytes::from("key"), Bytes::from("v3")).unwrap();
+            let cf = eng.default_column_family();
+            eng.put(&cf, "key".as_bytes(), "v1".as_bytes()).unwrap();
+            eng.put(&cf, "key".as_bytes(), "v2".as_bytes()).unwrap();
+            eng.put(&cf, "key".as_bytes(), "v3".as_bytes()).unwrap();
         },
         |eng| {
             // Assert
@@ -82,10 +85,11 @@ fn should_maintain_durability_given_large_batch() {
     with_engine_restart(
         opts,
         |eng| {
+            let cf = eng.default_column_family();
             for i in 0..100 {
                 let key = format!("key{:03}", i);
                 let value = format!("value{:03}", i);
-                eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
             }
         },
         |eng| {
@@ -109,8 +113,9 @@ fn should_preserve_deletes_across_restart() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("temp"), Bytes::from("value")).unwrap();
-            eng.delete(Bytes::from("temp")).unwrap();
+            let cf = eng.default_column_family();
+            eng.put(&cf, "temp".as_bytes(), "value".as_bytes()).unwrap();
+            eng.delete(&cf, "temp".as_bytes()).unwrap();
         },
         |eng| {
             // Assert
@@ -129,11 +134,12 @@ fn should_replay_operations_in_correct_sequence() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("x"), Bytes::from("1")).unwrap();
-            eng.put(Bytes::from("y"), Bytes::from("1")).unwrap();
-            eng.put(Bytes::from("x"), Bytes::from("2")).unwrap();
-            eng.delete(Bytes::from("y")).unwrap();
-            eng.put(Bytes::from("z"), Bytes::from("1")).unwrap();
+            let cf = eng.default_column_family();
+            eng.put(&cf, "x".as_bytes(), "1".as_bytes()).unwrap();
+            eng.put(&cf, "y".as_bytes(), "1".as_bytes()).unwrap();
+            eng.put(&cf, "x".as_bytes(), "2".as_bytes()).unwrap();
+            eng.delete(&cf, "y".as_bytes()).unwrap();
+            eng.put(&cf, "z".as_bytes(), "1".as_bytes()).unwrap();
         },
         |eng| {
             // Assert

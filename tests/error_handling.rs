@@ -20,18 +20,18 @@ fn should_detect_wal_corruption_given_invalid_checksum() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
     for i in 0..10 {
-        engine
-            .put(Bytes::from(format!("key{}", i)), Bytes::from("value"))
-            .unwrap();
+        let key = format!("key{}", i);
+        engine.put(&cf, key.as_bytes(), b"value").unwrap();
     }
 
     // Assert
     // No corruption should be detected with valid writes
     // (WAL corruption would be detected during recovery/replay)
-    let result = engine.get(b"key5");
+    let result = engine.get(&cf, b"key5");
     assert!(result.is_ok());
 }
 
@@ -43,19 +43,20 @@ fn should_return_error_when_reading_corrupt_data_block() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
     for i in 0..100 {
-        engine
-            .put(Bytes::from(format!("key{:04}", i)), Bytes::from("value"))
-            .unwrap();
+        let key = format!("key{:04}", i);
+        engine.put(&cf, key.as_bytes(), b"value").unwrap();
     }
     engine.flush().unwrap();
 
     // Assert
     // All reads should succeed (no corruption)
     for i in 0..100 {
-        let result = engine.get(format!("key{:04}", i).as_bytes());
+        let key = format!("key{:04}", i);
+        let result = engine.get(&cf, key.as_bytes());
         assert!(result.is_ok(), "Should read without corruption");
     }
 }
@@ -68,23 +69,21 @@ fn should_validate_block_checksums_on_every_read() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
     let value = vec![b'x'; 1024];
     for i in 0..500 {
-        engine
-            .put(
-                Bytes::from(format!("k{:06}", i)),
-                Bytes::from(value.clone()),
-            )
-            .unwrap();
+        let key = format!("k{:06}", i);
+        engine.put(&cf, key.as_bytes(), &value).unwrap();
     }
     engine.flush().unwrap();
 
     // Assert
     // All reads validate checksums (no errors = checksums valid)
     for i in 0..500 {
-        let result = engine.get(format!("k{:06}", i).as_bytes());
+        let key = format!("k{:06}", i);
+        let result = engine.get(&cf, key.as_bytes());
         assert!(result.is_ok(), "Checksum validation should pass on read");
         assert!(result.unwrap().is_some());
     }
@@ -98,9 +97,10 @@ fn should_handle_io_error_gracefully_during_read() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
-    let result = engine.get(b"nonexistent");
+    let result = engine.get(&cf, b"nonexistent");
 
     // Assert
     // Should return Ok(None), not an error
@@ -116,9 +116,10 @@ fn should_propagate_write_errors_to_caller() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
-    let result = engine.put(Bytes::from("key"), Bytes::from("value"));
+    let result = engine.put(&cf, b"key", b"value");
 
     // Assert
     // Write should succeed
@@ -137,11 +138,10 @@ fn should_surface_flush_errors_to_caller() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
-    engine
-        .put(Bytes::from("key"), Bytes::from("value"))
-        .unwrap();
+    engine.put(&cf, b"key", b"value").unwrap();
     let flush_result = engine.flush();
 
     // Assert
@@ -157,14 +157,13 @@ fn should_continue_reads_after_write_error() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
-    engine
-        .put(Bytes::from("key1"), Bytes::from("value1"))
-        .unwrap();
+    engine.put(&cf, b"key1", b"value1").unwrap();
     engine.flush().unwrap();
 
-    let read_result = engine.get(b"key1");
+    let read_result = engine.get(&cf, b"key1");
 
     // Assert
     // Reads should work even after errors
@@ -180,10 +179,11 @@ fn should_expose_metrics_after_errors() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
-    let _ = engine.put(Bytes::from("k"), Bytes::from("v"));
-    let _ = engine.get(b"nonexistent");
+    let _ = engine.put(&cf, b"k", b"v");
+    let _ = engine.get(&cf, b"nonexistent");
 
     // Assert
     // Metrics should be queryable
@@ -221,14 +221,12 @@ fn should_detect_torn_page_in_wal() {
             ..Default::default()
         };
         let engine = MidgeEngine::open(opts).unwrap();
+        let cf = engine.default_column_family();
 
         for i in 0..10 {
-            engine
-                .put(
-                    Bytes::from(format!("key{}", i)),
-                    Bytes::from(format!("value{}", i)),
-                )
-                .unwrap();
+            let key = format!("key{}", i);
+            let value = format!("value{}", i);
+            engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
 
         // Explicitly flush to ensure writes are persisted
@@ -274,7 +272,8 @@ fn should_detect_torn_page_in_wal() {
     match result {
         Ok(engine) => {
             // If it opens, verify we can still read something
-            let _ = engine.get(b"key0");
+            let cf = engine.default_column_family();
+            let _ = engine.get(&cf, b"key0");
         }
         Err(e) => {
             // Corruption detected - this is also acceptable
@@ -319,12 +318,13 @@ fn should_retry_failed_cloud_uploads() {
     };
 
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
-    let large_value = Bytes::from(vec![b'x'; 256]);
+    let large_value = vec![b'x'; 256];
     for i in 0..20 {
-        let key = Bytes::from(format!("key_{:04}", i));
-        let _ = engine.put(key, large_value.clone());
+        let key = format!("key_{:04}", i);
+        let _ = engine.put(&cf, key.as_bytes(), &large_value);
     }
 
     std::thread::sleep(std::time::Duration::from_millis(2500));

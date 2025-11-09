@@ -8,15 +8,18 @@ use std::time::Instant;
 use tempfile::TempDir;
 
 fn generate_key(id: usize) -> Bytes {
+    let cf = engine.default_column_family();
     Bytes::from(format!("key{:013}", id))
 }
 
 fn generate_value(id: usize) -> Bytes {
+    let cf = engine.default_column_family();
     Bytes::from(vec![id as u8; 1000])
 }
 
 #[test]
 fn should_measure_hot_read_latency() {
+    let cf = engine.default_column_family();
     // Arrange
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let opts = MidgeOptions {
@@ -41,7 +44,7 @@ fn should_measure_hot_read_latency() {
     // Act
     let start = Instant::now();
     for i in 0..100 {
-        let _ = engine.get(&generate_key(i)).expect("Read failed");
+        let _ = engine.get(&cf, &generate_key(i)).expect("Read failed");
     }
     let elapsed = start.elapsed();
     let avg_latency_us = elapsed.as_micros() / 100;
@@ -59,6 +62,7 @@ fn should_measure_hot_read_latency() {
 
 #[test]
 fn should_measure_warm_read_latency() {
+    let cf = engine.default_column_family();
     // Arrange
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let opts = MidgeOptions {
@@ -83,13 +87,13 @@ fn should_measure_warm_read_latency() {
 
     // Warm up cache
     for i in 0..100 {
-        let _ = engine.get(&generate_key(i));
+        let _ = engine.get(&cf, &generate_key(i));
     }
 
     // Act
     let start = Instant::now();
     for i in 0..100 {
-        let _ = engine.get(&generate_key(i)).expect("Read failed");
+        let _ = engine.get(&cf, &generate_key(i)).expect("Read failed");
     }
     let elapsed = start.elapsed();
     let avg_latency_us = elapsed.as_micros() / 100;
@@ -107,6 +111,7 @@ fn should_measure_warm_read_latency() {
 
 #[test]
 fn should_measure_cold_read_latency() {
+    let cf = engine.default_column_family();
     // Arrange
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let opts = MidgeOptions {
@@ -137,7 +142,7 @@ fn should_measure_cold_read_latency() {
     let start = Instant::now();
     for i in 0..10 {
         // Only 10 reads since cold reads are slower
-        let _ = engine.get(&generate_key(i)).expect("Read failed");
+        let _ = engine.get(&cf, &generate_key(i)).expect("Read failed");
     }
     let elapsed = start.elapsed();
     let avg_latency_us = elapsed.as_micros() / 10;

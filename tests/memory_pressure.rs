@@ -12,13 +12,14 @@ fn should_trigger_flush_when_memtable_full() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
     let value = vec![b'x'; 512];
     for i in 0..20 {
         let key = format!("key{:08}", i);
         engine
-            .put(Bytes::from(key), Bytes::from(value.clone()))
+            .put(&cf, key.as_bytes(), &value)
             .unwrap();
     }
 
@@ -36,13 +37,15 @@ fn should_trigger_emergency_flush_given_memtable_memory_critical() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let initial = engine.metrics().snapshot().memtable_flushes;
 
     // Act
     let value = vec![b'y'; 256];
     for i in 0..50 {
+        let key = format!("k{}", i);
         engine
-            .put(Bytes::from(format!("k{}", i)), Bytes::from(value.clone()))
+            .put(&cf, key.as_bytes(), &value)
             .unwrap();
     }
 
@@ -60,11 +63,12 @@ fn should_continue_operations_given_compaction_under_memory_pressure() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
     for b in 0..10 {
         for i in 0..20 {
-            if let Err(e) = engine.put(
+            if let Err(e) = engine.put(&cf, 
                 Bytes::from(format!("b{}k{}", b, i)),
                 Bytes::from(vec![b'c'; 256]),
             ) {
@@ -81,11 +85,11 @@ fn should_continue_operations_given_compaction_under_memory_pressure() {
         .unwrap();
 
     // Assert (with diagnostics on error to capture missing-file path)
-    if let Err(e) = engine.put(Bytes::from("test"), Bytes::from("ok")) {
+    if let Err(e) = engine.put(&cf, "test".as_bytes(), "ok".as_bytes()) {
         eprintln!("engine.put failed: {:?}", e);
         panic!("engine.put failed");
     }
-    match engine.get(b"test") {
+    match engine.get(&cf, b"test") {
         Ok(Some(v)) => assert_eq!(v, Bytes::from("ok")),
         Ok(None) => {
             eprintln!("engine.get returned None for key 'test'");
@@ -102,12 +106,12 @@ fn should_continue_operations_given_compaction_under_memory_pressure() {
 fn should_report_memory_usage_metrics_given_runtime_query() {
     // Arrange
     let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    let cf = engine.default_column_family();
 
     // Act
     for i in 0..100 {
-        engine
-            .put(Bytes::from(format!("k{}", i)), Bytes::from("v"))
-            .unwrap();
+        let key = format!("k{}", i);
+        engine.put(&cf, key.as_bytes(), b"v").unwrap();
     }
 
     // Assert

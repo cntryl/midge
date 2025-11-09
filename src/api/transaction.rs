@@ -499,7 +499,7 @@ impl super::kv_store::KvTransaction for EngineTransaction {
         // TODO: Implement transaction-aware scan in engine
         // For now, run a column-family scoped scan on the engine's default CF
         let cf = self.engine.default_column_family();
-        self.engine.scan_cf(&cf, q)
+        self.engine.scan(&cf, q)
     }
 
     fn delete_range(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<()> {

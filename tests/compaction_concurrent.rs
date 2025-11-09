@@ -24,7 +24,7 @@ fn populate_multi_level_data(engine: &MidgeEngine) {
     for i in 0..50 {
         let key = format!("key{:03}", i);
         let value = format!("value1_{}", i);
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -32,7 +32,7 @@ fn populate_multi_level_data(engine: &MidgeEngine) {
     for i in 25..75 {
         let key = format!("key{:03}", i);
         let value = format!("value2_{}", i);
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -40,7 +40,7 @@ fn populate_multi_level_data(engine: &MidgeEngine) {
     for i in 50..100 {
         let key = format!("key{:03}", i);
         let value = format!("value3_{}", i);
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 }
@@ -54,6 +54,7 @@ fn should_serve_reads_given_compaction_in_progress() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act - Trigger compaction in background thread
@@ -70,7 +71,7 @@ fn should_serve_reads_given_compaction_in_progress() {
         let handle = thread::spawn(move || {
             for i in 0..100 {
                 let key = format!("key{:03}", i);
-                let result = engine_clone.get(key.as_bytes());
+                let result = engine_clone.get(&cf, key.as_bytes());
                 // Assert - Read should succeed (value doesn't matter, just no crash/error)
                 assert!(result.is_ok(), "Read should succeed during compaction");
             }
@@ -87,7 +88,7 @@ fn should_serve_reads_given_compaction_in_progress() {
     // Verify data is still accessible after compaction
     for i in 0..100 {
         let key = format!("key{:03}", i);
-        let result = engine.get(key.as_bytes()).unwrap();
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
         assert!(result.is_some(), "Key should exist after compaction");
     }
 }
@@ -97,6 +98,7 @@ fn should_return_correct_value_given_key_being_compacted() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     // Write overlapping data across multiple L0 files
     engine
@@ -130,7 +132,7 @@ fn should_return_correct_value_given_key_being_compacted() {
     let engine_clone = Arc::clone(&engine);
     let read_handle = thread::spawn(move || {
         for _ in 0..100 {
-            let result = engine_clone.get(b"target_key").unwrap();
+            let result = engine_clone.get(&cf, b"target_key").unwrap();
             // Assert - Should always return the latest value
             assert!(result.is_some());
             assert_eq!(result.unwrap().as_ref(), b"new_value");
@@ -150,6 +152,7 @@ fn should_handle_scan_given_files_being_merged() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act - Trigger compaction in background
@@ -195,18 +198,19 @@ fn should_not_expose_deleted_keys_given_tombstone_compaction_in_progress() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     // Write and delete keys across multiple L0 files
     for i in 0..50 {
         let key = format!("key{:03}", i);
-        engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+        engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Delete some keys
     for i in 10..40 {
         let key = format!("key{:03}", i);
-        engine.delete(Bytes::from(key)).unwrap();
+        engine.delete(&cf, key.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -230,7 +234,7 @@ fn should_not_expose_deleted_keys_given_tombstone_compaction_in_progress() {
         for _ in 0..50 {
             for i in 10..40 {
                 let key = format!("key{:03}", i);
-                let result = engine_clone.get(key.as_bytes()).unwrap();
+                let result = engine_clone.get(&cf, key.as_bytes()).unwrap();
                 // Assert - Deleted keys should not be visible
                 assert!(result.is_none(), "Deleted key should not be visible");
             }
@@ -253,13 +257,14 @@ fn should_maintain_read_consistency_given_compaction_updates_manifest() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Record expected values before compaction
     let mut expected_values = std::collections::HashMap::new();
     for i in 0..100 {
         let key = format!("key{:03}", i);
-        if let Ok(Some(value)) = engine.get(key.as_bytes()) {
+        if let Ok(Some(value)) = engine.get(&cf, key.as_bytes()) {
             expected_values.insert(key, value);
         }
     }
@@ -276,7 +281,7 @@ fn should_maintain_read_consistency_given_compaction_updates_manifest() {
     let consistency_handle = thread::spawn(move || {
         for _ in 0..100 {
             for (key, expected_value) in &expected_clone {
-                let result = engine_clone.get(key.as_bytes()).unwrap();
+                let result = engine_clone.get(&cf, key.as_bytes()).unwrap();
                 // Assert - Should always read the same value (read consistency)
                 assert!(result.is_some(), "Key should exist");
                 assert_eq!(result.unwrap().as_ref(), expected_value.as_ref());
@@ -303,6 +308,7 @@ fn should_allow_writes_given_l0_l1_compaction_running() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act - Trigger compaction in background
@@ -317,7 +323,7 @@ fn should_allow_writes_given_l0_l1_compaction_running() {
         for i in 0..100 {
             let key = format!("new_key{:03}", i);
             let value = format!("new_value{}", i);
-            let result = engine_clone.put(Bytes::from(key), Bytes::from(value));
+            let result = engine_clone.put(&cf, key.as_bytes(), value.as_bytes());
             // Assert - Writes should succeed during compaction
             assert!(result.is_ok(), "Write should succeed during compaction");
         }
@@ -339,6 +345,7 @@ fn should_handle_put_to_compacting_key_range() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     // Write initial data that will be compacted
     for i in 0..100 {
@@ -371,7 +378,7 @@ fn should_handle_put_to_compacting_key_range() {
         thread::sleep(Duration::from_millis(5)); // Let compaction start
         for i in 25..75 {
             let key = format!("key{:03}", i);
-            let result = engine_clone.put(Bytes::from(key), Bytes::from("newest_value"));
+            let result = engine_clone.put(&cf, key.as_bytes(), "newest_value".as_bytes());
             // Assert - Writes to compacting range should succeed
             assert!(result.is_ok(), "Write to compacting range should succeed");
         }
@@ -392,6 +399,7 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act - Trigger compaction in background
@@ -434,6 +442,7 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act - Start compaction and flush new data concurrently
@@ -462,7 +471,7 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
     // Assert - Newly flushed data should be intact (not corrupted by ongoing compaction)
     for i in 300..350 {
         let key = format!("late_key{:03}", i);
-        let result = engine.get(key.as_bytes()).unwrap();
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
         assert!(result.is_some(), "Newly flushed key should exist");
         assert_eq!(result.unwrap().as_ref(), b"late_value");
     }
@@ -483,12 +492,13 @@ fn should_trigger_compaction_given_level_exceeds_target_size() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Write and flush multiple times to create SSTs
     for batch in 0..5 {
         for i in 0..30 {
             let key = format!("batch{}key{:03}", batch, i);
-            engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+            engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
         }
         engine.flush().unwrap();
     }
@@ -503,7 +513,7 @@ fn should_trigger_compaction_given_level_exceeds_target_size() {
     for batch in 0..5 {
         for i in 0..30 {
             let key = format!("batch{}key{:03}", batch, i);
-            let val = engine.get(key.as_bytes()).unwrap();
+            let val = engine.get(&cf, key.as_bytes()).unwrap();
             assert!(val.is_some(), "Key should exist after compaction");
         }
     }
@@ -514,6 +524,7 @@ fn should_compact_largest_file_given_level_too_large() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Create files of varying sizes
     for i in 0..20 {
@@ -541,7 +552,7 @@ fn should_compact_largest_file_given_level_too_large() {
     assert!(result.is_ok());
     for i in 0..200 {
         let key = format!("large{}", i);
-        assert!(engine.get(key.as_bytes()).unwrap().is_some());
+        assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
     }
 }
 
@@ -556,12 +567,13 @@ fn should_respect_level_multiplier_given_cascading_compaction() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Write enough data to potentially trigger cascading
     for batch in 0..10 {
         for i in 0..50 {
             let key = format!("cascade{}key{}", batch, i);
-            engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+            engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
         }
         engine.flush().unwrap();
         // Give flush coordinator time to complete async file operations
@@ -577,7 +589,7 @@ fn should_respect_level_multiplier_given_cascading_compaction() {
     for batch in 0..10 {
         for i in 0..50 {
             let key = format!("cascade{}key{}", batch, i);
-            assert!(engine.get(key.as_bytes()).unwrap().is_some());
+            assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
         }
     }
 }
@@ -587,6 +599,7 @@ fn should_not_exceed_target_size_given_completed_compaction() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act
@@ -595,7 +608,7 @@ fn should_not_exceed_target_size_given_completed_compaction() {
     // Assert - After compaction, data is consolidated and accessible
     for i in 0..100 {
         let key = format!("key{:03}", i);
-        let result = engine.get(key.as_bytes()).unwrap();
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
         assert!(
             result.is_some(),
             "All keys should be accessible after compaction"
@@ -613,6 +626,7 @@ fn should_organize_l0_into_sublevels_given_overlapping_files() {
     // Arrange - Create overlapping L0 files
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // First L0 file: keys 0-50
     for i in 0..50 {
@@ -645,6 +659,7 @@ fn should_compact_oldest_sublevel_first_given_incremental_strategy() {
     // Arrange - Create multiple L0 files in sequence
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for batch in 0..4 {
         for i in 0..30 {
@@ -662,7 +677,7 @@ fn should_compact_oldest_sublevel_first_given_incremental_strategy() {
     // Assert - All data preserved with latest values
     for i in 0..30 {
         let key = format!("batch3_key{:02}", i);
-        assert!(engine.get(key.as_bytes()).unwrap().is_some());
+        assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
     }
 }
 
@@ -671,11 +686,12 @@ fn should_compact_all_sublevels_given_aggressive_strategy_when_file_count_high()
     // Arrange - Create many L0 files
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for batch in 0..8 {
         for i in 0..20 {
             let key = format!("key{:03}", i + batch * 20);
-            engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+            engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
         }
         engine.flush().unwrap();
     }
@@ -687,7 +703,7 @@ fn should_compact_all_sublevels_given_aggressive_strategy_when_file_count_high()
     assert!(result.is_ok());
     for i in 0..160 {
         let key = format!("key{:03}", i);
-        assert!(engine.get(key.as_bytes()).unwrap().is_some());
+        assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
     }
 }
 
@@ -696,12 +712,13 @@ fn should_maintain_sublevel_ordering_given_concurrent_flushes() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Act - Sequential flushes (concurrent flushes may cause file conflicts)
     for batch in 0..5 {
         for i in 0..20 {
             let key = format!("b{}k{:02}", batch, i);
-            engine.put(Bytes::from(key), Bytes::from("val")).unwrap();
+            engine.put(&cf, key.as_bytes(), "val".as_bytes()).unwrap();
         }
         engine.flush().unwrap();
     }
@@ -710,7 +727,7 @@ fn should_maintain_sublevel_ordering_given_concurrent_flushes() {
     for batch in 0..5 {
         for i in 0..20 {
             let key = format!("b{}k{:02}", batch, i);
-            assert!(engine.get(key.as_bytes()).unwrap().is_some());
+            assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
         }
     }
 }
@@ -720,6 +737,7 @@ fn should_handle_concurrent_flush_calls_without_file_conflicts() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     // Act - Multiple threads calling flush() concurrently
     // This test previously exposed a file conflict bug (fixed with flush_mutex)
@@ -748,7 +766,7 @@ fn should_handle_concurrent_flush_calls_without_file_conflicts() {
     for batch in 0..5 {
         for i in 0..20 {
             let key = format!("concurrent_flush_b{}k{:02}", batch, i);
-            assert!(engine.get(key.as_bytes()).unwrap().is_some());
+            assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
         }
     }
 }
@@ -768,6 +786,7 @@ fn should_trigger_l2_compaction_given_l1_compaction_exceeded_l2_capacity() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Write substantial data
     for batch in 0..15 {
@@ -787,7 +806,7 @@ fn should_trigger_l2_compaction_given_l1_compaction_exceeded_l2_capacity() {
     for batch in 0..15 {
         for i in 0..40 {
             let key = format!("cascade_b{}_k{:03}", batch, i);
-            assert!(engine.get(key.as_bytes()).unwrap().is_some());
+            assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
         }
     }
 }
@@ -802,12 +821,13 @@ fn should_propagate_compaction_to_l3_given_l2_overflow() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Write and compact incrementally
     for round in 0..20 {
         for i in 0..25 {
             let key = format!("r{}_k{:02}", round, i);
-            engine.put(Bytes::from(key), Bytes::from("val")).unwrap();
+            engine.put(&cf, key.as_bytes(), "val".as_bytes()).unwrap();
         }
         engine.flush().unwrap();
         if round % 5 == 0 {
@@ -822,7 +842,7 @@ fn should_propagate_compaction_to_l3_given_l2_overflow() {
     for round in 0..20 {
         for i in 0..25 {
             let key = format!("r{}_k{:02}", round, i);
-            assert!(engine.get(key.as_bytes()).unwrap().is_some());
+            assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
         }
     }
 }
@@ -832,6 +852,7 @@ fn should_handle_cascading_compaction_to_max_level() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Create deep structure
     for i in 0..200 {
@@ -850,7 +871,7 @@ fn should_handle_cascading_compaction_to_max_level() {
     // Assert - Full data accessibility
     for i in 0..200 {
         let key = format!("deep_key{:04}", i);
-        assert!(engine.get(key.as_bytes()).unwrap().is_some());
+        assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
     }
 }
 
@@ -859,6 +880,7 @@ fn should_not_trigger_cascade_given_sufficient_capacity_at_next_level() {
     // Arrange - Write modest amount of data
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for i in 0..50 {
         engine
@@ -874,7 +896,7 @@ fn should_not_trigger_cascade_given_sufficient_capacity_at_next_level() {
     assert!(result.is_ok());
     for i in 0..50 {
         let key = format!("key{:02}", i);
-        assert!(engine.get(key.as_bytes()).unwrap().is_some());
+        assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
     }
 }
 
@@ -888,6 +910,7 @@ fn should_retry_compaction_given_disk_full_error_when_writing_sst() {
     // Arrange - This tests that compaction errors don't crash
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act - Multiple compaction attempts (simulates retry behavior)
@@ -901,7 +924,7 @@ fn should_retry_compaction_given_disk_full_error_when_writing_sst() {
     // Data should still be accessible
     for i in 0..10 {
         let key = format!("key{:03}", i);
-        assert!(engine.get(key.as_bytes()).is_ok());
+        assert!(engine.get(&cf, key.as_bytes()).is_ok());
     }
 }
 
@@ -910,6 +933,7 @@ fn should_abort_compaction_given_corruption_detected_when_reading_input() {
     // Arrange - Normal operation
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for i in 0..50 {
         engine
@@ -946,6 +970,7 @@ fn should_cleanup_partial_output_given_compaction_failure() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act - Compact (should clean up on any failure)
@@ -963,6 +988,7 @@ fn should_restore_manifest_given_compaction_crash_before_commit() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for i in 0..30 {
         engine
@@ -985,6 +1011,7 @@ fn should_preserve_input_files_given_compaction_error_when_aborting() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for i in 0..40 {
         engine
@@ -996,7 +1023,7 @@ fn should_preserve_input_files_given_compaction_error_when_aborting() {
     let _initial_keys: Vec<_> = (0..40)
         .filter_map(|i| {
             let key = format!("preserve{}", i);
-            engine.get(key.as_bytes()).unwrap()
+            engine.get(&cf, key.as_bytes()).unwrap()
         })
         .collect();
 
@@ -1007,7 +1034,7 @@ fn should_preserve_input_files_given_compaction_error_when_aborting() {
     for i in 0..40 {
         let key = format!("preserve{}", i);
         assert!(
-            engine.get(key.as_bytes()).unwrap().is_some(),
+            engine.get(&cf, key.as_bytes()).unwrap().is_some(),
             "Key should be preserved"
         );
     }
@@ -1022,6 +1049,7 @@ fn should_stop_compaction_given_shutdown_signal() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     populate_multi_level_data(&engine);
 
     // Act - Start compaction in background
@@ -1046,6 +1074,7 @@ fn should_cleanup_resources_given_cancelled_compaction() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for i in 0..50 {
         engine
@@ -1067,6 +1096,7 @@ fn should_not_update_manifest_given_incomplete_compaction_when_shutdown() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for i in 0..30 {
         engine
@@ -1082,7 +1112,7 @@ fn should_not_update_manifest_given_incomplete_compaction_when_shutdown() {
     // Assert - Manifest should be consistent on reopen
     let engine = MidgeEngine::open(compaction_test_opts()).unwrap();
     // Can write new data (manifest is valid)
-    engine.put(Bytes::from("test"), Bytes::from("ok")).unwrap();
+    engine.put(&cf, "test".as_bytes(), "ok".as_bytes()).unwrap();
 }
 
 // ============================================================================
@@ -1094,6 +1124,7 @@ fn should_remove_expired_keys_given_ttl_exceeded_when_compacting() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Write keys with very short TTL (1 second)
     for i in 0..20 {
@@ -1113,7 +1144,7 @@ fn should_remove_expired_keys_given_ttl_exceeded_when_compacting() {
     // Assert - Expired keys should not be readable
     for i in 0..20 {
         let key = format!("ttl_key{}", i);
-        let result = engine.get(key.as_bytes()).unwrap();
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
         // Keys may or may not be removed depending on compaction filter implementation
         // At minimum, reads should not crash
         let _ = result;
@@ -1125,6 +1156,7 @@ fn should_preserve_non_expired_keys_given_ttl_not_reached() {
     // Arrange
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     // Write keys with long TTL (1 hour)
     for i in 0..20 {
@@ -1141,7 +1173,7 @@ fn should_preserve_non_expired_keys_given_ttl_not_reached() {
     // Assert - Non-expired keys should be preserved
     for i in 0..20 {
         let key = format!("long_ttl{}", i);
-        let result = engine.get(key.as_bytes()).unwrap();
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
         assert!(result.is_some(), "Non-expired key should be preserved");
         assert_eq!(result.unwrap().as_ref(), b"keep_me");
     }

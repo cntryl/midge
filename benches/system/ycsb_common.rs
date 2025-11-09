@@ -92,11 +92,12 @@ pub fn generate_value(id: usize, seed: u64) -> Bytes {
 
 #[allow(dead_code)]
 pub fn load_data(engine: &MidgeEngine, record_count: usize) {
+    let cf = engine.default_column_family();
     for i in 0..record_count {
         let key = generate_key(i);
         let value = generate_value(i, 42);
         engine
-            .put(key, value)
+            .put(&cf, &key, &value)
             .expect("failed to insert record during load");
     }
     let _ = engine.flush();

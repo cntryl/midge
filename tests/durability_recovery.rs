@@ -9,6 +9,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 #[test]
 fn should_replay_wal_exactly_once_after_crash() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -21,29 +22,30 @@ fn should_replay_wal_exactly_once_after_crash() {
     // Act
     {
         let eng = MidgeEngine::open(opts.clone()).unwrap();
-        eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
-        eng.put(Bytes::from("key2"), Bytes::from("value2")).unwrap();
-        eng.put(Bytes::from("key3"), Bytes::from("value3")).unwrap();
+        eng.put(&cf, "key1".as_bytes(), "value1".as_bytes()).unwrap();
+        eng.put(&cf, "key2".as_bytes(), "value2".as_bytes()).unwrap();
+        eng.put(&cf, "key3".as_bytes(), "value3".as_bytes()).unwrap();
     }
 
     {
         let eng = MidgeEngine::open(opts.clone()).unwrap();
-        assert_eq!(eng.get(b"key1").unwrap(), Some(Bytes::from("value1")));
-        assert_eq!(eng.get(b"key2").unwrap(), Some(Bytes::from("value2")));
-        assert_eq!(eng.get(b"key3").unwrap(), Some(Bytes::from("value3")));
+        assert_eq!(eng.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
+        assert_eq!(eng.get(&cf, b"key2").unwrap(), Some(Bytes::from("value2")));
+        assert_eq!(eng.get(&cf, b"key3").unwrap(), Some(Bytes::from("value3")));
     }
 
     // Assert
     {
         let eng = MidgeEngine::open(opts).unwrap();
-        assert_eq!(eng.get(b"key1").unwrap(), Some(Bytes::from("value1")));
-        assert_eq!(eng.get(b"key2").unwrap(), Some(Bytes::from("value2")));
-        assert_eq!(eng.get(b"key3").unwrap(), Some(Bytes::from("value3")));
+        assert_eq!(eng.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
+        assert_eq!(eng.get(&cf, b"key2").unwrap(), Some(Bytes::from("value2")));
+        assert_eq!(eng.get(&cf, b"key3").unwrap(), Some(Bytes::from("value3")));
     }
 }
 
 #[test]
 fn should_not_replay_flushed_data_from_wal() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -58,14 +60,14 @@ fn should_not_replay_flushed_data_from_wal() {
         let eng = MidgeEngine::open(opts.clone()).unwrap();
 
         // First batch - will be flushed
-        eng.put(Bytes::from("flushed1"), Bytes::from("v1")).unwrap();
-        eng.put(Bytes::from("flushed2"), Bytes::from("v2")).unwrap();
+        eng.put(&cf, "flushed1".as_bytes(), "v1".as_bytes()).unwrap();
+        eng.put(&cf, "flushed2".as_bytes(), "v2".as_bytes()).unwrap();
         eng.flush().unwrap();
 
         // Second batch - only in WAL
-        eng.put(Bytes::from("unflushed1"), Bytes::from("v3"))
+        eng.put(&cf, "unflushed1".as_bytes(), "v3".as_bytes())
             .unwrap();
-        eng.put(Bytes::from("unflushed2"), Bytes::from("v4"))
+        eng.put(&cf, "unflushed2".as_bytes(), "v4".as_bytes())
             .unwrap();
         // No flush - simulates crash
     }
@@ -74,16 +76,17 @@ fn should_not_replay_flushed_data_from_wal() {
     let eng = MidgeEngine::open(opts).unwrap();
 
     // Flushed data from SST
-    assert_eq!(eng.get(b"flushed1").unwrap(), Some(Bytes::from("v1")));
-    assert_eq!(eng.get(b"flushed2").unwrap(), Some(Bytes::from("v2")));
+    assert_eq!(eng.get(&cf, b"flushed1").unwrap(), Some(Bytes::from("v1")));
+    assert_eq!(eng.get(&cf, b"flushed2").unwrap(), Some(Bytes::from("v2")));
 
     // Unflushed data from WAL replay
-    assert_eq!(eng.get(b"unflushed1").unwrap(), Some(Bytes::from("v3")));
-    assert_eq!(eng.get(b"unflushed2").unwrap(), Some(Bytes::from("v4")));
+    assert_eq!(eng.get(&cf, b"unflushed1").unwrap(), Some(Bytes::from("v3")));
+    assert_eq!(eng.get(&cf, b"unflushed2").unwrap(), Some(Bytes::from("v4")));
 }
 
 #[test]
 fn should_handle_multiple_restart_cycles_idempotently() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -100,7 +103,7 @@ fn should_handle_multiple_restart_cycles_idempotently() {
         // Write unique data for this cycle
         let key = format!("cycle{}", cycle);
         let value = format!("value{}", cycle);
-        eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
 
         // Drop to simulate restart
     }
@@ -111,7 +114,7 @@ fn should_handle_multiple_restart_cycles_idempotently() {
         let key = format!("cycle{}", cycle);
         let expected = format!("value{}", cycle);
         assert_eq!(
-            eng.get(key.as_bytes()).unwrap(),
+            eng.get(&cf, key.as_bytes()).unwrap(),
             Some(Bytes::from(expected)),
             "Cycle {} data missing",
             cycle
@@ -121,6 +124,7 @@ fn should_handle_multiple_restart_cycles_idempotently() {
 
 #[test]
 fn should_preserve_sequence_numbers_across_recovery() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -137,13 +141,13 @@ fn should_preserve_sequence_numbers_across_recovery() {
         // Multiple operations with increasing sequences
         for i in 0..10 {
             let key = format!("key{}", i);
-            eng.put(Bytes::from(key), Bytes::from("v1")).unwrap();
+            eng.put(&cf, key.as_bytes(), "v1".as_bytes()).unwrap();
         }
 
         // Update some keys
         for i in 0..5 {
             let key = format!("key{}", i);
-            eng.put(Bytes::from(key), Bytes::from("v2")).unwrap();
+            eng.put(&cf, key.as_bytes(), "v2".as_bytes()).unwrap();
         }
     }
 
@@ -152,7 +156,7 @@ fn should_preserve_sequence_numbers_across_recovery() {
     for i in 0..5 {
         let key = format!("key{}", i);
         assert_eq!(
-            eng.get(key.as_bytes()).unwrap(),
+            eng.get(&cf, key.as_bytes()).unwrap(),
             Some(Bytes::from("v2")),
             "Updated keys should have v2"
         );
@@ -160,7 +164,7 @@ fn should_preserve_sequence_numbers_across_recovery() {
     for i in 5..10 {
         let key = format!("key{}", i);
         assert_eq!(
-            eng.get(key.as_bytes()).unwrap(),
+            eng.get(&cf, key.as_bytes()).unwrap(),
             Some(Bytes::from("v1")),
             "Non-updated keys should have v1"
         );
@@ -169,6 +173,7 @@ fn should_preserve_sequence_numbers_across_recovery() {
 
 #[test]
 fn should_recover_tombstones_correctly() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -182,24 +187,25 @@ fn should_recover_tombstones_correctly() {
     {
         let eng = MidgeEngine::open(opts.clone()).unwrap();
 
-        eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
-        eng.put(Bytes::from("key2"), Bytes::from("value2")).unwrap();
-        eng.delete(Bytes::from("key1")).unwrap();
+        eng.put(&cf, "key1".as_bytes(), "value1".as_bytes()).unwrap();
+        eng.put(&cf, "key2".as_bytes(), "value2".as_bytes()).unwrap();
+        eng.delete(&cf, "key1".as_bytes()).unwrap();
         // Crash before flush
     }
 
     // Assert: Tombstone should be replayed
     let eng = MidgeEngine::open(opts).unwrap();
     assert_eq!(
-        eng.get(b"key1").unwrap(),
+        eng.get(&cf, b"key1").unwrap(),
         None,
         "Deleted key should stay deleted"
     );
-    assert_eq!(eng.get(b"key2").unwrap(), Some(Bytes::from("value2")));
+    assert_eq!(eng.get(&cf, b"key2").unwrap(), Some(Bytes::from("value2")));
 }
 
 #[test]
 fn should_handle_empty_wal_gracefully() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -212,17 +218,18 @@ fn should_handle_empty_wal_gracefully() {
     // Act: Create database, flush everything, restart
     {
         let eng = MidgeEngine::open(opts.clone()).unwrap();
-        eng.put(Bytes::from("key"), Bytes::from("value")).unwrap();
+        eng.put(&cf, "key".as_bytes(), "value".as_bytes()).unwrap();
         eng.flush().unwrap();
     }
 
     // Assert: Should restart cleanly with empty WAL
     let eng = MidgeEngine::open(opts).unwrap();
-    assert_eq!(eng.get(b"key").unwrap(), Some(Bytes::from("value")));
+    assert_eq!(eng.get(&cf, b"key").unwrap(), Some(Bytes::from("value")));
 }
 
 #[test]
 fn should_maintain_consistency_across_mixed_operations() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -237,38 +244,39 @@ fn should_maintain_consistency_across_mixed_operations() {
         let eng = MidgeEngine::open(opts.clone()).unwrap();
 
         // Batch 1
-        eng.put(Bytes::from("a"), Bytes::from("1")).unwrap();
-        eng.put(Bytes::from("b"), Bytes::from("2")).unwrap();
+        eng.put(&cf, "a".as_bytes(), "1".as_bytes()).unwrap();
+        eng.put(&cf, "b".as_bytes(), "2".as_bytes()).unwrap();
         eng.flush().unwrap();
 
         // Batch 2 (unflushed)
-        eng.put(Bytes::from("c"), Bytes::from("3")).unwrap();
-        eng.delete(Bytes::from("a")).unwrap();
+        eng.put(&cf, "c".as_bytes(), "3".as_bytes()).unwrap();
+        eng.delete(&cf, "a".as_bytes()).unwrap();
 
         // Batch 3 (flush)
-        eng.put(Bytes::from("d"), Bytes::from("4")).unwrap();
+        eng.put(&cf, "d".as_bytes(), "4".as_bytes()).unwrap();
         eng.flush().unwrap();
 
         // Batch 4 (unflushed crash)
-        eng.put(Bytes::from("e"), Bytes::from("5")).unwrap();
-        eng.put(Bytes::from("b"), Bytes::from("6")).unwrap();
+        eng.put(&cf, "e".as_bytes(), "5".as_bytes()).unwrap();
+        eng.put(&cf, "b".as_bytes(), "6".as_bytes()).unwrap();
     }
 
     // Assert: Final state should be consistent
     let eng = MidgeEngine::open(opts).unwrap();
-    assert_eq!(eng.get(b"a").unwrap(), None, "a was deleted");
+    assert_eq!(eng.get(&cf, b"a").unwrap(), None, "a was deleted");
     assert_eq!(
-        eng.get(b"b").unwrap(),
+        eng.get(&cf, b"b").unwrap(),
         Some(Bytes::from("6")),
         "b updated to 6"
     );
-    assert_eq!(eng.get(b"c").unwrap(), Some(Bytes::from("3")));
-    assert_eq!(eng.get(b"d").unwrap(), Some(Bytes::from("4")));
-    assert_eq!(eng.get(b"e").unwrap(), Some(Bytes::from("5")));
+    assert_eq!(eng.get(&cf, b"c").unwrap(), Some(Bytes::from("3")));
+    assert_eq!(eng.get(&cf, b"d").unwrap(), Some(Bytes::from("4")));
+    assert_eq!(eng.get(&cf, b"e").unwrap(), Some(Bytes::from("5")));
 }
 
 #[test]
 fn should_recover_large_wal_efficiently() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -285,7 +293,7 @@ fn should_recover_large_wal_efficiently() {
         for i in 0..1000 {
             let key = format!("key{:04}", i);
             let value = format!("value{}", i);
-            eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+            eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
         // No flush - large WAL to replay
     }
@@ -295,7 +303,7 @@ fn should_recover_large_wal_efficiently() {
     for i in 0..1000 {
         let key = format!("key{:04}", i);
         assert!(
-            eng.get(key.as_bytes()).unwrap().is_some(),
+            eng.get(&cf, key.as_bytes()).unwrap().is_some(),
             "key{:04} should exist",
             i
         );
@@ -304,6 +312,7 @@ fn should_recover_large_wal_efficiently() {
 
 #[test]
 fn should_handle_partial_flush_scenario() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -322,20 +331,20 @@ fn should_handle_partial_flush_scenario() {
         for i in 0..20 {
             let key = format!("auto{:02}", i);
             let value = vec![0u8; 50];
-            eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+            eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
 
         // Additional data after auto-flush
-        eng.put(Bytes::from("after_flush"), Bytes::from("value"))
+        eng.put(&cf, "after_flush".as_bytes(), "value".as_bytes())
             .unwrap();
         // Crash before final flush
     }
 
     // Assert: Both auto-flushed and WAL data should be present
     let eng = MidgeEngine::open(opts).unwrap();
-    assert!(eng.get(b"auto00").unwrap().is_some(), "Auto-flushed data");
+    assert!(eng.get(&cf, b"auto00").unwrap().is_some(), "Auto-flushed data");
     assert_eq!(
-        eng.get(b"after_flush").unwrap(),
+        eng.get(&cf, b"after_flush").unwrap(),
         Some(Bytes::from("value")),
         "WAL data after flush"
     );
@@ -343,6 +352,7 @@ fn should_handle_partial_flush_scenario() {
 
 #[test]
 fn should_deduplicate_keys_during_recovery() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -357,18 +367,18 @@ fn should_deduplicate_keys_during_recovery() {
         let eng = MidgeEngine::open(opts.clone()).unwrap();
 
         // Write same key multiple times
-        eng.put(Bytes::from("key"), Bytes::from("v1")).unwrap();
-        eng.put(Bytes::from("key"), Bytes::from("v2")).unwrap();
-        eng.put(Bytes::from("key"), Bytes::from("v3")).unwrap();
-        eng.put(Bytes::from("key"), Bytes::from("v4")).unwrap();
-        eng.put(Bytes::from("key"), Bytes::from("v5")).unwrap();
+        eng.put(&cf, "key".as_bytes(), "v1".as_bytes()).unwrap();
+        eng.put(&cf, "key".as_bytes(), "v2".as_bytes()).unwrap();
+        eng.put(&cf, "key".as_bytes(), "v3".as_bytes()).unwrap();
+        eng.put(&cf, "key".as_bytes(), "v4".as_bytes()).unwrap();
+        eng.put(&cf, "key".as_bytes(), "v5".as_bytes()).unwrap();
         // Crash - all in WAL
     }
 
     // Assert: Should see only latest version
     let eng = MidgeEngine::open(opts).unwrap();
     assert_eq!(
-        eng.get(b"key").unwrap(),
+        eng.get(&cf, b"key").unwrap(),
         Some(Bytes::from("v5")),
         "Should have latest value only"
     );

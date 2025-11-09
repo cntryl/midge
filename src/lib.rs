@@ -16,6 +16,10 @@
 // Note: unwrap is allowed in test modules via #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
+// Allow deprecated APIs across the crate for a transitional period while call sites
+// are migrated to the CF-aware APIs. This prevents deprecation warnings from
+// flooding test/bench output during the migration.
+#![allow(deprecated)]
 
 // Foundational modules with no internal dependencies
 pub mod common;

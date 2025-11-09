@@ -3,6 +3,7 @@
 //! Collects multiple write operations and commits them atomically to WAL and memtable.
 //! This reduces WAL overhead by batching multiple operations into single writes.
 
+use crate::api::ColumnFamilyId;
 use crate::wal::WalOpKind;
 use bytes::Bytes;
 
@@ -14,6 +15,7 @@ pub struct WriteBatch {
 
 #[derive(Debug, Clone)]
 pub(crate) struct WriteOp {
+    cf_id: ColumnFamilyId,
     kind: WalOpKind,
     key: Bytes,
     value: Option<Bytes>,
@@ -26,9 +28,10 @@ impl WriteBatch {
         Self::default()
     }
 
-    /// Add a put operation to the batch
-    pub fn put(&mut self, key: Bytes, value: Bytes) {
+    /// Add a put operation to the batch for a specific column family
+    pub fn put(&mut self, cf_id: ColumnFamilyId, key: Bytes, value: Bytes) {
         self.operations.push(WriteOp {
+            cf_id,
             kind: WalOpKind::Put,
             key,
             value: Some(value),
@@ -36,9 +39,10 @@ impl WriteBatch {
         });
     }
 
-    /// Add a put with TTL operation to the batch
-    pub fn put_with_ttl(&mut self, key: Bytes, value: Bytes, ttl_seconds: u64) {
+    /// Add a put with TTL operation to the batch for a specific column family
+    pub fn put_with_ttl(&mut self, cf_id: ColumnFamilyId, key: Bytes, value: Bytes, ttl_seconds: u64) {
         self.operations.push(WriteOp {
+            cf_id,
             kind: WalOpKind::Put,
             key,
             value: Some(value),
@@ -46,9 +50,10 @@ impl WriteBatch {
         });
     }
 
-    /// Add a delete operation to the batch
-    pub fn delete(&mut self, key: Bytes) {
+    /// Add a delete operation to the batch for a specific column family
+    pub fn delete(&mut self, cf_id: ColumnFamilyId, key: Bytes) {
         self.operations.push(WriteOp {
+            cf_id,
             kind: WalOpKind::Delete,
             key,
             value: None,
@@ -78,6 +83,10 @@ impl WriteBatch {
 }
 
 impl WriteOp {
+    pub(crate) fn cf_id(&self) -> ColumnFamilyId {
+        self.cf_id
+    }
+
     pub(crate) fn kind(&self) -> WalOpKind {
         self.kind
     }

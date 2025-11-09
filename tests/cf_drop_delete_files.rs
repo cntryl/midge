@@ -84,10 +84,10 @@ fn should_preserve_other_cfs_when_dropping_one_cf() {
     
     // Write to default CF
     let default_cf = engine.default_column_family();
-    engine.put_cf(&default_cf, b"default_key", b"default_value").expect("put");
+    engine.put(&cf, &default_cf, b"default_key", b"default_value").expect("put");
     
     // Write to cf2 only (cf1 stays empty)
-    engine.put_cf(&cf2, b"cf2_key", b"cf2_value").expect("put");
+    engine.put(&cf, &cf2, b"cf2_key", b"cf2_value").expect("put");
 
     // Act - Drop empty cf1
     engine.drop_column_family(&cf1).expect("drop cf1");
@@ -100,11 +100,11 @@ fn should_preserve_other_cfs_when_dropping_one_cf() {
     assert!(names.contains(&"default"), "default should still exist");
     
     // Verify data in cf2 is still accessible
-    let result = engine.get_cf(&cf2, b"cf2_key").expect("get");
+    let result = engine.get(&cf2, b"cf2_key").expect("get");
     assert_eq!(result, Some(Bytes::from_static(b"cf2_value")));
     
     // Verify data in default CF is still accessible
-    let result = engine.get_cf(&default_cf, b"default_key").expect("get");
+    let result = engine.get(&default_cf, b"default_key").expect("get");
     assert_eq!(result, Some(Bytes::from_static(b"default_value")));
     
     // Verify cf1 data is gone

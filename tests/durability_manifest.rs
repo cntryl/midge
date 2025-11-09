@@ -8,6 +8,7 @@ use common::*;
 
 #[test]
 fn should_preserve_manifest_consistency_across_flush() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = flush_test_opts(dir.path().to_path_buf(), 1024);
@@ -19,13 +20,13 @@ fn should_preserve_manifest_consistency_across_flush() {
             for i in 0..50 {
                 let key = format!("key{:03}", i);
                 let value = vec![0u8; 100];
-                eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
             }
             eng.flush().unwrap();
         },
         |eng| {
             // Assert
-            let result = eng.get(b"key000").unwrap();
+            let result = eng.get(&cf, b"key000").unwrap();
             assert!(result.is_some(), "Data should persist after flush");
         },
     );
@@ -37,6 +38,7 @@ fn should_preserve_manifest_consistency_across_flush() {
 
 #[test]
 fn should_recover_from_incomplete_flush() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -45,8 +47,8 @@ fn should_recover_from_incomplete_flush() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
-            eng.put(Bytes::from("key2"), Bytes::from("value2")).unwrap();
+            eng.put(&cf, "key1".as_bytes(), "value1".as_bytes()).unwrap();
+            eng.put(&cf, "key2".as_bytes(), "value2".as_bytes()).unwrap();
         },
         |eng| {
             // Assert
@@ -58,6 +60,7 @@ fn should_recover_from_incomplete_flush() {
 
 #[test]
 fn should_maintain_sequence_numbers_across_flush_and_restart() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -66,9 +69,9 @@ fn should_maintain_sequence_numbers_across_flush_and_restart() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("a"), Bytes::from("1")).unwrap();
+            eng.put(&cf, "a".as_bytes(), "1".as_bytes()).unwrap();
             eng.flush().unwrap();
-            eng.put(Bytes::from("b"), Bytes::from("2")).unwrap();
+            eng.put(&cf, "b".as_bytes(), "2".as_bytes()).unwrap();
         },
         |eng| {
             // Assert
@@ -80,6 +83,7 @@ fn should_maintain_sequence_numbers_across_flush_and_restart() {
 
 #[test]
 fn should_not_lose_data_given_flush_during_writes() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -88,13 +92,13 @@ fn should_not_lose_data_given_flush_during_writes() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("k1"), Bytes::from("v1")).unwrap();
+            eng.put(&cf, "k1".as_bytes(), "v1".as_bytes()).unwrap();
             eng.flush().unwrap();
 
-            eng.put(Bytes::from("k2"), Bytes::from("v2")).unwrap();
+            eng.put(&cf, "k2".as_bytes(), "v2".as_bytes()).unwrap();
             eng.flush().unwrap();
 
-            eng.put(Bytes::from("k3"), Bytes::from("v3")).unwrap();
+            eng.put(&cf, "k3".as_bytes(), "v3".as_bytes()).unwrap();
             eng.flush().unwrap();
         },
         |eng| {
@@ -108,6 +112,7 @@ fn should_not_lose_data_given_flush_during_writes() {
 
 #[test]
 fn should_preserve_tombstones_across_flush() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -116,8 +121,8 @@ fn should_preserve_tombstones_across_flush() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("key"), Bytes::from("value")).unwrap();
-            eng.delete(Bytes::from("key")).unwrap();
+            eng.put(&cf, "key".as_bytes(), "value".as_bytes()).unwrap();
+            eng.delete(&cf, "key".as_bytes()).unwrap();
             eng.flush().unwrap();
         },
         |eng| {
@@ -129,6 +134,7 @@ fn should_preserve_tombstones_across_flush() {
 
 #[test]
 fn should_handle_multiple_flushes_without_data_loss() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -140,7 +146,7 @@ fn should_handle_multiple_flushes_without_data_loss() {
             for i in 0..10 {
                 let key = format!("key{}", i);
                 let value = format!("value{}", i);
-                eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
                 eng.flush().unwrap();
             }
         },
@@ -157,6 +163,7 @@ fn should_handle_multiple_flushes_without_data_loss() {
 
 #[test]
 fn should_recover_wal_entries_not_yet_flushed() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -165,9 +172,9 @@ fn should_recover_wal_entries_not_yet_flushed() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("unflushed1"), Bytes::from("data1"))
+            eng.put(&cf, "unflushed1".as_bytes(), "data1".as_bytes())
                 .unwrap();
-            eng.put(Bytes::from("unflushed2"), Bytes::from("data2"))
+            eng.put(&cf, "unflushed2".as_bytes(), "data2".as_bytes())
                 .unwrap();
         },
         |eng| {
@@ -180,13 +187,14 @@ fn should_recover_wal_entries_not_yet_flushed() {
 
 #[test]
 fn should_preserve_manifest_last_persisted_sequence() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
 
     // Act
     with_engine(opts, |eng| {
-        eng.put(Bytes::from("key"), Bytes::from("value")).unwrap();
+        eng.put(&cf, "key".as_bytes(), "value".as_bytes()).unwrap();
         eng.flush().unwrap();
     });
 
@@ -202,6 +210,7 @@ fn should_preserve_manifest_last_persisted_sequence() {
 
 #[test]
 fn should_handle_empty_memtable_flush_gracefully() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -213,13 +222,14 @@ fn should_handle_empty_memtable_flush_gracefully() {
         // Assert
         assert!(result.is_ok(), "Empty flush should succeed");
 
-        eng.put(Bytes::from("key"), Bytes::from("value")).unwrap();
+        eng.put(&cf, "key".as_bytes(), "value".as_bytes()).unwrap();
         assert_get_equals(eng, b"key", b"value");
     });
 }
 
 #[test]
 fn should_maintain_atomicity_given_flush_then_immediate_restart() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -228,7 +238,7 @@ fn should_maintain_atomicity_given_flush_then_immediate_restart() {
     with_engine_restart(
         opts,
         |eng| {
-            eng.put(Bytes::from("atomic"), Bytes::from("test")).unwrap();
+            eng.put(&cf, "atomic".as_bytes(), "test".as_bytes()).unwrap();
             eng.flush().unwrap();
         },
         |eng| {

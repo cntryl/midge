@@ -17,13 +17,14 @@ use std::thread;
 use ycsb_common::*;
 
 fn run_workload_c(engine: &MidgeEngine, operations: usize, record_count: usize) {
+    let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
 
     for _ in 0..operations {
         let key_id = zipfian.next(&mut rng);
         let key = generate_key(key_id);
-        let _ = black_box(engine.get(&key));
+        let _ = black_box(engine.get(&cf, &key));
     }
 }
 
@@ -71,9 +72,11 @@ fn bench_workload_c(c: &mut Criterion) {
             &threads,
             |b, &_threads| {
                 b.iter(|| {
+                    let cf = engine.default_column_family();
                     let handles: Vec<_> = (0..threads)
                         .map(|thread_id| {
                             let engine = Arc::clone(&engine);
+                            let cf = cf.clone();
                             thread::spawn(move || {
                                 let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
                                 let zipfian = ZipfianGenerator::new(RECORD_COUNT, 0.99);
@@ -81,7 +84,7 @@ fn bench_workload_c(c: &mut Criterion) {
                                 for _ in 0..ops_per_thread {
                                     let key_id = zipfian.next(&mut rng);
                                     let key = generate_key(key_id);
-                                    let _ = black_box(engine.get(&key));
+                                    let _ = black_box(engine.get(&cf, &key));
                                 }
                             })
                         })

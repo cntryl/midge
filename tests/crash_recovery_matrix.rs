@@ -106,6 +106,7 @@ struct TestDataset {
 impl TestDataset {
     /// Generate deterministic test data based on seed
     fn generate(seed: usize, count: usize) -> Self {
+        let cf = engine.default_column_family();
         let mut keys = Vec::with_capacity(count);
         let mut values = Vec::with_capacity(count);
 
@@ -120,6 +121,7 @@ impl TestDataset {
     }
 
     fn len(&self) -> usize {
+        let cf = engine.default_column_family();
         self.keys.len()
     }
 }
@@ -170,7 +172,7 @@ fn run_crash_scenario(
 
         // Write all data
         for i in 0..dataset.len() {
-            if let Err(e) = eng.put(dataset.keys[i].clone(), dataset.values[i].clone()) {
+            if let Err(e) = eng.put(&cf, dataset.keys[i].clone(), dataset.values[i].clone()) {
                 return RecoveryResult {
                     iteration,
                     crash_point,
@@ -246,7 +248,7 @@ fn run_crash_scenario(
     let mut anomalies = Vec::new();
 
     for i in 0..dataset.len() {
-        match eng.get(&dataset.keys[i]) {
+        match eng.get(&cf, &dataset.keys[i]) {
             Ok(Some(value)) => {
                 if value == dataset.values[i] {
                     keys_recovered += 1;

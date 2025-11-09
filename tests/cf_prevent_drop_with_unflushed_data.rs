@@ -26,8 +26,8 @@ fn should_reject_drop_when_active_memtable_has_data() {
         .expect("create CF");
     
     // Write data but don't flush
-    engine.put_cf(&cf, b"key1", b"value1").expect("put");
-    engine.put_cf(&cf, b"key2", b"value2").expect("put");
+    engine.put(&cf, b"key1", b"value1").expect("put");
+    engine.put(&cf, b"key2", b"value2").expect("put");
 
     // Act
     let result = engine.drop_column_family(&cf);
@@ -67,7 +67,7 @@ fn should_preserve_cf_after_restart_when_drop_fails() {
             .create_column_family("test_cf", ColumnFamilyConfig::default())
             .expect("create CF");
         
-        engine.put_cf(&cf, b"key1", b"value1").expect("put");
+        engine.put(&cf, b"key1", b"value1").expect("put");
         
         // Try to drop with unflushed data - should fail
         let result = engine.drop_column_family(&cf);
@@ -96,7 +96,7 @@ fn should_preserve_cf_after_restart_when_drop_fails() {
     
     // Verify data is still accessible
     let cf = engine2.get_column_family("test_cf").expect("get CF");
-    let value = engine2.get_cf(&cf, b"key1").expect("get");
+    let value = engine2.get(&cf, b"key1").expect("get");
     assert_eq!(value, Some(bytes::Bytes::from_static(b"value1")));
 }
 
@@ -150,7 +150,7 @@ fn should_reject_drop_with_immutable_memtables() {
     for i in 0..1000 {
         let key = format!("key_{:08}", i);
         let value = format!("value_{:08}", i);
-        engine.put_cf(&cf, key.as_bytes(), value.as_bytes()).expect("put");
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).expect("put");
     }
     
     // Don't flush - this should leave immutable memtables
@@ -193,7 +193,7 @@ fn should_allow_drop_other_cfs_independently() {
         .expect("create cf2");
     
     // Write to cf1 only
-    engine.put_cf(&cf1, b"key", b"value").expect("put");
+    engine.put(&cf1, b"key", b"value").expect("put");
 
     // Act - Try to drop cf2 (empty) while cf1 has unflushed data
     let result_cf2 = engine.drop_column_family(&cf2);

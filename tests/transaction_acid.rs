@@ -6,6 +6,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use tempfile::TempDir;
 
 fn temp_dir() -> TempDir {
+    let cf = engine.default_column_family();
     tempfile::tempdir().expect("create temp dir")
 }
 
@@ -15,6 +16,7 @@ fn temp_dir() -> TempDir {
 
 #[test]
 fn should_detect_write_write_conflict_given_concurrent_updates_to_same_key() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -51,11 +53,12 @@ fn should_detect_write_write_conflict_given_concurrent_updates_to_same_key() {
         "Second transaction should fail with write conflict"
     );
     // First transaction's value should be persisted
-    assert_eq!(engine.get(b"key").expect("get"), Some(Bytes::from("v1")));
+    assert_eq!(engine.get(&cf, b"key").expect("get"), Some(Bytes::from("v1")));
 }
 
 #[test]
 fn should_abort_second_transaction_given_write_conflict_when_both_commit() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -89,13 +92,14 @@ fn should_abort_second_transaction_given_write_conflict_when_both_commit() {
     );
     // Verify first transaction's value persisted
     assert_eq!(
-        engine.get(b"conflict_key").expect("get"),
+        engine.get(&cf, b"conflict_key").expect("get"),
         Some(Bytes::from("txn1_value"))
     );
 }
 
 #[test]
 fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -124,13 +128,14 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
 
     // Assert
     assert_eq!(
-        engine.get(b"key").expect("get"),
+        engine.get(&cf, b"key").expect("get"),
         Some(Bytes::from("first_value"))
     );
 }
 
 #[test]
 fn should_handle_write_conflict_on_delete_given_concurrent_delete_and_put() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -147,7 +152,7 @@ fn should_handle_write_conflict_on_delete_given_concurrent_delete_and_put() {
     let mut delete_txn = engine.begin_transaction();
     let mut put_txn = engine.begin_transaction();
 
-    delete_txn.delete(Bytes::from("key")).unwrap();
+    delete_txn.delete(&cf, "key".as_bytes()).unwrap();
     put_txn
         .put(Bytes::from("key"), Bytes::from("updated"), None)
         .unwrap();
@@ -167,7 +172,7 @@ fn should_handle_write_conflict_on_delete_given_concurrent_delete_and_put() {
         "Put transaction should fail with conflict"
     );
     // Verify delete persisted (key should not exist)
-    assert_eq!(engine.get(b"key").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"key").expect("get"), None);
 }
 
 #[test]
@@ -248,6 +253,7 @@ fn should_validate_version_given_read_set_when_committing_transaction() {
 
 #[test]
 fn should_abort_transaction_given_stale_read_when_key_modified_by_other() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -283,6 +289,7 @@ fn should_abort_transaction_given_stale_read_when_key_modified_by_other() {
 
 #[test]
 fn should_track_read_set_given_transaction_gets_when_validating() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -316,6 +323,7 @@ fn should_track_read_set_given_transaction_gets_when_validating() {
 
 #[test]
 fn should_allow_commit_given_no_conflicts_when_validation_succeeds() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -337,7 +345,7 @@ fn should_allow_commit_given_no_conflicts_when_validation_succeeds() {
     // Assert
     assert!(result.is_ok());
     assert_eq!(
-        engine.get(b"new_key").expect("get"),
+        engine.get(&cf, b"new_key").expect("get"),
         Some(Bytes::from("new_value"))
     );
 }
@@ -348,6 +356,7 @@ fn should_allow_commit_given_no_conflicts_when_validation_succeeds() {
 
 #[test]
 fn should_prevent_dirty_read_given_uncommitted_write_when_read_committed() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -364,7 +373,7 @@ fn should_prevent_dirty_read_given_uncommitted_write_when_read_committed() {
         .unwrap();
 
     // Act
-    let read_result = engine.get(b"key").expect("get");
+    let read_result = engine.get(&cf, b"key").expect("get");
 
     // Assert
     // Should not see uncommitted write
@@ -374,7 +383,7 @@ fn should_prevent_dirty_read_given_uncommitted_write_when_read_committed() {
     );
 
     drop(uncommitted_txn);
-    assert_eq!(engine.get(b"key").expect("get after rollback"), None);
+    assert_eq!(engine.get(&cf, b"key").expect("get after rollback"), None);
 }
 
 #[test]
@@ -555,6 +564,7 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
 
 #[test]
 fn should_read_at_begin_sequence_given_transaction_when_using_transaction_get() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -586,6 +596,7 @@ fn should_read_at_begin_sequence_given_transaction_when_using_transaction_get() 
 
 #[test]
 fn should_not_see_concurrent_writes_given_transaction_when_snapshot_isolated() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -604,7 +615,7 @@ fn should_not_see_concurrent_writes_given_transaction_when_snapshot_isolated() {
 
     // Act
     let mut txn2 = engine.begin_transaction();
-    txn2.put(Bytes::from("key2"), Bytes::from("v2"), None)
+    txn2.put(&cf, Bytes::from("key2"), Bytes::from("v2"), None)
         .unwrap();
     engine
         .commit_transaction(txn2, cntryl_midge::WriteOptions::default())
@@ -621,6 +632,7 @@ fn should_not_see_concurrent_writes_given_transaction_when_snapshot_isolated() {
 
 #[test]
 fn should_see_own_writes_given_transaction_when_reading_staged_mutations() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -633,7 +645,7 @@ fn should_see_own_writes_given_transaction_when_reading_staged_mutations() {
 
     // Act
     let mut txn = engine.begin_transaction();
-    txn.put(Bytes::from("new_key"), Bytes::from("new_value"), None)
+    txn.put(&cf, Bytes::from("new_key"), Bytes::from("new_value"), None)
         .unwrap();
 
     // Read own write
@@ -645,6 +657,7 @@ fn should_see_own_writes_given_transaction_when_reading_staged_mutations() {
 
 #[test]
 fn should_track_reads_given_transaction_get_when_validating_conflicts() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -664,13 +677,13 @@ fn should_track_reads_given_transaction_get_when_validating_conflicts() {
 
     // Act
     let mut txn2 = engine.begin_transaction();
-    txn2.put(Bytes::from("key"), Bytes::from("v2"), None)
+    txn2.put(&cf, Bytes::from("key"), Bytes::from("v2"), None)
         .unwrap();
     engine
         .commit_transaction(txn2, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
-    txn1.put(Bytes::from("other_key"), Bytes::from("value"), None)
+    txn1.put(&cf, Bytes::from("other_key"), Bytes::from("value"), None)
         .unwrap();
     let result = engine.commit_transaction(txn1, cntryl_midge::WriteOptions::default());
 
@@ -723,6 +736,7 @@ fn should_provide_consistent_view_given_multiple_reads_when_snapshot_isolated() 
 
 #[test]
 fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -786,7 +800,7 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
     );
 
     // Final value is 1 (only first increment succeeded)
-    let final_val = engine.get(b"counter").expect("get final");
+    let final_val = engine.get(&cf, b"counter").expect("get final");
     let final_count: i32 = String::from_utf8(final_val.unwrap().to_vec())
         .unwrap()
         .parse()
@@ -799,6 +813,7 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
 
 #[test]
 fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -836,6 +851,7 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
 
 #[test]
 fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commits() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -867,11 +883,11 @@ fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commi
 
     // Assert
     assert_eq!(
-        engine.get(b"key1").expect("get"),
+        engine.get(&cf, b"key1").expect("get"),
         Some(Bytes::from("value1"))
     );
     assert_eq!(
-        engine.get(b"key2").expect("get"),
+        engine.get(&cf, b"key2").expect("get"),
         Some(Bytes::from("value2"))
     );
 }
@@ -1068,6 +1084,7 @@ fn should_detect_deadlock_given_three_way_circular_dependency() {
 
 #[test]
 fn should_timeout_transaction_given_exceed_deadline_when_committing() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1096,6 +1113,7 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
 
 #[test]
 fn should_release_locks_given_transaction_timeout_when_aborted() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1129,6 +1147,7 @@ fn should_release_locks_given_transaction_timeout_when_aborted() {
 
 #[test]
 fn should_rollback_partial_writes_given_timeout_when_aborting() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1154,9 +1173,9 @@ fn should_rollback_partial_writes_given_timeout_when_aborting() {
     drop(rollback_txn);
 
     // Assert
-    assert_eq!(engine.get(b"key1").expect("get"), None);
-    assert_eq!(engine.get(b"key2").expect("get"), None);
-    assert_eq!(engine.get(b"key3").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"key1").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"key2").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"key3").expect("get"), None);
 }
 
 #[test]
@@ -1190,6 +1209,7 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
 
 #[test]
 fn should_reject_operations_given_committed_transaction_when_reused() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1222,6 +1242,7 @@ fn should_reject_operations_given_committed_transaction_when_reused() {
 
 #[test]
 fn should_spill_to_disk_given_exceed_threshold_when_staging_writes() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1265,7 +1286,7 @@ fn should_spill_to_disk_given_exceed_threshold_when_staging_writes() {
     // Verify all keys are present after commit
     for i in 0..2000 {
         let key = format!("key{:06}", i);
-        let value = engine.get(key.as_bytes()).expect("get");
+        let value = engine.get(&cf, key.as_bytes()).expect("get");
         assert!(
             value.is_some(),
             "Key {} should exist after spill and commit",
@@ -1276,6 +1297,7 @@ fn should_spill_to_disk_given_exceed_threshold_when_staging_writes() {
 
 #[test]
 fn should_read_from_spill_file_given_large_transaction_when_get() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1315,7 +1337,7 @@ fn should_read_from_spill_file_given_large_transaction_when_get() {
     // Verify data after commit
     for i in 0..1500 {
         let key = format!("large_key_{:06}", i);
-        let value = engine.get(key.as_bytes()).expect("get");
+        let value = engine.get(&cf, key.as_bytes()).expect("get");
         assert!(
             value.is_some(),
             "Key {} should exist after spill commit",
@@ -1465,6 +1487,7 @@ fn should_cleanup_spill_file_given_transaction_abort_when_rolled_back() {
 
 #[test]
 fn should_handle_multiple_spill_files_given_very_large_transaction() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1507,7 +1530,7 @@ fn should_handle_multiple_spill_files_given_very_large_transaction() {
     // Verify all keys are present after multiple spills and commit
     for i in 0..10000 {
         let key = format!("huge_key_{:06}", i);
-        let value = engine.get(key.as_bytes()).expect("get");
+        let value = engine.get(&cf, key.as_bytes()).expect("get");
         assert!(
             value.is_some(),
             "Key {} should exist after multiple spills",
@@ -1522,6 +1545,7 @@ fn should_handle_multiple_spill_files_given_very_large_transaction() {
 
 #[test]
 fn should_commit_all_or_nothing_given_multi_key_transaction() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1542,7 +1566,7 @@ fn should_commit_all_or_nothing_given_multi_key_transaction() {
     atomic_txn
         .put(Bytes::from("k3"), Bytes::from("v3"), None)
         .unwrap();
-    atomic_txn.delete(Bytes::from("k4")).unwrap();
+    atomic_txn.delete(&cf, "k4".as_bytes()).unwrap();
 
     // Act
     engine
@@ -1550,14 +1574,15 @@ fn should_commit_all_or_nothing_given_multi_key_transaction() {
         .expect("commit");
 
     // Assert
-    assert_eq!(engine.get(b"k1").expect("get"), Some(Bytes::from("v1")));
-    assert_eq!(engine.get(b"k2").expect("get"), Some(Bytes::from("v2")));
-    assert_eq!(engine.get(b"k3").expect("get"), Some(Bytes::from("v3")));
-    assert_eq!(engine.get(b"k4").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"k1").expect("get"), Some(Bytes::from("v1")));
+    assert_eq!(engine.get(&cf, b"k2").expect("get"), Some(Bytes::from("v2")));
+    assert_eq!(engine.get(&cf, b"k3").expect("get"), Some(Bytes::from("v3")));
+    assert_eq!(engine.get(&cf, b"k4").expect("get"), None);
 }
 
 #[test]
 fn should_be_atomic_given_transaction_with_100_operations() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1589,7 +1614,7 @@ fn should_be_atomic_given_transaction_with_100_operations() {
         let key = format!("batch_key_{}", i);
         let expected = format!("batch_val_{}", i);
         assert_eq!(
-            engine.get(key.as_bytes()).expect("get"),
+            engine.get(&cf, key.as_bytes()).expect("get"),
             Some(Bytes::from(expected))
         );
     }
@@ -1597,6 +1622,7 @@ fn should_be_atomic_given_transaction_with_100_operations() {
 
 #[test]
 fn should_rollback_all_writes_given_single_failure_when_committing() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1619,12 +1645,13 @@ fn should_rollback_all_writes_given_single_failure_when_committing() {
     drop(failed_txn);
 
     // Assert
-    assert_eq!(engine.get(b"k1").expect("get"), None);
-    assert_eq!(engine.get(b"k2").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"k1").expect("get"), None);
+    assert_eq!(engine.get(&cf, b"k2").expect("get"), None);
 }
 
 #[test]
 fn should_not_expose_partial_writes_given_concurrent_readers_when_committing() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let opts = MidgeOptions {
@@ -1645,7 +1672,7 @@ fn should_not_expose_partial_writes_given_concurrent_readers_when_committing() {
         .put(Bytes::from("atomic_k2"), Bytes::from("v2"), None)
         .unwrap();
 
-    let read_during = engine.get(b"atomic_k1").expect("get during");
+    let read_during = engine.get(&cf, b"atomic_k1").expect("get during");
 
     // Act
     engine
@@ -1666,6 +1693,7 @@ fn should_not_expose_partial_writes_given_concurrent_readers_when_committing() {
 
 #[test]
 fn should_persist_transaction_given_commit_when_crash_after() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let db_path = dir.path().to_path_buf();
@@ -1701,13 +1729,14 @@ fn should_persist_transaction_given_commit_when_crash_after() {
 
     // Assert
     assert_eq!(
-        engine2.get(b"durable_key").expect("get"),
+        engine2.get(&cf, b"durable_key").expect("get"),
         Some(Bytes::from("durable_value"))
     );
 }
 
 #[test]
 fn should_not_persist_transaction_given_abort_when_crash_after() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let db_path = dir.path().to_path_buf();
@@ -1740,11 +1769,12 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
     let engine2 = MidgeEngine::open(opts2).expect("reopen");
 
     // Assert
-    assert_eq!(engine2.get(b"aborted_key").expect("get"), None);
+    assert_eq!(engine2.get(&cf, b"aborted_key").expect("get"), None);
 }
 
 #[test]
 fn should_recover_committed_transactions_given_wal_replay_when_restart() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = temp_dir();
     let db_path = dir.path().to_path_buf();
@@ -1785,7 +1815,7 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         let key = format!("wal_key_{}", i);
         let expected = format!("wal_val_{}", i);
         assert_eq!(
-            engine2.get(key.as_bytes()).expect("get"),
+            engine2.get(&cf, key.as_bytes()).expect("get"),
             Some(Bytes::from(expected)),
             "WAL replay should recover transaction {}",
             i

@@ -52,7 +52,7 @@ fn should_handle_1000_concurrent_puts_given_separate_keys() {
                 for i in 0..puts_per_thread {
                     let key = format!("thread{}_key{}", thread_id, i);
                     let value = format!("value_{}", i);
-                    engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
                 }
             })
         })
@@ -93,7 +93,7 @@ fn should_handle_concurrent_puts_to_same_key_given_100_threads() {
             let key = key.clone();
             thread::spawn(move || {
                 let value = format!("value_from_thread_{}", thread_id);
-                engine.put(key, Bytes::from(value)).unwrap();
+                engine.put(&cf, key, Bytes::from(value)).unwrap();
             })
         })
         .collect();
@@ -103,7 +103,7 @@ fn should_handle_concurrent_puts_to_same_key_given_100_threads() {
     }
 
     // Assert
-    let result = engine.get(b"hotspot_key").unwrap();
+    let result = engine.get(&cf, b"hotspot_key").unwrap();
     assert!(result.is_some(), "Key should exist after concurrent writes");
     let value_str = String::from_utf8(result.unwrap().to_vec()).unwrap();
     assert!(
@@ -133,7 +133,7 @@ fn should_maintain_consistency_given_concurrent_put_delete_to_same_key() {
         thread::spawn(move || {
             for i in 0..num_iterations {
                 let value = format!("value_{}", i);
-                engine.put(key.clone(), Bytes::from(value)).unwrap();
+                engine.put(&cf, key.clone(), Bytes::from(value)).unwrap();
             }
         })
     };
@@ -142,7 +142,7 @@ fn should_maintain_consistency_given_concurrent_put_delete_to_same_key() {
         let engine = Arc::clone(&engine);
         thread::spawn(move || {
             for _ in 0..num_iterations {
-                let _ = engine.delete(key.clone());
+                let _ = engine.delete(&cf, key.clone());
             }
         })
     };
@@ -151,7 +151,7 @@ fn should_maintain_consistency_given_concurrent_put_delete_to_same_key() {
     delete_handle.join().unwrap();
 
     // Assert
-    let result = engine.get(b"contested_key").unwrap();
+    let result = engine.get(&cf, b"contested_key").unwrap();
     // Value is either present (put won) or absent (delete won) - both valid
     // The key test is that we don't crash or corrupt data
     if let Some(val) = result {
@@ -172,7 +172,7 @@ fn should_preserve_last_write_wins_given_concurrent_updates_when_no_transaction(
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     let key = Bytes::from("lww_key");
-    engine.put(key.clone(), Bytes::from("initial")).unwrap();
+    engine.put(&cf, key.clone(), Bytes::from("initial")).unwrap();
 
     // Act
     let num_threads = 50;
@@ -182,7 +182,7 @@ fn should_preserve_last_write_wins_given_concurrent_updates_when_no_transaction(
             let key = key.clone();
             thread::spawn(move || {
                 let value = format!("thread_{}", thread_id);
-                engine.put(key, Bytes::from(value)).unwrap();
+                engine.put(&cf, key, Bytes::from(value)).unwrap();
             })
         })
         .collect();
@@ -192,7 +192,7 @@ fn should_preserve_last_write_wins_given_concurrent_updates_when_no_transaction(
     }
 
     // Assert
-    let result = engine.get(b"lww_key").unwrap();
+    let result = engine.get(&cf, b"lww_key").unwrap();
     assert!(result.is_some());
     let value_str = String::from_utf8(result.unwrap().to_vec()).unwrap();
     assert!(
@@ -240,7 +240,7 @@ fn should_handle_mixed_operations_given_concurrent_put_delete_get() {
             for i in 0..num_keys {
                 if i % 2 == 0 {
                     let key = format!("key_{}", i);
-                    let _ = engine.delete(Bytes::from(key));
+                    let _ = engine.delete(&cf, key.as_bytes());
                 }
             }
         })
@@ -252,7 +252,7 @@ fn should_handle_mixed_operations_given_concurrent_put_delete_get() {
             let mut read_count = 0;
             for i in 0..num_keys {
                 let key = format!("key_{}", i);
-                if engine.get(key.as_bytes()).unwrap().is_some() {
+                if engine.get(&cf, key.as_bytes()).unwrap().is_some() {
                     read_count += 1;
                 }
             }
@@ -292,7 +292,7 @@ fn should_freeze_memtable_atomically_given_concurrent_writes_when_size_exceeded(
                 for i in 0..writes_per_thread {
                     let key = format!("freeze_test_{}_{}", thread_id, i);
                     let value = vec![0u8; 1024]; // 1KB values
-                    engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
                 }
             })
         })
@@ -306,7 +306,7 @@ fn should_freeze_memtable_atomically_given_concurrent_writes_when_size_exceeded(
     for thread_id in 0..num_threads {
         for i in 0..writes_per_thread {
             let key = format!("freeze_test_{}_{}", thread_id, i);
-            let result = engine.get(key.as_bytes()).unwrap();
+            let result = engine.get(&cf, key.as_bytes()).unwrap();
             assert!(result.is_some(), "Key {} should exist", key);
             assert_eq!(result.unwrap().len(), 1024);
         }
@@ -328,7 +328,7 @@ fn should_route_writes_to_new_memtable_given_freeze_in_progress() {
             thread::spawn(move || {
                 let key = format!("routing_key_{}", i);
                 let value = vec![0u8; 2048]; // 2KB values
-                engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
             })
         })
         .collect();
@@ -362,7 +362,7 @@ fn should_not_lose_writes_given_memtable_freeze_race() {
                 for i in 0..200 {
                     let key = format!("preserve_{}_{}", thread_id, i);
                     let value = vec![0u8; 1024];
-                    engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -379,7 +379,7 @@ fn should_not_lose_writes_given_memtable_freeze_race() {
     for thread_id in 0..num_threads {
         for i in 0..200 {
             let key = format!("preserve_{}_{}", thread_id, i);
-            if engine.get(key.as_bytes()).unwrap().is_some() {
+            if engine.get(&cf, key.as_bytes()).unwrap().is_some() {
                 found_writes += 1;
             }
         }
@@ -408,7 +408,7 @@ fn should_maintain_write_order_given_freeze_during_batch() {
                 for i in 0..batch_size {
                     let key = format!("order_batch_{}_seq_{:04}", batch_id, i);
                     let value = format!("{}", i);
-                    engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
                 }
             })
         })
@@ -446,7 +446,7 @@ fn should_allow_writes_given_flush_in_progress() {
             for i in 0..500 {
                 let key = format!("flush_key_{}", i);
                 let value = vec![0u8; 4096]; // 4KB values
-                engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
             }
         })
     };
@@ -456,7 +456,7 @@ fn should_allow_writes_given_flush_in_progress() {
         thread::spawn(move || {
             for i in 0..100 {
                 let key = format!("concurrent_key_{}", i);
-                engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+                engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
             }
         })
     };
@@ -483,7 +483,7 @@ fn should_block_writes_given_too_many_immutable_memtables() {
     for i in 0..num_writes {
         let key = format!("stall_test_{}", i);
         let value = vec![0u8; 2048];
-        let result = engine.put(Bytes::from(key), Bytes::from(value));
+        let result = engine.put(&cf, key.as_bytes(), value.as_bytes());
         assert!(
             result.is_ok(),
             "Write should eventually succeed (may stall)"
@@ -509,13 +509,13 @@ fn should_stall_writes_given_l0_file_count_exceeded() {
     for i in 0..num_writes {
         let key = format!("l0_key_{}", i);
         let value = vec![0u8; 3072];
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
 
     // Assert - Despite potential stalls, all writes complete
     for i in 0..num_writes {
         let key = format!("l0_key_{}", i);
-        let result = engine.get(key.as_bytes()).unwrap();
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
         assert!(result.is_some());
     }
 }
@@ -531,14 +531,14 @@ fn should_resume_writes_given_compaction_caught_up() {
     for i in 0..1000 {
         let key = format!("burst_key_{}", i);
         let value = vec![0u8; 2048];
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     for i in 0..100 {
         let key = format!("resume_key_{}", i);
-        engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+        engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
     }
 
     // Assert
@@ -562,7 +562,7 @@ fn should_measure_write_stall_duration_given_backpressure() {
     for i in 0..num_writes {
         let key = format!("measure_key_{}", i);
         let value = vec![0u8; 4096];
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
 
     let elapsed = start.elapsed();
@@ -604,7 +604,7 @@ fn should_allocate_unique_sequences_given_concurrent_writes() {
             thread::spawn(move || {
                 for i in 0..puts_per_thread {
                     let key = format!("seq_test_{}_{}", thread_id, i);
-                    engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+                    engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
                 }
             })
         })
@@ -645,7 +645,7 @@ fn should_maintain_sequence_monotonicity_given_1000_concurrent_writes() {
             let engine = Arc::clone(&engine);
             thread::spawn(move || {
                 let key = format!("mono_key_{}", i);
-                engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+                engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
             })
         })
         .collect();
@@ -685,7 +685,7 @@ fn should_not_skip_sequences_given_aborted_writes() {
     // Act
     for i in 0..100 {
         let key = format!("key_{}", i);
-        engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+        engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
     }
 
     // Assert
@@ -719,7 +719,7 @@ fn should_preserve_sequence_order_given_concurrent_batches() {
             thread::spawn(move || {
                 for i in 0..batch_size {
                     let key = format!("batch_{}_item_{}", batch_id, i);
-                    engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+                    engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
                 }
             })
         })
@@ -753,7 +753,7 @@ fn should_allow_writes_given_compaction_in_progress() {
     for i in 0..1000 {
         let key = format!("compact_data_{}", i);
         let value = vec![0u8; 2048];
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
 
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -763,7 +763,7 @@ fn should_allow_writes_given_compaction_in_progress() {
         thread::spawn(move || {
             for i in 0..200 {
                 let key = format!("during_compact_{}", i);
-                engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+                engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
             }
         })
     };
@@ -788,7 +788,7 @@ fn should_not_block_writes_given_l0_l1_compaction_running() {
     for i in 0..800 {
         let key = format!("l0_data_{}", i);
         let value = vec![0u8; 3072];
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
 
     let num_concurrent = 100;
@@ -797,7 +797,7 @@ fn should_not_block_writes_given_l0_l1_compaction_running() {
             let engine = Arc::clone(&engine);
             thread::spawn(move || {
                 let key = format!("nonblock_key_{}", i);
-                engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+                engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
             })
         })
         .collect();
@@ -824,12 +824,12 @@ fn should_handle_write_during_multi_level_compaction() {
     for i in 0..1500 {
         let key = format!("multilevel_{}", i);
         let value = vec![0u8; 2048];
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
 
     for i in 0..100 {
         let key = format!("concurrent_ml_{}", i);
-        engine.put(Bytes::from(key), Bytes::from("test")).unwrap();
+        engine.put(&cf, key.as_bytes(), "test".as_bytes()).unwrap();
     }
 
     // Assert
@@ -857,7 +857,7 @@ fn should_handle_concurrent_delete_range_operations() {
 
     for i in 0..1000 {
         let key = format!("range_{:04}", i);
-        engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+        engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
     }
 
     // Act
@@ -908,7 +908,7 @@ fn should_handle_overlapping_delete_ranges_given_concurrent_calls() {
 
     for i in 0..500 {
         let key = format!("overlap_{:04}", i);
-        engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+        engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
     }
 
     // Act - Overlapping ranges
@@ -987,7 +987,7 @@ fn should_handle_point_write_during_delete_range() {
     // Assert - Final state depends on operation order, but no corruption
     for i in 0..500 {
         let key = format!("mixed_{:04}", i);
-        let result = engine.get(key.as_bytes()).unwrap();
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
         // Key may exist (write after delete) or not (delete after write)
         if let Some(val) = result {
             assert_eq!(val.as_ref(), b"updated");
@@ -1015,7 +1015,7 @@ fn should_serialize_wal_writes_given_concurrent_put_operations() {
             thread::spawn(move || {
                 for i in 0..writes_per_thread {
                     let key = format!("wal_{}_{}", thread_id, i);
-                    engine.put(Bytes::from(key), Bytes::from("value")).unwrap();
+                    engine.put(&cf, key.as_bytes(), "value".as_bytes()).unwrap();
                 }
             })
         })
@@ -1039,6 +1039,7 @@ fn should_serialize_wal_writes_given_concurrent_put_operations() {
 
 #[test]
 fn should_maintain_wal_order_given_concurrent_batches() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -1054,7 +1055,7 @@ fn should_maintain_wal_order_given_concurrent_batches() {
                 for i in 0..batch_size {
                     let key = format!("batch_{}_item_{}", batch_id, i);
                     let value = format!("batch{}", batch_id);
-                    engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
                 }
             })
         })
@@ -1079,6 +1080,7 @@ fn should_maintain_wal_order_given_concurrent_batches() {
 
 #[test]
 fn should_handle_wal_rotation_during_concurrent_writes() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let db_path = dir.path().to_path_buf();
@@ -1095,7 +1097,7 @@ fn should_handle_wal_rotation_during_concurrent_writes() {
                 for i in 0..writes_per_writer {
                     let key = format!("rotate_{}_{}", writer_id, i);
                     let value = vec![0u8; 1024]; // 1KB per write
-                    engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
                 }
             })
         })
@@ -1112,7 +1114,7 @@ fn should_handle_wal_rotation_during_concurrent_writes() {
     for writer_id in 0..num_writers {
         for i in 0..writes_per_writer {
             let key = format!("rotate_{}_{}", writer_id, i);
-            let result = engine.get(key.as_bytes()).unwrap();
+            let result = engine.get(&cf, key.as_bytes()).unwrap();
             assert!(result.is_some());
             assert_eq!(result.unwrap().len(), 1024);
         }

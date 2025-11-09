@@ -11,6 +11,7 @@ use std::path::Path;
 
 /// Helper to truncate a file by removing bytes from the end
 fn truncate_file(path: &Path, bytes_to_remove: u64) -> std::io::Result<()> {
+    let cf = engine.default_column_family();
     let file = OpenOptions::new().write(true).open(path)?;
     let metadata = file.metadata()?;
     let new_size = metadata.len().saturating_sub(bytes_to_remove);
@@ -20,6 +21,7 @@ fn truncate_file(path: &Path, bytes_to_remove: u64) -> std::io::Result<()> {
 
 /// Helper to corrupt bytes in the middle of a file
 fn corrupt_file_at_offset(path: &Path, offset: u64, corruption: &[u8]) -> std::io::Result<()> {
+    let cf = engine.default_column_family();
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(corruption)?;
@@ -29,6 +31,7 @@ fn corrupt_file_at_offset(path: &Path, offset: u64, corruption: &[u8]) -> std::i
 
 /// Helper to find WAL files in a directory
 fn find_wal_files(db_path: &Path) -> Vec<std::path::PathBuf> {
+    let cf = engine.default_column_family();
     let wal_dir = db_path.join("wal");
     if !wal_dir.exists() {
         return vec![];
@@ -65,6 +68,7 @@ fn find_wal_files(db_path: &Path) -> Vec<std::path::PathBuf> {
 
 #[test]
 fn should_recover_from_truncated_tail_given_power_loss() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -77,7 +81,7 @@ fn should_recover_from_truncated_tail_given_power_loss() {
         for i in 0..100 {
             let key = format!("key{:03}", i);
             let value = format!("value{:03}", i);
-            eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+            eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
 
         // Force flush to ensure all data is in WAL
@@ -116,7 +120,7 @@ fn should_recover_from_truncated_tail_given_power_loss() {
             for i in 0..95 {
                 let key = format!("key{:03}", i);
                 let expected = format!("value{:03}", i);
-                if let Ok(Some(value)) = eng.get(key.as_bytes()) {
+                if let Ok(Some(value)) = eng.get(&cf, key.as_bytes()) {
                     assert_eq!(value, Bytes::from(expected), "Mismatch for {}", key);
                     recovered_count += 1;
                 }
@@ -151,7 +155,7 @@ fn should_recover_from_truncated_tail_given_power_loss() {
             let mut count = 0;
             for i in 0..100 {
                 let key = format!("key{:03}", i);
-                if eng.get(key.as_bytes()).unwrap().is_some() {
+                if eng.get(&cf, key.as_bytes()).unwrap().is_some() {
                     count += 1;
                 }
             }
@@ -170,6 +174,7 @@ fn should_recover_from_truncated_tail_given_power_loss() {
 
 #[test]
 fn should_detect_middle_corruption_given_checksum_mismatch() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -182,7 +187,7 @@ fn should_detect_middle_corruption_given_checksum_mismatch() {
         for i in 0..100 {
             let key = format!("key{:03}", i);
             let value = format!("value{:03}", i);
-            eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+            eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
 
         drop(eng);
@@ -213,7 +218,7 @@ fn should_detect_middle_corruption_given_checksum_mismatch() {
             let mut found_early = false;
             for i in 0..10 {
                 let key = format!("key{:03}", i);
-                if eng.get(key.as_bytes()).is_ok() {
+                if eng.get(&cf, key.as_bytes()).is_ok() {
                     found_early = true;
                     break;
                 }
@@ -239,6 +244,7 @@ fn should_detect_middle_corruption_given_checksum_mismatch() {
 
 #[test]
 fn should_handle_empty_wal_file_given_crash_during_creation() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -246,7 +252,7 @@ fn should_handle_empty_wal_file_given_crash_during_creation() {
     // Create engine to establish directory structure
     {
         let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
-        eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
+        eng.put(&cf, "key1".as_bytes(), "value1".as_bytes()).unwrap();
         drop(eng);
     }
 
@@ -262,6 +268,7 @@ fn should_handle_empty_wal_file_given_crash_during_creation() {
 
 #[test]
 fn should_handle_partially_written_record_given_crash() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -273,7 +280,7 @@ fn should_handle_partially_written_record_given_crash() {
         for i in 0..50 {
             let key = format!("key{:03}", i);
             let value = format!("value{:03}", i);
-            eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+            eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
 
         drop(eng);
@@ -305,6 +312,7 @@ fn should_handle_partially_written_record_given_crash() {
 
 #[test]
 fn should_maintain_consistency_given_restart_during_flush() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     // Use small memtable to trigger flush
@@ -318,7 +326,7 @@ fn should_maintain_consistency_given_restart_during_flush() {
         for i in 0..100 {
             let key = format!("key{:03}", i);
             let value = "x".repeat(100); // 100 bytes per value
-            eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+            eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
 
         // Abrupt shutdown (drop without graceful shutdown)
@@ -332,7 +340,7 @@ fn should_maintain_consistency_given_restart_during_flush() {
     let mut found_count = 0;
     for i in 0..100 {
         let key = format!("key{:03}", i);
-        if let Ok(Some(_)) = eng.get(key.as_bytes()) {
+        if let Ok(Some(_)) = eng.get(&cf, key.as_bytes()) {
             found_count += 1;
         }
     }
@@ -346,6 +354,7 @@ fn should_maintain_consistency_given_restart_during_flush() {
 
 #[test]
 fn should_not_lose_data_given_manifest_and_wal_mismatch() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -353,7 +362,7 @@ fn should_not_lose_data_given_manifest_and_wal_mismatch() {
     // Write initial data
     {
         let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
-        eng.put(Bytes::from("persistent"), Bytes::from("data"))
+        eng.put(&cf, "persistent".as_bytes(), "data".as_bytes())
             .unwrap();
         drop(eng);
     }
@@ -361,7 +370,7 @@ fn should_not_lose_data_given_manifest_and_wal_mismatch() {
     // Act - Write more data but simulate crash before manifest update
     {
         let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
-        eng.put(Bytes::from("new_key"), Bytes::from("new_value"))
+        eng.put(&cf, "new_key".as_bytes(), "new_value".as_bytes())
             .unwrap();
 
         // Drop without explicit close to simulate crash
@@ -381,6 +390,7 @@ fn should_not_lose_data_given_manifest_and_wal_mismatch() {
 
 #[test]
 fn should_recover_from_crash_during_compaction() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = flush_test_opts(dir.path().to_path_buf(), 2048);
@@ -394,7 +404,7 @@ fn should_recover_from_crash_during_compaction() {
             for i in 0..50 {
                 let key = format!("key_{:02}_{:03}", batch, i);
                 let value = "x".repeat(100);
-                eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+                eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
             }
 
             // Give compaction time to start (if implemented)
@@ -412,7 +422,7 @@ fn should_recover_from_crash_during_compaction() {
     for batch in 0..5 {
         for i in 0..50 {
             let key = format!("key_{:02}_{:03}", batch, i);
-            if let Ok(Some(_)) = eng.get(key.as_bytes()) {
+            if let Ok(Some(_)) = eng.get(&cf, key.as_bytes()) {
                 total_found += 1;
             }
         }
@@ -431,6 +441,7 @@ fn should_recover_from_crash_during_compaction() {
 
 #[test]
 fn should_handle_multiple_wal_files_given_recovery() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -442,7 +453,7 @@ fn should_handle_multiple_wal_files_given_recovery() {
         for i in 0..20 {
             let key = format!("session{}_key{}", session, i);
             let value = format!("value{}", i);
-            eng.put(Bytes::from(key), Bytes::from(value)).unwrap();
+            eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
 
         drop(eng);
@@ -462,6 +473,7 @@ fn should_handle_multiple_wal_files_given_recovery() {
 
 #[test]
 fn should_preserve_sequence_order_across_corrupted_recovery() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -471,11 +483,11 @@ fn should_preserve_sequence_order_across_corrupted_recovery() {
         let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
 
         // Write, overwrite, delete pattern
-        eng.put(Bytes::from("key"), Bytes::from("v1")).unwrap();
-        eng.put(Bytes::from("key"), Bytes::from("v2")).unwrap();
-        eng.put(Bytes::from("key"), Bytes::from("v3")).unwrap();
-        eng.delete(Bytes::from("key")).unwrap();
-        eng.put(Bytes::from("key"), Bytes::from("final")).unwrap();
+        eng.put(&cf, "key".as_bytes(), "v1".as_bytes()).unwrap();
+        eng.put(&cf, "key".as_bytes(), "v2".as_bytes()).unwrap();
+        eng.put(&cf, "key".as_bytes(), "v3".as_bytes()).unwrap();
+        eng.delete(&cf, "key".as_bytes()).unwrap();
+        eng.put(&cf, "key".as_bytes(), "final".as_bytes()).unwrap();
 
         drop(eng);
 
@@ -491,7 +503,7 @@ fn should_preserve_sequence_order_across_corrupted_recovery() {
     // If "final" is present, we should see "final"
     let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
 
-    match eng.get(b"key") {
+    match eng.get(&cf, b"key") {
         Ok(Some(value)) => {
             // If key exists, it must be "final" (the last write)
             assert_eq!(
@@ -512,6 +524,7 @@ fn should_preserve_sequence_order_across_corrupted_recovery() {
 
 #[test]
 fn should_handle_zero_byte_wal_file() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -519,7 +532,7 @@ fn should_handle_zero_byte_wal_file() {
     // Create initial data
     {
         let eng = cntryl_midge::MidgeEngine::open(opts.clone()).unwrap();
-        eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
+        eng.put(&cf, "key1".as_bytes(), "value1".as_bytes()).unwrap();
         drop(eng);
     }
 
@@ -535,6 +548,7 @@ fn should_handle_zero_byte_wal_file() {
 
 #[test]
 fn should_recover_correct_count_after_batch_write_truncation() {
+    let cf = engine.default_column_family();
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
@@ -545,7 +559,7 @@ fn should_recover_correct_count_after_batch_write_truncation() {
 
         // Write exactly 100 records
         for i in 0..100 {
-            eng.put(
+            eng.put(&cf, 
                 Bytes::from(format!("k{:03}", i)),
                 Bytes::from(format!("v{:03}", i)),
             )
@@ -574,7 +588,7 @@ fn should_recover_correct_count_after_batch_write_truncation() {
             let mut count = 0;
             for i in 0..100 {
                 let key = format!("k{:03}", i);
-                if eng.get(key.as_bytes()).unwrap().is_some() {
+                if eng.get(&cf, key.as_bytes()).unwrap().is_some() {
                     count += 1;
                 }
             }

@@ -13,7 +13,7 @@ mod criterion_helper;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
-use cntryl_midge::{MidgeEngine, MidgeOptions, Mutation, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, WriteBatch, StorageMode};
 use std::hint::black_box;
 
 fn setup_db(name: &str) -> MidgeEngine {
@@ -36,6 +36,8 @@ fn bench_batch_put(c: &mut Criterion) {
 
     // Setup database once, reuse across iterations
     let engine = setup_db("batch_put");
+    let cf = engine.default_column_family();
+    let cf_id = cf.id();
 
     for &batch_size in &[100, 1_000] {
         group.bench_with_input(
@@ -44,19 +46,18 @@ fn bench_batch_put(c: &mut Criterion) {
             |b, &size| {
                 b.iter_batched(
                     || {
-                        // Only prepare mutations in setup (not database creation)
-                        let mutations: Vec<Mutation> = (0..size)
-                            .map(|i| {
-                                let key = format!("key_{:010}", i);
-                                let value = format!("value_{:010}_data", i);
-                                Mutation::put(Bytes::from(key), Bytes::from(value), None)
-                            })
-                            .collect();
-                        mutations
+                        // Only prepare a WriteBatch in setup (not database creation)
+                        let mut batch = WriteBatch::new();
+                        for i in 0..size {
+                            let key = format!("key_{:010}", i);
+                            let value = format!("value_{:010}_data", i);
+                            batch.put(cf_id, Bytes::from(key), Bytes::from(value));
+                        }
+                        batch
                     },
-                    |mutations| {
-                        // Only measure the batch operation itself
-                        engine.batch(mutations).unwrap();
+                    |batch| {
+                        // Only measure the batch operation itself (writes to default CF)
+                        engine.write_batch(&batch).unwrap();
                         black_box(());
                     },
                     BatchSize::SmallInput,
@@ -74,10 +75,11 @@ fn bench_multi_get(c: &mut Criterion) {
 
     // Setup: pre-populate database
     let engine = setup_db("multi_get");
+    let cf = engine.default_column_family();
     for i in 0..10_000 {
         let key = format!("key_{:010}", i);
         let value = format!("value_{:010}_padding", i);
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -90,8 +92,14 @@ fn bench_multi_get(c: &mut Criterion) {
             &batch_size,
             |b, _| {
                 b.iter(|| {
-                    let results = engine.multi_get(&key_refs).unwrap();
-                    black_box(results.len());
+                    // Use get_cf per-key (CF-aware API) instead of deprecated multi_get
+                    let mut found = 0usize;
+                    for k in &key_refs {
+                        if engine.get(&cf, k).unwrap().is_some() {
+                            found += 1;
+                        }
+                    }
+                    black_box(found);
                 })
             },
         );
@@ -105,6 +113,7 @@ fn bench_single_put(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_single_put");
 
     let engine = setup_db("single_put");
+    let cf = engine.default_column_family();
     let mut counter = 0u64;
 
     group.bench_function("single_put", |b| {
@@ -112,7 +121,7 @@ fn bench_single_put(c: &mut Criterion) {
             let key = format!("key_{:010}", counter);
             let value = format!("value_{:010}_data", counter);
             counter += 1;
-            engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+            engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
             black_box(());
         })
     });
@@ -125,12 +134,14 @@ fn bench_batch_delete(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_batch_delete");
 
     let engine = setup_db("batch_delete");
+    let cf = engine.default_column_family();
+    let cf_id = cf.id();
 
     // Pre-populate with data to delete
     for i in 0..100_000 {
         let key = format!("key_{:010}", i);
         let value = format!("value_{:010}_data", i);
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -142,17 +153,16 @@ fn bench_batch_delete(c: &mut Criterion) {
             |b, &size| {
                 b.iter_batched(
                     || {
-                        let mutations: Vec<Mutation> = (offset..offset + size)
-                            .map(|i| {
-                                let key = format!("key_{:010}", i);
-                                Mutation::delete(Bytes::from(key))
-                            })
-                            .collect();
+                        let mut batch = WriteBatch::new();
+                        for i in offset..offset + size {
+                            let key = format!("key_{:010}", i);
+                            batch.delete(cf_id, Bytes::from(key));
+                        }
                         offset += size;
-                        mutations
+                        batch
                     },
-                    |mutations| {
-                        engine.batch(mutations).unwrap();
+                    |batch| {
+                        engine.write_batch(&batch).unwrap();
                         black_box(());
                     },
                     BatchSize::SmallInput,
@@ -169,12 +179,14 @@ fn bench_batch_mixed(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_batch_mixed");
 
     let engine = setup_db("batch_mixed");
+    let cf = engine.default_column_family();
+    let cf_id = cf.id();
 
     // Pre-populate with some data
     for i in 0..50_000 {
         let key = format!("key_{:010}", i);
         let value = format!("value_{:010}_data", i);
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -186,25 +198,24 @@ fn bench_batch_mixed(c: &mut Criterion) {
             |b, &size| {
                 b.iter_batched(
                     || {
-                        let mutations: Vec<Mutation> = (0..size)
-                            .map(|i| {
-                                if i % 2 == 0 {
-                                    // Put new data
-                                    let key = format!("key_{:010}", offset + i);
-                                    let value = format!("value_{:010}_data", offset + i);
-                                    Mutation::put(Bytes::from(key), Bytes::from(value), None)
-                                } else {
-                                    // Delete existing data
-                                    let key = format!("key_{:010}", i / 2);
-                                    Mutation::delete(Bytes::from(key))
-                                }
-                            })
-                            .collect();
+                        let mut batch = WriteBatch::new();
+                        for i in 0..size {
+                            if i % 2 == 0 {
+                                // Put new data
+                                let key = format!("key_{:010}", offset + i);
+                                let value = format!("value_{:010}_data", offset + i);
+                                batch.put(cf_id, Bytes::from(key), Bytes::from(value));
+                            } else {
+                                // Delete existing data
+                                let key = format!("key_{:010}", i / 2);
+                                batch.delete(cf_id, Bytes::from(key));
+                            }
+                        }
                         offset += size;
-                        mutations
+                        batch
                     },
-                    |mutations| {
-                        engine.batch(mutations).unwrap();
+                    |batch| {
+                        engine.write_batch(&batch).unwrap();
                         black_box(());
                     },
                     BatchSize::SmallInput,

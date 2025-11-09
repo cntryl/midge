@@ -830,7 +830,7 @@ impl MidgeEngine {
             let memtable = cf.memtable.read();
             let is_empty = memtable.is_empty();
             drop(memtable);
-            
+
             if !is_empty {
                 return Err(crate::error::MidgeError::invalid_config(format!(
                     "Cannot drop column family '{}' with unflushed data in active memtable. \
@@ -838,7 +838,7 @@ impl MidgeEngine {
                     handle.name()
                 )));
             }
-            
+
             // Check if there are any immutable memtables
             let immutable_count = cf.immutable_count();
             if immutable_count > 0 {
@@ -912,7 +912,7 @@ impl MidgeEngine {
     // ==================== Column Family Operations ====================
 
     /// Get a value from a column family.
-    pub fn get_cf(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+    pub fn get(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         self.metrics.record_get();
 
         let cf_id = cf.id();
@@ -975,7 +975,7 @@ impl MidgeEngine {
     }
 
     /// Put a key-value pair into a specific column family.
-    pub fn put_cf(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+    pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         if self.read_only {
             return Err(crate::error::MidgeError::invalid_config(
                 "Cannot write in read-only mode",
@@ -1019,7 +1019,7 @@ impl MidgeEngine {
         if memtable_full {
             // Try to freeze the active memtable
             let frozen = column_family.try_freeze_memtable();
-            
+
             if frozen {
                 // Successfully froze memtable, trigger flush
                 // TODO Phase 4: Enqueue per-CF FlushJob instead of legacy flush
@@ -1043,7 +1043,7 @@ impl MidgeEngine {
     }
 
     /// Delete a key from a column family.
-    pub fn delete_cf(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
+    pub fn delete(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
         if self.read_only {
             return Err(crate::error::MidgeError::invalid_config(
                 "Cannot write in read-only mode",
@@ -1084,11 +1084,7 @@ impl MidgeEngine {
     }
 
     /// Scan a range in a column family.
-    pub fn scan_cf(
-        &self,
-        cf: &ColumnFamilyHandle,
-        query: Query,
-    ) -> MidgeResult<Vec<(Bytes, Bytes)>> {
+    pub fn scan(&self, cf: &ColumnFamilyHandle, query: Query) -> MidgeResult<Vec<(Bytes, Bytes)>> {
         let cf_id = cf.id();
         let start = query.start.as_ref().map(|b| b.as_ref());
         let end_ref = query.end.as_ref().map(|b| b.as_ref());
@@ -1139,7 +1135,7 @@ impl MidgeEngine {
                     .into_iter()
                     .map(|k| (k, None, 0u64))
                     .collect();
-                
+
                 if !immut_items.is_empty() {
                     sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
                         immut_items,
@@ -1207,7 +1203,7 @@ impl MidgeEngine {
     }
 
     /// Delete a range of keys in a column family where `start <= key < end`.
-    pub fn delete_range_cf(
+    pub fn delete_range(
         &self,
         cf: &ColumnFamilyHandle,
         start: &[u8],
@@ -1254,109 +1250,6 @@ impl MidgeEngine {
         }
 
         Ok(())
-    }
-
-    // ==================== Legacy API (delegates to default CF) ====================
-    // DEPRECATED: These methods operate on the default CF only. Use CF-aware methods instead:
-    // - get(&key) -> get_cf(&cf, key)
-    // - put(key, value) -> put_cf(&cf, &key, &value)
-    // - delete(key) -> delete_cf(&cf, &key)
-    // - scan(query) -> scan_cf(&cf, query)
-    // - multi_get(&keys) -> multi_get_cf(&cf, &keys)
-    // - batch(mutations) -> batch_cf(&cf, mutations)
-    // - begin_transaction() -> begin_transaction_cf(&cf)
-    //
-    // These will be removed in Phase 6 after existing tests/benchmarks are migrated.
-
-    /// Get a value by key (DEPRECATED: use `get_cf` instead).
-    #[deprecated(since = "0.2.0", note = "use `get_cf(&default_column_family(), key)` instead")]
-    pub fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
-        self.metrics.record_get();
-
-        // Use latest snapshot sequence for visibility and expiration checking
-        let snapshot_seq = self.seq.load(std::sync::atomic::Ordering::SeqCst);
-
-        // Collect versions from memtable
-        let mut all_versions =
-            self.with_default_memtable(|mt| mt.get_versions_for_merge(key, snapshot_seq));
-
-        // Check if memtable has a non-expired Put/Delete barrier (no need to check SSTs)
-        let now = timestamp::now_millis();
-
-        let has_barrier = all_versions.iter().any(|(_value_opt, exp_opt, op_type)| {
-            // Check if expired
-            if let Some(exp_millis) = exp_opt {
-                if now >= *exp_millis {
-                    return false; // Expired, not a barrier
-                }
-            }
-            // Non-expired Put or Delete acts as barrier
-            *op_type == crate::core::skiplist::OpType::Put
-                || *op_type == crate::core::skiplist::OpType::Delete
-        });
-
-        // If no barrier in memtable, collect from SSTs too
-        if !has_barrier {
-            let manifest = self.get_manifest();
-
-            // Iterate over file names (newest first)
-            for name in manifest.ssts.iter().rev() {
-                // BLOOM PRE-CHECK: Skip SST if bloom filter says key absent
-                if !self.bloom_cache.may_contain(name, key) {
-                    continue; // Key definitely not in this SST
-                }
-
-                let p = self.sst_dir.join(name);
-                // CloudSstReaderFactory will download from cloud if not in local cache
-                // Robustness: transient NotFound can occur on some platforms shortly
-                // after a file is renamed into place. Retry a few times for these
-                // transient errors before giving up on this SST.
-                let mut sst_opt: Option<Box<dyn crate::sst::SstStateReader>> = None;
-                for _attempt in 0..5 {
-                    match self.sst_reader_factory.open(&p) {
-                        Ok(s) => {
-                            sst_opt = Some(s);
-                            break;
-                        }
-                        Err(e) => {
-                            // If it's an IO NotFound, backoff and retry; otherwise ignore this SST
-                            match &e {
-                                crate::error::MidgeError::Io(ioe)
-                                    if ioe.kind() == std::io::ErrorKind::NotFound =>
-                                {
-                                    std::thread::sleep(std::time::Duration::from_millis(5));
-                                    continue;
-                                }
-                                _ => break,
-                            }
-                        }
-                    }
-                }
-                if let Some(sst) = sst_opt {
-                    match sst.get_state(key) {
-                        Ok(crate::sst::KeyState::Value(v, _seq, exp)) => {
-                            // Found a Put in SST - use as base value
-                            all_versions.push((Some(v), exp, crate::core::skiplist::OpType::Put));
-                            break; // Stop at first Put
-                        }
-                        Ok(crate::sst::KeyState::Tombstone(_seq)) => {
-                            // Found Delete in SST - acts as barrier
-                            all_versions.push((None, None, crate::core::skiplist::OpType::Delete));
-                            break;
-                        }
-                        Ok(_state) => {}
-                        Err(_e) => {}
-                    }
-                }
-            }
-        }
-
-        // Perform merge resolution if we have any versions
-        if !all_versions.is_empty() {
-            return self.resolve_merges(key, all_versions);
-        }
-
-        Ok(None)
     }
 
     /// Resolve merge operations given a list of versions from newest to oldest.
@@ -1439,86 +1332,6 @@ impl MidgeEngine {
         Ok(Some(Bytes::from(result)))
     }
 
-    /// Batched point lookup. More efficient than calling get() repeatedly.
-    /// (DEPRECATED: use `multi_get_cf` instead)
-    #[deprecated(since = "0.2.0", note = "use `multi_get_cf(&default_column_family(), keys)` instead")]
-    pub fn multi_get(&self, keys: &[&[u8]]) -> MidgeResult<Vec<(Bytes, Option<Bytes>)>> {
-        self.metrics.record_multi_get(keys.len());
-
-        // OPTIMIZATION: Pre-allocate with exact capacity
-        let mut results: Vec<(Bytes, Option<Bytes>)> = Vec::with_capacity(keys.len());
-        let mut pending: Vec<(usize, &[u8])> = Vec::with_capacity(keys.len());
-
-        // First pass: check memtable
-        for (idx, key) in keys.iter().enumerate() {
-            if let Some(v) = self.with_default_memtable(|mt| mt.get(key)) {
-                results.push((Bytes::copy_from_slice(key), Some(v)));
-            } else {
-                pending.push((idx, key));
-                results.push((Bytes::copy_from_slice(key), None));
-            }
-        }
-
-        if pending.is_empty() {
-            return Ok(results);
-        }
-
-        let manifest = Manifest::load(&self.db_path).unwrap_or_default();
-
-        for name in manifest.ssts.iter().rev() {
-            if pending.is_empty() {
-                break; // All keys found
-            }
-
-            let p = self.sst_dir.join(name);
-            // CloudSstReaderFactory will download from cloud if not in local cache
-            if let Ok(sst) = self.sst_reader_factory.open(&p) {
-                let now_millis = timestamp::now_millis();
-                let mut still_pending = Vec::with_capacity(pending.len());
-
-                for &(idx, key) in &pending {
-                    match sst.get_state(key) {
-                        Ok(crate::sst::KeyState::Value(v, _seq, expiration)) => {
-                            // Check if key is expired
-                            let is_expired = if let Some(exp_ts) = expiration {
-                                exp_ts <= now_millis
-                            } else {
-                                false
-                            };
-
-                            if is_expired {
-                                // Key is expired, treat as deleted
-                                results[idx].1 = None;
-                            } else {
-                                results[idx].1 = Some(v);
-                            }
-                            // Don't add to still_pending - we found it (or it's expired)
-                        }
-                        Ok(crate::sst::KeyState::Tombstone(_seq)) => {
-                            results[idx].1 = None;
-                            // Don't add to still_pending - it's deleted
-                        }
-                        _ => {
-                            // Not found in this SST, keep searching
-                            still_pending.push((idx, key));
-                        }
-                    }
-                }
-
-                pending = still_pending;
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// Range scan over key-value pairs (DEPRECATED: use `scan_cf` instead).
-    #[deprecated(since = "0.2.0", note = "use `scan_cf(&default_column_family(), query)` instead")]
-    pub fn scan(&self, q: Query) -> MidgeResult<Vec<(Bytes, Bytes)>> {
-        self.metrics.record_scan();
-        self.scan_streaming(q)
-    }
-
     /// Range scan using merging iterator for memory efficiency.
     pub fn scan_streaming(&self, q: Query) -> MidgeResult<Vec<(Bytes, Bytes)>> {
         use crate::core::merge_iterator::{IteratorSource, MergingIterator, VecSource};
@@ -1598,16 +1411,6 @@ impl MidgeEngine {
         Ok(iter.collect())
     }
 
-    /// Put a key/value synchronously (write to WAL then update MemTable).
-    /// (DEPRECATED: use `put_cf` instead)
-    ///
-    /// BREAKING CHANGE: Now consumes key and value for zero-copy performance.
-    /// Use .clone() at call site if you need to retain ownership.
-    #[deprecated(since = "0.2.0", note = "use `put_cf(&default_column_family(), &key, &value)` instead")]
-    pub fn put(&self, key: Bytes, value: Bytes) -> MidgeResult<()> {
-        self.put_with_ttl(key, value, 0)
-    }
-
     /// Put a key/value with a time-to-live (TTL) in seconds.
     ///
     /// The key will automatically expire after the specified duration.
@@ -1615,48 +1418,33 @@ impl MidgeEngine {
     ///
     /// BREAKING CHANGE: Now consumes key and value for zero-copy performance.
     ///
+    /// Put a key-value pair with TTL into a specific column family.
+    ///
     /// # Examples
     /// ```no_run
     /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
     /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
+    /// let cf = engine.default_column_family();
     /// // Key expires after 60 seconds
-    /// engine.put_with_ttl(Bytes::from("session:123"), Bytes::from("data"), 60).unwrap();
+    /// engine.put_with_ttl_cf(&cf, b"session:123", b"data", 60).unwrap();
     /// ```
-    pub fn put_with_ttl(&self, key: Bytes, value: Bytes, ttl_seconds: u64) -> MidgeResult<()> {
-        self.check_read_only()?;
-        self.metrics.record_put();
-        self.metrics.record_memtable_write();
-
-        // Check if rotation needed (racy but OK - we'll rotate on next write if we miss)
-        let predicted = wal_record_encoded_len(WalOpKind::Put, key.len(), Some(value.len()), None);
-        if self.wal_coordinator.current_pos().saturating_add(predicted)
-            > self.wal_buffer_size as u64
-        {
-            let _ = self.rollover_and_queue_flush();
+    pub fn put_with_ttl(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+        ttl_seconds: u64,
+    ) -> MidgeResult<()> {
+        if self.read_only {
+            return Err(crate::error::MidgeError::invalid_config(
+                "Cannot write in read-only mode",
+            ));
         }
 
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.metrics.record_wal_write();
-
-        // OPTIMIZATION: Clone Bytes ONCE for both WAL and memtable (cheap Arc increment)
-        // WAL gets ownership, memtable gets a clone
-        let key_for_memtable = key.clone();
-        let value_for_memtable = value.clone();
-
-        let _ = self.wal_coordinator.writer().append_op_with_seq_ttl_bytes(
-            WalOpKind::Put,
-            key,         // Consume: zero-copy move to WAL
-            Some(value), // Consume: zero-copy move to WAL
-            seq,
-            ttl_seconds,
-        )?;
-
-        if self.wal_sync {
-            self.metrics.record_wal_sync();
-            let _ = self.wal_coordinator.sync();
-        }
+        let cf_id = cf.id();
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
 
         // Compute expiration time in milliseconds if TTL > 0
         let expiration = if ttl_seconds > 0 {
@@ -1666,16 +1454,49 @@ impl MidgeEngine {
             None
         };
 
-        self.with_default_memtable_mut(|mt| {
-            mt.put_with_seq_and_exp(&key_for_memtable, &value_for_memtable, seq, expiration)
-        });
+        // Write to WAL with TTL
+        let rec = crate::wal::WalRecord::new_with_ttl(
+            cf_id,
+            crate::wal::WalOpKind::Put,
+            Bytes::copy_from_slice(key),
+            Some(Bytes::copy_from_slice(value)),
+            seq,
+            ttl_seconds,
+        );
 
-        // If memtable is full, trigger an immediate flush to avoid memory pressure.
-        // The previous optimization checked fullness only every 64 writes which
-        // could delay emergency flushes; ensure we always respond when full.
-        if self.with_default_memtable(|mt| mt.is_full(self.memtable_size)) {
-            let _ = self.flush();
+        self.wal_coordinator.append_record(&rec)?;
+        if self.wal_sync {
+            self.wal_coordinator.sync()?;
         }
+
+        // Write to MemTable with expiration
+        let column_family = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+            crate::error::MidgeError::invalid_config(format!(
+                "Column family '{}' does not exist",
+                cf.name()
+            ))
+        })?;
+
+        {
+            let mt = column_family.memtable.read();
+            mt.put_with_seq_and_exp(key, value, seq, expiration);
+        }
+
+        // Check if memtable is full and trigger freeze + flush
+        let memtable_full = column_family.is_full();
+
+        if memtable_full {
+            let frozen = column_family.try_freeze_memtable();
+
+            if frozen && cf_id == DEFAULT_CF_ID {
+                let _ = self.flush();
+            } else if column_family.should_stall_writes() {
+                return Err(crate::error::MidgeError::invalid_config(
+                    "Write stall: too many immutable memtables pending flush",
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -1684,6 +1505,8 @@ impl MidgeEngine {
     /// All operations in the batch are written to the WAL in a single write,
     /// then applied to the memtable. This provides better throughput than
     /// individual puts by reducing WAL overhead.
+    ///
+    /// Each operation in the batch can target a different column family.
     pub fn write_batch(&self, batch: &crate::api::WriteBatch) -> MidgeResult<()> {
         if batch.is_empty() {
             return Ok(());
@@ -1731,7 +1554,7 @@ impl MidgeEngine {
             sequences.push((op, seq, expiration));
 
             let record = crate::wal::WalRecord {
-                cf_id: 0,
+                cf_id: op.cf_id().as_u32(),
                 op: op.kind(),
                 key: op.key().clone(),
                 value: op.value().cloned(),
@@ -1750,22 +1573,30 @@ impl MidgeEngine {
 
         // Apply to memtable (using pre-computed expirations from WAL record creation)
         for (op, seq, expiration) in sequences {
+            let cf_id = op.cf_id();
+            let column_family = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+                crate::error::MidgeError::invalid_config(format!(
+                    "Column family with id {} does not exist",
+                    cf_id.as_u32()
+                ))
+            })?;
+
             match op.kind() {
                 WalOpKind::Put => {
                     self.metrics.record_put();
                     self.metrics.record_memtable_write();
 
                     if let Some(value) = op.value() {
-                        self.with_default_memtable_mut(|mt| {
-                            mt.put_with_seq_and_exp(op.key(), value, seq, expiration)
-                        });
+                        let mt = column_family.memtable.read();
+                        mt.put_with_seq_and_exp(op.key(), value, seq, expiration);
                     }
                 }
                 WalOpKind::Delete => {
                     self.metrics.record_delete();
                     self.metrics.record_memtable_write();
                     self.metrics.record_point_tombstone_created();
-                    self.with_default_memtable_mut(|mt| mt.delete_with_seq(op.key(), seq));
+                    let mt = column_family.memtable.read();
+                    mt.delete_with_seq(op.key(), seq);
                 }
                 _ => {}
             }
@@ -1777,95 +1608,11 @@ impl MidgeEngine {
             self.wal_coordinator.sync()?;
         }
 
-        // Check if memtable is full after batch
+        // Check if any memtables are full after batch
+        // TODO Phase 4: Implement per-CF flush triggering
         if self.with_default_memtable(|mt| mt.is_full(self.memtable_size)) {
             let _ = self.flush();
         }
-
-        Ok(())
-    }
-
-    /// Delete a key (DEPRECATED: use `delete_cf` instead).
-    #[deprecated(since = "0.2.0", note = "use `delete_cf(&default_column_family(), &key)` instead")]
-    pub fn delete(&self, key: Bytes) -> MidgeResult<()> {
-        self.check_read_only()?;
-        self.metrics.record_delete();
-        self.metrics.record_memtable_write();
-        self.metrics.record_point_tombstone_created();
-
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.metrics.record_wal_write();
-        let _ =
-            self.wal_coordinator
-                .writer()
-                .append_op_with_seq(WalOpKind::Delete, &key, None, seq)?;
-        if self.wal_sync {
-            self.metrics.record_wal_sync();
-            let _ = self.wal_coordinator.sync();
-        }
-        // OPTIMIZATION: When wal_sync=false, don't flush on every write.
-        self.with_default_memtable_mut(|mt| mt.delete_with_seq(&key, seq));
-        Ok(())
-    }
-
-    /// Delete a range of keys [start, end).
-    /// Delete a range of keys.
-    ///
-    /// This efficiently deletes all keys in the range from `start` (inclusive)
-    /// to `end` (exclusive) using range tombstones in the memtable. Range deletions
-    /// are more efficient than deleting keys individually when removing many
-    /// contiguous keys.
-    ///
-    /// Range deletions are durable - they are written to the Write-Ahead Log
-    /// (WAL) and will be replayed during recovery if the database crashes
-    /// before the memtable is flushed to disk.
-    ///
-    /// # Examples
-    /// ```no_run
-    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
-    /// # use bytes::Bytes;
-    /// # let opts = MidgeOptions::default();
-    /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// // Delete all session keys from "session:a" to "session:z"
-    /// engine.delete_range(
-    ///     Bytes::from("session:a"),
-    ///     Bytes::from("session:z")
-    /// ).unwrap();
-    /// ```
-    ///
-    /// # Errors
-    /// Returns an error if the engine is in read-only mode.
-    pub fn delete_range(&self, start: Bytes, end: Bytes) -> MidgeResult<()> {
-        self.check_read_only()?;
-        self.metrics.record_delete();
-        self.metrics.record_memtable_write();
-        self.metrics.record_range_tombstone_created();
-
-        // Validate range
-        if start >= end {
-            return Ok(()); // Empty range, no-op
-        }
-
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-
-        // Write to WAL first for durability
-        self.metrics.record_wal_write();
-        let record = crate::wal::WalRecord::new_delete_range(
-            crate::api::column_family::ColumnFamilyId::new(0),
-            start.clone(),
-            end.clone(),
-            seq,
-        );
-        self.wal_coordinator.append_record(&record)?;
-
-        if self.wal_sync {
-            self.metrics.record_wal_sync();
-            let _ = self.wal_coordinator.sync();
-        }
-        // OPTIMIZATION: When wal_sync=false, don't flush on every write.
-
-        // Apply to memtable using range tombstone
-        self.with_default_memtable_mut(|mt| mt.delete_range_with_seq(&start, &end, seq));
 
         Ok(())
     }
@@ -1900,7 +1647,7 @@ impl MidgeEngine {
         Ok(())
     }
 
-    /// Apply a merge operation to a key.
+    /// Apply a merge operation to a key in a specific column family.
     ///
     /// Merge operations are deferred - they don't require reading the current value.
     /// Multiple merge operands are combined during compaction or on read.
@@ -1912,84 +1659,66 @@ impl MidgeEngine {
     /// ```no_run
     /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
     /// # use cntryl_midge::merge_operator::IntegerAddOperator;
-    /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// # engine.register_merge_operator(0, Box::new(IntegerAddOperator)).unwrap();
+    /// let cf = engine.default_column_family();
+    /// engine.register_merge_operator(cf.id().as_u32(), Box::new(IntegerAddOperator)).unwrap();
     /// // Increment counter without reading current value
-    /// engine.merge(Bytes::from("page_views"), Bytes::from("1")).unwrap();
-    /// engine.merge(Bytes::from("page_views"), Bytes::from("5")).unwrap();
-    ///
-    /// // Read combines all increments
-    /// let count = engine.get(b"page_views").unwrap(); // Returns Some(b"6")
+    /// engine.merge_cf(&cf, b"page_views", b"1").unwrap();
+    /// engine.merge_cf(&cf, b"page_views", b"5").unwrap();
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Engine is in read-only mode
-    /// - No merge operator is registered for the column family
-    pub fn merge(&self, key: Bytes, value: Bytes) -> MidgeResult<()> {
-        self.merge_with_ttl(key, value, 0)
+    pub fn merge_cf(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+    ) -> MidgeResult<()> {
+        self.merge_with_ttl_cf(cf, key, value, 0)
     }
 
-    /// Apply a merge operation with a time-to-live (TTL).
+    /// Apply a merge operation with TTL to a key in a specific column family.
     ///
-    /// Like `merge`, but the resulting value will expire after the specified duration.
+    /// Like `merge_cf`, but the resulting value will expire after the specified duration.
     ///
     /// # Examples
     ///
     /// ```no_run
     /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
     /// # use cntryl_midge::merge_operator::IntegerAddOperator;
-    /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// # engine.register_merge_operator(0, Box::new(IntegerAddOperator)).unwrap();
+    /// let cf = engine.default_column_family();
+    /// engine.register_merge_operator(cf.id().as_u32(), Box::new(IntegerAddOperator)).unwrap();
     /// // Temporary counter expires after 60 seconds
-    /// engine.merge_with_ttl(Bytes::from("temp_counter"), Bytes::from("1"), 60).unwrap();
+    /// engine.merge_with_ttl_cf(&cf, b"temp_counter", b"1", 60).unwrap();
     /// ```
-    pub fn merge_with_ttl(&self, key: Bytes, value: Bytes, ttl_seconds: u64) -> MidgeResult<()> {
-        self.check_read_only()?;
-        self.metrics.record_put(); // Count as write operation
-        self.metrics.record_memtable_write();
+    pub fn merge_with_ttl_cf(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+        ttl_seconds: u64,
+    ) -> MidgeResult<()> {
+        if self.read_only {
+            return Err(crate::error::MidgeError::invalid_config(
+                "Cannot write in read-only mode",
+            ));
+        }
 
-        // Check that a merge operator is registered
+        let cf_id = cf.id();
+
+        // Check that a merge operator is registered for this CF
         {
             let ops = self.merge_operators.read();
-            if !ops.contains_key(&0) {
-                return Err(crate::error::MidgeError::invalid_config(
-                    "No merge operator registered for column family 0",
-                ));
+            if !ops.contains_key(&cf_id.as_u32()) {
+                return Err(crate::error::MidgeError::invalid_config(format!(
+                    "No merge operator registered for column family '{}'",
+                    cf.name()
+                )));
             }
         }
 
-        // Check if rotation needed (racy but OK)
-        let predicted =
-            wal_record_encoded_len(WalOpKind::Merge, key.len(), Some(value.len()), None);
-        if self.wal_coordinator.current_pos().saturating_add(predicted)
-            > self.wal_buffer_size as u64
-        {
-            let _ = self.rollover_and_queue_flush();
-        }
-
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.metrics.record_wal_write();
-
-        // Write as Merge operation to WAL
-        let _ = self.wal_coordinator.writer().append_op_with_seq_ttl(
-            WalOpKind::Merge,
-            &key,
-            Some(&value),
-            seq,
-            ttl_seconds,
-        )?;
-
-        if self.wal_sync {
-            self.metrics.record_wal_sync();
-            let _ = self.wal_coordinator.sync();
-        }
-        // OPTIMIZATION: When wal_sync=false, don't flush on every write.
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
 
         // Compute expiration time in milliseconds if TTL > 0
         let expiration = if ttl_seconds > 0 {
@@ -1999,13 +1728,47 @@ impl MidgeEngine {
             None
         };
 
-        // Store as merge operand in memtable with OpType::Merge
-        self.with_default_memtable_mut(|mt| {
-            mt.merge_with_seq_and_exp(&key, &value, seq, expiration)
-        });
+        // Write to WAL
+        let rec = crate::wal::WalRecord::new_with_ttl(
+            cf_id,
+            crate::wal::WalOpKind::Merge,
+            Bytes::copy_from_slice(key),
+            Some(Bytes::copy_from_slice(value)),
+            seq,
+            ttl_seconds,
+        );
 
-        if self.with_default_memtable(|mt| mt.is_full(self.memtable_size)) {
-            let _ = self.flush();
+        self.wal_coordinator.append_record(&rec)?;
+        if self.wal_sync {
+            self.wal_coordinator.sync()?;
+        }
+
+        // Write to MemTable as merge operand
+        let column_family = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+            crate::error::MidgeError::invalid_config(format!(
+                "Column family '{}' does not exist",
+                cf.name()
+            ))
+        })?;
+
+        {
+            let mt = column_family.memtable.read();
+            mt.merge_with_seq_and_exp(key, value, seq, expiration);
+        }
+
+        // Check if memtable is full and trigger freeze + flush
+        let memtable_full = column_family.is_full();
+
+        if memtable_full {
+            let frozen = column_family.try_freeze_memtable();
+
+            if frozen && cf_id == DEFAULT_CF_ID {
+                let _ = self.flush();
+            } else if column_family.should_stall_writes() {
+                return Err(crate::error::MidgeError::invalid_config(
+                    "Write stall: too many immutable memtables pending flush",
+                ));
+            }
         }
 
         Ok(())
@@ -2022,17 +1785,16 @@ impl MidgeEngine {
     /// # let mut opts = MidgeOptions::default();
     /// # opts.storage_mode = StorageMode::Memory;
     /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// let key = Bytes::from("user:123");
-    /// let value = Bytes::from("Alice");
+    /// let cf = engine.default_column_family();
     ///
     /// // First insert succeeds
-    /// assert!(engine.insert(key.clone(), value.clone()).unwrap());
+    /// assert!(engine.insert(&cf, b"user:123", b"Alice").unwrap());
     ///
     /// // Second insert fails (key exists)
-    /// assert!(!engine.insert(key, value).unwrap());
+    /// assert!(!engine.insert(&cf, b"user:123", b"Alice").unwrap());
     /// ```
-    pub fn insert(&self, key: Bytes, value: Bytes) -> MidgeResult<bool> {
-        self.insert_with_ttl(key, value, 0)
+    pub fn insert(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<bool> {
+        self.insert_with_ttl(cf, key, value, 0)
     }
 
     /// Insert a key-value pair only if the key does not exist, with TTL.
@@ -2043,29 +1805,36 @@ impl MidgeEngine {
     /// # Examples
     /// ```no_run
     /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
-    /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
+    /// let cf = engine.default_column_family();
     /// // Insert with 300 second TTL
     /// let inserted = engine.insert_with_ttl(
-    ///     Bytes::from("lock:resource"),
-    ///     Bytes::from("held"),
+    ///     &cf,
+    ///     b"lock:resource",
+    ///     b"held",
     ///     300
     /// ).unwrap();
     /// ```
-    pub fn insert_with_ttl(&self, key: Bytes, value: Bytes, ttl_seconds: u64) -> MidgeResult<bool> {
+    pub fn insert_with_ttl(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+        ttl_seconds: u64,
+    ) -> MidgeResult<bool> {
         self.check_read_only()?;
 
-        // Use snapshot isolation for consistent read
-        let snap = self.snapshot();
-        let exists = self.get_at(&key, &snap)?.is_some();
+        // Check if key exists
+        // TODO: Use snapshot isolation for consistent read across CFs
+        let exists = self.get(cf, key)?.is_some();
 
         if exists {
             return Ok(false);
         }
 
         // Key doesn't exist, perform the put with TTL
-        self.put_with_ttl(key, value, ttl_seconds)?;
+        self.put_with_ttl(cf, key, value, ttl_seconds)?;
         Ok(true)
     }
 
@@ -2081,31 +1850,33 @@ impl MidgeEngine {
     /// # Examples
     /// ```
     /// # use cntryl_midge::{MidgeOptions, MidgeEngine, InsertResult};
-    /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
+    /// let cf = engine.default_column_family();
     ///
-    /// let key = Bytes::from("counter");
-    /// let value = Bytes::from("1");
-    ///
-    /// match engine.insert_with_value(key.clone(), value).unwrap() {
+    /// match engine.insert_with_value(&cf, b"counter", b"1").unwrap() {
     ///     InsertResult::Inserted => println!("Created new counter"),
     ///     InsertResult::AlreadyExists(v) => println!("Counter exists: {:?}", v),
     /// }
     /// ```
-    pub fn insert_with_value(&self, key: Bytes, value: Bytes) -> MidgeResult<InsertResult> {
+    pub fn insert_with_value(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+    ) -> MidgeResult<InsertResult> {
         if self.read_only {
             return Err(crate::error::MidgeError::ReadOnly);
         }
 
-        // Use snapshot isolation for consistent read
-        let snap = self.snapshot();
-        if let Some(existing) = self.get_at(&key, &snap)? {
+        // Check if key exists
+        // TODO: Use snapshot isolation for consistent read across CFs
+        if let Some(existing) = self.get(cf, key)? {
             return Ok(InsertResult::AlreadyExists(existing));
         }
 
-        // Key doesn't exist, perform the put using the non-deprecated API
-        self.put_with_ttl(key, value, 0)?;
+        // Key doesn't exist, perform the put
+        self.put_with_ttl(cf, key, value, 0)?;
         Ok(InsertResult::Inserted)
     }
 
@@ -2128,17 +1899,16 @@ impl MidgeEngine {
     /// # Examples
     /// ```
     /// # use cntryl_midge::{MidgeOptions, MidgeEngine, CasResult};
-    /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
-    ///
-    /// let key = Bytes::from("counter");
+    /// let cf = engine.default_column_family();
     ///
     /// // Initialize counter (expect it to not exist)
     /// match engine.compare_and_swap(
-    ///     key.clone(),
+    ///     &cf,
+    ///     b"counter",
     ///     None,
-    ///     Bytes::from("0")
+    ///     b"0"
     /// ).unwrap() {
     ///     CasResult::Swapped => println!("Initialized"),
     ///     CasResult::Mismatch(_) => println!("Already exists"),
@@ -2146,9 +1916,10 @@ impl MidgeEngine {
     ///
     /// // Increment counter (expect current value to be "0")
     /// match engine.compare_and_swap(
-    ///     key.clone(),
+    ///     &cf,
+    ///     b"counter",
     ///     Some(Bytes::from("0")),
-    ///     Bytes::from("1")
+    ///     b"1"
     /// ).unwrap() {
     ///     CasResult::Swapped => println!("Incremented"),
     ///     CasResult::Mismatch(actual) => println!("Race detected: {:?}", actual),
@@ -2156,50 +1927,25 @@ impl MidgeEngine {
     /// ```
     pub fn compare_and_swap(
         &self,
-        key: Bytes,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
         expected: Option<Bytes>,
-        new_value: Bytes,
+        new_value: &[u8],
     ) -> MidgeResult<CasResult> {
         self.check_read_only()?;
 
-        // Use snapshot isolation for consistent read
-        let snap = self.snapshot();
-        let current = self.get_at(&key, &snap)?;
+        // Check current value
+        // TODO: Use snapshot isolation for consistent read across CFs
+        let current = self.get(cf, key)?;
 
         // Compare current value with expected
         if current != expected {
             return Ok(CasResult::Mismatch(current));
         }
 
-        // Match succeeded, perform the write using the non-deprecated API
-        self.put_with_ttl(key, new_value, 0)?;
+        // Match succeeded, perform the write
+        self.put_with_ttl(cf, key, new_value, 0)?;
         Ok(CasResult::Swapped)
-    }
-
-    /// Apply a batch of mutations atomically (writes to WAL then applies to MemTable).
-    ///
-    /// The batch is wrapped in TxnBegin/TxnCommit markers to ensure crash atomicity.
-    /// On recovery, only fully committed batches (those with a matching TxnCommit) are applied.
-    ///
-    /// **Sync Behavior:** This method uses the database-level `wal_sync` setting from
-    /// `MidgeOptions`. For per-operation sync control, use `begin_transaction()` and
-    /// `commit_transaction()` with `WriteOptions`.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # use cntryl_midge::api::Mutation;
-    /// # use bytes::Bytes;
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
-    /// let mutations = vec![
-    ///     Mutation::put(Bytes::from("key1"), Bytes::from("value1"), None),
-    ///     Mutation::put(Bytes::from("key2"), Bytes::from("value2"), None),
-    /// ];
-    /// engine.batch(mutations).unwrap();
-    /// ```
-    #[deprecated(since = "0.2.0", note = "use `batch_cf(&default_column_family(), mutations)` instead")]
-    pub fn batch(&self, mutations: Vec<Mutation>) -> MidgeResult<()> {
-        self.batch_internal(mutations, self.wal_sync)
     }
 
     /// Internal batch implementation with explicit sync control.
@@ -2415,37 +2161,6 @@ impl MidgeEngine {
                 Err(MidgeError::transaction_conflict(e))
             }
         }
-    }
-    /// Create a new transaction for staging mutations with snapshot isolation.
-    ///
-    /// The transaction captures the current sequence number as its isolation point.
-    /// All reads within the transaction will see a consistent view of the database
-    /// at the time the transaction was created.
-    ///
-    /// Transactions must be explicitly committed via `commit_transaction()` or
-    /// can be rolled back by dropping the transaction without calling `commit()`.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # use bytes::Bytes;
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
-    /// // Create a transaction
-    /// let mut txn = engine.begin_transaction();
-    ///
-    /// // Stage operations
-    /// txn.put(Bytes::from("key1"), Bytes::from("value1"), None);
-    /// txn.delete(Bytes::from("key2"));
-    ///
-    /// // Commit atomically with default sync behavior
-    /// engine.commit_transaction(txn, cntryl_midge::WriteOptions::default()).unwrap();
-    /// ```
-    #[deprecated(since = "0.2.0", note = "use `begin_transaction_cf(&default_column_family())` instead")]
-    pub fn begin_transaction(&self) -> Transaction {
-        let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
-        let begin_sequence = self.seq.load(Ordering::SeqCst);
-        Transaction::new(txn_id, begin_sequence)
     }
 
     /// Get a value within a transaction's snapshot isolation.
@@ -2830,7 +2545,7 @@ impl MidgeEngine {
             self.block_size,
             &self.sst_dir,
             &versions,
-            0, // Default CF (compact_all is legacy method)
+            0,    // Default CF (compact_all is legacy method)
             None, // compact_all doesn't support cloud upload yet (could be added with engine field)
             None, // Manifest will be updated separately after this call
         )?
@@ -2964,7 +2679,10 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
         self.as_ref().create_column_family(name, config)
     }
 
-    fn column_family(&self, name: &str) -> MidgeResult<crate::api::column_family::ColumnFamilyHandle> {
+    fn column_family(
+        &self,
+        name: &str,
+    ) -> MidgeResult<crate::api::column_family::ColumnFamilyHandle> {
         self.as_ref().get_column_family(name)
     }
 
@@ -2976,22 +2694,38 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
         self.as_ref().list_column_families()
     }
 
-    fn drop_column_family(&self, cf: &crate::api::column_family::ColumnFamilyHandle) -> MidgeResult<()> {
+    fn drop_column_family(
+        &self,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+    ) -> MidgeResult<()> {
         self.as_ref().drop_column_family(cf)
     }
 
     // ==================== Data Operations (CF-Scoped) ====================
 
-    fn put(&self, cf: &crate::api::column_family::ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        self.as_ref().put_cf(cf, key, value)
+    fn put(
+        &self,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+    ) -> MidgeResult<()> {
+        self.as_ref().put(cf, key, value)
     }
 
-    fn get(&self, cf: &crate::api::column_family::ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<Bytes>> {
-        self.as_ref().get_cf(cf, key)
+    fn get(
+        &self,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+        key: &[u8],
+    ) -> MidgeResult<Option<Bytes>> {
+        self.as_ref().get(cf, key)
     }
 
-    fn delete(&self, cf: &crate::api::column_family::ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
-        self.as_ref().delete_cf(cf, key)
+    fn delete(
+        &self,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+        key: &[u8],
+    ) -> MidgeResult<()> {
+        self.as_ref().delete(cf, key)
     }
 
     fn scan(
@@ -3003,7 +2737,7 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
         let q = crate::api::query::Query::new()
             .start_key(Bytes::copy_from_slice(start))
             .end_key(Bytes::copy_from_slice(end));
-        self.as_ref().scan_cf(cf, q)
+        self.as_ref().scan(cf, q)
     }
 
     fn delete_range(
@@ -3012,13 +2746,18 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
         start: &[u8],
         end: &[u8],
     ) -> MidgeResult<()> {
-        self.as_ref().delete_range_cf(cf, start, end)
+        self.as_ref().delete_range(cf, start, end)
     }
 
-    fn insert(&self, cf: &crate::api::column_family::ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+    fn insert(
+        &self,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+    ) -> MidgeResult<()> {
         // TODO: Implement proper insert_cf that checks for existence
         // For now, delegate to put_cf
-        self.as_ref().put_cf(cf, key, value)
+        self.as_ref().put(cf, key, value)
     }
 
     // ==================== Batch Operations ====================
@@ -3033,16 +2772,16 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
         for op in operations {
             match op {
                 crate::api::kv_store::BatchOperation::Insert { key, value } => {
-                    self.as_ref().put_cf(cf, &key, &value)?;
+                    self.as_ref().put(cf, &key, &value)?;
                 }
                 crate::api::kv_store::BatchOperation::Put { key, value } => {
-                    self.as_ref().put_cf(cf, &key, &value)?;
+                    self.as_ref().put(cf, &key, &value)?;
                 }
                 crate::api::kv_store::BatchOperation::Delete { key } => {
-                    self.as_ref().delete_cf(cf, &key)?;
+                    self.as_ref().delete(cf, &key)?;
                 }
                 crate::api::kv_store::BatchOperation::DeleteRange { start, end } => {
-                    self.as_ref().delete_range_cf(cf, &start, &end)?;
+                    self.as_ref().delete_range(cf, &start, &end)?;
                 }
             }
         }
@@ -3064,7 +2803,7 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
         let engine_txn = crate::api::transaction::EngineTransaction::new(txn, Arc::clone(self));
         Ok(Box::new(engine_txn))
     }
-    
+
     fn commit_transaction(
         &self,
         txn: Box<dyn crate::api::kv_store::KvTransaction>,
@@ -3140,10 +2879,10 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
             .map_err(|_| MidgeError::internal("Failed to downcast transaction"))?;
 
         let txn = engine_txn.into_inner();
-        
+
         // Abort the transaction in the transaction manager
         self.txn_manager.abort(txn.txn_id());
-        
+
         // Transaction is dropped here, releasing its resources
         Ok(())
     }

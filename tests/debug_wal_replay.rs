@@ -17,9 +17,10 @@ fn should_replay_wal_after_engine_restart() {
             ..Default::default()
         };
         let eng = MidgeEngine::open(opts).unwrap();
+        let cf = eng.default_column_family();
 
         println!("Writing key1");
-        eng.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
+        eng.put(&cf, "key1".as_bytes(), "value1".as_bytes()).unwrap();
 
         println!("Closing engine");
     }
@@ -45,7 +46,7 @@ fn should_replay_wal_after_engine_restart() {
         let eng = MidgeEngine::open(opts).unwrap();
 
         println!("Reading key1");
-        let result = eng.get(b"key1").unwrap();
+        let result = eng.get(&cf, b"key1").unwrap();
         println!("Result: {:?}", result);
 
         assert_eq!(result, Some(Bytes::from("value1")), "Data should persist!");

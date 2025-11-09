@@ -8,7 +8,6 @@
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
 
@@ -27,11 +26,12 @@ fn setup_db(name: &str, num_keys: usize) -> MidgeEngine {
     };
 
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
 
     for i in 0..num_keys {
         let key = format!("key_{:010}", i);
         let value = format!("value_{:010}_data_padding", i);
-        engine.put(Bytes::from(key), Bytes::from(value)).unwrap();
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
 
     engine

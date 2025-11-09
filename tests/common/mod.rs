@@ -175,7 +175,8 @@ where
 /// ```
 #[allow(dead_code)]
 pub fn assert_get_equals(eng: &MidgeEngine, key: &[u8], expected: &[u8]) {
-    let result = eng.get(key).expect("Get operation failed");
+    let cf = eng.default_column_family();
+    let result = eng.get(&cf, key).expect("Get operation failed");
     let expected_bytes = Bytes::copy_from_slice(expected);
     assert_eq!(
         result,
@@ -200,7 +201,8 @@ pub fn assert_get_equals(eng: &MidgeEngine, key: &[u8], expected: &[u8]) {
 /// ```
 #[allow(dead_code)]
 pub fn assert_key_absent(eng: &MidgeEngine, key: &[u8]) {
-    let result = eng.get(key).expect("Get operation failed");
+    let cf = eng.default_column_family();
+    let result = eng.get(&cf, key).expect("Get operation failed");
     assert!(
         result.is_none(),
         "Expected key to be absent: {:?}",
@@ -215,7 +217,8 @@ pub fn assert_key_absent(eng: &MidgeEngine, key: &[u8]) {
 /// Panics if the key doesn't exist or get operation fails.
 #[allow(dead_code)]
 pub fn assert_get_exists(eng: &MidgeEngine, key: &[u8]) {
-    let result = eng.get(key).expect("Get operation failed");
+    let cf = eng.default_column_family();
+    let result = eng.get(&cf, key).expect("Get operation failed");
     assert!(
         result.is_some(),
         "Expected key to exist: {:?}",
@@ -230,7 +233,8 @@ pub fn assert_get_exists(eng: &MidgeEngine, key: &[u8]) {
 /// Panics if the key exists or get operation fails.
 #[allow(dead_code)]
 pub fn assert_get_not_exists(eng: &MidgeEngine, key: &[u8]) {
-    let result = eng.get(key).expect("Get operation failed");
+    let cf = eng.default_column_family();
+    let result = eng.get(&cf, key).expect("Get operation failed");
     assert!(
         result.is_none(),
         "Expected key to not exist: {:?}",

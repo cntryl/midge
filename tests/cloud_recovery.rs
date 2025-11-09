@@ -34,17 +34,12 @@ fn should_recover_from_cloud_wal_after_restart() {
 
     {
         let engine = MidgeEngine::open(opts.clone()).unwrap();
+        let cf = engine.default_column_family();
 
         // Write test data
-        engine
-            .put(Bytes::from("key1"), Bytes::from("value1"))
-            .unwrap();
-        engine
-            .put(Bytes::from("key2"), Bytes::from("value2"))
-            .unwrap();
-        engine
-            .put(Bytes::from("key3"), Bytes::from("value3"))
-            .unwrap();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        engine.put(&cf, b"key2", b"value2").unwrap();
+        engine.put(&cf, b"key3", b"value3").unwrap();
 
         // Ensure WAL is synced to cloud
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -55,9 +50,9 @@ fn should_recover_from_cloud_wal_after_restart() {
     let engine = MidgeEngine::open(opts).unwrap();
 
     // Assert - Data should be recovered from cloud WAL
-    let val1 = engine.get(b"key1").unwrap();
-    let val2 = engine.get(b"key2").unwrap();
-    let val3 = engine.get(b"key3").unwrap();
+    let val1 = engine.get(&cf, b"key1").unwrap();
+    let val2 = engine.get(&cf, b"key2").unwrap();
+    let val3 = engine.get(&cf, b"key3").unwrap();
 
     assert_eq!(val1, Some(Bytes::from("value1")));
     assert_eq!(val2, Some(Bytes::from("value2")));
@@ -92,7 +87,7 @@ fn should_recover_from_cloud_ssts_after_cache_loss() {
         for i in 0..100 {
             let key = Bytes::from(format!("key_{:04}", i));
             let value = Bytes::from(format!("value_{:04}", i));
-            engine.put(key, value).unwrap();
+            engine.put(&cf, key, value).unwrap();
         }
 
         engine.flush().unwrap();
@@ -109,7 +104,7 @@ fn should_recover_from_cloud_ssts_after_cache_loss() {
     let engine = MidgeEngine::open(opts).unwrap();
 
     // Assert - Data should be recovered from cloud SSTs
-    let val = engine.get(b"key_0000").unwrap();
+    let val = engine.get(&cf, b"key_0000").unwrap();
     assert!(val.is_some(), "Should recover data from cloud SSTs");
 }
 
@@ -151,8 +146,8 @@ fn should_maintain_consistency_after_partial_write() {
     let engine = MidgeEngine::open(opts).unwrap();
 
     // Assert - Committed data should be present
-    let val1 = engine.get(b"committed1").unwrap();
-    let val2 = engine.get(b"committed2").unwrap();
+    let val1 = engine.get(&cf, b"committed1").unwrap();
+    let val2 = engine.get(&cf, b"committed2").unwrap();
 
     assert!(
         val1.is_some() || val2.is_some(),
@@ -187,7 +182,7 @@ fn should_handle_concurrent_uploads_correctly() {
     for i in 0..200 {
         let key = Bytes::from(format!("concurrent_key_{:05}", i));
         let value = Bytes::from(format!("concurrent_value_{:05}", i));
-        engine.put(key, value).unwrap();
+        engine.put(&cf, key, value).unwrap();
     }
 
     engine.flush().unwrap();
@@ -203,7 +198,7 @@ fn should_handle_concurrent_uploads_correctly() {
     );
 
     // Verify data integrity
-    let val = engine.get(b"concurrent_key_00000").unwrap();
+    let val = engine.get(&cf, b"concurrent_key_00000").unwrap();
     assert!(
         val.is_some(),
         "Data should remain consistent across multiple uploads"

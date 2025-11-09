@@ -25,16 +25,16 @@ fn should_write_to_separate_cfs_given_different_cf_handles() {
         .unwrap();
 
     // Act
-    engine.put_cf(&cf1, b"key1", b"value_cf1").unwrap();
-    engine.put_cf(&cf2, b"key2", b"value_cf2").unwrap();
+    engine.put(&cf, &cf1, b"key1", b"value_cf1").unwrap();
+    engine.put(&cf, &cf2, b"key2", b"value_cf2").unwrap();
 
     // Assert
     assert_eq!(
-        engine.get_cf(&cf1, b"key1").unwrap(),
+        engine.get(&cf1, b"key1").unwrap(),
         Some(Bytes::from("value_cf1"))
     );
     assert_eq!(
-        engine.get_cf(&cf2, b"key2").unwrap(),
+        engine.get(&cf2, b"key2").unwrap(),
         Some(Bytes::from("value_cf2"))
     );
 }
@@ -56,19 +56,19 @@ fn should_isolate_cf_data_given_writes_to_multiple_cfs() {
         .unwrap();
 
     // Act
-    engine.put_cf(&cf1, b"shared_key", b"cf1_value").unwrap();
-    engine.put_cf(&cf2, b"shared_key", b"cf2_value").unwrap();
+    engine.put(&cf, &cf1, b"shared_key", b"cf1_value").unwrap();
+    engine.put(&cf, &cf2, b"shared_key", b"cf2_value").unwrap();
 
     // Assert
     assert_eq!(
-        engine.get_cf(&cf1, b"shared_key").unwrap(),
+        engine.get(&cf1, b"shared_key").unwrap(),
         Some(Bytes::from("cf1_value"))
     );
     assert_eq!(
-        engine.get_cf(&cf2, b"shared_key").unwrap(),
+        engine.get(&cf2, b"shared_key").unwrap(),
         Some(Bytes::from("cf2_value"))
     );
-    assert_eq!(engine.get_cf(&cf2, b"cf1_only").unwrap(), None);
+    assert_eq!(engine.get(&cf2, b"cf1_only").unwrap(), None);
 }
 
 #[test]
@@ -88,25 +88,25 @@ fn should_write_batch_across_cfs_given_multi_cf_mutations() {
         .unwrap();
 
     // Act
-    engine.put_cf(&cf1, b"batch_key1", b"batch_value1").unwrap();
-    engine.put_cf(&cf2, b"batch_key2", b"batch_value2").unwrap();
-    engine.put_cf(&cf1, b"batch_key3", b"batch_value3").unwrap();
+    engine.put(&cf, &cf1, b"batch_key1", b"batch_value1").unwrap();
+    engine.put(&cf, &cf2, b"batch_key2", b"batch_value2").unwrap();
+    engine.put(&cf, &cf1, b"batch_key3", b"batch_value3").unwrap();
 
     // Assert
     assert_eq!(
-        engine.get_cf(&cf1, b"batch_key1").unwrap(),
+        engine.get(&cf1, b"batch_key1").unwrap(),
         Some(Bytes::from("batch_value1"))
     );
     assert_eq!(
-        engine.get_cf(&cf2, b"batch_key2").unwrap(),
+        engine.get(&cf2, b"batch_key2").unwrap(),
         Some(Bytes::from("batch_value2"))
     );
     assert_eq!(
-        engine.get_cf(&cf1, b"batch_key3").unwrap(),
+        engine.get(&cf1, b"batch_key3").unwrap(),
         Some(Bytes::from("batch_value3"))
     );
-    assert_eq!(engine.get_cf(&cf2, b"batch_key1").unwrap(), None);
-    assert_eq!(engine.get_cf(&cf1, b"batch_key2").unwrap(), None);
+    assert_eq!(engine.get(&cf2, b"batch_key1").unwrap(), None);
+    assert_eq!(engine.get(&cf1, b"batch_key2").unwrap(), None);
 }
 
 // ============================================================================
@@ -131,15 +131,15 @@ fn should_read_from_correct_cf_given_same_key_in_multiple_cfs() {
     let default_cf = engine.default_column_family();
 
     engine
-        .put_cf(&default_cf, b"key", b"default_value")
+        .put(&default_cf, b"key", b"default_value")
         .unwrap();
-    engine.put_cf(&cf1, b"key", b"cf1_value").unwrap();
-    engine.put_cf(&cf2, b"key", b"cf2_value").unwrap();
+    engine.put(&cf, &cf1, b"key", b"cf1_value").unwrap();
+    engine.put(&cf, &cf2, b"key", b"cf2_value").unwrap();
 
     // Act
-    let default_result = engine.get_cf(&default_cf, b"key").unwrap();
-    let cf1_result = engine.get_cf(&cf1, b"key").unwrap();
-    let cf2_result = engine.get_cf(&cf2, b"key").unwrap();
+    let default_result = engine.get(&default_cf, b"key").unwrap();
+    let cf1_result = engine.get(&cf1, b"key").unwrap();
+    let cf2_result = engine.get(&cf2, b"key").unwrap();
 
     // Assert
     assert_eq!(default_result, Some(Bytes::from("default_value")));
@@ -163,12 +163,12 @@ fn should_return_none_given_key_in_different_cf() {
         .create_column_family("cf2", ColumnFamilyConfig::default())
         .unwrap();
 
-    engine.put_cf(&cf1, b"cf1_key", b"cf1_value").unwrap();
+    engine.put(&cf, &cf1, b"cf1_key", b"cf1_value").unwrap();
 
     // Act
-    let cf2_result = engine.get_cf(&cf2, b"cf1_key").unwrap();
+    let cf2_result = engine.get(&cf2, b"cf1_key").unwrap();
     let default_cf = engine.default_column_family();
-    let default_result = engine.get_cf(&default_cf, b"cf1_key").unwrap();
+    let default_result = engine.get(&default_cf, b"cf1_key").unwrap();
 
     // Assert
     assert_eq!(cf2_result, None);
@@ -191,14 +191,14 @@ fn should_scan_only_target_cf_given_overlapping_key_ranges() {
         .create_column_family("cf2", ColumnFamilyConfig::default())
         .unwrap();
 
-    engine.put_cf(&cf1, b"a", b"cf1_a").unwrap();
-    engine.put_cf(&cf1, b"b", b"cf1_b").unwrap();
-    engine.put_cf(&cf2, b"a", b"cf2_a").unwrap();
-    engine.put_cf(&cf2, b"c", b"cf2_c").unwrap();
+    engine.put(&cf, &cf1, b"a", b"cf1_a").unwrap();
+    engine.put(&cf, &cf1, b"b", b"cf1_b").unwrap();
+    engine.put(&cf, &cf2, b"a", b"cf2_a").unwrap();
+    engine.put(&cf, &cf2, b"c", b"cf2_c").unwrap();
 
     // Act
-    let cf1_results = engine.scan_cf(&cf1, Query::new()).unwrap();
-    let cf2_results = engine.scan_cf(&cf2, Query::new()).unwrap();
+    let cf1_results = engine.scan(&cf1, Query::new()).unwrap();
+    let cf2_results = engine.scan(&cf2, Query::new()).unwrap();
 
     // Assert
     assert_eq!(cf1_results.len(), 2);
@@ -237,7 +237,7 @@ fn should_compact_cf_independently_given_different_compaction_triggers() {
 
     for i in 0..100 {
         engine
-            .put_cf(&cf1, format!("key{:04}", i).as_bytes(), b"value")
+            .put(&cf1, format!("key{:04}", i).as_bytes(), b"value")
             .unwrap();
     }
     engine.flush().unwrap();
@@ -247,8 +247,8 @@ fn should_compact_cf_independently_given_different_compaction_triggers() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Assert
-    assert!(engine.get_cf(&cf1, b"key0000").unwrap().is_some());
-    assert_eq!(engine.get_cf(&cf2, b"key0000").unwrap(), None);
+    assert!(engine.get(&cf1, b"key0000").unwrap().is_some());
+    assert_eq!(engine.get(&cf2, b"key0000").unwrap(), None);
 }
 
 #[test]
@@ -274,12 +274,12 @@ fn should_respect_cf_specific_compaction_settings() {
     let cf2 = engine.create_column_family("cf2", config2).unwrap();
 
     // Act
-    engine.put_cf(&cf1, b"key1", b"value1").unwrap();
-    engine.put_cf(&cf2, b"key2", b"value2").unwrap();
+    engine.put(&cf, &cf1, b"key1", b"value1").unwrap();
+    engine.put(&cf, &cf2, b"key2", b"value2").unwrap();
 
     // Assert
-    assert!(engine.get_cf(&cf1, b"key1").unwrap().is_some());
-    assert!(engine.get_cf(&cf2, b"key2").unwrap().is_some());
+    assert!(engine.get(&cf1, b"key1").unwrap().is_some());
+    assert!(engine.get(&cf2, b"key2").unwrap().is_some());
 }
 
 #[test]
@@ -301,10 +301,10 @@ fn should_not_compact_other_cfs_given_single_cf_compaction_trigger() {
 
     for i in 0..50 {
         engine
-            .put_cf(&cf1, format!("cf1_key{:04}", i).as_bytes(), b"value")
+            .put(&cf1, format!("cf1_key{:04}", i).as_bytes(), b"value")
             .unwrap();
         engine
-            .put_cf(&cf2, format!("cf2_key{:04}", i).as_bytes(), b"value")
+            .put(&cf2, format!("cf2_key{:04}", i).as_bytes(), b"value")
             .unwrap();
     }
     engine.flush().unwrap();
@@ -314,8 +314,8 @@ fn should_not_compact_other_cfs_given_single_cf_compaction_trigger() {
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Assert
-    assert!(engine.get_cf(&cf1, b"cf1_key0000").unwrap().is_some());
-    assert!(engine.get_cf(&cf2, b"cf2_key0000").unwrap().is_some());
+    assert!(engine.get(&cf1, b"cf1_key0000").unwrap().is_some());
+    assert!(engine.get(&cf2, b"cf2_key0000").unwrap().is_some());
 }
 
 // ============================================================================
@@ -343,14 +343,14 @@ fn should_share_memory_budget_across_cfs_given_global_limit() {
     // Write data to CF1
     for i in 0..100 {
         engine
-            .put_cf(&cf1, format!("key{}", i).as_bytes(), &vec![b'a'; 1000])
+            .put(&cf1, format!("key{}", i).as_bytes(), &vec![b'a'; 1000])
             .unwrap();
     }
 
     // Write data to CF2
     for i in 0..50 {
         engine
-            .put_cf(&cf2, format!("key{}", i).as_bytes(), &vec![b'b'; 1000])
+            .put(&cf2, format!("key{}", i).as_bytes(), &vec![b'b'; 1000])
             .unwrap();
     }
 
@@ -393,7 +393,7 @@ fn should_stall_cf_writes_given_cf_exceeded_share_of_memory() {
     // Act
     // Write data until we exceed memtable size
     for i in 0..100 {
-        let result = engine.put_cf(&cf, format!("key{:04}", i).as_bytes(), &vec![b'x'; 1000]);
+        let result = engine.put(&cf, format!("key{:04}", i).as_bytes(), &vec![b'x'; 1000]);
 
         // All writes should succeed (flush happens in background)
         assert!(result.is_ok(), "Write {} failed: {:?}", i, result);
@@ -428,14 +428,14 @@ fn should_flush_largest_cf_memtable_given_global_memory_pressure() {
     // Write small amount to CF1
     for i in 0..10 {
         engine
-            .put_cf(&cf1, format!("key{}", i).as_bytes(), &[b'a'; 100])
+            .put(&cf1, format!("key{}", i).as_bytes(), &[b'a'; 100])
             .unwrap();
     }
 
     // Write large amount to CF2
     for i in 0..200 {
         engine
-            .put_cf(&cf2, format!("key{:04}", i).as_bytes(), &vec![b'b'; 500])
+            .put(&cf2, format!("key{:04}", i).as_bytes(), &vec![b'b'; 500])
             .unwrap();
     }
 
@@ -471,8 +471,8 @@ fn should_drop_cf_given_no_active_references() {
         .create_column_family("temp_cf", ColumnFamilyConfig::default())
         .unwrap();
 
-    engine.put_cf(&cf, b"key", b"value").unwrap();
-    assert!(engine.get_cf(&cf, b"key").unwrap().is_some());
+    engine.put(&cf, b"key", b"value").unwrap();
+    assert!(engine.get(&cf, b"key").unwrap().is_some());
 
     // Act
     let result = engine.drop_column_family(&cf);
@@ -494,13 +494,13 @@ fn should_fail_reads_given_dropped_cf_when_handle_used() {
         .create_column_family("temp_cf", ColumnFamilyConfig::default())
         .unwrap();
 
-    engine.put_cf(&cf, b"key", b"value").unwrap();
+    engine.put(&cf, b"key", b"value").unwrap();
 
     // Act
     engine.drop_column_family(&cf).unwrap();
 
     // Assert
-    let result = engine.get_cf(&cf, b"key");
+    let result = engine.get(&cf, b"key");
     assert!(result.is_err());
 }
 
@@ -518,12 +518,12 @@ fn should_allow_reads_given_cf_drop_in_progress_when_references_held() {
         .unwrap();
     let cf_clone = cf.clone();
 
-    engine.put_cf(&cf, b"key", b"value").unwrap();
+    engine.put(&cf, b"key", b"value").unwrap();
 
     // Act
     engine.drop_column_family(&cf).unwrap();
 
     // Assert
-    let result = engine.get_cf(&cf_clone, b"key");
+    let result = engine.get(&cf_clone, b"key");
     assert!(result.is_err());
 }

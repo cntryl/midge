@@ -226,8 +226,9 @@ fn should_restore_config_from_manifest_given_reopen() {
     // Open, write data, close
     {
         let engine = MidgeEngine::open_with_config(config.clone()).expect("engine should open");
+        let cf = engine.default_column_family();
         engine
-            .put(b"key".to_vec().into(), b"value".to_vec().into())
+            .put(&cf, b"key", b"value")
             .expect("put should succeed");
     }
 
@@ -239,10 +240,11 @@ fn should_restore_config_from_manifest_given_reopen() {
         .expect("new config should build");
 
     let engine = MidgeEngine::open_with_config(new_config).expect("engine should reopen");
+    let cf = engine.default_column_family();
 
     // Assert
     // Verify data persisted across reopens
-    let value = engine.get(b"key").expect("get should succeed");
+    let value = engine.get(&cf, b"key").expect("get should succeed");
     assert_eq!(value, Some(b"value".to_vec().into()));
 
     // NOTE: Config is NOT restored from manifest - user must provide config on reopen

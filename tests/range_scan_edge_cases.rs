@@ -7,6 +7,7 @@
 
 #[test]
 fn should_scan_across_1000_ssts_given_large_database() {
+    let cf = engine.default_column_family();
     // Smoke test: create many small SSTs and scan across them
     // Arrange
     let opts = cntryl_midge::MidgeOptions {
@@ -47,6 +48,7 @@ fn should_scan_across_1000_ssts_given_large_database() {
 
 #[test]
 fn should_not_exhaust_memory_given_scan_over_millions_of_keys() {
+    let cf = engine.default_column_family();
     // Arrange - create a large-ish dataset in memory (smoke sized)
     let opts = cntryl_midge::MidgeOptions {
         storage_mode: cntryl_midge::StorageMode::Memory,
@@ -79,6 +81,7 @@ fn should_not_exhaust_memory_given_scan_over_millions_of_keys() {
 
 #[test]
 fn should_handle_scan_with_many_tombstones_efficiently() {
+    let cf = engine.default_column_family();
     // Arrange
     let opts = cntryl_midge::MidgeOptions {
         storage_mode: cntryl_midge::StorageMode::Memory,
@@ -100,7 +103,7 @@ fn should_handle_scan_with_many_tombstones_efficiently() {
     // Tombstone most keys
     for i in 0..150 {
         let key = format!("t{:04}", i);
-        engine.delete(bytes::Bytes::from(key)).unwrap();
+        engine.delete(&cf, bytes::Bytes::from(key)).unwrap();
     }
     engine.flush().unwrap();
 
@@ -115,6 +118,7 @@ fn should_handle_scan_with_many_tombstones_efficiently() {
 
 #[test]
 fn should_maintain_consistency_given_compaction_during_scan() {
+    let cf = engine.default_column_family();
     // Arrange
     let opts = cntryl_midge::MidgeOptions {
         storage_mode: cntryl_midge::StorageMode::Memory,
@@ -151,7 +155,7 @@ fn should_maintain_consistency_given_compaction_during_scan() {
     handle.join().unwrap();
 
     // Assert - key visibility preserved after compaction
-    let sample = engine.get(b"c000_0").unwrap();
+    let sample = engine.get(&cf, b"c000_0").unwrap();
     assert!(sample.is_some());
 }
 
@@ -320,6 +324,7 @@ fn should_seek_efficiently_given_large_skip_forward() {
 
 #[test]
 fn should_seek_backward_efficiently_given_reverse_iterator() {
+    let cf = engine.default_column_family();
     // Arrange
     let opts = cntryl_midge::MidgeOptions {
         storage_mode: cntryl_midge::StorageMode::Memory,
@@ -349,6 +354,7 @@ fn should_seek_backward_efficiently_given_reverse_iterator() {
 
 #[test]
 fn should_use_bloom_filters_given_seek_to_nonexistent_key() {
+    let cf = engine.default_column_family();
     // Arrange
     let opts = cntryl_midge::MidgeOptions {
         storage_mode: cntryl_midge::StorageMode::Memory,
@@ -382,6 +388,7 @@ fn should_use_bloom_filters_given_seek_to_nonexistent_key() {
 
 #[test]
 fn should_not_see_new_writes_given_snapshot_iterator_when_concurrent_puts() {
+    let cf = engine.default_column_family();
     // Arrange
     let opts = cntryl_midge::MidgeOptions {
         storage_mode: cntryl_midge::StorageMode::Memory,
@@ -407,7 +414,7 @@ fn should_not_see_new_writes_given_snapshot_iterator_when_concurrent_puts() {
     let e = std::sync::Arc::clone(&engine);
     let handle = std::thread::spawn(move || {
         for i in 100..200 {
-            e.put(
+            e.put(&cf, 
                 bytes::Bytes::from(format!("n{:03}", i)),
                 bytes::Bytes::from("v"),
             )
