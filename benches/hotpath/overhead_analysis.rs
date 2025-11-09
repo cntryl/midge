@@ -37,8 +37,8 @@ fn bench_layer1_wal_only(c: &mut Criterion) {
 
     group.bench_function("layer1_wal_batch_append", |b| {
         let tmp = tempdir().expect("tempdir");
-        let writer =
-            cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let writer = cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+            .expect("open WAL");
 
         // Pre-create records
         let records: Vec<WalRecord> = (0..BATCH_SIZE)
@@ -71,8 +71,8 @@ fn bench_layer2_wal_with_seq(c: &mut Criterion) {
 
     group.bench_function("layer2_wal_plus_sequence", |b| {
         let tmp = tempdir().expect("tempdir");
-        let writer =
-            cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let writer = cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+            .expect("open WAL");
         let seq = Arc::new(AtomicU64::new(0));
 
         // Pre-create record templates (without seq)
@@ -117,8 +117,8 @@ fn bench_layer3_wal_plus_memtable(c: &mut Criterion) {
 
     group.bench_function("layer3_wal_plus_memtable", |b| {
         let tmp = tempdir().expect("tempdir");
-        let writer =
-            cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let writer = cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+            .expect("open WAL");
         let memtable = MemTable::new();
         let seq = Arc::new(AtomicU64::new(0));
 
@@ -171,8 +171,8 @@ fn bench_layer4_write_batch_construction(c: &mut Criterion) {
 
     group.bench_function("layer4_writebatch_construction", |b| {
         let tmp = tempdir().expect("tempdir");
-        let writer =
-            cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let writer = cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+            .expect("open WAL");
         let memtable = MemTable::new();
         let seq = Arc::new(AtomicU64::new(0));
 

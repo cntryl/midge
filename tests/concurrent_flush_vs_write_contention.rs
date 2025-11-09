@@ -5,8 +5,8 @@
 // Tests for multi-threaded correctness under high concurrency
 
 mod common;
-use common::*;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::*;
 use std::sync::Arc;
 use std::thread;
 

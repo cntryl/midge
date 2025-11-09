@@ -10,7 +10,7 @@ pub struct TransactionManager {
 
 struct TransactionManagerInner {
     active_txns: HashMap<u64, TransactionInfo>,
-    committed_writes: HashMap<u64, (u64, HashSet<Bytes>)>, // seq -> (txn_id, write_set)
+    committed_writes: HashMap<u64, (u64, HashSet<(u32, Bytes)>)>, // seq -> (txn_id, write_set)
     max_retained_commits: usize,
     wait_for_graph: HashMap<u64, HashSet<u64>>, // txn_id -> set of txns it waits for
 }
@@ -20,9 +20,9 @@ struct TransactionInfo {
     #[allow(dead_code)]
     txn_id: u64,
     begin_seq: u64,
-    write_set: HashSet<Bytes>,
-    read_set: HashSet<Bytes>,
-    read_versions: HashMap<Bytes, u64>,
+    write_set: HashSet<(u32, Bytes)>,
+    read_set: HashSet<(u32, Bytes)>,
+    read_versions: HashMap<(u32, Bytes), u64>,
 }
 
 impl TransactionManager {
@@ -42,9 +42,9 @@ impl TransactionManager {
         &self,
         txn_id: u64,
         begin_seq: u64,
-        write_set: HashSet<Bytes>,
-        read_set: HashSet<Bytes>,
-        read_versions: HashMap<Bytes, u64>,
+        write_set: HashSet<(u32, Bytes)>,
+        read_set: HashSet<(u32, Bytes)>,
+        read_versions: HashMap<(u32, Bytes), u64>,
     ) -> Result<(), String> {
         let mut inner = self.inner.lock();
 
@@ -301,12 +301,12 @@ mod tests {
         // Arrange
         let tm = TransactionManager::new();
         let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("key1"));
-        ws1.insert(Bytes::from("key2"));
+        ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1")));
+        ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2")));
 
         let mut ws2 = HashSet::new();
-        ws2.insert(Bytes::from("key2"));
-        ws2.insert(Bytes::from("key3"));
+        ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2")));
+        ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key3")));
 
         tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
             .unwrap();
@@ -326,10 +326,10 @@ mod tests {
         // Arrange
         let tm = TransactionManager::new();
         let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("key1"));
+        ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1")));
 
         let mut ws2 = HashSet::new();
-        ws2.insert(Bytes::from("key2"));
+        ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2")));
 
         tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
             .unwrap();
@@ -357,7 +357,10 @@ mod tests {
         tm.try_commit(1, 110).unwrap();
 
         let mut read_versions = HashMap::new();
-        read_versions.insert(Bytes::from("key"), 105);
+        read_versions.insert(
+            (crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key")),
+            105,
+        );
         tm.begin(2, 105, HashSet::new(), HashSet::new(), read_versions)
             .unwrap();
 
@@ -408,7 +411,10 @@ mod tests {
         // Act
         for i in 0..1100 {
             let mut ws = HashSet::new();
-            ws.insert(Bytes::from(format!("key{}", i)));
+            ws.insert((
+                crate::api::DEFAULT_CF_ID.as_u32(),
+                Bytes::from(format!("key{}", i)),
+            ));
             tm.begin(i, 100 + i, ws, HashSet::new(), HashMap::new())
                 .unwrap();
             tm.try_commit(i, 100 + i).unwrap();
@@ -425,11 +431,11 @@ mod tests {
         let tm = TransactionManager::new();
 
         let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("key1"));
+        ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1")));
 
         let mut ws2 = HashSet::new();
-        ws2.insert(Bytes::from("key1")); // Conflicts with txn1
-        ws2.insert(Bytes::from("key2"));
+        ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"))); // Conflicts with txn1
+        ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2")));
 
         tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
             .unwrap();
@@ -451,10 +457,10 @@ mod tests {
         let tm = TransactionManager::new();
 
         let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("data"));
+        ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("data")));
 
         let mut rs2 = HashSet::new();
-        rs2.insert(Bytes::from("data")); // Reads what txn1 writes
+        rs2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("data"))); // Reads what txn1 writes
 
         tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
             .unwrap();
@@ -480,15 +486,15 @@ mod tests {
 
         // Txn 1 writes A, wants B
         let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("A"));
+        ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("A")));
         let mut rs1 = HashSet::new();
-        rs1.insert(Bytes::from("B"));
+        rs1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("B")));
 
         // Txn 2 writes B, wants A
         let mut ws2 = HashSet::new();
-        ws2.insert(Bytes::from("B"));
+        ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("B")));
         let mut rs2 = HashSet::new();
-        rs2.insert(Bytes::from("A"));
+        rs2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("A")));
 
         tm.begin(1, 100, ws1.clone(), rs1.clone(), HashMap::new())
             .unwrap();
@@ -521,21 +527,21 @@ mod tests {
 
         // Txn 1 writes A, reads B
         let mut ws1 = HashSet::new();
-        ws1.insert(Bytes::from("A"));
+        ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("A")));
         let mut rs1 = HashSet::new();
-        rs1.insert(Bytes::from("B"));
+        rs1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("B")));
 
         // Txn 2 writes B, reads C
         let mut ws2 = HashSet::new();
-        ws2.insert(Bytes::from("B"));
+        ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("B")));
         let mut rs2 = HashSet::new();
-        rs2.insert(Bytes::from("C"));
+        rs2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("C")));
 
         // Txn 3 writes C, reads A
         let mut ws3 = HashSet::new();
-        ws3.insert(Bytes::from("C"));
+        ws3.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("C")));
         let mut rs3 = HashSet::new();
-        rs3.insert(Bytes::from("A"));
+        rs3.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("A")));
 
         tm.begin(1, 100, ws1, rs1, HashMap::new()).unwrap();
         tm.begin(2, 100, ws2, rs2, HashMap::new()).unwrap();

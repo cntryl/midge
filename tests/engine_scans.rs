@@ -27,7 +27,9 @@ fn should_return_ordered_pairs_given_range_when_scan() {
 
     // Act
     let rows = eng
-        .scan(&cf, Query::new()
+        .scan(
+            &cf,
+            Query::new()
                 .start_key(Bytes::from_static(b"b"))
                 .end_key(Bytes::from_static(b"d")),
         )
@@ -42,7 +44,6 @@ fn should_return_ordered_pairs_given_range_when_scan() {
         ]
     );
 }
-
 
 #[test]
 fn should_scan_by_prefix_memtable() {
@@ -74,7 +75,6 @@ fn should_scan_by_prefix_memtable() {
     assert_eq!(rows, expected);
 }
 
-
 #[test]
 fn should_scan_by_prefix_and_limit_memtable() {
     // Arrange
@@ -93,7 +93,10 @@ fn should_scan_by_prefix_and_limit_memtable() {
 
     // Act: prefix + limit
     let rows_limited = eng
-        .scan(&cf, Query::new().prefix(Bytes::from_static(b"user:1:")).limit(2))
+        .scan(
+            &cf,
+            Query::new().prefix(Bytes::from_static(b"user:1:")).limit(2),
+        )
         .expect("scan");
 
     // Assert
@@ -101,7 +104,6 @@ fn should_scan_by_prefix_and_limit_memtable() {
     assert_eq!(rows_limited[0].0, Bytes::from_static(b"user:1:a"));
     assert_eq!(rows_limited[1].0, Bytes::from_static(b"user:1:b"));
 }
-
 
 #[test]
 fn should_scan_reverse_from_memtable() {
@@ -118,14 +120,10 @@ fn should_scan_reverse_from_memtable() {
     let cf = eng.default_column_family();
 
     // Write keys in forward order
-    eng.put(&cf, b"k1", b"v1")
-        .expect("put");
-    eng.put(&cf, b"k2", b"v2")
-        .expect("put");
-    eng.put(&cf, b"k3", b"v3")
-        .expect("put");
-    eng.put(&cf, b"k4", b"v4")
-        .expect("put");
+    eng.put(&cf, b"k1", b"v1").expect("put");
+    eng.put(&cf, b"k2", b"v2").expect("put");
+    eng.put(&cf, b"k3", b"v3").expect("put");
+    eng.put(&cf, b"k4", b"v4").expect("put");
 
     // Act: Scan in reverse
     let results = eng.scan(&cf, Query::new().reverse()).expect("scan");
@@ -142,7 +140,6 @@ fn should_scan_reverse_from_memtable() {
     assert_eq!(results[3].1, Bytes::from_static(b"v1"));
 }
 
-
 #[test]
 fn should_scan_reverse_with_bounds() {
     // Arrange
@@ -158,20 +155,17 @@ fn should_scan_reverse_with_bounds() {
     let cf = eng.default_column_family();
 
     // Write keys
-    eng.put(&cf, b"a", b"va")
-        .expect("put");
-    eng.put(&cf, b"b", b"vb")
-        .expect("put");
-    eng.put(&cf, b"c", b"vc")
-        .expect("put");
-    eng.put(&cf, b"d", b"vd")
-        .expect("put");
-    eng.put(&cf, b"e", b"ve")
-        .expect("put");
+    eng.put(&cf, b"a", b"va").expect("put");
+    eng.put(&cf, b"b", b"vb").expect("put");
+    eng.put(&cf, b"c", b"vc").expect("put");
+    eng.put(&cf, b"d", b"vd").expect("put");
+    eng.put(&cf, b"e", b"ve").expect("put");
 
     // Act: Reverse scan from 'b' to 'e' (exclusive of e)
     let results = eng
-        .scan(&cf, Query::new()
+        .scan(
+            &cf,
+            Query::new()
                 .start_key(Bytes::from_static(b"b"))
                 .end_key(Bytes::from_static(b"e"))
                 .reverse(),
@@ -187,7 +181,6 @@ fn should_scan_reverse_with_bounds() {
     assert_eq!(results[2].0, Bytes::from_static(b"b"));
     assert_eq!(results[2].1, Bytes::from_static(b"vb"));
 }
-
 
 #[test]
 fn should_scan_reverse_with_limit() {
@@ -211,7 +204,9 @@ fn should_scan_reverse_with_limit() {
     }
 
     // Act: Reverse scan with limit of 3
-    let results = eng.scan(&cf, Query::new().reverse().limit(3)).expect("scan");
+    let results = eng
+        .scan(&cf, Query::new().reverse().limit(3))
+        .expect("scan");
 
     // Assert: Should get top 3 in reverse order
     assert_eq!(results.len(), 3);
@@ -219,7 +214,6 @@ fn should_scan_reverse_with_limit() {
     assert_eq!(results[1].0, Bytes::from_static(b"k09"));
     assert_eq!(results[2].0, Bytes::from_static(b"k08"));
 }
-
 
 #[test]
 fn should_scan_with_lower_and_upper_bounds() {
@@ -244,7 +238,9 @@ fn should_scan_with_lower_and_upper_bounds() {
 
     // Act: Scan from 'f' to 'k' (exclusive)
     let results = eng
-        .scan(&cf, Query::new()
+        .scan(
+            &cf,
+            Query::new()
                 .start_key(Bytes::from_static(b"f"))
                 .end_key(Bytes::from_static(b"k")),
         )
@@ -258,5 +254,3 @@ fn should_scan_with_lower_and_upper_bounds() {
     assert_eq!(results[3].0, Bytes::from_static(b"i"));
     assert_eq!(results[4].0, Bytes::from_static(b"j"));
 }
-
-

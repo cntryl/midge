@@ -42,7 +42,6 @@ fn should_fail_insert_given_read_only_mode() {
     ));
 }
 
-
 #[test]
 fn should_allow_reads_when_opened_read_only() {
     // Arrange: create a temp dir DB and write a key, then close
@@ -76,7 +75,6 @@ fn should_allow_reads_when_opened_read_only() {
     let got = db_ro.get(&cf_ro, b"k").unwrap();
     assert_eq!(got, Some(Bytes::from_static(b"v")));
 }
-
 
 #[test]
 fn should_reject_writes_when_opened_read_only() {
@@ -112,5 +110,3 @@ fn should_reject_writes_when_opened_read_only() {
     let msg = format!("{}", err);
     assert!(msg.contains("read-only"));
 }
-
-

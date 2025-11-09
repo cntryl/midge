@@ -2,7 +2,7 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, ColumnFamilyHandle};
+use cntryl_midge::{ColumnFamilyHandle, MidgeEngine, MidgeOptions, StorageMode};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -24,25 +24,25 @@ fn compaction_test_opts() -> MidgeOptions {
 fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     // Write batch 1 and flush to L0
     for i in 0..50 {
-    let key = format!("key{:03}", i);
-    let value = format!("value1_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value1_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 2 and flush to L0 (overlapping keys)
     for i in 25..75 {
-    let key = format!("key{:03}", i);
-    let value = format!("value2_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value2_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 3 and flush to L0
     for i in 50..100 {
-    let key = format!("key{:03}", i);
-    let value = format!("value3_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value3_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 }
@@ -95,18 +95,14 @@ fn should_handle_put_to_compacting_key_range() {
     // Write initial data that will be compacted
     for i in 0..100 {
         let key = format!("key{:03}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"old_value")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"old_value").unwrap();
     }
     engine.flush().unwrap();
 
     // Add more L0 files to trigger compaction
     for i in 0..100 {
         let key = format!("key{:03}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"updated_value")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"updated_value").unwrap();
     }
     engine.flush().unwrap();
 

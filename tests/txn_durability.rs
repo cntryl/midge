@@ -5,7 +5,7 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, KvStore};
+use cntryl_midge::{KvStore, MidgeEngine, MidgeOptions, StorageMode};
 use std::sync::Arc;
 
 mod common;
@@ -26,9 +26,7 @@ fn should_persist_transaction_given_commit_when_crash_after() {
     let cf = engine.default_column_family();
 
     let mut durable_txn = engine.begin_transaction(&cf).expect("begin_transaction");
-    durable_txn
-        .put(b"durable_key", b"durable_value")
-        .unwrap();
+    durable_txn.put(b"durable_key", b"durable_value").unwrap();
     engine
         .commit_transaction(durable_txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
@@ -66,9 +64,7 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
     let cf = engine.default_column_family();
 
     let mut aborted_txn = engine.begin_transaction(&cf).expect("begin_transaction");
-    aborted_txn
-        .put(b"aborted_key", b"aborted_value")
-        .unwrap();
+    aborted_txn.put(b"aborted_key", b"aborted_value").unwrap();
     drop(aborted_txn);
 
     drop(engine);
@@ -104,9 +100,7 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         let mut wal_txn = engine.begin_transaction(&cf).expect("begin_transaction");
         let key = format!("wal_key_{}", i);
         let value = format!("wal_val_{}", i);
-        wal_txn
-            .put(key.as_bytes(), value.as_bytes())
-            .unwrap();
+        wal_txn.put(key.as_bytes(), value.as_bytes()).unwrap();
         engine
             .commit_transaction(wal_txn, cntryl_midge::WriteOptions::default())
             .expect("commit");

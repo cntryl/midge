@@ -46,7 +46,6 @@ fn should_commit_transaction_atomically_given_multiple_operations() {
     assert_eq!(engine.get(&cf, b"key5").expect("get"), None);
 }
 
-
 #[test]
 fn should_rollback_transaction_on_drop_given_uncommitted() {
     // Arrange
@@ -64,15 +63,18 @@ fn should_rollback_transaction_on_drop_given_uncommitted() {
     {
         let snap = engine.snapshot();
         let mut txn = cntryl_midge::Transaction::with_options(2, snap.seq, None, 100 * 1024 * 1024);
-        txn.put(Bytes::from("rollback_key"), Bytes::from("rollback_value"), None)
-            .expect("put");
+        txn.put(
+            Bytes::from("rollback_key"),
+            Bytes::from("rollback_value"),
+            None,
+        )
+        .expect("put");
         // txn dropped here without commit
     }
 
     // Assert: changes not persisted
     assert_eq!(engine.get(&cf, b"rollback_key").expect("get"), None);
 }
-
 
 #[test]
 fn should_provide_snapshot_isolation_in_transaction() {
@@ -100,7 +102,6 @@ fn should_provide_snapshot_isolation_in_transaction() {
     // Note: Full snapshot isolation for transaction reads would require
     // wiring txn.get() to engine.get_at(key, snap) - that's a future enhancement
 }
-
 
 #[test]
 fn should_stage_delete_range_in_transaction() {
@@ -136,11 +137,15 @@ fn should_stage_delete_range_in_transaction() {
         .expect("commit");
 
     // Assert: keys in range are deleted, boundaries preserved
-    assert_eq!(engine.get(&cf, b"key0").expect("get"), Some(Bytes::from("val0")));
+    assert_eq!(
+        engine.get(&cf, b"key0").expect("get"),
+        Some(Bytes::from("val0"))
+    );
     assert_eq!(engine.get(&cf, b"key1").expect("get"), None);
     assert_eq!(engine.get(&cf, b"key2").expect("get"), None);
     assert_eq!(engine.get(&cf, b"key3").expect("get"), None);
-    assert_eq!(engine.get(&cf, b"key4").expect("get"), Some(Bytes::from("val4")));
+    assert_eq!(
+        engine.get(&cf, b"key4").expect("get"),
+        Some(Bytes::from("val4"))
+    );
 }
-
-

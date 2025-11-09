@@ -1,6 +1,6 @@
 use super::mutation::{Mutation, MutationOp};
-use crate::error::MidgeError;
 use crate::api::ColumnFamilyId;
+use crate::error::MidgeError;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -184,6 +184,12 @@ impl Transaction {
                 .write_all(&[op_byte])
                 .map_err(|e| MidgeError::internal(format!("Failed to write op: {}", e)))?;
 
+            // Write column family id (u32 little-endian)
+            let cf_bytes = mutation.cf_id.as_u32().to_le_bytes();
+            writer
+                .write_all(&cf_bytes)
+                .map_err(|e| MidgeError::internal(format!("Failed to write cf id: {}", e)))?;
+
             // Write key
             let key_len = mutation.key.len() as u32;
             writer
@@ -296,6 +302,13 @@ impl Transaction {
                     }
                 }
 
+                // Read column family id
+                let mut cf_id_bytes = [0u8; 4];
+                reader
+                    .read_exact(&mut cf_id_bytes)
+                    .map_err(|e| MidgeError::internal(format!("Failed to read cf id: {}", e)))?;
+                let cf_id = u32::from_le_bytes(cf_id_bytes);
+
                 // Read key
                 let mut key_len_bytes = [0u8; 4];
                 reader
@@ -326,19 +339,15 @@ impl Transaction {
                     None
                 };
 
-                // Reconstruct mutation (using default CF since spill files don't store CF ID)
+                // Reconstruct mutation using stored cf_id
+                let cf_id_obj = crate::api::ColumnFamilyId::from(cf_id);
                 let mutation = match op_byte[0] {
-                    0 => Mutation::put(key, value_or_end.unwrap_or_default(), None),
-                    1 => Mutation::insert(key, value_or_end.unwrap_or_default(), None),
-                    2 => Mutation::delete(key),
-                    3 => Mutation {
-                        cf_id: crate::api::DEFAULT_CF_ID,
-                        key,
-                        value: None,
-                        op: MutationOp::DeleteRange,
-                        range_end: value_or_end,
-                        ttl: None,
-                    },
+                    0 => Mutation::put_cf(cf_id_obj, key, value_or_end.unwrap_or_default(), None),
+                    1 => {
+                        Mutation::insert_cf(cf_id_obj, key, value_or_end.unwrap_or_default(), None)
+                    }
+                    2 => Mutation::delete_cf(cf_id_obj, key),
+                    3 => Mutation::delete_range_cf(cf_id_obj, key, value_or_end),
                     4 => {
                         // CompareAndSwap: read expected value (second field)
                         let mut expected_len_bytes = [0u8; 4];
@@ -357,9 +366,14 @@ impl Transaction {
                             None
                         };
 
-                        Mutation::compare_and_swap(key, expected, value_or_end.unwrap_or_default())
+                        Mutation::compare_and_swap_cf(
+                            cf_id_obj,
+                            key,
+                            expected,
+                            value_or_end.unwrap_or_default(),
+                        )
                     }
-                    5 => Mutation::merge(key, value_or_end.unwrap_or_default()),
+                    5 => Mutation::merge_cf(cf_id_obj, key, value_or_end.unwrap_or_default()),
                     _ => {
                         return Err(MidgeError::internal(format!(
                             "Unknown mutation op: {}",
@@ -383,8 +397,8 @@ impl Transaction {
         self.spill_files.clear();
     }
 
-    fn track_write(&mut self, key: Bytes) {
-        self.write_set.insert(key);
+    fn track_write(&mut self, cf_id: u32, key: Bytes) {
+        self.write_set.insert((cf_id, key));
     }
 
     #[inline]
@@ -405,7 +419,7 @@ impl Transaction {
         value: Bytes,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), MidgeError> {
-        self.track_write(key.clone());
+        self.track_write(cf_id.as_u32(), key.clone());
         let mutation = Mutation::put_cf(cf_id, key, value, ttl);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
@@ -430,7 +444,7 @@ impl Transaction {
         value: Bytes,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), MidgeError> {
-        self.track_write(key.clone());
+        self.track_write(cf_id.as_u32(), key.clone());
         let mutation = Mutation::insert_cf(cf_id, key, value, ttl);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
@@ -443,8 +457,12 @@ impl Transaction {
     }
 
     #[inline]
-    pub fn delete_cf(&mut self, cf_id: crate::api::ColumnFamilyId, key: Bytes) -> Result<(), MidgeError> {
-        self.track_write(key.clone());
+    pub fn delete_cf(
+        &mut self,
+        cf_id: crate::api::ColumnFamilyId,
+        key: Bytes,
+    ) -> Result<(), MidgeError> {
+        self.track_write(cf_id.as_u32(), key.clone());
         let mutation = Mutation::delete_cf(cf_id, key);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
@@ -457,8 +475,13 @@ impl Transaction {
     }
 
     #[inline]
-    pub fn delete_range_cf(&mut self, cf_id: crate::api::ColumnFamilyId, start: Bytes, end: Bytes) -> Result<(), MidgeError> {
-        self.track_write(start.clone());
+    pub fn delete_range_cf(
+        &mut self,
+        cf_id: crate::api::ColumnFamilyId,
+        start: Bytes,
+        end: Bytes,
+    ) -> Result<(), MidgeError> {
+        self.track_write(cf_id.as_u32(), start.clone());
         let mutation = Mutation::delete_range_cf(cf_id, start, end);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
@@ -483,7 +506,7 @@ impl Transaction {
         expected: Option<Bytes>,
         new_value: Bytes,
     ) -> Result<(), MidgeError> {
-        self.track_write(key.clone());
+        self.track_write(cf_id.as_u32(), key.clone());
         let mutation = Mutation::compare_and_swap_cf(cf_id, key, expected, new_value);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
@@ -496,8 +519,13 @@ impl Transaction {
     }
 
     #[inline]
-    pub fn merge_cf(&mut self, cf_id: crate::api::ColumnFamilyId, key: Bytes, value: Bytes) -> Result<(), MidgeError> {
-        self.track_write(key.clone());
+    pub fn merge_cf(
+        &mut self,
+        cf_id: crate::api::ColumnFamilyId,
+        key: Bytes,
+        value: Bytes,
+    ) -> Result<(), MidgeError> {
+        self.track_write(cf_id.as_u32(), key.clone());
         let mutation = Mutation::merge_cf(cf_id, key, value);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
@@ -512,8 +540,12 @@ impl Transaction {
     /// Note: This only checks in-memory staged mutations for performance.
     /// Spill files are only read during commit.
     #[inline]
-    pub fn get_local(&self, key: &[u8]) -> Option<Option<Bytes>> {
+    pub fn get_local(&self, cf_id: u32, key: &[u8]) -> Option<Option<Bytes>> {
         for m in self.staged.iter().rev() {
+            // Only consider staged mutations for the requested column family
+            if m.cf_id.as_u32() != cf_id {
+                continue;
+            }
             match &m.op {
                 MutationOp::DeleteRange => {
                     if let Some(end) = &m.range_end {
@@ -532,8 +564,8 @@ impl Transaction {
         None
     }
 
-    pub fn exists_local(&self, key: &[u8]) -> bool {
-        matches!(self.get_local(key), Some(Some(_)))
+    pub fn exists_local(&self, cf_id: u32, key: &[u8]) -> bool {
+        matches!(self.get_local(cf_id, key), Some(Some(_)))
     }
 
     /// Consume the transaction and return staged mutations for the caller
@@ -596,7 +628,10 @@ pub(crate) struct EngineTransaction {
 }
 
 impl EngineTransaction {
-    pub(crate) fn new(txn: Transaction, engine: std::sync::Arc<crate::core::engine::MidgeEngine>) -> Self {
+    pub(crate) fn new(
+        txn: Transaction,
+        engine: std::sync::Arc<crate::core::engine::MidgeEngine>,
+    ) -> Self {
         Self { txn, engine }
     }
 
@@ -608,7 +643,11 @@ impl EngineTransaction {
 // Implement the public KvTransaction trait for EngineTransaction
 impl super::kv_store::KvTransaction for EngineTransaction {
     fn put(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
-        self.txn.put(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value), None)
+        self.txn.put(
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value),
+            None,
+        )
     }
 
     fn get(&mut self, key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
@@ -625,7 +664,7 @@ impl super::kv_store::KvTransaction for EngineTransaction {
         let q = crate::api::query::Query::new()
             .start_key(Bytes::copy_from_slice(start))
             .end_key(Bytes::copy_from_slice(end));
-        
+
         // TODO: Implement transaction-aware scan in engine
         // For now, run a column-family scoped scan on the engine's default CF
         let cf = self.engine.default_column_family();
@@ -633,7 +672,8 @@ impl super::kv_store::KvTransaction for EngineTransaction {
     }
 
     fn delete_range(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<()> {
-        self.txn.delete_range(Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))
+        self.txn
+            .delete_range(Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))
     }
 
     fn compare_and_swap(
@@ -652,7 +692,8 @@ impl super::kv_store::KvTransaction for EngineTransaction {
     }
 
     fn merge(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
-        self.txn.merge(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
+        self.txn
+            .merge(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
     }
 }
 
@@ -661,12 +702,17 @@ impl super::kv_store::KvTransaction for EngineTransaction {
 // is expected by external integrations (though reads won't work without engine reference).
 impl super::kv_store::KvTransaction for Transaction {
     fn put(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
-        Transaction::put(self, Bytes::copy_from_slice(key), Bytes::copy_from_slice(value), None)
+        Transaction::put(
+            self,
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value),
+            None,
+        )
     }
 
     fn get(&mut self, _key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
         Err(crate::MidgeError::internal(
-            "Transaction reads require engine context. Use KvStore::begin_transaction() instead."
+            "Transaction reads require engine context. Use KvStore::begin_transaction() instead.",
         ))
     }
 
@@ -676,12 +722,16 @@ impl super::kv_store::KvTransaction for Transaction {
 
     fn scan(&mut self, _start: &[u8], _end: &[u8]) -> crate::MidgeResult<Vec<(Bytes, Bytes)>> {
         Err(crate::MidgeError::internal(
-            "Transaction scans require engine context. Use KvStore::begin_transaction() instead."
+            "Transaction scans require engine context. Use KvStore::begin_transaction() instead.",
         ))
     }
 
     fn delete_range(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<()> {
-        Transaction::delete_range(self, Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))
+        Transaction::delete_range(
+            self,
+            Bytes::copy_from_slice(start),
+            Bytes::copy_from_slice(end),
+        )
     }
 
     fn compare_and_swap(
@@ -701,7 +751,11 @@ impl super::kv_store::KvTransaction for Transaction {
     }
 
     fn merge(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
-        Transaction::merge(self, Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
+        Transaction::merge(
+            self,
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value),
+        )
     }
 }
 
@@ -725,8 +779,12 @@ mod tests {
             .unwrap();
 
         // Assert
-        assert!(txn.write_set().contains(&Bytes::from("key1")));
-        assert!(txn.write_set().contains(&Bytes::from("key2")));
+        assert!(txn
+            .write_set()
+            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"))));
+        assert!(txn
+            .write_set()
+            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"))));
         assert_eq!(txn.write_set().len(), 2);
     }
 
@@ -739,7 +797,10 @@ mod tests {
         txn.delete(Bytes::from("deleted_key")).unwrap();
 
         // Assert
-        assert!(txn.write_set().contains(&Bytes::from("deleted_key")));
+        assert!(txn.write_set().contains(&(
+            crate::api::DEFAULT_CF_ID.as_u32(),
+            Bytes::from("deleted_key")
+        )));
     }
 
     #[test]
@@ -752,7 +813,9 @@ mod tests {
             .unwrap();
 
         // Assert
-        assert!(txn.write_set().contains(&Bytes::from("start")));
+        assert!(txn
+            .write_set()
+            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("start"))));
     }
 
     #[test]
@@ -782,12 +845,16 @@ mod tests {
         let mut txn = Transaction::new(1, 100);
 
         // Act
-        txn.track_read(Bytes::from("key1"), 50);
-        txn.track_read(Bytes::from("key2"), 75);
+        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"), 50);
+        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"), 75);
 
         // Assert
-        assert!(txn.read_set().contains(&Bytes::from("key1")));
-        assert!(txn.read_set().contains(&Bytes::from("key2")));
+        assert!(txn
+            .read_set()
+            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"))));
+        assert!(txn
+            .read_set()
+            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"))));
     }
 
     #[test]
@@ -796,10 +863,13 @@ mod tests {
         let mut txn = Transaction::new(1, 100);
 
         // Act
-        txn.track_read(Bytes::from("key"), 42);
+        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key"), 42);
 
         // Assert
-        assert_eq!(txn.read_version(b"key"), Some(42));
+        assert_eq!(
+            txn.read_version(crate::api::DEFAULT_CF_ID.as_u32(), b"key"),
+            Some(42)
+        );
     }
 
     #[test]
@@ -808,11 +878,14 @@ mod tests {
         let mut txn = Transaction::new(1, 100);
 
         // Act
-        txn.track_read(Bytes::from("key"), 10);
-        txn.track_read(Bytes::from("key"), 20);
+        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key"), 10);
+        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key"), 20);
 
         // Assert
-        assert_eq!(txn.read_version(b"key"), Some(20));
+        assert_eq!(
+            txn.read_version(crate::api::DEFAULT_CF_ID.as_u32(), b"key"),
+            Some(20)
+        );
     }
 
     #[test]
@@ -821,7 +894,7 @@ mod tests {
         let txn = Transaction::new(1, 100);
 
         // Act
-        let version = txn.read_version(b"never_read");
+        let version = txn.read_version(crate::api::DEFAULT_CF_ID.as_u32(), b"never_read");
 
         // Assert
         assert_eq!(version, None);
@@ -1052,14 +1125,20 @@ mod tests {
         let mut txn = Transaction::new(1, 100);
 
         // Act
-        txn.track_read(Bytes::from("key1"), 50);
-        txn.track_read(Bytes::from("key2"), 75);
+        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"), 50);
+        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"), 75);
 
         // Assert
         let read_versions = txn.read_versions();
         assert_eq!(read_versions.len(), 2);
-        assert_eq!(read_versions.get(&Bytes::from("key1")), Some(&50));
-        assert_eq!(read_versions.get(&Bytes::from("key2")), Some(&75));
+        assert_eq!(
+            read_versions.get(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"))),
+            Some(&50)
+        );
+        assert_eq!(
+            read_versions.get(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"))),
+            Some(&75)
+        );
     }
 
     // ========================================================================

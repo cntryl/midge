@@ -5,9 +5,9 @@ mod criterion_helper;
 #[path = "ycsb_common.rs"]
 mod ycsb_common;
 
+use cntryl_midge::MidgeEngine;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
-use cntryl_midge::MidgeEngine;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;

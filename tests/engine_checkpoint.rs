@@ -38,5 +38,3 @@ fn should_create_checkpoint_and_read_from_it() {
     assert_eq!(cp.get(&cf, b"k1").unwrap(), Some(Bytes::from_static(b"v1")));
     assert_eq!(cp.get(&cf, b"k2").unwrap(), Some(Bytes::from_static(b"v2")));
 }
-
-

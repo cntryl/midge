@@ -2,7 +2,7 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, ColumnFamilyHandle};
+use cntryl_midge::{ColumnFamilyHandle, MidgeEngine, MidgeOptions, StorageMode};
 
 mod common;
 use common::assert_get_equals;
@@ -21,25 +21,25 @@ fn compaction_test_opts() -> MidgeOptions {
 fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     // Write batch 1 and flush to L0
     for i in 0..50 {
-    let key = format!("key{:03}", i);
-    let value = format!("value1_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value1_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 2 and flush to L0 (overlapping keys)
     for i in 25..75 {
-    let key = format!("key{:03}", i);
-    let value = format!("value2_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value2_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 3 and flush to L0
     for i in 50..100 {
-    let key = format!("key{:03}", i);
-    let value = format!("value3_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value3_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 }
@@ -78,9 +78,7 @@ fn should_abort_compaction_given_corruption_detected_when_reading_input() {
 
     for i in 0..50 {
         let key = format!("key{}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"value")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"value").unwrap();
     }
     engine.flush().unwrap();
 
@@ -93,10 +91,7 @@ fn should_abort_compaction_given_corruption_detected_when_reading_input() {
             // Successful compaction
             for i in 0..50 {
                 let key = format!("key{}", i);
-                assert!(engine
-                    .get(&cf, key.as_bytes())
-                    .unwrap()
-                    .is_some());
+                assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
             }
         }
         Err(_) => {
@@ -121,9 +116,7 @@ fn should_cleanup_partial_output_given_compaction_failure() {
     let _ = engine.compact_all();
 
     // Assert - Engine should still be usable
-    engine
-        .put(&cf, b"new_key", b"new_value")
-        .unwrap();
+    engine.put(&cf, b"new_key", b"new_value").unwrap();
     assert_get_equals(&engine, b"new_key", b"new_value");
 }
 
@@ -136,9 +129,7 @@ fn should_restore_manifest_given_compaction_crash_before_commit() {
 
     for i in 0..30 {
         let key = format!("k{}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"v")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"v").unwrap();
     }
     engine.flush().unwrap();
 
@@ -161,9 +152,7 @@ fn should_preserve_input_files_given_compaction_error_when_aborting() {
 
     for i in 0..40 {
         let key = format!("preserve{}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"data")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"data").unwrap();
     }
     engine.flush().unwrap();
 

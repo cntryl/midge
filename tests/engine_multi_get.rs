@@ -21,14 +21,11 @@ fn should_multi_get_all_keys_from_memtable() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
-let cf = eng.default_column_family();
+    let cf = eng.default_column_family();
 
-    eng.put(&cf, b"k1", b"v1")
-        .expect("put");
-    eng.put(&cf, b"k2", b"v2")
-        .expect("put");
-    eng.put(&cf, b"k3", b"v3")
-        .expect("put");
+    eng.put(&cf, b"k1", b"v1").expect("put");
+    eng.put(&cf, b"k2", b"v2").expect("put");
+    eng.put(&cf, b"k3", b"v3").expect("put");
 
     // Act
     let keys: Vec<&[u8]> = vec![b"k1", b"k2", b"k3", b"k4"];
@@ -52,7 +49,6 @@ let cf = eng.default_column_family();
     assert_eq!(results[3].1, None); // Not found
 }
 
-
 #[test]
 fn should_multi_get_respect_tombstones() {
     // Arrange
@@ -65,12 +61,10 @@ fn should_multi_get_respect_tombstones() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
-let cf = eng.default_column_family();
+    let cf = eng.default_column_family();
 
-    eng.put(&cf, b"k1", b"v1")
-        .expect("put");
-    eng.put(&cf, b"k2", b"v2")
-        .expect("put");
+    eng.put(&cf, b"k1", b"v1").expect("put");
+    eng.put(&cf, b"k2", b"v2").expect("put");
     eng.delete(&cf, b"k1").expect("delete");
 
     // Act
@@ -90,7 +84,6 @@ let cf = eng.default_column_family();
     assert_eq!(results[1].0, Bytes::from_static(b"k2"));
     assert_eq!(results[1].1, Some(Bytes::from_static(b"v2")));
 }
-
 
 #[test]
 fn should_multi_get_from_ssts_after_flush() {
@@ -139,7 +132,6 @@ fn should_multi_get_from_ssts_after_flush() {
     assert_eq!(results[3].0, Bytes::from_static(b"key999"));
     assert_eq!(results[3].1, None); // Not found
 }
-
 
 #[test]
 fn should_multi_get_mixed_memtable_and_sst() {
@@ -193,5 +185,3 @@ fn should_multi_get_mixed_memtable_and_sst() {
     assert_eq!(results[4].0, Bytes::from_static(b"missing"));
     assert_eq!(results[4].1, None); // Not found
 }
-
-

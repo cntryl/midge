@@ -6,8 +6,8 @@
 
 mod common;
 use bytes::Bytes;
-use common::*;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::*;
 use std::sync::Arc;
 use std::thread;
 
@@ -96,7 +96,9 @@ fn should_handle_concurrent_puts_to_same_key_given_100_threads() {
             let key = key.clone();
             thread::spawn(move || {
                 let value = format!("value_from_thread_{}", thread_id);
-                engine.put(&cf, key.as_ref(), Bytes::from(value).as_ref()).unwrap();
+                engine
+                    .put(&cf, key.as_ref(), Bytes::from(value).as_ref())
+                    .unwrap();
             })
         })
         .collect();
@@ -138,7 +140,9 @@ fn should_maintain_consistency_given_concurrent_put_delete_to_same_key() {
         thread::spawn(move || {
             for i in 0..num_iterations {
                 let value = format!("value_{}", i);
-                engine.put(&cf, key.as_ref(), Bytes::from(value).as_ref()).unwrap();
+                engine
+                    .put(&cf, key.as_ref(), Bytes::from(value).as_ref())
+                    .unwrap();
             }
         })
     };
@@ -191,7 +195,9 @@ fn should_preserve_last_write_wins_given_concurrent_updates_when_no_transaction(
             let key = key.clone();
             thread::spawn(move || {
                 let value = format!("thread_{}", thread_id);
-                engine.put(&cf, key.as_ref(), Bytes::from(value).as_ref()).unwrap();
+                engine
+                    .put(&cf, key.as_ref(), Bytes::from(value).as_ref())
+                    .unwrap();
             })
         })
         .collect();
@@ -226,9 +232,7 @@ fn should_handle_mixed_operations_given_concurrent_put_delete_get() {
 
     for i in 0..num_keys {
         let key = format!("key_{}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"initial")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"initial").unwrap();
     }
 
     // Act
@@ -238,9 +242,7 @@ fn should_handle_mixed_operations_given_concurrent_put_delete_get() {
         thread::spawn(move || {
             for i in 0..num_keys {
                 let key = format!("key_{}", i);
-                engine
-                    .put(&cf, key.as_bytes(), b"updated")
-                    .unwrap();
+                engine.put(&cf, key.as_bytes(), b"updated").unwrap();
             }
         })
     };

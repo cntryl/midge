@@ -36,7 +36,6 @@ fn should_hide_newer_writes_given_snapshot_when_get_at() {
     assert_eq!(full, Some(Bytes::from_static(b"v2")));
 }
 
-
 #[test]
 #[ignore = "Snapshot isolation not fully implemented - documents expected behavior"]
 fn should_scan_at_hides_newer_writes_given_snapshot() {
@@ -69,5 +68,3 @@ fn should_scan_at_hides_newer_writes_given_snapshot() {
         vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))]
     );
 }
-
-

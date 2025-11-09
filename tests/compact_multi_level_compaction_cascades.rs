@@ -2,7 +2,7 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, ColumnFamilyHandle};
+use cntryl_midge::{ColumnFamilyHandle, MidgeEngine, MidgeOptions, StorageMode};
 
 mod common;
 
@@ -22,25 +22,25 @@ fn compaction_test_opts() -> MidgeOptions {
 fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     // Write batch 1 and flush to L0
     for i in 0..50 {
-    let key = format!("key{:03}", i);
-    let value = format!("value1_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value1_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 2 and flush to L0 (overlapping keys)
     for i in 25..75 {
-    let key = format!("key{:03}", i);
-    let value = format!("value2_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value2_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 3 and flush to L0
     for i in 50..100 {
-    let key = format!("key{:03}", i);
-    let value = format!("value3_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value3_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 }
@@ -62,9 +62,7 @@ fn should_trigger_l2_compaction_given_l1_compaction_exceeded_l2_capacity() {
     for batch in 0..15 {
         for i in 0..40 {
             let key = format!("cascade_b{}_k{:03}", batch, i);
-            engine
-                .put(&cf, key.as_bytes(), b"cascade_value")
-                .unwrap();
+            engine.put(&cf, key.as_bytes(), b"cascade_value").unwrap();
         }
         engine.flush().unwrap();
     }
@@ -127,9 +125,7 @@ fn should_handle_cascading_compaction_to_max_level() {
     // Create deep structure
     for i in 0..200 {
         let key = format!("deep_key{:04}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"deep_value")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"deep_value").unwrap();
         if i % 20 == 19 {
             engine.flush().unwrap();
         }

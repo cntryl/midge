@@ -25,21 +25,16 @@ fn should_compact_all_merge_newest_and_drop_tombstones() {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
         // SST1: a=1, b=2
-        eng.put(&cf, b"a", b"1")
-            .unwrap();
-        eng.put(&cf, b"zz", &vec![b'x'; 256])
-            .unwrap();
+        eng.put(&cf, b"a", b"1").unwrap();
+        eng.put(&cf, b"zz", &vec![b'x'; 256]).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         // SST2: b=2', c=3
-        eng.put(&cf, b"b", b"2' ")
-            .unwrap();
-        eng.put(&cf, b"zz2", &vec![b'x'; 256])
-            .unwrap();
+        eng.put(&cf, b"b", b"2' ").unwrap();
+        eng.put(&cf, b"zz2", &vec![b'x'; 256]).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         // SST3: delete a
         eng.delete(&cf, b"a").unwrap();
-        eng.put(&cf, b"zz3", &vec![b'x'; 256])
-            .unwrap();
+        eng.put(&cf, b"zz3", &vec![b'x'; 256]).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(120));
         // leave eng in scope to ensure flush thread has time
     }
@@ -61,7 +56,6 @@ fn should_compact_all_merge_newest_and_drop_tombstones() {
     assert_eq!(got_b, Some(Bytes::from_static(b"2' ")));
 }
 
-
 #[test]
 fn should_preserve_snapshot_visibility_across_compaction() {
     // Arrange: create value, take snapshot, delete value, then compact
@@ -76,8 +70,7 @@ fn should_preserve_snapshot_visibility_across_compaction() {
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
 
-    eng.put(&cf, b"a", b"v1")
-        .expect("put v1");
+    eng.put(&cf, b"a", b"v1").expect("put v1");
     eng.flush().expect("flush v1");
 
     let snap = eng.snapshot();
@@ -96,7 +89,6 @@ fn should_preserve_snapshot_visibility_across_compaction() {
     assert_eq!(snapshot_view, Some(Bytes::from_static(b"v1")));
 }
 
-
 #[test]
 fn should_background_compact_when_threshold_exceeded() {
     // Arrange: enable compaction with low threshold so it triggers
@@ -114,20 +106,14 @@ fn should_background_compact_when_threshold_exceeded() {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
         // Create 3 SSTs quickly
-        eng.put(&cf, b"a", b"1")
-            .unwrap();
-        eng.put(&cf, b"zz", &[b'x'; 128])
-            .unwrap();
+        eng.put(&cf, b"a", b"1").unwrap();
+        eng.put(&cf, b"zz", &[b'x'; 128]).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
-        eng.put(&cf, b"b", b"2")
-            .unwrap();
-        eng.put(&cf, b"zz2", &[b'x'; 128])
-            .unwrap();
+        eng.put(&cf, b"b", b"2").unwrap();
+        eng.put(&cf, b"zz2", &[b'x'; 128]).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(80));
-        eng.put(&cf, b"c", b"3")
-            .unwrap();
-        eng.put(&cf, b"zz3", &[b'x'; 128])
-            .unwrap();
+        eng.put(&cf, b"c", b"3").unwrap();
+        eng.put(&cf, b"zz3", &[b'x'; 128]).unwrap();
     }
     // Act: wait for background compaction to kick in
     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -141,5 +127,3 @@ fn should_background_compact_when_threshold_exceeded() {
     assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
     assert_eq!(eng.get(&cf, b"c").unwrap(), Some(Bytes::from_static(b"3")));
 }
-
-

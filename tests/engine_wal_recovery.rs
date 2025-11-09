@@ -76,7 +76,6 @@ fn should_rotate_wal_given_small_buffer_when_multiple_puts() {
     );
 }
 
-
 #[test]
 fn should_recover_state_given_unflushed_wal_when_reopening() {
     // Arrange
@@ -106,5 +105,3 @@ fn should_recover_state_given_unflushed_wal_when_reopening() {
     assert_eq!(eng2.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));
     assert_eq!(eng2.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
 }
-
-

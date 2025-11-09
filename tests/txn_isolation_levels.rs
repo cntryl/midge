@@ -19,9 +19,7 @@ fn should_prevent_dirty_read_given_uncommitted_write_when_read_committed() {
     let cf = engine.default_column_family();
 
     let mut uncommitted_txn = engine.begin_transaction(&cf).expect("begin_transaction");
-    uncommitted_txn
-        .put(b"key", b"uncommitted")
-        .unwrap();
+    uncommitted_txn.put(b"key", b"uncommitted").unwrap();
 
     // Act
     let read_result = engine.get(&cf, b"key").expect("get");
@@ -44,19 +42,13 @@ fn should_prevent_dirty_write_given_uncommitted_update_when_read_committed() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key", b"v1")
-        .expect("put");
+    engine.put(&cf, b"key", b"v1").expect("put");
 
     let mut first_txn = engine.begin_transaction(&cf).expect("begin_transaction");
-    first_txn
-        .put(b"key", b"txn1_value")
-        .unwrap();
+    first_txn.put(b"key", b"txn1_value").unwrap();
 
     let mut second_txn = engine.begin_transaction(&cf).expect("begin_transaction");
-    second_txn
-        .put(b"key", b"txn2_value")
-        .unwrap();
+    second_txn.put(b"key", b"txn2_value").unwrap();
 
     // Act
     let second_result =
@@ -78,9 +70,7 @@ fn should_see_own_writes_given_transaction_when_get_after_put() {
     let cf = engine.default_column_family();
 
     let mut writing_txn = engine.begin_transaction(&cf).expect("begin_transaction");
-    writing_txn
-        .put(b"key", b"my_value")
-        .unwrap();
+    writing_txn.put(b"key", b"my_value").unwrap();
 
     // Act
     let local_read = writing_txn.get(b"key").expect("get");
@@ -99,9 +89,7 @@ fn should_not_see_other_uncommitted_writes_given_concurrent_transactions() {
     let mut writing_txn = engine.begin_transaction(&cf).expect("begin_transaction");
     let mut reading_txn = engine.begin_transaction(&cf).expect("begin_transaction");
 
-    writing_txn
-        .put(b"key", b"txn1_value")
-        .unwrap();
+    writing_txn.put(b"key", b"txn1_value").unwrap();
 
     // Act
     let read_result = reading_txn.get(b"key").expect("get");
@@ -120,15 +108,11 @@ fn should_maintain_snapshot_view_given_transaction_when_external_writes_occur() 
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key", b"v1")
-        .expect("put");
+    engine.put(&cf, b"key", b"v1").expect("put");
 
     let begin_seq = engine.snapshot().seq;
 
-    engine
-        .put(&cf, b"key", b"v2")
-        .expect("external put");
+    engine.put(&cf, b"key", b"v2").expect("external put");
 
     // Act
     let snap = engine.snapshot();
@@ -147,9 +131,7 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key1", b"v1")
-        .expect("put");
+    engine.put(&cf, b"key1", b"v1").expect("put");
 
     let snap = engine.snapshot();
     let first_scan = engine
@@ -162,9 +144,7 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
         )
         .expect("scan");
 
-    engine
-        .put(&cf, b"key2", b"v2")
-        .expect("put new key");
+    engine.put(&cf, b"key2", b"v2").expect("put new key");
 
     // Act
     let second_scan = engine

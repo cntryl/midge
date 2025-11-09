@@ -16,29 +16,21 @@ fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"k1", b"v1")
-        .expect("put");
-    engine
-        .put(&cf, b"k2", b"v2")
-        .expect("put");
+    engine.put(&cf, b"k1", b"v1").expect("put");
+    engine.put(&cf, b"k2", b"v2").expect("put");
 
-    let mut first_circular_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    let mut second_circular_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut first_circular_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    let mut second_circular_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
 
-    first_circular_txn
-        .put(b"k1", b"txn1_k1")
-        .unwrap();
-    second_circular_txn
-        .put(b"k2", b"txn2_k2")
-        .unwrap();
+    first_circular_txn.put(b"k1", b"txn1_k1").unwrap();
+    second_circular_txn.put(b"k2", b"txn2_k2").unwrap();
 
-    first_circular_txn
-        .put(b"k2", b"txn1_k2")
-        .unwrap();
-    second_circular_txn
-        .put(b"k1", b"txn2_k1")
-        .unwrap();
+    first_circular_txn.put(b"k2", b"txn1_k2").unwrap();
+    second_circular_txn.put(b"k1", b"txn2_k1").unwrap();
 
     let first_result =
         engine.commit_transaction(first_circular_txn, cntryl_midge::WriteOptions::default());
@@ -66,22 +58,18 @@ fn should_abort_victim_transaction_given_deadlock_when_detected() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut first_deadlock_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    let mut second_deadlock_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut first_deadlock_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    let mut second_deadlock_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
 
-    first_deadlock_txn
-        .put(b"resource_a", b"txn1")
-        .unwrap();
-    second_deadlock_txn
-        .put(b"resource_b", b"txn2")
-        .unwrap();
+    first_deadlock_txn.put(b"resource_a", b"txn1").unwrap();
+    second_deadlock_txn.put(b"resource_b", b"txn2").unwrap();
 
-    first_deadlock_txn
-        .put(b"resource_b", b"txn1_b")
-        .unwrap();
-    second_deadlock_txn
-        .put(b"resource_a", b"txn2_a")
-        .unwrap();
+    first_deadlock_txn.put(b"resource_b", b"txn1_b").unwrap();
+    second_deadlock_txn.put(b"resource_a", b"txn2_a").unwrap();
 
     // Act
     let first_deadlock_result =
@@ -104,20 +92,20 @@ fn should_allow_retry_given_deadlock_victim_when_aborted() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut initial_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    initial_txn
-        .put(b"key", b"value")
-        .unwrap();
+    let mut initial_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    initial_txn.put(b"key", b"value").unwrap();
 
     // Act
     let result = engine.commit_transaction(initial_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     if result.is_err() {
-        let mut retry_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-        retry_txn
-            .put(b"key", b"retry_value")
-            .unwrap();
+        let mut retry_txn = engine
+            .begin_transaction(&cf)
+            .expect("Transaction creation failed");
+        retry_txn.put(b"key", b"retry_value").unwrap();
         let retry_result =
             engine.commit_transaction(retry_txn, cntryl_midge::WriteOptions::default());
         assert!(retry_result.is_ok(), "Retry should succeed");
@@ -133,29 +121,23 @@ fn should_detect_deadlock_given_three_way_circular_dependency() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut first_three_way_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    let mut second_three_way_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    let mut third_three_way_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut first_three_way_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    let mut second_three_way_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    let mut third_three_way_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
 
-    first_three_way_txn
-        .put(b"r1", b"t1")
-        .unwrap();
-    second_three_way_txn
-        .put(b"r2", b"t2")
-        .unwrap();
-    third_three_way_txn
-        .put(b"r3", b"t3")
-        .unwrap();
+    first_three_way_txn.put(b"r1", b"t1").unwrap();
+    second_three_way_txn.put(b"r2", b"t2").unwrap();
+    third_three_way_txn.put(b"r3", b"t3").unwrap();
 
-    first_three_way_txn
-        .put(b"r2", b"t1_r2")
-        .unwrap();
-    second_three_way_txn
-        .put(b"r3", b"t2_r3")
-        .unwrap();
-    third_three_way_txn
-        .put(b"r1", b"t3_r1")
-        .unwrap();
+    first_three_way_txn.put(b"r2", b"t1_r2").unwrap();
+    second_three_way_txn.put(b"r3", b"t2_r3").unwrap();
+    third_three_way_txn.put(b"r1", b"t3_r1").unwrap();
 
     // Act
     let first_three_way_result =

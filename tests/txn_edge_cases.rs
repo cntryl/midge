@@ -18,7 +18,9 @@ fn should_handle_empty_transaction_given_commit_without_operations() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let empty_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let empty_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
 
     // Act
     let result = engine.commit_transaction(empty_txn, cntryl_midge::WriteOptions::default());
@@ -39,7 +41,9 @@ fn should_handle_read_only_transaction_given_no_writes_when_commit() {
 
     engine.put(&cf, b"key", b"value").expect("put");
 
-    let readonly_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let readonly_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
     let snap = engine.snapshot();
     let _value = engine.get_at(b"key", &snap).expect("get_at");
 
@@ -57,10 +61,10 @@ fn should_allow_nested_get_given_transaction_when_reading_own_writes() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut nested_read_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    nested_read_txn
-        .put(b"nested_key", b"nested_value")
-        .unwrap();
+    let mut nested_read_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    nested_read_txn.put(b"nested_key", b"nested_value").unwrap();
 
     // Act
     let read1 = nested_read_txn.get(b"nested_key").ok();
@@ -78,10 +82,10 @@ fn should_handle_transaction_on_dropped_cf_given_cf_deleted_during_transaction()
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut cf_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    cf_txn
-        .put(b"cf_key", b"cf_value")
-        .unwrap();
+    let mut cf_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    cf_txn.put(b"cf_key", b"cf_value").unwrap();
 
     // Act
     let result = engine.commit_transaction(cf_txn, cntryl_midge::WriteOptions::default());

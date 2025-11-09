@@ -43,7 +43,9 @@ fn should_streaming_scan_match_regular_scan() {
 
     // Act: scan with both methods
     let regular_results = eng
-        .scan(&cf, Query::new()
+        .scan(
+            &cf,
+            Query::new()
                 .start_key(Bytes::from_static(b"a"))
                 .end_key(Bytes::from_static(b"z")),
         )
@@ -60,7 +62,6 @@ fn should_streaming_scan_match_regular_scan() {
     assert_eq!(regular_results.len(), streaming_results.len());
     assert_eq!(regular_results, streaming_results);
 }
-
 
 #[test]
 fn should_streaming_scan_respect_limit() {
@@ -92,7 +93,6 @@ fn should_streaming_scan_respect_limit() {
     assert_eq!(results.len(), 5);
 }
 
-
 #[test]
 fn should_streaming_scan_apply_tombstones() {
     // Arrange
@@ -105,12 +105,10 @@ fn should_streaming_scan_apply_tombstones() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
-let cf = eng.default_column_family();
+    let cf = eng.default_column_family();
 
-    eng.put(&cf, b"k1", b"v1")
-        .expect("put");
-    eng.put(&cf, b"k2", b"v2")
-        .expect("put");
+    eng.put(&cf, b"k1", b"v1").expect("put");
+    eng.put(&cf, b"k2", b"v2").expect("put");
 
     // Delete k1
     eng.delete(&cf, b"k1").expect("delete");
@@ -123,5 +121,3 @@ let cf = eng.default_column_family();
     assert_eq!(results[0].0, Bytes::from_static(b"k2"));
     assert_eq!(results[0].1, Bytes::from_static(b"v2"));
 }
-
-

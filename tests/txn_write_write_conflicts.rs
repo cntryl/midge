@@ -16,14 +16,13 @@ fn should_detect_write_write_conflict_given_concurrent_updates_to_same_key() {
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
-    engine
-        .put(&cf, b"key", b"v0")
-        .unwrap();
+    engine.put(&cf, b"key", b"v0").unwrap();
 
     let snap = engine.snapshot();
     let mut txn1 = cntryl_midge::Transaction::with_options(1001, snap.seq, None, 100 * 1024 * 1024);
     let snap2 = engine.snapshot();
-    let mut txn2 = cntryl_midge::Transaction::with_options(1002, snap2.seq, None, 100 * 1024 * 1024);
+    let mut txn2 =
+        cntryl_midge::Transaction::with_options(1002, snap2.seq, None, 100 * 1024 * 1024);
 
     txn1.put(Bytes::from_static(b"key"), Bytes::from_static(b"v1"), None)
         .unwrap();
@@ -51,15 +50,25 @@ fn should_abort_second_transaction_given_write_conflict_when_both_commit() {
     let _cf = engine.default_column_family();
 
     let snap = engine.snapshot();
-    let mut winner = cntryl_midge::Transaction::with_options(1003, snap.seq, None, 100 * 1024 * 1024);
+    let mut winner =
+        cntryl_midge::Transaction::with_options(1003, snap.seq, None, 100 * 1024 * 1024);
     let snap2 = engine.snapshot();
-    let mut loser = cntryl_midge::Transaction::with_options(1004, snap2.seq, None, 100 * 1024 * 1024);
+    let mut loser =
+        cntryl_midge::Transaction::with_options(1004, snap2.seq, None, 100 * 1024 * 1024);
 
     winner
-        .put(Bytes::from_static(b"conflict_key"), Bytes::from_static(b"txn1_value"), None)
+        .put(
+            Bytes::from_static(b"conflict_key"),
+            Bytes::from_static(b"txn1_value"),
+            None,
+        )
         .unwrap();
     loser
-        .put(Bytes::from_static(b"conflict_key"), Bytes::from_static(b"txn2_value"), None)
+        .put(
+            Bytes::from_static(b"conflict_key"),
+            Bytes::from_static(b"txn2_value"),
+            None,
+        )
         .unwrap();
 
     // Act
@@ -84,16 +93,25 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
 
     let snap = engine.snapshot();
     let mut txn1 = cntryl_midge::Transaction::with_options(1005, snap.seq, None, 100 * 1024 * 1024);
-    txn1.put(Bytes::from_static(b"key"), Bytes::from_static(b"first_value"), None)
-        .unwrap();
+    txn1.put(
+        Bytes::from_static(b"key"),
+        Bytes::from_static(b"first_value"),
+        None,
+    )
+    .unwrap();
     engine
         .commit_transaction(Box::new(txn1), WriteOptions::default())
         .unwrap();
 
     let snap2 = engine.snapshot();
-    let mut aborted_txn = cntryl_midge::Transaction::with_options(1006, snap2.seq, None, 100 * 1024 * 1024);
+    let mut aborted_txn =
+        cntryl_midge::Transaction::with_options(1006, snap2.seq, None, 100 * 1024 * 1024);
     aborted_txn
-        .put(Bytes::from_static(b"key"), Bytes::from_static(b"second_value"), None)
+        .put(
+            Bytes::from_static(b"key"),
+            Bytes::from_static(b"second_value"),
+            None,
+        )
         .unwrap();
 
     // Act
@@ -109,18 +127,22 @@ fn should_handle_write_conflict_on_delete_given_concurrent_delete_and_put() {
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
-    engine
-        .put(&cf, b"key", b"initial")
-        .unwrap();
+    engine.put(&cf, b"key", b"initial").unwrap();
 
     let snap = engine.snapshot();
-    let mut delete_txn = cntryl_midge::Transaction::with_options(1007, snap.seq, None, 100 * 1024 * 1024);
+    let mut delete_txn =
+        cntryl_midge::Transaction::with_options(1007, snap.seq, None, 100 * 1024 * 1024);
     let snap2 = engine.snapshot();
-    let mut put_txn = cntryl_midge::Transaction::with_options(1008, snap2.seq, None, 100 * 1024 * 1024);
+    let mut put_txn =
+        cntryl_midge::Transaction::with_options(1008, snap2.seq, None, 100 * 1024 * 1024);
 
     delete_txn.delete(Bytes::from_static(b"key")).unwrap();
     put_txn
-        .put(Bytes::from_static(b"key"), Bytes::from_static(b"updated"), None)
+        .put(
+            Bytes::from_static(b"key"),
+            Bytes::from_static(b"updated"),
+            None,
+        )
         .unwrap();
 
     // Act
@@ -142,21 +164,25 @@ fn should_detect_conflict_on_delete_range_given_overlapping_keys() {
 
     for i in 0..10 {
         let key = format!("key{i}");
-        engine
-            .put(&cf, key.as_bytes(), b"val")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"val").unwrap();
     }
 
     let snap = engine.snapshot();
-    let mut range_txn = cntryl_midge::Transaction::with_options(1009, snap.seq, None, 100 * 1024 * 1024);
+    let mut range_txn =
+        cntryl_midge::Transaction::with_options(1009, snap.seq, None, 100 * 1024 * 1024);
     range_txn
         .delete_range(Bytes::from_static(b"key3"), Bytes::from_static(b"key7"))
         .unwrap();
 
     let snap2 = engine.snapshot();
-    let mut overlap_txn = cntryl_midge::Transaction::with_options(1010, snap2.seq, None, 100 * 1024 * 1024);
+    let mut overlap_txn =
+        cntryl_midge::Transaction::with_options(1010, snap2.seq, None, 100 * 1024 * 1024);
     overlap_txn
-        .put(Bytes::from_static(b"key5"), Bytes::from_static(b"new_value"), None)
+        .put(
+            Bytes::from_static(b"key5"),
+            Bytes::from_static(b"new_value"),
+            None,
+        )
         .unwrap();
 
     // Act

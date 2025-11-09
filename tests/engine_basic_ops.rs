@@ -46,7 +46,6 @@ fn should_get_value_given_existing_key_when_put() {
     );
 }
 
-
 #[test]
 fn should_return_none_given_deleted_key_when_delete() {
     // Arrange
@@ -69,11 +68,10 @@ fn should_return_none_given_deleted_key_when_delete() {
     assert_eq!(got, None);
 }
 
-
 #[test]
 fn should_apply_all_mutations_given_mixed_ops_when_batch() {
     use cntryl_midge::WriteBatch;
-    
+
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -98,7 +96,6 @@ fn should_apply_all_mutations_given_mixed_ops_when_batch() {
     assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
 }
 
-
 #[test]
 fn should_return_mismatch_given_unexpected_value() {
     // Arrange
@@ -120,10 +117,12 @@ fn should_return_mismatch_given_unexpected_value() {
     let value = engine.get(&cf, key).unwrap();
 
     // Assert
-    assert_eq!(result, CasResult::Mismatch(Some(Bytes::from_static(initial))));
+    assert_eq!(
+        result,
+        CasResult::Mismatch(Some(Bytes::from_static(initial)))
+    );
     assert_eq!(value, Some(Bytes::from_static(initial)));
 }
-
 
 #[test]
 fn should_handle_empty_range_given_start_equals_end() {
@@ -152,7 +151,6 @@ fn should_handle_empty_range_given_start_equals_end() {
     );
 }
 
-
 #[test]
 fn should_handle_inverted_range_given_start_greater_than_end() {
     // Arrange
@@ -177,5 +175,3 @@ fn should_handle_inverted_range_given_start_greater_than_end() {
         Some(Bytes::from_static(b"2"))
     );
 }
-
-

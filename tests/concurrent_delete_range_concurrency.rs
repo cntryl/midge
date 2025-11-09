@@ -5,8 +5,8 @@
 // Tests for multi-threaded correctness under high concurrency
 
 mod common;
-use common::*;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::*;
 use std::sync::Arc;
 use std::thread;
 
@@ -51,7 +51,9 @@ fn should_handle_concurrent_delete_range_operations() {
         let engine = Arc::clone(&engine);
         let cf = cf.clone();
         thread::spawn(move || {
-            engine.delete_range(&cf, b"range_0000", b"range_0250").unwrap();
+            engine
+                .delete_range(&cf, b"range_0000", b"range_0250")
+                .unwrap();
         })
     };
 
@@ -59,7 +61,9 @@ fn should_handle_concurrent_delete_range_operations() {
         let engine = Arc::clone(&engine);
         let cf = cf.clone();
         thread::spawn(move || {
-            engine.delete_range(&cf, b"range_0500", b"range_0750").unwrap();
+            engine
+                .delete_range(&cf, b"range_0500", b"range_0750")
+                .unwrap();
         })
     };
 
@@ -101,7 +105,9 @@ fn should_handle_overlapping_delete_ranges_given_concurrent_calls() {
         let engine = Arc::clone(&engine);
         let cf = cf.clone();
         thread::spawn(move || {
-            engine.delete_range(&cf, b"overlap_0000", b"overlap_0300").unwrap();
+            engine
+                .delete_range(&cf, b"overlap_0000", b"overlap_0300")
+                .unwrap();
         })
     };
 
@@ -109,7 +115,9 @@ fn should_handle_overlapping_delete_ranges_given_concurrent_calls() {
         let engine = Arc::clone(&engine);
         let cf = cf.clone();
         thread::spawn(move || {
-            engine.delete_range(&cf, b"overlap_0200", b"overlap_0450").unwrap();
+            engine
+                .delete_range(&cf, b"overlap_0200", b"overlap_0450")
+                .unwrap();
         })
     };
 
@@ -138,9 +146,7 @@ fn should_handle_point_write_during_delete_range() {
 
     for i in 0..500 {
         let key = format!("mixed_{:04}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"initial")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"initial").unwrap();
     }
 
     // Act
@@ -148,7 +154,9 @@ fn should_handle_point_write_during_delete_range() {
         let engine = Arc::clone(&engine);
         let cf = cf.clone();
         thread::spawn(move || {
-            engine.delete_range(&cf, b"mixed_0000", b"mixed_0400").unwrap();
+            engine
+                .delete_range(&cf, b"mixed_0000", b"mixed_0400")
+                .unwrap();
         })
     };
 
@@ -158,9 +166,7 @@ fn should_handle_point_write_during_delete_range() {
         thread::spawn(move || {
             for i in 0..500 {
                 let key = format!("mixed_{:04}", i);
-                engine
-                    .put(&cf, key.as_bytes(), b"updated")
-                    .unwrap();
+                engine.put(&cf, key.as_bytes(), b"updated").unwrap();
             }
         })
     };

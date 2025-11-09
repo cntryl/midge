@@ -1092,7 +1092,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1118,7 +1119,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1155,7 +1157,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1194,7 +1197,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1226,7 +1230,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1259,7 +1264,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1468,7 +1474,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1649,7 +1656,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1677,7 +1685,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1748,7 +1757,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1779,7 +1789,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1809,7 +1820,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1841,7 +1853,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             &sst_dir,
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1878,7 +1891,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -1904,7 +1918,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None, // No manifest
         );
@@ -2001,7 +2016,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -2032,7 +2048,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );
@@ -2057,7 +2074,8 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,                0, // Default CF
+            &versions,
+            0, // Default CF
             None,
             None,
         );

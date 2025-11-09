@@ -31,13 +31,13 @@ pub(super) struct ColumnFamily {
     pub(super) id: ColumnFamilyId,
     pub(super) name: String,
     pub(super) config: ColumnFamilyConfig,
-    
+
     /// Active writable memtable (wrapped for atomic replacement during freeze)
     pub(super) memtable: Arc<RwLock<MemTable>>,
-    
+
     /// Queue of frozen memtables waiting to be flushed (oldest first)
     pub(super) immutable_memtables: Arc<Mutex<VecDeque<MemTable>>>,
-    
+
     /// Current number of immutable memtables (cached for fast check without locking)
     pub(super) immutable_count: AtomicUsize,
 }
@@ -141,7 +141,7 @@ pub(super) struct ColumnFamilySet {
     pub(super) cfs: Arc<DashMap<u32, Arc<ColumnFamily>>>,
     pub(super) name_to_id: Arc<DashMap<String, u32>>,
     pub(super) next_cf_id: AtomicU32,
-    
+
     /// Serializes column family creation to prevent race conditions.
     /// Protects the check-then-insert pattern across two maps (cfs and name_to_id).
     pub(super) create_lock: Arc<Mutex<()>>,

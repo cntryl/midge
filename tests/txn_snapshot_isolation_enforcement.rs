@@ -18,17 +18,13 @@ fn should_read_at_begin_sequence_given_transaction_when_using_transaction_get() 
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key", b"initial")
-        .expect("put");
+    engine.put(&cf, b"key", b"initial").expect("put");
 
     let mut txn = engine.begin_transaction(&cf).expect("begin_transaction");
     let begin_value = txn.get(b"key").expect("get");
 
     // Act
-    engine
-        .put(&cf, b"key", b"updated")
-        .expect("put");
+    engine.put(&cf, b"key", b"updated").expect("put");
 
     let second_value = txn.get(b"key").expect("get");
 
@@ -44,16 +40,13 @@ fn should_not_see_concurrent_writes_given_transaction_when_snapshot_isolated() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key1", b"v1")
-        .expect("put");
+    engine.put(&cf, b"key1", b"v1").expect("put");
 
     let mut txn1 = engine.begin_transaction(&cf).expect("begin_transaction");
 
     // Act
     let mut txn2 = engine.begin_transaction(&cf).expect("begin_transaction");
-    txn2.put(b"key2", b"v2")
-        .unwrap();
+    txn2.put(b"key2", b"v2").unwrap();
     engine
         .commit_transaction(txn2, cntryl_midge::WriteOptions::default())
         .expect("commit");
@@ -76,8 +69,7 @@ fn should_see_own_writes_given_transaction_when_reading_staged_mutations() {
 
     // Act
     let mut txn = engine.begin_transaction(&cf).expect("begin_transaction");
-    txn.put(b"new_key", b"new_value")
-        .unwrap();
+    txn.put(b"new_key", b"new_value").unwrap();
 
     // Read own write
     let value = txn.get(b"new_key").expect("get");
@@ -93,23 +85,19 @@ fn should_track_reads_given_transaction_get_when_validating_conflicts() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key", b"v1")
-        .expect("put");
+    engine.put(&cf, b"key", b"v1").expect("put");
 
     let mut txn1 = engine.begin_transaction(&cf).expect("begin_transaction");
     let _ = txn1.get(b"key").expect("get");
 
     // Act
     let mut txn2 = engine.begin_transaction(&cf).expect("begin_transaction");
-    txn2.put(b"key", b"v2")
-        .unwrap();
+    txn2.put(b"key", b"v2").unwrap();
     engine
         .commit_transaction(txn2, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
-    txn1.put(b"other_key", b"value")
-        .unwrap();
+    txn1.put(b"other_key", b"value").unwrap();
     let result = engine.commit_transaction(txn1, cntryl_midge::WriteOptions::default());
 
     // Assert
@@ -123,23 +111,15 @@ fn should_provide_consistent_view_given_multiple_reads_when_snapshot_isolated() 
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key1", b"v1")
-        .expect("put");
-    engine
-        .put(&cf, b"key2", b"v2")
-        .expect("put");
+    engine.put(&cf, b"key1", b"v1").expect("put");
+    engine.put(&cf, b"key2", b"v2").expect("put");
 
     let mut txn = engine.begin_transaction(&cf).expect("begin_transaction");
     let first_read = txn.get(b"key1").expect("get");
 
     // Act
-    engine
-        .put(&cf, b"key1", b"updated1")
-        .expect("put");
-    engine
-        .put(&cf, b"key2", b"updated2")
-        .expect("put");
+    engine.put(&cf, b"key1", b"updated1").expect("put");
+    engine.put(&cf, b"key2", b"updated2").expect("put");
 
     let second_read = txn.get(b"key1").expect("get");
     let key2_read = txn.get(b"key2").expect("get");

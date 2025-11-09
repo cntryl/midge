@@ -1687,12 +1687,7 @@ impl MidgeEngine {
     /// engine.merge_cf(&cf, b"page_views", b"1").unwrap();
     /// engine.merge_cf(&cf, b"page_views", b"5").unwrap();
     /// ```
-    pub fn merge_cf(
-        &self,
-        cf: &ColumnFamilyHandle,
-        key: &[u8],
-        value: &[u8],
-    ) -> MidgeResult<()> {
+    pub fn merge_cf(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         self.merge_with_ttl_cf(cf, key, value, 0)
     }
 
@@ -2076,12 +2071,12 @@ impl MidgeEngine {
         for (i, m) in mutations.into_iter().enumerate() {
             let s = seqs[i];
             let cf_id = m.cf_id;
-            
+
             // Skip mutations for dropped column families
             if self.cf_set.cfs.get(&cf_id.as_u32()).is_none() {
                 continue;
             }
-            
+
             match m.op {
                 crate::api::mutation::MutationOp::Put
                 | crate::api::mutation::MutationOp::Insert => {
@@ -2245,14 +2240,19 @@ impl MidgeEngine {
     /// txn.put(Bytes::from("other_key"), Bytes::from("value"), None).unwrap();
     /// engine.commit_transaction(txn, cntryl_midge::WriteOptions::default()).unwrap();
     /// ```
-    pub fn transaction_get(&self, txn: &mut Transaction, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+    pub fn transaction_get(
+        &self,
+        txn: &mut Transaction,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+    ) -> MidgeResult<Option<Bytes>> {
         let cf_id = cf.id();
-        
+
         // First check transaction's local staged mutations
-        if let Some(local_value) = txn.get_local(key) {
+        if let Some(local_value) = txn.get_local(cf_id.as_u32(), key) {
             // Track the read at current sequence (local reads see latest)
             let current_seq = self.seq.load(Ordering::SeqCst);
-            txn.track_read(Bytes::copy_from_slice(key), current_seq);
+            txn.track_read(cf_id.as_u32(), Bytes::copy_from_slice(key), current_seq);
             return Ok(local_value);
         }
 
@@ -2260,8 +2260,11 @@ impl MidgeEngine {
         let begin_seq = txn.begin_sequence();
 
         // 1) Check MemTable visible value at snapshot
-        if let Some(v) = self.with_cf_memtable(cf_id, |mt| mt.get_at(key, begin_seq)).flatten() {
-            txn.track_read(Bytes::copy_from_slice(key), begin_seq);
+        if let Some(v) = self
+            .with_cf_memtable(cf_id, |mt| mt.get_at(key, begin_seq))
+            .flatten()
+        {
+            txn.track_read(cf_id.as_u32(), Bytes::copy_from_slice(key), begin_seq);
             return Ok(Some(v));
         }
 
@@ -2271,11 +2274,13 @@ impl MidgeEngine {
             v.push(0);
             v
         };
-        let tombs = self.with_cf_memtable(cf_id, |mt| {
-            mt.tombstones_range_at(Some(key), Some(end_key.as_slice()), begin_seq)
-        }).unwrap_or_default();
+        let tombs = self
+            .with_cf_memtable(cf_id, |mt| {
+                mt.tombstones_range_at(Some(key), Some(end_key.as_slice()), begin_seq)
+            })
+            .unwrap_or_default();
         if !tombs.is_empty() {
-            txn.track_read(Bytes::copy_from_slice(key), begin_seq);
+            txn.track_read(cf_id.as_u32(), Bytes::copy_from_slice(key), begin_seq);
             return Ok(None);
         }
 
@@ -2291,15 +2296,19 @@ impl MidgeEngine {
                         // Check if value is expired
                         if let Some(exp_millis) = exp {
                             if now_millis >= exp_millis {
-                                txn.track_read(Bytes::copy_from_slice(key), begin_seq);
+                                txn.track_read(
+                                    cf_id.as_u32(),
+                                    Bytes::copy_from_slice(key),
+                                    begin_seq,
+                                );
                                 return Ok(None);
                             }
                         }
-                        txn.track_read(Bytes::copy_from_slice(key), seq);
+                        txn.track_read(cf_id.as_u32(), Bytes::copy_from_slice(key), seq);
                         return Ok(Some(v));
                     }
                     Ok(crate::sst::KeyState::Tombstone(seq)) => {
-                        txn.track_read(Bytes::copy_from_slice(key), seq);
+                        txn.track_read(cf_id.as_u32(), Bytes::copy_from_slice(key), seq);
                         return Ok(None);
                     }
                     Ok(_) => continue,
@@ -2309,14 +2318,19 @@ impl MidgeEngine {
         }
 
         // Not found anywhere
-        txn.track_read(Bytes::copy_from_slice(key), begin_seq);
+        txn.track_read(cf_id.as_u32(), Bytes::copy_from_slice(key), begin_seq);
         Ok(None)
     }
 
     /// Check if a key exists within a transaction's snapshot isolation.
     ///
     /// This is equivalent to `transaction_get()` but only returns whether the key exists.
-    pub fn transaction_exists(&self, txn: &mut Transaction, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<bool> {
+    pub fn transaction_exists(
+        &self,
+        txn: &mut Transaction,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+    ) -> MidgeResult<bool> {
         self.transaction_get(txn, cf, key).map(|opt| opt.is_some())
     }
 
@@ -2826,14 +2840,14 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
     ) -> MidgeResult<bool> {
         // Read current value
         let current = self.as_ref().get(cf, key)?;
-        
+
         // Check if current value matches expected
         let matches = match (current.as_ref(), expected) {
             (None, None) => true,
             (Some(c), Some(e)) => c.as_ref() == e,
             _ => false,
         };
-        
+
         // If matches, perform the swap
         if matches {
             self.as_ref().put(cf, key, new_value)?;
@@ -2877,7 +2891,11 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
                 crate::api::kv_store::BatchOperation::DeleteRange { start, end } => {
                     self.as_ref().delete_range(cf, &start, &end)?;
                 }
-                crate::api::kv_store::BatchOperation::CompareAndSwap { key, expected, new_value } => {
+                crate::api::kv_store::BatchOperation::CompareAndSwap {
+                    key,
+                    expected,
+                    new_value,
+                } => {
                     // For batch operations, CAS is not atomic across the batch
                     // Each CAS is applied individually
                     let current = self.as_ref().get(cf, &key)?;

@@ -40,7 +40,13 @@ impl WriteBatch {
     }
 
     /// Add a put with TTL operation to the batch for a specific column family
-    pub fn put_with_ttl(&mut self, cf_id: ColumnFamilyId, key: Bytes, value: Bytes, ttl_seconds: u64) {
+    pub fn put_with_ttl(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        key: Bytes,
+        value: Bytes,
+        ttl_seconds: u64,
+    ) {
         self.operations.push(WriteOp {
             cf_id,
             kind: WalOpKind::Put,

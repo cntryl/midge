@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use crate::api::column_family::ColumnFamilyId;
+use bytes::Bytes;
 
 /// Mutation operation kinds used for batched writes/transactions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -48,7 +48,12 @@ impl Mutation {
     }
 
     #[inline]
-    pub fn put_cf(cf_id: ColumnFamilyId, key: Bytes, value: Bytes, ttl: Option<std::time::Duration>) -> Self {
+    pub fn put_cf(
+        cf_id: ColumnFamilyId,
+        key: Bytes,
+        value: Bytes,
+        ttl: Option<std::time::Duration>,
+    ) -> Self {
         Self {
             op: MutationOp::Put,
             cf_id,
@@ -65,7 +70,12 @@ impl Mutation {
     }
 
     #[inline]
-    pub fn insert_cf(cf_id: ColumnFamilyId, key: Bytes, value: Bytes, ttl: Option<std::time::Duration>) -> Self {
+    pub fn insert_cf(
+        cf_id: ColumnFamilyId,
+        key: Bytes,
+        value: Bytes,
+        ttl: Option<std::time::Duration>,
+    ) -> Self {
         Self {
             op: MutationOp::Insert,
             cf_id,
@@ -116,7 +126,12 @@ impl Mutation {
     }
 
     #[inline]
-    pub fn compare_and_swap_cf(cf_id: ColumnFamilyId, key: Bytes, expected: Option<Bytes>, new_value: Bytes) -> Self {
+    pub fn compare_and_swap_cf(
+        cf_id: ColumnFamilyId,
+        key: Bytes,
+        expected: Option<Bytes>,
+        new_value: Bytes,
+    ) -> Self {
         Self {
             op: MutationOp::CompareAndSwap,
             cf_id,

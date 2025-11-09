@@ -127,7 +127,7 @@ mod tests {
             crate::sst::KeyState::Absent => {}
             other => panic!("unexpected state for c: {:?}", other),
         }
-        
+
         // c tombstone IS visible at snapshot 11
         match reader.get_state_at(b"c", 11).expect("get_state_at c at 11") {
             crate::sst::KeyState::Tombstone(_seq) => {}

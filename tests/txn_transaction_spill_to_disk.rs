@@ -7,7 +7,7 @@
 use bytes::Bytes;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::{new_engine, test_temp_dir};
 #[test]
 fn should_spill_to_disk_given_exceed_threshold_when_staging_writes() {
     // Arrange

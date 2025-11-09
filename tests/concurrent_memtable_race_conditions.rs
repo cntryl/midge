@@ -5,8 +5,8 @@
 // Tests for multi-threaded correctness under high concurrency
 
 mod common;
-use common::*;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -48,7 +48,9 @@ fn should_freeze_memtable_atomically_given_concurrent_writes_when_size_exceeded(
                 for i in 0..writes_per_thread {
                     let key = format!("freeze_test_{}_{}", thread_id, i);
                     let value = vec![0u8; 1024]; // 1KB values
-                    engine.put(&cf_clone, key.as_bytes(), value.as_slice()).unwrap();
+                    engine
+                        .put(&cf_clone, key.as_bytes(), value.as_slice())
+                        .unwrap();
                 }
             })
         })
@@ -86,7 +88,9 @@ fn should_route_writes_to_new_memtable_given_freeze_in_progress() {
             thread::spawn(move || {
                 let key = format!("routing_key_{}", i);
                 let value = vec![0u8; 2048]; // 2KB values
-                engine.put(&cf_clone, key.as_bytes(), value.as_slice()).unwrap();
+                engine
+                    .put(&cf_clone, key.as_bytes(), value.as_slice())
+                    .unwrap();
             })
         })
         .collect();
@@ -122,7 +126,9 @@ fn should_not_lose_writes_given_memtable_freeze_race() {
                 for i in 0..200 {
                     let key = format!("preserve_{}_{}", thread_id, i);
                     let value = vec![0u8; 1024];
-                    engine.put(&cf_clone, key.as_bytes(), value.as_slice()).unwrap();
+                    engine
+                        .put(&cf_clone, key.as_bytes(), value.as_slice())
+                        .unwrap();
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -169,7 +175,9 @@ fn should_maintain_write_order_given_freeze_during_batch() {
                 for i in 0..batch_size {
                     let key = format!("order_batch_{}_seq_{:04}", batch_id, i);
                     let value = format!("{}", i);
-                    engine.put(&cf_clone, key.as_bytes(), value.as_bytes()).unwrap();
+                    engine
+                        .put(&cf_clone, key.as_bytes(), value.as_bytes())
+                        .unwrap();
                 }
             })
         })

@@ -70,7 +70,9 @@ fn should_return_existing_value_given_insert_with_value() {
     let result1 = engine
         .insert_with_value(&cf, key.as_ref(), value1.as_ref())
         .unwrap();
-    let result2 = engine.insert_with_value(&cf, key.as_ref(), value2.as_ref()).unwrap();
+    let result2 = engine
+        .insert_with_value(&cf, key.as_ref(), value2.as_ref())
+        .unwrap();
     let stored = engine.get(&cf, key.as_ref()).unwrap();
 
     // Assert
@@ -185,7 +187,10 @@ fn should_respect_snapshot_isolation_given_insert() {
     assert!(inserted1);
     assert!(!inserted2);
     assert_eq!(engine.get_at(key.as_ref(), &snap1).unwrap(), None);
-    assert_eq!(engine.get_at(key.as_ref(), &snap2).unwrap(), Some(value1.clone()));
+    assert_eq!(
+        engine.get_at(key.as_ref(), &snap2).unwrap(),
+        Some(value1.clone())
+    );
     assert_eq!(engine.get(&cf, key.as_ref()).unwrap(), Some(value1));
 }
 

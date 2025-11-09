@@ -3,7 +3,7 @@
 
 // Compaction During Concurrent Operations tests - P1 Priority
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode, ColumnFamilyHandle};
+use cntryl_midge::{ColumnFamilyHandle, MidgeEngine, MidgeOptions, Query, StorageMode};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -25,25 +25,25 @@ fn compaction_test_opts() -> MidgeOptions {
 fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     // Write batch 1 and flush to L0
     for i in 0..50 {
-    let key = format!("key{:03}", i);
-    let value = format!("value1_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value1_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 2 and flush to L0 (overlapping keys)
     for i in 25..75 {
-    let key = format!("key{:03}", i);
-    let value = format!("value2_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value2_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 3 and flush to L0
     for i in 50..100 {
-    let key = format!("key{:03}", i);
-    let value = format!("value3_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value3_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 }
@@ -101,20 +101,20 @@ fn should_return_correct_value_given_key_being_compacted() {
     let cf = engine.default_column_family();
 
     // Write overlapping data across multiple L0 files
-    engine
-        .put(&cf, b"target_key", b"old_value")
-        .unwrap();
+    engine.put(&cf, b"target_key", b"old_value").unwrap();
     engine.flush().unwrap();
 
-    engine
-        .put(&cf, b"target_key", b"new_value")
-        .unwrap();
+    engine.put(&cf, b"target_key", b"new_value").unwrap();
     engine.flush().unwrap();
 
     // Add more data to trigger compaction
     for i in 0..100 {
         engine
-            .put(&cf, format!("key{}", i).as_bytes(), format!("val{}", i).as_bytes())
+            .put(
+                &cf,
+                format!("key{}", i).as_bytes(),
+                format!("val{}", i).as_bytes(),
+            )
             .unwrap();
     }
     engine.flush().unwrap();
@@ -215,9 +215,7 @@ fn should_not_expose_deleted_keys_given_tombstone_compaction_in_progress() {
     // Add more data
     for i in 40..80 {
         let key = format!("key{:03}", i);
-        engine
-            .put(&cf, key.as_bytes(), b"value2")
-            .unwrap();
+        engine.put(&cf, key.as_bytes(), b"value2").unwrap();
     }
     engine.flush().unwrap();
 

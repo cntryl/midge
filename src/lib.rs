@@ -64,9 +64,15 @@ pub use crate::storage_mode::{CloudStorageBuilder, StorageMode};
 // Legacy module re-exports for backward compatibility
 // These allow existing code to continue using `cntryl_midge::bloom::Filter` etc.
 // DEPRECATED: Use proper module paths like `cntryl_midge::index::bloom` instead
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::column_family` instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `cntryl_midge::api::column_family` instead"
+)]
 pub use api::column_family;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::merge_operator` instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `cntryl_midge::api::merge_operator` instead"
+)]
 pub use api::merge_operator;
 #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::mutation` instead")]
 pub use api::mutation as mutation_compat;
@@ -92,7 +98,10 @@ pub use cloud::azure as cloud_wal_azure;
 pub use cloud::gcp as cloud_wal_gcp;
 #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::mock` instead")]
 pub use cloud::mock as cloud_wal_mock;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::range_tombstone` instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `cntryl_midge::common::range_tombstone` instead"
+)]
 pub use common::range_tombstone;
 #[deprecated(
     since = "0.2.0",
@@ -105,18 +114,30 @@ pub use core::compaction::strategy as compactor;
 pub use core::memtable;
 #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::bloom` instead")]
 pub use sst::bloom;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::file_manager` instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `cntryl_midge::sst::file_manager` instead"
+)]
 pub use sst::file_manager;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::sparse_index` instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `cntryl_midge::sst::sparse_index` instead"
+)]
 pub use sst::sparse_index;
 // NOTE: `crate::sst` is provided as the new top-level SST module. The old
 // `storage::sst` re-export was removed to avoid symbol conflicts during the
 // migration to the `src/sst/*` layout.
 #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::codec` instead")]
 pub use common::codec;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::internal_key` instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `cntryl_midge::common::internal_key` instead"
+)]
 pub use common::internal_key;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::rate_limiter` instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `cntryl_midge::common::rate_limiter` instead"
+)]
 pub use common::rate_limiter;
 #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::tlv` instead")]
 pub use common::tlv;

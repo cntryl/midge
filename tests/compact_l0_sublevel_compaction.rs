@@ -2,7 +2,7 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, ColumnFamilyHandle};
+use cntryl_midge::{ColumnFamilyHandle, MidgeEngine, MidgeOptions, StorageMode};
 use std::sync::Arc;
 use std::thread;
 
@@ -25,25 +25,25 @@ fn compaction_test_opts() -> MidgeOptions {
 fn populate_multi_level_data(engine: &MidgeEngine, cf: &ColumnFamilyHandle) {
     // Write batch 1 and flush to L0
     for i in 0..50 {
-    let key = format!("key{:03}", i);
-    let value = format!("value1_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value1_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 2 and flush to L0 (overlapping keys)
     for i in 25..75 {
-    let key = format!("key{:03}", i);
-    let value = format!("value2_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value2_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
     // Write batch 3 and flush to L0
     for i in 50..100 {
-    let key = format!("key{:03}", i);
-    let value = format!("value3_{}", i);
-    engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+        let key = format!("key{:03}", i);
+        let value = format!("value3_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 }
@@ -90,7 +90,7 @@ fn should_compact_oldest_sublevel_first_given_incremental_strategy() {
     let engine = MidgeEngine::open(opts).unwrap();
     let cf = engine.default_column_family();
 
-        for batch in 0..4 {
+    for batch in 0..4 {
         for i in 0..30 {
             let key = format!("batch{}_key{:02}", batch, i);
             engine
@@ -177,9 +177,7 @@ fn should_handle_concurrent_flush_calls_without_file_conflicts() {
         let handle = thread::spawn(move || {
             for i in 0..20 {
                 let key = format!("concurrent_flush_b{}k{:02}", batch, i);
-                engine_clone
-                    .put(&cf_clone, key.as_bytes(), b"val")
-                    .unwrap();
+                engine_clone.put(&cf_clone, key.as_bytes(), b"val").unwrap();
             }
             // Now safe: flush_mutex serializes concurrent flush() calls
             engine_clone.flush().unwrap();

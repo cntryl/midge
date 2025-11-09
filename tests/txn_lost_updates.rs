@@ -17,12 +17,14 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"counter", b"0")
-        .expect("put");
+    engine.put(&cf, b"counter", b"0").expect("put");
 
-    let mut first_increment_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    let mut second_increment_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut first_increment_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    let mut second_increment_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
 
     let snap1 = engine.snapshot();
     let snap2 = engine.snapshot();
@@ -40,16 +42,10 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
         .unwrap();
 
     first_increment_txn
-        .put(
-            b"counter",
-            (count1 + 1).to_string().as_bytes(),
-        )
+        .put(b"counter", (count1 + 1).to_string().as_bytes())
         .unwrap();
     second_increment_txn
-        .put(
-            b"counter",
-            (count2 + 1).to_string().as_bytes(),
-        )
+        .put(b"counter", (count2 + 1).to_string().as_bytes())
         .unwrap();
 
     engine
@@ -88,21 +84,17 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key", b"v1")
-        .expect("put");
+    engine.put(&cf, b"key", b"v1").expect("put");
 
     let snap = engine.snapshot();
     let expected = engine.get_at(b"key", &snap).expect("get");
 
-    engine
-        .put(&cf, b"key", b"v2")
-        .expect("concurrent update");
+    engine.put(&cf, b"key", b"v2").expect("concurrent update");
 
-    let mut cas_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    cas_txn
-        .put(b"key", b"v3")
-        .unwrap();
+    let mut cas_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    cas_txn.put(b"key", b"v3").unwrap();
 
     // Act
     let result = engine.commit_transaction(cas_txn, cntryl_midge::WriteOptions::default());
@@ -121,15 +113,15 @@ fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commi
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut first_key_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
-    let mut second_key_txn = engine.begin_transaction(&cf).expect("Transaction creation failed");
+    let mut first_key_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
+    let mut second_key_txn = engine
+        .begin_transaction(&cf)
+        .expect("Transaction creation failed");
 
-    first_key_txn
-        .put(b"key1", b"value1")
-        .unwrap();
-    second_key_txn
-        .put(b"key2", b"value2")
-        .unwrap();
+    first_key_txn.put(b"key1", b"value1").unwrap();
+    second_key_txn.put(b"key2", b"value2").unwrap();
 
     engine
         .commit_transaction(first_key_txn, cntryl_midge::WriteOptions::default())

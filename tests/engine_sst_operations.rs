@@ -27,9 +27,9 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         let cf = eng.default_column_family();
         eng.put(&cf, b"a", b"1").unwrap();
         eng.put(&cf, b"b", b"2").unwrap();
-    // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
-    let big = vec![b'v'; 128];
-    eng.put(&cf, b"zz", big.as_slice()).unwrap();
+        // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
+        let big = vec![b'v'; 128];
+        eng.put(&cf, b"zz", big.as_slice()).unwrap();
         // Give background flush a moment to materialize SST and update manifest
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
@@ -45,7 +45,6 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
     assert_eq!(got_b, Some(Bytes::from_static(b"2")));
 }
 
-
 #[test]
 fn should_respect_tombstone_from_sst_when_point_lookup() {
     // Arrange: write k->v, rotate/flush, then delete and rotate/flush, so SST set has a tombstone
@@ -60,15 +59,15 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
-    eng.put(&cf, b"k", b"v1").unwrap();
-    // rotate to flush first version
-    let big = vec![b'v'; 128];
-    eng.put(&cf, b"zz", big.as_slice()).unwrap();
+        eng.put(&cf, b"k", b"v1").unwrap();
+        // rotate to flush first version
+        let big = vec![b'v'; 128];
+        eng.put(&cf, b"zz", big.as_slice()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
-    // delete and rotate again to flush tombstone
-    eng.delete(&cf, b"k").unwrap();
-    let big2 = vec![b'v'; 128];
-    eng.put(&cf, b"zz2", big2.as_slice()).unwrap();
+        // delete and rotate again to flush tombstone
+        eng.delete(&cf, b"k").unwrap();
+        let big2 = vec![b'v'; 128];
+        eng.put(&cf, b"zz2", big2.as_slice()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(120));
     }
 
@@ -80,7 +79,6 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
     let got = eng2.get(&cf2, b"k").expect("get");
     assert_eq!(got, None);
 }
-
 
 #[test]
 fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
@@ -97,11 +95,11 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf1 = eng.default_column_family();
-    eng.put(&cf1, b"a", b"1").unwrap();
-    eng.put(&cf1, b"b", b"2").unwrap();
-    eng.put(&cf1, b"c", b"3").unwrap();
-    let big = vec![b'v'; 256];
-    eng.put(&cf1, b"zz", big.as_slice()).unwrap();
+        eng.put(&cf1, b"a", b"1").unwrap();
+        eng.put(&cf1, b"b", b"2").unwrap();
+        eng.put(&cf1, b"c", b"3").unwrap();
+        let big = vec![b'v'; 256];
+        eng.put(&cf1, b"zz", big.as_slice()).unwrap();
     }
     // Wait for background flush
     std::thread::sleep(std::time::Duration::from_millis(150));
@@ -115,7 +113,9 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
 
     // Act: scan full range
     let rows = eng
-        .scan(&cf, Query::new()
+        .scan(
+            &cf,
+            Query::new()
                 .start_key(Bytes::from_static(b"a"))
                 .end_key(Bytes::from_static(b"z")),
         )
@@ -132,7 +132,6 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
     );
 }
 
-
 #[test]
 fn should_scan_by_prefix_and_limit_across_sst_and_memtable() {
     // Arrange: seed SST with a, ab, ac; then add ad in memtable
@@ -147,16 +146,12 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable() {
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
 
-    eng.put(&cf, b"a", b"1")
-        .unwrap();
-    eng.put(&cf, b"ab", b"2")
-        .unwrap();
-    eng.put(&cf, b"ac", b"3")
-        .unwrap();
+    eng.put(&cf, b"a", b"1").unwrap();
+    eng.put(&cf, b"ab", b"2").unwrap();
+    eng.put(&cf, b"ac", b"3").unwrap();
     eng.flush().unwrap(); // persist above to SST
                           // Now add a memtable overlay
-    eng.put(&cf, b"ad", b"4")
-        .unwrap();
+    eng.put(&cf, b"ad", b"4").unwrap();
 
     // Act: prefix "a" should include a, ab, ac from SST and ad from memtable
     let rows = eng
@@ -173,7 +168,6 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable() {
     assert_eq!(rows, expected_full);
 }
 
-
 #[test]
 fn should_scan_by_prefix_and_limit_across_sst_and_memtable_limited() {
     // Arrange: seed SST with a, ab, ac; then add ad in memtable (same setup as previous test)
@@ -188,15 +182,11 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable_limited() {
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
 
-    eng.put(&cf, b"a", b"1")
-        .unwrap();
-    eng.put(&cf, b"ab", b"2")
-        .unwrap();
-    eng.put(&cf, b"ac", b"3")
-        .unwrap();
+    eng.put(&cf, b"a", b"1").unwrap();
+    eng.put(&cf, b"ab", b"2").unwrap();
+    eng.put(&cf, b"ac", b"3").unwrap();
     eng.flush().unwrap(); // persist above to SST
-    eng.put(&cf, b"ad", b"4")
-        .unwrap();
+    eng.put(&cf, b"ad", b"4").unwrap();
 
     // Act: limited prefix scan (limit 3)
     let rows_limited = eng
@@ -209,7 +199,6 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable_limited() {
     assert_eq!(rows_limited[1].0, Bytes::from_static(b"ab"));
     assert_eq!(rows_limited[2].0, Bytes::from_static(b"ac"));
 }
-
 
 #[test]
 fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
@@ -226,8 +215,7 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
 
-    eng.put(&cf, b"k", b"v1")
-        .unwrap();
+    eng.put(&cf, b"k", b"v1").unwrap();
     // Flush so v1 is persisted to SST
     eng.flush().unwrap();
     let snap = eng.snapshot();
@@ -243,8 +231,7 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     println!("sst rows: {:?}", rows);
     println!("snapshot seq={} ", snap.seq);
     // Newer write stays in memtable with higher seq
-    eng.put(&cf, b"k", b"v2")
-        .unwrap();
+    eng.put(&cf, b"k", b"v2").unwrap();
 
     // Act: get_at and full get
     let at = eng.get_at(b"k", &snap).unwrap();
@@ -271,7 +258,6 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     );
 }
 
-
 #[test]
 fn should_scan_reverse_respects_tombstones() {
     // Arrange
@@ -287,12 +273,9 @@ fn should_scan_reverse_respects_tombstones() {
     let cf = eng.default_column_family();
 
     // Write and delete keys
-    eng.put(&cf, b"k1", b"v1")
-        .expect("put");
-    eng.put(&cf, b"k2", b"v2")
-        .expect("put");
-    eng.put(&cf, b"k3", b"v3")
-        .expect("put");
+    eng.put(&cf, b"k1", b"v1").expect("put");
+    eng.put(&cf, b"k2", b"v2").expect("put");
+    eng.put(&cf, b"k3", b"v3").expect("put");
     eng.delete(&cf, b"k2").expect("delete");
 
     // Act: Reverse scan
@@ -309,5 +292,3 @@ fn should_scan_reverse_respects_tombstones() {
 // ============================================================================
 // Insert-if-not-exists and CAS tests (consolidated from tests/insert.rs)
 // ============================================================================
-
-

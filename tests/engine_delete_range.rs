@@ -132,7 +132,7 @@ fn should_persist_delete_range_in_wal() {
 
     let tmp_dir = test_temp_dir();
     let db_path = tmp_dir.path().to_path_buf();
-    
+
     {
         let opts = cntryl_midge::MidgeOptions {
             storage_mode: cntryl_midge::StorageMode::LocalDisk {
@@ -154,12 +154,21 @@ fn should_persist_delete_range_in_wal() {
         // Act
         engine.delete_range(&cf, b"key2", b"key4").unwrap();
 
-    // Assert (before crash)
-    assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
-    assert_eq!(engine.get(&cf, b"key2").unwrap(), None);
-    assert_eq!(engine.get(&cf, b"key3").unwrap(), None);
-    assert_eq!(engine.get(&cf, b"key4").unwrap(), Some(Bytes::from("value4")));
-    assert_eq!(engine.get(&cf, b"key5").unwrap(), Some(Bytes::from("value5")));
+        // Assert (before crash)
+        assert_eq!(
+            engine.get(&cf, b"key1").unwrap(),
+            Some(Bytes::from("value1"))
+        );
+        assert_eq!(engine.get(&cf, b"key2").unwrap(), None);
+        assert_eq!(engine.get(&cf, b"key3").unwrap(), None);
+        assert_eq!(
+            engine.get(&cf, b"key4").unwrap(),
+            Some(Bytes::from("value4"))
+        );
+        assert_eq!(
+            engine.get(&cf, b"key5").unwrap(),
+            Some(Bytes::from("value5"))
+        );
 
         drop(engine);
     }
@@ -178,11 +187,20 @@ fn should_persist_delete_range_in_wal() {
 
         // Assert (after recovery)
         let cf = engine.default_column_family();
-        assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
+        assert_eq!(
+            engine.get(&cf, b"key1").unwrap(),
+            Some(Bytes::from("value1"))
+        );
         assert_eq!(engine.get(&cf, b"key2").unwrap(), None);
         assert_eq!(engine.get(&cf, b"key3").unwrap(), None);
-        assert_eq!(engine.get(&cf, b"key4").unwrap(), Some(Bytes::from("value4")));
-        assert_eq!(engine.get(&cf, b"key5").unwrap(), Some(Bytes::from("value5")));
+        assert_eq!(
+            engine.get(&cf, b"key4").unwrap(),
+            Some(Bytes::from("value4"))
+        );
+        assert_eq!(
+            engine.get(&cf, b"key5").unwrap(),
+            Some(Bytes::from("value5"))
+        );
     }
 
     drop(tmp_dir);

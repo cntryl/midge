@@ -14,9 +14,9 @@
 mod criterion_helper;
 
 use bytes::Bytes;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;

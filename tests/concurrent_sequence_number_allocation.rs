@@ -5,8 +5,8 @@
 // Tests for multi-threaded correctness under high concurrency
 
 mod common;
-use common::*;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::*;
 use std::sync::Arc;
 use std::thread;
 
@@ -51,7 +51,9 @@ fn should_allocate_unique_sequences_given_concurrent_writes() {
             thread::spawn(move || {
                 for i in 0..puts_per_thread {
                     let key = format!("seq_test_{}_{}", thread_id, i);
-                    engine.put(&cf_clone, key.as_bytes(), "value".as_bytes()).unwrap();
+                    engine
+                        .put(&cf_clone, key.as_bytes(), "value".as_bytes())
+                        .unwrap();
                 }
             })
         })
@@ -94,7 +96,9 @@ fn should_maintain_sequence_monotonicity_given_1000_concurrent_writes() {
             let cf_clone = cf.clone();
             thread::spawn(move || {
                 let key = format!("mono_key_{}", i);
-                engine.put(&cf_clone, key.as_bytes(), "value".as_bytes()).unwrap();
+                engine
+                    .put(&cf_clone, key.as_bytes(), "value".as_bytes())
+                    .unwrap();
             })
         })
         .collect();
@@ -171,7 +175,9 @@ fn should_preserve_sequence_order_given_concurrent_batches() {
             thread::spawn(move || {
                 for i in 0..batch_size {
                     let key = format!("batch_{}_item_{}", batch_id, i);
-                    engine.put(&cf_clone, key.as_bytes(), "value".as_bytes()).unwrap();
+                    engine
+                        .put(&cf_clone, key.as_bytes(), "value".as_bytes())
+                        .unwrap();
                 }
             })
         })

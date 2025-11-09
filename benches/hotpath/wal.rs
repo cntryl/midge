@@ -484,8 +484,8 @@ fn bench_wal_append_individual(c: &mut Criterion) {
                     let tmp = tempdir().expect("tempdir");
                     let dir = tmp.path();
 
-                    let mut writer =
-                        cntryl_midge::wal::fs::Wal::open_with_mode(dir, *sync_mode).expect("open WAL");
+                    let mut writer = cntryl_midge::wal::fs::Wal::open_with_mode(dir, *sync_mode)
+                        .expect("open WAL");
 
                     // Pre-create records with realistic 18-byte values
                     let records: Vec<WalRecord> = (0..size)
@@ -557,8 +557,8 @@ fn bench_wal_append_batch(c: &mut Criterion) {
                     let tmp = tempdir().expect("tempdir");
                     let dir = tmp.path();
 
-                    let writer =
-                        cntryl_midge::wal::fs::Wal::open_with_mode(dir, *sync_mode).expect("open WAL");
+                    let writer = cntryl_midge::wal::fs::Wal::open_with_mode(dir, *sync_mode)
+                        .expect("open WAL");
 
                     // Pre-create records
                     let records: Vec<WalRecord> = (0..size)
@@ -619,8 +619,8 @@ fn bench_wal_io_seq_throughput(c: &mut Criterion) {
             let tmp = tempdir().expect("tempdir");
             let dir = tmp.path();
 
-            let mut writer =
-                cntryl_midge::wal::fs::Wal::open_with_mode(dir, WalSyncMode::NoSync).expect("open WAL");
+            let mut writer = cntryl_midge::wal::fs::Wal::open_with_mode(dir, WalSyncMode::NoSync)
+                .expect("open WAL");
 
             // Pre-create a single record template
             let record = WalRecord::new(
@@ -659,8 +659,9 @@ fn bench_wal_io_append_sync_latency(c: &mut Criterion) {
             let tmp = tempdir().expect("tempdir");
             let dir = tmp.path();
 
-            let mut writer = cntryl_midge::wal::fs::Wal::open_with_mode(dir, WalSyncMode::EveryWrite)
-                .expect("open WAL");
+            let mut writer =
+                cntryl_midge::wal::fs::Wal::open_with_mode(dir, WalSyncMode::EveryWrite)
+                    .expect("open WAL");
 
             // Use a compact payload to emphasize sync cost
             let record = WalRecord::new(

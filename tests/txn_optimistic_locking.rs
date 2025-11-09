@@ -15,17 +15,13 @@ fn should_validate_version_given_read_set_when_committing_transaction() {
     let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key", b"v1")
-        .expect("put");
+    engine.put(&cf, b"key", b"v1").expect("put");
 
     let reading_txn = Transaction::with_options(1, engine.snapshot().seq, None, 100 * 1024 * 1024);
     let snap = engine.snapshot();
     let _read_value = engine.get_at(b"key", &snap).expect("get_at");
 
-    engine
-        .put(&cf, b"key", b"v2")
-        .expect("external put");
+    engine.put(&cf, b"key", b"v2").expect("external put");
 
     // Act
     let result = engine.commit_transaction(reading_txn, cntryl_midge::WriteOptions::default());
@@ -42,11 +38,10 @@ fn should_abort_transaction_given_stale_read_when_key_modified_by_other() {
     let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"key", b"initial")
-        .expect("put");
+    engine.put(&cf, b"key", b"initial").expect("put");
 
-    let mut stale_txn = Transaction::with_options(2, engine.snapshot().seq, None, 100 * 1024 * 1024);
+    let mut stale_txn =
+        Transaction::with_options(2, engine.snapshot().seq, None, 100 * 1024 * 1024);
     let _local = stale_txn.get_local(b"key");
 
     engine
@@ -72,12 +67,8 @@ fn should_track_read_set_given_transaction_gets_when_validating() {
     let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, b"k1", b"v1")
-        .expect("put");
-    engine
-        .put(&cf, b"k2", b"v2")
-        .expect("put");
+    engine.put(&cf, b"k1", b"v1").expect("put");
+    engine.put(&cf, b"k2", b"v2").expect("put");
 
     let reading_txn = Transaction::with_options(3, engine.snapshot().seq, None, 100 * 1024 * 1024);
     let snap = engine.snapshot();
@@ -101,7 +92,8 @@ fn should_allow_commit_given_no_conflicts_when_validation_succeeds() {
     let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
-    let mut clean_txn = Transaction::with_options(4, engine.snapshot().seq, None, 100 * 1024 * 1024);
+    let mut clean_txn =
+        Transaction::with_options(4, engine.snapshot().seq, None, 100 * 1024 * 1024);
     clean_txn
         .put(Bytes::from("new_key"), Bytes::from("new_value"), None)
         .unwrap();
