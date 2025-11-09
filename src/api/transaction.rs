@@ -1,5 +1,6 @@
 use super::mutation::{Mutation, MutationOp};
 use crate::error::MidgeError;
+use crate::api::ColumnFamilyId;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -20,9 +21,10 @@ pub struct Transaction {
     completed: bool,
 
     // ACID enhancements
-    read_set: HashSet<Bytes>,
-    write_set: HashSet<Bytes>,
-    read_versions: HashMap<Bytes, u64>,
+    // Use composite (cf_id, key) to avoid cross-CF conflicts
+    read_set: HashSet<(u32, Bytes)>,
+    write_set: HashSet<(u32, Bytes)>,
+    read_versions: HashMap<(u32, Bytes), u64>,
     #[allow(dead_code)]
     created_at: Instant,
     deadline: Option<Instant>,
@@ -87,33 +89,35 @@ impl Transaction {
     }
 
     /// Track a read operation for conflict detection
-    pub fn track_read(&mut self, key: Bytes, version: u64) {
-        self.read_set.insert(key.clone());
-        self.read_versions.insert(key, version);
+    pub fn track_read(&mut self, cf_id: u32, key: Bytes, version: u64) {
+        self.read_set.insert((cf_id, key.clone()));
+        self.read_versions.insert((cf_id, key), version);
     }
 
     /// Get the write set (keys modified by this transaction)
-    pub fn write_set(&self) -> &HashSet<Bytes> {
+    pub fn write_set(&self) -> &HashSet<(u32, Bytes)> {
         &self.write_set
     }
 
     /// Get the read set (keys read by this transaction)
-    pub fn read_set(&self) -> &HashSet<Bytes> {
+    pub fn read_set(&self) -> &HashSet<(u32, Bytes)> {
         &self.read_set
     }
 
     /// Get the read versions map (keys -> sequence numbers)
-    pub fn read_versions(&self) -> &HashMap<Bytes, u64> {
+    pub fn read_versions(&self) -> &HashMap<(u32, Bytes), u64> {
         &self.read_versions
     }
 
     /// Get read version for a key
-    pub fn read_version(&self, key: &[u8]) -> Option<u64> {
-        self.read_versions.get(key).copied()
+    pub fn read_version(&self, cf_id: u32, key: &[u8]) -> Option<u64> {
+        self.read_versions
+            .get(&(cf_id, Bytes::copy_from_slice(key)))
+            .copied()
     }
 
     /// Check if there's a write-write conflict with given write set
-    pub fn has_write_conflict(&self, other_writes: &HashSet<Bytes>) -> bool {
+    pub fn has_write_conflict(&self, other_writes: &HashSet<(u32, Bytes)>) -> bool {
         !self.write_set.is_disjoint(other_writes)
     }
 

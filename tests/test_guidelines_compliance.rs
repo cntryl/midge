@@ -174,7 +174,7 @@ fn should_enforce_proper_test_file_organization() {
         message.push_str("Guidelines:\n");
         message.push_str("  • Files under `tests/` are auto-discovered by Cargo.\n");
         message.push_str("  • Nested tests require `mod.rs` or explicit `mod` imports.\n");
-        message.push_str("  • Use descriptive, snake_case filenames (e.g., `engine.rs`).\n");
+        message.push_str("  • Use descriptive, snake_case filenames (e.g., `engine_scans.rs`).\n");
         message.push_str("  • Avoid redundant prefixes like `test_` in filenames.\n\n");
 
         for issue in &issues {
