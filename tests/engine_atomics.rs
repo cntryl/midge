@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::{new_engine, test_temp_dir};
 #[test]
 fn should_insert_key_given_nonexistent_key() {
     // Arrange
@@ -17,6 +17,7 @@ fn should_insert_key_given_nonexistent_key() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("key1");
     let value = Bytes::from("value1");
 
@@ -28,7 +29,6 @@ fn should_insert_key_given_nonexistent_key() {
     assert!(inserted, "First insert should return true");
     assert_eq!(result, Some(value));
 }
-
 
 #[test]
 fn should_not_insert_given_existing_key() {
@@ -52,7 +52,6 @@ fn should_not_insert_given_existing_key() {
     assert!(!inserted, "Insert should return false for existing key");
     assert_eq!(result, Some(value1));
 }
-
 
 #[test]
 fn should_return_existing_value_given_insert_with_value() {
@@ -81,7 +80,6 @@ fn should_return_existing_value_given_insert_with_value() {
     assert_eq!(stored, Some(value1));
 }
 
-
 #[test]
 fn should_swap_value_given_matching_expected() {
     // Arrange
@@ -91,6 +89,7 @@ fn should_swap_value_given_matching_expected() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("counter");
 
     // Act
@@ -107,7 +106,6 @@ fn should_swap_value_given_matching_expected() {
     assert_eq!(result2, CasResult::Swapped);
     assert_eq!(value, Some(Bytes::from("1")));
 }
-
 
 #[test]
 fn should_handle_concurrent_inserts_given_race_simulation() {
@@ -132,7 +130,6 @@ fn should_handle_concurrent_inserts_given_race_simulation() {
     assert!(!result3, "Third insert should fail");
     assert_eq!(value, Some(Bytes::from("value1")));
 }
-
 
 #[test]
 fn should_handle_concurrent_cas_given_race_simulation() {
@@ -166,7 +163,6 @@ fn should_handle_concurrent_cas_given_race_simulation() {
     assert_eq!(value, Some(Bytes::from("3")));
 }
 
-
 #[test]
 fn should_respect_snapshot_isolation_given_insert() {
     // Arrange
@@ -175,6 +171,7 @@ fn should_respect_snapshot_isolation_given_insert() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("key1");
     let value1 = Bytes::from("value1");
     let value2 = Bytes::from("value2");
@@ -192,7 +189,6 @@ fn should_respect_snapshot_isolation_given_insert() {
     assert_eq!(engine.get_at(&key, &snap2).unwrap(), Some(value1.clone()));
     assert_eq!(engine.get(&cf, &key).unwrap(), Some(value1));
 }
-
 
 #[test]
 fn should_handle_insert_after_delete() {
@@ -218,10 +214,8 @@ fn should_handle_insert_after_delete() {
     assert_eq!(result, Some(value2));
 }
 
-
 #[test]
 fn should_use_latest_value_given_cas_after_concurrent_put() {
-    let cf = engine.default_column_family();
     // Arrange
     use cntryl_midge::CasResult;
     let opts = MidgeOptions {
@@ -229,6 +223,7 @@ fn should_use_latest_value_given_cas_after_concurrent_put() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
     let key = Bytes::from("key1");
     engine.put(&cf, key.clone(), Bytes::from("A")).unwrap();
     let snap = engine.snapshot();
@@ -251,5 +246,3 @@ fn should_use_latest_value_given_cas_after_concurrent_put() {
 // ============================================================================
 // Read-only mode tests (consolidated from tests/read_only.rs)
 // ============================================================================
-
-

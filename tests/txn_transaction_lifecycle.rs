@@ -5,7 +5,8 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, KvStore};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
@@ -14,6 +15,7 @@ use common::{test_temp_dir, new_engine};
 fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut timeout_txn = engine.begin_transaction(&cf);
@@ -36,6 +38,7 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
 fn should_release_locks_given_transaction_timeout_when_aborted() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut aborted_lock_txn = engine.begin_transaction(&cf);
@@ -63,6 +66,7 @@ fn should_release_locks_given_transaction_timeout_when_aborted() {
 fn should_rollback_partial_writes_given_timeout_when_aborting() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut rollback_txn = engine.begin_transaction(&cf);
@@ -89,6 +93,7 @@ fn should_rollback_partial_writes_given_timeout_when_aborting() {
 fn should_reject_operations_given_aborted_transaction_when_used() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut aborted_txn = engine.begin_transaction(&cf);
@@ -112,6 +117,7 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
 fn should_reject_operations_given_committed_transaction_when_reused() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut committed_txn = engine.begin_transaction(&cf);

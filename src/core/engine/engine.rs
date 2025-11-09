@@ -503,7 +503,7 @@ impl MidgeEngine {
     {
         let cf = self.cf_set.default_cf();
         let mt = cf.memtable.read();
-        f(&*mt)
+        f(&mt)
     }
 
     fn with_default_memtable_mut<F, R>(&self, f: F) -> R
@@ -514,7 +514,7 @@ impl MidgeEngine {
         // No need for write lock for reads, just read lock
         let cf = self.cf_set.default_cf();
         let mt = cf.memtable.read();
-        f(&*mt)
+        f(&mt)
     }
 
     /// Replay WAL records into column families. Ignores records for dropped CFs.

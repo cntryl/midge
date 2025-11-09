@@ -35,6 +35,7 @@ fn should_freeze_memtable_atomically_given_concurrent_writes_when_size_exceeded(
     let _dir = test_temp_dir();
     let opts = memory_opts_with_memtable_size(10 * 1024 * 1024); // Small budget to trigger freezes
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let num_threads = 20;
     let writes_per_thread = 100;
 
@@ -46,7 +47,7 @@ fn should_freeze_memtable_atomically_given_concurrent_writes_when_size_exceeded(
                 for i in 0..writes_per_thread {
                     let key = format!("freeze_test_{}_{}", thread_id, i);
                     let value = vec![0u8; 1024]; // 1KB values
-                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
                 }
             })
         })
@@ -73,6 +74,7 @@ fn should_route_writes_to_new_memtable_given_freeze_in_progress() {
     let _dir = test_temp_dir();
     let opts = memory_opts_with_memtable_size(8 * 1024 * 1024);
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     // Act
     let num_writes = 1000;
@@ -82,7 +84,7 @@ fn should_route_writes_to_new_memtable_given_freeze_in_progress() {
             thread::spawn(move || {
                 let key = format!("routing_key_{}", i);
                 let value = vec![0u8; 2048]; // 2KB values
-                engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+                engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
             })
         })
         .collect();
@@ -104,6 +106,7 @@ fn should_not_lose_writes_given_memtable_freeze_race() {
     let _dir = test_temp_dir();
     let opts = memory_opts_with_memtable_size(5 * 1024 * 1024);
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
     let write_count = Arc::new(AtomicUsize::new(0));
 
     // Act
@@ -116,7 +119,7 @@ fn should_not_lose_writes_given_memtable_freeze_race() {
                 for i in 0..200 {
                     let key = format!("preserve_{}_{}", thread_id, i);
                     let value = vec![0u8; 1024];
-                    engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+                    engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             })

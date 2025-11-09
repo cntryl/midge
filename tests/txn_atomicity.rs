@@ -5,15 +5,17 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, KvStore};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::{new_engine, test_temp_dir};
 #[test]
 fn should_commit_all_or_nothing_given_multi_key_transaction() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut atomic_txn = engine.begin_transaction(&cf);
@@ -53,6 +55,7 @@ fn should_commit_all_or_nothing_given_multi_key_transaction() {
 fn should_be_atomic_given_transaction_with_100_operations() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut batch_txn = engine.begin_transaction(&cf);
@@ -86,6 +89,7 @@ fn should_be_atomic_given_transaction_with_100_operations() {
 fn should_rollback_all_writes_given_single_failure_when_committing() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut failed_txn = engine.begin_transaction(&cf);
@@ -108,6 +112,7 @@ fn should_rollback_all_writes_given_single_failure_when_committing() {
 fn should_not_expose_partial_writes_given_concurrent_readers_when_committing() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
     let snap_before = engine.snapshot();
 

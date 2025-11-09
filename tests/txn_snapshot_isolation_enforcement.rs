@@ -5,19 +5,21 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use tempfile::TempDir;
+use cntryl_midge::KvStore;
+use std::sync::Arc;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::new_engine;
+
 #[test]
 fn should_read_at_begin_sequence_given_transaction_when_using_transaction_get() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     engine
-        .put(&cf, Bytes::from("key"), Bytes::from("initial"))
+        .put(&cf, b"key", b"initial")
         .expect("put");
 
     let mut txn = engine.begin_transaction(&cf);
@@ -25,7 +27,7 @@ fn should_read_at_begin_sequence_given_transaction_when_using_transaction_get() 
 
     // Act
     engine
-        .put(&cf, Bytes::from("key"), Bytes::from("updated"))
+        .put(&cf, b"key", b"updated")
         .expect("put");
 
     let second_value = engine.transaction_get(&mut txn, b"key").expect("get");

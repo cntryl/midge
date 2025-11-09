@@ -173,11 +173,12 @@ fn should_handle_concurrent_flush_calls_without_file_conflicts() {
     let mut handles = vec![];
     for batch in 0..5 {
         let engine_clone = Arc::clone(&engine);
+        let cf_clone = cf.clone();
         let handle = thread::spawn(move || {
             for i in 0..20 {
                 let key = format!("concurrent_flush_b{}k{:02}", batch, i);
                 engine_clone
-                    .put(Bytes::from(key), Bytes::from("val"))
+                    .put(&cf_clone, key.as_bytes(), b"val")
                     .unwrap();
             }
             // Now safe: flush_mutex serializes concurrent flush() calls

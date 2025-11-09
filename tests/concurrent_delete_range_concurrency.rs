@@ -40,6 +40,7 @@ fn should_handle_concurrent_delete_range_operations() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     for i in 0..1000 {
         let key = format!("range_{:04}", i);
@@ -49,19 +50,17 @@ fn should_handle_concurrent_delete_range_operations() {
     // Act
     let handle1 = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
-            let start = Bytes::from("range_0000");
-            let end = Bytes::from("range_0250");
-            engine.delete_range(start, end).unwrap();
+            engine.delete_range(&cf, b"range_0000", b"range_0250").unwrap();
         })
     };
 
     let handle2 = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
-            let start = Bytes::from("range_0500");
-            let end = Bytes::from("range_0750");
-            engine.delete_range(start, end).unwrap();
+            engine.delete_range(&cf, b"range_0500", b"range_0750").unwrap();
         })
     };
 
@@ -91,6 +90,7 @@ fn should_handle_overlapping_delete_ranges_given_concurrent_calls() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     for i in 0..500 {
         let key = format!("overlap_{:04}", i);
@@ -100,19 +100,17 @@ fn should_handle_overlapping_delete_ranges_given_concurrent_calls() {
     // Act - Overlapping ranges
     let handle1 = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
-            let start = Bytes::from("overlap_0000");
-            let end = Bytes::from("overlap_0300");
-            engine.delete_range(start, end).unwrap();
+            engine.delete_range(&cf, b"overlap_0000", b"overlap_0300").unwrap();
         })
     };
 
     let handle2 = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
-            let start = Bytes::from("overlap_0200");
-            let end = Bytes::from("overlap_0450");
-            engine.delete_range(start, end).unwrap();
+            engine.delete_range(&cf, b"overlap_0200", b"overlap_0450").unwrap();
         })
     };
 
@@ -137,31 +135,32 @@ fn should_handle_point_write_during_delete_range() {
         ..Default::default()
     };
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
 
     for i in 0..500 {
         let key = format!("mixed_{:04}", i);
         engine
-            .put(Bytes::from(key), Bytes::from("initial"))
+            .put(&cf, key.as_bytes(), b"initial")
             .unwrap();
     }
 
     // Act
     let delete_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
-            let start = Bytes::from("mixed_0000");
-            let end = Bytes::from("mixed_0400");
-            engine.delete_range(start, end).unwrap();
+            engine.delete_range(&cf, b"mixed_0000", b"mixed_0400").unwrap();
         })
     };
 
     let write_handle = {
         let engine = Arc::clone(&engine);
+        let cf = cf.clone();
         thread::spawn(move || {
             for i in 0..500 {
                 let key = format!("mixed_{:04}", i);
                 engine
-                    .put(Bytes::from(key), Bytes::from("updated"))
+                    .put(&cf, key.as_bytes(), b"updated")
                     .unwrap();
             }
         })

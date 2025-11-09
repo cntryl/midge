@@ -71,6 +71,7 @@ fn should_retry_compaction_given_disk_full_error_when_writing_sst() {
         let key = format!("key{:03}", i);
         assert!(engine.get(&cf, key.as_bytes()).is_ok());
     }
+}
 
 #[test]
 fn should_abort_compaction_given_corruption_detected_when_reading_input() {
@@ -80,8 +81,9 @@ fn should_abort_compaction_given_corruption_detected_when_reading_input() {
     let cf = engine.default_column_family();
 
     for i in 0..50 {
+        let key = format!("key{}", i);
         engine
-            .put(Bytes::from(format!("key{}", i)), Bytes::from("value"))
+            .put(&cf, key.as_bytes(), b"value")
             .unwrap();
     }
     engine.flush().unwrap();
@@ -94,8 +96,9 @@ fn should_abort_compaction_given_corruption_detected_when_reading_input() {
         Ok(_) => {
             // Successful compaction
             for i in 0..50 {
+                let key = format!("key{}", i);
                 assert!(engine
-                    .get(format!("key{}", i).as_bytes())
+                    .get(&cf, key.as_bytes())
                     .unwrap()
                     .is_some());
             }
@@ -103,7 +106,8 @@ fn should_abort_compaction_given_corruption_detected_when_reading_input() {
         Err(_) => {
             // Failed gracefully - data should still be accessible
             for i in 0..50 {
-                assert!(engine.get(format!("key{}", i).as_bytes()).is_ok());
+                let key = format!("key{}", i);
+                assert!(engine.get(&cf, key.as_bytes()).is_ok());
             }
         }
     }
@@ -115,14 +119,14 @@ fn should_cleanup_partial_output_given_compaction_failure() {
     let opts = compaction_test_opts();
     let engine = MidgeEngine::open(opts).unwrap();
     let cf = engine.default_column_family();
-    populate_multi_level_data(&engine);
+    populate_multi_level_data(&engine, &cf);
 
     // Act - Compact (should clean up on any failure)
     let _ = engine.compact_all();
 
     // Assert - Engine should still be usable
     engine
-        .put(Bytes::from("new_key"), Bytes::from("new_value"))
+        .put(&cf, b"new_key", b"new_value")
         .unwrap();
     assert_get_equals(&engine, b"new_key", b"new_value");
 }
@@ -135,8 +139,9 @@ fn should_restore_manifest_given_compaction_crash_before_commit() {
     let cf = engine.default_column_family();
 
     for i in 0..30 {
+        let key = format!("k{}", i);
         engine
-            .put(Bytes::from(format!("k{}", i)), Bytes::from("v"))
+            .put(&cf, key.as_bytes(), b"v")
             .unwrap();
     }
     engine.flush().unwrap();
@@ -146,7 +151,8 @@ fn should_restore_manifest_given_compaction_crash_before_commit() {
 
     // Assert - Data accessible (manifest is consistent)
     for i in 0..30 {
-        assert!(engine.get(format!("k{}", i).as_bytes()).unwrap().is_some());
+        let key = format!("k{}", i);
+        assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
     }
 }
 
@@ -158,8 +164,9 @@ fn should_preserve_input_files_given_compaction_error_when_aborting() {
     let cf = engine.default_column_family();
 
     for i in 0..40 {
+        let key = format!("preserve{}", i);
         engine
-            .put(Bytes::from(format!("preserve{}", i)), Bytes::from("data"))
+            .put(&cf, key.as_bytes(), b"data")
             .unwrap();
     }
     engine.flush().unwrap();

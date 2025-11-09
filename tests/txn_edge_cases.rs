@@ -5,15 +5,17 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use tempfile::TempDir;
+use cntryl_midge::KvStore;
+use std::sync::Arc;
 
 mod common;
-use common::{test_temp_dir, new_engine};
+use common::new_engine;
+
 #[test]
 fn should_handle_empty_transaction_given_commit_without_operations() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let empty_txn = engine.begin_transaction(&cf);
@@ -32,11 +34,10 @@ fn should_handle_empty_transaction_given_commit_without_operations() {
 fn should_handle_read_only_transaction_given_no_writes_when_commit() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    engine
-        .put(&cf, Bytes::from("key"), Bytes::from("value"))
-        .expect("put");
+    engine.put(&cf, b"key", b"value").expect("put");
 
     let readonly_txn = engine.begin_transaction(&cf);
     let snap = engine.snapshot();
@@ -53,6 +54,7 @@ fn should_handle_read_only_transaction_given_no_writes_when_commit() {
 fn should_allow_nested_get_given_transaction_when_reading_own_writes() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut nested_read_txn = engine.begin_transaction(&cf);
@@ -73,6 +75,7 @@ fn should_allow_nested_get_given_transaction_when_reading_own_writes() {
 fn should_handle_transaction_on_dropped_cf_given_cf_deleted_during_transaction() {
     // Arrange
     let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
     let mut cf_txn = engine.begin_transaction(&cf);

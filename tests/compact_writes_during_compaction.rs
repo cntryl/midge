@@ -54,7 +54,7 @@ fn should_allow_writes_given_l0_l1_compaction_running() {
     let opts = compaction_test_opts();
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     let cf = engine.default_column_family();
-    populate_multi_level_data(&engine);
+    populate_multi_level_data(&engine, &cf);
 
     // Act - Trigger compaction in background
     let engine_clone = Arc::clone(&engine);
@@ -64,11 +64,12 @@ fn should_allow_writes_given_l0_l1_compaction_running() {
 
     // Perform concurrent writes while compaction runs
     let engine_clone = Arc::clone(&engine);
+    let cf_clone = cf.clone();
     let write_handle = thread::spawn(move || {
         for i in 0..100 {
             let key = format!("new_key{:03}", i);
             let value = format!("new_value{}", i);
-            let result = engine_clone.put(&cf, key.as_bytes(), value.as_bytes());
+            let result = engine_clone.put(&cf_clone, key.as_bytes(), value.as_bytes());
             // Assert - Writes should succeed during compaction
             assert!(result.is_ok(), "Write should succeed during compaction");
         }
@@ -96,7 +97,7 @@ fn should_handle_put_to_compacting_key_range() {
     for i in 0..100 {
         let key = format!("key{:03}", i);
         engine
-            .put(Bytes::from(key), Bytes::from("old_value"))
+            .put(&cf, key.as_bytes(), b"old_value")
             .unwrap();
     }
     engine.flush().unwrap();
@@ -105,7 +106,7 @@ fn should_handle_put_to_compacting_key_range() {
     for i in 0..100 {
         let key = format!("key{:03}", i);
         engine
-            .put(Bytes::from(key), Bytes::from("updated_value"))
+            .put(&cf, key.as_bytes(), b"updated_value")
             .unwrap();
     }
     engine.flush().unwrap();
