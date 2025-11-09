@@ -1,8 +1,18 @@
+Absolutely — here’s your complete, polished version of the **GitHub Copilot Instructions for the Midge Project**, with consistent tone, typography, and structure, plus the new **Automation Scripts** section added cleanly at the top.
+
 # GitHub Copilot Instructions for Midge Project
 
-## Test Writing Guidelines - STRICTLY ENFORCE
+## Automation Scripts
 
-When generating or suggesting tests, **ALWAYS** follow these rules:
+When writing automation for this project, **prefer Python over PowerShell**.
+
+- **Python** offers better **cross-platform compatibility**, **library support**, and **VS Code integration**.
+- **PowerShell** is acceptable for quick Windows-specific admin or shell tasks, but all **project automation (build helpers, generators, CI utilities)** must be written in **Python** for consistency and maintainability.
+- Use `.py` scripts in the `/tools` directory when adding new automation logic.
+
+## Test Writing Guidelines — STRICTLY ENFORCE
+
+When generating or suggesting tests, **ALWAYS** follow these rules.
 
 ### 1. Naming Convention (MANDATORY)
 
@@ -22,7 +32,7 @@ fn test_get_value() { }
 
 ### 2. AAA Structure (MANDATORY for tests >5 lines)
 
-Every test MUST have exactly these three comments:
+Every test **must** have exactly these three comments:
 
 ```rust
 #[test]
@@ -42,33 +52,33 @@ fn should_do_something() {
 
 - ❌ `// Arrange & Act` (combined)
 - ❌ `// Act & Assert` (combined)
-- ❌ `// Setup` (use Arrange)
-- ❌ `// Arrange: setup data` (no suffixes)
-- ❌ Descriptive AAA comments like `// Arrange - create database`
+- ❌ `// Setup` (use `// Arrange`)
+- ❌ Descriptive comments like `// Arrange - create database`
 
 **ALWAYS use:**
 
-- ✅ Exactly `// Arrange` (no suffix, no combination)
-- ✅ Exactly `// Act` (no suffix, no combination)
-- ✅ Exactly `// Assert` (no suffix, no combination)
+- ✅ Exactly `// Arrange`
+- ✅ Exactly `// Act`
+- ✅ Exactly `// Assert`
 
 ### 3. Single Behavior Principle (PEDANTIC RULE)
 
-**CRITICAL: If each assert_eq! describes a different input-output mapping, create separate tests.**
+Each test must verify **one behavior only**.
+If each `assert_eq!` tests a different input/output pair, **split into multiple tests**.
 
 ```rust
-// ❌ WRONG - Testing 3 different inputs
+// ❌ WRONG - Testing multiple inputs
 #[test]
 fn should_return_files_at_level() {
     let l0 = manifest.files_at_level(0);
     let l1 = manifest.files_at_level(1);
     let l2 = manifest.files_at_level(2);
-    assert_eq!(l0.len(), 1);  // Different input!
-    assert_eq!(l1.len(), 2);  // Different input!
-    assert_eq!(l2.len(), 0);  // Different input!
+    assert_eq!(l0.len(), 1);
+    assert_eq!(l1.len(), 2);
+    assert_eq!(l2.len(), 0);
 }
 
-// ✅ CORRECT - 3 focused tests
+// ✅ CORRECT - Focused, one behavior per test
 #[test]
 fn should_return_files_at_level_zero() {
     // Arrange
@@ -94,10 +104,11 @@ fn should_return_files_at_level_one() {
 }
 ```
 
-**Exception:** Multiple assertions checking facets of ONE property are OK:
+**Exception:**
+Multiple assertions verifying **facets of the same operation** are acceptable:
 
 ```rust
-// ✅ CORRECT - All assertions verify one operation
+// ✅ CORRECT - All assertions validate one property
 #[test]
 fn should_preserve_data_across_save_load() {
     // Arrange
@@ -107,37 +118,37 @@ fn should_preserve_data_across_save_load() {
     let loaded = save_and_load(original);
 
     // Assert
-    assert_eq!(loaded.id, original.id);      // ✅ Same operation
-    assert_eq!(loaded.name, original.name);  // ✅ Same operation
-    assert_eq!(loaded.size, original.size);  // ✅ Same operation
+    assert_eq!(loaded.id, original.id);
+    assert_eq!(loaded.name, original.name);
+    assert_eq!(loaded.size, original.size);
 }
 ```
 
 ### 4. No Multiple Act Sections
 
-**NEVER have multiple `// Act` comments in one test.**
+**Never** have more than one `// Act` section per test.
 
 ```rust
-// ❌ WRONG - Two operations
+// ❌ WRONG
 #[test]
 fn should_upload_and_download() {
     // Arrange
     let backend = Backend::new();
 
     // Act
-    backend.upload("data");  // First operation
+    backend.upload("data");
 
     // Assert
     assert_eq!(backend.count(), 1);
 
-    // Act  // ❌ SECOND ACT - WRONG!
+    // Act  // ❌ SECOND ACT - WRONG
     let downloaded = backend.download();
 
     // Assert
     assert_eq!(downloaded, "data");
 }
 
-// ✅ CORRECT - Split into 2 tests
+// ✅ CORRECT
 #[test]
 fn should_upload_data_successfully() {
     // Arrange
@@ -166,10 +177,10 @@ fn should_download_uploaded_data() {
 
 ### 5. Small Tests Can Omit AAA
 
-Tests with ≤5 lines don't need AAA comments, but still need proper naming:
+Tests with ≤5 lines may omit AAA comments, but still require correct naming.
 
 ```rust
-// ✅ CORRECT - Small test, no AAA needed
+// ✅ CORRECT - Short test, AAA optional
 #[test]
 fn should_create_default_config() {
     let config = Config::default();
@@ -181,10 +192,9 @@ fn should_create_default_config() {
 
 ### Testing Serialization/Deserialization
 
-**ALWAYS split serialize and deserialize into separate tests:**
+Always **separate** serialization and deserialization tests.
 
 ```rust
-// ✅ CORRECT
 #[test]
 fn should_serialize_manifest() {
     // Arrange
@@ -213,10 +223,9 @@ fn should_deserialize_manifest() {
 
 ### Testing Multiple Scenarios
 
-Create separate tests for each scenario:
+Each scenario must have its own test.
 
 ```rust
-// ✅ CORRECT - Separate tests per scenario
 #[test]
 fn should_return_value_when_key_exists() {
     // Arrange
@@ -245,16 +254,16 @@ fn should_return_none_when_key_does_not_exist() {
 
 ### Table-Driven Tests (When Appropriate)
 
-Use for same operation with different inputs:
+Use only when verifying the same logic with multiple inputs.
 
 ```rust
 #[test]
 fn should_validate_range_bounds_correctly() {
     // Arrange
     let test_cases = vec![
-        (0, 10, true),   // valid
-        (10, 0, false),  // invalid
-        (5, 5, false),   // invalid
+        (0, 10, true),
+        (10, 0, false),
+        (5, 5, false),
     ];
 
     // Act & Assert
@@ -267,15 +276,14 @@ fn should_validate_range_bounds_correctly() {
 
 ## Meta-Test Enforcement
 
-**All tests are validated by `tests/test_guidelines_compliance.rs`**
-
-The meta-test will FAIL if:
+Compliance is validated by `tests/test_guidelines_compliance.rs`.
+The meta-test will **fail** if:
 
 - Any test uses `test_*` naming
 - Tests >5 lines are missing AAA comments
-- Tests have combined AAA comments (`// Arrange & Act`)
+- Combined AAA comments (`// Arrange & Act`, etc.) exist
 
-Run it with:
+Run manually with:
 
 ```bash
 cargo test test_guidelines_compliance
@@ -286,27 +294,26 @@ cargo test test_guidelines_compliance
 Before suggesting a test, verify:
 
 - [ ] Name starts with `should_`
-- [ ] If >5 lines, has `// Arrange`, `// Act`, `// Assert` (exact format)
-- [ ] Only ONE `// Act` section
-- [ ] Each test verifies ONE specific behavior
-- [ ] Multiple assertions only if they verify facets of the SAME operation
+- [ ] If >5 lines, includes `// Arrange`, `// Act`, `// Assert`
+- [ ] Only **one** `// Act` section
+- [ ] Verifies **one** behavior per test
+- [ ] Multiple assertions only if validating **facets of one operation**
 
-## Examples from Codebase
+## Example References
 
-See these files for excellent examples:
+Excellent examples can be found in:
 
-- `src/manifest.rs` - Clean AAA structure, proper splitting
-- `src/index/range_tombstone.rs` - Single-behavior tests
-- `src/cloud/mock.rs` - Upload/download properly split
+- `src/manifest.rs` — Clean AAA structure
+- `src/index/range_tombstone.rs` — Single-behavior tests
+- `src/cloud/mock.rs` — Upload/download split properly
 
-## Why These Rules?
+## Why These Rules Exist
 
-1. **Consistency**: All tests look the same → easier to read
-2. **Debuggability**: One test fails → know exactly what broke
-3. **Maintainability**: Change behavior → update one focused test
-4. **Documentation**: Tests serve as examples of how to use code
-5. **CI/CD**: Meta-test enforces rules automatically
+1. **Consistency** — Tests all follow the same readable pattern.
+2. **Debuggability** — A failing test pinpoints the exact behavior.
+3. **Maintainability** — Code changes require minimal test churn.
+4. **Documentation** — Tests serve as living usage examples.
+5. **CI Enforceability** — The meta-test automatically guards rules.
 
----
-
-**REMEMBER: When in doubt, create MORE smaller tests rather than fewer large tests!**
+**REMEMBER:** When in doubt, create **more smaller tests**, not fewer large ones.
+Clarity beats cleverness.

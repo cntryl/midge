@@ -7,6 +7,7 @@ pub struct CompactionPlan {
     pub output_files: Vec<String>,
     pub source_level: u32,
     pub target_level: u32,
+    pub cf_id: u32,
 }
 
 /// Configuration for leveled compaction
@@ -157,6 +158,7 @@ impl Compactor {
                 output_files: vec![],
                 source_level: 0,
                 target_level: 1,
+                cf_id,
             });
         }
 
@@ -200,6 +202,7 @@ impl Compactor {
                         output_files: vec![],
                         source_level: level as u32,
                         target_level: (level + 1) as u32,
+                        cf_id,
                     });
                 }
             }
@@ -248,6 +251,7 @@ impl Compactor {
             output_files: vec![],
             source_level: target_level,
             target_level: target_level + 1,
+            cf_id,
         })
     }
 
@@ -333,6 +337,7 @@ impl Compactor {
             output_files: vec![],
             source_level: 0,
             target_level: 1,
+            cf_id,
         })
     }
 
@@ -383,12 +388,14 @@ impl Compactor {
     pub fn pick_tombstone_compaction(
         &self,
         files: &[FileMeta],
+        cf_id: u32,
         tombstone_threshold: f64,
         max_files: usize,
     ) -> Option<CompactionPlan> {
-        // Find all high-density files
+        // Find all high-density files for this CF
         let mut high_density: Vec<(&FileMeta, f64)> = files
             .iter()
+            .filter(|f| f.cf_id == cf_id)
             .map(|f| (f, f.tombstone_density()))
             .filter(|(_, density)| *density >= tombstone_threshold)
             .collect();
@@ -429,6 +436,7 @@ impl Compactor {
             output_files: Vec::new(), // Generated during execution
             source_level,
             target_level,
+            cf_id,
         })
     }
 

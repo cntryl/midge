@@ -478,16 +478,16 @@ impl EngineTransaction {
 
 // Implement the public KvTransaction trait for EngineTransaction
 impl super::kv_store::KvTransaction for EngineTransaction {
-    fn put(&mut self, key: Bytes, value: Bytes) -> crate::MidgeResult<()> {
-        self.txn.put(key, value, None)
+    fn put(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
+        self.txn.put(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value), None)
     }
 
     fn get(&mut self, key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
         self.engine.transaction_get(&mut self.txn, key)
     }
 
-    fn delete(&mut self, key: Bytes) -> crate::MidgeResult<()> {
-        self.txn.delete(key)
+    fn delete(&mut self, key: &[u8]) -> crate::MidgeResult<()> {
+        self.txn.delete(Bytes::copy_from_slice(key))
     }
 
     fn scan(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<Vec<(Bytes, Bytes)>> {
@@ -497,12 +497,13 @@ impl super::kv_store::KvTransaction for EngineTransaction {
             .end_key(Bytes::copy_from_slice(end));
         
         // TODO: Implement transaction-aware scan in engine
-        // For now, use regular scan which may not respect transaction isolation
-        self.engine.scan(q)
+        // For now, run a column-family scoped scan on the engine's default CF
+        let cf = self.engine.default_column_family();
+        self.engine.scan_cf(&cf, q)
     }
 
-    fn delete_range(&mut self, start: Bytes, end: Bytes) -> crate::MidgeResult<()> {
-        self.txn.delete_range(start, end)
+    fn delete_range(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<()> {
+        self.txn.delete_range(Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))
     }
 }
 
@@ -510,8 +511,8 @@ impl super::kv_store::KvTransaction for EngineTransaction {
 // crate-local Transaction can be used wherever the generic KvTransaction trait
 // is expected by external integrations (though reads won't work without engine reference).
 impl super::kv_store::KvTransaction for Transaction {
-    fn put(&mut self, key: Bytes, value: Bytes) -> crate::MidgeResult<()> {
-        Transaction::put(self, key, value, None)
+    fn put(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
+        Transaction::put(self, Bytes::copy_from_slice(key), Bytes::copy_from_slice(value), None)
     }
 
     fn get(&mut self, _key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
@@ -520,8 +521,8 @@ impl super::kv_store::KvTransaction for Transaction {
         ))
     }
 
-    fn delete(&mut self, key: Bytes) -> crate::MidgeResult<()> {
-        Transaction::delete(self, key)
+    fn delete(&mut self, key: &[u8]) -> crate::MidgeResult<()> {
+        Transaction::delete(self, Bytes::copy_from_slice(key))
     }
 
     fn scan(&mut self, _start: &[u8], _end: &[u8]) -> crate::MidgeResult<Vec<(Bytes, Bytes)>> {
@@ -530,8 +531,8 @@ impl super::kv_store::KvTransaction for Transaction {
         ))
     }
 
-    fn delete_range(&mut self, start: Bytes, end: Bytes) -> crate::MidgeResult<()> {
-        Transaction::delete_range(self, start, end)
+    fn delete_range(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<()> {
+        Transaction::delete_range(self, Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))
     }
 }
 

@@ -32,6 +32,8 @@ use crate::manifest::Manifest;
 /// Created during WAL rotation when the memtable is drained. Contains all the
 /// key-value pairs and range tombstones that need to be persisted.
 pub struct FlushJob {
+    /// Column family ID that owns this flush job
+    pub cf_id: crate::column_family::ColumnFamilyId,
     /// Sequence number of the rotated WAL segment
     pub seq: u64,
     /// Drained memtable entries: (key, value, sequence, is_tombstone)
@@ -110,6 +112,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     // Record memtable flush metric for background-flush path as well
     config.metrics.record_memtable_flush();
 
+    let cf_id = job.cf_id;
     let seq_for_prune = job.seq;
     let entries = job.entries;
     let range_tombstones = job.range_tombstones;
@@ -145,8 +148,9 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     }
 
     // Finish and persist (streaming writer will write directly to disk)
-    let id = uuid::Uuid::new_v4().to_string();
-    let sst_path = config.sst_dir.join(format!("{}.sst", id));
+    // Format: {seq:020}_{cf_id:04}.sst for per-CF identification
+    let fname = format!("{:020}_{:04}.sst", seq_for_prune, cf_id.as_u32());
+    let sst_path = config.sst_dir.join(&fname);
     // Prefer streaming finish_to_path; default implementation will write bytes
     let boxed_writer = Box::new(writer);
     boxed_writer.finish_to_path(&sst_path)?;
@@ -155,7 +159,6 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let mut m =
         Manifest::load_with_retry(&config.db_path, 10, std::time::Duration::from_millis(10))?;
     m.last_persisted_sequence = seq_for_prune;
-    let fname = format!("{}.sst", id);
     let size_bytes = std::fs::metadata(&sst_path).map(|md| md.len()).unwrap_or(0);
 
     // Assign sublevel based on overlap with existing L0 files
@@ -171,10 +174,10 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
 
     m.ssts.push(fname.clone());
     m.files.push(crate::manifest::FileMeta {
-        name: fname,
+        name: fname.clone(),
         level: 0,
         size_bytes,
-        cf_id: 0, // Default CF
+        cf_id: cf_id.as_u32(),
         smallest_key,
         largest_key,
         smallest_seq,
@@ -198,7 +201,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
 
     // Upload SST to cloud if cloud manager is configured
     if let Some(cloud_manager) = &config.cloud_sst_manager {
-        let sst_id = id.clone();
+        let sst_id = fname.clone();
         let sequence_range = (
             seq_range_for_upload.0.unwrap_or(0),
             seq_range_for_upload.1.unwrap_or(0),
@@ -419,6 +422,7 @@ pub(crate) struct FlushConfig<'a> {
 /// * `Ok((path, metadata))` - Path to created SST and its metadata
 /// * `Err(_)` - If memtable is empty or write fails
 pub(crate) fn flush_memtable_to_sst<F>(
+    cf_id: crate::column_family::ColumnFamilyId,
     memtable_drain: F,
     config: FlushConfig,
 ) -> MidgeResult<(PathBuf, crate::manifest::FileMeta)>
@@ -470,21 +474,19 @@ where
     }
 
     // Persist to file (streaming writer should write directly to disk)
-    let id = uuid::Uuid::new_v4().to_string();
-    let file_path = config.sst_dir.join(format!("{}.sst", id));
+    // Format: {seq:020}_{cf_id:04}.sst for per-CF identification
+    let seq = smallest_seq.unwrap_or(0);
+    let fname = format!("{:020}_{:04}.sst", seq, cf_id.as_u32());
+    let file_path = config.sst_dir.join(&fname);
     let boxed = Box::new(dyn_writer);
     boxed.finish_to_path(&file_path)?;
 
     // Build FileMeta (size to be filled by caller)
     let fm = crate::manifest::FileMeta {
-        name: file_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string(),
+        name: fname.clone(),
         level: 0,
         size_bytes: 0,
-        cf_id: 0, // Default CF
+        cf_id: cf_id.as_u32(),
         smallest_key: smallest_key.clone(),
         largest_key: largest_key.clone(),
         smallest_seq,
@@ -505,7 +507,7 @@ where
 
         // Queue async upload (no callback needed - manifest updated by worker)
         mgr.upload_sst_async(
-            id.clone(),
+            fname.clone(),
             file_path.clone(),
             sequence_range,
             (smallest_key, largest_key),
@@ -529,6 +531,7 @@ where
 ///
 /// Returns the sequence number of the rotated WAL segment.
 pub(crate) fn rollover_and_queue_flush<F>(
+    cf_id: crate::column_family::ColumnFamilyId,
     seq_counter: &std::sync::atomic::AtomicU64,
     wal: &parking_lot::RwLock<Box<dyn crate::wal::WalWriter>>,
     wal_factory: &Arc<dyn crate::wal::WalFactory>,
@@ -553,6 +556,7 @@ where
     let (entries, range_tombstones) = memtable_drain();
 
     let job = FlushJob {
+        cf_id,
         seq,
         entries,
         range_tombstones,

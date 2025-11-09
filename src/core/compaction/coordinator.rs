@@ -228,6 +228,7 @@ impl CompactionCoordinator {
                                 block_size,
                                 &sst_dir,
                                 &deduped,
+                                plan.cf_id,
                                 cloud_sst_manager.as_ref(),
                                 None,
                             )?;

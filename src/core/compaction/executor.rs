@@ -252,6 +252,7 @@ pub(crate) fn write_compacted_sst(
     block_size: usize,
     sst_dir: &std::path::Path,
     versions: &[CompactionVersion],
+    cf_id: u32,
     cloud_sst_manager: Option<&Arc<crate::sst::cloud::CloudSstManager>>,
     _manifest: Option<&mut crate::manifest::Manifest>,
 ) -> MidgeResult<Option<(PathBuf, crate::manifest::FileMeta)>> {
@@ -330,7 +331,7 @@ pub(crate) fn write_compacted_sst(
         name: name.clone(),
         level: 0,
         size_bytes,
-        cf_id: 0, // Default CF
+        cf_id,
         smallest_key,
         largest_key,
         smallest_seq,
@@ -1090,7 +1091,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1116,7 +1117,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1153,7 +1154,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1192,7 +1193,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1224,7 +1225,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1257,7 +1258,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1466,7 +1467,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1647,7 +1648,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1675,7 +1676,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1703,6 +1704,7 @@ mod tests {
             4096,
             temp_dir.path(),
             &versions1,
+            0, // Default CF
             None,
             None,
         );
@@ -1712,6 +1714,7 @@ mod tests {
             4096,
             temp_dir.path(),
             &versions2,
+            0, // Default CF
             None,
             None,
         );
@@ -1744,7 +1747,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1775,7 +1778,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1805,7 +1808,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1837,7 +1840,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             &sst_dir,
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1874,7 +1877,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -1900,7 +1903,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None, // No manifest
         );
@@ -1997,7 +2000,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -2028,7 +2031,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );
@@ -2053,7 +2056,7 @@ mod tests {
             crate::codec::CompressionType::None,
             4096,
             temp_dir.path(),
-            &versions,
+            &versions,                0, // Default CF
             None,
             None,
         );

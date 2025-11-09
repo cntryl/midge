@@ -1,7 +1,9 @@
 //! Column family management for the storage engine.
 
 use dashmap::DashMap;
-use std::sync::atomic::AtomicU32;
+use parking_lot::{Mutex, RwLock};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::api::column_family::{
@@ -12,13 +14,32 @@ use crate::error::MidgeResult;
 
 /// Per-column-family state.
 ///
-/// Each column family maintains its own MemTable, immutable memtables queue,
+/// Each column family maintains its own active MemTable, immutable memtables queue,
 /// and SSTable hierarchy. Column families share the WAL and global sequence counter.
+///
+/// # Memtable Lifecycle
+/// - **Active memtable**: Current writable memtable (wrapped in RwLock for atomic replacement)
+/// - **Immutable memtables**: Bounded queue of frozen memtables waiting to be flushed
+/// - **Max immutables**: Configured limit (`ColumnFamilyConfig.max_immutable_memtables`)
+///
+/// When active memtable exceeds size limit:
+/// 1. Freeze active memtable (move to immutable queue)
+/// 2. Create new empty active memtable
+/// 3. Enqueue flush job for oldest immutable
+/// 4. If immutable queue is full, stall writes until flush completes
 pub(super) struct ColumnFamily {
     pub(super) id: ColumnFamilyId,
     pub(super) name: String,
     pub(super) config: ColumnFamilyConfig,
-    pub(super) memtable: MemTable,
+    
+    /// Active writable memtable (wrapped for atomic replacement during freeze)
+    pub(super) memtable: Arc<RwLock<MemTable>>,
+    
+    /// Queue of frozen memtables waiting to be flushed (oldest first)
+    pub(super) immutable_memtables: Arc<Mutex<VecDeque<MemTable>>>,
+    
+    /// Current number of immutable memtables (cached for fast check without locking)
+    pub(super) immutable_count: AtomicUsize,
 }
 
 impl ColumnFamily {
@@ -27,23 +48,103 @@ impl ColumnFamily {
             id,
             name,
             config,
-            memtable: MemTable::new(),
+            memtable: Arc::new(RwLock::new(MemTable::new())),
+            immutable_memtables: Arc::new(Mutex::new(VecDeque::new())),
+            immutable_count: AtomicUsize::new(0),
         }
     }
 
     pub(super) fn handle(&self) -> ColumnFamilyHandle {
         ColumnFamilyHandle::new(self.id, self.name.clone())
     }
+
+    /// Check if the active memtable has exceeded its size limit.
+    pub(super) fn is_full(&self) -> bool {
+        let mt = self.memtable.read();
+        mt.is_full(self.config.memtable_max_bytes)
+    }
+
+    /// Try to freeze the active memtable and create a new empty one.
+    ///
+    /// Returns `true` if successful, `false` if the immutable queue is full.
+    /// When false is returned, writes should be stalled until a flush completes.
+    pub(super) fn try_freeze_memtable(&self) -> bool {
+        // Check if immutable queue is already at capacity (fast path without locking)
+        let current_count = self.immutable_count.load(Ordering::Acquire);
+        if current_count >= self.config.max_immutable_memtables {
+            return false; // Queue full, cannot freeze
+        }
+
+        // Lock immutable queue for the freeze operation
+        let mut immutables = self.immutable_memtables.lock();
+
+        // Double-check after acquiring lock (another thread may have added)
+        if immutables.len() >= self.config.max_immutable_memtables {
+            return false;
+        }
+
+        // Lock active memtable for replacement
+        let mut mt_write = self.memtable.write();
+
+        // Clone the old memtable (cheap Arc clone of inner skip-list)
+        let old_memtable = (*mt_write).clone();
+
+        // Replace with new empty memtable
+        *mt_write = MemTable::new();
+
+        // Release write lock before pushing to immutable queue
+        drop(mt_write);
+
+        // Add frozen memtable to immutable queue (oldest first, newest last)
+        immutables.push_back(old_memtable);
+        self.immutable_count.fetch_add(1, Ordering::Release);
+
+        true
+    }
+
+    /// Pop the oldest immutable memtable for flushing.
+    ///
+    /// Returns `None` if the immutable queue is empty.
+    ///
+    /// TODO: This will be used in Phase 5 when implementing proper per-CF
+    /// background flush coordination. Currently, flush directly accesses
+    /// the immutable queue.
+    #[allow(dead_code)]
+    pub(super) fn pop_immutable(&self) -> Option<MemTable> {
+        let mut immutables = self.immutable_memtables.lock();
+        if let Some(mt) = immutables.pop_front() {
+            self.immutable_count.fetch_sub(1, Ordering::Release);
+            Some(mt)
+        } else {
+            None
+        }
+    }
+
+    /// Get the current number of immutable memtables waiting to be flushed.
+    pub(super) fn immutable_count(&self) -> usize {
+        self.immutable_count.load(Ordering::Acquire)
+    }
+
+    /// Check if writes should be stalled due to too many immutable memtables.
+    pub(super) fn should_stall_writes(&self) -> bool {
+        self.immutable_count() >= self.config.max_immutable_memtables
+    }
 }
 
 /// Manages all column families in the database.
 ///
-/// Lock-free implementation using DashMap for concurrent access without RwLock contention.
+/// Uses DashMap for concurrent lookup access, with a creation lock to prevent
+/// races during CF registration (checking name/id availability and inserting into two maps).
+///
 /// Provides lookup by ID or name, and tracks the next available CF ID.
 pub(super) struct ColumnFamilySet {
     pub(super) cfs: Arc<DashMap<u32, Arc<ColumnFamily>>>,
     pub(super) name_to_id: Arc<DashMap<String, u32>>,
     pub(super) next_cf_id: AtomicU32,
+    
+    /// Serializes column family creation to prevent race conditions.
+    /// Protects the check-then-insert pattern across two maps (cfs and name_to_id).
+    pub(super) create_lock: Arc<Mutex<()>>,
 }
 
 impl ColumnFamilySet {
@@ -52,6 +153,7 @@ impl ColumnFamilySet {
             cfs: Arc::new(DashMap::new()),
             name_to_id: Arc::new(DashMap::new()),
             next_cf_id: AtomicU32::new(1),
+            create_lock: Arc::new(Mutex::new(())),
         };
 
         // Always create default CF (ID=0) to make default_cf() infallible
@@ -72,8 +174,13 @@ impl ColumnFamilySet {
         name: String,
         config: ColumnFamilyConfig,
     ) -> MidgeResult<ColumnFamilyHandle> {
+        // Serialize CF creation to prevent race conditions
+        // Protects the check-then-insert pattern across two maps
+        let _guard = self.create_lock.lock();
+
         let id_u32 = id.as_u32();
 
+        // Check for duplicate ID
         if self.cfs.contains_key(&id_u32) {
             return Err(crate::error::MidgeError::invalid_config(format!(
                 "Column family with ID {} already exists",
@@ -81,6 +188,7 @@ impl ColumnFamilySet {
             )));
         }
 
+        // Check for duplicate name
         if self.name_to_id.contains_key(&name) {
             return Err(crate::error::MidgeError::invalid_config(format!(
                 "Column family with name '{}' already exists",
@@ -88,9 +196,11 @@ impl ColumnFamilySet {
             )));
         }
 
+        // Create new CF
         let cf = Arc::new(ColumnFamily::new(id, name.clone(), config));
         let handle = cf.handle();
 
+        // Atomically insert into both maps (protected by lock above)
         self.name_to_id.insert(name, id_u32);
         self.cfs.insert(id_u32, cf);
 

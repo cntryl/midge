@@ -71,10 +71,11 @@ fn generate_value(id: usize, seed: u64) -> Bytes {
 }
 
 fn load_data(engine: &MidgeEngine, record_count: usize) {
+    let cf = engine.default_column_family();
     for i in 0..record_count {
         let key = generate_key(i);
         let value = generate_value(i, 42);
-        engine.put(key, value).expect("Failed to insert record");
+        engine.put_cf(&cf, &key, &value).expect("Failed to insert record");
     }
     let _ = engine.flush();
 }
@@ -98,6 +99,7 @@ fn should_run_ycsb_workload_a_smoke_test() {
     load_data(&engine, record_count);
 
     // Act
+    let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
 
@@ -106,17 +108,17 @@ fn should_run_ycsb_workload_a_smoke_test() {
         let key = generate_key(key_id);
 
         if rng.random_bool(0.5) {
-            let _ = black_box(engine.get(&key));
+            let _ = black_box(engine.get_cf(&cf, &key));
         } else {
             let value = generate_value(key_id, rng.random());
-            let _ = engine.put(key, value);
+            let _ = engine.put_cf(&cf, &key, &value);
         }
     }
 
     // Assert
     let key = generate_key(0);
     assert!(
-        engine.get(&key).unwrap().is_some(),
+        engine.get_cf(&cf, &key).unwrap().is_some(),
         "Data should be readable"
     );
 
@@ -142,6 +144,7 @@ fn should_run_ycsb_workload_b_smoke_test() {
     load_data(&engine, record_count);
 
     // Act
+    let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
 
@@ -150,17 +153,17 @@ fn should_run_ycsb_workload_b_smoke_test() {
         let key = generate_key(key_id);
 
         if rng.random_bool(0.95) {
-            let _ = black_box(engine.get(&key));
+            let _ = black_box(engine.get_cf(&cf, &key));
         } else {
             let value = generate_value(key_id, rng.random());
-            let _ = engine.put(key, value);
+            let _ = engine.put_cf(&cf, &key, &value);
         }
     }
 
     // Assert
     let key = generate_key(0);
     assert!(
-        engine.get(&key).unwrap().is_some(),
+        engine.get_cf(&cf, &key).unwrap().is_some(),
         "Data should be readable"
     );
 
@@ -186,19 +189,20 @@ fn should_run_ycsb_workload_c_smoke_test() {
     load_data(&engine, record_count);
 
     // Act
+    let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
 
     for _ in 0..100 {
         let key_id = zipfian.next(&mut rng);
         let key = generate_key(key_id);
-        let _ = black_box(engine.get(&key));
+        let _ = black_box(engine.get_cf(&cf, &key));
     }
 
     // Assert
     let key = generate_key(0);
     assert!(
-        engine.get(&key).unwrap().is_some(),
+        engine.get_cf(&cf, &key).unwrap().is_some(),
         "Data should be readable"
     );
 
