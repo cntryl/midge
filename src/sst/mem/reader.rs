@@ -85,7 +85,8 @@ impl SstMemReader {
                 }
 
                 if _key_slice == key {
-                    if actual_seq <= snapshot_seq && !tomb {
+                    // Snapshot isolation: only see writes with seq < snapshot_seq
+                    if actual_seq < snapshot_seq && !tomb {
                         return Ok(value_opt.map(Bytes::copy_from_slice));
                     } else {
                         return Ok(None);
@@ -115,8 +116,8 @@ impl SstMemReader {
     }
 
     /// Checks if an entry should be included in scan results.
-    /// Entry is visible if:
-    /// - Sequence number <= snapshot sequence
+    /// Returns true if an entry is visible at a snapshot:
+    /// - Sequence number < snapshot sequence (snapshot isolation)
     /// - Not a tombstone
     /// - Not covered by a range tombstone
     #[inline]
@@ -127,7 +128,7 @@ impl SstMemReader {
         snapshot_seq: u64,
         range_tombstones: &[RangeTombstone],
     ) -> bool {
-        seq <= snapshot_seq
+        seq < snapshot_seq
             && !tomb
             && !is_covered_by_range_tombstone(range_tombstones, key, snapshot_seq)
     }
@@ -505,7 +506,8 @@ impl SstMemReader {
                 }
 
                 if actual_key.as_slice() == key {
-                    if actual_seq <= snapshot_seq {
+                    // Snapshot isolation: only see writes with seq < snapshot_seq
+                    if actual_seq < snapshot_seq {
                         return Ok(if tomb {
                             KeyState::Tombstone(actual_seq)
                         } else {
@@ -567,7 +569,8 @@ impl SstMemReader {
                     }
                 }
 
-                if actual_seq <= snapshot_seq {
+                // Snapshot isolation: only see writes with seq < snapshot_seq
+                if actual_seq < snapshot_seq {
                     let state = if tomb
                         || is_covered_by_range_tombstone(
                             &self.range_tombstones,

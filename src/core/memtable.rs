@@ -455,16 +455,19 @@ mod tests {
         // Arrange
         let mt = MemTable::new();
         mt.put_with_seq(b"k", b"v1", 10);
-        // newer write not visible to snapshot 10
+        // newer write not visible to snapshot 11
         mt.put_with_seq(b"k", b"v2", 11);
 
         // Act
-        let v_at_10 = mt.get_at(b"k", 10);
+        let v_at_11 = mt.get_at(b"k", 11);
+        let v_at_12 = mt.get_at(b"k", 12);
         let v_latest = mt.get(b"k");
 
         // Assert
-        // Multi-version structure: snapshot at seq 10 should see v1 (written at seq 10)
-        assert_eq!(v_at_10, Some(Bytes::from_static(b"v1")));
+        // Snapshot isolation: snapshot at seq 11 sees writes with seq < 11 (i.e., seq 10)
+        // Snapshot at seq 12 sees writes with seq < 12 (i.e., seq 10 and 11)
+        assert_eq!(v_at_11, Some(Bytes::from_static(b"v1")));
+        assert_eq!(v_at_12, Some(Bytes::from_static(b"v2")));
         assert_eq!(v_latest, Some(Bytes::from_static(b"v2")));
     }
 
@@ -476,12 +479,12 @@ mod tests {
         mt.put_with_seq(b"b", b"2", 2);
         mt.put_with_seq(b"c", b"3", 3);
 
-        // Act
-        let rows_at_2 = mt.scan_range_at(Some(b"a"), Some(b"z"), 2);
+        // Act: snapshot at seq 3 sees writes with seq < 3 (i.e., seq 1 and 2)
+        let rows_at_3 = mt.scan_range_at(Some(b"a"), Some(b"z"), 3);
 
-        // Assert: keys with seq <= 2 only
+        // Assert: keys with seq < 3 only (a and b)
         assert_eq!(
-            rows_at_2,
+            rows_at_3,
             vec![
                 (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
                 (Bytes::from_static(b"b"), Bytes::from_static(b"2")),

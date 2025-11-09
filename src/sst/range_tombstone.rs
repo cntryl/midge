@@ -69,8 +69,9 @@ pub fn decode_range_tombstones(data: &[u8]) -> MidgeResult<Vec<RangeTombstone>> 
 }
 
 pub fn is_covered_by_range_tombstone(ts: &[RangeTombstone], key: &[u8], snapshot_seq: u64) -> bool {
+    // Snapshot isolation: only see tombstones with seq < snapshot_seq
     ts.iter()
-        .any(|t| t.seq <= snapshot_seq && key >= t.start.as_slice() && key < t.end.as_slice())
+        .any(|t| t.seq < snapshot_seq && key >= t.start.as_slice() && key < t.end.as_slice())
 }
 
 #[cfg(test)]
@@ -411,15 +412,15 @@ mod tests {
     }
 
     #[test]
-    fn should_return_true_when_snapshot_equals_tombstone_seq() {
+    fn should_return_true_when_snapshot_after_tombstone_seq() {
         // Arrange
         let tombstones = vec![create_tombstone(b"a", b"z", 100)];
 
-        // Act
-        let result = is_covered_by_range_tombstone(&tombstones, b"m", 100);
+        // Act: Snapshot isolation - snapshot at seq 101 sees tombstones with seq < 101
+        let result = is_covered_by_range_tombstone(&tombstones, b"m", 101);
 
         // Assert
-        assert!(result); // tombstone visible at exact sequence
+        assert!(result); // tombstone visible at snapshot > tombstone seq
     }
 
     #[test]

@@ -109,7 +109,8 @@ impl SstCloudReader {
                 }
 
                 if actual_key.as_slice() == key {
-                    if actual_seq <= snapshot_seq && !tomb {
+                    // Snapshot isolation: only see writes with seq < snapshot_seq
+                    if actual_seq < snapshot_seq && !tomb {
                         return Ok(value_opt.map(Bytes::copy_from_slice));
                     } else {
                         return Ok(None);

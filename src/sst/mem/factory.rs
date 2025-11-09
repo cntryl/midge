@@ -99,31 +99,39 @@ mod tests {
     fn should_respect_snapshot_when_getting_state() {
         // Arrange
         let mut w = SstMemWriter::new(crate::codec::CompressionType::None, 64);
-        // low-seq visible at low snapshots
+        // low-seq visible at snapshots > 5
         w.add_with_meta(b"a", Some(b"A1"), 5, false, None)
             .expect("add a");
-        // high-seq only visible at higher snapshots
+        // high-seq only visible at snapshots > 15
         w.add_with_meta(b"b", Some(b"B1"), 15, false, None)
             .expect("add b");
-        // tombstone visible at snapshots >= 10
+        // tombstone visible at snapshots > 10
         w.add_with_meta(b"c", None, 10, true, None)
             .expect("add tombstone c");
 
         // Act
         let reader = w.finish().expect("finish sst");
 
-        // Assert
+        // Assert: Snapshot isolation - snapshot seq N sees writes with seq < N
+        // Snapshot at seq 10 sees writes with seq < 10 (i.e., seq 5 for 'a')
         let a10 = reader.get_at(b"a", 10).expect("get_at a");
         assert_eq!(a10.map(|b: Bytes| b.to_vec()), Some(b"A1".to_vec()));
 
-        // b should NOT be visible at snapshot 10
+        // b (seq 15) should NOT be visible at snapshot 10
         let b10 = reader.get_at(b"b", 10).expect("get_at b");
         assert_eq!(b10, None);
 
-        // c as tombstone: get_state_at should report Tombstone at snapshot 10
+        // c (tombstone at seq 10) should NOT be visible at snapshot 10
+        // It will be visible at snapshot 11+
         match reader.get_state_at(b"c", 10).expect("get_state_at c") {
-            crate::sst::KeyState::Tombstone(_seq) => {}
+            crate::sst::KeyState::Absent => {}
             other => panic!("unexpected state for c: {:?}", other),
+        }
+        
+        // c tombstone IS visible at snapshot 11
+        match reader.get_state_at(b"c", 11).expect("get_state_at c at 11") {
+            crate::sst::KeyState::Tombstone(_seq) => {}
+            other => panic!("unexpected state for c at snapshot 11: {:?}", other),
         }
     }
 

@@ -2290,8 +2290,13 @@ impl MidgeEngine {
     }
 
     /// Create a snapshot capturing the current sequence number for consistent reads.
+    /// The snapshot will see all writes with sequence numbers strictly less than
+    /// the snapshot's sequence number.
     pub fn snapshot(&self) -> Snapshot {
         self.metrics.snapshot_created();
+        // Load the CURRENT sequence counter value. This is the next sequence that
+        // will be assigned to a write. The snapshot will see all writes with
+        // seq < this value (strictly less than, not <=).
         let seq = self.seq.load(Ordering::SeqCst);
         self.snapshot_registry.register(seq)
     }

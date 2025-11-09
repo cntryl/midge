@@ -309,9 +309,10 @@ impl SkipList {
         if let Some(node) = unsafe { node_ptr.as_ref() } {
             if node.key.as_ref() == key {
                 // Walk version chain to find visible version
+                // Snapshot isolation: only see writes with seq < snapshot_seq
                 let mut v = node.versions_head.load(AO::Acquire, guard);
                 while let Some(vn) = unsafe { v.as_ref() } {
-                    if vn.seq <= snapshot_seq {
+                    if vn.seq < snapshot_seq {
                         return vn.val.clone();
                     }
                     // Relaxed is safe: version nodes are immutable after publishing
@@ -334,7 +335,9 @@ impl SkipList {
             if node.key.as_ref() == key {
                 let mut v = node.versions_head.load(AO::Acquire, guard);
                 while let Some(vn) = unsafe { v.as_ref() } {
-                    if vn.seq <= snapshot_seq {
+                    // Snapshot isolation: only see writes with seq < snapshot_seq
+                    // (strictly less than, not <=)
+                    if vn.seq < snapshot_seq {
                         return Some(vn.val.clone().map(|val| (val, vn.exp)));
                     }
                     // Relaxed is safe: version nodes are immutable after publishing
@@ -361,7 +364,8 @@ impl SkipList {
                 // Collect all visible versions (no unrolling here since we need all versions)
                 let mut v = node.versions_head.load(AO::Acquire, guard);
                 while let Some(vn) = unsafe { v.as_ref() } {
-                    if vn.seq <= snapshot_seq {
+                    // Snapshot isolation: only see writes with seq < snapshot_seq
+                    if vn.seq < snapshot_seq {
                         versions.push((vn.val.clone(), vn.exp, vn.op));
                     }
                     v = vn.next.load(AO::Relaxed, guard);
@@ -579,9 +583,10 @@ impl SkipList {
             }
 
             // Find first visible version
+            // Snapshot isolation: only see writes with seq < snapshot_seq
             let mut v = node.versions_head.load(AO::Acquire, guard);
             while let Some(vn) = unsafe { v.as_ref() } {
-                if vn.seq <= snapshot_seq {
+                if vn.seq < snapshot_seq {
                     if let Some(ref val) = vn.val {
                         out.push((node.key.clone(), val.clone()));
                     }
@@ -626,9 +631,10 @@ impl SkipList {
                 }
             }
 
+            // Snapshot isolation: only see writes with seq < snapshot_seq
             let mut v = node.versions_head.load(AO::Acquire, guard);
             while let Some(vn) = unsafe { v.as_ref() } {
-                if vn.seq <= snapshot_seq {
+                if vn.seq < snapshot_seq {
                     if vn.val.is_none() {
                         out.push(node.key.clone());
                     }

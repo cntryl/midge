@@ -150,8 +150,8 @@ impl BlockEntryBuilder {
             "processing entry"
         );
 
-        // Check visibility
-        let is_visible = snapshot_seq.is_none_or(|snap_seq| seq <= snap_seq);
+        // Check visibility - snapshot isolation: only see writes with seq < snapshot_seq
+        let is_visible = snapshot_seq.is_none_or(|snap_seq| seq < snap_seq);
 
         // Early exit if key is past target
         if user_key.as_slice() > target_key {
@@ -620,7 +620,8 @@ impl SstFile {
                 let in_range = start.is_none_or(|s| user_key.as_slice() >= s)
                     && end.is_none_or(|e| user_key.as_slice() < e);
 
-                if in_range && seq <= snapshot_seq {
+                // Snapshot isolation: only see writes with seq < snapshot_seq
+                if in_range && seq < snapshot_seq {
                     let state = if tomb
                         || is_covered_by_range_tombstone(
                             &self.range_tombstones,
