@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use crate::api::column_family::ColumnFamilyId;
 
 /// Mutation operation kinds used for batched writes/transactions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -16,6 +17,7 @@ pub enum MutationOp {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Mutation {
     pub op: MutationOp,
+    pub cf_id: ColumnFamilyId,
     pub key: Bytes,
     pub value: Option<Bytes>,
     /// Time-to-live duration for this mutation.
@@ -42,8 +44,14 @@ pub struct Mutation {
 impl Mutation {
     #[inline]
     pub fn put(key: Bytes, value: Bytes, ttl: Option<std::time::Duration>) -> Self {
+        Self::put_cf(crate::api::DEFAULT_CF_ID, key, value, ttl)
+    }
+
+    #[inline]
+    pub fn put_cf(cf_id: ColumnFamilyId, key: Bytes, value: Bytes, ttl: Option<std::time::Duration>) -> Self {
         Self {
             op: MutationOp::Put,
+            cf_id,
             key,
             value: Some(value),
             ttl,
@@ -53,8 +61,14 @@ impl Mutation {
 
     #[inline]
     pub fn insert(key: Bytes, value: Bytes, ttl: Option<std::time::Duration>) -> Self {
+        Self::insert_cf(crate::api::DEFAULT_CF_ID, key, value, ttl)
+    }
+
+    #[inline]
+    pub fn insert_cf(cf_id: ColumnFamilyId, key: Bytes, value: Bytes, ttl: Option<std::time::Duration>) -> Self {
         Self {
             op: MutationOp::Insert,
+            cf_id,
             key,
             value: Some(value),
             ttl,
@@ -64,8 +78,14 @@ impl Mutation {
 
     #[inline]
     pub fn delete(key: Bytes) -> Self {
+        Self::delete_cf(crate::api::DEFAULT_CF_ID, key)
+    }
+
+    #[inline]
+    pub fn delete_cf(cf_id: ColumnFamilyId, key: Bytes) -> Self {
         Self {
             op: MutationOp::Delete,
+            cf_id,
             key,
             value: None,
             ttl: None,
@@ -75,8 +95,14 @@ impl Mutation {
 
     #[inline]
     pub fn delete_range(start: Bytes, end: Bytes) -> Self {
+        Self::delete_range_cf(crate::api::DEFAULT_CF_ID, start, end)
+    }
+
+    #[inline]
+    pub fn delete_range_cf(cf_id: ColumnFamilyId, start: Bytes, end: Bytes) -> Self {
         Self {
             op: MutationOp::DeleteRange,
+            cf_id,
             key: start,
             value: None,
             ttl: None,
@@ -86,8 +112,14 @@ impl Mutation {
 
     #[inline]
     pub fn compare_and_swap(key: Bytes, expected: Option<Bytes>, new_value: Bytes) -> Self {
+        Self::compare_and_swap_cf(crate::api::DEFAULT_CF_ID, key, expected, new_value)
+    }
+
+    #[inline]
+    pub fn compare_and_swap_cf(cf_id: ColumnFamilyId, key: Bytes, expected: Option<Bytes>, new_value: Bytes) -> Self {
         Self {
             op: MutationOp::CompareAndSwap,
+            cf_id,
             key,
             value: Some(new_value),
             ttl: None,
@@ -97,8 +129,14 @@ impl Mutation {
 
     #[inline]
     pub fn merge(key: Bytes, value: Bytes) -> Self {
+        Self::merge_cf(crate::api::DEFAULT_CF_ID, key, value)
+    }
+
+    #[inline]
+    pub fn merge_cf(cf_id: ColumnFamilyId, key: Bytes, value: Bytes) -> Self {
         Self {
             op: MutationOp::Merge,
+            cf_id,
             key,
             value: Some(value),
             ttl: None,

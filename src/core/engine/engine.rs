@@ -517,6 +517,26 @@ impl MidgeEngine {
         f(&mt)
     }
 
+    // Helper methods for accessing any CF's MemTable
+    fn with_cf_memtable<F, R>(&self, cf_id: ColumnFamilyId, f: F) -> Option<R>
+    where
+        F: FnOnce(&MemTable) -> R,
+    {
+        let cf = self.cf_set.cfs.get(&cf_id.as_u32())?;
+        let mt = cf.memtable.read();
+        Some(f(&mt))
+    }
+
+    fn with_cf_memtable_mut<F, R>(&self, cf_id: ColumnFamilyId, f: F) -> Option<R>
+    where
+        F: FnOnce(&MemTable) -> R,
+    {
+        // MemTable uses interior mutability (lock-free skiplist)
+        let cf = self.cf_set.cfs.get(&cf_id.as_u32())?;
+        let mt = cf.memtable.read();
+        Some(f(&mt))
+    }
+
     /// Replay WAL records into column families. Ignores records for dropped CFs.
     /// Returns the maximum sequence number seen in the records.
     pub(super) fn replay_wal_to_cfs(
@@ -2011,7 +2031,7 @@ impl MidgeEngine {
                         None
                     };
                     let mut rec = crate::wal::WalRecord::new_cf(
-                        crate::api::column_family::ColumnFamilyId::new(0),
+                        m.cf_id,
                         WalOpKind::Put,
                         m.key.clone(),
                         m.value.clone(),
@@ -2021,7 +2041,7 @@ impl MidgeEngine {
                     rec
                 }
                 crate::api::mutation::MutationOp::Delete => crate::wal::WalRecord::new_cf(
-                    crate::api::column_family::ColumnFamilyId::new(0),
+                    m.cf_id,
                     WalOpKind::Delete,
                     m.key.clone(),
                     None,
@@ -2030,7 +2050,7 @@ impl MidgeEngine {
                 crate::api::mutation::MutationOp::DeleteRange => {
                     if let Some(end) = m.range_end.as_ref() {
                         crate::wal::WalRecord::new_delete_range(
-                            crate::api::column_family::ColumnFamilyId::new(0),
+                            m.cf_id,
                             m.key.clone(),
                             end.clone(),
                             seq,
@@ -2055,33 +2075,40 @@ impl MidgeEngine {
         // Apply to MemTable (with per-mutation seqs preserved)
         for (i, m) in mutations.into_iter().enumerate() {
             let s = seqs[i];
+            let cf_id = m.cf_id;
+            
+            // Skip mutations for dropped column families
+            if self.cf_set.cfs.get(&cf_id.as_u32()).is_none() {
+                continue;
+            }
+            
             match m.op {
                 crate::api::mutation::MutationOp::Put
                 | crate::api::mutation::MutationOp::Insert => {
                     if let Some(v) = m.value {
-                        self.with_default_memtable_mut(|mt| mt.put_with_seq(&m.key, &v, s));
+                        self.with_cf_memtable_mut(cf_id, |mt| mt.put_with_seq(&m.key, &v, s));
                     }
                 }
                 crate::api::mutation::MutationOp::CompareAndSwap => {
                     // CAS validation should happen before reaching here
                     // At commit time, we just apply as a regular put
                     if let Some(v) = m.value {
-                        self.with_default_memtable_mut(|mt| mt.put_with_seq(&m.key, &v, s));
+                        self.with_cf_memtable_mut(cf_id, |mt| mt.put_with_seq(&m.key, &v, s));
                     }
                 }
                 crate::api::mutation::MutationOp::Merge => {
                     // TODO: Implement proper merge semantics with merge operators
                     // For now, treat as a regular put
                     if let Some(v) = m.value {
-                        self.with_default_memtable_mut(|mt| mt.put_with_seq(&m.key, &v, s));
+                        self.with_cf_memtable_mut(cf_id, |mt| mt.put_with_seq(&m.key, &v, s));
                     }
                 }
                 crate::api::mutation::MutationOp::Delete => {
-                    self.with_default_memtable_mut(|mt| mt.delete_with_seq(&m.key, s));
+                    self.with_cf_memtable_mut(cf_id, |mt| mt.delete_with_seq(&m.key, s));
                 }
                 crate::api::mutation::MutationOp::DeleteRange => {
                     if let Some(end) = m.range_end.as_ref() {
-                        self.with_default_memtable_mut(|mt| {
+                        self.with_cf_memtable_mut(cf_id, |mt| {
                             mt.delete_range_with_seq(&m.key, end.as_ref(), s)
                         });
                     } else {
@@ -2192,6 +2219,7 @@ impl MidgeEngine {
     /// # Arguments
     ///
     /// * `txn` - Mutable reference to the transaction
+    /// * `cf` - Column family handle to read from
     /// * `key` - The key to read
     ///
     /// # Returns
@@ -2205,10 +2233,11 @@ impl MidgeEngine {
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # use bytes::Bytes;
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// let cf = engine.default_column_family();
     /// let mut txn = engine.begin_transaction();
     ///
     /// // Read with snapshot isolation
-    /// if let Some(value) = engine.transaction_get(&mut txn, b"key").unwrap() {
+    /// if let Some(value) = engine.transaction_get(&mut txn, &cf, b"key").unwrap() {
     ///     println!("Value: {:?}", value);
     /// }
     ///
@@ -2216,7 +2245,9 @@ impl MidgeEngine {
     /// txn.put(Bytes::from("other_key"), Bytes::from("value"), None).unwrap();
     /// engine.commit_transaction(txn, cntryl_midge::WriteOptions::default()).unwrap();
     /// ```
-    pub fn transaction_get(&self, txn: &mut Transaction, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+    pub fn transaction_get(&self, txn: &mut Transaction, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+        let cf_id = cf.id();
+        
         // First check transaction's local staged mutations
         if let Some(local_value) = txn.get_local(key) {
             // Track the read at current sequence (local reads see latest)
@@ -2229,7 +2260,7 @@ impl MidgeEngine {
         let begin_seq = txn.begin_sequence();
 
         // 1) Check MemTable visible value at snapshot
-        if let Some(v) = self.with_default_memtable(|mt| mt.get_at(key, begin_seq)) {
+        if let Some(v) = self.with_cf_memtable(cf_id, |mt| mt.get_at(key, begin_seq)).flatten() {
             txn.track_read(Bytes::copy_from_slice(key), begin_seq);
             return Ok(Some(v));
         }
@@ -2240,9 +2271,9 @@ impl MidgeEngine {
             v.push(0);
             v
         };
-        let tombs = self.with_default_memtable(|mt| {
+        let tombs = self.with_cf_memtable(cf_id, |mt| {
             mt.tombstones_range_at(Some(key), Some(end_key.as_slice()), begin_seq)
-        });
+        }).unwrap_or_default();
         if !tombs.is_empty() {
             txn.track_read(Bytes::copy_from_slice(key), begin_seq);
             return Ok(None);
@@ -2285,8 +2316,8 @@ impl MidgeEngine {
     /// Check if a key exists within a transaction's snapshot isolation.
     ///
     /// This is equivalent to `transaction_get()` but only returns whether the key exists.
-    pub fn transaction_exists(&self, txn: &mut Transaction, key: &[u8]) -> MidgeResult<bool> {
-        self.transaction_get(txn, key).map(|opt| opt.is_some())
+    pub fn transaction_exists(&self, txn: &mut Transaction, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<bool> {
+        self.transaction_get(txn, cf, key).map(|opt| opt.is_some())
     }
 
     /// Create a snapshot capturing the current sequence number for consistent reads.

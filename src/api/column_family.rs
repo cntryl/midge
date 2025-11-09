@@ -4,7 +4,7 @@ use std::sync::Arc;
 ///
 /// Column family IDs are assigned sequentially starting from 0.
 /// The default column family always has ID 0.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct ColumnFamilyId(pub u32);
 
 /// The default column family ID, always present in every database.

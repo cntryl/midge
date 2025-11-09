@@ -322,12 +322,13 @@ impl Transaction {
                     None
                 };
 
-                // Reconstruct mutation
+                // Reconstruct mutation (using default CF since spill files don't store CF ID)
                 let mutation = match op_byte[0] {
                     0 => Mutation::put(key, value_or_end.unwrap_or_default(), None),
                     1 => Mutation::insert(key, value_or_end.unwrap_or_default(), None),
                     2 => Mutation::delete(key),
                     3 => Mutation {
+                        cf_id: crate::api::DEFAULT_CF_ID,
                         key,
                         value: None,
                         op: MutationOp::DeleteRange,
@@ -389,8 +390,19 @@ impl Transaction {
         value: Bytes,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), MidgeError> {
+        self.put_cf(crate::api::DEFAULT_CF_ID, key, value, ttl)
+    }
+
+    #[inline]
+    pub fn put_cf(
+        &mut self,
+        cf_id: crate::api::ColumnFamilyId,
+        key: Bytes,
+        value: Bytes,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<(), MidgeError> {
         self.track_write(key.clone());
-        let mutation = Mutation::put(key, value, ttl);
+        let mutation = Mutation::put_cf(cf_id, key, value, ttl);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
         Ok(())
@@ -403,8 +415,19 @@ impl Transaction {
         value: Bytes,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), MidgeError> {
+        self.insert_cf(crate::api::DEFAULT_CF_ID, key, value, ttl)
+    }
+
+    #[inline]
+    pub fn insert_cf(
+        &mut self,
+        cf_id: crate::api::ColumnFamilyId,
+        key: Bytes,
+        value: Bytes,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<(), MidgeError> {
         self.track_write(key.clone());
-        let mutation = Mutation::insert(key, value, ttl);
+        let mutation = Mutation::insert_cf(cf_id, key, value, ttl);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
         Ok(())
@@ -412,8 +435,13 @@ impl Transaction {
 
     #[inline]
     pub fn delete(&mut self, key: Bytes) -> Result<(), MidgeError> {
+        self.delete_cf(crate::api::DEFAULT_CF_ID, key)
+    }
+
+    #[inline]
+    pub fn delete_cf(&mut self, cf_id: crate::api::ColumnFamilyId, key: Bytes) -> Result<(), MidgeError> {
         self.track_write(key.clone());
-        let mutation = Mutation::delete(key);
+        let mutation = Mutation::delete_cf(cf_id, key);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
         Ok(())
@@ -421,8 +449,13 @@ impl Transaction {
 
     #[inline]
     pub fn delete_range(&mut self, start: Bytes, end: Bytes) -> Result<(), MidgeError> {
+        self.delete_range_cf(crate::api::DEFAULT_CF_ID, start, end)
+    }
+
+    #[inline]
+    pub fn delete_range_cf(&mut self, cf_id: crate::api::ColumnFamilyId, start: Bytes, end: Bytes) -> Result<(), MidgeError> {
         self.track_write(start.clone());
-        let mutation = Mutation::delete_range(start, end);
+        let mutation = Mutation::delete_range_cf(cf_id, start, end);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
         Ok(())
@@ -435,8 +468,19 @@ impl Transaction {
         expected: Option<Bytes>,
         new_value: Bytes,
     ) -> Result<(), MidgeError> {
+        self.compare_and_swap_cf(crate::api::DEFAULT_CF_ID, key, expected, new_value)
+    }
+
+    #[inline]
+    pub fn compare_and_swap_cf(
+        &mut self,
+        cf_id: crate::api::ColumnFamilyId,
+        key: Bytes,
+        expected: Option<Bytes>,
+        new_value: Bytes,
+    ) -> Result<(), MidgeError> {
         self.track_write(key.clone());
-        let mutation = Mutation::compare_and_swap(key, expected, new_value);
+        let mutation = Mutation::compare_and_swap_cf(cf_id, key, expected, new_value);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
         Ok(())
@@ -444,8 +488,13 @@ impl Transaction {
 
     #[inline]
     pub fn merge(&mut self, key: Bytes, value: Bytes) -> Result<(), MidgeError> {
+        self.merge_cf(crate::api::DEFAULT_CF_ID, key, value)
+    }
+
+    #[inline]
+    pub fn merge_cf(&mut self, cf_id: crate::api::ColumnFamilyId, key: Bytes, value: Bytes) -> Result<(), MidgeError> {
         self.track_write(key.clone());
-        let mutation = Mutation::merge(key, value);
+        let mutation = Mutation::merge_cf(cf_id, key, value);
         self.staged.push(mutation);
         self.update_memory_usage_and_spill()?;
         Ok(())
@@ -559,7 +608,8 @@ impl super::kv_store::KvTransaction for EngineTransaction {
     }
 
     fn get(&mut self, key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
-        self.engine.transaction_get(&mut self.txn, key)
+        let cf = self.engine.default_column_family();
+        self.engine.transaction_get(&mut self.txn, &cf, key)
     }
 
     fn delete(&mut self, key: &[u8]) -> crate::MidgeResult<()> {
