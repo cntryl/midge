@@ -35,11 +35,7 @@ impl EngineTransaction {
 // Implement the public KvTransaction trait for EngineTransaction
 impl KvTransaction for EngineTransaction {
     fn put(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        self.txn.put(
-            Bytes::copy_from_slice(key),
-            Bytes::copy_from_slice(value),
-            None,
-        )
+        self.txn.put(key, value)
     }
 
     fn get(&mut self, key: &[u8]) -> MidgeResult<Option<Bytes>> {

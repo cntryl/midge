@@ -186,6 +186,44 @@ impl MidgeEngine {
         Ok(())
     }
 
+    /// Begin a new transaction.
+    ///
+    /// Creates a new transaction with a unique transaction ID and snapshot of current
+    /// sequence number. The transaction can be used to stage multiple mutations
+    /// before committing them atomically.
+    ///
+    /// **Note**: The returned Transaction object does not support reads directly.
+    /// For transactional reads, use the KvStore trait methods instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `_cf` - Column family handle (accepted for compatibility but transactions
+    ///           work across all column families)
+    ///
+    /// # Returns
+    ///
+    /// A new Transaction object ready to accept mutations
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// # let cf = engine.default_column_family();
+    /// let mut txn = engine.begin_transaction(&cf).unwrap();
+    /// txn.put(b"key1", b"value1").unwrap();
+    /// txn.put(b"key2", b"value2").unwrap();
+    /// engine.commit_transaction(txn, Default::default()).unwrap();
+    /// ```
+    pub fn begin_transaction(
+        &self,
+        _cf: &ColumnFamilyHandle,
+    ) -> MidgeResult<Transaction> {
+        let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
+        let begin_sequence = self.seq.load(Ordering::SeqCst);
+        Ok(Transaction::new(txn_id, begin_sequence))
+    }
+
     /// Commit a Transaction by applying its staged mutations to WAL and MemTable.
     ///
     /// The `opts` parameter allows per-transaction control over durability:
@@ -199,15 +237,16 @@ impl MidgeEngine {
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions, WriteOptions};
     /// # use bytes::Bytes;
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// # let cf = engine.default_column_family();
     /// // Critical transaction - sync immediately
-    /// let mut txn = engine.begin_transaction();
-    /// txn.put(Bytes::from("account:1"), Bytes::from("balance:1000"), None);
+    /// let mut txn = engine.begin_transaction(&cf).unwrap();
+    /// txn.put(b"account:1", b"balance:1000").unwrap();
     /// engine.commit_transaction(txn, WriteOptions::sync()).unwrap();
     ///
     /// // Non-critical transaction - amortize sync cost
-    /// let mut txn2 = engine.begin_transaction();
-    /// txn2.put(Bytes::from("cache:key"), Bytes::from("value"), None);
-    /// engine.commit_transaction(txn2, WriteOptions::no_sync()).unwrap();
+    /// let mut txn2 = engine.begin_transaction(&cf).unwrap();
+    /// txn2.put(b"cache:key", b"value").unwrap();
+    ///  engine.commit_transaction(txn2, WriteOptions::no_sync()).unwrap();
     /// ```
     pub fn commit_transaction(
         &self,
