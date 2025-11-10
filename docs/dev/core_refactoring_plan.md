@@ -349,12 +349,27 @@ src/core/
   - `src/core/manifest/queries.rs` (222 lines) - Query operations (files_at_level, l0_sublevels, etc.)
   - `src/core/manifest/cloud.rs` (55 lines) - Cloud SST tracking and checkpoint management
   - `src/core/manifest/column_families.rs` (31 lines) - Column family add/remove operations
-  - `src/core/manifest/tests.rs` (867 lines) - All 67 unit tests
   - `src/core/manifest/mod.rs` - Public API exports
-- **Files Deleted**: `src/core/manifest.rs` (1379 lines)
-- **Key Achievement**: Clean separation of I/O, queries, cloud tracking, and CF management
-- **Tests**: All 1104 tests pass (same test count, just reorganized)
-- **Better Organization**: 1379 lines split into 6 focused modules
+- **Files Deleted**: `src/core/manifest.rs` (1379 lines), `tests.rs` (centralized tests)
+- **Key Achievement**: Clean separation of I/O, queries, cloud tracking, and CF management. Tests distributed to their respective modules.
+- **Tests**: All 1104 tests pass, now distributed across module files
+- **Better Organization**: 1379 lines split into 6 focused modules with tests co-located
+
+#### Phase 4: Compaction Executor Split (COMPLETED)
+- **Status**: ✅ Done
+- **Files Created**:
+  - `src/core/compaction/execution/types.rs` (17 lines) - CompactionVersion struct
+  - `src/core/compaction/execution/collection.rs` (177 lines) - collect_compaction_versions(), sort_versions_for_output()
+  - `src/core/compaction/execution/merging.rs` (289 lines) - deduplicate_versions(), filter_safe_tombstones()
+  - `src/core/compaction/execution/filtering.rs` (130 lines) - apply_compaction_filter()
+  - `src/core/compaction/execution/output_writer.rs` (174 lines) - write_compacted_sst()
+  - `src/core/compaction/execution/all_tests.rs` (1710 lines) - Comprehensive test suite (69 tests)
+  - `src/core/compaction/execution/mod.rs` - Module exports and re-exports
+  - `src/core/compaction/executor.rs` (9 lines) - Backward compatibility facade with deprecation notice
+- **Files Backed Up**: `src/core/compaction/executor.rs.backup` (2089 lines original)
+- **Key Achievement**: Split massive 1796-line executor into focused modules by responsibility (collection, merging, filtering, output). Maintained 100% backward compatibility via re-exports.
+- **Tests**: All 1120 tests pass (+16 new tests, some duplication between module tests and comprehensive suite)
+- **Better Organization**: Executor split into 5 focused modules with clear separation of concerns
 
 ---
 

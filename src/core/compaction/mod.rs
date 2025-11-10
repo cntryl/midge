@@ -2,18 +2,22 @@
 //!
 //! This module contains all compaction-related functionality:
 //! - `coordinator.rs` - Background compaction worker coordination
-//! - `executor.rs` - Compaction execution logic (merge, dedup, write SSTs)
+//! - `execution/` - Compaction execution logic (merge, dedup, write SSTs)
 //! - `filter.rs` - Compaction filter trait and implementations
 //! - `strategy.rs` - Compaction strategy (leveled compaction)
 
 pub mod coordinator;
-pub mod executor;
+pub mod execution;
 pub mod filter;
 pub mod strategy;
 
+// For backward compatibility, keep executor.rs as a re-export facade
+#[allow(deprecated)]
+pub mod executor;
+
 // Re-export commonly used types
 pub use coordinator::{CompactionCoordinator, CompactionMsg, CompactionWorkerConfig};
-pub use executor::CompactionVersion;
+pub use execution::CompactionVersion;
 pub use filter::CompactionFilter;
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
