@@ -65,8 +65,10 @@ impl MidgeEngine {
             if self.wal_coordinator.current_pos().saturating_add(predicted)
                 > self.wal_buffer_size as u64
             {
-                // rotate before appending this record
-                let _ = self.rollover_and_queue_flush();
+                // Rotate before appending this record
+                // For transactions with multiple CFs, flush the default CF
+                // TODO: Track which CF triggered the WAL rotation and flush that one
+                let _ = self.rollover_and_queue_flush(crate::api::column_family::DEFAULT_CF_ID);
             }
             let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
             seqs.push(seq);

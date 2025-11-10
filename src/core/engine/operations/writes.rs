@@ -319,7 +319,9 @@ impl MidgeEngine {
             .saturating_add(total_size)
             > self.wal_buffer_size as u64
         {
-            let _ = self.rollover_and_queue_flush();
+            // For batches with multiple CFs, flush the default CF
+            // TODO: Track which CF triggered the WAL rotation and flush that one
+            let _ = self.rollover_and_queue_flush(crate::api::column_family::DEFAULT_CF_ID);
         }
 
         // Build WAL records for batch

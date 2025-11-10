@@ -21,17 +21,36 @@ use tracing::{debug, warn};
 
 impl MidgeEngine {
     /// Flush MemTable to SST and update manifest. No-op if MemTable is empty or read-only.
+    ///
+    /// Currently flushes the default column family.
+    /// Use `flush_cf()` to flush a specific column family.
     pub fn flush(&self) -> MidgeResult<()> {
+        self.flush_cf(&self.default_column_family())
+    }
+
+    /// Flush a specific column family's memtable to SST.
+    pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
         // Serialize flush operations to prevent concurrent file conflicts
         let _flush_guard = self.flush_mutex.lock();
 
         if self.read_only {
             return Ok(());
         }
-        if self.with_default_memtable(|mt| mt.is_empty()) {
+
+        let cf_id = cf.id();
+        
+        // Check if memtable is empty
+        let is_empty = if cf_id == crate::api::column_family::DEFAULT_CF_ID {
+            self.with_default_memtable(|mt| mt.is_empty())
+        } else {
+            self.with_cf_memtable(cf_id, |mt| mt.is_empty()).unwrap_or(true)
+        };
+
+        if is_empty {
             return Ok(());
         }
-        let (file_path, file_meta) = self.flush_memtable_to_sst()?;
+
+        let (file_path, file_meta) = self.flush_memtable_to_sst(cf_id)?;
         let mut m =
             Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
         let name = file_path
