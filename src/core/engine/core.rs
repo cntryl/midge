@@ -566,9 +566,11 @@ mod tests {
     #[test]
     fn should_return_ok_immediately_when_compaction_disabled() {
         // Arrange
-        let mut opts = crate::MidgeOptions::default();
-        opts.storage_mode = crate::StorageMode::Memory;
-        opts.enable_compaction = false;
+        let opts = crate::MidgeOptions {
+            storage_mode: crate::StorageMode::Memory,
+            enable_compaction: false,
+            ..Default::default()
+        };
         let engine = Arc::new(MidgeEngine::open(opts).expect("Failed to create engine"));
 
         // Act
