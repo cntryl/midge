@@ -8,9 +8,8 @@ use std::sync::atomic::Ordering;
 
 use crate::api::column_family::ColumnFamilyHandle;
 use crate::api::mutation::Mutation;
-use crate::api::transaction::Transaction;
 use crate::common::timestamp;
-use crate::core::transaction::EngineTransaction;
+use crate::core::transaction::{EngineTransaction, Transaction};
 use crate::core::wal_replay::wal_record_encoded_len;
 use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
@@ -287,7 +286,7 @@ impl MidgeEngine {
 
         if let Err(e) = self.txn_manager.begin(
             txn.txn_id(),
-            txn.begin_sequence(),
+            txn.begin_seq(),
             write_set,
             read_set,
             read_versions,
@@ -380,7 +379,7 @@ impl MidgeEngine {
             return Ok(local_result);
         }
 
-        let begin_seq = txn.begin_sequence();
+        let begin_seq = txn.begin_seq();
 
         // Check MemTable with snapshot isolation
         if let Some(result) = self.with_cf_memtable(cf_id, |mt| mt.get_at(key, begin_seq)) {

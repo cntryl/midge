@@ -1,4 +1,4 @@
-///! Column family management operations.
+//! Column family management operations.
 
 use crate::api::column_family::{ColumnFamilyConfig, ColumnFamilyId};
 

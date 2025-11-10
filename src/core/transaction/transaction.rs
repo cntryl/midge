@@ -1,331 +1,241 @@
-use super::mutation::{Mutation, MutationOp};
+use crate::api::mutation::{Mutation, MutationOp};
 use crate::core::transaction::{ConflictTracker, SpillManager};
 use crate::error::MidgeError;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-/// Synchronous transaction object that stages mutations in-memory.
+/// Internal transaction staging buffer for mutations and conflict tracking.
 ///
-/// This is an internal staging buffer used by EngineTransaction.
-/// Users should use the public Transaction type (which is EngineTransaction)
-/// returned by engine.begin_transaction().
+/// Responsibilities:
+/// - Stage mutations (put/delete/etc.) in memory with optional spill-to-disk
+/// - Track read/write sets for optimistic concurrency
+/// - Enforce timeouts and memory thresholds
+/// - Manage commit/rollback lifecycle
+///
+/// Not user-facing; wrapped by `EngineTransaction`.
 pub(crate) struct Transaction {
     txn_id: u64,
-    begin_sequence: u64,
-    commit_sequence: Option<u64>,
-    staged: Vec<Mutation>,
-    completed: bool,
-
-    // ACID enhancements
-    conflict_tracker: ConflictTracker,
-    #[allow(dead_code)]
+    begin_seq: u64,
+    commit_seq: Option<u64>,
     created_at: Instant,
     deadline: Option<Instant>,
+    completed: bool,
 
-    // Spill-to-disk tracking
-    memory_threshold: usize,
-    current_memory: usize,
-    spill_manager: SpillManager,
+    // Mutation staging
+    staged: Vec<Mutation>,
+    mem_limit: usize,
+    mem_used: usize,
+    spill: SpillManager,
+
+    // Conflict tracking
+    conflicts: ConflictTracker,
 }
 
 impl Transaction {
-    pub fn new(txn_id: u64, begin_sequence: u64) -> Self {
-        Self::with_options(txn_id, begin_sequence, None, 100 * 1024 * 1024)
+    // -------------------------------------------------------------------------
+    // Constructors
+    // -------------------------------------------------------------------------
+    pub fn new(txn_id: u64, begin_seq: u64) -> Self {
+        Self::with_options(txn_id, begin_seq, None, 100 * 1024 * 1024)
     }
 
-    pub fn with_options(
-        txn_id: u64,
-        begin_sequence: u64,
-        timeout: Option<std::time::Duration>,
-        memory_threshold: usize,
-    ) -> Self {
+    pub fn with_options(txn_id: u64, begin_seq: u64, timeout: Option<Duration>, mem_limit: usize) -> Self {
         let created_at = Instant::now();
-        let deadline = timeout.map(|d| created_at + d);
-
+        let deadline = timeout.map(|t| created_at + t);
         Self {
             txn_id,
-            begin_sequence,
-            commit_sequence: None,
-            staged: Vec::new(),
-            completed: false,
-            conflict_tracker: ConflictTracker::new(),
+            begin_seq,
+            commit_seq: None,
             created_at,
             deadline,
-            memory_threshold,
-            current_memory: 0,
-            spill_manager: SpillManager::new(txn_id),
+            completed: false,
+            staged: Vec::new(),
+            mem_limit,
+            mem_used: 0,
+            spill: SpillManager::new(txn_id),
+            conflicts: ConflictTracker::new(),
         }
     }
 
-    pub fn txn_id(&self) -> u64 {
-        self.txn_id
+    // -------------------------------------------------------------------------
+    // Basic accessors
+    // -------------------------------------------------------------------------
+    pub(crate) fn txn_id(&self) -> u64 { self.txn_id }
+    pub(crate) fn begin_seq(&self) -> u64 { self.begin_seq }
+    pub(crate) fn commit_seq(&self) -> Option<u64> { self.commit_seq }
+    pub(crate) fn is_expired(&self) -> bool { self.deadline.map_or(false, |d| Instant::now() > d) }
+
+    // -------------------------------------------------------------------------
+    // Conflict tracking
+    // -------------------------------------------------------------------------
+    pub(crate) fn track_read(&mut self, cf: u32, key: Bytes, ver: u64) {
+        self.conflicts.track_read(cf, key, ver);
+    }
+    pub(crate) fn track_write(&mut self, cf: u32, key: Bytes) {
+        self.conflicts.track_write(cf, key);
+    }
+    pub(crate) fn write_set(&self) -> &HashSet<(u32, Bytes)> { self.conflicts.write_set() }
+    pub(crate) fn read_set(&self) -> &HashSet<(u32, Bytes)> { self.conflicts.read_set() }
+    pub(crate) fn read_versions(&self) -> &HashMap<(u32, Bytes), u64> { self.conflicts.read_versions() }
+    pub(crate) fn read_version(&self, cf: u32, key: &[u8]) -> Option<u64> {
+        self.conflicts.read_version(cf, key)
+    }
+    pub(crate) fn has_write_conflict(&self, other: &HashSet<(u32, Bytes)>) -> bool {
+        self.conflicts.has_write_conflict(other)
     }
 
-    pub fn begin_sequence(&self) -> u64 {
-        self.begin_sequence
-    }
-
-    #[inline]
-    pub fn commit_sequence(&self) -> Option<u64> {
-        self.commit_sequence
-    }
-
-    /// Check if transaction has exceeded deadline
-    pub fn is_expired(&self) -> bool {
-        if let Some(deadline) = self.deadline {
-            Instant::now() > deadline
-        } else {
-            false
-        }
-    }
-
-    /// Track a read operation for conflict detection
-    pub fn track_read(&mut self, cf_id: u32, key: Bytes, version: u64) {
-        self.conflict_tracker.track_read(cf_id, key, version);
-    }
-
-    /// Get the write set (keys modified by this transaction)
-    pub fn write_set(&self) -> &HashSet<(u32, Bytes)> {
-        self.conflict_tracker.write_set()
-    }
-
-    /// Get the read set (keys read by this transaction)
-    pub fn read_set(&self) -> &HashSet<(u32, Bytes)> {
-        self.conflict_tracker.read_set()
-    }
-
-    /// Get the read versions map (keys -> sequence numbers)
-    pub fn read_versions(&self) -> &HashMap<(u32, Bytes), u64> {
-        self.conflict_tracker.read_versions()
-    }
-
-    /// Get read version for a key
-    pub fn read_version(&self, cf_id: u32, key: &[u8]) -> Option<u64> {
-        self.conflict_tracker.read_version(cf_id, key)
-    }
-
-    /// Check if there's a write-write conflict with given write set
-    pub fn has_write_conflict(&self, other_writes: &HashSet<(u32, Bytes)>) -> bool {
-        self.conflict_tracker.has_write_conflict(other_writes)
-    }
-
-    fn update_memory_usage_and_spill(&mut self) -> Result<(), MidgeError> {
-        // Calculate size of last staged mutation
-        if let Some(mutation) = self.staged.last() {
-            let size = mutation.key.len()
-                + mutation.value.as_ref().map(|v| v.len()).unwrap_or(0)
-                + mutation.range_end.as_ref().map(|v| v.len()).unwrap_or(0);
-            self.current_memory += size;
-
-            // Check if we need to spill to disk
-            if self.current_memory >= self.memory_threshold {
+    // -------------------------------------------------------------------------
+    // Spill management
+    // -------------------------------------------------------------------------
+    fn maybe_spill(&mut self) -> Result<(), MidgeError> {
+        if let Some(m) = self.staged.last() {
+            let sz = m.key.len()
+                + m.value.as_ref().map_or(0, |v| v.len())
+                + m.range_end.as_ref().map_or(0, |v| v.len());
+            self.mem_used += sz;
+            if self.mem_used >= self.mem_limit {
                 self.spill_to_disk()?;
             }
         }
-
         Ok(())
     }
 
-    /// Spill currently staged mutations to a temporary file and clear memory
     fn spill_to_disk(&mut self) -> Result<(), MidgeError> {
-        // Delegate to SpillManager
-        self.spill_manager.spill_to_disk(&self.staged)?;
-
-        // Clear staged mutations and reset memory counter
+        self.spill.spill_to_disk(&self.staged)?;
         self.staged.clear();
-        self.current_memory = 0;
-
+        self.mem_used = 0;
         Ok(())
     }
 
-    /// Read mutations from spill files
-    fn read_spill_files(&self) -> Result<Vec<Mutation>, MidgeError> {
-        // Delegate to SpillManager
-        self.spill_manager.read_spill_files()
+    fn read_spilled(&self) -> Result<Vec<Mutation>, MidgeError> {
+        self.spill.read_spill_files()
     }
 
-    /// Cleanup all spill files
-    fn cleanup_spill_files(&mut self) {
-        // Delegate to SpillManager
-        self.spill_manager.cleanup_spill_files();
+    fn cleanup_spills(&mut self) {
+        self.spill.cleanup_spill_files();
     }
 
     /// Get the number of spill files (for testing).
     #[cfg(test)]
     pub(crate) fn spill_file_count(&self) -> usize {
-        self.spill_manager.spill_file_count()
+        self.spill.spill_file_count()
     }
 
     /// Get the spill file paths (for testing).
     #[cfg(test)]
     pub(crate) fn spill_file_paths(&self) -> &[std::path::PathBuf] {
-        self.spill_manager.spill_file_paths()
+        self.spill.spill_file_paths()
     }
 
-    fn track_write(&mut self, cf_id: u32, key: Bytes) {
-        self.conflict_tracker.track_write(cf_id, key);
-    }
-
-    #[inline]
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), MidgeError> {
-        self.put_cf(
-            crate::api::DEFAULT_CF_ID,
-            Bytes::copy_from_slice(key),
-            Bytes::copy_from_slice(value),
-            None,
-        )
+    // -------------------------------------------------------------------------
+    // Mutation helpers
+    // -------------------------------------------------------------------------
+    fn stage(&mut self, cf: crate::api::ColumnFamilyId, m: Mutation, key: Bytes) -> Result<(), MidgeError> {
+        self.track_write(cf.as_u32(), key);
+        self.staged.push(m);
+        self.maybe_spill()
     }
 
     #[inline]
-    pub fn put_with_ttl(
-        &mut self,
-        key: &[u8],
-        value: &[u8],
-        ttl: std::time::Duration,
-    ) -> Result<(), MidgeError> {
-        self.put_cf(
-            crate::api::DEFAULT_CF_ID,
-            Bytes::copy_from_slice(key),
-            Bytes::copy_from_slice(value),
-            Some(ttl),
-        )
+    pub fn put(&mut self, key: &[u8], val: &[u8]) -> Result<(), MidgeError> {
+        self.put_cf(crate::api::DEFAULT_CF_ID, Bytes::copy_from_slice(key), Bytes::copy_from_slice(val), None)
     }
 
-    #[inline]
+    pub fn put_with_ttl(&mut self, key: &[u8], val: &[u8], ttl: Duration) -> Result<(), MidgeError> {
+        self.put_cf(crate::api::DEFAULT_CF_ID, Bytes::copy_from_slice(key), Bytes::copy_from_slice(val), Some(ttl))
+    }
+
     pub fn put_cf(
         &mut self,
-        cf_id: crate::api::ColumnFamilyId,
+        cf: crate::api::ColumnFamilyId,
         key: Bytes,
-        value: Bytes,
-        ttl: Option<std::time::Duration>,
+        val: Bytes,
+        ttl: Option<Duration>,
     ) -> Result<(), MidgeError> {
-        self.track_write(cf_id.as_u32(), key.clone());
-        let mutation = Mutation::put_cf(cf_id, key, value, ttl);
-        self.staged.push(mutation);
-        self.update_memory_usage_and_spill()?;
-        Ok(())
+        let m = Mutation::put_cf(cf, key.clone(), val, ttl);
+        self.stage(cf, m, key)
     }
 
-    #[inline]
-    pub fn insert(
-        &mut self,
-        key: Bytes,
-        value: Bytes,
-        ttl: Option<std::time::Duration>,
-    ) -> Result<(), MidgeError> {
-        self.insert_cf(crate::api::DEFAULT_CF_ID, key, value, ttl)
+    pub fn insert(&mut self, key: Bytes, val: Bytes, ttl: Option<Duration>) -> Result<(), MidgeError> {
+        self.insert_cf(crate::api::DEFAULT_CF_ID, key, val, ttl)
     }
 
-    #[inline]
     pub fn insert_cf(
         &mut self,
-        cf_id: crate::api::ColumnFamilyId,
+        cf: crate::api::ColumnFamilyId,
         key: Bytes,
-        value: Bytes,
-        ttl: Option<std::time::Duration>,
+        val: Bytes,
+        ttl: Option<Duration>,
     ) -> Result<(), MidgeError> {
-        self.track_write(cf_id.as_u32(), key.clone());
-        let mutation = Mutation::insert_cf(cf_id, key, value, ttl);
-        self.staged.push(mutation);
-        self.update_memory_usage_and_spill()?;
-        Ok(())
+        let m = Mutation::insert_cf(cf, key.clone(), val, ttl);
+        self.stage(cf, m, key)
     }
 
-    #[inline]
     pub fn delete(&mut self, key: Bytes) -> Result<(), MidgeError> {
         self.delete_cf(crate::api::DEFAULT_CF_ID, key)
     }
 
-    #[inline]
-    pub fn delete_cf(
-        &mut self,
-        cf_id: crate::api::ColumnFamilyId,
-        key: Bytes,
-    ) -> Result<(), MidgeError> {
-        self.track_write(cf_id.as_u32(), key.clone());
-        let mutation = Mutation::delete_cf(cf_id, key);
-        self.staged.push(mutation);
-        self.update_memory_usage_and_spill()?;
-        Ok(())
+    pub fn delete_cf(&mut self, cf: crate::api::ColumnFamilyId, key: Bytes) -> Result<(), MidgeError> {
+        let m = Mutation::delete_cf(cf, key.clone());
+        self.stage(cf, m, key)
     }
 
-    #[inline]
     pub fn delete_range(&mut self, start: Bytes, end: Bytes) -> Result<(), MidgeError> {
         self.delete_range_cf(crate::api::DEFAULT_CF_ID, start, end)
     }
 
-    #[inline]
     pub fn delete_range_cf(
         &mut self,
-        cf_id: crate::api::ColumnFamilyId,
+        cf: crate::api::ColumnFamilyId,
         start: Bytes,
         end: Bytes,
     ) -> Result<(), MidgeError> {
-        self.track_write(cf_id.as_u32(), start.clone());
-        let mutation = Mutation::delete_range_cf(cf_id, start, end);
-        self.staged.push(mutation);
-        self.update_memory_usage_and_spill()?;
-        Ok(())
+        let m = Mutation::delete_range_cf(cf, start.clone(), end);
+        self.stage(cf, m, start)
     }
 
-    #[inline]
     pub fn compare_and_swap(
         &mut self,
         key: Bytes,
         expected: Option<Bytes>,
-        new_value: Bytes,
+        new_val: Bytes,
     ) -> Result<(), MidgeError> {
-        self.compare_and_swap_cf(crate::api::DEFAULT_CF_ID, key, expected, new_value)
+        self.compare_and_swap_cf(crate::api::DEFAULT_CF_ID, key, expected, new_val)
     }
 
-    #[inline]
     pub fn compare_and_swap_cf(
         &mut self,
-        cf_id: crate::api::ColumnFamilyId,
+        cf: crate::api::ColumnFamilyId,
         key: Bytes,
         expected: Option<Bytes>,
-        new_value: Bytes,
+        new_val: Bytes,
     ) -> Result<(), MidgeError> {
-        self.track_write(cf_id.as_u32(), key.clone());
-        let mutation = Mutation::compare_and_swap_cf(cf_id, key, expected, new_value);
-        self.staged.push(mutation);
-        self.update_memory_usage_and_spill()?;
-        Ok(())
+        let m = Mutation::compare_and_swap_cf(cf, key.clone(), expected, new_val);
+        self.stage(cf, m, key)
     }
 
-    #[inline]
-    pub fn merge(&mut self, key: Bytes, value: Bytes) -> Result<(), MidgeError> {
-        self.merge_cf(crate::api::DEFAULT_CF_ID, key, value)
+    pub fn merge(&mut self, key: Bytes, val: Bytes) -> Result<(), MidgeError> {
+        self.merge_cf(crate::api::DEFAULT_CF_ID, key, val)
     }
 
-    #[inline]
     pub fn merge_cf(
         &mut self,
-        cf_id: crate::api::ColumnFamilyId,
+        cf: crate::api::ColumnFamilyId,
         key: Bytes,
-        value: Bytes,
+        val: Bytes,
     ) -> Result<(), MidgeError> {
-        self.track_write(cf_id.as_u32(), key.clone());
-        let mutation = Mutation::merge_cf(cf_id, key, value);
-        self.staged.push(mutation);
-        self.update_memory_usage_and_spill()?;
-        Ok(())
+        let m = Mutation::merge_cf(cf, key.clone(), val);
+        self.stage(cf, m, key)
     }
 
-    /// Local get resolves staged mutations only: returns Some(Some(value)) if
-    /// a staged Put/Insert is present, Some(None) if a staged Delete applies,
-    /// or None if the key is not present in the staged set and caller should
-    /// consult the underlying DB.
-    ///
-    /// Note: This only checks in-memory staged mutations for performance.
-    /// Spill files are only read during commit.
-    #[inline]
-    pub fn get_local(&self, cf_id: u32, key: &[u8]) -> Option<Option<Bytes>> {
-        for m in self.staged.iter().rev() {
-            // Only consider staged mutations for the requested column family
-            if m.cf_id.as_u32() != cf_id {
-                continue;
+    // -------------------------------------------------------------------------
+    // Read helpers
+    // -------------------------------------------------------------------------
+    pub fn get_local(&self, cf: u32, key: &[u8]) -> Option<Option<Bytes>> {
+        self.staged.iter().rev().find_map(|m| {
+            if m.cf_id.as_u32() != cf {
+                return None;
             }
             match &m.op {
                 MutationOp::DeleteRange => {
@@ -334,51 +244,41 @@ impl Transaction {
                             return Some(None);
                         }
                     }
+                    None
                 }
-                _ => {
-                    if m.key.as_ref() == key {
-                        return Some(m.value.clone());
-                    }
-                }
+                _ if m.key.as_ref() == key => Some(m.value.clone()),
+                _ => None,
             }
-        }
-        None
+        })
     }
 
-    pub fn exists_local(&self, cf_id: u32, key: &[u8]) -> bool {
-        matches!(self.get_local(cf_id, key), Some(Some(_)))
+    pub fn exists_local(&self, cf: u32, key: &[u8]) -> bool {
+        matches!(self.get_local(cf, key), Some(Some(_)))
     }
 
-    /// Consume the transaction and return staged mutations for the caller
-    /// to apply to the underlying engine. Marks the transaction completed.
-    /// Merges mutations from spill files with in-memory staged mutations.
+    // -------------------------------------------------------------------------
+    // Commit / Rollback
+    // -------------------------------------------------------------------------
     pub fn commit(mut self) -> Result<Vec<Mutation>, MidgeError> {
         if self.completed {
             return Err(MidgeError::internal("transaction already completed"));
         }
         self.completed = true;
 
-        // Read mutations from spill files if any exist
-        let mut all_mutations = if self.spill_manager.has_spill_files() {
-            self.read_spill_files()?
+        let mut all = if self.spill.has_spill_files() {
+            self.read_spilled()?
         } else {
             Vec::new()
         };
-
-        // Append in-memory staged mutations
-        all_mutations.extend(std::mem::take(&mut self.staged));
-
-        // Cleanup spill files after successful read
-        self.cleanup_spill_files();
-
-        Ok(all_mutations)
+        all.extend(std::mem::take(&mut self.staged));
+        self.cleanup_spills();
+        Ok(all)
     }
 
-    /// Rollback clears staged mutations and marks completed.
     pub fn rollback(&mut self) {
         if !self.completed {
             self.staged.clear();
-            self.cleanup_spill_files();
+            self.cleanup_spills();
             self.completed = true;
         }
     }
@@ -386,81 +286,9 @@ impl Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
-        if !self.completed {
-            // Auto-rollback on drop for safety
-            self.staged.clear();
-            self.cleanup_spill_files();
-            self.completed = true;
-        } else {
-            // Still cleanup spill files even if completed (defensive programming)
-            self.cleanup_spill_files();
-        }
-    }
-}
-
-// Transaction is now internal - users should use EngineTransaction (exported as Transaction in lib.rs)
-
-// Implement the public KvTransaction trait for the crate Transaction so that the
-// crate-local Transaction can be used wherever the generic KvTransaction trait
-// is expected by external integrations (though reads won't work without engine reference).
-impl super::kv_store::KvTransaction for Transaction {
-    fn put(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
-        Transaction::put(self, key, value)
-    }
-
-    fn get(&mut self, _key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
-        Err(crate::MidgeError::internal(
-            "Transaction reads require engine context. Use KvStore::begin_transaction() instead.",
-        ))
-    }
-
-    fn delete(&mut self, key: &[u8]) -> crate::MidgeResult<()> {
-        Transaction::delete(self, Bytes::copy_from_slice(key))
-    }
-
-    fn scan(&mut self, _start: &[u8], _end: &[u8]) -> crate::MidgeResult<Vec<(Bytes, Bytes)>> {
-        Err(crate::MidgeError::internal(
-            "Transaction scans require engine context. Use KvStore::begin_transaction() instead.",
-        ))
-    }
-
-    fn delete_range(&mut self, start: &[u8], end: &[u8]) -> crate::MidgeResult<()> {
-        Transaction::delete_range(
-            self,
-            Bytes::copy_from_slice(start),
-            Bytes::copy_from_slice(end),
-        )
-    }
-
-    fn compare_and_swap(
-        &mut self,
-        key: &[u8],
-        expected: Option<&[u8]>,
-        new_value: &[u8],
-    ) -> crate::MidgeResult<bool> {
-        Transaction::compare_and_swap(
-            self,
-            Bytes::copy_from_slice(key),
-            expected.map(Bytes::copy_from_slice),
-            Bytes::copy_from_slice(new_value),
-        )?;
-        // For now, always return true since validation happens at commit time
-        Ok(true)
-    }
-
-    fn merge(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
-        Transaction::merge(
-            self,
-            Bytes::copy_from_slice(key),
-            Bytes::copy_from_slice(value),
-        )
-    }
-
-    fn into_transaction(
-        self: Box<Self>,
-    ) -> Result<Transaction, Box<dyn super::kv_store::KvTransaction>> {
-        // This is already a Transaction, so just return it
-        Ok(*self)
+        self.staged.clear();
+        self.cleanup_spills();
+        self.completed = true;
     }
 }
 
@@ -709,7 +537,7 @@ mod tests {
         txn.put(b"key", b"value").unwrap();
 
         // Assert
-        assert!(txn.current_memory > 0);
+        assert!(txn.mem_used > 0);
     }
 
     #[test]
@@ -719,10 +547,10 @@ mod tests {
 
         // Act
         txn.put(b"k1", b"v1").unwrap();
-        let mem1 = txn.current_memory;
+        let mem1 = txn.mem_used;
 
         txn.put(b"k2", b"v2").unwrap();
-        let mem2 = txn.current_memory;
+        let mem2 = txn.mem_used;
 
         // Assert
         assert!(mem2 > mem1);
@@ -737,7 +565,7 @@ mod tests {
         txn.delete(Bytes::from("deleted_key")).unwrap();
 
         // Assert
-        assert!(txn.current_memory > 0);
+        assert!(txn.mem_used > 0);
     }
 
     // ========================================================================
@@ -806,8 +634,8 @@ mod tests {
         let txn = Transaction::new(1, begin_seq);
 
         // Assert
-        assert_eq!(txn.begin_sequence(), begin_seq);
-        assert_eq!(txn.commit_sequence(), None);
+        assert_eq!(txn.begin_seq(), begin_seq);
+        assert_eq!(txn.commit_seq(), None);
     }
 
     #[test]
@@ -841,7 +669,7 @@ mod tests {
         // Arrange
         let memory_threshold = 100; // Very small threshold to trigger spill
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-        let large_value = Bytes::from(vec![b'x'; 200]); // Larger than threshold
+        let large_value = vec![b'x'; 200]; // Larger than threshold
 
         // Act
         txn.put(b"key1", &large_value).unwrap();
@@ -852,7 +680,7 @@ mod tests {
             1,
             "Should have created one spill file"
         );
-        assert_eq!(txn.current_memory, 0, "Memory should be reset after spill");
+        assert_eq!(txn.mem_used, 0, "Memory should be reset after spill");
         assert_eq!(
             txn.staged.len(),
             0,
@@ -871,8 +699,8 @@ mod tests {
         // Arrange
         let memory_threshold = 50;
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-        let value1 = Bytes::from(vec![b'a'; 100]);
-        let value2 = Bytes::from(vec![b'b'; 20]);
+        let value1 = vec![b'a'; 100];
+        let value2 = vec![b'b'; 20];
 
         // Act
         txn.put(b"spilled_key", &value1).unwrap();
@@ -888,9 +716,9 @@ mod tests {
 
         // Verify mutations are in correct order
         assert_eq!(mutations[0].key, Bytes::from("spilled_key"));
-        assert_eq!(mutations[0].value, Some(value1));
+        assert_eq!(mutations[0].value.as_ref().map(|v| v.len()), Some(100));
         assert_eq!(mutations[1].key, Bytes::from("memory_key"));
-        assert_eq!(mutations[1].value, Some(value2));
+        assert_eq!(mutations[1].value.as_ref().map(|v| v.len()), Some(20));
     }
 
     #[test]
@@ -898,7 +726,7 @@ mod tests {
         // Arrange
         let memory_threshold = 50;
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-        let large_value = Bytes::from(vec![b'x'; 100]);
+        let large_value = vec![b'x'; 100];
 
         // Act
         txn.put(b"key", &large_value).unwrap();
@@ -920,7 +748,7 @@ mod tests {
         // Arrange
         let memory_threshold = 50;
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-        let large_value = Bytes::from(vec![b'x'; 100]);
+        let large_value = vec![b'x'; 100];
 
         // Act
         txn.put(b"key", &large_value).unwrap();
@@ -950,7 +778,7 @@ mod tests {
         // Arrange
         let memory_threshold = 100;
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-        let large_value = Bytes::from(vec![b'x'; 150]);
+        let large_value = vec![b'x'; 150];
 
         // Act
         txn.put(b"key1", &large_value).unwrap();
@@ -993,11 +821,9 @@ mod tests {
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
         // Act
-        txn.put(b"key1", &[b'a'; 100])
-            .unwrap(); // Spill
+        txn.put(b"key1", &vec![b'a'; 100]).unwrap(); // Spill
         txn.put(b"key2", b"small").unwrap(); // Memory
-        txn.put(b"key3", &[b'b'; 100])
-            .unwrap(); // Spill
+        txn.put(b"key3", &vec![b'b'; 100]).unwrap(); // Spill
         txn.put(b"key4", b"tiny").unwrap(); // Memory
 
         let mutations = txn.commit().unwrap();
@@ -1019,7 +845,7 @@ mod tests {
         // Act
         {
             let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-            let large_value = Bytes::from(vec![b'x'; 100]);
+            let large_value = vec![b'x'; 100];
             txn.put(b"key", &large_value).unwrap();
 
             spill_path = txn.spill_file_paths()[0].to_path_buf();
@@ -1041,11 +867,9 @@ mod tests {
         let memory_threshold = 50;
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
-        txn.put(b"key1", &[b'a'; 100])
-            .unwrap();
+        txn.put(b"key1", &vec![b'a'; 100]).unwrap();
         txn.delete(Bytes::from("key2")).unwrap(); // Small, stays in memory
-        txn.put(b"key3", &[b'b'; 100])
-            .unwrap();
+        txn.put(b"key3", &vec![b'b'; 100]).unwrap();
 
         // Act
         let mutations = txn.commit().unwrap();
@@ -1064,8 +888,7 @@ mod tests {
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
         // Act
-        txn.put(b"key1", &[b'a'; 100])
-            .unwrap();
+        txn.put(b"key1", &vec![b'a'; 100]).unwrap();
         txn.delete_range(Bytes::from("start"), Bytes::from("end"))
             .unwrap();
 

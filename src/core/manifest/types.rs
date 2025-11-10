@@ -1,4 +1,4 @@
-///! Core data types for the manifest.
+//! Core data types for the manifest.
 
 use serde::{Deserialize, Serialize};
 

@@ -1,13 +1,13 @@
-///! Compaction execution implementation.
-///!
-///! This module contains the low-level machinery for executing compaction operations:
-///! - Collecting versions from multiple SST files
-///! - Filtering tombstones based on snapshot visibility  
-///! - Applying compaction filters
-///! - Writing compacted SST files
-///!
-///! The high-level compaction strategy (when to compact, which files to select)
-///! is handled by the parent `compaction` module.
+/// Compaction execution implementation.
+///
+/// This module contains the low-level machinery for executing compaction operations:
+/// - Collecting versions from multiple SST files
+/// - Filtering tombstones based on snapshot visibility  
+/// - Applying compaction filters
+/// - Writing compacted SST files
+///
+/// The high-level compaction strategy (when to compact, which files to select)
+/// is handled by the parent `compaction` module.
 
 pub(crate) mod collection;
 pub(crate) mod filtering;

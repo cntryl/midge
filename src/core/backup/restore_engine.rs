@@ -1,5 +1,4 @@
-///! Backup restore engine.
-
+/// Backup restoration and validation engine.
 use std::path::{Path, PathBuf};
 
 use crate::error::MidgeResult;

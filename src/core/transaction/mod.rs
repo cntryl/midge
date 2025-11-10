@@ -13,9 +13,13 @@ pub mod conflict_tracking;
 pub mod engine_transaction;
 pub mod manager;
 pub mod spill;
+pub(crate) mod transaction;
 
 // Re-export public types
 pub use conflict_tracking::ConflictTracker;
 pub use engine_transaction::EngineTransaction;
 pub use manager::{Key, TransactionManager};
 pub use spill::SpillManager;
+
+// Internal re-export for use within core module
+pub(crate) use transaction::Transaction;

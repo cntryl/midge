@@ -133,6 +133,7 @@ pub trait KvStore: Send + Sync {
 }
 
 pub trait KvTransaction: Send + Sync + std::any::Any {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
     fn put(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
     fn get(&mut self, key: &[u8]) -> MidgeResult<Option<Bytes>>;
     fn delete(&mut self, key: &[u8]) -> MidgeResult<()>;
@@ -149,22 +150,6 @@ pub trait KvTransaction: Send + Sync + std::any::Any {
 
     /// Stage a merge operation within this transaction.
     fn merge(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
-
-    /// Extract the inner transaction for commit/rollback.
-    ///
-    /// This is an internal method used by the engine to extract the concrete
-    /// `Transaction` from the trait object without unsafe downcasting.
-    /// Returns `Ok(Transaction)` if this is an `EngineTransaction`, otherwise
-    /// returns `Err` with the trait object back.
-    ///
-    /// # Implementation Note
-    ///
-    /// This method should be implemented to return `Ok(transaction)` for
-    /// `EngineTransaction` and `Err(self)` for any other implementations.
-    #[doc(hidden)]
-    fn into_transaction(
-        self: Box<Self>,
-    ) -> Result<crate::api::transaction::Transaction, Box<dyn KvTransaction>>;
 }
 
 pub type DynKvStore = Arc<dyn KvStore>;

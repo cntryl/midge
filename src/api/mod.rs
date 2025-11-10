@@ -9,7 +9,6 @@ pub mod merge_operator;
 pub mod mutation;
 pub mod query;
 pub mod snapshot;
-pub mod transaction;
 pub mod write_batch;
 pub mod write_options;
 

@@ -82,8 +82,6 @@ pub use api::mutation as mutation_compat;
 pub use api::query as query_compat;
 #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::snapshot` instead")]
 pub use api::snapshot as snapshot_compat;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::transaction` instead")]
-pub use api::transaction;
 #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::write_batch` instead")]
 pub use api::write_batch;
 #[cfg(feature = "cloud-aws")]

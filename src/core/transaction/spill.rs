@@ -310,7 +310,8 @@ impl SpillManager {
     }
 
     /// Get the spill file paths (for testing).
-    pub(crate) fn spill_file_paths(&self) -> &[PathBuf] {
+    #[cfg(test)]
+    pub fn spill_file_paths(&self) -> &[PathBuf] {
         &self.spill_files
     }
 }

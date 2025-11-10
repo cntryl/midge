@@ -1,4 +1,4 @@
-///! Manifest I/O operations - loading and saving.
+//! Manifest I/O operations - loading and saving.
 
 use std::path::Path;
 

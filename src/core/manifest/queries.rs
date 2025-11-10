@@ -1,4 +1,4 @@
-///! Query operations on the manifest - finding files, levels, and metadata.
+//! Query operations on the manifest - finding files, levels, and metadata.
 
 use crate::api::column_family::ColumnFamilyId;
 

@@ -1,4 +1,4 @@
-///! Version collection from SST files during compaction.
+/// Version collection from SST files during compaction.
 
 use std::sync::Arc;
 

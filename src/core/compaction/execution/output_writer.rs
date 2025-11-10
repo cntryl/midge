@@ -1,4 +1,4 @@
-///! Writing compacted SST files to disk.
+//! Writing compacted SST files to disk.
 
 use std::path::PathBuf;
 use std::sync::Arc;

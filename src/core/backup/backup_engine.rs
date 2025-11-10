@@ -1,5 +1,4 @@
-///! Backup creation and management engine.
-
+/// Backup creation and management engine.
 use std::path::{Path, PathBuf};
 
 use crate::error::MidgeResult;

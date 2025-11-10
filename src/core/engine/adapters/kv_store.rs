@@ -224,7 +224,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         // can target any CF via the EngineTransaction methods
         let txn_id = self.engine.txn_id.fetch_add(1, Ordering::SeqCst);
         let begin_sequence = self.engine.seq.load(Ordering::SeqCst);
-        let txn = crate::api::transaction::Transaction::new(txn_id, begin_sequence);
+        let txn = crate::core::transaction::Transaction::new(txn_id, begin_sequence);
         let engine_txn =
             crate::core::transaction::EngineTransaction::from_arc(txn, Arc::clone(&self.engine));
         Ok(Box::new(engine_txn))
@@ -237,10 +237,15 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
     ) -> MidgeResult<()> {
         self.engine.check_read_only()?;
 
-        // Extract the Transaction using the trait method (no downcasting!)
-        let txn = txn
-            .into_transaction()
+        // Downcast to EngineTransaction to access internals
+        // KvTransaction: Any allows us to downcast from the trait object
+        let any_txn: Box<dyn std::any::Any> = txn;
+        let engine_txn = any_txn
+            .downcast::<crate::core::transaction::EngineTransaction>()
             .map_err(|_| MidgeError::internal("Transaction type not supported"))?;
+        
+        // Extract the internal Transaction by moving out of the box
+        let txn = engine_txn.txn;
 
         // Check if transaction is expired (timeout)
         if txn.is_expired() {
@@ -269,7 +274,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
 
         if let Err(e) = self.engine.txn_manager.begin(
             txn.txn_id(),
-            txn.begin_sequence(),
+            txn.begin_seq(),
             write_set,
             read_set,
             read_versions,
@@ -316,10 +321,14 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         &self,
         txn: Box<dyn crate::api::kv_store::KvTransaction>,
     ) -> MidgeResult<()> {
-        // Extract the Transaction using the trait method (no downcasting!)
-        let txn = txn
-            .into_transaction()
+        // Downcast to EngineTransaction to access internals
+        let any_txn: Box<dyn std::any::Any> = txn;
+        let engine_txn = any_txn
+            .downcast::<crate::core::transaction::EngineTransaction>()
             .map_err(|_| MidgeError::internal("Transaction type not supported"))?;
+        
+        // Extract the internal Transaction by moving out of the box
+        let txn = engine_txn.txn;
 
         // Abort the transaction in the transaction manager
         self.engine.txn_manager.abort(txn.txn_id());

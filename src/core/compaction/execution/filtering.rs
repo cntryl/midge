@@ -1,5 +1,3 @@
-///! Compaction filter application logic.
-
 use super::types::CompactionVersion;
 
 /// Apply compaction filter to versions, removing entries based on filter decisions.
@@ -49,8 +47,8 @@ pub(crate) fn apply_compaction_filter(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::filter::{CompactionFilter, FilterDecision};
+    use super::*;
     use bytes::Bytes;
 
     // Helper to create a version
@@ -162,11 +160,7 @@ mod tests {
         // Arrange
         struct RemoveTombstonesFilter;
         impl CompactionFilter for RemoveTombstonesFilter {
-            fn filter(
-                &self,
-                _level: u32,
-                version: &CompactionVersion,
-            ) -> FilterDecision {
+            fn filter(&self, _level: u32, version: &CompactionVersion) -> FilterDecision {
                 if version.tombstone {
                     FilterDecision::Remove
                 } else {

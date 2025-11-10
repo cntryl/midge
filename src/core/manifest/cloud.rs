@@ -1,5 +1,3 @@
-///! Cloud SST tracking and checkpoint management.
-
 use crate::common::timestamp;
 use crate::error::MidgeResult;
 

@@ -7,9 +7,10 @@ use bytes::Bytes;
 use std::sync::Arc;
 
 use crate::api::kv_store::KvTransaction;
-use crate::api::transaction::Transaction;
 use crate::core::engine::MidgeEngine;
 use crate::MidgeResult;
+
+use super::transaction::Transaction;
 
 /// Transaction wrapper that provides read access via engine reference.
 ///
@@ -37,7 +38,7 @@ impl EngineTransaction {
     /// # Safety
     /// The engine reference must outlive this transaction. This is guaranteed
     /// by Rust's borrow checker when transactions are created from `&self` methods.
-    pub fn new(txn: Transaction, engine: &MidgeEngine) -> Self {
+    pub(crate) fn new(txn: Transaction, engine: &MidgeEngine) -> Self {
         Self {
             txn,
             engine: engine as *const MidgeEngine,
@@ -45,31 +46,34 @@ impl EngineTransaction {
     }
 
     /// Create from Arc<MidgeEngine> (for KvStore adapter)
-    pub fn from_arc(txn: Transaction, engine: Arc<MidgeEngine>) -> Self {
+    pub(crate) fn from_arc(txn: Transaction, engine: Arc<MidgeEngine>) -> Self {
         Self {
             txn,
             engine: Arc::into_raw(engine),
         }
     }
 
-    /// Get reference to engine (safe because engine outlives transaction)
-    fn engine(&self) -> &MidgeEngine {
-        unsafe { &*self.engine }
-    }
-
-    /// Get the transaction ID
-    pub fn txn_id(&self) -> u64 {
+    /// Get the transaction ID (internal)
+    pub(crate) fn txn_id(&self) -> u64 {
         self.txn.txn_id()
     }
 
-    /// Get the begin sequence number
-    pub fn begin_sequence(&self) -> u64 {
-        self.txn.begin_sequence()
+    /// Get the begin sequence number (internal)
+    pub(crate) fn begin_seq(&self) -> u64 {
+        self.txn.begin_seq()
     }
 }
 
 // Implement the public KvTransaction trait for EngineTransaction
 impl KvTransaction for EngineTransaction {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+        self.txn.insert(
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value),
+            None,
+        )
+    }
+
     fn put(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         self.txn.put(key, value)
     }
@@ -122,12 +126,5 @@ impl KvTransaction for EngineTransaction {
     fn merge(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         self.txn
             .merge(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
-    }
-
-    fn into_transaction(
-        self: Box<Self>,
-    ) -> Result<Transaction, Box<dyn KvTransaction>> {
-        // Extract the transaction from EngineTransaction
-        Ok(self.txn)
     }
 }

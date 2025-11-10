@@ -1,4 +1,4 @@
-///! Core data types for compaction execution.
+//! Core data types for compaction execution.
 
 use bytes::Bytes;
 
