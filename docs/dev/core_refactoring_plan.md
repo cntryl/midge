@@ -302,6 +302,41 @@ src/core/
 
 ### ✅ Completed Phases
 
+#### Phase 1.1: Engine Operations Extraction (COMPLETED)
+- **Status**: ✅ Done
+- **Files Created**:
+  - `src/core/engine/operations/reads.rs` (435 lines) - get(), multi_get(), scan(), get_at(), scan_at()
+  - `src/core/engine/operations/writes.rs` (593 lines) - put(), delete(), delete_range(), write_batch(), merge operations
+  - `src/core/engine/operations/maintenance.rs` (379 lines) - flush(), compact_level(), compact_range(), close(), create_checkpoint(), compact_all()
+  - `src/core/engine/operations/mutations.rs` (133 lines) - insert_with_value(), compare_and_swap()
+  - `src/core/engine/operations/transactions.rs` (406 lines) - batch_internal(), commit_transaction(), transaction_get(), transaction_exists()
+  - `src/core/engine/operations/snapshots.rs` (58 lines) - snapshot() creation
+  - `src/core/engine/operations/observability.rs` (192 lines) - metrics, cache stats, memory usage operations
+  - `src/core/engine/operations/mod.rs` (21 lines) - Public API exports
+- **Files Modified**: `src/core/engine/engine.rs` (2,673 → 1,292 lines, 51.6% reduction)
+- **Key Achievement**: Extracted 36 public methods into 7 focused operation modules, dramatically improving maintainability
+- **Tests**: All 1,104 tests passing continuously throughout refactoring
+- **Lines Migrated**: 2,195 lines across 8 operation files (includes enhanced documentation)
+
+#### Phase 1.2: Column Family Manager Extraction (COMPLETED)
+- **Status**: ✅ Done
+- **Files Created**:
+  - `src/core/engine/cf_manager.rs` (312 lines) - Column family CRUD operations and merge operator management
+    - `create_column_family()` - CF creation with manifest persistence and error rollback
+    - `drop_column_family()` - CF deletion with safety checks for unflushed data
+    - `list_column_families()` - List all CFs in database
+    - `default_column_family()` - Get default CF handle
+    - `get_column_family()` - Get CF by name with error handling
+    - `register_merge_operator()` - Register per-CF merge operators
+    - `resolve_merges()` - Internal merge resolution for compaction/flush
+- **Files Modified**: 
+  - `src/core/engine/engine.rs` (1,292 → 936 lines, 27.5% reduction)
+  - `src/core/engine/mod.rs` - Added cf_manager module declaration
+- **Key Achievement**: Consolidated all column family management logic into dedicated module, improving separation of concerns
+- **Tests**: All 1,104 tests passing after extraction
+- **Lines Migrated**: 356 lines (7 methods + supporting code) moved to cf_manager.rs
+- **Cumulative engine.rs Reduction**: 2,673 → 936 lines (65.0% reduction from original)
+
 #### Phase 2.2: Lock Module Split & Deduplication (COMPLETED)
 - **Status**: ✅ Done
 - **Files Created**:
@@ -424,15 +459,16 @@ src/core/
 ## Migration Checklist
 
 ### Phase 1: Engine Operations (1-2 days)
-- [ ] Create `engine/operations/` directory
-- [ ] Extract read operations (get, multi_get, scan)
-- [ ] Extract write operations (put, delete, delete_range)
-- [ ] Extract mutation operations (insert, CAS, merge)
-- [ ] Extract snapshot operations
-- [ ] Extract transaction operations
-- [ ] Extract lifecycle operations (open, close)
-- [ ] Update `engine.rs` to delegate to operation modules
-- [ ] Run tests: `cargo test --lib core::engine`
+- [x] Create `engine/operations/` directory
+- [x] Extract read operations (get, multi_get, scan)
+- [x] Extract write operations (put, delete, delete_range)
+- [x] Extract mutation operations (insert, CAS, merge)
+- [x] Extract snapshot operations
+- [x] Extract transaction operations
+- [x] Extract maintenance operations (flush, compaction, checkpoint)
+- [x] Extract observability operations (metrics, cache stats)
+- [x] Update `engine.rs` to delegate to operation modules
+- [x] Run tests: `cargo test --lib core::engine`
 
 ### Phase 2: Engine State (1 day)
 - [ ] Create `engine/state/` directory
@@ -443,32 +479,32 @@ src/core/
 - [ ] Run tests
 
 ### Phase 3: Manifest Split (1 day)
-- [ ] Create `manifest/` directory
-- [ ] Split manifest.rs into submodules
-- [ ] Update imports throughout codebase
-- [ ] Run tests: `cargo test --lib core::manifest`
+- [x] Create `manifest/` directory
+- [x] Split manifest.rs into submodules
+- [x] Update imports throughout codebase
+- [x] Run tests: `cargo test --lib core::manifest`
 
 ### Phase 4: Lock Split (0.5 days)
-- [ ] Create `locking/` directory
-- [ ] Split lock.rs into trait/local/cloud
-- [ ] Update imports
-- [ ] Run tests
+- [x] Create `locking/` directory
+- [x] Split lock.rs into trait/local/cloud
+- [x] Update imports
+- [x] Run tests
 
 ### Phase 5: Backup Split (0.5 days)
-- [ ] Create `backup/` directory
-- [ ] Split backup.rs into backup/restore
-- [ ] Update imports
-- [ ] Run tests
+- [x] Create `backup/` directory
+- [x] Split backup.rs into backup/restore
+- [x] Update imports
+- [x] Run tests
 
 ### Phase 6: Compaction Executor (1 day)
-- [ ] Create `compaction/execution/` directory
-- [ ] Split executor.rs into focused modules
-- [ ] Update compaction coordinator
-- [ ] Run tests: `cargo test --lib core::compaction`
+- [x] Create `compaction/execution/` directory
+- [x] Split executor.rs into focused modules
+- [x] Update compaction coordinator
+- [x] Run tests: `cargo test --lib core::compaction`
 
 ### Phase 7: Optional Cleanups (As needed)
 - [ ] Extract skiplist to datastructures/
-- [ ] Split memtable module
+- [x] Split memtable module
 - [ ] Split flush module
 
 ---

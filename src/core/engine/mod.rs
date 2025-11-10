@@ -9,6 +9,7 @@
 //!   - `reads.rs` - Point reads and range scans
 //!   - (more to be added: writes, mutations, transactions, etc.)
 
+mod cf_manager;
 mod column_family;
 #[allow(clippy::module_inception)]
 mod engine;

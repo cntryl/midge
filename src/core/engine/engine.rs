@@ -8,12 +8,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use tracing::warn;
 
-use crate::api::column_family::{
-    ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, DEFAULT_CF_ID,
-};
+use crate::api::column_family::{ColumnFamilyId, DEFAULT_CF_ID};
 use crate::error::{MidgeError, MidgeResult};
-
-use crate::common::timestamp;
 use crate::core::memtable::MemTable;
 use crate::core::metrics::Metrics;
 use crate::core::wal_replay::replay_wal_to_memtables;
@@ -670,157 +666,11 @@ impl MidgeEngine {
     // close() method moved to operations/maintenance.rs
 
     // ==================== Column Family Management ====================
-
-    /// Create a new column family.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - A column family with the same name already exists
-    /// - The database is in read-only mode
-    pub fn create_column_family(
-        &self,
-        name: &str,
-        config: ColumnFamilyConfig,
-    ) -> MidgeResult<ColumnFamilyHandle> {
-        if self.read_only {
-            return Err(crate::error::MidgeError::invalid_config(
-                "Cannot create column family in read-only mode",
-            ));
-        }
-
-        let cf_id = ColumnFamilyId::new(self.cf_set.next_cf_id.fetch_add(1, Ordering::SeqCst));
-        let handle = self
-            .cf_set
-            .create_cf(cf_id, name.to_string(), config.clone())?;
-
-        let mut manifest = Manifest::load(&self.db_path).unwrap_or_default();
-        manifest.add_cf(cf_id, name.to_string(), Some(config));
-
-        // Persist manifest. If persistence fails, roll back the in-memory CF registration
-        if let Err(e) = manifest.save_atomic(&self.db_path) {
-            // Best-effort rollback of in-memory state inserted by create_cf
-            let id_u32 = cf_id.as_u32();
-            let _ = self.cf_set.cfs.remove(&id_u32);
-            let _ = self.cf_set.name_to_id.remove(handle.name());
-            return Err(e);
-        }
-
-        // Update cached manifest after successful save
-        self.update_manifest_cache(manifest);
-
-        Ok(handle)
-    }
-
-    /// Drop a column family and delete all its data.
-    ///
-    /// # Warning
-    /// This operation is irreversible. All data in the column family will be permanently deleted.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - The column family does not exist
-    /// - Attempting to drop the default column family
-    /// - The database is in read-only mode
-    pub fn drop_column_family(&self, handle: &ColumnFamilyHandle) -> MidgeResult<()> {
-        if self.read_only {
-            return Err(crate::error::MidgeError::invalid_config(
-                "Cannot drop column family in read-only mode",
-            ));
-        }
-
-        let cf_id = handle.id();
-
-        if cf_id == DEFAULT_CF_ID {
-            return Err(crate::error::MidgeError::invalid_config(
-                "Cannot drop the default column family",
-            ));
-        }
-
-        // Check for unflushed data - refuse to drop if memtable or immutables are non-empty
-        let cf_id_u32 = cf_id.as_u32();
-        if let Some(cf) = self.cf_set.cfs.get(&cf_id_u32) {
-            // Check if active memtable has any data
-            let memtable = cf.memtable.read();
-            let is_empty = memtable.is_empty();
-            drop(memtable);
-
-            if !is_empty {
-                return Err(crate::error::MidgeError::invalid_config(format!(
-                    "Cannot drop column family '{}' with unflushed data in active memtable. \
-                     Please flush the column family first.",
-                    handle.name()
-                )));
-            }
-
-            // Check if there are any immutable memtables
-            let immutable_count = cf.immutable_count();
-            if immutable_count > 0 {
-                return Err(crate::error::MidgeError::invalid_config(format!(
-                    "Cannot drop column family '{}' with {} unflushed immutable memtable(s). \
-                     Please flush the column family first.",
-                    handle.name(),
-                    immutable_count
-                )));
-            }
-        }
-
-        // Remove from manifest. Collect SST file names first so we can delete them
-        // after the manifest is updated.
-        let mut manifest = Manifest::load(&self.db_path).unwrap_or_default();
-
-        let cf_id_u32 = cf_id.as_u32();
-        let files_to_delete: Vec<String> = manifest
-            .files
-            .iter()
-            .filter(|f| f.cf_id == cf_id_u32)
-            .map(|f| f.name.clone())
-            .collect();
-
-        manifest.remove_cf(cf_id);
-        manifest.save_atomic(&self.db_path)?;
-
-        // Update cached manifest after successful save
-        self.update_manifest_cache(manifest.clone());
-
-        // Delete SST files for this CF (best-effort)
-        for name in files_to_delete {
-            let path = self.sst_dir.join(&name);
-            let _ = std::fs::remove_file(path);
-        }
-
-        // Remove in-memory CF metadata
-        self.cf_set.cfs.remove(&cf_id_u32);
-        self.cf_set.name_to_id.remove(handle.name());
-
-        Ok(())
-    }
-
-    /// List all column families.
-    pub fn list_column_families(&self) -> Vec<ColumnFamilyHandle> {
-        self.cf_set
-            .cfs
-            .iter()
-            .map(|entry| entry.value().handle())
-            .collect()
-    }
-
-    /// Get the default column family handle.
-    pub fn default_column_family(&self) -> ColumnFamilyHandle {
-        self.cf_set.default_cf().handle()
-    }
-
-    /// Get a column family handle by name.
-    pub fn get_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
-        self.cf_set
-            .get_cf_by_name(name)
-            .map(|cf| cf.handle())
-            .ok_or_else(|| {
-                crate::error::MidgeError::invalid_config(format!(
-                    "Column family '{}' does not exist",
-                    name
-                ))
-            })
-    }
+    // create_column_family() method moved to cf_manager.rs
+    // drop_column_family() method moved to cf_manager.rs
+    // list_column_families() method moved to cf_manager.rs
+    // default_column_family() method moved to cf_manager.rs
+    // get_column_family() method moved to cf_manager.rs
 
     // ==================== Column Family Operations ====================
     //
@@ -831,125 +681,20 @@ impl MidgeEngine {
     // NOTE: Write operations (put, put_with_ttl, delete, delete_range, write_batch,
     // merge_cf, merge_with_ttl_cf, insert, insert_with_ttl) have been moved to
     // operations/writes.rs for better organization.
+    //
+    // NOTE: Merge operators (register_merge_operator, resolve_merges) have been
+    // moved to cf_manager.rs as they are part of CF management.
 
     // put() method moved to operations/writes.rs
     // delete() method moved to operations/writes.rs
     // scan() method moved to operations/reads.rs
     // delete_range() method moved to operations/writes.rs
-
-    /// Resolve merge operations given a list of versions from newest to oldest.
-    /// Returns None if the chain ends with Delete or all values are expired.
-    fn resolve_merges(
-        &self,
-        key: &[u8],
-        versions: Vec<(Option<Bytes>, Option<u64>, crate::core::skiplist::OpType)>,
-    ) -> MidgeResult<Option<Bytes>> {
-        use crate::core::skiplist::OpType;
-
-        let now = timestamp::now_millis();
-
-        let mut merge_operands: Vec<Bytes> = Vec::new();
-        let mut base_value: Option<Bytes> = None;
-
-        // Scan versions from newest to oldest
-        for (value_opt, expiration_opt, op_type) in versions {
-            // Check expiration FIRST - expired values act as barriers
-            if let Some(exp_millis) = expiration_opt {
-                if now >= exp_millis {
-                    // Expired value - this is a tombstone barrier!
-                    // NO RESURRECTION: Don't scan older versions
-                    // Return current merge state or None
-                    if merge_operands.is_empty() {
-                        return Ok(None);
-                    } else {
-                        // We have merge operands accumulated - resolve them with no base
-                        break;
-                    }
-                }
-            }
-
-            match op_type {
-                OpType::Merge => {
-                    // Accumulate merge operand
-                    if let Some(v) = value_opt {
-                        merge_operands.push(v);
-                    }
-                }
-                OpType::Put => {
-                    // Put acts as base value and stops the scan
-                    base_value = value_opt;
-                    break;
-                }
-                OpType::Delete => {
-                    // Delete stops the scan with no base
-                    break;
-                }
-            }
-        }
-
-        // If no merge operands, just return the base (Put) or None (Delete/not found)
-        if merge_operands.is_empty() {
-            return Ok(base_value);
-        }
-
-        // We have merge operands - need to resolve them
-        // Reverse to get oldest-to-newest order for merging
-        merge_operands.reverse();
-
-        // Get the merge operator for CF 0 (default)
-        let ops = self.merge_operators.read();
-        let op = ops.get(&0).ok_or_else(|| {
-            crate::error::MidgeError::invalid_config(
-                "No merge operator registered for column family 0",
-            )
-        })?;
-
-        // Apply merges
-        let result = if merge_operands.len() == 1 {
-            // Single merge operand
-            op.merge(key, base_value.as_deref(), &merge_operands[0])?
-        } else {
-            // Multiple merge operands - use merge_many for efficiency
-            let operand_refs: Vec<&[u8]> = merge_operands.iter().map(|b| b.as_ref()).collect();
-            op.merge_many(key, base_value.as_deref(), &operand_refs)?
-        };
-
-        Ok(Some(Bytes::from(result)))
-    }
+    // resolve_merges() method moved to cf_manager.rs
+    // register_merge_operator() method moved to cf_manager.rs
 
     // scan_streaming() method moved to operations/reads.rs
     // put_with_ttl() method moved to operations/writes.rs
     // write_batch() method moved to operations/writes.rs
-
-    /// Register a merge operator for a column family.
-    ///
-    /// Merge operators define how to combine multiple values for the same key,
-    /// enabling efficient patterns like counters, append-only logs, and document updates.
-    ///
-    /// # Arguments
-    ///
-    /// * `cf_id` - Column family ID (use 0 for default CF)
-    /// * `operator` - The merge operator implementation
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
-    /// # use cntryl_midge::merge_operator::IntegerAddOperator;
-    /// # let opts = MidgeOptions::default();
-    /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// // Register counter operator for default CF
-    /// engine.register_merge_operator(0, Box::new(IntegerAddOperator)).unwrap();
-    /// ```
-    pub fn register_merge_operator(
-        &self,
-        cf_id: u32,
-        operator: Box<dyn crate::api::MergeOperator>,
-    ) -> MidgeResult<()> {
-        let mut ops = self.merge_operators.write();
-        ops.insert(cf_id, Arc::from(operator));
-        Ok(())
-    }
 
     // merge_cf() method moved to operations/writes.rs
     // merge_with_ttl_cf() method moved to operations/writes.rs
