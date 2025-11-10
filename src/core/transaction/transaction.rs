@@ -821,9 +821,9 @@ mod tests {
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
         // Act
-        txn.put(b"key1", &vec![b'a'; 100]).unwrap(); // Spill
+        txn.put(b"key1", &[b'a'; 100]).unwrap(); // Spill
         txn.put(b"key2", b"small").unwrap(); // Memory
-        txn.put(b"key3", &vec![b'b'; 100]).unwrap(); // Spill
+        txn.put(b"key3", &[b'b'; 100]).unwrap(); // Spill
         txn.put(b"key4", b"tiny").unwrap(); // Memory
 
         let mutations = txn.commit().unwrap();
@@ -867,9 +867,9 @@ mod tests {
         let memory_threshold = 50;
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
-        txn.put(b"key1", &vec![b'a'; 100]).unwrap();
+        txn.put(b"key1", &[b'a'; 100]).unwrap();
         txn.delete(Bytes::from("key2")).unwrap(); // Small, stays in memory
-        txn.put(b"key3", &vec![b'b'; 100]).unwrap();
+        txn.put(b"key3", &[b'b'; 100]).unwrap();
 
         // Act
         let mutations = txn.commit().unwrap();
@@ -888,7 +888,7 @@ mod tests {
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
         // Act
-        txn.put(b"key1", &vec![b'a'; 100]).unwrap();
+        txn.put(b"key1", &[b'a'; 100]).unwrap();
         txn.delete_range(Bytes::from("start"), Bytes::from("end"))
             .unwrap();
 
