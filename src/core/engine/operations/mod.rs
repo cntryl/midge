@@ -16,7 +16,5 @@ pub(crate) mod mutations;
 pub(crate) mod transactions;
 pub(crate) mod snapshots;
 pub(crate) mod observability;
-pub(crate) mod kv_store;
 
-// Re-export for backward compatibility (will add other modules as we create them)
 // No re-exports needed - methods are implemented directly on MidgeEngine
