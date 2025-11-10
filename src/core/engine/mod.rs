@@ -4,20 +4,10 @@
 //! - `types.rs` - Result enums (InsertResult, CasResult)
 //! - `column_family.rs` - Column family management (ColumnFamily, ColumnFamilySet)
 //! - `factory.rs` - Engine construction and initialization helpers
-//! - `engine.rs` - Main MidgeEngine implementation
-//!
-//! The engine.rs file is large but logically organized into sections:
-//! - Construction & initialization (delegated to factory.rs)
-//! - Internal helpers (memtable access, manifest, WAL)
-//! - Flush & compaction
-//! - Column family management
-//! - Read operations (get, multi_get, scan)
-//! - Write operations (put, delete, write_batch)
-//! - Advanced operations (merge, CAS, insert, batch mutations)
-//! - Transactions
-//! - Snapshots
-//! - Checkpoints & lifecycle
-//! - Observability (metrics, cache stats)
+//! - `engine.rs` - Main MidgeEngine struct and internal helpers
+//! - `operations/` - Focused operation modules:
+//!   - `reads.rs` - Point reads and range scans
+//!   - (more to be added: writes, mutations, transactions, etc.)
 
 mod column_family;
 #[allow(clippy::module_inception)]
@@ -27,6 +17,8 @@ pub mod types;
 
 // Re-export public types
 pub use types::{CasResult, InsertResult};
+
+pub(crate) mod operations;
 
 // Re-export the engine and its public API
 pub use engine::*;

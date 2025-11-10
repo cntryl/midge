@@ -24,5 +24,5 @@ pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 // Re-export crate-internal executor functions for engine use
 pub(crate) use executor::{
     apply_compaction_filter, collect_compaction_versions, deduplicate_versions,
-    filter_safe_tombstones, sort_versions_for_output, write_compacted_sst,
+    filter_safe_tombstones, sort_versions_for_output,
 };
