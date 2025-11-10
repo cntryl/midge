@@ -181,16 +181,6 @@ mod tests {
         }
     }
 
-    fn make_version_with_value(key: &[u8], seq: u64, value: &[u8]) -> CompactionVersion {
-        CompactionVersion {
-            user_key: key.to_vec(),
-            seq,
-            tombstone: false,
-            value: Some(Bytes::from(value.to_vec())),
-            expiration: None,
-        }
-    }
-
     fn make_tombstone(key: &[u8], seq: u64) -> CompactionVersion {
         CompactionVersion {
             user_key: key.to_vec(),
@@ -219,8 +209,7 @@ mod tests {
     fn should_return_none_given_empty_versions_when_writing_sst() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions: Vec<CompactionVersion> = vec![];
 
@@ -236,8 +225,7 @@ mod tests {
     fn should_write_single_version_when_writing_sst() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"test_key", 100, false)];
 
@@ -259,8 +247,7 @@ mod tests {
     fn should_maintain_key_order_when_writing_multiple_versions() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let mut versions = vec![
             make_version(b"key3", 300, false),
@@ -287,8 +274,7 @@ mod tests {
     fn should_write_deduplicated_versions_without_error() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
 
         let mut versions = vec![
@@ -313,8 +299,7 @@ mod tests {
     fn should_count_tombstones_when_writing_sst() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![
             make_version(b"key1", 100, false),
@@ -336,8 +321,7 @@ mod tests {
     fn should_fail_given_duplicate_keys_when_writing_sst() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
 
         // Intentionally create duplicate keys (same user_key)
@@ -359,8 +343,7 @@ mod tests {
     fn should_produce_valid_index_given_merged_input() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![
             make_version(b"key1", 100, false),
@@ -381,8 +364,7 @@ mod tests {
     fn should_generate_unique_filename_given_parallel_compactions() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
 
         let versions1 = vec![make_version(b"key1", 100, false)];
@@ -404,8 +386,7 @@ mod tests {
     fn should_report_statistics_given_compaction_complete() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let mut versions = vec![
             make_version(b"key1", 100, false),
@@ -431,8 +412,7 @@ mod tests {
     fn should_write_all_metadata_blocks_given_footer_creation() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let mut versions = vec![
             make_version(b"key", 100, false),
@@ -456,8 +436,7 @@ mod tests {
     fn should_write_correct_sequence_bounds_in_footer() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![
             make_version(b"a", 50, false),
@@ -479,8 +458,7 @@ mod tests {
     fn should_propagate_reader_error_given_corrupted_sst() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, true)];
 
@@ -495,8 +473,7 @@ mod tests {
     fn should_cleanup_partial_output_given_compaction_failure() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
 
         // Duplicate keys cause failure
@@ -516,8 +493,7 @@ mod tests {
     fn should_fail_gracefully_given_insufficient_disk_space() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, false)];
 
@@ -533,8 +509,7 @@ mod tests {
         // Arrange
         // Level is tracked by Manifest, not FileMeta
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, false)];
 
@@ -554,8 +529,7 @@ mod tests {
         let sst_dir = temp_dir.path().join("new_subdir");
         // Directory doesn't exist yet
 
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, &sst_dir);
         let versions = vec![make_version(b"key", 100, false)];
 
@@ -574,8 +548,7 @@ mod tests {
     fn should_record_output_file_in_manifest_given_successful_write() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, false)];
 
@@ -639,8 +612,7 @@ mod tests {
     fn should_recompute_bloom_given_filtered_keys() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let mut versions = vec![
             make_version(b"key1", 100, false),
@@ -660,8 +632,7 @@ mod tests {
     fn should_update_manifest_compaction_stats_after_write() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, false)];
 
