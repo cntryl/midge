@@ -6,26 +6,35 @@
 //   cargo run --bin validate_tests -- --summary
 //   cargo run --bin validate_tests -- --file src/wal/wal_helpers.rs
 
-use clap::Parser;
 use regex::Regex;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Parser, Debug)]
-#[command(name = "validate_tests")]
-#[command(about = "Validate test compliance with project guidelines", long_about = None)]
 struct Args {
-    /// Show summary of all tests
-    #[arg(short, long)]
     summary: bool,
-
-    /// Check specific file
-    #[arg(short, long)]
     file: Option<PathBuf>,
-
-    /// Check test organization
-    #[arg(short, long)]
     organization: bool,
+}
+
+impl Args {
+    fn parse() -> Self {
+        let args: Vec<String> = env::args().collect();
+        
+        let summary = args.iter().any(|a| a == "--summary" || a == "-s");
+        let organization = args.iter().any(|a| a == "--organization" || a == "-o");
+        
+        let file = args.iter()
+            .position(|a| a == "--file" || a == "-f")
+            .and_then(|i| args.get(i + 1))
+            .map(PathBuf::from);
+        
+        Args {
+            summary,
+            file,
+            organization,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,39 +158,7 @@ pub fn test_single_test(
             // Additional heuristic: allow common phrases that aren't multi-behavior
             // These are patterns where "and" is part of the description, not separate actions
             let allowed_patterns = [
-                "with_id_and_name",          // Configuration/setup
-                "with_start_and_end",        // Range specification
-                "with_hash_and_sequence",    // Compound data
-                "with_hash_and_cf_nesting",  // Compound data
-                "given_start_and_end",       // Range specification
-                "key_and_value",             // Common pair
-                "id_and_name",               // Common pair for objects
-                "open_and_close",            // Lifecycle pair that's ONE behavior
-                "read_and_write",            // I/O pair
-                "reads_and_writes",          // I/O pair
-                "open_and_get",              // Common sequential operation
-                "insert_and_get",            // Verify insertion
-                "store_and_retrieve",        // Verify storage
-                "save_and_load",             // Persistence verification
-                "write_and_read",            // Write then read verification
-                "read_and_verify",           // Read with verification
-                "download_and_verify",       // Download with verification
-                "serialize_and_deserialize", // Roundtrip
-                "encode_and_decode",         // Roundtrip
-                "put_and_get",               // Verify put
-                "upload_and_",               // Upload then verify
-                "write_and_",                // Write then verify
-                "add_and_",                  // Adding then checking
-                "create_and_",               // Creating then checking
-                "register_and_unregister",   // Lifecycle
-                "_and_return",               // Result description, not separate action
-                "_and_track",                // Side effect verification
-                "_and_prevent",              // Negative verification
-                "_and_empty",                // State description
-                "_and_convert",              // Type conversion as part of one action
-                "preserving_id_and_name",    // Preservation verification
-                "counts_and_empty",          // Compound state
-                "full_and_incremental",      // Type comparison
+                "with_id_and_name",          
             ];
 
             let is_allowed = allowed_patterns
