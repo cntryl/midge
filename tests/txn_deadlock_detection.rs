@@ -4,7 +4,7 @@
 // Transaction ACID tests - P0 Priority
 // Tests document expected behavior and will fail until features are implemented
 
-use cntryl_midge::KvStore;
+use cntryl_midge::{KvStore, KvTransaction};
 use std::sync::Arc;
 
 mod common;

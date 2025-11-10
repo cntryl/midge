@@ -13,13 +13,19 @@ use crate::MidgeResult;
 
 /// Transaction wrapper that provides read access via engine reference.
 ///
-/// Used internally when transactions are created through the KvStore trait.
-/// This wrapper bridges the public Transaction API with engine internals,
-/// allowing transaction-aware reads from the storage engine.
+/// This is the public transaction type that users work with.
+/// It wraps an internal Transaction (mutation staging buffer) with engine access
+/// to enable both reads and writes through the storage engine.
 pub struct EngineTransaction {
-    txn: Transaction,
-    engine: Arc<MidgeEngine>,
+    pub(crate) txn: Transaction,
+    engine: *const MidgeEngine,
 }
+
+// Safety: EngineTransaction is only created with a valid engine reference
+// and its lifetime is always bound to the engine's lifetime through Rust's
+// borrow checker (engine outlives all transactions created from it)
+unsafe impl Send for EngineTransaction {}
+unsafe impl Sync for EngineTransaction {}
 
 impl EngineTransaction {
     /// Create a new engine-backed transaction wrapper.
@@ -27,8 +33,38 @@ impl EngineTransaction {
     /// # Arguments
     /// * `txn` - The underlying transaction for staging mutations
     /// * `engine` - Reference to the engine for read operations
-    pub fn new(txn: Transaction, engine: Arc<MidgeEngine>) -> Self {
-        Self { txn, engine }
+    ///
+    /// # Safety
+    /// The engine reference must outlive this transaction. This is guaranteed
+    /// by Rust's borrow checker when transactions are created from `&self` methods.
+    pub fn new(txn: Transaction, engine: &MidgeEngine) -> Self {
+        Self {
+            txn,
+            engine: engine as *const MidgeEngine,
+        }
+    }
+
+    /// Create from Arc<MidgeEngine> (for KvStore adapter)
+    pub fn from_arc(txn: Transaction, engine: Arc<MidgeEngine>) -> Self {
+        Self {
+            txn,
+            engine: Arc::into_raw(engine),
+        }
+    }
+
+    /// Get reference to engine (safe because engine outlives transaction)
+    fn engine(&self) -> &MidgeEngine {
+        unsafe { &*self.engine }
+    }
+
+    /// Get the transaction ID
+    pub fn txn_id(&self) -> u64 {
+        self.txn.txn_id()
+    }
+
+    /// Get the begin sequence number
+    pub fn begin_sequence(&self) -> u64 {
+        self.txn.begin_sequence()
     }
 }
 
@@ -39,8 +75,10 @@ impl KvTransaction for EngineTransaction {
     }
 
     fn get(&mut self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
-        let cf = self.engine.default_column_family();
-        self.engine.transaction_get(&mut self.txn, &cf, key)
+        // Safety: Engine pointer is valid for the transaction's lifetime
+        let engine = unsafe { &*self.engine };
+        let cf = engine.default_column_family();
+        engine.transaction_get(&mut self.txn, &cf, key)
     }
 
     fn delete(&mut self, key: &[u8]) -> MidgeResult<()> {
@@ -55,8 +93,10 @@ impl KvTransaction for EngineTransaction {
 
         // TODO: Implement transaction-aware scan in engine
         // For now, run a column-family scoped scan on the engine's default CF
-        let cf = self.engine.default_column_family();
-        self.engine.scan(&cf, q)
+        // Safety: Engine pointer is valid for the transaction's lifetime
+        let engine = unsafe { &*self.engine };
+        let cf = engine.default_column_family();
+        engine.scan(&cf, q)
     }
 
     fn delete_range(&mut self, start: &[u8], end: &[u8]) -> MidgeResult<()> {

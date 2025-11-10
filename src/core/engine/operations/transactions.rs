@@ -10,6 +10,7 @@ use crate::api::column_family::ColumnFamilyHandle;
 use crate::api::mutation::Mutation;
 use crate::api::transaction::Transaction;
 use crate::common::timestamp;
+use crate::core::transaction::EngineTransaction;
 use crate::core::wal_replay::wal_record_encoded_len;
 use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
@@ -218,10 +219,11 @@ impl MidgeEngine {
     pub fn begin_transaction(
         &self,
         _cf: &ColumnFamilyHandle,
-    ) -> MidgeResult<Transaction> {
+    ) -> MidgeResult<EngineTransaction> {
         let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
         let begin_sequence = self.seq.load(Ordering::SeqCst);
-        Ok(Transaction::new(txn_id, begin_sequence))
+        let txn = Transaction::new(txn_id, begin_sequence);
+        Ok(EngineTransaction::new(txn, self))
     }
 
     /// Commit a Transaction by applying its staged mutations to WAL and MemTable.
@@ -250,10 +252,13 @@ impl MidgeEngine {
     /// ```
     pub fn commit_transaction(
         &self,
-        txn: Transaction,
+        engine_txn: EngineTransaction,
         opts: crate::api::WriteOptions,
     ) -> MidgeResult<()> {
         self.check_read_only()?;
+
+        // Extract the internal transaction
+        let txn = engine_txn.txn;
 
         // Check if transaction is expired (timeout)
         if txn.is_expired() {

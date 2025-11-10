@@ -32,7 +32,7 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
 
     // Act
     let result =
-        engine.commit_transaction(Box::new(timeout_txn), cntryl_midge::WriteOptions::default());
+        engine.commit_transaction(timeout_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // No timeout mechanism currently
@@ -151,7 +151,7 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
 
     // Act
     let result =
-        engine.commit_transaction(Box::new(aborted_txn), cntryl_midge::WriteOptions::default());
+        engine.commit_transaction(aborted_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(

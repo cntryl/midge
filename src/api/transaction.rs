@@ -7,11 +7,10 @@ use std::time::Instant;
 
 /// Synchronous transaction object that stages mutations in-memory.
 ///
-/// This is a lightweight, crate-root Transaction intended to be used where
-/// a full internal engine transaction API is not available. It implements
-/// the common semantics: staged mutation list, last-write-wins local reads,
-/// commit/rollback lifecycle, with optional conflict detection.
-pub struct Transaction {
+/// This is an internal staging buffer used by EngineTransaction.
+/// Users should use the public Transaction type (which is EngineTransaction)
+/// returned by engine.begin_transaction().
+pub(crate) struct Transaction {
     txn_id: u64,
     begin_sequence: u64,
     commit_sequence: Option<u64>,
@@ -399,8 +398,7 @@ impl Drop for Transaction {
     }
 }
 
-// Re-export common types so downstream code can `use cntryl_midge::Transaction;`
-pub use Transaction as Tx;
+// Transaction is now internal - users should use EngineTransaction (exported as Transaction in lib.rs)
 
 // Implement the public KvTransaction trait for the crate Transaction so that the
 // crate-local Transaction can be used wherever the generic KvTransaction trait
@@ -480,8 +478,8 @@ mod tests {
         let mut txn = Transaction::new(1, 100);
 
         // Act
-        txn.put(Bytes::from("key1"), Bytes::from("value1")).unwrap();
-        txn.put(Bytes::from("key2"), Bytes::from("value2")).unwrap();
+        txn.put(b"key1", b"value1").unwrap();
+        txn.put(b"key2", b"value2").unwrap();
 
         // Assert
         assert!(txn
@@ -529,9 +527,9 @@ mod tests {
         let mut txn = Transaction::new(1, 100);
 
         // Act
-        txn.put(Bytes::from("key"), Bytes::from("v1")).unwrap();
-        txn.put(Bytes::from("key"), Bytes::from("v2")).unwrap();
-        txn.put(Bytes::from("key"), Bytes::from("v3")).unwrap();
+        txn.put(b"key", b"v1").unwrap();
+        txn.put(b"key", b"v2").unwrap();
+        txn.put(b"key", b"v3").unwrap();
 
         // Assert
         assert_eq!(txn.write_set().len(), 1);
@@ -612,11 +610,11 @@ mod tests {
         let mut txn1 = Transaction::new(1, 100);
         let mut txn2 = Transaction::new(2, 100);
 
-        txn1.put(Bytes::from("key1"), Bytes::from("v1")).unwrap();
-        txn1.put(Bytes::from("key2"), Bytes::from("v2")).unwrap();
+        txn1.put(b"key1", b"v1").unwrap();
+        txn1.put(b"key2", b"v2").unwrap();
 
-        txn2.put(Bytes::from("key2"), Bytes::from("v3")).unwrap();
-        txn2.put(Bytes::from("key3"), Bytes::from("v4")).unwrap();
+        txn2.put(b"key2", b"v3").unwrap();
+        txn2.put(b"key3", b"v4").unwrap();
 
         // Act
         let has_conflict = txn1.has_write_conflict(txn2.write_set());
@@ -631,8 +629,8 @@ mod tests {
         let mut txn1 = Transaction::new(1, 100);
         let mut txn2 = Transaction::new(2, 100);
 
-        txn1.put(Bytes::from("key1"), Bytes::from("v1")).unwrap();
-        txn2.put(Bytes::from("key2"), Bytes::from("v2")).unwrap();
+        txn1.put(b"key1", b"v1").unwrap();
+        txn2.put(b"key2", b"v2").unwrap();
 
         // Act
         let has_conflict = txn1.has_write_conflict(txn2.write_set());
@@ -648,7 +646,7 @@ mod tests {
         let mut txn2 = Transaction::new(2, 100);
 
         txn1.delete(Bytes::from("key")).unwrap();
-        txn2.put(Bytes::from("key"), Bytes::from("value")).unwrap();
+        txn2.put(b"key", b"value").unwrap();
 
         // Act
         let has_conflict = txn1.has_write_conflict(txn2.write_set());
@@ -708,7 +706,7 @@ mod tests {
         let mut txn = Transaction::new(1, 100);
 
         // Act
-        txn.put(Bytes::from("key"), Bytes::from("value")).unwrap();
+        txn.put(b"key", b"value").unwrap();
 
         // Assert
         assert!(txn.current_memory > 0);
@@ -720,10 +718,10 @@ mod tests {
         let mut txn = Transaction::new(1, 100);
 
         // Act
-        txn.put(Bytes::from("k1"), Bytes::from("v1")).unwrap();
+        txn.put(b"k1", b"v1").unwrap();
         let mem1 = txn.current_memory;
 
-        txn.put(Bytes::from("k2"), Bytes::from("v2")).unwrap();
+        txn.put(b"k2", b"v2").unwrap();
         let mem2 = txn.current_memory;
 
         // Assert
@@ -775,7 +773,7 @@ mod tests {
     fn should_clear_staged_mutations_given_rollback() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
-        txn.put(Bytes::from("key"), Bytes::from("value")).unwrap();
+        txn.put(b"key", b"value").unwrap();
 
         // Act
         txn.rollback();
@@ -789,8 +787,8 @@ mod tests {
     fn should_return_staged_mutations_given_successful_commit() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
-        txn.put(Bytes::from("k1"), Bytes::from("v1")).unwrap();
-        txn.put(Bytes::from("k2"), Bytes::from("v2")).unwrap();
+        txn.put(b"k1", b"v1").unwrap();
+        txn.put(b"k2", b"v2").unwrap();
 
         // Act
         let mutations = txn.commit().expect("commit");
@@ -846,7 +844,7 @@ mod tests {
         let large_value = Bytes::from(vec![b'x'; 200]); // Larger than threshold
 
         // Act
-        txn.put(Bytes::from("key1"), large_value.clone()).unwrap();
+        txn.put(b"key1", &large_value).unwrap();
 
         // Assert
         assert_eq!(
@@ -877,8 +875,8 @@ mod tests {
         let value2 = Bytes::from(vec![b'b'; 20]);
 
         // Act
-        txn.put(Bytes::from("spilled_key"), value1.clone()).unwrap();
-        txn.put(Bytes::from("memory_key"), value2.clone()).unwrap();
+        txn.put(b"spilled_key", &value1).unwrap();
+        txn.put(b"memory_key", &value2).unwrap();
         let mutations = txn.commit().unwrap();
 
         // Assert
@@ -903,7 +901,7 @@ mod tests {
         let large_value = Bytes::from(vec![b'x'; 100]);
 
         // Act
-        txn.put(Bytes::from("key"), large_value).unwrap();
+        txn.put(b"key", &large_value).unwrap();
 
         let spill_path = txn.spill_file_paths()[0].to_path_buf();
         assert!(spill_path.exists(), "Spill file should exist before commit");
@@ -925,7 +923,7 @@ mod tests {
         let large_value = Bytes::from(vec![b'x'; 100]);
 
         // Act
-        txn.put(Bytes::from("key"), large_value).unwrap();
+        txn.put(b"key", &large_value).unwrap();
 
         let spill_path = txn.spill_file_paths()[0].to_path_buf();
         assert!(
@@ -955,21 +953,21 @@ mod tests {
         let large_value = Bytes::from(vec![b'x'; 150]);
 
         // Act
-        txn.put(Bytes::from("key1"), large_value.clone()).unwrap();
+        txn.put(b"key1", &large_value).unwrap();
         assert_eq!(
             txn.spill_file_count(),
             1,
             "Should have one spill file after first write"
         );
 
-        txn.put(Bytes::from("key2"), large_value.clone()).unwrap();
+        txn.put(b"key2", &large_value).unwrap();
         assert_eq!(
             txn.spill_file_count(),
             2,
             "Should have two spill files after second write"
         );
 
-        txn.put(Bytes::from("key3"), large_value.clone()).unwrap();
+        txn.put(b"key3", &large_value).unwrap();
 
         // Assert
         assert_eq!(txn.spill_file_count(), 3, "Should have three spill files");
@@ -995,12 +993,12 @@ mod tests {
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
         // Act
-        txn.put(Bytes::from("key1"), Bytes::from(vec![b'a'; 100]))
+        txn.put(b"key1", &vec![b'a'; 100])
             .unwrap(); // Spill
-        txn.put(Bytes::from("key2"), Bytes::from("small")).unwrap(); // Memory
-        txn.put(Bytes::from("key3"), Bytes::from(vec![b'b'; 100]))
+        txn.put(b"key2", b"small").unwrap(); // Memory
+        txn.put(b"key3", &vec![b'b'; 100])
             .unwrap(); // Spill
-        txn.put(Bytes::from("key4"), Bytes::from("tiny")).unwrap(); // Memory
+        txn.put(b"key4", b"tiny").unwrap(); // Memory
 
         let mutations = txn.commit().unwrap();
 
@@ -1022,7 +1020,7 @@ mod tests {
         {
             let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
             let large_value = Bytes::from(vec![b'x'; 100]);
-            txn.put(Bytes::from("key"), large_value).unwrap();
+            txn.put(b"key", &large_value).unwrap();
 
             spill_path = txn.spill_file_paths()[0].to_path_buf();
             assert!(spill_path.exists(), "Spill file should exist before drop");
@@ -1043,10 +1041,10 @@ mod tests {
         let memory_threshold = 50;
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
-        txn.put(Bytes::from("key1"), Bytes::from(vec![b'a'; 100]))
+        txn.put(b"key1", &vec![b'a'; 100])
             .unwrap();
         txn.delete(Bytes::from("key2")).unwrap(); // Small, stays in memory
-        txn.put(Bytes::from("key3"), Bytes::from(vec![b'b'; 100]))
+        txn.put(b"key3", &vec![b'b'; 100])
             .unwrap();
 
         // Act
@@ -1066,7 +1064,7 @@ mod tests {
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
         // Act
-        txn.put(Bytes::from("key1"), Bytes::from(vec![b'a'; 100]))
+        txn.put(b"key1", &vec![b'a'; 100])
             .unwrap();
         txn.delete_range(Bytes::from("start"), Bytes::from("end"))
             .unwrap();

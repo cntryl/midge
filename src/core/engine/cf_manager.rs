@@ -298,14 +298,10 @@ impl MidgeEngine {
         let cf_id = DEFAULT_CF_ID.as_u32();
 
         let ops = self.merge_operators.read();
-        let merge_op = ops.get(&cf_id);
-
-        if merge_op.is_none() {
+        let Some(merge_op) = ops.get(&cf_id) else {
             // No merge operator registered - can't resolve
             return Ok(None);
-        }
-
-        let merge_op = merge_op.unwrap();
+        };
 
         // Collect merge operands and base value
         let mut operands: Vec<Bytes> = Vec::new();

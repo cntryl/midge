@@ -139,9 +139,11 @@ impl TransactionManager {
                 if let Some(neighbors) = inner.wait_for.get(&node) {
                     for &n in neighbors {
                         if path.contains(&n) {
-                            let idx = path.iter().position(|&x| x == n).unwrap();
+                            let idx = path.iter().position(|&x| x == n)
+                                .expect("position should exist since path.contains returned true");
                             let cycle = path[idx..].to_vec();
-                            let victim = *cycle.iter().max().unwrap();
+                            let victim = *cycle.iter().max()
+                                .expect("cycle should not be empty");
                             return Some((victim, cycle));
                         }
                         let mut next = path.clone();

@@ -52,9 +52,11 @@ pub mod wal;
 pub use crate::api::{
     BytesAppendOperator, ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, CompactionStyle,
     CompressionType, DynKvStore, DynMergeOperator, IntegerAddOperator, KvStore, KvTransaction,
-    MergeOperator, Mutation, MutationOp, Query, Snapshot, StringAppendOperator, Transaction,
+    MergeOperator, Mutation, MutationOp, Query, Snapshot, StringAppendOperator,
     WriteBatch, WriteOptions, DEFAULT_CF_ID, DEFAULT_CF_NAME,
 };
+// Export EngineTransaction as the public Transaction type
+pub use crate::core::transaction::EngineTransaction as Transaction;
 // Re-export the engine API from the new `core` location for backwards compatibility
 pub use crate::core::engine::{CasResult, InsertResult, MidgeEngine};
 pub use crate::core::metrics::PerformanceMetrics;

@@ -224,9 +224,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         // can target any CF via the EngineTransaction methods
         let txn_id = self.engine.txn_id.fetch_add(1, Ordering::SeqCst);
         let begin_sequence = self.engine.seq.load(Ordering::SeqCst);
-        let txn = crate::api::Transaction::new(txn_id, begin_sequence);
+        let txn = crate::api::transaction::Transaction::new(txn_id, begin_sequence);
         let engine_txn =
-            crate::core::transaction::EngineTransaction::new(txn, Arc::clone(&self.engine));
+            crate::core::transaction::EngineTransaction::from_arc(txn, Arc::clone(&self.engine));
         Ok(Box::new(engine_txn))
     }
 
