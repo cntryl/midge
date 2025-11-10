@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tracing::warn;
 
-use crate::api::column_family::{ColumnFamilyId, DEFAULT_CF_ID};
+use crate::api::column_family::ColumnFamilyId;
 use crate::error::{MidgeError, MidgeResult};
 use crate::core::memtable::MemTable;
 use crate::core::metrics::Metrics;
@@ -46,11 +46,11 @@ pub struct MidgeEngine {
     /// Performance metrics for real-time monitoring and optimization
     pub(crate) performance_metrics: Arc<crate::core::metrics::PerformanceMetrics>,
     /// Background flush coordinator
-    flush_coordinator: crate::core::FlushCoordinator,
+    pub(crate) flush_coordinator: crate::core::FlushCoordinator,
     /// Background compaction coordinator (optional - may be disabled)
     pub(crate) compaction_coordinator: Option<crate::core::CompactionCoordinator>,
     pub(crate) merge_operators: RwLock<HashMap<u32, crate::api::DynMergeOperator>>,
-    cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
+    pub(crate) cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     /// Database lock to prevent concurrent writers. Held for RAII - released on drop.
     #[allow(dead_code)]
     db_lock: Option<Box<dyn crate::core::locking::DbLock>>,
@@ -485,7 +485,7 @@ impl MidgeEngine {
         f(&mt)
     }
 
-    fn with_default_memtable_mut<F, R>(&self, f: F) -> R
+    pub(crate) fn with_default_memtable_mut<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&MemTable) -> R,
     {
@@ -541,124 +541,10 @@ impl MidgeEngine {
         replay_wal_to_memtables(&mut cf_map, records)
     }
 
-    /// Rotate WAL: close current writer and create a new one using wal_factory.
-    /// Drains the specified column family's memtable and queues it for background flush.
-    pub(crate) fn rollover_and_queue_flush(&self, cf_id: ColumnFamilyId) -> MidgeResult<u64> {
-        crate::core::flush::rollover_and_queue_flush(
-            cf_id,
-            &self.seq,
-            self.wal_coordinator.writer_lock(),
-            self.wal_coordinator.factory(),
-            &self.db_path.join("wal"),
-            || {
-                if cf_id == DEFAULT_CF_ID {
-                    let entries = self.with_default_memtable_mut(|mt| mt.drain_with_meta_internal());
-                    let range_tombstones =
-                        self.with_default_memtable_mut(|mt| mt.drain_range_tombstones());
-                    (entries, range_tombstones)
-                } else {
-                    // For non-default CFs, use with_cf_memtable_mut
-                    let entries = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_with_meta_internal()).unwrap_or_default();
-                    let range_tombstones = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_range_tombstones()).unwrap_or_default();
-                    (entries, range_tombstones)
-                }
-            },
-            &self.flush_coordinator,
-        )
-    }
-
-    /// Flush memtable to SST for the specified column family.
-    pub(crate) fn flush_memtable_to_sst(&self, cf_id: ColumnFamilyId) -> MidgeResult<(PathBuf, crate::manifest::FileMeta)> {
-        // Resolve any pending merge operations before flushing
-        self.resolve_memtable_merges(cf_id)?;
-
-        // Get CF config
-        let cf_config = self.cf_set.get_cf_config(cf_id).unwrap_or_default();
-
-        crate::core::flush::flush_memtable_to_sst(
-            cf_id,
-            || {
-                if cf_id == DEFAULT_CF_ID {
-                    let entries = self.with_default_memtable_mut(|mt| mt.drain_with_meta_internal());
-                    let range_tombstones =
-                        self.with_default_memtable_mut(|mt| mt.drain_range_tombstones());
-                    (entries, range_tombstones)
-                } else {
-                    let entries = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_with_meta_internal()).unwrap_or_default();
-                    let range_tombstones = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_range_tombstones()).unwrap_or_default();
-                    (entries, range_tombstones)
-                }
-            },
-            crate::core::flush::FlushConfig {
-                sst_factory: &self.sst_factory,
-                compression: cf_config.compression.into(),
-                block_size: self.block_size,
-                bloom_bits_per_key: cf_config.bloom_bits_per_key,
-                sst_dir: &self.sst_dir,
-                metrics: &self.metrics,
-                cloud_sst_mgr: self.cloud_sst_manager.as_ref().map(|m| m.as_ref()),
-            },
-        )
-    }
-
-    /// Resolve all pending merge operations in the memtable before flushing.
-    /// This combines all merge operands for each key into a single resolved value.
-    fn resolve_memtable_merges(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
-        // Get all keys from memtable
-        let all_keys = if cf_id == DEFAULT_CF_ID {
-            self.with_default_memtable(|mt| mt.get_all_keys())
-        } else {
-            self.with_cf_memtable(cf_id, |mt| mt.get_all_keys()).unwrap_or_default()
-        };
-
-        // For each key, check if it has merge operands and resolve them
-        for key in all_keys.iter() {
-            let versions = if cf_id == DEFAULT_CF_ID {
-                self.with_default_memtable(|mt| mt.get_versions_for_merge(key, u64::MAX))
-            } else {
-                self.with_cf_memtable(cf_id, |mt| mt.get_versions_for_merge(key, u64::MAX)).unwrap_or_default()
-            };
-
-            if versions.is_empty() {
-                continue;
-            }
-
-            // Check if the latest operation is a Delete or Put - if so, don't resolve
-            // (only resolve if we have Merge operations)
-            if let Some((_value, _exp, op_type)) = versions.first() {
-                if *op_type == crate::core::skiplist::OpType::Delete
-                    || *op_type == crate::core::skiplist::OpType::Put
-                {
-                    continue; // Skip non-merge operations
-                }
-            }
-
-            // Check if there are any merge operations
-            let has_merges = versions
-                .iter()
-                .any(|(_, _, op)| *op == crate::core::skiplist::OpType::Merge);
-            if !has_merges {
-                continue; // Skip keys without merges
-            }
-
-            // Resolve the merges
-            if let Some(resolved_value) = self.resolve_merges(key, versions)? {
-                // Replace all versions with a single Put containing the resolved value
-                let seq = self.seq.load(Ordering::SeqCst);
-                if cf_id == DEFAULT_CF_ID {
-                    self.with_default_memtable_mut(|mt| {
-                        mt.put_with_seq_and_exp(key, &resolved_value, seq, None);
-                    });
-                } else {
-                    self.with_cf_memtable_mut(cf_id, |mt| {
-                        mt.put_with_seq_and_exp(key, &resolved_value, seq, None);
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    }
+    // ==================== Flush Coordination ====================
+    // rollover_and_queue_flush() method moved to coordination/flush_manager.rs
+    // flush_memtable_to_sst() method moved to coordination/flush_manager.rs
+    // resolve_memtable_merges() method moved to coordination/flush_manager.rs
 
     // flush() method moved to operations/maintenance.rs
     // compact_level() method moved to operations/maintenance.rs

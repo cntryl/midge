@@ -337,6 +337,23 @@ src/core/
 - **Lines Migrated**: 356 lines (7 methods + supporting code) moved to cf_manager.rs
 - **Cumulative engine.rs Reduction**: 2,673 → 936 lines (65.0% reduction from original)
 
+#### Phase 1.3: Flush Coordination Extraction (COMPLETED)
+- **Status**: ✅ Done
+- **Files Created**:
+  - `src/core/engine/coordination/flush_manager.rs` (147 lines) - Flush coordination logic
+    - `rollover_and_queue_flush()` - Memtable rollover and flush queueing
+    - `flush_memtable_to_sst()` - Convert memtable to SST file
+    - `resolve_memtable_merges()` - Resolve pending merges before flush
+  - `src/core/engine/coordination/mod.rs` - Coordination subsystems module
+- **Files Modified**:
+  - `src/core/engine/engine.rs` (936 → 832 lines, 11.1% reduction)
+  - `src/core/engine/mod.rs` - Added coordination module declaration
+  - Made `flush_coordinator`, `cloud_sst_manager`, `with_default_memtable_mut()` pub(crate) for flush_manager access
+- **Key Achievement**: Isolated flush coordination logic from main engine, improving modularity
+- **Tests**: All 1,104 tests passing after extraction
+- **Lines Migrated**: 104 lines (3 methods) moved to coordination/flush_manager.rs
+- **Cumulative engine.rs Reduction**: 2,673 → 832 lines (68.9% reduction from original)
+
 #### Phase 2.2: Lock Module Split & Deduplication (COMPLETED)
 - **Status**: ✅ Done
 - **Files Created**:

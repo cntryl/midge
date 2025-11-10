@@ -11,6 +11,7 @@
 
 mod cf_manager;
 mod column_family;
+mod coordination;
 #[allow(clippy::module_inception)]
 mod engine;
 pub(crate) mod factory;
