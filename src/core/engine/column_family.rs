@@ -27,23 +27,23 @@ use crate::error::MidgeResult;
 /// 2. Create new empty active memtable
 /// 3. Enqueue flush job for oldest immutable
 /// 4. If immutable queue is full, stall writes until flush completes
-pub(super) struct ColumnFamily {
-    pub(super) id: ColumnFamilyId,
-    pub(super) name: String,
-    pub(super) config: ColumnFamilyConfig,
+pub(crate) struct ColumnFamily {
+    pub(crate) id: ColumnFamilyId,
+    pub(crate) name: String,
+    pub(crate) config: ColumnFamilyConfig,
 
     /// Active writable memtable (wrapped for atomic replacement during freeze)
-    pub(super) memtable: Arc<RwLock<MemTable>>,
+    pub(crate) memtable: Arc<RwLock<MemTable>>,
 
     /// Queue of frozen memtables waiting to be flushed (oldest first)
-    pub(super) immutable_memtables: Arc<Mutex<VecDeque<MemTable>>>,
+    pub(crate) immutable_memtables: Arc<Mutex<VecDeque<MemTable>>>,
 
     /// Current number of immutable memtables (cached for fast check without locking)
-    pub(super) immutable_count: AtomicUsize,
+    pub(crate) immutable_count: AtomicUsize,
 }
 
 impl ColumnFamily {
-    pub(super) fn new(id: ColumnFamilyId, name: String, config: ColumnFamilyConfig) -> Self {
+    pub(crate) fn new(id: ColumnFamilyId, name: String, config: ColumnFamilyConfig) -> Self {
         Self {
             id,
             name,
@@ -54,12 +54,12 @@ impl ColumnFamily {
         }
     }
 
-    pub(super) fn handle(&self) -> ColumnFamilyHandle {
+    pub(crate) fn handle(&self) -> ColumnFamilyHandle {
         ColumnFamilyHandle::new(self.id, self.name.clone())
     }
 
     /// Check if the active memtable has exceeded its size limit.
-    pub(super) fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         let mt = self.memtable.read();
         mt.is_full(self.config.memtable_max_bytes)
     }
@@ -68,7 +68,7 @@ impl ColumnFamily {
     ///
     /// Returns `true` if successful, `false` if the immutable queue is full.
     /// When false is returned, writes should be stalled until a flush completes.
-    pub(super) fn try_freeze_memtable(&self) -> bool {
+    pub(crate) fn try_freeze_memtable(&self) -> bool {
         // Check if immutable queue is already at capacity (fast path without locking)
         let current_count = self.immutable_count.load(Ordering::Acquire);
         if current_count >= self.config.max_immutable_memtables {
@@ -110,7 +110,7 @@ impl ColumnFamily {
     /// background flush coordination. Currently, flush directly accesses
     /// the immutable queue.
     #[allow(dead_code)]
-    pub(super) fn pop_immutable(&self) -> Option<MemTable> {
+    pub(crate) fn pop_immutable(&self) -> Option<MemTable> {
         let mut immutables = self.immutable_memtables.lock();
         if let Some(mt) = immutables.pop_front() {
             self.immutable_count.fetch_sub(1, Ordering::Release);
@@ -121,12 +121,12 @@ impl ColumnFamily {
     }
 
     /// Get the current number of immutable memtables waiting to be flushed.
-    pub(super) fn immutable_count(&self) -> usize {
+    pub(crate) fn immutable_count(&self) -> usize {
         self.immutable_count.load(Ordering::Acquire)
     }
 
     /// Check if writes should be stalled due to too many immutable memtables.
-    pub(super) fn should_stall_writes(&self) -> bool {
+    pub(crate) fn should_stall_writes(&self) -> bool {
         self.immutable_count() >= self.config.max_immutable_memtables
     }
 }
@@ -137,18 +137,18 @@ impl ColumnFamily {
 /// races during CF registration (checking name/id availability and inserting into two maps).
 ///
 /// Provides lookup by ID or name, and tracks the next available CF ID.
-pub(super) struct ColumnFamilySet {
-    pub(super) cfs: Arc<DashMap<u32, Arc<ColumnFamily>>>,
-    pub(super) name_to_id: Arc<DashMap<String, u32>>,
-    pub(super) next_cf_id: AtomicU32,
+pub(crate) struct ColumnFamilySet {
+    pub(crate) cfs: Arc<DashMap<u32, Arc<ColumnFamily>>>,
+    pub(crate) name_to_id: Arc<DashMap<String, u32>>,
+    pub(crate) next_cf_id: AtomicU32,
 
     /// Serializes column family creation to prevent race conditions.
     /// Protects the check-then-insert pattern across two maps (cfs and name_to_id).
-    pub(super) create_lock: Arc<Mutex<()>>,
+    pub(crate) create_lock: Arc<Mutex<()>>,
 }
 
 impl ColumnFamilySet {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let set = Self {
             cfs: Arc::new(DashMap::new()),
             name_to_id: Arc::new(DashMap::new()),
@@ -168,7 +168,7 @@ impl ColumnFamilySet {
         set
     }
 
-    pub(super) fn create_cf(
+    pub(crate) fn create_cf(
         &self,
         id: ColumnFamilyId,
         name: String,
@@ -208,19 +208,19 @@ impl ColumnFamilySet {
     }
 
     #[inline]
-    pub(super) fn get_cf(&self, id: ColumnFamilyId) -> Option<Arc<ColumnFamily>> {
+    pub(crate) fn get_cf(&self, id: ColumnFamilyId) -> Option<Arc<ColumnFamily>> {
         self.cfs.get(&id.as_u32()).map(|r| r.value().clone())
     }
 
     #[inline]
-    pub(super) fn get_cf_by_name(&self, name: &str) -> Option<Arc<ColumnFamily>> {
+    pub(crate) fn get_cf_by_name(&self, name: &str) -> Option<Arc<ColumnFamily>> {
         self.name_to_id
             .get(name)
             .and_then(|id| self.cfs.get(id.value()).map(|r| r.value().clone()))
     }
 
     #[inline]
-    pub(super) fn default_cf(&self) -> Arc<ColumnFamily> {
+    pub(crate) fn default_cf(&self) -> Arc<ColumnFamily> {
         // SAFETY: Default CF is always created in ColumnFamilySet::new()
         // This is now truly infallible by construction
         self.cfs
@@ -231,7 +231,7 @@ impl ColumnFamilySet {
 
     /// Get the configuration for a column family.
     #[inline]
-    pub(super) fn get_cf_config(&self, id: ColumnFamilyId) -> Option<ColumnFamilyConfig> {
+    pub(crate) fn get_cf_config(&self, id: ColumnFamilyId) -> Option<ColumnFamilyConfig> {
         self.get_cf(id).map(|cf| cf.config.clone())
     }
 }

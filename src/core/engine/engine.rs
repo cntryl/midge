@@ -13,19 +13,14 @@ use crate::api::column_family::{
 };
 use crate::error::{MidgeError, MidgeResult};
 
-use crate::api::mutation::Mutation;
-pub use crate::api::snapshot::Snapshot;
-use crate::api::transaction::Transaction;
 use crate::common::timestamp;
 use crate::core::memtable::MemTable;
 use crate::core::metrics::Metrics;
-use crate::core::wal_replay::{replay_wal_to_memtables, wal_record_encoded_len};
+use crate::core::wal_replay::replay_wal_to_memtables;
 use crate::manifest::Manifest;
-use crate::wal::WalOpKind;
 
 // Import from sibling modules
 use super::column_family::{ColumnFamily, ColumnFamilySet};
-pub use super::types::{CasResult, InsertResult};
 
 /// Core LSM-tree storage engine with WAL, memtables, SSTs, and background compaction.
 ///
@@ -482,13 +477,6 @@ impl MidgeEngine {
                     .insert(sst_name.to_string(), metadata.sparse_index);
             }
         }
-    }
-
-    /// Remove caches for deleted SST files
-    /// Called after compaction to clean up caches for old SST files
-    fn remove_caches_for_sst(&self, sst_name: &str) {
-        self.bloom_cache.remove(sst_name);
-        self.sparse_index_cache.remove(sst_name);
     }
 
     // Helper methods for accessing default CF MemTable (now lock-free!)
