@@ -635,10 +635,6 @@ impl EngineTransaction {
     ) -> Self {
         Self { txn, engine }
     }
-
-    pub(crate) fn into_inner(self) -> Transaction {
-        self.txn
-    }
 }
 
 // Implement the public KvTransaction trait for EngineTransaction
@@ -695,6 +691,13 @@ impl super::kv_store::KvTransaction for EngineTransaction {
     fn merge(&mut self, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
         self.txn
             .merge(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
+    }
+
+    fn into_transaction(
+        self: Box<Self>,
+    ) -> Result<Transaction, Box<dyn super::kv_store::KvTransaction>> {
+        // Extract the transaction from EngineTransaction
+        Ok(self.txn)
     }
 }
 
@@ -757,6 +760,13 @@ impl super::kv_store::KvTransaction for Transaction {
             Bytes::copy_from_slice(key),
             Bytes::copy_from_slice(value),
         )
+    }
+
+    fn into_transaction(
+        self: Box<Self>,
+    ) -> Result<Transaction, Box<dyn super::kv_store::KvTransaction>> {
+        // This is already a Transaction, so just return it
+        Ok(*self)
     }
 }
 

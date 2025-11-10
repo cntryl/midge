@@ -244,12 +244,10 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
     ) -> MidgeResult<()> {
         self.engine.check_read_only()?;
 
-        // Downcast to EngineTransaction to extract the Transaction
-        let engine_txn = (txn as Box<dyn std::any::Any>)
-            .downcast::<crate::api::transaction::EngineTransaction>()
-            .map_err(|_| MidgeError::internal("Failed to downcast transaction"))?;
-
-        let txn = engine_txn.into_inner();
+        // Extract the Transaction using the trait method (no downcasting!)
+        let txn = txn
+            .into_transaction()
+            .map_err(|_| MidgeError::internal("Transaction type not supported"))?;
 
         // Check if transaction is expired (timeout)
         if txn.is_expired() {
@@ -325,12 +323,10 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         &self,
         txn: Box<dyn crate::api::kv_store::KvTransaction>,
     ) -> MidgeResult<()> {
-        // Downcast to EngineTransaction to extract the Transaction
-        let engine_txn = (txn as Box<dyn std::any::Any>)
-            .downcast::<crate::api::transaction::EngineTransaction>()
-            .map_err(|_| MidgeError::internal("Failed to downcast transaction"))?;
-
-        let txn = engine_txn.into_inner();
+        // Extract the Transaction using the trait method (no downcasting!)
+        let txn = txn
+            .into_transaction()
+            .map_err(|_| MidgeError::internal("Transaction type not supported"))?;
 
         // Abort the transaction in the transaction manager
         self.engine.txn_manager.abort(txn.txn_id());
