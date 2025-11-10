@@ -226,19 +226,19 @@ impl MidgeEngine {
             .write_set()
             .clone()
             .into_iter()
-            .map(|(cf, key)| crate::core::transaction_manager::Key::new(cf, key))
+            .map(|(cf, key)| crate::core::transaction::Key::new(cf, key))
             .collect::<HashSet<_>>();
         let read_set = txn
             .read_set()
             .clone()
             .into_iter()
-            .map(|(cf, key)| crate::core::transaction_manager::Key::new(cf, key))
+            .map(|(cf, key)| crate::core::transaction::Key::new(cf, key))
             .collect::<HashSet<_>>();
         let read_versions = txn
             .read_versions()
             .clone()
             .into_iter()
-            .map(|((cf, key), v)| (crate::core::transaction_manager::Key::new(cf, key), v))
+            .map(|((cf, key), v)| (crate::core::transaction::Key::new(cf, key), v))
             .collect::<HashMap<_, _>>();
 
         if let Err(e) = self.txn_manager.begin(

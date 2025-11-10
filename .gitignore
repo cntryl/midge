@@ -120,6 +120,7 @@ test-results/
 # Keep these for backwards compatibility with older checkouts
 midge_db/
 .midge_dev/
+test_db_*/
 
 tools/
 .docker/bench/results

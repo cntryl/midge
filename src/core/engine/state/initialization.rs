@@ -320,7 +320,7 @@ pub fn open_with_factories(
         cloud_sst_manager,
         db_lock,
         is_read_only: AtomicBool::new(opts.read_only),
-        txn_manager: crate::transaction_manager::TransactionManager::new(),
+        txn_manager: crate::core::transaction::TransactionManager::new(),
         flush_mutex: Mutex::new(()),
         manifest_cache,
         bloom_cache,

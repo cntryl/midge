@@ -56,7 +56,7 @@ pub struct MidgeEngine {
     /// Dynamic read-only flag that can be set during runtime (e.g., when lock renewal fails)
     pub(super) is_read_only: AtomicBool,
     /// Transaction manager for ACID guarantees
-    pub(crate) txn_manager: crate::transaction_manager::TransactionManager,
+    pub(crate) txn_manager: crate::core::transaction::TransactionManager,
     /// Flush mutex to serialize concurrent flush operations and prevent file conflicts
     pub(crate) flush_mutex: Mutex<()>,
     /// Cached manifest for fast read access without disk I/O
