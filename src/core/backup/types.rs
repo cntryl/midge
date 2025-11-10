@@ -1,4 +1,4 @@
-/// Common types and options for backup and restore operations.
+//! Common types and options for backup and restore operations.
 
 use serde::{Deserialize, Serialize};
 

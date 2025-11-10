@@ -1,4 +1,4 @@
-/// Version merging and deduplication logic.
+//! Version merging and deduplication logic.
 
 use super::types::CompactionVersion;
 

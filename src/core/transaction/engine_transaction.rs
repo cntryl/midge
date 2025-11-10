@@ -52,16 +52,6 @@ impl EngineTransaction {
             engine: Arc::into_raw(engine),
         }
     }
-
-    /// Get the transaction ID (internal)
-    pub(crate) fn txn_id(&self) -> u64 {
-        self.txn.txn_id()
-    }
-
-    /// Get the begin sequence number (internal)
-    pub(crate) fn begin_seq(&self) -> u64 {
-        self.txn.begin_seq()
-    }
 }
 
 // Implement the public KvTransaction trait for EngineTransaction

@@ -198,7 +198,7 @@ impl MidgeEngine {
     /// # Arguments
     ///
     /// * `_cf` - Column family handle (accepted for compatibility but transactions
-    ///           work across all column families)
+    ///   work across all column families)
     ///
     /// # Returns
     ///

@@ -14,11 +14,9 @@ use std::time::{Duration, Instant};
 /// - Manage commit/rollback lifecycle
 ///
 /// Not user-facing; wrapped by `EngineTransaction`.
-pub(crate) struct Transaction {
+pub struct Transaction {
     txn_id: u64,
     begin_seq: u64,
-    commit_seq: Option<u64>,
-    created_at: Instant,
     deadline: Option<Instant>,
     completed: bool,
 
@@ -46,8 +44,6 @@ impl Transaction {
         Self {
             txn_id,
             begin_seq,
-            commit_seq: None,
-            created_at,
             deadline,
             completed: false,
             staged: Vec::new(),
@@ -63,8 +59,7 @@ impl Transaction {
     // -------------------------------------------------------------------------
     pub(crate) fn txn_id(&self) -> u64 { self.txn_id }
     pub(crate) fn begin_seq(&self) -> u64 { self.begin_seq }
-    pub(crate) fn commit_seq(&self) -> Option<u64> { self.commit_seq }
-    pub(crate) fn is_expired(&self) -> bool { self.deadline.map_or(false, |d| Instant::now() > d) }
+    pub(crate) fn is_expired(&self) -> bool { self.deadline.is_some_and(|d| Instant::now() > d) }
 
     // -------------------------------------------------------------------------
     // Conflict tracking
@@ -78,12 +73,15 @@ impl Transaction {
     pub(crate) fn write_set(&self) -> &HashSet<(u32, Bytes)> { self.conflicts.write_set() }
     pub(crate) fn read_set(&self) -> &HashSet<(u32, Bytes)> { self.conflicts.read_set() }
     pub(crate) fn read_versions(&self) -> &HashMap<(u32, Bytes), u64> { self.conflicts.read_versions() }
+    #[cfg(test)]
     pub(crate) fn read_version(&self, cf: u32, key: &[u8]) -> Option<u64> {
         self.conflicts.read_version(cf, key)
     }
+    #[cfg(test)]
     pub(crate) fn has_write_conflict(&self, other: &HashSet<(u32, Bytes)>) -> bool {
         self.conflicts.has_write_conflict(other)
     }
+
 
     // -------------------------------------------------------------------------
     // Spill management
@@ -250,10 +248,6 @@ impl Transaction {
                 _ => None,
             }
         })
-    }
-
-    pub fn exists_local(&self, cf: u32, key: &[u8]) -> bool {
-        matches!(self.get_local(cf, key), Some(Some(_)))
     }
 
     // -------------------------------------------------------------------------
@@ -635,7 +629,6 @@ mod tests {
 
         // Assert
         assert_eq!(txn.begin_seq(), begin_seq);
-        assert_eq!(txn.commit_seq(), None);
     }
 
     #[test]
