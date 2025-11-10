@@ -22,9 +22,9 @@ use crate::common::error::{MidgeError, MidgeResult};
 use crate::core::engine::column_family::ColumnFamilySet;
 use crate::core::engine::engine::MidgeEngine;
 use crate::core::flush::FlushWorkerConfig;
+use crate::core::locking::DbLock;
 use crate::core::manifest::Manifest;
 use crate::core::metrics::Metrics;
-use crate::lock::DbLock;
 use crate::wal::WalFile;
 
 /// Acquire database lock to prevent concurrent writers.
@@ -33,15 +33,15 @@ pub(crate) fn acquire_db_lock(
     db_path: &Path,
     read_only: bool,
     mem_mode: bool,
-) -> MidgeResult<Option<Box<dyn crate::lock::DbLock>>> {
+) -> MidgeResult<Option<Box<dyn crate::core::locking::DbLock>>> {
     if !read_only && !mem_mode {
         let ttl_ms = 5000; // 5 second TTL
-        let mut lock = Box::new(crate::lock::LocalFileLock::new(db_path, ttl_ms));
+        let mut lock = Box::new(crate::core::locking::LocalFileLock::new(db_path, ttl_ms));
         lock.try_acquire(std::time::Duration::from_secs(10))
             .map_err(|e| MidgeError::InvalidConfig {
                 message: format!("Failed to acquire database lock: {}", e),
             })?;
-        Ok(Some(lock as Box<dyn crate::lock::DbLock>))
+        Ok(Some(lock as Box<dyn crate::core::locking::DbLock>))
     } else {
         Ok(None)
     }

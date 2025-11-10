@@ -67,7 +67,7 @@ pub struct MidgeEngine {
     cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     /// Database lock to prevent concurrent writers. Held for RAII - released on drop.
     #[allow(dead_code)]
-    db_lock: Option<Box<dyn crate::lock::DbLock>>,
+    db_lock: Option<Box<dyn crate::core::locking::DbLock>>,
     /// Dynamic read-only flag that can be set during runtime (e.g., when lock renewal fails)
     is_read_only: AtomicBool,
     /// Transaction manager for ACID guarantees

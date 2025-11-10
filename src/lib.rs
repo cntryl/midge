@@ -41,7 +41,7 @@ pub mod api;
 pub use crate::core::backup;
 pub mod cloud;
 pub mod health;
-pub use crate::core::lock;
+pub use crate::core::locking;
 pub use crate::core::manifest;
 pub mod sst;
 pub use crate::core::storage_mode;

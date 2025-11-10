@@ -191,7 +191,7 @@ mod tests {
 
     const CF: u32 = 1;
     fn k(name: &str) -> Key {
-        Key::new(CF, Bytes::from(name))
+        Key::new(CF, Bytes::from(name.to_string()))
     }
 
     // =========================================================================

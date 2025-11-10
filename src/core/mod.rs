@@ -9,7 +9,7 @@ pub mod compaction;
 pub mod engine;
 pub mod flush;
 pub mod flush_coordinator;
-pub mod lock;
+pub mod locking;
 pub mod manifest;
 
 pub mod memtable;
@@ -25,7 +25,7 @@ pub mod wal_replay;
 pub use compaction::CompactionCoordinator;
 pub use engine::*;
 pub use flush_coordinator::FlushCoordinator;
-pub use lock::*;
+pub use locking::{CloudLeaseLock, DbLock, LocalFileLock, LockMeta};
 pub use manifest::*;
 pub use storage_mode::*;
 pub use transaction_manager::*;
