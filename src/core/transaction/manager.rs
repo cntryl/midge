@@ -345,9 +345,9 @@ mod tests {
         for i in 0..1100 {
             let mut ws = HashSet::new();
             ws.insert(k(&format!("k{i}")));
-            tm.begin(i, i as u64, ws, HashSet::new(), HashMap::new())
+            tm.begin(i, i, ws, HashSet::new(), HashMap::new())
                 .unwrap();
-            tm.try_commit(i, 1000 + i as u64).unwrap();
+            tm.try_commit(i, 1000 + i).unwrap();
         }
 
         // Assert

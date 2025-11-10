@@ -5,7 +5,7 @@
 // Tests document expected behavior and will fail until features are implemented
 
 use bytes::Bytes;
-use cntryl_midge::{KvStore, KvTransaction};
+use cntryl_midge::KvTransaction;
 use std::sync::Arc;
 
 mod common;

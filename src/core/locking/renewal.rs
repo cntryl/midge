@@ -104,7 +104,7 @@ mod tests {
 
         // Assert
         let count = counter.load(Ordering::SeqCst);
-        assert!(count >= 2 && count <= 5, "Expected 2-5 renewals, got {}", count);
+        assert!((2..=5).contains(&count), "Expected 2-5 renewals, got {}", count);
 
         // Cleanup
         renewal.stop();
