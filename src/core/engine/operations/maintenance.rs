@@ -13,7 +13,7 @@
 //! - Consistency guarantees
 
 use crate::api::column_family::ColumnFamilyHandle;
-use crate::core::engine::engine::MidgeEngine;
+use crate::core::engine::core::MidgeEngine;
 use crate::core::manifest::Manifest;
 use crate::error::{MidgeError, MidgeResult};
 use std::sync::atomic::Ordering;

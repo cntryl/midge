@@ -13,8 +13,7 @@ mod adapters;
 mod cf_manager;
 mod column_family;
 mod coordination;
-#[allow(clippy::module_inception)]
-mod engine;
+mod core;
 pub(crate) mod factory;
 mod state;
 pub mod types;
@@ -28,7 +27,7 @@ pub use types::{CasResult, InsertResult};
 pub(crate) mod operations;
 
 // Re-export the engine and its public API
-pub use engine::*;
+pub use core::*;
 
 // Re-export Query and Snapshot from API
 pub use crate::api::query::Query;

@@ -20,7 +20,7 @@ use crate::api::column_family::{
 };
 use crate::common::error::{MidgeError, MidgeResult};
 use crate::core::engine::column_family::ColumnFamilySet;
-use crate::core::engine::engine::MidgeEngine;
+use crate::core::engine::core::MidgeEngine;
 use crate::core::flush::FlushWorkerConfig;
 use crate::core::locking::DbLock;
 use crate::core::manifest::Manifest;

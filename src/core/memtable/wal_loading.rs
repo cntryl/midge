@@ -6,7 +6,7 @@ use crate::core::skiplist::OpType;
 use crate::error::MidgeResult;
 use crate::wal::WalRecord;
 
-use super::memtable::MemTable;
+use super::core::MemTable;
 
 /// Load WAL records into a memtable.
 ///

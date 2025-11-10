@@ -17,7 +17,7 @@
 use crate::api::column_family::ColumnFamilyHandle;
 use crate::api::column_family::DEFAULT_CF_ID;
 use crate::common::timestamp;
-use crate::core::engine::engine::MidgeEngine;
+use crate::core::engine::core::MidgeEngine;
 use crate::error::MidgeResult;
 use crate::wal::WalOpKind;
 use bytes::Bytes;

@@ -280,8 +280,10 @@ mod tests {
     use std::sync::Arc;
 
     fn create_test_engine() -> Arc<MidgeEngine> {
-        let mut opts = crate::MidgeOptions::default();
-        opts.storage_mode = crate::StorageMode::Memory;
+        let opts = crate::MidgeOptions {
+            storage_mode: crate::StorageMode::Memory,
+            ..Default::default()
+        };
         Arc::new(MidgeEngine::open(opts).expect("Failed to create test engine"))
     }
 
@@ -361,9 +363,11 @@ mod tests {
     #[test]
     fn should_reject_operations_when_created_in_readonly_mode() {
         // Arrange
-        let mut opts = crate::MidgeOptions::default();
-        opts.storage_mode = crate::StorageMode::Memory;
-        opts.read_only = true;
+        let opts = crate::MidgeOptions {
+            storage_mode: crate::StorageMode::Memory,
+            read_only: true,
+            ..Default::default()
+        };
         let engine = Arc::new(MidgeEngine::open(opts).expect("Failed to create engine"));
 
         // Act

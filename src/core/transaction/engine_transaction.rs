@@ -10,7 +10,7 @@ use crate::api::kv_store::KvTransaction;
 use crate::core::engine::MidgeEngine;
 use crate::MidgeResult;
 
-use super::transaction::Transaction;
+use super::core::Transaction;
 
 /// Transaction wrapper that provides read access via engine reference.
 ///
