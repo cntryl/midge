@@ -15,9 +15,6 @@ pub(crate) mod merging;
 pub(crate) mod output_writer;
 pub(crate) mod types;
 
-#[cfg(test)]
-mod all_tests;
-
 // Re-export public API for backward compatibility
 pub use types::CompactionVersion;
 

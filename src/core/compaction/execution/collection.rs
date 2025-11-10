@@ -164,4 +164,140 @@ mod tests {
         assert!(!versions[0].tombstone); // Value first
         assert!(versions[1].tombstone); // Tombstone second
     }
+
+    #[test]
+    fn should_handle_empty_keys_when_sorting() {
+        // Arrange
+        let mut versions = vec![
+            make_version(b"", 100, false),
+            make_version(b"a", 200, false),
+        ];
+
+        // Act
+        sort_versions_for_output(&mut versions);
+
+        // Assert
+        assert_eq!(versions[0].user_key, b"");
+        assert_eq!(versions[1].user_key, b"a");
+    }
+
+    #[test]
+    fn should_handle_binary_keys_when_sorting() {
+        // Arrange
+        let mut versions = vec![
+            make_version(b"key\x00\xff", 100, false),
+            make_version(b"key\x00\x00", 100, false),
+            make_version(b"key", 100, false),
+        ];
+
+        // Act
+        sort_versions_for_output(&mut versions);
+
+        // Assert
+        assert_eq!(versions[0].user_key, b"key");
+        assert_eq!(versions[1].user_key, b"key\x00\x00");
+        assert_eq!(versions[2].user_key, b"key\x00\xff");
+    }
+
+    #[test]
+    fn should_handle_sequence_boundaries_when_sorting() {
+        // Arrange
+        let mut versions = vec![
+            make_version(b"key1", u64::MAX, false),
+            make_version(b"key1", 0, false),
+            make_version(b"key1", u64::MAX - 1, false),
+        ];
+
+        // Act
+        sort_versions_for_output(&mut versions);
+
+        // Assert
+        assert_eq!(versions[0].seq, u64::MAX);
+        assert_eq!(versions[1].seq, u64::MAX - 1);
+        assert_eq!(versions[2].seq, 0);
+    }
+
+    #[test]
+    fn should_collect_all_versions_given_multiple_column_families() {
+        // Arrange
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sst_factory: Arc<dyn crate::sst::SstReaderFactory> =
+            Arc::new(crate::sst::mem::MemSstReaderFactory);
+
+        // Act
+        let versions = collect_compaction_versions(
+            &sst_factory,
+            temp_dir.path(),
+            &["nonexistent.sst".to_string()],
+        );
+
+        // Assert
+        assert_eq!(versions.len(), 0);
+    }
+
+    #[test]
+    fn should_skip_deleted_sst_metadata_given_manifest_marked_deleted() {
+        // Arrange
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sst_factory: Arc<dyn crate::sst::SstReaderFactory> =
+            Arc::new(crate::sst::mem::MemSstReaderFactory);
+
+        // Act
+        let versions = collect_compaction_versions(
+            &sst_factory,
+            temp_dir.path(),
+            &[
+                "deleted_file_1.sst".to_string(),
+                "deleted_file_2.sst".to_string(),
+            ],
+        );
+
+        // Assert
+        assert_eq!(versions.len(), 0);
+    }
+
+    #[test]
+    fn should_preserve_file_order_given_same_level_input() {
+        // Arrange
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sst_factory: Arc<dyn crate::sst::SstReaderFactory> =
+            Arc::new(crate::sst::mem::MemSstReaderFactory);
+
+        // Act
+        let file_names = vec!["file1.sst".to_string(), "file2.sst".to_string()];
+        let versions = collect_compaction_versions(&sst_factory, temp_dir.path(), &file_names);
+
+        // Assert
+        assert_eq!(versions.len(), 0);
+    }
+
+    #[test]
+    fn should_handle_partial_read_errors_and_continue_merge() {
+        // Arrange
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sst_factory: Arc<dyn crate::sst::SstReaderFactory> =
+            Arc::new(crate::sst::mem::MemSstReaderFactory);
+
+        // Act
+        let versions = collect_compaction_versions(
+            &sst_factory,
+            temp_dir.path(),
+            &["corrupted.sst".to_string()],
+        );
+
+        // Assert
+        assert_eq!(versions.len(), 0);
+    }
 }

@@ -141,4 +141,72 @@ mod tests {
         assert_eq!(result[0].user_key, b"key1");
         assert_eq!(result[1].user_key, b"key2");
     }
+
+    #[test]
+    fn should_preserve_sequence_given_tombstone_conversion_when_applying_filter() {
+        // Arrange
+        let versions = vec![make_version_with_value(b"key1", 12345, b"value")];
+        let filter = TombstoneAllFilter;
+
+        // Act
+        let result = apply_compaction_filter(&versions, &filter, 1);
+
+        // Assert
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].seq, 12345);
+        assert!(result[0].tombstone);
+    }
+
+    #[test]
+    fn should_apply_filter_to_tombstone_entries() {
+        // Arrange
+        struct RemoveTombstonesFilter;
+        impl CompactionFilter for RemoveTombstonesFilter {
+            fn filter(
+                &self,
+                _level: u32,
+                version: &CompactionVersion,
+            ) -> FilterDecision {
+                if version.tombstone {
+                    FilterDecision::Remove
+                } else {
+                    FilterDecision::Keep
+                }
+            }
+        }
+
+        fn make_version(key: &[u8], seq: u64, _tombstone: bool) -> CompactionVersion {
+            CompactionVersion {
+                user_key: key.to_vec(),
+                seq,
+                tombstone: false,
+                value: Some(Bytes::from(format!("value_{}", seq))),
+                expiration: None,
+            }
+        }
+
+        fn make_tombstone(key: &[u8], seq: u64) -> CompactionVersion {
+            CompactionVersion {
+                user_key: key.to_vec(),
+                seq,
+                tombstone: true,
+                value: None,
+                expiration: None,
+            }
+        }
+
+        let versions = vec![
+            make_version(b"key1", 100, false),
+            make_tombstone(b"key2", 200),
+            make_version(b"key3", 150, false),
+        ];
+        let filter = RemoveTombstonesFilter;
+
+        // Act
+        let result = apply_compaction_filter(&versions, &filter, 1);
+
+        // Assert
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|v| !v.tombstone));
+    }
 }
