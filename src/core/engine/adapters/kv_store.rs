@@ -33,13 +33,6 @@ impl KvStoreAdapter {
     pub fn new(engine: Arc<MidgeEngine>) -> Self {
         Self { engine }
     }
-
-    /// Get a reference to the underlying engine.
-    ///
-    /// This is provided for internal use cases that need direct engine access.
-    pub(crate) fn engine(&self) -> &Arc<MidgeEngine> {
-        &self.engine
-    }
 }
 
 impl crate::api::kv_store::KvStore for KvStoreAdapter {
@@ -233,7 +226,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         let begin_sequence = self.engine.seq.load(Ordering::SeqCst);
         let txn = crate::api::Transaction::new(txn_id, begin_sequence);
         let engine_txn =
-            crate::api::transaction::EngineTransaction::new(txn, Arc::clone(&self.engine));
+            crate::core::transaction::EngineTransaction::new(txn, Arc::clone(&self.engine));
         Ok(Box::new(engine_txn))
     }
 

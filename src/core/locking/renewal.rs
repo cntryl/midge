@@ -70,11 +70,6 @@ impl RenewalThread {
             let _ = handle.join(); // Best effort
         }
     }
-
-    /// Check if the renewal thread is currently running.
-    pub(super) fn is_running(&self) -> bool {
-        self.handle.is_some()
-    }
 }
 
 impl Drop for RenewalThread {

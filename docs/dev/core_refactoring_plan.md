@@ -580,12 +580,351 @@ src/core/
 
 ---
 
-## Open Questions
+## Open Questions - RESOLVED ✅
 
-1. Should `skiplist` be extracted to a separate crate? (It's generic, reusable)
-2. Should `transaction_manager.rs` be split into `transactions/` module?
-3. Should `flush_coordinator.rs` and `compaction/coordinator.rs` move to `engine/coordination/`?
-4. Do we want to introduce trait boundaries between modules (e.g., `FlushService`, `CompactionService`)?
+### 1. Should `skiplist` be extracted to a separate crate?
+
+**RECOMMENDATION: NO (Not yet)**
+
+**Analysis**:
+- **Size**: 864 lines (990 with tests) - reasonable for single-file module
+- **Dependencies**: Tightly coupled to Midge's MVCC semantics (sequence numbers, OpType enum)
+- **Usage**: Only used by `memtable.rs` (2 import locations)
+- **Current State**: Well-contained in `src/core/skiplist.rs` with comprehensive tests
+
+**Rationale**:
+- The skiplist is designed specifically for LSM memtables with MVCC versioning
+- Has Midge-specific types (`OpType`, expiration tracking, sequence numbers)
+- No external demand/reuse cases identified
+- Extracting to separate crate would add complexity without clear benefit
+- If genericization is needed later, consider creating `datastructures/skiplist/` submodule first
+
+**Action**: **Keep as single-file module in `src/core/skiplist.rs`** ✅
+
+---
+
+### 2. Should `transaction_manager.rs` be split into `transactions/` module?
+
+**RECOMMENDATION: NO (Not at this time)**
+
+**Analysis**:
+- **Size**: 424 lines - below 500-line threshold
+- **Cohesion**: High - all code relates to transaction lifecycle and conflict detection
+- **Complexity**: Single responsibility (optimistic concurrency control)
+- **Usage**: Used by engine operations (3 modules) but minimal cross-dependencies
+- **Test Coverage**: 14 comprehensive tests in same file
+
+**Rationale**:
+- File is well-organized with clear sections (begin, commit, rollback, conflict detection)
+- No obvious split points - would artificially separate related logic
+- Splitting would require pub(crate) leaks between submodules
+- Benefits of refactoring don't justify the churn at current size
+
+**Action**: **Keep as single-file module `src/core/transaction_manager.rs`** ✅
+
+---
+
+### 3. Should `flush_coordinator.rs` and `compaction/coordinator.rs` move to `engine/coordination/`?
+
+**RECOMMENDATION: NO (Keep current structure)**
+
+**Analysis**:
+- **Current Structure**:
+  - `flush_coordinator.rs` (269 lines) - top-level in `core/`
+  - `compaction/coordinator.rs` (464 lines) - inside `compaction/` module
+- **Dependencies**: 
+  - FlushCoordinator: depends on `flush::spawn_flush_worker()` (same level)
+  - CompactionCoordinator: depends on `compaction::strategy::Compactor` (sibling module)
+- **Existing Coordination Module**: `engine/coordination/flush_manager.rs` (147 lines) - different concern (engine-level orchestration)
+
+**Rationale**:
+- Coordinators belong with their subsystems, not in generic coordination namespace
+- `engine/coordination/` is for **engine-level orchestration** (combining flush + WAL + memtable)
+- `flush_coordinator.rs` and `compaction/coordinator.rs` are **subsystem schedulers**
+- Moving them would:
+  - Break cohesion with subsystem modules (flush/, compaction/)
+  - Create circular dependencies (engine → coordination → flush → engine)
+  - Confuse the distinction between "orchestration" and "scheduling"
+
+**Current Structure is Correct**:
+```
+core/
+├── flush_coordinator.rs       ← Scheduler for flush subsystem
+├── flush/                     ← Flush implementation
+├── compaction/
+│   ├── coordinator.rs         ← Scheduler for compaction subsystem
+│   ├── strategy.rs            ← Compaction logic
+│   └── execution/             ← Compaction implementation
+└── engine/
+    └── coordination/          ← Engine-level orchestration
+        └── flush_manager.rs   ← Memtable rollover + flush queueing
+```
+
+**Action**: **Keep current structure** ✅
+
+---
+
+### 4. Do we want to introduce trait boundaries between modules?
+
+**RECOMMENDATION: YES (Selectively, for testability)**
+
+**Analysis**:
+- **Current State**: One trait exists (`CompactionFilter`) but no service traits
+- **Coupling**: Engine directly holds concrete `FlushCoordinator` and `CompactionCoordinator`
+- **Testing Pain Points**: Hard to test engine operations without spawning real background threads
+
+**Proposal - Add Trait Boundaries Where Valuable**:
+
+```rust
+// 1. Flush Service Trait (for engine testability)
+pub trait FlushService: Send + Sync {
+    fn request_flush(&self, job: FlushJob) -> MidgeResult<()>;
+    fn wait_until_idle(&self, timeout: Duration) -> MidgeResult<()>;
+    fn shutdown(self: Box<Self>) -> MidgeResult<()>;
+}
+
+impl FlushService for FlushCoordinator {
+    // Existing implementation
+}
+
+// 2. Compaction Service Trait (for engine testability)
+pub trait CompactionService: Send + Sync {
+    fn request_compact_level(&self, cf_id: u32, level: u32) -> MidgeResult<()>;
+    fn request_compact_range(&self, cf_id: u32, start: Option<Vec<u8>>, end: Option<Vec<u8>>) -> MidgeResult<()>;
+    fn wait_for_idle(&self, timeout: Duration) -> MidgeResult<()>;
+    fn shutdown(self: Box<Self>) -> MidgeResult<()>;
+}
+
+impl CompactionService for CompactionCoordinator {
+    // Existing implementation
+}
+```
+
+**Benefits**:
+- ✅ Enables mock implementations for engine unit tests
+- ✅ Clarifies public API surface of coordinators
+- ✅ Allows future alternative implementations (e.g., remote compaction service)
+- ✅ No performance cost (traits compiled away with monomorphization)
+
+**NOT Recommended**:
+- ❌ Transaction service trait - TransactionManager is simple data structure, no background work
+- ❌ Manifest service trait - Manifest is already well-isolated
+- ❌ Lock service trait - Already has `DbLock` trait
+
+**Action**: **Add `FlushService` and `CompactionService` traits** as future enhancement (Priority: LOW)
+- Current: Use concrete types (no immediate pain)
+- Future: Add traits when testing becomes priority
+- Implementation: 1-2 hours work, zero breaking changes (add traits, impl, update engine fields)
+
+---
+
+## Summary of Decisions
+
+| Question | Decision | Priority | Rationale |
+|----------|----------|----------|-----------|
+| 1. Extract skiplist to separate crate? | **NO** | N/A | Tightly coupled to Midge MVCC, no reuse cases |
+| 2. Split transaction_manager? | **NO** | N/A | 424 lines, high cohesion, below threshold |
+| 3. Move coordinators to engine/coordination? | **NO** | N/A | Breaks subsystem cohesion, wrong abstraction |
+| 4. Add service trait boundaries? | **YES** | LOW | Future enhancement for testability |
+
+**All questions resolved. No immediate refactoring needed.** ✅
+
+---
+
+## ⚠️ NEW CONCERN: Transaction Code Fragmentation
+
+**Issue Identified**: Transaction-related code is scattered across 3 different locations with unclear boundaries:
+
+### Current State Analysis
+
+| Location | File | Lines | Purpose | Issues |
+|----------|------|-------|---------|--------|
+| **API Layer** | `src/api/transaction.rs` | **1,192** | Public `Transaction` API + `EngineTransaction` impl | ⚠️ **TOO LARGE** - Should be < 500 lines |
+| **Core Layer** | `src/core/transaction_manager.rs` | 424 | Conflict detection (OCC) + active transaction tracking | ✅ Well-sized |
+| **Engine Layer** | `src/core/engine/operations/transactions.rs` | 377 | Engine transaction operations (batch_internal, commit_transaction) | ✅ Well-sized |
+
+### Responsibility Breakdown
+
+```
+api/transaction.rs (1,192 lines)
+├── Transaction struct (public API)              ~100 lines
+├── In-memory mutation staging                   ~200 lines
+├── Spill-to-disk logic (>100MB threshold)       ~300 lines
+├── Conflict detection (read/write sets)         ~150 lines
+├── Serialization/deserialization                ~200 lines
+├── EngineTransaction (internal impl)            ~150 lines
+└── Tests                                        ~100 lines
+
+core/transaction_manager.rs (424 lines)
+├── TransactionManager (OCC conflict detection)  ~200 lines
+├── Key type (cf_id + key composite)             ~20 lines
+├── Deadlock detection                           ~100 lines
+└── Tests                                        ~100 lines
+
+engine/operations/transactions.rs (377 lines)
+├── batch_internal() - WAL + memtable apply      ~150 lines
+├── commit_transaction() - Conflict check + commit ~100 lines
+├── Transaction reads (get, exists)              ~100 lines
+└── Tests                                        ~30 lines
+```
+
+### Problems with Current Structure
+
+1. **❌ Massive API File**: `api/transaction.rs` at **1,192 lines** violates the 500-line guideline by **138%**
+2. **❌ Duplicate Conflict Logic**: Both `Transaction` and `TransactionManager` track read/write sets
+3. **❌ Unclear Layering**: 
+   - `Transaction` (API) has spill-to-disk (should be internal concern)
+   - `EngineTransaction` lives in API layer but is internal implementation
+4. **❌ Mixed Concerns**: `api/transaction.rs` combines public API + internal implementation + persistence logic
+
+### Recommendation: Clean Layering with API/Core Separation
+
+**BETTER APPROACH** (Following proper layering):
+
+Keep **trait definitions** in `api/`, move **implementation details** to `core/`:
+
+```
+src/api/
+├── kv_store.rs                 - KvStore + KvTransaction traits (keep as-is)
+└── transaction/                - NEW: Split api/transaction.rs
+    ├── mod.rs                  ~50 lines   - Public Transaction API exports
+    └── transaction.rs          ~350 lines  - Public Transaction struct (staging only)
+
+src/core/transaction/           - NEW: Implementation details
+├── mod.rs                      ~50 lines   - Internal exports
+├── manager.rs                  ~424 lines  - TransactionManager (MOVED from core/transaction_manager.rs)
+├── engine_transaction.rs       ~150 lines  - EngineTransaction (MOVED from api/)
+├── spill.rs                    ~350 lines  - Spill-to-disk implementation
+├── conflict_tracking.rs        ~200 lines  - Read/write set tracking
+├── serialization.rs            ~200 lines  - Serialize/deserialize for spill files
+└── tests.rs                    ~150 lines  - All implementation tests
+```
+
+**Clear Separation of Concerns**:
+
+| Layer | Files | Responsibility | Users |
+|-------|-------|---------------|-------|
+| **API** | `api/kv_store.rs` | Trait definitions (KvStore, KvTransaction) | External users |
+| **API** | `api/transaction/transaction.rs` | Public Transaction struct (staging) | External users |
+| **Core** | `core/transaction/*` | Implementation (OCC, spill, engine integration) | Internal only |
+| **Engine** | `engine/operations/transactions.rs` | Engine-specific operations (batch_internal, commit) | Internal only |
+
+**Why This Is Better**:
+
+1. **✅ Clean Layering**: 
+   - `api/` = Public contracts (traits + Transaction API)
+   - `core/` = Storage implementation (OCC, conflict detection, spilling)
+   - `engine/` = Engine integration (WAL, memtable apply)
+
+2. **✅ Separation of Concerns**:
+   - `Transaction` (public API) stays in `api/` - users create/manipulate transactions
+   - `EngineTransaction` (internal wrapper) moves to `core/` - engine implementation detail
+   - `TransactionManager` (OCC) moves to `core/` - storage engine concern
+   - Spill-to-disk logic in `core/` - internal optimization
+
+3. **✅ No Circular Dependencies**:
+   ```
+   api/transaction.rs      → Uses only public types (Mutation, MidgeError)
+   core/transaction/*      → Implements api traits, uses engine internals
+   engine/operations/*     → Uses core/transaction for commit logic
+   ```
+
+4. **✅ Testability**:
+   - `api/transaction.rs` can be tested without engine (staging, rollback)
+   - `core/transaction/spill.rs` can be tested in isolation
+   - `core/transaction/manager.rs` has focused OCC tests
+
+5. **✅ API Stability**:
+   - Public `Transaction` API remains stable in `api/`
+   - Internal details (spilling, OCC) can change in `core/` without breaking users
+
+**Migration Strategy**:
+
+```rust
+// api/transaction/transaction.rs (PUBLIC - ~350 lines)
+pub struct Transaction {
+    // Public fields and methods for staging mutations
+    // NO spill logic, NO engine coupling, NO OCC
+}
+
+// core/transaction/engine_transaction.rs (INTERNAL)
+pub(crate) struct EngineTransaction {
+    txn: crate::api::Transaction,
+    engine: Arc<MidgeEngine>,
+}
+
+impl crate::api::kv_store::KvTransaction for EngineTransaction {
+    // Implements trait using engine operations
+}
+
+// core/transaction/manager.rs (INTERNAL)
+pub struct TransactionManager {
+    // OCC conflict detection
+}
+
+// core/transaction/spill.rs (INTERNAL)
+pub(crate) struct SpillManager {
+    // Handles >100MB transactions
+}
+```
+
+### Action Items
+
+**Priority: MEDIUM** (Not urgent but should address before adding more transaction features)
+
+1. **Phase 1**: Create clean API layer (1-2 hours)
+   - Create `api/transaction/` directory
+   - Move public `Transaction` struct to `api/transaction/transaction.rs`
+   - Keep only staging/mutation logic in public API
+   - No breaking changes (re-export from `api/transaction/mod.rs`)
+
+2. **Phase 2**: Move implementation to core (2-3 hours)
+   - Create `core/transaction/` directory
+   - Move `EngineTransaction` from `api/` to `core/transaction/engine_transaction.rs`
+   - Move `TransactionManager` from `core/transaction_manager.rs` to `core/transaction/manager.rs`
+   - Extract spill logic to `core/transaction/spill.rs`
+   - Extract serialization to `core/transaction/serialization.rs`
+   - Update all imports
+
+3. **Phase 3**: Consolidate tests (30 minutes)
+   - Move implementation tests to `core/transaction/tests.rs`
+   - Keep public API tests in `api/transaction/transaction.rs`
+   - Ensure test coverage for all modules
+
+### Current vs Proposed Architecture
+
+```
+CURRENT (Fragmented & Inverted):
+api/transaction.rs                 1,192 lines  ⚠️  (public API + internal impl mixed)
+core/transaction_manager.rs          424 lines  ✅  (OCC logic)
+engine/operations/transactions.rs    377 lines  ✅  (engine integration)
+
+PROPOSED (Clean Layering):
+api/
+├── kv_store.rs                      175 lines  ✅  (traits only)
+└── transaction/
+    ├── mod.rs                        50 lines  ✅  (public exports)
+    └── transaction.rs               350 lines  ✅  (PUBLIC: staging, mutation, rollback)
+
+core/transaction/
+├── mod.rs                            50 lines  ✅  (internal exports)
+├── manager.rs                       424 lines  ✅  (OCC conflict detection)
+├── engine_transaction.rs            150 lines  ✅  (KvTransaction impl)
+├── spill.rs                         350 lines  ✅  (>100MB spill-to-disk)
+├── serialization.rs                 200 lines  ✅  (persist/restore)
+└── tests.rs                         150 lines  ✅  (implementation tests)
+
+engine/operations/transactions.rs    377 lines  ✅  (engine operations)
+```
+
+**Key Improvements**:
+- ✅ **Proper Layering**: API contracts separate from implementation
+- ✅ **No File >450 Lines**: Largest file is `manager.rs` at 424 lines
+- ✅ **Clear Boundaries**: Public API doesn't know about spilling or OCC
+- ✅ **Testability**: Can test Transaction API without engine dependency
+- ✅ **Maintainability**: Implementation details isolated in `core/transaction/`
+
+**Decision**: Mark for future refactoring. Recommended before adding MVCC snapshot isolation or distributed transactions. Estimated effort: 4-6 hours total.
 
 ---
 
