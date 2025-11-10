@@ -2,12 +2,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use parking_lot::RwLock;
 
 use crate::common::timestamp;
 use crate::core::skiplist::{OpType, SkipList};
 use crate::error::MidgeResult;
 use crate::wal::WalRecord;
+
+use super::range_tombstones::RangeTombstones;
+use super::wal_loading;
 
 /// Return current Unix epoch time in milliseconds.
 fn current_time_millis() -> u64 {
@@ -27,9 +29,9 @@ fn is_expired(expiration: Option<u64>) -> bool {
 /// Simple in-memory memtable using a lock-free SkipList for ordered keys and tombstones.
 #[derive(Clone)]
 pub struct MemTable {
-    inner: Arc<SkipList>,
-    bytes: Arc<AtomicUsize>,
-    range_tombstones: RangeTombstones,
+    pub(super) inner: Arc<SkipList>,
+    pub(super) bytes: Arc<AtomicUsize>,
+    pub(super) range_tombstones: RangeTombstones,
 }
 
 impl MemTable {
@@ -43,51 +45,7 @@ impl MemTable {
 
     /// Load initial state from WAL records (Vec<WalRecord>), useful at startup.
     pub fn load_from_wal(&self, records: Vec<WalRecord>) -> MidgeResult<()> {
-        for rec in records {
-            match rec.op {
-                crate::wal::WalOpKind::Put | crate::wal::WalOpKind::Insert => {
-                    let k = rec.key;
-                    let v = rec.value;
-                    let add = k.len() + v.as_ref().map(|x| x.len()).unwrap_or(0);
-                    self.bytes.fetch_add(add, Ordering::Relaxed);
-                    self.inner
-                        .upsert_exp(k, v, rec.seq, rec.expiration, OpType::Put);
-                }
-                crate::wal::WalOpKind::Delete => {
-                    let k = rec.key;
-                    // store tombstone; count key size as storage overhead
-                    let add = k.len();
-                    self.bytes.fetch_add(add, Ordering::Relaxed);
-                    // Tombstones never have expiration
-                    self.inner
-                        .upsert_exp(k, None, rec.seq, None, OpType::Delete);
-                }
-                crate::wal::WalOpKind::DeleteRange => {
-                    // Range deletes are handled through range_tombstones, not the skiplist
-                    if let Some(range_end) = rec.range_end {
-                        self.range_tombstones
-                            .push(rec.key.to_vec(), range_end.to_vec(), rec.seq);
-                        // Count range tombstone storage overhead
-                        let add = rec.key.len() + range_end.len();
-                        self.bytes.fetch_add(add, Ordering::Relaxed);
-                    }
-                }
-                crate::wal::WalOpKind::Merge => {
-                    // Merge operations are stored with OpType::Merge in the skiplist
-                    // The merge resolution happens at read time, not write time
-                    let k = rec.key;
-                    let v = rec.value;
-                    let add = k.len() + v.as_ref().map(|x| x.len()).unwrap_or(0);
-                    self.bytes.fetch_add(add, Ordering::Relaxed);
-                    self.inner
-                        .upsert_exp(k, v, rec.seq, rec.expiration, OpType::Merge);
-                }
-                crate::wal::WalOpKind::TxnBegin | crate::wal::WalOpKind::TxnCommit => {
-                    // Transaction markers are not stored in memtable
-                }
-            }
-        }
-        Ok(())
+        wal_loading::load_from_wal(self, records)
     }
 
     /// Get the latest value for a key, respecting TTL expiration.
@@ -388,42 +346,6 @@ pub type Memtable = MemTable;
 impl Default for MemTable {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RangeDel {
-    start: Vec<u8>,
-    end: Vec<u8>,
-    seq: u64,
-}
-
-/// Encapsulates range tombstone storage with interior mutability
-#[derive(Clone)]
-struct RangeTombstones {
-    inner: Arc<RwLock<Vec<RangeDel>>>,
-}
-
-impl RangeTombstones {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(Vec::new())),
-        }
-    }
-
-    /// Record a range deletion [start, end) with sequence number
-    fn push(&self, start: Vec<u8>, end: Vec<u8>, seq: u64) {
-        let mut tombstones = self.inner.write();
-        tombstones.push(RangeDel { start, end, seq });
-    }
-
-    /// Drain and return all range tombstones, resetting the list
-    fn drain(&self) -> Vec<(Vec<u8>, Vec<u8>, u64)> {
-        let mut tombstones = self.inner.write();
-        tombstones
-            .drain(..)
-            .map(|r| (r.start, r.end, r.seq))
-            .collect()
     }
 }
 

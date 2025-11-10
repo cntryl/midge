@@ -298,6 +298,38 @@ src/core/
 
 ---
 
+## Progress Tracking
+
+### ✅ Completed Phases
+
+#### Phase 2.2: Lock Module Split & Deduplication (COMPLETED)
+- **Status**: ✅ Done
+- **Files Created**:
+  - `src/core/locking/traits.rs` (25 lines) - DbLock trait
+  - `src/core/locking/meta.rs` (193 lines) - LockMeta serialization
+  - `src/core/locking/renewal.rs` (147 lines) - **NEW**: Shared renewal infrastructure
+  - `src/core/locking/local.rs` (242 lines) - LocalFileLock
+  - `src/core/locking/cloud.rs` (250 lines) - CloudLeaseLock
+  - `src/core/locking/mod.rs` - Public API exports
+- **Files Deleted**: `src/core/lock.rs` (951 lines)
+- **Key Achievement**: Eliminated ~130 lines of duplicated renewal thread code by extracting common `RenewalThread` abstraction
+- **Tests**: All 1094 tests pass
+- **Documentation**: `docs/dev/locking_deduplication.md`
+
+#### Phase 3.2: Memtable Module Split (COMPLETED)
+- **Status**: ✅ Done
+- **Files Created**:
+  - `src/core/memtable/memtable.rs` (438 lines) - Main MemTable struct with core operations
+  - `src/core/memtable/range_tombstones.rs` (85 lines) - RangeTombstones storage with tests
+  - `src/core/memtable/wal_loading.rs` (207 lines) - WAL replay logic with 5 comprehensive tests
+  - `src/core/memtable/mod.rs` - Public API exports
+- **Files Deleted**: `src/core/memtable.rs` (572 lines)
+- **Key Achievement**: Separated WAL loading logic and range tombstone management into focused modules
+- **Tests**: All 1100 tests pass (+6 new tests in submodules)
+- **Lines Saved**: 572 original → 730 total (158 more lines, but better organized with 11 additional unit tests)
+
+---
+
 ## Implementation Guidelines
 
 ### 1. **Incremental Migration**
