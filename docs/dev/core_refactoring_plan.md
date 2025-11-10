@@ -341,6 +341,21 @@ src/core/
 - **Tests**: All 1104 tests pass (+4 new tests in types.rs)
 - **Better Organization**: Backup and restore logic no longer mixed in single file
 
+#### Phase 2.1: Manifest Module Split (COMPLETED)
+- **Status**: ✅ Done
+- **Files Created**:
+  - `src/core/manifest/types.rs` (132 lines) - Manifest, FileMeta, CloudCheckpoint, ColumnFamilyMeta
+  - `src/core/manifest/io.rs` (119 lines) - load(), load_with_retry(), save_atomic()
+  - `src/core/manifest/queries.rs` (222 lines) - Query operations (files_at_level, l0_sublevels, etc.)
+  - `src/core/manifest/cloud.rs` (55 lines) - Cloud SST tracking and checkpoint management
+  - `src/core/manifest/column_families.rs` (31 lines) - Column family add/remove operations
+  - `src/core/manifest/tests.rs` (867 lines) - All 67 unit tests
+  - `src/core/manifest/mod.rs` - Public API exports
+- **Files Deleted**: `src/core/manifest.rs` (1379 lines)
+- **Key Achievement**: Clean separation of I/O, queries, cloud tracking, and CF management
+- **Tests**: All 1104 tests pass (same test count, just reorganized)
+- **Better Organization**: 1379 lines split into 6 focused modules
+
 ---
 
 ## Implementation Guidelines
