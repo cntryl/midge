@@ -328,6 +328,19 @@ src/core/
 - **Tests**: All 1100 tests pass (+6 new tests in submodules)
 - **Lines Saved**: 572 original → 730 total (158 more lines, but better organized with 11 additional unit tests)
 
+#### Phase 2.3: Backup Module Split (COMPLETED)
+- **Status**: ✅ Done
+- **Files Created**:
+  - `src/core/backup/types.rs` (171 lines) - BackupType, BackupInfo, options, VerifyResult
+  - `src/core/backup/backup_engine.rs` (390 lines) - BackupEngine for backup creation
+  - `src/core/backup/restore_engine.rs` (150 lines) - RestoreEngine for backup restoration
+  - `src/core/backup/tests.rs` (334 lines) - All unit tests
+  - `src/core/backup/mod.rs` - Public API exports
+- **Files Deleted**: `src/core/backup.rs` (1014 lines)
+- **Key Achievement**: Clean separation of backup creation vs restoration, shared types isolated
+- **Tests**: All 1104 tests pass (+4 new tests in types.rs)
+- **Better Organization**: Backup and restore logic no longer mixed in single file
+
 ---
 
 ## Implementation Guidelines
