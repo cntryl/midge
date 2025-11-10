@@ -222,15 +222,17 @@ impl CompactionCoordinator {
                             let deduped = super::executor::deduplicate_versions(&versions_after_cf);
 
                             // Write compacted SST
-                            let write_res = super::executor::write_compacted_sst(
-                                &sst_factory,
+                            let ctx = super::executor::SstWriterContext {
+                                sst_factory: &sst_factory,
                                 compression,
                                 block_size,
-                                &sst_dir,
+                                sst_dir: &sst_dir,
+                                cloud_sst_manager: cloud_sst_manager.as_ref(),
+                            };
+                            let write_res = super::executor::write_compacted_sst(
+                                &ctx,
                                 &deduped,
                                 plan.cf_id,
-                                cloud_sst_manager.as_ref(),
-                                None,
                             )?;
 
                             if let Some((_path, meta)) = write_res {

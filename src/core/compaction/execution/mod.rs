@@ -21,4 +21,4 @@ pub use types::CompactionVersion;
 pub(crate) use collection::{collect_compaction_versions, sort_versions_for_output};
 pub(crate) use filtering::apply_compaction_filter;
 pub(crate) use merging::{deduplicate_versions, filter_safe_tombstones};
-pub(crate) use output_writer::write_compacted_sst;
+pub(crate) use output_writer::{write_compacted_sst, SstWriterContext};

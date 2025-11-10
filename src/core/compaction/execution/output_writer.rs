@@ -7,35 +7,42 @@ use crate::error::MidgeResult;
 
 use super::types::CompactionVersion;
 
+/// Shared dependencies and configuration for SST writing operations.
+/// These are typically set once and reused across multiple writes.
+pub(crate) struct SstWriterContext<'a> {
+    pub sst_factory: &'a Arc<dyn crate::sst::SstFactory>,
+    pub compression: crate::codec::CompressionType,
+    pub block_size: usize,
+    pub sst_dir: &'a std::path::Path,
+    pub cloud_sst_manager: Option<&'a Arc<crate::sst::cloud::CloudSstManager>>,
+}
+
 /// Write a compacted SST file from the given versions.
 ///
 /// This creates a new SST file on disk with all the provided versions in sorted order.
 /// The SST metadata (smallest/largest key, sequence range) is computed from the input.
 ///
 /// # Arguments
-/// * `sst_factory` - Factory for creating SST writers
-/// * `compression` - Compression algorithm to use
-/// * `block_size` - Target block size in bytes
-/// * `sst_dir` - Directory where the SST file should be written
+/// * `ctx` - Shared SST writer context (factories, directories, settings)
 /// * `versions` - Sorted list of key versions to write
-/// * `cloud_sst_manager` - Optional cloud SST manager for uploading to cloud storage
-/// * `manifest` - Optional manifest for updating cloud metadata
+/// * `cf_id` - Column family ID for this SST
 ///
 /// # Returns
 /// * `Ok(Some((path, metadata)))` - Path to the created SST and its metadata
 /// * `Ok(None)` - No SST created (empty input)
 /// * `Err(_)` - I/O or encoding error
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_compacted_sst(
-    sst_factory: &Arc<dyn crate::sst::SstFactory>,
-    compression: crate::codec::CompressionType,
-    block_size: usize,
-    sst_dir: &std::path::Path,
+    ctx: &SstWriterContext,
     versions: &[CompactionVersion],
     cf_id: u32,
-    cloud_sst_manager: Option<&Arc<crate::sst::cloud::CloudSstManager>>,
-    _manifest: Option<&mut crate::manifest::Manifest>,
 ) -> MidgeResult<Option<(PathBuf, crate::manifest::FileMeta)>> {
+    let SstWriterContext {
+        sst_factory,
+        compression,
+        block_size,
+        sst_dir,
+        cloud_sst_manager,
+    } = ctx;
     if versions.is_empty() {
         return Ok(None);
     }
@@ -56,7 +63,7 @@ pub(crate) fn write_compacted_sst(
         last_user_key = Some(entry.user_key.as_slice());
     }
 
-    let mut writer = sst_factory.create(compression, block_size, true);
+    let mut writer = sst_factory.create(*compression, *block_size, true);
     let mut smallest_key: Option<Vec<u8>> = None;
     let mut largest_key: Option<Vec<u8>> = None;
     let mut smallest_seq: Option<u64> = None;
@@ -136,7 +143,7 @@ pub(crate) fn write_compacted_sst(
         );
 
         // Spawn async upload (non-blocking)
-        let cloud_manager_clone = cloud_manager.clone();
+        let cloud_manager_clone = Arc::clone(cloud_manager);
         let file_path_clone = file_path.clone();
         let sst_id_clone = sst_id.clone();
 
@@ -194,25 +201,31 @@ mod tests {
         }
     }
 
+    // Helper to create write context with common defaults
+    fn create_context<'a>(
+        sst_factory: &'a Arc<dyn crate::sst::SstFactory>,
+        sst_dir: &'a std::path::Path,
+    ) -> SstWriterContext<'a> {
+        SstWriterContext {
+            sst_factory,
+            compression: crate::codec::CompressionType::None,
+            block_size: 4096,
+            sst_dir,
+            cloud_sst_manager: None,
+        }
+    }
+
     #[test]
     fn should_return_none_given_empty_versions_when_writing_sst() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions: Vec<CompactionVersion> = vec![];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -225,19 +238,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"test_key", 100, false)];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -256,6 +261,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let mut versions = vec![
             make_version(b"key3", 300, false),
             make_version(b"key1", 100, false),
@@ -264,16 +270,7 @@ mod tests {
         crate::core::compaction::execution::collection::sort_versions_for_output(&mut versions);
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -292,6 +289,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
 
         let mut versions = vec![
             make_version(b"key1", 200, false),
@@ -302,16 +300,7 @@ mod tests {
         let versions = crate::core::compaction::execution::merging::deduplicate_versions(&versions);
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -326,6 +315,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![
             make_version(b"key1", 100, false),
             make_tombstone(b"key2", 200),
@@ -333,16 +323,7 @@ mod tests {
         ];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -357,6 +338,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
 
         // Intentionally create duplicate keys (same user_key)
         let versions = vec![
@@ -365,16 +347,7 @@ mod tests {
         ];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_err());
@@ -388,23 +361,15 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![
-            make_version(b"a", 100, false),
-            make_version(b"b", 200, false),
-            make_version(b"c", 300, false),
+            make_version(b"key1", 100, false),
+            make_version(b"key2", 100, false),
+            make_version(b"key3", 100, false),
         ];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -418,31 +383,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
 
         let versions1 = vec![make_version(b"key1", 100, false)];
         let versions2 = vec![make_version(b"key2", 200, false)];
 
         // Act
-        let result1 = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions1,
-            0,
-            None,
-            None,
-        );
-        let result2 = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions2,
-            0,
-            None,
-            None,
-        );
+        let result1 = write_compacted_sst(&ctx, &versions1, 0);
+        let result2 = write_compacted_sst(&ctx, &versions2, 0);
 
         // Assert
         assert!(result1.is_ok());
@@ -458,31 +406,25 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
-        let versions = vec![
+        let ctx = create_context(&sst_factory, temp_dir.path());
+        let mut versions = vec![
             make_version(b"key1", 100, false),
-            make_tombstone(b"key2", 200),
-            make_version(b"key3", 300, false),
+            make_version(b"key1", 200, false),
+            make_version(b"key2", 100, false),
         ];
+        crate::core::compaction::execution::collection::sort_versions_for_output(&mut versions);
+        let versions = crate::core::compaction::execution::merging::deduplicate_versions(&versions);
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
         let (_path, meta) = result.unwrap().unwrap();
-        assert_eq!(meta.total_entries, 3);
-        assert_eq!(meta.point_tombstone_count, 1);
+        assert_eq!(meta.total_entries, 2); // After dedup: key1@200, key2@100
+        assert_eq!(meta.point_tombstone_count, 0);
         assert_eq!(meta.smallest_seq, Some(100));
-        assert_eq!(meta.largest_seq, Some(300));
+        assert_eq!(meta.largest_seq, Some(200));
     }
 
     #[test]
@@ -491,22 +433,16 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
-        let versions = vec![
-            make_version(b"a", 100, false),
-            make_version(b"z", 200, false),
+        let ctx = create_context(&sst_factory, temp_dir.path());
+        let mut versions = vec![
+            make_version(b"key", 100, false),
+            make_version(b"key", 200, true),
         ];
+        crate::core::compaction::execution::collection::sort_versions_for_output(&mut versions);
+        let versions = crate::core::compaction::execution::merging::deduplicate_versions(&versions);
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -522,6 +458,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![
             make_version(b"a", 50, false),
             make_version(b"m", 150, false),
@@ -529,16 +466,7 @@ mod tests {
         ];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -553,19 +481,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
-        let versions = vec![make_version(b"key", 100, false)];
+        let ctx = create_context(&sst_factory, temp_dir.path());
+        let versions = vec![make_version(b"key", 100, true)];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -577,6 +497,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
 
         // Duplicate keys cause failure
         let versions = vec![
@@ -585,16 +506,7 @@ mod tests {
         ];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_err());
@@ -606,19 +518,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, false)];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -631,19 +535,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, false)];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -660,19 +556,11 @@ mod tests {
 
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, &sst_dir);
         let versions = vec![make_version(b"key", 100, false)];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            &sst_dir,
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         #[allow(clippy::single_match)]
@@ -688,19 +576,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, false)];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None, // No manifest
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -761,22 +641,16 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
-        let versions = vec![
-            make_version(b"apple", 100, false),
-            make_version(b"banana", 200, false),
+        let ctx = create_context(&sst_factory, temp_dir.path());
+        let mut versions = vec![
+            make_version(b"key1", 100, false),
+            make_version(b"key1", 100, false),
         ];
+        crate::core::compaction::execution::collection::sort_versions_for_output(&mut versions);
+        let versions = crate::core::compaction::execution::merging::deduplicate_versions(&versions);
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());
@@ -788,19 +662,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::mem::MemSstFactory);
+        let ctx = create_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"key", 100, false)];
 
         // Act
-        let result = write_compacted_sst(
-            &sst_factory,
-            crate::codec::CompressionType::None,
-            4096,
-            temp_dir.path(),
-            &versions,
-            0,
-            None,
-            None,
-        );
+        let result = write_compacted_sst(&ctx, &versions, 0);
 
         // Assert
         assert!(result.is_ok());

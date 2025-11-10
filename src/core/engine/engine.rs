@@ -2629,16 +2629,14 @@ impl MidgeEngine {
             );
         }
 
-        let Some((_path, meta)) = write_compacted_sst(
-            &self.sst_factory,
-            self.compression,
-            self.block_size,
-            &self.sst_dir,
-            &versions,
-            0,    // Default CF (compact_all is legacy method)
-            None, // compact_all doesn't support cloud upload yet (could be added with engine field)
-            None, // Manifest will be updated separately after this call
-        )?
+        let ctx = crate::core::compaction::execution::SstWriterContext {
+            sst_factory: &self.sst_factory,
+            compression: self.compression,
+            block_size: self.block_size,
+            sst_dir: &self.sst_dir,
+            cloud_sst_manager: None, // compact_all doesn't support cloud upload yet
+        };
+        let Some((_path, meta)) = write_compacted_sst(&ctx, &versions, 0)?
         else {
             return Ok(());
         };
