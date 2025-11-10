@@ -42,7 +42,8 @@ fn should_abort_transaction_given_stale_read_when_key_modified_by_other() {
 
     let mut stale_txn =
         Transaction::with_options(2, engine.snapshot().seq, None, 100 * 1024 * 1024);
-    let _local = stale_txn.get_local(b"key");
+    // Provide the column family id to get_local (API expects cf_id: u32, key: &[u8])
+    let _local = stale_txn.get_local(cf.id().as_u32(), b"key");
 
     engine
         .put(&cf, b"key", b"modified")

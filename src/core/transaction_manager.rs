@@ -1,337 +1,205 @@
 use bytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Small wrapper for a column-family id + key bytes so we don't keep using
-/// raw tuple types throughout the transaction manager.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-struct Key(u32, Bytes);
+pub struct Key(pub u32, pub Bytes);
 
 impl Key {
-    fn new(cf: u32, key: Bytes) -> Self {
+    pub fn new(cf: u32, key: Bytes) -> Self {
         Self(cf, key)
     }
 }
 
-impl From<(u32, Bytes)> for Key {
-    fn from(t: (u32, Bytes)) -> Self {
-        Key::new(t.0, t.1)
-    }
-}
-
-type KeySet = HashSet<Key>;
-type KeyMap = HashMap<Key, u64>;
-
-/// Tracks active transactions and detects conflicts
-pub struct TransactionManager {
-    inner: Arc<Mutex<TransactionManagerInner>>,
-}
-
-struct TransactionManagerInner {
-    active_txns: HashMap<u64, TransactionInfo>,
-    committed_writes: CommittedWrites,
-    max_retained_commits: usize,
-    wait_for_graph: HashMap<u64, HashSet<u64>>, // txn_id -> set of txns it waits for
-}
-
-/// Encapsulates committed write sets keyed by commit sequence.
-/// Internally keeps a map seq -> (txn_id, write_set). Provides helpers
-/// for iteration, insertion and cleanup of old entries.
-struct CommittedWrites {
-    map: HashMap<u64, (u64, KeySet)>,
-}
-
-impl CommittedWrites {
-    fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    fn insert(&mut self, seq: u64, txn_id: u64, write_set: KeySet) {
-        self.map.insert(seq, (txn_id, write_set));
-    }
-
-    fn iter(&self) -> std::collections::hash_map::Iter<'_, u64, (u64, KeySet)> {
-        self.map.iter()
-    }
-
-    fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    /// Remove the oldest entries until only `max_retained` entries remain.
-    fn remove_oldest_excess(&mut self, max_retained: usize) {
-        if self.map.len() <= max_retained {
-            return;
-        }
-        let excess = self.map.len() - max_retained;
-        let mut keys: Vec<u64> = self.map.keys().copied().collect();
-        // commit sequences are monotonic; remove lowest (oldest) sequences
-        keys.sort_unstable();
-        for k in keys.into_iter().take(excess) {
-            self.map.remove(&k);
-        }
-    }
-}
-
 #[derive(Clone)]
-struct TransactionInfo {
-    #[allow(dead_code)]
+struct TxnInfo {
     txn_id: u64,
     begin_seq: u64,
-    write_set: KeySet,
-    read_set: KeySet,
+    write_set: HashSet<Key>,
+    read_set: HashSet<Key>,
     read_versions: HashMap<Key, u64>,
+}
+
+#[derive(Default)]
+struct Inner {
+    active: HashMap<u64, TxnInfo>,
+    committed: HashMap<u64, (u64, HashSet<Key>)>, // commit_seq -> (txn_id, writes)
+    wait_for: HashMap<u64, HashSet<u64>>,
+    max_retained: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct TransactionManager {
+    inner: Arc<RwLock<Inner>>,
 }
 
 impl TransactionManager {
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(TransactionManagerInner {
-                active_txns: HashMap::new(),
-                    committed_writes: CommittedWrites::new(),
-                max_retained_commits: 1000,
-                wait_for_graph: HashMap::new(),
-            })),
-        }
+        Self::default()
     }
 
-    /// Register a new transaction
-    pub fn begin<WI, RI, RVI, WItem, RItem, RVItem>(
+    pub fn begin(
         &self,
         txn_id: u64,
         begin_seq: u64,
-        write_set: WI,
-        read_set: RI,
-        read_versions: RVI,
-    ) -> Result<(), String>
-    where
-        WI: IntoIterator<Item = WItem>,
-        WItem: Into<Key>,
-        RI: IntoIterator<Item = RItem>,
-        RItem: Into<Key>,
-        RVI: IntoIterator<Item = (RVItem, u64)>,
-        RVItem: Into<Key>,
-    {
-        let mut inner = self.inner.lock();
-
-        let write_set: KeySet = write_set.into_iter().map(|k| k.into()).collect();
-        let read_set: KeySet = read_set.into_iter().map(|k| k.into()).collect();
-        let read_versions: HashMap<Key, u64> = read_versions
-            .into_iter()
-            .map(|(k, v)| (k.into(), v))
-            .collect();
-
-        let info = TransactionInfo {
+        write_set: HashSet<Key>,
+        read_set: HashSet<Key>,
+        read_versions: HashMap<Key, u64>,
+    ) -> Result<(), String> {
+        let txn = TxnInfo {
             txn_id,
             begin_seq,
             write_set,
             read_set,
             read_versions,
         };
-
-        inner.active_txns.insert(txn_id, info);
+        self.inner.write().active.insert(txn_id, txn);
         Ok(())
     }
 
-    /// Check for conflicts and commit if no conflicts found
     pub fn try_commit(&self, txn_id: u64, commit_seq: u64) -> Result<(), String> {
-        let mut inner = self.inner.lock();
-
-        let txn_info = inner
-            .active_txns
+        let mut inner = self.inner.write();
+        let txn = inner
+            .active
             .get(&txn_id)
             .ok_or_else(|| "Transaction not found".to_string())?
             .clone();
 
-        // Check for write-write conflicts with other active transactions
-        for (other_id, other_info) in &inner.active_txns {
-            if *other_id != txn_id && !txn_info.write_set.is_disjoint(&other_info.write_set) {
-                return Err(format!(
-                    "Write-write conflict detected with transaction {}",
-                    other_id
-                ));
-            }
+        if Self::has_write_conflict(&txn, &inner.active, txn_id) {
+            return Err("Write-write conflict with active transaction".into());
+        }
+        if Self::has_commit_conflict(&txn, &inner.committed, txn_id) {
+            return Err("Write-write conflict with committed transaction".into());
+        }
+        if Self::has_read_conflict(&txn, &inner.committed) {
+            return Err("Read-write conflict detected".into());
         }
 
-        // Check for write-write conflicts with committed transactions after our begin
-        for (&seq, (committed_txn_id, writes)) in inner.committed_writes.iter() {
-            // Conflict if: committed after our begin AND it's not our own transaction AND writes overlap
-            if seq >= txn_info.begin_seq && *committed_txn_id != txn_id && !txn_info.write_set.is_disjoint(writes) {
-                return Err(format!(
-                    "Write-write conflict: key was modified by transaction {} at sequence {}",
-                    committed_txn_id, seq
-                ));
+        inner.committed.insert(commit_seq, (txn_id, txn.write_set));
+        inner.active.remove(&txn_id);
+
+        // Keep only N most recent commits
+        while inner.committed.len() > inner.max_retained.max(1000) {
+            if let Some(min) = inner.committed.keys().min().copied() {
+                inner.committed.remove(&min);
             }
         }
-
-        // Check for read-write conflicts (optimistic locking)
-        // If a key was read by this txn, verify no writes occurred after read version
-        for (key, read_ver) in &txn_info.read_versions {
-            // Check if any committed transaction wrote to this key after our read
-            for (&seq, (_committed_txn_id, writes)) in inner.committed_writes.iter() {
-                if seq > *read_ver && writes.contains(key) {
-                    return Err(format!(
-                        "Read-write conflict: key modified after read at version {}",
-                        read_ver
-                    ));
-                }
-            }
-        }
-
-        // Commit: record write set for future conflict detection
-        inner.committed_writes.insert(commit_seq, txn_id, txn_info.write_set.clone());
-        inner.active_txns.remove(&txn_id);
-
-        // Cleanup old commits to prevent unbounded growth
-        let max_retained = inner.max_retained_commits;
-        inner.committed_writes.remove_oldest_excess(max_retained);
-
         Ok(())
     }
 
-    /// Abort a transaction
     pub fn abort(&self, txn_id: u64) {
-        let mut inner = self.inner.lock();
-        inner.active_txns.remove(&txn_id);
-        inner.wait_for_graph.remove(&txn_id);
-        // Remove all edges pointing to this transaction
-        for edges in inner.wait_for_graph.values_mut() {
-            edges.remove(&txn_id);
+        let mut inner = self.inner.write();
+        inner.active.remove(&txn_id);
+        inner.wait_for.remove(&txn_id);
+        for deps in inner.wait_for.values_mut() {
+            deps.remove(&txn_id);
         }
     }
 
-    /// Get number of active transactions
     pub fn active_count(&self) -> usize {
-        let inner = self.inner.lock();
-        inner.active_txns.len()
+        self.inner.read().active.len()
     }
 
-    /// Detect cycles in wait-for graph using DFS
-    /// Returns Some(cycle_path) if deadlock detected, None otherwise
-    fn detect_cycle(
-        graph: &HashMap<u64, HashSet<u64>>,
-        start: u64,
-        visited: &mut HashSet<u64>,
-        rec_stack: &mut HashSet<u64>,
-        path: &mut Vec<u64>,
-    ) -> Option<Vec<u64>> {
-        visited.insert(start);
-        rec_stack.insert(start);
-        path.push(start);
-
-        if let Some(neighbors) = graph.get(&start) {
-            for &neighbor in neighbors {
-                if !visited.contains(&neighbor) {
-                    if let Some(cycle) =
-                        Self::detect_cycle(graph, neighbor, visited, rec_stack, path)
-                    {
-                        return Some(cycle);
-                    }
-                } else if rec_stack.contains(&neighbor) {
-                    // Found a cycle - extract the cycle from path
-                    let cycle_start_idx = path
-                        .iter()
-                        .position(|&x| x == neighbor)
-                        .expect("Neighbor must exist in path when cycle detected");
-                    return Some(path[cycle_start_idx..].to_vec());
-                }
-            }
-        }
-
-        path.pop();
-        rec_stack.remove(&start);
-        None
-    }
-
-    /// Check for deadlocks in the wait-for graph
-    /// Returns Some((victim_id, cycle_path)) if deadlock detected
-    pub fn check_for_deadlock(&self) -> Option<(u64, Vec<u64>)> {
-        let inner = self.inner.lock();
-
-        if inner.wait_for_graph.is_empty() {
-            return None;
-        }
-
-        let mut visited = HashSet::new();
-
-        for &txn_id in inner.wait_for_graph.keys() {
-            if !visited.contains(&txn_id) {
-                let mut rec_stack = HashSet::new();
-                let mut path = Vec::new();
-
-                if let Some(cycle) = Self::detect_cycle(
-                    &inner.wait_for_graph,
-                    txn_id,
-                    &mut visited,
-                    &mut rec_stack,
-                    &mut path,
-                ) {
-                    // Choose victim: youngest transaction (highest txn_id) in the cycle
-                    let victim = *cycle
-                        .iter()
-                        .max()
-                        .expect("Cycle must contain at least one transaction");
-                    return Some((victim, cycle));
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Build wait-for edges based on potential conflicts
-    /// Called during try_commit to detect circular dependencies
     pub fn update_wait_for_graph(&self, txn_id: u64) -> Result<(), String> {
-        let mut inner = self.inner.lock();
-
-        let txn_info = inner
-            .active_txns
+        let mut inner = self.inner.write();
+        let txn = inner
+            .active
             .get(&txn_id)
-            .ok_or_else(|| "Transaction not found".to_string())?
+            .ok_or("Transaction not found")?
             .clone();
+        let mut waits = HashSet::new();
 
-        // Clear previous wait-for edges for this transaction
-        let mut wait_for_set = HashSet::new();
-
-        // Build wait-for edges: this txn waits for any active txn with conflicting writes
-        for (other_id, other_info) in &inner.active_txns {
-            if *other_id != txn_id {
-                // If write sets overlap, this txn "waits for" the other
-                if !txn_info.write_set.is_disjoint(&other_info.write_set) {
-                    wait_for_set.insert(*other_id);
-                }
-
-                // If this txn reads what the other writes, it waits for the other
-                if txn_info
-                    .read_set
-                    .iter()
-                    .any(|k| other_info.write_set.contains(k))
-                {
-                    wait_for_set.insert(*other_id);
-                }
+        for (other_id, other) in &inner.active {
+            if *other_id == txn_id {
+                continue;
+            }
+            if !txn.write_set.is_disjoint(&other.write_set)
+                || txn.read_set.iter().any(|k| other.write_set.contains(k))
+            {
+                waits.insert(*other_id);
             }
         }
 
-        inner.wait_for_graph.insert(txn_id, wait_for_set);
+        inner.wait_for.insert(txn_id, waits);
         Ok(())
     }
-}
 
-impl Default for TransactionManager {
-    fn default() -> Self {
-        Self::new()
+    pub fn check_for_deadlock(&self) -> Option<(u64, Vec<u64>)> {
+        let inner = self.inner.read();
+        let mut visited = HashSet::new();
+        let mut stack = Vec::new();
+
+        for &start in inner.wait_for.keys() {
+            if visited.contains(&start) {
+                continue;
+            }
+
+            stack.push((start, vec![start]));
+            while let Some((node, path)) = stack.pop() {
+                visited.insert(node);
+                if let Some(neighbors) = inner.wait_for.get(&node) {
+                    for &n in neighbors {
+                        if path.contains(&n) {
+                            let idx = path.iter().position(|&x| x == n).unwrap();
+                            let cycle = path[idx..].to_vec();
+                            let victim = *cycle.iter().max().unwrap();
+                            return Some((victim, cycle));
+                        }
+                        let mut next = path.clone();
+                        next.push(n);
+                        stack.push((n, next));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // --- Private helpers ---
+
+    fn has_write_conflict(txn: &TxnInfo, active: &HashMap<u64, TxnInfo>, id: u64) -> bool {
+        active
+            .iter()
+            .any(|(other_id, o)| *other_id != id && !txn.write_set.is_disjoint(&o.write_set))
+    }
+
+    fn has_commit_conflict(
+        txn: &TxnInfo,
+        committed: &HashMap<u64, (u64, HashSet<Key>)>,
+        id: u64,
+    ) -> bool {
+        committed.iter().any(|(&seq, (cid, ws))| {
+            seq >= txn.begin_seq && *cid != id && !txn.write_set.is_disjoint(ws)
+        })
+    }
+
+    fn has_read_conflict(txn: &TxnInfo, committed: &HashMap<u64, (u64, HashSet<Key>)>) -> bool {
+        txn.read_versions.iter().any(|(key, ver)| {
+            committed
+                .iter()
+                .any(|(&seq, (_, ws))| seq > *ver && ws.contains(key))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use std::collections::{HashMap, HashSet};
+
+    const CF: u32 = 1;
+    fn k(name: &str) -> Key {
+        Key::new(CF, Bytes::from(name))
+    }
+
+    // =========================================================================
+    // Begin / Abort
+    // =========================================================================
 
     #[test]
-    fn should_register_transaction_given_begin() {
+    fn should_register_transaction_given_valid_begin() {
         // Arrange
         let tm = TransactionManager::new();
 
@@ -344,116 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn should_commit_transaction_given_no_conflicts() {
-        // Arrange
-        let tm = TransactionManager::new();
-        tm.begin(1, 100, HashSet::new(), HashSet::new(), HashMap::new())
-            .unwrap();
-
-        // Act
-        let result = tm.try_commit(1, 101);
-
-        // Assert
-        assert!(result.is_ok());
-        assert_eq!(tm.active_count(), 0);
-    }
-
-    #[test]
-    fn should_detect_write_write_conflict_given_overlapping_write_sets() {
-        // Arrange
-        let tm = TransactionManager::new();
-        let mut ws1 = HashSet::new();
-        ws1.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("key1"),
-        ));
-        ws1.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("key2"),
-        ));
-
-        let mut ws2 = HashSet::new();
-        ws2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("key2"),
-        ));
-        ws2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("key3"),
-        ));
-
-        tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.begin(2, 100, ws2, HashSet::new(), HashMap::new())
-            .unwrap();
-
-        // Act
-        let result = tm.try_commit(2, 101);
-
-        // Assert
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Write-write conflict"));
-    }
-
-    #[test]
-    fn should_allow_commit_given_disjoint_write_sets() {
-        // Arrange
-        let tm = TransactionManager::new();
-        let mut ws1 = HashSet::new();
-        ws1.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("key1"),
-        ));
-
-        let mut ws2 = HashSet::new();
-        ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2")));
-
-        tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.begin(2, 100, ws2, HashSet::new(), HashMap::new())
-            .unwrap();
-
-        // Act
-        let r1 = tm.try_commit(1, 101);
-        let r2 = tm.try_commit(2, 102);
-
-        // Assert
-        assert!(r1.is_ok());
-        assert!(r2.is_ok());
-    }
-
-    #[test]
-    fn should_detect_read_write_conflict_given_key_modified_after_read() {
-        // Arrange
-        let tm = TransactionManager::new();
-
-    let mut ws1 = HashSet::new();
-    ws1.insert(Key::new(
-        crate::api::DEFAULT_CF_ID.as_u32(),
-        Bytes::from("key"),
-    ));
-        tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.try_commit(1, 110).unwrap();
-
-        let mut read_versions = HashMap::new();
-        read_versions.insert(
-            Key::new(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key")),
-            105,
-        );
-        tm.begin(2, 105, HashSet::new(), HashSet::new(), read_versions)
-            .unwrap();
-
-        // Act
-        let result = tm.try_commit(2, 115);
-
-        // Assert
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Read-write conflict"));
-    }
-
-    #[test]
-    fn should_abort_transaction_given_abort_called() {
+    fn should_remove_transaction_given_abort() {
         // Arrange
         let tm = TransactionManager::new();
         tm.begin(1, 100, HashSet::new(), HashSet::new(), HashMap::new())
@@ -466,144 +225,221 @@ mod tests {
         assert_eq!(tm.active_count(), 0);
     }
 
+    // =========================================================================
+    // Commit success
+    // =========================================================================
+
     #[test]
-    fn should_track_multiple_active_transactions() {
+    fn should_commit_transaction_given_no_conflicts() {
         // Arrange
         let tm = TransactionManager::new();
+        let mut ws = HashSet::new();
+        ws.insert(k("a"));
+        tm.begin(1, 10, ws, HashSet::new(), HashMap::new()).unwrap();
 
         // Act
-        tm.begin(1, 100, HashSet::new(), HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.begin(2, 101, HashSet::new(), HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.begin(3, 102, HashSet::new(), HashSet::new(), HashMap::new())
-            .unwrap();
+        let result = tm.try_commit(1, 20);
 
         // Assert
-        assert_eq!(tm.active_count(), 3);
+        assert!(result.is_ok());
+        assert_eq!(tm.active_count(), 0);
     }
 
     #[test]
-    fn should_cleanup_old_commits_given_exceeds_retention_limit() {
+    fn should_allow_disjoint_commits_between_two_transactions() {
+        // Arrange
+        let tm = TransactionManager::new();
+        let mut ws1 = HashSet::new();
+        ws1.insert(k("a"));
+        let mut ws2 = HashSet::new();
+        ws2.insert(k("b"));
+        tm.begin(1, 10, ws1, HashSet::new(), HashMap::new())
+            .unwrap();
+        tm.begin(2, 10, ws2, HashSet::new(), HashMap::new())
+            .unwrap();
+
+        // Act
+        let r1 = tm.try_commit(1, 20);
+        let r2 = tm.try_commit(2, 21);
+
+        // Assert
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+    }
+
+    // =========================================================================
+    // Conflict detection
+    // =========================================================================
+
+    #[test]
+    fn should_detect_write_write_conflict_between_active_transactions() {
+        // Arrange
+        let tm = TransactionManager::new();
+        let mut ws1 = HashSet::new();
+        ws1.insert(k("x"));
+        let mut ws2 = HashSet::new();
+        ws2.insert(k("x"));
+        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), HashMap::new()).unwrap();
+
+        // Act
+        let result = tm.try_commit(2, 5);
+
+        // Assert
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Write-write conflict"));
+    }
+
+    #[test]
+    fn should_detect_write_write_conflict_with_committed_transaction() {
+        // Arrange
+        let tm = TransactionManager::new();
+        let mut ws = HashSet::new();
+        ws.insert(k("shared"));
+        tm.begin(1, 10, ws.clone(), HashSet::new(), HashMap::new())
+            .unwrap();
+        tm.try_commit(1, 20).unwrap();
+        tm.begin(2, 15, ws, HashSet::new(), HashMap::new()).unwrap();
+
+        // Act
+        let result = tm.try_commit(2, 25);
+
+        // Assert
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Write-write conflict"));
+    }
+
+    #[test]
+    fn should_detect_read_write_conflict_given_key_modified_after_read() {
+        // Arrange
+        let tm = TransactionManager::new();
+        let mut ws1 = HashSet::new();
+        ws1.insert(k("data"));
+        tm.begin(1, 10, ws1, HashSet::new(), HashMap::new())
+            .unwrap();
+        tm.try_commit(1, 20).unwrap();
+
+        let mut reads = HashMap::new();
+        reads.insert(k("data"), 15);
+        tm.begin(2, 15, HashSet::new(), HashSet::new(), reads)
+            .unwrap();
+
+        // Act
+        let result = tm.try_commit(2, 30);
+
+        // Assert
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Read-write conflict"));
+    }
+
+    // =========================================================================
+    // Retention management
+    // =========================================================================
+
+    #[test]
+    fn should_trim_committed_entries_given_exceeds_max_retained() {
         // Arrange
         let tm = TransactionManager::new();
 
         // Act
         for i in 0..1100 {
             let mut ws = HashSet::new();
-            ws.insert(Key::new(
-                crate::api::DEFAULT_CF_ID.as_u32(),
-                Bytes::from(format!("key{}", i)),
-            ));
-            tm.begin(i, 100 + i, ws, HashSet::new(), HashMap::new())
+            ws.insert(k(&format!("k{i}")));
+            tm.begin(i, i as u64, ws, HashSet::new(), HashMap::new())
                 .unwrap();
-            tm.try_commit(i, 100 + i).unwrap();
+            tm.try_commit(i, 1000 + i as u64).unwrap();
         }
 
         // Assert
-        let inner = tm.inner.lock();
-        assert!(inner.committed_writes.len() <= 1000);
+        let inner = tm.inner.read();
+        assert!(inner.committed.len() <= inner.max_retained.max(1000));
     }
 
+    // =========================================================================
+    // Wait-for graph
+    // =========================================================================
+
     #[test]
-    fn should_update_wait_for_graph_given_conflicting_write_sets() {
+    fn should_add_wait_for_edge_given_write_conflict() {
         // Arrange
         let tm = TransactionManager::new();
-
         let mut ws1 = HashSet::new();
-        ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1")));
-
+        ws1.insert(k("shared"));
         let mut ws2 = HashSet::new();
-        ws2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("key1"),
-        )); // Conflicts with txn1
-        ws2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("key2"),
-        ));
-
-        tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.begin(2, 100, ws2, HashSet::new(), HashMap::new())
-            .unwrap();
+        ws2.insert(k("shared"));
+        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), HashMap::new()).unwrap();
 
         // Act
         tm.update_wait_for_graph(2).unwrap();
 
         // Assert
-        let inner = tm.inner.lock();
-        let wait_for = inner.wait_for_graph.get(&2).unwrap();
-        assert!(wait_for.contains(&1), "Txn 2 should wait for txn 1");
+        let inner = tm.inner.read();
+        let waits = inner.wait_for.get(&2).unwrap();
+        assert!(waits.contains(&1));
     }
 
     #[test]
-    fn should_update_wait_for_graph_given_read_write_conflict() {
+    fn should_add_wait_for_edge_given_read_write_conflict() {
         // Arrange
         let tm = TransactionManager::new();
-
         let mut ws1 = HashSet::new();
-        ws1.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("data"),
-        ));
-
+        ws1.insert(k("data"));
         let mut rs2 = HashSet::new();
-        rs2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("data"),
-        )); // Reads what txn1 writes
-
-        tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.begin(2, 100, HashSet::new(), rs2, HashMap::new())
-            .unwrap();
+        rs2.insert(k("data"));
+        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, HashSet::new(), rs2, HashMap::new()).unwrap();
 
         // Act
         tm.update_wait_for_graph(2).unwrap();
 
         // Assert
-        let inner = tm.inner.lock();
-        let wait_for = inner.wait_for_graph.get(&2).unwrap();
-        assert!(
-            wait_for.contains(&1),
-            "Txn 2 should wait for txn 1 (read-write)"
-        );
+        let inner = tm.inner.read();
+        let waits = inner.wait_for.get(&2).unwrap();
+        assert!(waits.contains(&1));
     }
+
+    #[test]
+    fn should_clear_wait_for_edges_given_abort() {
+        // Arrange
+        let tm = TransactionManager::new();
+        let mut ws1 = HashSet::new();
+        ws1.insert(k("shared"));
+        let mut ws2 = HashSet::new();
+        ws2.insert(k("shared"));
+        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), HashMap::new()).unwrap();
+        tm.update_wait_for_graph(2).unwrap();
+
+        // Act
+        tm.abort(2);
+
+        // Assert
+        let inner = tm.inner.read();
+        assert!(!inner.wait_for.contains_key(&2));
+    }
+
+    // =========================================================================
+    // Deadlock detection
+    // =========================================================================
 
     #[test]
     fn should_detect_two_transaction_cycle() {
         // Arrange
         let tm = TransactionManager::new();
 
-        // Txn 1 writes A, wants B
         let mut ws1 = HashSet::new();
-        ws1.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("A"),
-        ));
+        ws1.insert(k("A"));
         let mut rs1 = HashSet::new();
-        rs1.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("B"),
-        ));
+        rs1.insert(k("B"));
 
-        // Txn 2 writes B, wants A
         let mut ws2 = HashSet::new();
-        ws2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("B"),
-        ));
+        ws2.insert(k("B"));
         let mut rs2 = HashSet::new();
-        rs2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("A"),
-        ));
+        rs2.insert(k("A"));
 
-        tm.begin(1, 100, ws1.clone(), rs1.clone(), HashMap::new())
-            .unwrap();
-        tm.begin(2, 100, ws2.clone(), rs2.clone(), HashMap::new())
-            .unwrap();
+        tm.begin(1, 1, ws1, rs1, HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, rs2, HashMap::new()).unwrap();
 
         tm.update_wait_for_graph(1).unwrap();
         tm.update_wait_for_graph(2).unwrap();
@@ -612,16 +448,10 @@ mod tests {
         let result = tm.check_for_deadlock();
 
         // Assert
-        assert!(result.is_some(), "Should detect deadlock");
+        assert!(result.is_some());
         let (victim, cycle) = result.unwrap();
-        assert!(
-            victim == 1 || victim == 2,
-            "Victim should be one of the transactions"
-        );
-        assert!(
-            cycle.len() >= 2,
-            "Cycle should contain at least 2 transactions"
-        );
+        assert!(victim == 1 || victim == 2);
+        assert!(cycle.len() >= 2);
     }
 
     #[test]
@@ -629,45 +459,18 @@ mod tests {
         // Arrange
         let tm = TransactionManager::new();
 
-        // Txn 1 writes A, reads B
-        let mut ws1 = HashSet::new();
-        ws1.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("A"),
-        ));
-        let mut rs1 = HashSet::new();
-        rs1.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("B"),
-        ));
+        let (a, b, c) = (k("A"), k("B"), k("C"));
 
-        // Txn 2 writes B, reads C
-        let mut ws2 = HashSet::new();
-        ws2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("B"),
-        ));
-        let mut rs2 = HashSet::new();
-        rs2.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("C"),
-        ));
+        let ws1 = HashSet::from([a.clone()]);
+        let rs1 = HashSet::from([b.clone()]);
+        let ws2 = HashSet::from([b.clone()]);
+        let rs2 = HashSet::from([c.clone()]);
+        let ws3 = HashSet::from([c.clone()]);
+        let rs3 = HashSet::from([a.clone()]);
 
-        // Txn 3 writes C, reads A
-        let mut ws3 = HashSet::new();
-        ws3.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("C"),
-        ));
-        let mut rs3 = HashSet::new();
-        rs3.insert(Key::new(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("A"),
-        ));
-
-        tm.begin(1, 100, ws1, rs1, HashMap::new()).unwrap();
-        tm.begin(2, 100, ws2, rs2, HashMap::new()).unwrap();
-        tm.begin(3, 100, ws3, rs3, HashMap::new()).unwrap();
+        tm.begin(1, 1, ws1, rs1, HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, rs2, HashMap::new()).unwrap();
+        tm.begin(3, 1, ws3, rs3, HashMap::new()).unwrap();
 
         tm.update_wait_for_graph(1).unwrap();
         tm.update_wait_for_graph(2).unwrap();
@@ -677,37 +480,22 @@ mod tests {
         let result = tm.check_for_deadlock();
 
         // Assert
-        assert!(result.is_some(), "Should detect 3-way deadlock");
+        assert!(result.is_some());
         let (victim, cycle) = result.unwrap();
-        assert!(
-            victim == 1 || victim == 2 || victim == 3,
-            "Victim should be highest txn_id in cycle"
-        );
-        assert!(cycle.len() >= 2, "Cycle should contain transactions");
+        assert!(victim == 1 || victim == 2 || victim == 3);
+        assert!(cycle.len() >= 2);
     }
 
     #[test]
-    fn should_not_detect_cycle_given_no_circular_dependency() {
+    fn should_not_detect_cycle_given_disjoint_keys() {
         // Arrange
         let tm = TransactionManager::new();
-
-    let mut ws1 = HashSet::new();
-    ws1.insert(Key::new(
-        crate::api::DEFAULT_CF_ID.as_u32(),
-        Bytes::from("key1"),
-    ));
-
-    let mut ws2 = HashSet::new();
-    ws2.insert(Key::new(
-        crate::api::DEFAULT_CF_ID.as_u32(),
-        Bytes::from("key2"),
-    ));
-
-        tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.begin(2, 100, ws2, HashSet::new(), HashMap::new())
-            .unwrap();
-
+        let mut ws1 = HashSet::new();
+        ws1.insert(k("x"));
+        let mut ws2 = HashSet::new();
+        ws2.insert(k("y"));
+        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), HashMap::new()).unwrap();
         tm.update_wait_for_graph(1).unwrap();
         tm.update_wait_for_graph(2).unwrap();
 
@@ -715,36 +503,6 @@ mod tests {
         let result = tm.check_for_deadlock();
 
         // Assert
-        assert!(
-            result.is_none(),
-            "Should not detect deadlock with disjoint keys"
-        );
-    }
-
-    #[test]
-    fn should_clear_wait_for_edges_given_transaction_aborted() {
-        // Arrange
-        let tm = TransactionManager::new();
-
-    let mut ws1 = HashSet::new();
-    ws1.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key")));
-    let mut ws2 = HashSet::new();
-    ws2.insert((crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key")));
-
-        tm.begin(1, 100, ws1, HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.begin(2, 100, ws2, HashSet::new(), HashMap::new())
-            .unwrap();
-        tm.update_wait_for_graph(2).unwrap();
-
-        // Act
-        tm.abort(2);
-
-        // Assert
-        let inner = tm.inner.lock();
-        assert!(
-            !inner.wait_for_graph.contains_key(&2),
-            "Wait-for edges should be cleared"
-        );
+        assert!(result.is_none());
     }
 }

@@ -1,5 +1,5 @@
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -2161,12 +2161,31 @@ impl MidgeEngine {
         }
 
         // Register transaction with manager (tracks read/write sets)
+        let write_set = txn
+            .write_set()
+            .clone()
+            .into_iter()
+            .map(|(cf, key)| crate::core::transaction_manager::Key::new(cf, key))
+            .collect::<HashSet<_>>();
+        let read_set = txn
+            .read_set()
+            .clone()
+            .into_iter()
+            .map(|(cf, key)| crate::core::transaction_manager::Key::new(cf, key))
+            .collect::<HashSet<_>>();
+        let read_versions = txn
+            .read_versions()
+            .clone()
+            .into_iter()
+            .map(|((cf, key), v)| (crate::core::transaction_manager::Key::new(cf, key), v))
+            .collect::<HashMap<_, _>>();
+
         if let Err(e) = self.txn_manager.begin(
             txn.txn_id(),
             txn.begin_sequence(),
-            txn.write_set().clone(),
-            txn.read_set().clone(),
-            txn.read_versions().clone(),
+            write_set,
+            read_set,
+            read_versions,
         ) {
             return Err(MidgeError::transaction_conflict(e));
         }
@@ -2954,12 +2973,31 @@ impl crate::api::kv_store::KvStore for Arc<MidgeEngine> {
         }
 
         // Register transaction with manager (tracks read/write sets)
+        let write_set = txn
+            .write_set()
+            .clone()
+            .into_iter()
+            .map(|(cf, key)| crate::core::transaction_manager::Key::new(cf, key))
+            .collect::<HashSet<_>>();
+        let read_set = txn
+            .read_set()
+            .clone()
+            .into_iter()
+            .map(|(cf, key)| crate::core::transaction_manager::Key::new(cf, key))
+            .collect::<HashSet<_>>();
+        let read_versions = txn
+            .read_versions()
+            .clone()
+            .into_iter()
+            .map(|((cf, key), v)| (crate::core::transaction_manager::Key::new(cf, key), v))
+            .collect::<HashMap<_, _>>();
+
         if let Err(e) = self.txn_manager.begin(
             txn.txn_id(),
             txn.begin_sequence(),
-            txn.write_set().clone(),
-            txn.read_set().clone(),
-            txn.read_versions().clone(),
+            write_set,
+            read_set,
+            read_versions,
         ) {
             return Err(MidgeError::transaction_conflict(e));
         }

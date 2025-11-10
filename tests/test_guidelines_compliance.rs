@@ -35,24 +35,23 @@ fn should_enforce_test_naming_convention() {
 
     // Assert
     if !violations.is_empty() {
-        let mut message = String::from("\n\n❌ TEST NAMING CONVENTION VIOLATIONS\n");
-        message.push_str("───────────────────────────────────────────────\n\n");
-        message.push_str("Each test must use the `should_*` naming pattern.\n");
-        message.push_str("This improves readability and documents expected behavior.\n");
-        message.push_str("Rename tests using `test_*` → `should_*`.\n\n");
+        let mut msg = String::from("\n\n❌ TEST NAMING CONVENTION VIOLATIONS\n");
+        msg.push_str("───────────────────────────────────────────────\n\n");
+        msg.push_str("Each test must use the `should_*` naming pattern.\n");
+        msg.push_str("Rename tests using `test_*` → `should_*` for clarity.\n\n");
 
-        for result in &violations {
-            message.push_str(&format!(
+        for r in &violations {
+            msg.push_str(&format!(
                 "• {}:{} → '{}' should be renamed to 'should_*'\n",
-                result.file, result.line, result.test_name
+                r.file, r.line, r.test_name
             ));
         }
 
-        message.push_str(&format!(
-            "\nTotal Violations: {}\n\nSee: docs/dev/test_guidelines.md#1-naming-convention",
+        msg.push_str(&format!(
+            "\nTotal Violations: {}\n\nSee: docs/dev/test_guidelines.md#naming",
             violations.len()
         ));
-        panic!("{}", message);
+        panic!("{}", msg);
     }
 }
 
@@ -69,41 +68,38 @@ fn should_enforce_arrange_act_assert_structure() {
 
     // Assert
     if !violations.is_empty() {
-        let mut message = String::from("\n\n⚠️  AAA STRUCTURE VIOLATIONS\n");
-        message.push_str("─────────────────────────────\n\n");
-        message.push_str("All tests longer than 5 lines must clearly separate stages using:\n");
-        message.push_str("  // Arrange\n  // Act\n  // Assert\n\n");
-        message.push_str("This helps future readers immediately understand the test flow.\n\n");
+        let mut msg = String::from("\n\n⚠️  AAA STRUCTURE VIOLATIONS\n");
+        msg.push_str("─────────────────────────────\n\n");
+        msg.push_str("Tests longer than 5 lines must contain:\n");
+        msg.push_str("  // Arrange\n  // Act\n  // Assert\n\n");
+        msg.push_str("These comments clarify structure and intention.\n\n");
 
-        for result in &violations {
-            message.push_str(&format!(
-                "• {}:{} — '{}'\n",
-                result.file, result.line, result.test_name
-            ));
-            for issue in &result.issues {
+        for r in &violations {
+            msg.push_str(&format!("• {}:{} — '{}'\n", r.file, r.line, r.test_name));
+            for issue in &r.issues {
                 if issue.starts_with("AAA:") {
-                    message.push_str(&format!("    ↳ {}\n", issue));
+                    msg.push_str(&format!("    ↳ {}\n", issue));
                 }
             }
-            message.push('\n');
+            msg.push('\n');
         }
 
-        message.push_str(&format!(
+        msg.push_str(&format!(
             "Found {} tests missing proper AAA structure.\n\n",
             violations.len()
         ));
-        message.push_str("💡 Example of correct format:\n\n");
-        message.push_str("  #[test]\n");
-        message.push_str("  fn should_do_something() {\n");
-        message.push_str("      // Arrange\n");
-        message.push_str("      let setup = create_test_data();\n\n");
-        message.push_str("      // Act\n");
-        message.push_str("      let result = perform_operation(setup);\n\n");
-        message.push_str("      // Assert\n");
-        message.push_str("      assert_eq!(result, expected);\n");
-        message.push_str("  }\n");
+        msg.push_str("💡 Example of correct format:\n\n");
+        msg.push_str("  #[test]\n");
+        msg.push_str("  fn should_perform_action() {\n");
+        msg.push_str("      // Arrange\n");
+        msg.push_str("      let setup = create_fixture();\n\n");
+        msg.push_str("      // Act\n");
+        msg.push_str("      let result = run_operation(setup);\n\n");
+        msg.push_str("      // Assert\n");
+        msg.push_str("      assert_eq!(result, expected);\n");
+        msg.push_str("  }\n");
 
-        panic!("{}", message);
+        panic!("{}", msg);
     }
 }
 
@@ -125,37 +121,32 @@ fn should_enforce_single_behavior_principle() {
 
     // Assert
     if !violations.is_empty() {
-        let mut message = String::from("\n\n⚠️  SINGLE-BEHAVIOR VIOLATIONS\n");
-        message.push_str("───────────────────────────────\n\n");
-        message.push_str("Each test should verify ONE specific behavior.\n");
-        message.push_str("Multiple '// Act' sections or names like 'should_upload_and_download'\n");
-        message.push_str("indicate more than one behavior is being tested.\n\n");
-        message.push_str("Split such tests into focused, independent ones.\n\n");
+        let mut msg = String::from("\n\n⚠️  SINGLE-BEHAVIOR VIOLATIONS\n");
+        msg.push_str("───────────────────────────────\n\n");
+        msg.push_str("Each test should verify ONE behavior only.\n");
+        msg.push_str("Multiple '// Act' blocks or '_and_' in names imply multi-behavior.\n\n");
 
-        for result in &violations {
-            message.push_str(&format!(
-                "• {}:{} — '{}'\n",
-                result.file, result.line, result.test_name
-            ));
-            for issue in &result.issues {
+        for r in &violations {
+            msg.push_str(&format!("• {}:{} — '{}'\n", r.file, r.line, r.test_name));
+            for issue in &r.issues {
                 if issue.starts_with("MULTI-BEHAVIOR:") {
-                    message.push_str(&format!("    ↳ {}\n", issue));
+                    msg.push_str(&format!("    ↳ {}\n", issue));
                 }
             }
-            message.push('\n');
+            msg.push('\n');
         }
 
-        message.push_str(&format!(
+        msg.push_str(&format!(
             "Found {} multi-behavior tests.\n\n",
             violations.len()
         ));
-        message.push_str("💡 Example of correct structure:\n\n");
-        message.push_str("  #[test]\n");
-        message.push_str("  fn should_upload_data_successfully() { ... }\n\n");
-        message.push_str("  #[test]\n");
-        message.push_str("  fn should_download_uploaded_data() { ... }\n");
+        msg.push_str("💡 Split into separate tests:\n\n");
+        msg.push_str("  #[test]\n");
+        msg.push_str("  fn should_upload_file_successfully() { ... }\n\n");
+        msg.push_str("  #[test]\n");
+        msg.push_str("  fn should_download_uploaded_file() { ... }\n");
 
-        panic!("{}", message);
+        panic!("{}", msg);
     }
 }
 
@@ -164,29 +155,26 @@ fn should_enforce_proper_test_file_organization() {
     // Arrange
     let issues = check_test_organization();
 
-    // Act
+    // Act / Assert
     if !issues.is_empty() {
-        let mut message = String::from("\n\n📁 TEST ORGANIZATION VIOLATIONS\n");
-        message.push_str("────────────────────────────────\n\n");
-        message.push_str(
-            "Ensure test files follow Rust conventions for clarity and discoverability.\n",
+        let mut msg = String::from("\n\n📁 TEST ORGANIZATION VIOLATIONS\n");
+        msg.push_str("────────────────────────────────\n\n");
+        msg.push_str("Ensure test files follow standard Cargo test layout:\n");
+        msg.push_str("  • Tests under `tests/` are auto-discovered.\n");
+        msg.push_str("  • Nested modules require explicit `mod` imports.\n");
+        msg.push_str(
+            "  • Filenames should be descriptive, snake_case, and not prefixed with `test_`.\n\n",
         );
-        message.push_str("Guidelines:\n");
-        message.push_str("  • Files under `tests/` are auto-discovered by Cargo.\n");
-        message.push_str("  • Nested tests require `mod.rs` or explicit `mod` imports.\n");
-        message.push_str("  • Use descriptive, snake_case filenames (e.g., `engine_scans.rs`).\n");
-        message.push_str("  • Avoid redundant prefixes like `test_` in filenames.\n\n");
 
         for issue in &issues {
-            message.push_str(&format!("• {}\n    {}\n\n", issue.file_path, issue.issue));
+            msg.push_str(&format!("• {}\n    {}\n\n", issue.file_path, issue.issue));
         }
 
-        message.push_str(&format!("Found {} organization issues.\n\n", issues.len()));
-        message.push_str("💡 Fix by renaming or restructuring test files per above rules.\n");
+        msg.push_str(&format!("Found {} organization issues.\n\n", issues.len()));
+        msg.push_str("💡 Fix by renaming or restructuring test files accordingly.\n");
 
-        panic!("{}", message);
+        panic!("{}", msg);
     }
 }
 
-// Note: The meta-tests above are intentionally exempt from AAA enforcement
-// because they are internal compliance verifiers, not behavior tests.
+// Meta-tests are exempt from AAA rules

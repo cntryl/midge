@@ -1,5 +1,4 @@
 use super::mutation::{Mutation, MutationOp};
-use crate::api::ColumnFamilyId;
 use crate::error::MidgeError;
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
@@ -347,7 +346,9 @@ impl Transaction {
                         Mutation::insert_cf(cf_id_obj, key, value_or_end.unwrap_or_default(), None)
                     }
                     2 => Mutation::delete_cf(cf_id_obj, key),
-                    3 => Mutation::delete_range_cf(cf_id_obj, key, value_or_end.unwrap_or_default()),
+                    3 => {
+                        Mutation::delete_range_cf(cf_id_obj, key, value_or_end.unwrap_or_default())
+                    }
                     4 => {
                         // CompareAndSwap: read expected value (second field)
                         let mut expected_len_bytes = [0u8; 4];
