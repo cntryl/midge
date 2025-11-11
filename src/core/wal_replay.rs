@@ -47,8 +47,9 @@ pub(crate) fn replay_wal_to_memtables_after_seq(
 
     // First pass: identify committed transactions
     for rec in records {
-        // Skip records that were already persisted
-        if rec.seq <= skip_before_seq {
+        // Skip records already persisted. Special case: skip_before_seq=0 means nothing persisted yet
+        // (since sequences start at 0), so don't skip anything. Otherwise skip rec.seq <= skip_before_seq.
+        if skip_before_seq > 0 && rec.seq <= skip_before_seq {
             continue;
         }
         
@@ -61,8 +62,9 @@ pub(crate) fn replay_wal_to_memtables_after_seq(
 
     // Second pass: buffer transactional ops and apply committed ones
     for rec in records {
-        // Skip records that were already persisted
-        if rec.seq <= skip_before_seq {
+        // Skip records already persisted. Special case: skip_before_seq=0 means nothing persisted yet
+        // (since sequences start at 0), so don't skip anything. Otherwise skip rec.seq <= skip_before_seq.
+        if skip_before_seq > 0 && rec.seq <= skip_before_seq {
             continue;
         }
         

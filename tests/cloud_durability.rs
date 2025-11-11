@@ -30,6 +30,11 @@ fn should_preserve_local_file_given_upload_in_progress_when_crash() {
     };
     let eng = MidgeEngine::open(opts).expect("reopen");
     let cf = eng.default_column_family();
+    
+    // Check first key with debug output
+    let result = eng.get(&cf, b"key000").expect("get");
+    println!("First key after restart: {:?}", result.is_some());
+    
     for i in 0..100 {
         let result = eng.get(&cf, format!("key{:03}", i).as_bytes()).expect("get");
         assert!(result.is_some(), "Local file should be preserved");
