@@ -182,8 +182,9 @@ impl MidgeEngine {
     /// Merges data from memtables and SST files, handling tombstones appropriately.
     pub fn scan(&self, cf: &ColumnFamilyHandle, query: Query) -> MidgeResult<Vec<(Bytes, Bytes)>> {
         let cf_id = cf.id();
-        let start = query.start.as_ref().map(|b| b.as_ref());
-        let end_ref = query.end.as_ref().map(|b| b.as_ref());
+        let start = query.effective_start();
+        let end_owned = query.effective_end();
+        let end_ref = end_owned.as_ref().map(|v| v.as_slice());
 
         let column_family = self.cf_set.get_cf(cf_id).ok_or_else(|| {
             crate::error::MidgeError::invalid_config(format!(
@@ -192,7 +193,7 @@ impl MidgeEngine {
             ))
         })?;
 
-        // Scan active memtable
+                // Scan active memtable
         let (mem_items, mem_tombs) = {
             let mt = column_family.memtable.read();
             let items = mt
@@ -210,12 +211,21 @@ impl MidgeEngine {
 
         // Build sources for merging iterator
         let mut sources: Vec<Box<dyn crate::core::merge_iterator::IteratorSource>> = vec![];
-        sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
-            mem_items,
-        )));
-        sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
-            mem_tombs,
-        )));
+        if query.reverse {
+            sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(
+                mem_items,
+            )));
+            sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(
+                mem_tombs,
+            )));
+        } else {
+            sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
+                mem_items,
+            )));
+            sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
+                mem_tombs,
+            )));
+        }
 
         // Scan immutable memtables (newest to oldest)
         {
@@ -233,14 +243,26 @@ impl MidgeEngine {
                     .collect();
 
                 if !immut_items.is_empty() {
-                    sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
-                        immut_items,
-                    )));
+                    if query.reverse {
+                        sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(
+                            immut_items,
+                        )));
+                    } else {
+                        sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
+                            immut_items,
+                        )));
+                    }
                 }
                 if !immut_tombs.is_empty() {
-                    sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
-                        immut_tombs,
-                    )));
+                    if query.reverse {
+                        sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(
+                            immut_tombs,
+                        )));
+                    } else {
+                        sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
+                            immut_tombs,
+                        )));
+                    }
                 }
             }
         }
@@ -281,21 +303,24 @@ impl MidgeEngine {
                         })
                         .collect();
                     if !items.is_empty() {
-                        sources.push(Box::new(crate::core::merge_iterator::VecSource::new(items)));
+                        if query.reverse {
+                            sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(items)));
+                        } else {
+                            sources.push(Box::new(crate::core::merge_iterator::VecSource::new(items)));
+                        }
                     }
                 }
             }
         }
 
-        // Merge and collect
-        let iter = crate::core::merge_iterator::MergingIterator::new(sources, query.limit);
+        // Merge and collect (with proper reverse handling)
+        let iter = crate::core::merge_iterator::MergingIterator::with_reverse(
+            sources,
+            query.limit,
+            query.reverse,
+        );
         let results: Vec<(Bytes, Bytes)> = iter.collect();
-
-        if query.reverse {
-            Ok(results.into_iter().rev().collect())
-        } else {
-            Ok(results)
-        }
+        Ok(results)
     }
 
     /// Streaming scan implementation (legacy, uses default CF).
