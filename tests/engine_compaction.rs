@@ -27,17 +27,17 @@ fn should_compact_all_merge_newest_and_drop_tombstones() {
         // SST1: a=1, b=2
         eng.put(&cf, b"a", b"1").unwrap();
         eng.put(&cf, b"zz", &vec![b'x'; 256]).unwrap();
-        eng.wait_for_flush(std::time::Duration::from_secs(1))
+        eng.wait_for_flush(std::time::Duration::from_millis(100))
             .expect("flush should complete");
         // SST2: b=2', c=3
         eng.put(&cf, b"b", b"2' ").unwrap();
         eng.put(&cf, b"zz2", &vec![b'x'; 256]).unwrap();
-        eng.wait_for_flush(std::time::Duration::from_secs(1))
+        eng.wait_for_flush(std::time::Duration::from_millis(100))
             .expect("flush should complete");
         // SST3: delete a
         eng.delete(&cf, b"a").unwrap();
         eng.put(&cf, b"zz3", &vec![b'x'; 256]).unwrap();
-        eng.wait_for_flush(std::time::Duration::from_secs(1))
+        eng.wait_for_flush(std::time::Duration::from_millis(100))
             .expect("flush should complete");
         // leave eng in scope to ensure flush thread has time
     }
@@ -115,7 +115,7 @@ fn should_background_compact_when_threshold_exceeded() {
         eng.put(&cf, format!("padding{}", i).as_bytes(), &[b'x'; 128]).unwrap();
         eng.flush_cf(&cf).unwrap();
         // Wait for flush to complete before closing
-        eng.wait_for_flush(std::time::Duration::from_secs(1)).unwrap();
+        eng.wait_for_flush(std::time::Duration::from_millis(100)).unwrap();
         drop(eng);
     }
     

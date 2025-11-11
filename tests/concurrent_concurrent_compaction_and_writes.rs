@@ -45,7 +45,7 @@ fn should_allow_writes_given_compaction_in_progress() {
 
     // Wait for flush to complete before starting concurrent writes
     engine
-        .wait_for_flush(std::time::Duration::from_secs(1))
+        .wait_for_flush(std::time::Duration::from_millis(100))
         .expect("flush should complete");
 
     let write_handle = {

@@ -138,7 +138,7 @@ fn should_resume_writes_given_compaction_caught_up() {
 
     // Wait for flush/compaction to complete
     engine
-        .wait_for_flush(std::time::Duration::from_secs(1))
+        .wait_for_flush(std::time::Duration::from_millis(100))
         .expect("flush should complete");
 
     for i in 0..100 {

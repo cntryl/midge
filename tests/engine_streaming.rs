@@ -32,7 +32,7 @@ fn should_streaming_scan_match_regular_scan() {
     }
 
     // Wait for flush
-    eng.wait_for_flush(std::time::Duration::from_secs(1))
+    eng.wait_for_flush(std::time::Duration::from_millis(100))
         .expect("flush should complete");
 
     // Add more keys to memtable

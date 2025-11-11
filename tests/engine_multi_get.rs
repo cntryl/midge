@@ -109,7 +109,7 @@ fn should_multi_get_from_ssts_after_flush() {
     eng.put(&cf, b"key009", big.as_slice()).expect("put");
 
     // Wait for flush to complete
-    eng.wait_for_flush(std::time::Duration::from_secs(1))
+    eng.wait_for_flush(std::time::Duration::from_millis(100))
         .expect("flush should complete");
 
     // Act: Read keys that should be in SSTs (from before rotation)
@@ -158,7 +158,7 @@ fn should_multi_get_mixed_memtable_and_sst() {
     eng.put(&cf, b"oldlarge", big.as_slice()).expect("put");
 
     // Wait for flush to complete
-    eng.wait_for_flush(std::time::Duration::from_secs(1))
+    eng.wait_for_flush(std::time::Duration::from_millis(100))
         .expect("flush should complete");
 
     // Write new data to memtable (after rotation)

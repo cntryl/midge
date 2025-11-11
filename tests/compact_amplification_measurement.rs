@@ -24,7 +24,7 @@ fn should_measure_read_amplification_given_multilevel_scan() {
         }
         eng.flush_cf(&cf).expect("flush");
         // Wait for compaction to complete
-        eng.wait_for_compaction(Duration::from_secs(1))
+        eng.wait_for_compaction(Duration::from_millis(100))
             .expect("compaction should complete");
     }
 
@@ -72,7 +72,7 @@ fn should_measure_write_amplification_given_compaction_cascade() {
     }
     eng.flush_cf(&cf).expect("flush");
     // Wait for compaction cascade to complete
-    eng.wait_for_compaction(Duration::from_secs(1))
+    eng.wait_for_compaction(Duration::from_millis(100))
         .expect("compaction should complete");
 
     let final_compaction_bytes = eng.performance_metrics().compaction.total_bytes_written();
@@ -155,7 +155,7 @@ fn should_track_amplification_over_time_given_workload() {
         }
         eng.flush_cf(&cf).expect("flush");
         // Wait for compaction to complete
-        eng.wait_for_compaction(Duration::from_secs(1))
+        eng.wait_for_compaction(Duration::from_millis(100))
             .expect("compaction should complete");
 
         // Sample write amplification at each phase
