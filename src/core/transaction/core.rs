@@ -130,6 +130,9 @@ impl Transaction {
     // Mutation helpers
     // -------------------------------------------------------------------------
     fn stage(&mut self, cf: crate::api::ColumnFamilyId, m: Mutation, key: Bytes) -> Result<(), MidgeError> {
+        if self.completed {
+            return Err(MidgeError::internal("cannot modify completed transaction"));
+        }
         self.track_write(cf.as_u32(), key);
         self.staged.push(m);
         self.maybe_spill()
@@ -963,5 +966,81 @@ mod tests {
 
         // Assert - Should not panic or leave files (tested by not crashing)
         // Cleanup is automatic via Drop trait
+    }
+
+    // ========================================================================
+    // Transaction Lifecycle Tests
+    // ========================================================================
+
+    #[test]
+    fn should_reject_put_given_rolled_back_transaction() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+        txn.put(b"key1", b"value1").unwrap();
+        txn.rollback();
+
+        // Act
+        let result = txn.put(b"key2", b"value2");
+
+        // Assert
+        assert!(result.is_err(), "Should reject put on rolled-back transaction");
+        assert!(result.unwrap_err().to_string().contains("completed"));
+    }
+
+    #[test]
+    fn should_reject_delete_given_rolled_back_transaction() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+        txn.rollback();
+
+        // Act
+        let result = txn.delete(Bytes::from("key"));
+
+        // Assert
+        assert!(result.is_err(), "Should reject delete on rolled-back transaction");
+    }
+
+    #[test]
+    fn should_reject_commit_given_already_committed_transaction() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+        txn.put(b"key", b"value").unwrap();
+        // Manually mark as completed to simulate the state
+        txn.rollback(); // This sets completed = true
+
+        // Act
+        let result = txn.commit();
+
+        // Assert
+        assert!(result.is_err(), "Should reject commit on already completed transaction");
+        assert!(result.unwrap_err().to_string().contains("already completed"));
+    }
+
+    #[test]
+    fn should_allow_rollback_given_already_rolled_back_transaction() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+        txn.rollback();
+
+        // Act
+        txn.rollback(); // Second rollback should be idempotent
+
+        // Assert - No panic, rollback is idempotent
+    }
+
+    #[test]
+    fn should_clear_staged_mutations_on_rollback() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+        txn.put(b"key1", b"value1").unwrap();
+        txn.put(b"key2", b"value2").unwrap();
+        assert_eq!(txn.staged.len(), 2);
+
+        // Act
+        txn.rollback();
+
+        // Assert
+        assert_eq!(txn.staged.len(), 0, "Staged mutations should be cleared on rollback");
+        assert!(txn.completed, "Transaction should be marked as completed");
     }
 }

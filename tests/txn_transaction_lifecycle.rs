@@ -82,22 +82,31 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let aborted_txn = engine.begin_transaction(&cf).unwrap();
-    // Note: rollback() is not part of KvTransaction trait, transaction is dropped/aborted on drop
-    // Just drop it to abort
-    drop(aborted_txn);
+    // This test verifies that transaction lifecycle is properly managed.
+    // Once a transaction is completed (committed or aborted), it cannot be reused.
+    // Rust's ownership system enforces this at compile time for commit
+    // (transaction is moved/consumed).
+    
+    // Test 1: Verify committed transaction cannot be double-committed
+    let mut txn1 = engine.begin_transaction(&cf).unwrap();
+    txn1.put(b"key1", b"value1").unwrap();
+    engine
+        .commit_transaction(txn1, cntryl_midge::WriteOptions::default())
+        .expect("first commit should succeed");
+    // txn1 is now consumed and cannot be used again (compile-time enforced)
 
-    let mut aborted_txn = engine.begin_transaction(&cf).unwrap();
-    aborted_txn.put(b"key", b"value").unwrap();
+    // Act & Assert - verify the data was written
+    let result = engine.get(&cf, b"key1").expect("get should work");
+    assert_eq!(result.as_deref(), Some(b"value1".as_ref()));
+    
+    // Test 2: Verify transaction can be properly aborted and data is not visible
+    let mut txn2 = engine.begin_transaction(&cf).unwrap();
+    txn2.put(b"key2", b"value2").unwrap();
+    drop(txn2); // Abort by dropping
 
-    // Act
-    let result = engine.commit_transaction(aborted_txn, cntryl_midge::WriteOptions::default());
-
-    // Assert
-    assert!(
-        result.is_err(),
-        "Should reject operations on aborted transaction"
-    );
+    // Assert - aborted transaction data should not be visible
+    let result = engine.get(&cf, b"key2").expect("get should work");
+    assert_eq!(result.as_deref(), None, "aborted transaction data should not be visible");
 }
 
 #[test]
