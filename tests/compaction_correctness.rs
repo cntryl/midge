@@ -67,7 +67,8 @@ fn should_remove_deleted_keys_given_tombstones_when_compaction_runs() {
                 eng.delete(&cf, format!("key{:03}", i).as_bytes()).expect("delete");
             }
             // Force compaction to merge tombstones
-            // TODO: Add explicit compaction trigger
+            eng.flush_cf(&cf).expect("flush");
+            eng.compact_all().expect("compact");
         },
         |eng| {
             // Assert - deleted keys should be absent

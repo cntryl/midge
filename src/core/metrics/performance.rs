@@ -355,6 +355,14 @@ impl CompactionMetrics {
         self.compactions.load(Ordering::Relaxed)
     }
 
+    pub fn total_bytes_read(&self) -> u64 {
+        self.bytes_read.load(Ordering::Relaxed)
+    }
+
+    pub fn total_bytes_written(&self) -> u64 {
+        self.bytes_written.load(Ordering::Relaxed)
+    }
+
     /// Write amplification factor
     pub fn write_amplification(&self) -> f64 {
         let read = self.bytes_read.load(Ordering::Relaxed);
