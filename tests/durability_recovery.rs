@@ -17,7 +17,7 @@ fn should_detect_and_ignore_already_compacted_wal_entries_given_manifest_sequenc
                 eng.put(&cf, format!("key{:04}", i).as_bytes(), b"value").expect("put");
             }
             // Force flush so data is in SST
-            // TODO: Add explicit flush API call
+            eng.flush_cf(&cf).expect("flush");
         },
         |eng| {
             // Assert - recovery should not replay WAL entries already in SSTs

@@ -23,7 +23,7 @@ fn should_measure_read_amplification_given_multilevel_scan() {
             let value = format!("value_{}", level);
             eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
-        // TODO: Add explicit flush API
+        eng.flush_cf(&cf).expect("flush");
         thread::sleep(Duration::from_millis(100)); // Allow compaction
     }
 
@@ -57,7 +57,7 @@ fn should_measure_write_amplification_given_compaction_cascade() {
         let value = vec![b'x'; 256]; // 256-byte values
         eng.put(&cf, key.as_bytes(), &value).unwrap();
     }
-    // TODO: Add explicit flush API
+    eng.flush_cf(&cf).expect("flush");
     thread::sleep(Duration::from_millis(500)); // Allow compaction cascade
 
     // TODO: Get final bytes_written from metrics
@@ -82,7 +82,7 @@ fn should_measure_space_amplification_given_live_vs_total_data() {
         let key = format!("key_{:02}", i);
         eng.put(&cf, key.as_bytes(), b"version1").unwrap();
     }
-    // TODO: Add explicit flush API
+    eng.flush_cf(&cf).expect("flush");
 
     // Act
     // Overwrite half the keys (creates obsolete data)
@@ -90,7 +90,7 @@ fn should_measure_space_amplification_given_live_vs_total_data() {
         let key = format!("key_{:02}", i);
         eng.put(&cf, key.as_bytes(), b"version2").unwrap();
     }
-    // TODO: Add explicit flush API
+    eng.flush_cf(&cf).expect("flush");
 
     // TODO: Get total_disk_bytes and live_data_bytes from metrics
     // let stats = eng.get_stats(&cf);
@@ -124,10 +124,10 @@ fn should_track_amplification_over_time_given_workload() {
             let key = format!("key_p{}_i{}", phase, i);
             eng.put(&cf, key.as_bytes(), b"data").unwrap();
         }
-        // TODO: Add explicit flush API
+        eng.flush_cf(&cf).expect("flush");
         thread::sleep(Duration::from_millis(100));
 
-        // TODO: Sample amplification metrics at each phase
+        // TODO: Sample amplification metrics at each phase (requires metrics API)
         // let snapshot = eng.get_amplification_metrics(&cf);
         // read_amp_samples.push(snapshot.read_amplification);
         // write_amp_samples.push(snapshot.write_amplification);

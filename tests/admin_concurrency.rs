@@ -84,13 +84,17 @@ fn should_return_current_cf_list_given_admin_query_when_changes_in_progress() {
     let (_dir, eng) = new_engine();
     let cf = eng.default_column_family();
     eng.put(&cf, b"key1", b"value1").expect("put");
-    
+
     // Act - query CF list
-    // TODO: Add API to list column families
-    // let cf_list = eng.list_column_families();
-    
+    let cf_list = eng.list_column_families();
+
     // Assert - default CF should always be present
+    assert!(!cf_list.is_empty(), "CF list should not be empty");
+    assert!(
+        cf_list.iter().any(|cf| cf.name() == "default"),
+        "Default CF should be in the list"
+    );
+
     let result = eng.get(&cf, b"key1").expect("get");
     assert!(result.is_some(), "Default CF should be functional");
-    // TODO: Verify CF list includes default CF
 }

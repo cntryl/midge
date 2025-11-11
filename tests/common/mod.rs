@@ -252,6 +252,54 @@ pub fn assert_get_exists(eng: &MidgeEngine, key: &[u8]) {
     );
 }
 
+/// Asserts that a key in a specific column family equals an expected value.
+///
+/// # Panics
+///
+/// Panics if:
+/// - The get operation fails
+/// - The value doesn't match expected
+/// - The key doesn't exist
+#[allow(dead_code)]
+pub fn assert_get_equals_cf(
+    eng: &MidgeEngine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    key: &[u8],
+    expected: &[u8],
+) {
+    let result = eng.get(cf, key).expect("Get operation failed");
+    let expected_bytes = Bytes::copy_from_slice(expected);
+    assert_eq!(
+        result,
+        Some(expected_bytes),
+        "Expected value mismatch for key: {:?} in CF: {}",
+        String::from_utf8_lossy(key),
+        cf.name()
+    );
+}
+
+/// Asserts that a key is absent from a specific column family.
+///
+/// # Panics
+///
+/// Panics if:
+/// - The get operation fails
+/// - The key exists when it shouldn't
+#[allow(dead_code)]
+pub fn assert_key_absent_cf(
+    eng: &MidgeEngine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    key: &[u8],
+) {
+    let result = eng.get(cf, key).expect("Get operation failed");
+    assert!(
+        result.is_none(),
+        "Expected key to be absent: {:?} in CF: {}",
+        String::from_utf8_lossy(key),
+        cf.name()
+    );
+}
+
 /// Asserts that a key does not exist in the database.
 ///
 /// # Panics

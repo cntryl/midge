@@ -9,6 +9,11 @@ Here is the complete **Midge LSM-Tree Database — Full Behavioral Requirements 
 
 ---
 
+## Scope
+
+Midge is an embedded, single-node database intended to be used as a local library or process. Distributed multi-node replication, leader election, and consensus protocols are out of scope for this specification and are not required for compliance.
+
+
 ## 1. Write-Ahead Log (WAL) & Durability
 
 ### 1.1 Ordering and Atomicity
@@ -47,8 +52,8 @@ Acceptance: should_return_latest_value_given_concurrent_puts_to_same_key_when_re
 
 ### 2.2 Sequence Monotonicity
 
-Requirement: Sequence numbers increase globally and are never reused.
-Acceptance: should_generate_strictly_increasing_sequence_numbers_given_parallel_writes
+Requirement: Sequence numbers increase globally (shared across column families) and are never reused. Column families do not have independent sequence number spaces; CFs isolate data and compaction behavior but share the global sequence space.
+Acceptance: should_generate_strictly_increasing_global_sequence_numbers_given_parallel_writes
 
 ### 2.3 Freeze and Handoff
 
@@ -190,7 +195,7 @@ Acceptance: should_preserve_local_file_given_upload_in_progress_when_crash
 
 ### 9.1 Isolation
 
-Requirement: Column families isolate data, sequence space, and compaction.
+Requirement: Column families isolate data and compaction; they do not have independent sequence spaces (sequence numbers are global). Column families provide logical isolation but operate within the same global ordering for transactions and snapshots.
 Acceptance: should_not_return_key_from_different_cf_given_same_user_key_when_read
 
 ### 9.2 Independent Compaction
