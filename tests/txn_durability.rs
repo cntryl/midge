@@ -4,8 +4,7 @@
 // Transaction ACID tests - P0 Priority
 // Tests document expected behavior and will fail until features are implemented
 
-use bytes::Bytes;
-use cntryl_midge::{KvStore, MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{KvTransaction, MidgeEngine, MidgeOptions, StorageMode};
 use std::sync::Arc;
 
 mod common;
@@ -43,10 +42,8 @@ fn should_persist_transaction_given_commit_when_crash_after() {
     let cf2 = engine2.default_column_family();
 
     // Assert
-    assert_eq!(
-        engine2.get(&cf2, b"durable_key").expect("get"),
-        Some(Bytes::from("durable_value"))
-    );
+    let result = engine2.get(&cf2, b"durable_key").expect("get");
+    assert_eq!(result, Some(b"durable_value".to_vec().into()));
 }
 
 #[test]
@@ -121,9 +118,10 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
     for i in 0..10 {
         let key = format!("wal_key_{}", i);
         let expected = format!("wal_val_{}", i);
+        let result = engine2.get(&cf2, key.as_bytes()).expect("get");
         assert_eq!(
-            engine2.get(&cf2, key.as_bytes()).expect("get"),
-            Some(Bytes::from(expected)),
+            result,
+            Some(expected.as_bytes().to_vec().into()),
             "WAL replay should recover transaction {}",
             i
         );

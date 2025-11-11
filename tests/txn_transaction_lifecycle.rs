@@ -4,8 +4,7 @@
 // Transaction ACID tests - P0 Priority
 // Tests document expected behavior and will fail until features are implemented
 
-use bytes::Bytes;
-use cntryl_midge::KvStore;
+use cntryl_midge::KvTransaction;
 use std::sync::Arc;
 
 mod common;
@@ -15,24 +14,15 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let _cf = engine.default_column_family();
+    let cf = engine.default_column_family();
 
-    let snap = engine.snapshot();
-    let mut timeout_txn =
-        cntryl_midge::Transaction::with_options(2001, snap.seq, None, 100 * 1024 * 1024);
-    timeout_txn
-        .put(
-            Bytes::from_static(b"key"),
-            Bytes::from_static(b"value"),
-            None,
-        )
-        .unwrap();
+    let mut timeout_txn = engine.begin_transaction(&cf).unwrap();
+    timeout_txn.put(b"key", b"value").unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(10));
 
     // Act
-    let result =
-        engine.commit_transaction(timeout_txn, cntryl_midge::WriteOptions::default());
+    let result = engine.commit_transaction(timeout_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // No timeout mechanism currently
@@ -45,37 +35,18 @@ fn should_release_locks_given_transaction_timeout_when_aborted() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let _cf = engine.default_column_family();
+    let cf = engine.default_column_family();
 
-    let snap = engine.snapshot();
-    let mut aborted_lock_txn =
-        cntryl_midge::Transaction::with_options(2002, snap.seq, None, 100 * 1024 * 1024);
-    aborted_lock_txn
-        .put(
-            Bytes::from_static(b"locked_key"),
-            Bytes::from_static(b"value"),
-            None,
-        )
-        .unwrap();
+    let mut aborted_lock_txn = engine.begin_transaction(&cf).unwrap();
+    aborted_lock_txn.put(b"locked_key", b"value").unwrap();
 
     drop(aborted_lock_txn);
 
-    let snap2 = engine.snapshot();
-    let mut subsequent_txn =
-        cntryl_midge::Transaction::with_options(2003, snap2.seq, None, 100 * 1024 * 1024);
-    subsequent_txn
-        .put(
-            Bytes::from_static(b"locked_key"),
-            Bytes::from_static(b"value2"),
-            None,
-        )
-        .unwrap();
+    let mut subsequent_txn = engine.begin_transaction(&cf).unwrap();
+    subsequent_txn.put(b"locked_key", b"value2").unwrap();
 
     // Act
-    let result = engine.commit_transaction(
-        Box::new(subsequent_txn),
-        cntryl_midge::WriteOptions::default(),
-    );
+    let result = engine.commit_transaction(subsequent_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // No locking currently, so always succeeds
@@ -90,30 +61,10 @@ fn should_rollback_partial_writes_given_timeout_when_aborting() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let snap = engine.snapshot();
-    let mut rollback_txn =
-        cntryl_midge::Transaction::with_options(2004, snap.seq, None, 100 * 1024 * 1024);
-    rollback_txn
-        .put(
-            Bytes::from_static(b"key1"),
-            Bytes::from_static(b"value1"),
-            None,
-        )
-        .unwrap();
-    rollback_txn
-        .put(
-            Bytes::from_static(b"key2"),
-            Bytes::from_static(b"value2"),
-            None,
-        )
-        .unwrap();
-    rollback_txn
-        .put(
-            Bytes::from_static(b"key3"),
-            Bytes::from_static(b"value3"),
-            None,
-        )
-        .unwrap();
+    let mut rollback_txn = engine.begin_transaction(&cf).unwrap();
+    rollback_txn.put(b"key1", b"value1").unwrap();
+    rollback_txn.put(b"key2", b"value2").unwrap();
+    rollback_txn.put(b"key3", b"value3").unwrap();
 
     // Act
     drop(rollback_txn);
@@ -129,29 +80,18 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let _cf = engine.default_column_family();
+    let cf = engine.default_column_family();
 
-    let snap = engine.snapshot();
-    let aborted_txn =
-        cntryl_midge::Transaction::with_options(2005, snap.seq, None, 100 * 1024 * 1024);
+    let aborted_txn = engine.begin_transaction(&cf).unwrap();
     // Note: rollback() is not part of KvTransaction trait, transaction is dropped/aborted on drop
     // Just drop it to abort
     drop(aborted_txn);
 
-    let snap2 = engine.snapshot();
-    let mut aborted_txn =
-        cntryl_midge::Transaction::with_options(2006, snap2.seq, None, 100 * 1024 * 1024);
-    aborted_txn
-        .put(
-            Bytes::from_static(b"key"),
-            Bytes::from_static(b"value"),
-            None,
-        )
-        .unwrap();
+    let mut aborted_txn = engine.begin_transaction(&cf).unwrap();
+    aborted_txn.put(b"key", b"value").unwrap();
 
     // Act
-    let result =
-        engine.commit_transaction(aborted_txn, cntryl_midge::WriteOptions::default());
+    let result = engine.commit_transaction(aborted_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     assert!(
@@ -165,25 +105,14 @@ fn should_reject_operations_given_committed_transaction_when_reused() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);
-    let _cf = engine.default_column_family();
+    let cf = engine.default_column_family();
 
-    let snap = engine.snapshot();
-    let mut committed_txn =
-        cntryl_midge::Transaction::with_options(2007, snap.seq, None, 100 * 1024 * 1024);
-    committed_txn
-        .put(
-            Bytes::from_static(b"key1"),
-            Bytes::from_static(b"value1"),
-            None,
-        )
-        .unwrap();
+    let mut committed_txn = engine.begin_transaction(&cf).unwrap();
+    committed_txn.put(b"key1", b"value1").unwrap();
 
     // Act
     engine
-        .commit_transaction(
-            Box::new(committed_txn),
-            cntryl_midge::WriteOptions::default(),
-        )
+        .commit_transaction(committed_txn, cntryl_midge::WriteOptions::default())
         .expect("commit");
 
     // Assert
