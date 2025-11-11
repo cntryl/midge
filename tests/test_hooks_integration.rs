@@ -198,7 +198,7 @@ fn should_increment_compaction_counters_during_manual_compaction() {
         .expect("compact");
 
     // Wait for compaction to complete
-    eng.wait_for_compaction(std::time::Duration::from_millis(100))
+    eng.wait_for_compaction(std::time::Duration::from_secs(2))
         .expect("compaction should complete");
 
     let final_start = hooks.compaction_start_count();

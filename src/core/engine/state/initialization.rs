@@ -63,7 +63,7 @@ pub fn open_with_config(config: crate::config::Config) -> MidgeResult<MidgeEngin
 pub fn open(opts: crate::MidgeOptions) -> MidgeResult<MidgeEngine> {
     // Validate configuration before opening
     opts.validate()
-        .map_err(|e| crate::error::MidgeError::invalid_config(e))?;
+        .map_err(crate::error::MidgeError::invalid_config)?;
 
     let mem_mode = matches!(opts.storage_mode, crate::StorageMode::Memory);
 

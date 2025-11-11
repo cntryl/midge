@@ -190,7 +190,7 @@ impl MidgeEngine {
         let cf_id = cf.id();
         let start = query.effective_start();
         let end_owned = query.effective_end();
-        let end_ref = end_owned.as_ref().map(|v| v.as_slice());
+        let end_ref = end_owned.as_deref();
 
         let column_family = self.cf_set.get_cf(cf_id).ok_or_else(|| {
             crate::error::MidgeError::invalid_config(format!(
