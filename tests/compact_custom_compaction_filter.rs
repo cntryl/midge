@@ -7,8 +7,6 @@ use cntryl_midge::compaction::{CompactionFilter, CompactionVersion, FilterDecisi
 use common::{bulk_put, new_engine_with_opts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
 // ============================================================================
 
@@ -62,89 +60,142 @@ fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
     assert!(result.is_some(), "Data should be present after filtered compaction");
 }
 
+// ============================================================================
+
+// Custom filter that removes keys with a specific prefix
+struct PrefixRemovalFilter {
+    prefix: Vec<u8>,
+}
+
+impl PrefixRemovalFilter {
+    fn new(prefix: &[u8]) -> Self {
+        Self {
+            prefix: prefix.to_vec(),
+        }
+    }
+}
+
+impl CompactionFilter for PrefixRemovalFilter {
+    fn filter(&self, _level: u32, version: &CompactionVersion) -> FilterDecision {
+        if version.user_key.starts_with(&self.prefix) {
+            FilterDecision::Remove
+        } else {
+            FilterDecision::Keep
+        }
+    }
+}
+
 #[test]
-#[ignore = "TODO: Implement PrefixRemovalFilter example"]
 fn should_drop_key_given_filter_returns_remove_decision() {
     // Arrange
     let (_dir, eng) = new_engine_with_opts(512, true);
     let cf = eng.default_column_family();
 
-    // TODO: Create a CompactionFilter that removes keys with specific prefix
-    // let filter = PrefixRemovalFilter::new(b"remove_");
-    // eng.set_compaction_filter(&cf, filter);
+    let filter = PrefixRemovalFilter::new(b"remove_");
+    eng.set_compaction_filter(&cf, Arc::new(filter))
+        .expect("set filter");
 
-    // Write keys with different prefixes
+    // Write keys with different prefixes (bulk_put generates keys with {:03} format)
     bulk_put(&eng, &cf, "keep_", 10, b"value");
     bulk_put(&eng, &cf, "remove_", 10, b"value");
 
-    // Act
-    // TODO: Add explicit compaction trigger API
-    thread::sleep(Duration::from_millis(500)); // Allow compaction
+    // Act - flush memtable to SST, then compact all SSTs
+    eng.flush_cf(&cf).expect("flush");
+    eng.compact_all().expect("compact");
+
+    // Reopen engine to ensure we're reading from SST files only (not memtable/WAL)
+    let db_path = _dir.path().to_path_buf();
+    drop(cf);
+    drop(eng);
+    
+    // Delete WAL files to prevent replay (since flush_cf doesn't truncate WAL)
+    // This ensures we're only reading from the compacted SST
+    let wal_dir = db_path.join("wal");
+    if wal_dir.exists() {
+        std::fs::remove_dir_all(&wal_dir).expect("remove wal dir");
+    }
+    
+    // Reopen the engine
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::LocalDisk {
+            db_path: db_path.clone(),
+        },
+        ..Default::default()
+    };
+    let eng2 = cntryl_midge::MidgeEngine::open(opts).expect("reopen engine");
+    let cf2 = eng2.default_column_family();
 
     // Assert
     // Kept keys should still exist
-    let result = eng.get(&cf, b"keep_00").expect("get failed");
+    let result = eng2.get(&cf2, b"keep_000").expect("get failed");
     assert!(result.is_some(), "Kept keys should survive compaction");
 
-    // TODO: Assert removed keys are gone (requires filter implementation)
-    // assert_key_absent(&eng, &cf, b"remove_00");
-    let result = eng.get(&cf, b"remove_00").expect("get failed");
-    assert!(result.is_some(), "Keys will be present until filter is implemented");
+    // Removed keys should be gone after compaction
+    let result = eng2.get(&cf2, b"remove_000").expect("get failed");
+    assert!(result.is_none(), "Keys with 'remove_' prefix should be filtered out after compaction");
+    
+    let result = eng2.get(&cf2, b"remove_005").expect("get failed");
+    assert!(result.is_none(), "All keys with 'remove_' prefix should be filtered out after compaction");
+}
+
+// ============================================================================
+
+// Custom filter that explicitly keeps all keys (useful for testing)
+struct KeepAllFilter;
+
+impl KeepAllFilter {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl CompactionFilter for KeepAllFilter {
+    fn filter(&self, _level: u32, _version: &CompactionVersion) -> FilterDecision {
+        FilterDecision::Keep
+    }
 }
 
 #[test]
-#[ignore = "TODO: Implement KeepAllFilter example"]
 fn should_keep_key_given_filter_returns_keep_decision() {
     // Arrange
     let (_dir, eng) = new_engine_with_opts(512, true);
     let cf = eng.default_column_family();
 
-    // TODO: Create a CompactionFilter that keeps all keys
-    // let filter = KeepAllFilter::new();
-    // eng.set_compaction_filter(&cf, filter);
+    let filter = KeepAllFilter::new();
+    eng.set_compaction_filter(&cf, Arc::new(filter))
+        .expect("set filter");
 
     // Write data
     bulk_put(&eng, &cf, "key_", 30, b"important_data");
 
-    // Act
-    // TODO: Add explicit compaction trigger API
-    thread::sleep(Duration::from_millis(500)); // Allow compaction
+    // Act - flush and compact synchronously
+    eng.flush_cf(&cf).expect("flush");
+    eng.compact_all().expect("compact");
 
     // Assert
-    // All keys should still exist after compaction
+    // All keys should still exist after compaction (bulk_put uses {:03} format)
     for i in 0..30 {
-        let key = format!("key_{:02}", i);
+        let key = format!("key_{:03}", i);
         let result = eng.get(&cf, key.as_bytes()).expect("get failed");
-        assert!(result.is_some(), "All keys should be kept by filter");
+        assert!(
+            result.is_some(),
+            "All keys should be kept by filter, missing: {}",
+            key
+        );
     }
 }
 
-#[test]
-#[ignore = "TODO: Implement ValueModifyFilter example (requires FilterDecision::Change support)"]
-fn should_modify_value_given_filter_returns_change_decision() {
-    // Arrange
-    let (_dir, eng) = new_engine_with_opts(512, true);
-    let cf = eng.default_column_family();
-
-    // TODO: Create a CompactionFilter that modifies values
-    // let filter = ValueModifyFilter::new(|value| {
-    //     format!("{}_modified", String::from_utf8_lossy(value))
-    // });
-    // eng.set_compaction_filter(&cf, filter);
-
-    // Write original values
-    bulk_put(&eng, &cf, "key_", 20, b"original");
-
-    // Act
-    // TODO: Add explicit compaction trigger API
-    thread::sleep(Duration::from_millis(500)); // Allow compaction
-
-    // Assert
-    // TODO: Verify values are modified after compaction
-    // let result = eng.get(&cf, b"key_00").expect("get failed");
-    // assert_eq!(result.unwrap().as_ref(), b"original_modified");
-    
-    // For now, just verify data integrity
-    let result = eng.get(&cf, b"key_00").expect("get failed");
-    assert!(result.is_some(), "Data should be present after compaction");
-}
+// NOTE: Value modification during compaction is intentionally not supported.
+//
+// Reasons:
+// 1. Breaks LSM semantics - compaction should preserve logical state
+// 2. Complexity - would require FilterDecision::Change(Bytes) variant
+// 3. Performance - modifying values during compaction adds overhead
+// 4. Alternative - use merge operators for value transformations
+//
+// If you need to transform values, use one of these approaches:
+// - Merge operators (designed for value aggregation/transformation)
+// - Application-level rewriting (read-modify-write cycle)
+// - Background job that rewrites keys outside compaction
+//
+// Compaction filters are for *removing* data (GC, TTL, privacy), not transforming it.
