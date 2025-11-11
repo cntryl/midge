@@ -358,7 +358,8 @@ impl Config {
                 .as_ref()
                 .map(|c| c.upload_params.chunk_size as u64)
                 .unwrap_or(0),
-            test_hooks: None, // No test hooks when using Config API
+            test_hooks: None,           // No test hooks when using Config API
+            paranoid_checksums: false,  // Default to false for performance
         }
     }
 

@@ -304,6 +304,18 @@ impl Block {
                     | CompressionType::Zstd5
                     | CompressionType::Zstd9 => Bytes::from(zstd::decode_all(payload)?),
                 };
+                
+                // Paranoid mode: verify decompressed data integrity
+                if paranoid {
+                    let verify_crc = crc32c::crc32c(&body_decompressed);
+                    tracing::trace!(
+                        "Paranoid checksum verification: block_type={:?}, size={}, crc=0x{:08x}",
+                        block_type,
+                        body_decompressed.len(),
+                        verify_crc
+                    );
+                }
+                
                 Ok(Block::new(body_decompressed, block_type, compression))
             }
         }

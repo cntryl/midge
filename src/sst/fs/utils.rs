@@ -161,10 +161,18 @@ pub(super) fn is_valid_data_block_payload(data: &[u8]) -> bool {
 pub(super) fn decode_data_block(
     raw: &[u8],
 ) -> crate::error::MidgeResult<crate::sst::format::Block> {
+    decode_data_block_paranoid(raw, false)
+}
+
+/// Decode a data block with optional paranoid checksum verification
+pub(super) fn decode_data_block_paranoid(
+    raw: &[u8],
+    paranoid: bool,
+) -> crate::error::MidgeResult<crate::sst::format::Block> {
     use crate::error::MidgeError;
     use crate::sst::format::{Block, BlockType};
 
-    match Block::decode(raw, BlockType::Data) {
+    match Block::decode_with_options(raw, BlockType::Data, paranoid) {
         Ok(b) if b.block_type == BlockType::Data && is_valid_data_block_payload(&b.data) => Ok(b),
         _ => Err(MidgeError::InvalidData(
             "Unable to decode data block".into(),

@@ -4,8 +4,8 @@ use crate::sst::encoding::{decode, TlvBlockIterator};
 use crate::sst::format::{Block, BlockHandle, Footer};
 use crate::sst::range_tombstone::is_covered_by_range_tombstone;
 use crate::sst::reader_common::{
-    parse_key_at_offset, read_data_block_from_bytes, search_data_block as common_search_data_block,
-    should_skip_key, SstMetadata,
+    parse_key_at_offset, read_data_block_from_bytes, read_data_block_from_bytes_paranoid,
+    search_data_block as common_search_data_block, should_skip_key, SstMetadata,
 };
 use crate::sst::sparse_index::SparseIndex;
 use crate::sst::traits::{KeyState, RangeTombstone, SstStateReader};
@@ -21,10 +21,16 @@ pub struct SstMemReader {
     bloom_filter: Option<BloomFilter>,
     range_tombstones: Vec<RangeTombstone>,
     use_internal_keys: bool,
+    paranoid_checksums: bool,
 }
 
 impl SstMemReader {
     pub(crate) fn from_bytes(raw: Vec<u8>) -> MidgeResult<Self> {
+        Self::from_bytes_with_paranoid(raw, false)
+    }
+
+    /// Create reader with paranoid checksum verification enabled
+    pub(crate) fn from_bytes_with_paranoid(raw: Vec<u8>, paranoid_checksums: bool) -> MidgeResult<Self> {
         // Use common metadata parsing logic
         let metadata = SstMetadata::from_bytes(&raw)?;
 
@@ -35,6 +41,7 @@ impl SstMemReader {
             bloom_filter: metadata.bloom_filter,
             range_tombstones: metadata.range_tombstones,
             use_internal_keys: metadata.use_internal_keys,
+            paranoid_checksums,
         })
     }
 
@@ -42,7 +49,11 @@ impl SstMemReader {
         let off = handle.offset as usize;
         let sz = handle.size as usize;
         let raw = &self.data.raw[off..off + sz];
-        read_data_block_from_bytes(raw)
+        if self.paranoid_checksums {
+            read_data_block_from_bytes_paranoid(raw, true)
+        } else {
+            read_data_block_from_bytes(raw)
+        }
     }
 
     fn search_data_block(&self, data: &[u8], target_key: &[u8]) -> MidgeResult<Option<Bytes>> {

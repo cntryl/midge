@@ -77,12 +77,24 @@ impl crate::sst::SstFactory for MemSstFactory {
 /// In-memory reader factory that opens readers by loading bytes from a path.
 /// Useful to exercise the same trait surface as FS-backed readers when the SST
 /// content is already produced in-memory and written out via the engine.
-pub struct MemSstReaderFactory;
+pub struct MemSstReaderFactory {
+    paranoid_checksums: bool,
+}
+
+impl MemSstReaderFactory {
+    pub fn new(paranoid_checksums: bool) -> Self {
+        Self { paranoid_checksums }
+    }
+}
 
 impl SstReaderFactory for MemSstReaderFactory {
     fn open(&self, path: &std::path::Path) -> MidgeResult<Box<dyn SstStateReader>> {
         let raw = std::fs::read(path)?;
-        let r = SstMemReader::from_bytes(raw)?;
+        let r = if self.paranoid_checksums {
+            SstMemReader::from_bytes_with_paranoid(raw, true)?
+        } else {
+            SstMemReader::from_bytes(raw)?
+        };
         Ok(Box::new(r))
     }
 }
@@ -181,7 +193,7 @@ mod tests {
         std::fs::write(&path, &bytes).expect("write sst");
 
         // Act
-        let r = MemSstReaderFactory {};
+        let r = MemSstReaderFactory::new(false);
         let reader = r.open(&path).expect("open mem reader");
 
         // Assert

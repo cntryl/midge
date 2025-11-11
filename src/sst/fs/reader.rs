@@ -18,7 +18,7 @@ use crate::sst::traits::{KeyState, RangeTombstone, SstStateReader};
 use super::iterator::SstRangeIter;
 use super::utils::{
     binary_search_restart_points, calculate_entries_end, decode_data_block,
-    decode_internal_key_or_raw, now_millis,
+    decode_data_block_paranoid, decode_internal_key_or_raw, now_millis,
 };
 
 /// Helper struct for building and processing block entries during linear search
@@ -214,6 +214,7 @@ pub struct SstFile {
     bloom_filter: Option<BloomFilter>,
     range_tombstones: Vec<RangeTombstone>,
     use_internal_keys: bool,
+    paranoid_checksums: bool,
 }
 
 impl SstFile {
@@ -225,12 +226,31 @@ impl SstFile {
             bloom_filter: None,
             range_tombstones: Vec::new(),
             use_internal_keys: false,
+            paranoid_checksums: false,
+        }
+    }
+
+    /// Create a new SST file reader with paranoid checksum verification enabled
+    pub fn new_with_paranoid(path: PathBuf, paranoid_checksums: bool) -> Self {
+        Self {
+            path,
+            footer: None,
+            sparse_index: None,
+            bloom_filter: None,
+            range_tombstones: Vec::new(),
+            use_internal_keys: false,
+            paranoid_checksums,
         }
     }
 
     pub fn open(path: &Path) -> MidgeResult<Self> {
+        Self::open_with_paranoid(path, false)
+    }
+
+    /// Open SST file with paranoid checksum verification
+    pub fn open_with_paranoid(path: &Path, paranoid_checksums: bool) -> MidgeResult<Self> {
         debug!("Opening SST file: {}", path.display());
-        let mut sst = Self::new(path.to_path_buf());
+        let mut sst = Self::new_with_paranoid(path.to_path_buf(), paranoid_checksums);
         if let Err(e) = sst.load_metadata() {
             // Use structured logging for failures; tests/CI should configure a tracing
             // subscriber if they want to capture these diagnostics.
@@ -518,7 +538,11 @@ impl SstFile {
         // For now, we optimize by reusing file handles and minimizing allocations.
         let mut file = OpenOptions::new().read(true).open(&self.path)?;
         let block_data = fs::read_range(&mut file, handle.offset, handle.offset + handle.size)?;
-        decode_data_block(&block_data)
+        if self.paranoid_checksums {
+            decode_data_block_paranoid(&block_data, true)
+        } else {
+            decode_data_block(&block_data)
+        }
     }
 
     pub fn scan_range(

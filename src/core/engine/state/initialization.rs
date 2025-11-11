@@ -110,18 +110,21 @@ pub fn open(opts: crate::MidgeOptions) -> MidgeResult<MidgeEngine> {
         Box<dyn crate::wal::WalFactory>,
     ) = if mem_mode {
         (
-            Box::new(crate::sst::mem::MemSstReaderFactory),
+            Box::new(crate::sst::mem::MemSstReaderFactory::new(opts.paranoid_checksums)),
             Box::new(crate::wal::MemWalFactory),
         )
     } else if let Some(cloud_backend) = opts.storage_mode.cloud_backend() {
         // Use CloudSstReaderFactory for cloud-backed mode
         (
-            Box::new(crate::sst::cloud::CloudSstReaderFactory::new(cloud_backend)),
+            Box::new(crate::sst::cloud::CloudSstReaderFactory::new_with_paranoid(
+                cloud_backend,
+                opts.paranoid_checksums,
+            )),
             Box::new(crate::wal::FsWalFactory::new()),
         )
     } else {
         (
-            Box::new(crate::sst::fs::FsSstReaderFactory),
+            Box::new(crate::sst::fs::FsSstReaderFactory::new(opts.paranoid_checksums)),
             Box::new(crate::wal::FsWalFactory::new()),
         )
     };

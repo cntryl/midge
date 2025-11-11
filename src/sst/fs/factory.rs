@@ -8,12 +8,20 @@ use super::writer::FsDynWriter;
 use crate::common::codec::CompressionType;
 use crate::sst::traits::SstFactory;
 
-pub struct FsSstReaderFactory;
+pub struct FsSstReaderFactory {
+    paranoid_checksums: bool,
+}
+
+impl FsSstReaderFactory {
+    pub fn new(paranoid_checksums: bool) -> Self {
+        Self { paranoid_checksums }
+    }
+}
 
 impl SstReaderFactory for FsSstReaderFactory {
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn SstStateReader>> {
-        let r = SstFile::open(path)?;
-        Ok(Box::new(r))
+        let sst = SstFile::open_with_paranoid(path, self.paranoid_checksums)?;
+        Ok(Box::new(sst))
     }
 }
 

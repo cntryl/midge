@@ -10,8 +10,8 @@ use crate::sst::encoding::TlvBlockIterator;
 use crate::sst::format::{Block, BlockHandle, Footer};
 use crate::sst::range_tombstone::is_covered_by_range_tombstone;
 use crate::sst::reader_common::{
-    read_data_block_from_bytes, search_data_block as common_search_data_block, should_skip_key,
-    SstMetadata,
+    read_data_block_from_bytes, read_data_block_from_bytes_paranoid,
+    search_data_block as common_search_data_block, should_skip_key, SstMetadata,
 };
 use crate::sst::sparse_index::SparseIndex;
 use crate::sst::traits::{KeyState, RangeTombstone, SstStateReader};
@@ -29,6 +29,7 @@ pub struct SstCloudReader {
     bloom_filter: Option<BloomFilter>,
     range_tombstones: Vec<RangeTombstone>,
     use_internal_keys: bool,
+    paranoid_checksums: bool,
 }
 
 impl SstCloudReader {
@@ -43,10 +44,20 @@ impl SstCloudReader {
         Self::from_bytes_with_key(backend, raw, None)
     }
 
-    fn from_bytes_with_key(
+    pub(crate) fn from_bytes_with_key(
         backend: Arc<dyn StorageBackend>,
         raw: Vec<u8>,
         cloud_key: Option<String>,
+    ) -> MidgeResult<Self> {
+        Self::from_bytes_with_key_paranoid(backend, raw, cloud_key, false)
+    }
+
+    /// Create reader with paranoid checksum verification
+    pub(crate) fn from_bytes_with_key_paranoid(
+        backend: Arc<dyn StorageBackend>,
+        raw: Vec<u8>,
+        cloud_key: Option<String>,
+        paranoid_checksums: bool,
     ) -> MidgeResult<Self> {
         // Use common metadata parsing logic
         let metadata = SstMetadata::from_bytes(&raw)?;
@@ -60,6 +71,7 @@ impl SstCloudReader {
             bloom_filter: metadata.bloom_filter,
             range_tombstones: metadata.range_tombstones,
             use_internal_keys: metadata.use_internal_keys,
+            paranoid_checksums,
         })
     }
 
@@ -67,7 +79,11 @@ impl SstCloudReader {
         let off = handle.offset as usize;
         let sz = handle.size as usize;
         let raw = &self.data[off..off + sz];
-        read_data_block_from_bytes(raw)
+        if self.paranoid_checksums {
+            read_data_block_from_bytes_paranoid(raw, true)
+        } else {
+            read_data_block_from_bytes(raw)
+        }
     }
 
     #[allow(dead_code)]

@@ -135,7 +135,12 @@ pub fn parse_key_at_offset(
 /// Validates that the decoded block is actually a data block.
 /// Used by mem and cloud readers that already have data in memory.
 pub fn read_data_block_from_bytes(raw: &[u8]) -> MidgeResult<Block> {
-    if let Ok(b) = Block::decode(raw, BlockType::Data) {
+    read_data_block_from_bytes_paranoid(raw, false)
+}
+
+/// Read and decode data block with optional paranoid checksum verification
+pub fn read_data_block_from_bytes_paranoid(raw: &[u8], paranoid: bool) -> MidgeResult<Block> {
+    if let Ok(b) = Block::decode_with_options(raw, BlockType::Data, paranoid) {
         if b.block_type == BlockType::Data {
             return Ok(b);
         }

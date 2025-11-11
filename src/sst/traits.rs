@@ -204,7 +204,7 @@ mod tests {
         };
         // reader: MemSstReaderFactory (reads bytes from the path)
         let reader_factory = |p: &std::path::Path| -> Box<dyn SstStateReader> {
-            let fac = crate::sst::mem::MemSstReaderFactory {};
+            let fac = crate::sst::mem::MemSstReaderFactory::new(false);
             fac.open(p).expect("open mem reader")
         };
 

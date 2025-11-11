@@ -104,11 +104,22 @@ impl crate::sst::SstFactory for CloudSstFactory {
 /// SST blob from the backend.
 pub struct CloudSstReaderFactory {
     backend: Arc<dyn StorageBackend>,
+    paranoid_checksums: bool,
 }
 
 impl CloudSstReaderFactory {
     pub fn new(backend: Arc<dyn StorageBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            paranoid_checksums: false,
+        }
+    }
+
+    pub fn new_with_paranoid(backend: Arc<dyn StorageBackend>, paranoid_checksums: bool) -> Self {
+        Self {
+            backend,
+            paranoid_checksums,
+        }
     }
 }
 
@@ -116,7 +127,21 @@ impl SstReaderFactory for CloudSstReaderFactory {
     fn open(&self, path: &std::path::Path) -> MidgeResult<Box<dyn SstStateReader>> {
         // Convert path to cloud key (use path as-is, or extract filename)
         let cloud_key = path.to_string_lossy().to_string();
-        let r = SstCloudReader::open(self.backend.clone(), &cloud_key)?;
+        let data = self.backend.get_blob(&cloud_key)?;
+        let r = if self.paranoid_checksums {
+            SstCloudReader::from_bytes_with_key_paranoid(
+                self.backend.clone(),
+                data.to_vec(),
+                Some(cloud_key),
+                true,
+            )?
+        } else {
+            SstCloudReader::from_bytes_with_key(
+                self.backend.clone(),
+                data.to_vec(),
+                Some(cloud_key),
+            )?
+        };
         Ok(Box::new(r))
     }
 }

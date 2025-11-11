@@ -442,7 +442,7 @@ mod tests {
             db_path: db_path.clone(),
             sst_dir,
             sst_factory: Arc::new(crate::sst::mem::MemSstFactory),
-            sst_reader_factory: Arc::new(crate::sst::mem::MemSstReaderFactory),
+            sst_reader_factory: Arc::new(crate::sst::mem::MemSstReaderFactory::new(false)),
             snapshot_registry: Arc::new(crate::snapshot_compat::SnapshotRegistry::new()),
             metrics: Arc::new(crate::core::metrics::Metrics::new()),
             compression: CompressionType::None,

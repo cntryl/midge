@@ -225,7 +225,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstReaderFactory> =
-            Arc::new(crate::sst::mem::MemSstReaderFactory);
+            Arc::new(crate::sst::mem::MemSstReaderFactory::new(false));
 
         // Act
         let versions = collect_compaction_versions(
@@ -246,7 +246,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstReaderFactory> =
-            Arc::new(crate::sst::mem::MemSstReaderFactory);
+            Arc::new(crate::sst::mem::MemSstReaderFactory::new(false));
 
         // Act
         let versions = collect_compaction_versions(
@@ -270,7 +270,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstReaderFactory> =
-            Arc::new(crate::sst::mem::MemSstReaderFactory);
+            Arc::new(crate::sst::mem::MemSstReaderFactory::new(false));
 
         // Act
         let file_names = vec!["file1.sst".to_string(), "file2.sst".to_string()];
@@ -288,7 +288,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let sst_factory: Arc<dyn crate::sst::SstReaderFactory> =
-            Arc::new(crate::sst::mem::MemSstReaderFactory);
+            Arc::new(crate::sst::mem::MemSstReaderFactory::new(false));
 
         // Act
         let versions = collect_compaction_versions(
