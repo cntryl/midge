@@ -308,3 +308,93 @@ pub fn assert_wal_exists(db_path: &std::path::Path) {
         wal_path
     );
 }
+
+// ============================================================================
+// Compaction Test Helpers
+// ============================================================================
+
+/// Creates MidgeOptions configured for compaction testing.
+///
+/// Uses small memtable size and low SST threshold to trigger compaction easily
+/// for testing purposes.
+///
+/// # Returns
+///
+/// MidgeOptions with:
+/// - Memory storage mode
+/// - 1KB memtable size (triggers frequent flushes)
+/// - SST threshold of 2 (triggers compaction with just 2 files)
+///
+/// # Examples
+///
+/// ```rust
+/// let opts = compaction_test_opts();
+/// let engine = MidgeEngine::open(opts).unwrap();
+/// ```
+#[allow(dead_code)]
+pub fn compaction_test_opts() -> MidgeOptions {
+    MidgeOptions {
+        storage_mode: StorageMode::Memory,
+        memtable_size: 1024,         // Small memtable to trigger flushes easily
+        compaction_sst_threshold: 2, // Trigger compaction with just 2 SST files
+        ..Default::default()
+    }
+}
+
+/// Populates an engine with overlapping data across multiple L0 files.
+///
+/// This helper creates a multi-level dataset suitable for testing compaction
+/// behavior. It writes three batches of overlapping keys, each flushed to
+/// create separate L0 SST files.
+///
+/// # Data Pattern
+///
+/// - Batch 1: key000..key049 (50 keys)
+/// - Batch 2: key025..key074 (50 keys, overlapping)
+/// - Batch 3: key050..key099 (50 keys)
+///
+/// Each batch is flushed to create a separate L0 file, resulting in
+/// overlapping key ranges that require compaction to merge.
+///
+/// # Arguments
+///
+/// * `engine` - The MidgeEngine to populate
+/// * `cf` - The ColumnFamilyHandle to write to
+///
+/// # Examples
+///
+/// ```rust
+/// let opts = compaction_test_opts();
+/// let engine = MidgeEngine::open(opts).unwrap();
+/// let cf = engine.default_column_family();
+/// populate_multi_level_data(&engine, &cf);
+/// ```
+#[allow(dead_code)]
+pub fn populate_multi_level_data(
+    engine: &MidgeEngine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+) {
+    // Write batch 1 and flush to L0
+    for i in 0..50 {
+        let key = format!("key{:03}", i);
+        let value = format!("value1_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+    }
+    engine.flush().unwrap();
+
+    // Write batch 2 and flush to L0 (overlapping keys)
+    for i in 25..75 {
+        let key = format!("key{:03}", i);
+        let value = format!("value2_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+    }
+    engine.flush().unwrap();
+
+    // Write batch 3 and flush to L0
+    for i in 50..100 {
+        let key = format!("key{:03}", i);
+        let value = format!("value3_{}", i);
+        engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
+    }
+    engine.flush().unwrap();
+}
