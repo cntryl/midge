@@ -159,13 +159,13 @@ pub fn open_with_factories(
         crate::core::engine::factory::acquire_db_lock(&db_path, opts.read_only, mem_mode)?;
     let (manifest, max_cf_id) =
         crate::core::engine::factory::init_manifest(&db_path, opts.read_only)?;
-    let cf_set = ColumnFamilySet::new();
-    crate::core::engine::factory::init_column_families(&manifest, &cf_set, max_cf_id)?;
+    let cf_set_arc = Arc::new(ColumnFamilySet::new());
+    crate::core::engine::factory::init_column_families(&manifest, &cf_set_arc, max_cf_id)?;
 
     // Replay WAL and setup WAL writer
     let max_replay_seq = crate::core::engine::factory::replay_local_wal_segments(
         &wal_dir,
-        &cf_set,
+        &cf_set_arc,
         manifest.last_persisted_sequence,
         opts.wal_recovery_mode,
         mem_mode,
@@ -174,7 +174,7 @@ pub fn open_with_factories(
         &opts,
         &wal_dir,
         &db_path,
-        &cf_set,
+        &cf_set_arc,
         &manifest,
         max_replay_seq,
     )?;
@@ -234,6 +234,7 @@ pub fn open_with_factories(
         sst_reader_factory_arc.clone(),
         snapshot_registry_arc.clone(),
         metrics_arc.clone(),
+        cf_set_arc.clone(),
     )?;
 
     // Initialize manifest cache for fast read access
@@ -283,7 +284,7 @@ pub fn open_with_factories(
 
     Ok(MidgeEngine {
         wal_coordinator,
-        cf_set,
+        cf_set: cf_set_arc,
         seq: AtomicU64::new(max_replay_seq),
         txn_id: AtomicU64::new(0),
         db_path,

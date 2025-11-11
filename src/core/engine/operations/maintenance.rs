@@ -17,6 +17,7 @@ use crate::core::engine::core::MidgeEngine;
 use crate::core::manifest::Manifest;
 use crate::error::{MidgeError, MidgeResult};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 impl MidgeEngine {
@@ -242,7 +243,7 @@ impl MidgeEngine {
             return Err(crate::error::MidgeError::ReadOnly);
         }
         let manifest = Manifest::load(&self.db_path).unwrap_or_default();
-        if manifest.ssts.len() <= 1 {
+        if manifest.ssts.is_empty() {
             return Ok(());
         }
         let mut versions = crate::core::compaction::collect_compaction_versions(
@@ -267,9 +268,26 @@ impl MidgeEngine {
                 .record_tombstones_removed(removed_tombstones as u64);
         }
 
-        // Apply compaction filter (currently uses NoOp filter)
-        let filter = crate::compaction_filter::NoOpFilter;
-        let versions = crate::core::compaction::apply_compaction_filter(&versions, &filter, 0);
+        // Apply compaction filter from default CF
+        let cf_id = crate::api::column_family::DEFAULT_CF_ID;
+        let filter_arc = self.cf_set
+            .cfs
+            .get(&cf_id.as_u32())
+            .and_then(|cf| {
+                let guard = cf.compaction_filter.read();
+                if let Some(ref arc) = *guard {
+                    Some(Arc::clone(arc))
+                } else {
+                    None
+                }
+            });
+        
+        let versions = if let Some(filter) = filter_arc {
+            crate::core::compaction::apply_compaction_filter(&versions, filter.as_ref(), 0)
+        } else {
+            let noop = crate::compaction_filter::NoOpFilter;
+            crate::core::compaction::apply_compaction_filter(&versions, &noop, 0)
+        };
 
         // Deduplicate to ensure only one version per key in output SST
         let versions = crate::core::compaction::deduplicate_versions(&versions);
@@ -333,11 +351,14 @@ impl MidgeEngine {
         let largest_seq = versions.iter().map(|v| v.seq).max();
         let point_tombstone_count = versions.iter().filter(|v| v.tombstone).count() as u64;
 
+        // compact_all operates on the default CF
+        let cf_id = crate::api::column_family::DEFAULT_CF_ID.as_u32();
+        
         m.files.push(crate::manifest::FileMeta {
             name: sst_name.clone(),
             level: 0,
             size_bytes,
-            cf_id: 0,
+            cf_id,
             smallest_key,
             largest_key,
             smallest_seq,
@@ -358,6 +379,13 @@ impl MidgeEngine {
         // Update cached manifest after successful save
         self.update_manifest_cache(m);
 
+        // Invalidate table cache entries for old SSTs before deleting files
+        if let Some(ref cache) = self.table_cache {
+            for old_sst in &manifest.ssts {
+                cache.remove(old_sst);
+            }
+        }
+
         // Delete old SST files
         for old_sst in &manifest.ssts {
             let old_path = self.sst_dir.join(old_sst);
@@ -374,5 +402,60 @@ impl MidgeEngine {
         self.update_caches_for_new_sst(&sst_name);
 
         Ok(())
+    }
+
+    /// Set a custom compaction filter for a column family.
+    ///
+    /// The filter will be applied during compaction to drop or modify keys.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # use cntryl_midge::compaction::filter::{CompactionFilter, FilterDecision, CompactionVersion};
+    /// # use std::sync::Arc;
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// struct MyFilter;
+    /// impl CompactionFilter for MyFilter {
+    ///     fn filter(&self, _level: u32, version: &CompactionVersion) -> FilterDecision {
+    ///         // Custom logic here
+    ///         FilterDecision::Keep
+    ///     }
+    /// }
+    ///
+    /// let cf = engine.default_column_family();
+    /// engine.set_compaction_filter(&cf, Arc::new(MyFilter));
+    /// ```
+    pub fn set_compaction_filter(
+        &self,
+        cf: &ColumnFamilyHandle,
+        filter: Arc<dyn crate::core::compaction::filter::CompactionFilter>,
+    ) -> MidgeResult<()> {
+        let cf_id = cf.id();
+        
+        if let Some(cf_entry) = self.cf_set.cfs.get(&cf_id.as_u32()) {
+            let mut filter_lock = cf_entry.compaction_filter.write();
+            *filter_lock = Some(filter);
+            Ok(())
+        } else {
+            Err(MidgeError::InvalidConfig {
+                message: format!("Column family {} not found", cf.name()),
+            })
+        }
+    }
+
+    /// Clear the compaction filter for a column family.
+    pub fn clear_compaction_filter(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
+        let cf_id = cf.id();
+        
+        if let Some(cf_entry) = self.cf_set.cfs.get(&cf_id.as_u32()) {
+            let mut filter_lock = cf_entry.compaction_filter.write();
+            *filter_lock = None;
+            Ok(())
+        } else {
+            Err(MidgeError::InvalidConfig {
+                message: format!("Column family {} not found", cf.name()),
+            })
+        }
     }
 }

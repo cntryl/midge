@@ -271,6 +271,7 @@ pub(crate) fn setup_compaction_coordinator(
     sst_reader_factory_arc: Arc<dyn crate::sst::SstReaderFactory>,
     snapshot_registry_arc: Arc<crate::api::snapshot::SnapshotRegistry>,
     metrics_arc: Arc<Metrics>,
+    cf_set_arc: Arc<super::column_family::ColumnFamilySet>,
 ) -> MidgeResult<Option<crate::core::CompactionCoordinator>> {
     if opts.enable_compaction && !opts.read_only {
         // Create CloudSstManager if in cloud-backed mode
@@ -319,6 +320,7 @@ pub(crate) fn setup_compaction_coordinator(
             check_interval_ms: opts.compaction_check_interval_ms,
             cloud_sst_manager: cloud_sst_manager_c,
             compactor,
+            cf_set: cf_set_arc,
         };
 
         Ok(Some(crate::core::CompactionCoordinator::spawn(config)?))

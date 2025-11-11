@@ -40,6 +40,11 @@ pub mod fs;
 pub mod api;
 pub use crate::core::backup;
 pub mod cloud;
+pub mod compaction {
+    //! Compaction filter API for custom compaction logic
+    pub use crate::core::compaction::filter::{CompactionFilter, FilterDecision};
+    pub use crate::core::compaction::execution::types::CompactionVersion;
+}
 pub mod health;
 pub use crate::core::locking;
 pub use crate::core::manifest;

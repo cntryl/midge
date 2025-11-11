@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::api::column_family::{
     ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, DEFAULT_CF_ID, DEFAULT_CF_NAME,
 };
+use crate::core::compaction::filter::CompactionFilter;
 use crate::core::memtable::MemTable;
 use crate::error::MidgeResult;
 
@@ -40,6 +41,9 @@ pub(crate) struct ColumnFamily {
 
     /// Current number of immutable memtables (cached for fast check without locking)
     pub(crate) immutable_count: AtomicUsize,
+
+    /// Optional compaction filter for this column family
+    pub(crate) compaction_filter: Arc<RwLock<Option<Arc<dyn CompactionFilter>>>>,
 }
 
 impl ColumnFamily {
@@ -51,6 +55,7 @@ impl ColumnFamily {
             memtable: Arc::new(RwLock::new(MemTable::new())),
             immutable_memtables: Arc::new(Mutex::new(VecDeque::new())),
             immutable_count: AtomicUsize::new(0),
+            compaction_filter: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -137,7 +142,7 @@ impl ColumnFamily {
 /// races during CF registration (checking name/id availability and inserting into two maps).
 ///
 /// Provides lookup by ID or name, and tracks the next available CF ID.
-pub(crate) struct ColumnFamilySet {
+pub struct ColumnFamilySet {
     pub(crate) cfs: Arc<DashMap<u32, Arc<ColumnFamily>>>,
     pub(crate) name_to_id: Arc<DashMap<String, u32>>,
     pub(crate) next_cf_id: AtomicU32,

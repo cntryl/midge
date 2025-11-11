@@ -11,7 +11,7 @@
 
 mod adapters;
 mod cf_manager;
-mod column_family;
+pub(crate) mod column_family;
 mod coordination;
 mod core;
 pub(crate) mod factory;

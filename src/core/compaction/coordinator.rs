@@ -49,6 +49,7 @@ pub struct CompactionWorkerConfig {
     pub check_interval_ms: u64,
     pub cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     pub compactor: Compactor,
+    pub cf_set: Arc<crate::core::engine::column_family::ColumnFamilySet>,
 }
 
 /// Coordinates background compaction of LSM-tree levels.
@@ -84,6 +85,7 @@ impl CompactionCoordinator {
         let interval = Duration::from_millis(config.check_interval_ms);
         let cloud_sst_manager = config.cloud_sst_manager.clone();
         let compactor = config.compactor;
+        let cf_set = config.cf_set.clone();
 
         let handle = thread::Builder::new()
             .name("midge-compaction-worker".to_string())
@@ -212,12 +214,33 @@ impl CompactionCoordinator {
                                     min_snapshot_seq,
                                 );
 
-                            let filter = super::filter::NoOpFilter;
-                            let versions_after_cf = super::executor::apply_compaction_filter(
-                                &versions_after_filter,
-                                &filter,
-                                plan.target_level,
-                            );
+                            // Retrieve compaction filter for this CF, or use NoOpFilter as fallback
+                            let filter_arc: Option<Arc<dyn super::filter::CompactionFilter>> = cf_set
+                                .cfs
+                                .get(&plan.cf_id)
+                                .and_then(|cf| {
+                                    let guard = cf.compaction_filter.read();
+                                    if let Some(ref arc) = *guard {
+                                        Some(Arc::clone(arc))
+                                    } else {
+                                        None
+                                    }
+                                });
+                            
+                            let versions_after_cf = if let Some(filter) = filter_arc {
+                                super::executor::apply_compaction_filter(
+                                    &versions_after_filter,
+                                    filter.as_ref(),
+                                    plan.target_level,
+                                )
+                            } else {
+                                let noop = super::filter::NoOpFilter;
+                                super::executor::apply_compaction_filter(
+                                    &versions_after_filter,
+                                    &noop,
+                                    plan.target_level,
+                                )
+                            };
 
                             let deduped = super::executor::deduplicate_versions(&versions_after_cf);
 
@@ -411,6 +434,7 @@ mod tests {
                 l1_target_size: 10 * 1024 * 1024,
                 max_levels: 7,
             }),
+            cf_set: Arc::new(crate::core::engine::column_family::ColumnFamilySet::new()),
         }
     }
 

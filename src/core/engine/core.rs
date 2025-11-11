@@ -23,7 +23,7 @@ use super::column_family::{ColumnFamily, ColumnFamilySet};
 pub struct MidgeEngine {
     /// WAL coordinator managing write-ahead log operations
     pub(crate) wal_coordinator: crate::wal::WalCoordinator,
-    pub(crate) cf_set: ColumnFamilySet,
+    pub(crate) cf_set: Arc<ColumnFamilySet>,
     pub(crate) seq: AtomicU64,
     pub(crate) txn_id: AtomicU64,
     pub(crate) db_path: PathBuf,
