@@ -39,14 +39,12 @@ pub(crate) fn collect_compaction_versions(
             continue;
         };
         for (raw_key, state) in rows {
-            let (user_key, seq, key_kind_tomb) =
-                crate::internal_key::decode_internal_key(raw_key.as_ref()).unwrap_or_else(|| {
-                    let tomb = matches!(state, crate::sst::KeyState::Tombstone(_));
-                    (raw_key.to_vec(), 0, tomb)
-                });
-            let (tombstone, value, expiration) = match state {
-                crate::sst::KeyState::Value(v, _seq, exp) => (key_kind_tomb, Some(v), exp),
-                crate::sst::KeyState::Tombstone(_seq) => (true, None, None),
+            // The key returned by scan_range_state is now a user key (after SST encoding fix)
+            // The sequence number is in the KeyState, not in the key itself
+            let user_key = raw_key.to_vec();
+            let (seq, tombstone, value, expiration) = match state {
+                crate::sst::KeyState::Value(v, seq, exp) => (seq, false, Some(v), exp),
+                crate::sst::KeyState::Tombstone(seq) => (seq, true, None, None),
                 crate::sst::KeyState::Absent => continue,
             };
             if seen.insert((user_key.clone(), seq, tombstone)) {

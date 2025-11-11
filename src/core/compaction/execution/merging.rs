@@ -28,6 +28,49 @@ pub(crate) fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<Compac
     result
 }
 
+/// Deduplicate versions while preserving older versions visible to active snapshots.
+///
+/// Unlike `deduplicate_versions`, this function keeps multiple versions of the same key
+/// when necessary to maintain snapshot visibility. A version is kept if:
+/// 1. It's the newest version of the key, OR
+/// 2. It has a sequence number < min_snapshot_seq (visible to at least one snapshot)
+///
+/// Note: Snapshots see all writes with sequence < snapshot_seq (strictly less than).
+/// So if min_snapshot_seq is the smallest active snapshot, any version with seq < min_snapshot_seq
+/// is visible to at least that snapshot and must be preserved.
+///
+/// # Arguments
+/// * `versions` - Versions sorted by user_key (ascending), then seq (descending)
+/// * `min_snapshot_seq` - Minimum sequence number of any active snapshot, or None
+///
+/// # Returns
+/// Deduplicated list preserving snapshot visibility
+pub(crate) fn deduplicate_versions_snapshot_aware(
+    versions: &[CompactionVersion],
+    min_snapshot_seq: Option<u64>,
+) -> Vec<CompactionVersion> {
+    let mut result = Vec::new();
+    let mut last_user_key: Option<&[u8]> = None;
+
+    for v in versions {
+        let current_key = v.user_key.as_slice();
+        
+        // Keep this version if:
+        // 1. It's a new key (first version we see for this key), OR
+        // 2. It's visible to an active snapshot (seq < min_snapshot_seq)
+        let is_new_key = last_user_key != Some(current_key);
+        let visible_to_snapshot = min_snapshot_seq.is_some_and(|min_seq| v.seq < min_seq);
+        
+        if is_new_key || visible_to_snapshot {
+            result.push(v.clone());
+            if is_new_key {
+                last_user_key = Some(current_key);
+            }
+        }
+    }
+    result
+}
+
 /// Filter tombstones that are safe to garbage collect.
 ///
 /// A tombstone can be dropped if:
@@ -195,6 +238,66 @@ mod tests {
         // Assert
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].user_key, b"key1");
+        assert_eq!(result[0].seq, 200);
+        assert!(result[0].tombstone);
+    }
+
+    #[test]
+    fn should_discard_old_value_visible_to_snapshot_when_deduplicating() {
+        // Arrange: key with value at seq=100, tombstone at seq=200
+        // This simulates: write value, take snapshot, delete key, compact
+        let mut versions = vec![
+            make_tombstone(b"key1", 200),      // Newest: tombstone
+            make_version(b"key1", 100, false), // Older: value (should be visible to snapshot at seq=100)
+        ];
+        sort_versions_for_output(&mut versions);
+
+        // Act: deduplicate without snapshot awareness
+        let result = deduplicate_versions(&versions);
+
+        // Assert: Bug! Only tombstone kept, old value discarded even though snapshot needs it
+        // This test will PASS showing the bug exists - we WANT it to fail (keep both versions)
+        assert_eq!(result.len(), 1, "BUG: deduplicate_versions should keep both versions when snapshot is active, but it only keeps 1");
+        assert_eq!(result[0].seq, 200);
+        assert!(result[0].tombstone, "Only the tombstone is kept");
+    }
+
+    #[test]
+    fn should_preserve_old_value_visible_to_snapshot_when_deduplicating_snapshot_aware() {
+        // Arrange: key with value at seq=100, tombstone at seq=200
+        // Snapshot exists at seq=150, so it should see value at seq=100 (100 < 150)
+        let mut versions = vec![
+            make_tombstone(b"key1", 200),      // Newest: tombstone (not visible to snapshot)
+            make_version(b"key1", 100, false), // Older: value (visible to snapshot at seq=150)
+        ];
+        sort_versions_for_output(&mut versions);
+
+        // Act: deduplicate with snapshot awareness (min_snapshot_seq=150)
+        let result = deduplicate_versions_snapshot_aware(&versions, Some(150));
+
+        // Assert: Both versions should be kept
+        assert_eq!(result.len(), 2, "Should keep both tombstone and old value visible to snapshot");
+        assert_eq!(result[0].seq, 200);
+        assert!(result[0].tombstone);
+        assert_eq!(result[1].seq, 100);
+        assert!(!result[1].tombstone);
+    }
+
+    #[test]
+    fn should_discard_old_value_not_visible_to_snapshot_when_deduplicating_snapshot_aware() {
+        // Arrange: key with value at seq=50, tombstone at seq=200
+        // Snapshot exists at seq=25, so it doesn't see seq=50 (50 >= 25)
+        let mut versions = vec![
+            make_tombstone(b"key1", 200),     // Newest: tombstone
+            make_version(b"key1", 50, false), // Older: value (NOT visible to snapshot at seq=25)
+        ];
+        sort_versions_for_output(&mut versions);
+
+        // Act: deduplicate with snapshot awareness (min_snapshot_seq=25)
+        let result = deduplicate_versions_snapshot_aware(&versions, Some(25));
+
+        // Assert: Only tombstone kept since old value not visible to any snapshot
+        assert_eq!(result.len(), 1);
         assert_eq!(result[0].seq, 200);
         assert!(result[0].tombstone);
     }

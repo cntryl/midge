@@ -327,7 +327,11 @@ impl MidgeEngine {
         };
 
         // Deduplicate to ensure only one version per key in output SST
-        let versions = crate::core::compaction::deduplicate_versions(&versions);
+        // Use snapshot-aware deduplication to preserve versions visible to active snapshots
+        let mut versions = crate::core::compaction::deduplicate_versions_snapshot_aware(&versions, min_snapshot_seq);
+        
+        // Re-sort after deduplication to ensure proper ordering
+        crate::core::compaction::sort_versions_for_output(&mut versions);
 
         // Debug: log versions that will be written during compact_all
         debug!(
@@ -346,11 +350,15 @@ impl MidgeEngine {
             .create(self.compression, self.block_size, true);
 
         for v in &versions {
+            // When use_internal=true, the writer expects keys to be pre-encoded as internal keys
+            let internal_key =
+                crate::internal_key::encode_internal_key(&v.user_key, v.seq, v.tombstone);
+
             if v.tombstone {
-                writer.add_with_meta(v.user_key.as_slice(), None, v.seq, true, v.expiration)?;
+                writer.add_with_meta(&internal_key, None, v.seq, true, v.expiration)?;
             } else if let Some(value) = &v.value {
                 writer.add_with_meta(
-                    v.user_key.as_slice(),
+                    &internal_key,
                     Some(value.as_ref()),
                     v.seq,
                     false,

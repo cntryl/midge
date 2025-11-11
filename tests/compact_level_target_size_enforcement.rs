@@ -116,6 +116,9 @@ fn should_respect_level_multiplier_given_cascading_compaction() {
     let result = engine.compact_all();
 
     // Assert - Compaction succeeds and data intact
+    if let Err(e) = &result {
+        println!("compact_all error: {:?}", e);
+    }
     assert!(result.is_ok());
     for batch in 0..10 {
         for i in 0..50 {
