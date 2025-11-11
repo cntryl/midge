@@ -136,7 +136,10 @@ fn should_resume_writes_given_compaction_caught_up() {
         engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Wait for flush/compaction to complete
+    engine
+        .wait_for_flush(std::time::Duration::from_secs(5))
+        .expect("flush should complete");
 
     for i in 0..100 {
         let key = format!("resume_key_{}", i);

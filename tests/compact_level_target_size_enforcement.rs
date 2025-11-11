@@ -3,7 +3,6 @@
 
 // Compaction During Concurrent Operations tests - P1 Priority
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use std::thread;
 use std::time::Duration;
 
 mod common;
@@ -107,9 +106,10 @@ fn should_respect_level_multiplier_given_cascading_compaction() {
             engine.put(&cf, key.as_bytes(), b"value").unwrap();
         }
         engine.flush().unwrap();
-        // Give flush coordinator time to complete async file operations
-        // Increase wait to reduce flakiness on slow CI or loaded hosts
-        thread::sleep(Duration::from_millis(100));
+        // Wait for flush to complete
+        engine
+            .wait_for_flush(Duration::from_secs(5))
+            .expect("flush should complete");
     }
 
     // Act

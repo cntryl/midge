@@ -5,7 +5,6 @@ mod common;
 
 use common::new_engine_with_opts;
 use cntryl_midge::Query;
-use std::thread;
 use std::time::Duration;
 
 // ============================================================================
@@ -24,7 +23,9 @@ fn should_measure_read_amplification_given_multilevel_scan() {
             eng.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
         }
         eng.flush_cf(&cf).expect("flush");
-        thread::sleep(Duration::from_millis(100)); // Allow compaction
+        // Wait for compaction to complete
+        eng.wait_for_compaction(Duration::from_secs(5))
+            .expect("compaction should complete");
     }
 
     // Act
@@ -70,7 +71,9 @@ fn should_measure_write_amplification_given_compaction_cascade() {
         eng.put(&cf, key.as_bytes(), &value).unwrap();
     }
     eng.flush_cf(&cf).expect("flush");
-    thread::sleep(Duration::from_millis(500)); // Allow compaction cascade
+    // Wait for compaction cascade to complete
+    eng.wait_for_compaction(Duration::from_secs(5))
+        .expect("compaction should complete");
 
     let final_compaction_bytes = eng.performance_metrics().compaction.total_bytes_written();
     let final_wal_bytes = eng.performance_metrics().wal.total_bytes_written();
@@ -151,7 +154,9 @@ fn should_track_amplification_over_time_given_workload() {
             eng.put(&cf, key.as_bytes(), b"data").unwrap();
         }
         eng.flush_cf(&cf).expect("flush");
-        thread::sleep(Duration::from_millis(100));
+        // Wait for compaction to complete
+        eng.wait_for_compaction(Duration::from_secs(5))
+            .expect("compaction should complete");
 
         // Sample write amplification at each phase
         let phase_end_compaction_bytes = eng.performance_metrics().compaction.total_bytes_written();

@@ -188,7 +188,8 @@ fn should_increment_compaction_counters_during_manual_compaction() {
     eng.compact_range(&cf, Some(b""), Some(b"~")).expect("compact");
     
     // Wait for compaction to complete
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    eng.wait_for_compaction(std::time::Duration::from_secs(5))
+        .expect("compaction should complete");
     
     let final_start = hooks.compaction_start_count();
     let final_complete = hooks.compaction_complete_count();

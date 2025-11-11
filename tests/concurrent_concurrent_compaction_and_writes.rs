@@ -43,7 +43,10 @@ fn should_allow_writes_given_compaction_in_progress() {
         engine.put(&cf, key.as_bytes(), value.as_slice()).unwrap();
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Wait for flush to complete before starting concurrent writes
+    engine
+        .wait_for_flush(std::time::Duration::from_secs(5))
+        .expect("flush should complete");
 
     let write_handle = {
         let engine = Arc::clone(&engine);

@@ -32,7 +32,8 @@ fn should_streaming_scan_match_regular_scan() {
     }
 
     // Wait for flush
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    eng.wait_for_flush(std::time::Duration::from_secs(5))
+        .expect("flush should complete");
 
     // Add more keys to memtable
     for i in 5..10u8 {

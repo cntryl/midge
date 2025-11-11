@@ -30,8 +30,9 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
         let big = vec![b'v'; 128];
         eng.put(&cf, b"zz", big.as_slice()).unwrap();
-        // Give background flush a moment to materialize SST and update manifest
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Wait for background flush to materialize SST and update manifest
+        eng.wait_for_flush(std::time::Duration::from_secs(5))
+            .expect("flush should complete");
     }
 
     // Act: reopen engine (memtable will only have post-rotation tail; 'a' should be in SST)
@@ -63,12 +64,14 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
         // rotate to flush first version
         let big = vec![b'v'; 128];
         eng.put(&cf, b"zz", big.as_slice()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        eng.wait_for_flush(std::time::Duration::from_secs(5))
+            .expect("flush should complete");
         // delete and rotate again to flush tombstone
         eng.delete(&cf, b"k").unwrap();
         let big2 = vec![b'v'; 128];
         eng.put(&cf, b"zz2", big2.as_slice()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        eng.wait_for_flush(std::time::Duration::from_secs(5))
+            .expect("flush should complete");
     }
 
     // Act: reopen
@@ -100,9 +103,10 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
         eng.put(&cf1, b"c", b"3").unwrap();
         let big = vec![b'v'; 256];
         eng.put(&cf1, b"zz", big.as_slice()).unwrap();
+        // Wait for background flush
+        eng.wait_for_flush(std::time::Duration::from_secs(5))
+            .expect("flush should complete");
     }
-    // Wait for background flush
-    std::thread::sleep(std::time::Duration::from_millis(150));
     // Phase 2: reopen with large WAL so overlay remains in memtable
     opts.wal_buffer_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
