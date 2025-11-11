@@ -34,6 +34,7 @@ pub mod cloud;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Creates a temporary directory for test isolation.
@@ -397,4 +398,185 @@ pub fn populate_multi_level_data(
         engine.put(cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
+}
+
+// ============================================================================
+// Engine Creation Helpers
+// ============================================================================
+
+/// Creates a new MidgeEngine with custom options.
+///
+/// Returns both the TempDir (to keep it alive) and the opened engine.
+///
+/// # Arguments
+///
+/// * `memtable_size` - Size of memtable in bytes
+/// * `enable_compaction` - Whether to enable background compaction
+///
+/// # Examples
+///
+/// ```rust
+/// let (dir, engine) = new_engine_with_opts(512, true);
+/// let cf = engine.default_column_family();
+/// ```
+#[allow(dead_code)]
+pub fn new_engine_with_opts(memtable_size: usize, enable_compaction: bool) -> (TempDir, MidgeEngine) {
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size,
+        enable_compaction,
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("Failed to open engine");
+    (dir, engine)
+}
+
+/// Creates MidgeOptions configured for compaction testing with custom settings.
+///
+/// # Arguments
+///
+/// * `db_path` - Path to database directory
+/// * `memtable_size` - Size of memtable in bytes
+///
+/// # Examples
+///
+/// ```rust
+/// let dir = test_temp_dir();
+/// let opts = compaction_opts(dir.path().to_path_buf(), 512);
+/// ```
+#[allow(dead_code)]
+pub fn compaction_opts(db_path: PathBuf, memtable_size: usize) -> MidgeOptions {
+    MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path },
+        memtable_size,
+        enable_compaction: true,
+        ..Default::default()
+    }
+}
+
+/// Creates an Arc-wrapped MidgeEngine for concurrent tests.
+///
+/// Returns both the TempDir (to keep it alive) and the Arc-wrapped engine.
+///
+/// # Examples
+///
+/// ```rust
+/// let (dir, engine) = new_shared_engine();
+/// let eng_clone = engine.clone();
+/// // Use in multiple threads
+/// ```
+#[allow(dead_code)]
+pub fn new_shared_engine() -> (TempDir, Arc<MidgeEngine>) {
+    let (dir, eng) = new_engine();
+    (dir, Arc::new(eng))
+}
+
+// ============================================================================
+// Bulk Write Helpers
+// ============================================================================
+
+/// Bulk insert keys with a common prefix and value.
+///
+/// Generates keys in format: `{prefix}{i:03}` where i is 0-padded to 3 digits.
+///
+/// # Arguments
+///
+/// * `eng` - The MidgeEngine to write to
+/// * `cf` - The ColumnFamilyHandle to write to
+/// * `prefix` - Key prefix string (e.g., "key_")
+/// * `count` - Number of keys to insert
+/// * `value` - Value bytes to use for all keys
+///
+/// # Examples
+///
+/// ```rust
+/// let (dir, eng) = new_engine();
+/// let cf = eng.default_column_family();
+/// bulk_put(&eng, &cf, "key_", 100, b"value");
+/// // Creates: key_000, key_001, ..., key_099
+/// ```
+#[allow(dead_code)]
+pub fn bulk_put(
+    eng: &MidgeEngine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    prefix: &str,
+    count: usize,
+    value: &[u8],
+) {
+    for i in 0..count {
+        let key = format!("{}{:03}", prefix, i);
+        eng.put(cf, key.as_bytes(), value).expect("bulk_put failed");
+    }
+}
+
+/// Bulk insert keys with custom value generation function.
+///
+/// Generates keys in format: `{prefix}{i:03}` and calls `value_fn(i)` for each value.
+///
+/// # Arguments
+///
+/// * `eng` - The MidgeEngine to write to
+/// * `cf` - The ColumnFamilyHandle to write to
+/// * `prefix` - Key prefix string
+/// * `count` - Number of keys to insert
+/// * `value_fn` - Function that takes index and returns value bytes
+///
+/// # Examples
+///
+/// ```rust
+/// let (dir, eng) = new_engine();
+/// let cf = eng.default_column_family();
+/// bulk_put_fn(&eng, &cf, "key_", 100, |i| format!("value_{}", i).into_bytes());
+/// ```
+#[allow(dead_code)]
+pub fn bulk_put_fn<F>(
+    eng: &MidgeEngine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    prefix: &str,
+    count: usize,
+    value_fn: F,
+) where
+    F: Fn(usize) -> Vec<u8>,
+{
+    for i in 0..count {
+        let key = format!("{}{:03}", prefix, i);
+        let value = value_fn(i);
+        eng.put(cf, key.as_bytes(), &value).expect("bulk_put_fn failed");
+    }
+}
+
+// ============================================================================
+// Assertion Helpers
+// ============================================================================
+
+/// Asserts that a key exists (without checking value) with custom message.
+///
+/// # Arguments
+///
+/// * `eng` - The MidgeEngine to query
+/// * `cf` - The ColumnFamilyHandle to query
+/// * `key` - The key to check
+/// * `msg` - Custom failure message
+///
+/// # Panics
+///
+/// Panics if the key doesn't exist or get operation fails.
+///
+/// # Examples
+///
+/// ```rust
+/// assert_key_present(&eng, &cf, b"key", "Key should exist after write");
+/// ```
+#[allow(dead_code)]
+pub fn assert_key_present(
+    eng: &MidgeEngine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    key: &[u8],
+    msg: &str,
+) {
+    let result = eng.get(cf, key).expect("get failed");
+    assert!(result.is_some(), "{}", msg);
 }

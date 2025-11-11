@@ -3,8 +3,7 @@
 
 mod common;
 
-use common::test_temp_dir;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::{bulk_put, new_engine_with_opts};
 use std::thread;
 use std::time::Duration;
 
@@ -13,16 +12,7 @@ use std::time::Duration;
 #[test]
 fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 512,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("Failed to open engine");
+    let (_dir, eng) = new_engine_with_opts(512, true);
     let cf = eng.default_column_family();
 
     // TODO: Create a CompactionFilter that counts invocations
@@ -31,10 +21,7 @@ fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
     // eng.set_compaction_filter(&cf, filter);
 
     // Write keys to trigger compaction
-    for i in 0..50 {
-        let key = format!("key_{:02}", i);
-        eng.put(&cf, key.as_bytes(), b"value").unwrap();
-    }
+    bulk_put(&eng, &cf, "key_", 50, b"value");
 
     // Act
     // TODO: Add explicit compaction trigger API
@@ -49,16 +36,7 @@ fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
 #[test]
 fn should_drop_key_given_filter_returns_remove_decision() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 512,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("Failed to open engine");
+    let (_dir, eng) = new_engine_with_opts(512, true);
     let cf = eng.default_column_family();
 
     // TODO: Create a CompactionFilter that removes keys with specific prefix
@@ -66,10 +44,8 @@ fn should_drop_key_given_filter_returns_remove_decision() {
     // eng.set_compaction_filter(&cf, filter);
 
     // Write keys with different prefixes
-    for i in 0..10 {
-        eng.put(&cf, format!("keep_{:02}", i).as_bytes(), b"value").unwrap();
-        eng.put(&cf, format!("remove_{:02}", i).as_bytes(), b"value").unwrap();
-    }
+    bulk_put(&eng, &cf, "keep_", 10, b"value");
+    bulk_put(&eng, &cf, "remove_", 10, b"value");
 
     // Act
     // TODO: Add explicit compaction trigger API
@@ -89,16 +65,7 @@ fn should_drop_key_given_filter_returns_remove_decision() {
 #[test]
 fn should_keep_key_given_filter_returns_keep_decision() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 512,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("Failed to open engine");
+    let (_dir, eng) = new_engine_with_opts(512, true);
     let cf = eng.default_column_family();
 
     // TODO: Create a CompactionFilter that keeps all keys
@@ -106,10 +73,7 @@ fn should_keep_key_given_filter_returns_keep_decision() {
     // eng.set_compaction_filter(&cf, filter);
 
     // Write data
-    for i in 0..30 {
-        let key = format!("key_{:02}", i);
-        eng.put(&cf, key.as_bytes(), b"important_data").unwrap();
-    }
+    bulk_put(&eng, &cf, "key_", 30, b"important_data");
 
     // Act
     // TODO: Add explicit compaction trigger API
@@ -127,16 +91,7 @@ fn should_keep_key_given_filter_returns_keep_decision() {
 #[test]
 fn should_modify_value_given_filter_returns_change_decision() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 512,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("Failed to open engine");
+    let (_dir, eng) = new_engine_with_opts(512, true);
     let cf = eng.default_column_family();
 
     // TODO: Create a CompactionFilter that modifies values
@@ -146,10 +101,7 @@ fn should_modify_value_given_filter_returns_change_decision() {
     // eng.set_compaction_filter(&cf, filter);
 
     // Write original values
-    for i in 0..20 {
-        let key = format!("key_{:02}", i);
-        eng.put(&cf, key.as_bytes(), b"original").unwrap();
-    }
+    bulk_put(&eng, &cf, "key_", 20, b"original");
 
     // Act
     // TODO: Add explicit compaction trigger API

@@ -1,28 +1,16 @@
 mod common;
-use common::{new_engine, test_temp_dir};
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::{bulk_put_fn, new_engine, new_engine_with_opts};
 use std::sync::Arc;
 use std::thread;
 
 #[test]
 fn should_block_backup_start_given_active_compaction_when_requested() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 1024,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("open");
+    let (_dir, eng) = new_engine_with_opts(1024, true);
     let cf = eng.default_column_family();
     
     // Act - write data to trigger compaction
-    for i in 0..200 {
-        eng.put(&cf, format!("key{:03}", i % 50).as_bytes(), b"value").expect("put");
-    }
+    bulk_put_fn(&eng, &cf, "key", 200, |_| b"value".to_vec());
     
     // TODO: Attempt backup during compaction
     // Verify backup either waits or proceeds with consistent snapshot
@@ -35,21 +23,11 @@ fn should_block_backup_start_given_active_compaction_when_requested() {
 #[test]
 fn should_fail_cf_drop_given_inflight_flush() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 1024,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("open");
+    let (_dir, eng) = new_engine_with_opts(1024, false);
     let cf = eng.default_column_family();
     
     // Act - write enough to trigger flush
-    for i in 0..100 {
-        eng.put(&cf, format!("key{:03}", i).as_bytes(), b"value").expect("put");
-    }
+    bulk_put_fn(&eng, &cf, "key", 100, |_| b"value".to_vec());
     
     // TODO: Attempt CF drop during flush
     // Should either fail gracefully or wait for flush completion
@@ -69,9 +47,7 @@ fn should_allow_backup_readonly_mode_given_active_writes() {
     let eng_clone = Arc::clone(&eng);
     let write_handle = thread::spawn(move || {
         let cf = eng_clone.default_column_family();
-        for i in 0..100 {
-            eng_clone.put(&cf, format!("key{:03}", i).as_bytes(), b"value").expect("put");
-        }
+        bulk_put_fn(&eng_clone, &cf, "key", 100, |_| b"value".to_vec());
     });
     
     // TODO: Initiate readonly backup concurrently
@@ -88,22 +64,11 @@ fn should_allow_backup_readonly_mode_given_active_writes() {
 #[test]
 fn should_handle_config_reload_during_compaction_without_panic() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 1024,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("open");
+    let (_dir, eng) = new_engine_with_opts(1024, true);
     let cf = eng.default_column_family();
     
     // Act - trigger compaction
-    for i in 0..200 {
-        eng.put(&cf, format!("key{:03}", i % 50).as_bytes(), b"value").expect("put");
-    }
+    bulk_put_fn(&eng, &cf, "key", 200, |_| b"value".to_vec());
     
     // TODO: Reload config during compaction
     // Should not panic or corrupt state

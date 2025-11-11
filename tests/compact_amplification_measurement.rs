@@ -3,8 +3,8 @@
 
 mod common;
 
-use common::test_temp_dir;
-use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
+use common::new_engine_with_opts;
+use cntryl_midge::Query;
 use std::thread;
 use std::time::Duration;
 
@@ -13,16 +13,7 @@ use std::time::Duration;
 #[test]
 fn should_measure_read_amplification_given_multilevel_scan() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 1024,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("Failed to open engine");
+    let (_dir, eng) = new_engine_with_opts(1024, true);
     let cf = eng.default_column_family();
 
     // Write data across multiple levels
@@ -53,16 +44,7 @@ fn should_measure_read_amplification_given_multilevel_scan() {
 #[test]
 fn should_measure_write_amplification_given_compaction_cascade() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 512,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("Failed to open engine");
+    let (_dir, eng) = new_engine_with_opts(512, true);
     let cf = eng.default_column_family();
 
     // TODO: Get baseline bytes_written from metrics (total_bytes_written, compaction_bytes_written)
@@ -92,16 +74,7 @@ fn should_measure_write_amplification_given_compaction_cascade() {
 #[test]
 fn should_measure_space_amplification_given_live_vs_total_data() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 1024,
-        enable_compaction: false, // Disable to accumulate obsolete data
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("Failed to open engine");
+    let (_dir, eng) = new_engine_with_opts(1024, false);
     let cf = eng.default_column_family();
 
     // Write initial data
@@ -136,16 +109,7 @@ fn should_measure_space_amplification_given_live_vs_total_data() {
 #[test]
 fn should_track_amplification_over_time_given_workload() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 512,
-        enable_compaction: true,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("Failed to open engine");
+    let (_dir, eng) = new_engine_with_opts(512, true);
     let cf = eng.default_column_family();
 
     // TODO: Create metrics snapshot API or export amplification history
