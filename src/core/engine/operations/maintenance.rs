@@ -103,6 +103,11 @@ impl MidgeEngine {
             self.update_caches_for_new_sst(&name);
         }
 
+        // TODO: After manifest is persisted, we should replace memtable with new empty one
+        // to avoid re-flushing data (since drain is non-destructive). However, this breaks
+        // snapshot reads in some edge cases. Needs further investigation.
+        // self.replace_memtable_after_flush(cf_id);
+
         Ok(())
     }
 
@@ -154,6 +159,40 @@ impl MidgeEngine {
         } else {
             Err(MidgeError::invalid_config(
                 "Manual compaction requested but compaction is disabled",
+            ))
+        }
+    }
+
+    /// Wait for all pending flush operations to complete.
+    ///
+    /// This blocks until the background flush worker has processed all queued flush jobs.
+    /// Useful for tests that need to ensure flushes are complete before asserting state.
+    ///
+    /// # Arguments
+    /// * `timeout` - Maximum time to wait for flush completion
+    ///
+    /// # Errors
+    /// Returns an error if the timeout expires or the flush worker is disconnected.
+    pub fn wait_for_flush(&self, timeout: std::time::Duration) -> MidgeResult<()> {
+        self.flush_coordinator.wait_until_idle(timeout)
+    }
+
+    /// Wait for all pending compaction operations to complete.
+    ///
+    /// This blocks until the background compaction worker has processed all queued jobs.
+    /// Useful for tests that need to ensure compactions are complete before asserting state.
+    ///
+    /// # Arguments
+    /// * `timeout` - Maximum time to wait for compaction completion
+    ///
+    /// # Errors
+    /// Returns an error if compaction is disabled, the timeout expires, or the worker is disconnected.
+    pub fn wait_for_compaction(&self, timeout: std::time::Duration) -> MidgeResult<()> {
+        if let Some(ref coordinator) = self.compaction_coordinator {
+            coordinator.wait_until_idle(timeout)
+        } else {
+            Err(MidgeError::invalid_config(
+                "Cannot wait for compaction when compaction is disabled",
             ))
         }
     }
