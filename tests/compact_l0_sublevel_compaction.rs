@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 
 mod common;
-use common::{assert_get_equals, compaction_test_opts, populate_multi_level_data};
+use common::{assert_get_equals, compaction_test_opts};
 
 // ============================================================================
 

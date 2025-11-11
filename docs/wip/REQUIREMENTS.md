@@ -2331,3 +2331,73 @@ pub enum DurabilityMode {
 This document is automatically regeneratable by re-running test extraction from the codebase. All test names reflect actual executable requirements.
 
 _Requirements as living documentation - every test name is a verified behavior specification._
+
+## Newly-enumerated system-bound behaviors (implicit → explicit)
+
+The analysis above identified a set of behaviors that were implied by implementation and tests but not explicitly enumerated as testable requirements. Making them explicit improves traceability, reduces ambiguity at system boundaries (fsyncs, shutdowns, admin APIs), and prevents subtle contradictions between subsystems. The list below converts those implicit behaviors into discrete, named test entries you can add to the test-suite.
+
+1. Crash semantics at fsync boundaries (🔴 high priority — ~6–8 tests)
+  - `should_recover_without_loss_given_crash_after_wal_append_before_fsync`
+  - `should_recover_without_duplication_given_crash_after_manifest_fsync_before_delete`
+  - `should_preserve_consistency_given_crash_between_sst_write_and_manifest_update`
+  - `should_recover_partial_compaction_output_given_crash_after_partial_sst_creation`
+  - (additional tests for intermediate fsync points and combinations)
+
+2. Iterator and snapshot cursor semantics (🟠 high — 4–6 tests)
+  - `should_rewind_iterator_to_start_given_reset_called`
+  - `should_return_error_given_iterator_used_after_close`
+  - `should_resume_iteration_given_checkpoint_sequence`
+  - `should_reuse_iterator_buffers_given_multiple_next_calls`
+
+3. Schema / format versioning (🟡 medium — ~4 tests)
+  - `should_reject_sst_given_version_newer_than_reader`
+  - `should_fallback_to_backward_compatible_decode_given_older_sst`
+  - `should_migrate_manifest_to_new_schema_version_given_open`
+  - `should_preserve_backward_compatibility_given_minor_version_change`
+
+4. Resource shutdown semantics (🟡 medium — ~4 tests)
+  - `should_flush_and_fsync_all_memtables_given_shutdown_signal`
+  - `should_complete_pending_compactions_given_shutdown_signal`
+  - `should_abort_long_running_uploads_given_shutdown_signal`
+  - `should_reopen_without_recovery_needed_given_clean_shutdown`
+
+5. Metrics and observability contracts (🟢 low — ~4 tests)
+  - `should_export_metric_given_flush_completed`
+  - `should_update_latency_histograms_given_compaction_finished`
+  - `should_expose_health_state_unhealthy_given_background_error`
+  - `should_reset_metrics_after_reopen`
+
+6. Concurrency safety for admin APIs (🟢 low — ~4 tests)
+  - `should_block_backup_start_given_active_compaction`
+  - `should_fail_cf_drop_given_inflight_flush`
+  - `should_allow_backup_readonly_mode_given_active_writes`
+  - `should_handle_config_reload_during_compaction_without_panic`
+
+7. Configuration and hot-reload idempotence (⚪ informational — ~3 tests)
+  - `should_apply_same_config_twice_without_side_effects`
+  - `should_preserve_runtime_state_given_reconfiguration_of_unrelated_setting`
+  - `should_reject_reconfiguration_given_conflicting_live_state`
+
+8. End-to-end tenant isolation / CF lifecycle (⚪ informational — ~4 tests)
+  - `should_persist_cf_metadata_across_restart`
+  - `should_recreate_cf_with_same_name_after_drop_without_leak`
+  - `should_reassign_cf_id_given_drop_and_recreate`
+  - `should_ignore_dropped_cf_during_wal_replay`
+
+9. System integration with file descriptors / OS limits (⚪ informational — ~2 tests)
+  - `should_recover_from_emfile_given_retry_after_fd_release`
+  - `should_log_and_skip_background_task_given_os_resource_exhaustion`
+
+10. Security / integrity extensions (future-facing, ⚪ — ~2 tests)
+  - `should_verify_manifest_signature_given_public_key`
+  - `should_reject_backup_given_invalid_signature`
+
+Estimated new tests if all implicit behaviors are made explicit: ~35–40 (add to the gap analysis as appropriate). These items should be prioritised into the roadmap above (Durability and Integration phases first).
+
+Notes:
+- Each test above follows the project's naming convention and should include AAA comments as required by `wip/TEST_GUIDELINES`.
+- Where a test requires crash injection, use the crash simulation harness described in the Durability roadmap.
+- Several tests will be small unit tests; many (especially compaction/flush/fsync tests) should be written as integration tests using temporary directories and controlled fsync semantics.
+
+Add these entries to the traceability/gap tables and the Phase 1/2 roadmap as appropriate; implement the highest-impact durability tests first (the crash/fsync boundary ones).
+

@@ -268,7 +268,6 @@ fn should_handle_default_cf_merge_independently_from_other_cfs() {
 }
 
 #[test]
-#[ignore = "Requires WAL truncation after flush - not yet implemented"]
 fn should_persist_and_recover_merge_resolutions_across_restart() {
     // Arrange
     let dir = test_temp_dir();

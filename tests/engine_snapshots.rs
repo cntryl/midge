@@ -10,7 +10,6 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 mod common;
 use common::test_temp_dir;
 #[test]
-#[ignore = "Snapshot isolation not fully implemented - documents expected behavior"]
 fn should_hide_newer_writes_given_snapshot_when_get_at() {
     // Arrange
     let dir = test_temp_dir();
@@ -37,7 +36,6 @@ fn should_hide_newer_writes_given_snapshot_when_get_at() {
 }
 
 #[test]
-#[ignore = "Snapshot isolation not fully implemented - documents expected behavior"]
 fn should_scan_at_hides_newer_writes_given_snapshot() {
     // Arrange: put v1, snapshot, then write v2 in memtable (v1 persisted or not)
     let dir = test_temp_dir();
