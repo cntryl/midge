@@ -203,7 +203,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         s.offset += footer.len() as u64;
 
         // Ensure all bytes flushed
-        crate::fs::sync_data_only(&s.file)?;
+        crate::fs::sync_data_only(&s.file, None)?; // TODO: pass test_hooks when available
 
         // Read file bytes back
         let mut buf = Vec::with_capacity(s.offset as usize);
@@ -277,7 +277,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         s.file.write_all(&footer)?;
         s.offset += footer.len() as u64;
 
-        crate::fs::sync_data_only(&s.file)?;
+        crate::fs::sync_data_only(&s.file, None)?; // TODO: pass test_hooks when available
         drop(s.file);
 
         // Move temp file into place (atomic rename preferred)

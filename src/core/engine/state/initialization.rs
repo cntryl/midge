@@ -61,6 +61,10 @@ pub fn open_with_config(config: crate::config::Config) -> MidgeResult<MidgeEngin
 /// **Note:** Consider using [`open_with_config()`] for the
 /// new high-level configuration API with automatic parameter derivation.
 pub fn open(opts: crate::MidgeOptions) -> MidgeResult<MidgeEngine> {
+    // Validate configuration before opening
+    opts.validate()
+        .map_err(|e| crate::error::MidgeError::invalid_config(e))?;
+
     let mem_mode = matches!(opts.storage_mode, crate::StorageMode::Memory);
 
     // Precompute db path and sst dir so we can create an FS-backed writer factory
@@ -237,8 +241,11 @@ pub fn open_with_factories(
         cf_set_arc.clone(),
     )?;
 
-    // Initialize manifest cache for fast read access
-    let manifest_cache = crate::sst::ManifestCache::new(db_path.clone())?;
+    // Initialize manifest cache for fast read access (with test hooks if provided)
+    let manifest_cache = crate::sst::ManifestCache::new_with_hooks(
+        db_path.clone(),
+        opts.test_hooks.clone(),
+    )?;
     let manifest = manifest_cache.get();
 
     // Initialize bloom filter cache and populate from existing SSTs

@@ -99,7 +99,26 @@ impl Manifest {
     /// Serializes the manifest to a temporary file, then atomically renames it to
     /// manifest.json. Updates the CURRENT file to point to the new manifest.
     pub fn save_atomic(&self, db_path: &Path) -> MidgeResult<()> {
+        self.save_atomic_with_hooks(db_path, None)
+    }
+
+    /// Save with optional test hooks for fault injection testing.
+    pub fn save_atomic_with_hooks(
+        &self,
+        db_path: &Path,
+        test_hooks: Option<&crate::common::test_hooks::TestHooks>,
+    ) -> MidgeResult<()> {
         std::fs::create_dir_all(db_path)?;
+
+        // Call test hook before manifest update (increments counter and checks for FailSave behavior)
+        if let Some(hooks) = test_hooks {
+            if hooks.before_manifest_update() {
+                // before_manifest_update returns true when FailSave is configured
+                return Err(crate::error::MidgeError::internal(
+                    "Manifest update failed by test hook (FailSave behavior)",
+                ));
+            }
+        }
 
         // OPTIMIZATION: Serialize to memory before any I/O operations.
         // This reduces the time between temp file write and atomic rename.
@@ -116,6 +135,13 @@ impl Manifest {
 
         // Update CURRENT pointer
         std::fs::write(db_path.join("CURRENT"), b"manifest.json")?;
+
+        // TODO: Implement CorruptAfterSave behavior if needed
+        // if let Some(hooks) = test_hooks {
+        //     if hooks.manifest_behavior() == ManifestBehavior::CorruptAfterSave {
+        //         // Intentionally corrupt the manifest file
+        //     }
+        // }
 
         Ok(())
     }

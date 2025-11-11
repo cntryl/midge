@@ -28,6 +28,9 @@ pub mod common;
 pub use common::error;
 pub use common::{MidgeError, MidgeResult};
 
+// Re-export test hooks for testing
+pub use common::test_hooks;
+
 // Core modules (grouped under `core` after reorganization)
 pub mod config;
 pub mod core;
@@ -435,6 +438,51 @@ pub struct MidgeOptions {
     ///
     /// Controls how much burst traffic is allowed before throttling kicks in.
     pub cloud_upload_max_burst_bytes: u64,
+
+    /// Test hooks for fault injection and instrumentation (test builds only).
+    ///
+    /// Allows tests to intercept operations, inject failures, and verify
+    /// internal behavior. Set to `None` for normal operation (default).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use cntryl_midge::{MidgeOptions, test_hooks::{TestHooks, FsyncBehavior}};
+    ///
+    /// let hooks = TestHooks::new()
+    ///     .with_fsync_behavior(FsyncBehavior::Skip);
+    ///
+    /// let opts = MidgeOptions {
+    ///     test_hooks: Some(hooks),
+    ///     ..Default::default()
+    /// };
+    /// ```
+    pub test_hooks: Option<crate::common::test_hooks::TestHooks>,
+
+    /// Enable paranoid checksum verification on every SST block read.
+    ///
+    /// When enabled, checksums are verified on every SST block read, not just
+    /// during decompression. This provides stronger data integrity guarantees
+    /// at the cost of read performance (typically 5-10% overhead).
+    ///
+    /// Recommended for:
+    /// - Systems with unreliable storage (e.g., network filesystems)
+    /// - Compliance scenarios requiring end-to-end data integrity
+    /// - Debugging data corruption issues
+    ///
+    /// Default: `false` (verify checksums only during decompression)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cntryl_midge::MidgeOptions;
+    ///
+    /// let opts = MidgeOptions {
+    ///     paranoid_checksums: true,
+    ///     ..Default::default()
+    /// };
+    /// ```
+    pub paranoid_checksums: bool,
 }
 
 impl Default for MidgeOptions {
@@ -463,10 +511,134 @@ impl Default for MidgeOptions {
             wal_recovery_mode: WalRecoveryMode::default(), // Strict consistency
             cloud_upload_bytes_per_sec: 0,
             cloud_upload_max_burst_bytes: 0,
+            test_hooks: None,         // No test hooks by default
+            paranoid_checksums: false, // Disabled by default for performance
         }
     }
 }
 
 impl MidgeOptions {
-    // Future methods can be added here
+    /// Validate configuration options and return an error if any are invalid.
+    ///
+    /// This checks for:
+    /// - Unreasonably large memory allocations
+    /// - Invalid bloom filter rates
+    /// - Invalid level configuration
+    /// - Unreasonable threshold values
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cntryl_midge::{MidgeOptions, StorageMode};
+    ///
+    /// let mut opts = MidgeOptions::default();
+    /// opts.memtable_size = usize::MAX; // Invalid
+    ///
+    /// assert!(opts.validate().is_err());
+    /// ```
+    pub fn validate(&self) -> Result<(), String> {
+        // Validate memtable size (max 4GB to prevent unreasonable allocations)
+        const MAX_MEMTABLE_SIZE: usize = 4 * 1024 * 1024 * 1024; // 4GB
+        if self.memtable_size == 0 {
+            return Err("memtable_size must be greater than 0".to_string());
+        }
+        if self.memtable_size > MAX_MEMTABLE_SIZE {
+            return Err(format!(
+                "memtable_size ({}) exceeds maximum of {} bytes (4GB)",
+                self.memtable_size, MAX_MEMTABLE_SIZE
+            ));
+        }
+
+        // Validate max_levels
+        if self.max_levels == 0 {
+            return Err("max_levels must be greater than 0".to_string());
+        }
+        if self.max_levels > 20 {
+            return Err(format!(
+                "max_levels ({}) exceeds reasonable maximum of 20",
+                self.max_levels
+            ));
+        }
+
+        // Validate level_multiplier
+        if self.level_multiplier < 2 {
+            return Err("level_multiplier must be at least 2".to_string());
+        }
+        if self.level_multiplier > 100 {
+            return Err(format!(
+                "level_multiplier ({}) exceeds reasonable maximum of 100",
+                self.level_multiplier
+            ));
+        }
+
+        // Validate block_size
+        if self.block_size == 0 {
+            return Err("block_size must be greater than 0".to_string());
+        }
+        if self.block_size < 1024 {
+            return Err("block_size must be at least 1024 bytes (1KB)".to_string());
+        }
+        if self.block_size > 16 * 1024 * 1024 {
+            return Err(format!(
+                "block_size ({}) exceeds reasonable maximum of 16MB",
+                self.block_size
+            ));
+        }
+
+        // Validate bloom filter false positive rate
+        if self.bloom_filter_fp_rate <= 0.0 || self.bloom_filter_fp_rate >= 1.0 {
+            return Err(format!(
+                "bloom_filter_fp_rate ({}) must be between 0.0 and 1.0 (exclusive)",
+                self.bloom_filter_fp_rate
+            ));
+        }
+
+        // Validate WAL buffer size
+        if self.wal_buffer_size == 0 {
+            return Err("wal_buffer_size must be greater than 0".to_string());
+        }
+        if self.wal_buffer_size > 1024 * 1024 * 1024 {
+            return Err(format!(
+                "wal_buffer_size ({}) exceeds reasonable maximum of 1GB",
+                self.wal_buffer_size
+            ));
+        }
+
+        // Validate cache_size_mb
+        const MAX_CACHE_MB: usize = 100 * 1024; // 100GB
+        if self.cache_size_mb > MAX_CACHE_MB {
+            return Err(format!(
+                "cache_size_mb ({}) exceeds reasonable maximum of {} MB (100GB)",
+                self.cache_size_mb, MAX_CACHE_MB
+            ));
+        }
+
+        // Validate transaction spill threshold
+        if self.txn_spill_threshold_bytes == 0 {
+            return Err("txn_spill_threshold_bytes must be greater than 0".to_string());
+        }
+        if self.txn_spill_threshold_bytes < 1024 * 1024 {
+            return Err("txn_spill_threshold_bytes should be at least 1MB".to_string());
+        }
+
+        // Validate compaction threshold
+        if self.compaction_sst_threshold == 0 {
+            return Err("compaction_sst_threshold must be greater than 0".to_string());
+        }
+
+        // Validate tombstone density threshold
+        if self.tombstone_density_threshold < 0.0 || self.tombstone_density_threshold > 100.0 {
+            return Err(format!(
+                "tombstone_density_threshold ({}) must be between 0.0 and 100.0",
+                self.tombstone_density_threshold
+            ));
+        }
+
+        // Validate max_tombstone_compaction_files
+        if self.max_tombstone_compaction_files == 0 {
+            return Err("max_tombstone_compaction_files must be greater than 0".to_string());
+        }
+
+        Ok(())
+    }
 }

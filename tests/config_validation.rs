@@ -7,7 +7,6 @@ fn should_reject_config_given_memtable_size_exceeds_memory_budget_when_open_call
     // Arrange
     let dir = test_temp_dir();
     
-    // Act - attempt to open with extremely large memtable
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
             db_path: dir.path().to_path_buf(),
@@ -16,13 +15,21 @@ fn should_reject_config_given_memtable_size_exceeds_memory_budget_when_open_call
         ..Default::default()
     };
     
-    // Assert - should either succeed or fail gracefully
+    // Act
     let result = MidgeEngine::open(opts);
-    // TODO: Add validation to reject unreasonable configs
-    // For now, verify engine opens (will allocate on demand)
-    if let Ok(eng) = result {
-        let cf = eng.default_column_family();
-        eng.put(&cf, b"test", b"value").expect("put should work");
+    
+    // Assert
+    assert!(
+        result.is_err(),
+        "Should reject config with excessively large memtable_size"
+    );
+    if let Err(err) = result {
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("memtable_size"),
+            "Error message should mention memtable_size, got: {}",
+            err_msg
+        );
     }
 }
 

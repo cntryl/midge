@@ -189,4 +189,137 @@ impl MidgeEngine {
 
         result
     }
+
+    /// Get a snapshot of all metrics
+    ///
+    /// Returns a consistent point-in-time snapshot of all operational metrics.
+    /// Useful for monitoring dashboards and performance analysis.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// let snapshot = engine.metrics_snapshot();
+    /// println!("Total gets: {}", snapshot.get_count);
+    /// println!("Total puts: {}", snapshot.put_count);
+    /// println!("Cache hit rate: {:.2}%", 
+    ///     snapshot.block_cache_hits as f64 / 
+    ///     (snapshot.block_cache_hits + snapshot.block_cache_misses) as f64 * 100.0
+    /// );
+    /// ```
+    pub fn metrics_snapshot(&self) -> crate::core::metrics::MetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    /// Get the approximate read amplification factor
+    ///
+    /// Returns the ratio of bytes read from disk to bytes returned to user.
+    /// Values > 1 indicate read amplification due to scanning multiple levels.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// let amplification = engine.read_amplification();
+    /// if amplification > 10.0 {
+    ///     println!("Warning: High read amplification: {:.2}x", amplification);
+    /// }
+    /// ```
+    pub fn read_amplification(&self) -> f64 {
+        let snapshot = self.metrics.snapshot();
+        let manifest = self.manifest_cache.get();
+        
+        // Estimate: average number of SST levels checked per read
+        // More accurate calculation would need per-level metrics
+        let avg_levels_checked = if manifest.files.is_empty() {
+            1.0
+        } else {
+            // Approximate based on manifest structure
+            let max_level = manifest.files.iter().map(|f| f.level).max().unwrap_or(0);
+            (max_level as f64 + 1.0) / 2.0
+        };
+        
+        // Factor in bloom filter effectiveness
+        let bloom_effectiveness = if snapshot.bloom_filter_checks > 0 {
+            1.0 - (snapshot.bloom_filter_positives as f64 / snapshot.bloom_filter_checks as f64)
+        } else {
+            0.5
+        };
+        
+        avg_levels_checked * (1.0 - bloom_effectiveness * 0.5)
+    }
+
+    /// Get the approximate write amplification factor
+    ///
+    /// Returns the ratio of bytes written to storage vs bytes written by user.
+    /// Includes WAL writes, memtable flushes, and compaction rewrites.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// let amplification = engine.write_amplification();
+    /// println!("Write amplification: {:.2}x", amplification);
+    /// ```
+    pub fn write_amplification(&self) -> f64 {
+        let snapshot = self.metrics.snapshot();
+        
+        if snapshot.put_count == 0 {
+            return 0.0;
+        }
+        
+        // Estimate total bytes written:
+        // 1. WAL writes (1x)
+        // 2. Memtable flushes (1x) 
+        // 3. Compaction rewrites (varies by level)
+        let wal_factor = 1.0;
+        let flush_factor = 1.0;
+        
+        // Compaction factor depends on compaction bytes
+        let compaction_factor = if snapshot.compaction_bytes_written > 0 {
+            snapshot.compaction_bytes_written as f64 / 
+            (snapshot.put_count as f64 * 100.0) // Assume ~100 bytes per put
+        } else {
+            0.0
+        };
+        
+        wal_factor + flush_factor + compaction_factor
+    }
+
+    /// Get the number of SST files across all levels
+    ///
+    /// Returns the total count of SST files in the database.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// let count = engine.sst_file_count();
+    /// println!("Total SST files: {}", count);
+    /// ```
+    pub fn sst_file_count(&self) -> usize {
+        let manifest = self.manifest_cache.get();
+        manifest.files.len()
+    }
+
+    /// Get the total size of all SST files in bytes
+    ///
+    /// Returns the sum of all SST file sizes across all levels.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// let size = engine.total_sst_size();
+    /// println!("Total SST size: {} MB", size / 1024 / 1024);
+    /// ```
+    pub fn total_sst_size(&self) -> u64 {
+        let manifest = self.manifest_cache.get();
+        manifest.files.iter().map(|f| f.size_bytes).sum()
+    }
 }

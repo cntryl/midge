@@ -21,6 +21,8 @@ pub struct ManifestCache {
     cached: Arc<RwLock<Manifest>>,
     /// Path to the database directory (for loading/saving)
     db_path: PathBuf,
+    /// Test hooks for fault injection (optional)
+    test_hooks: Option<crate::common::test_hooks::TestHooks>,
 }
 
 impl ManifestCache {
@@ -28,10 +30,19 @@ impl ManifestCache {
     ///
     /// If the manifest file doesn't exist, creates a default empty manifest.
     pub fn new(db_path: PathBuf) -> MidgeResult<Self> {
+        Self::new_with_hooks(db_path, None)
+    }
+
+    /// Create a new manifest cache with optional test hooks.
+    pub fn new_with_hooks(
+        db_path: PathBuf,
+        test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    ) -> MidgeResult<Self> {
         let manifest = Manifest::load(&db_path).unwrap_or_default();
         Ok(Self {
             cached: Arc::new(RwLock::new(manifest)),
             db_path,
+            test_hooks,
         })
     }
 
@@ -41,6 +52,7 @@ impl ManifestCache {
         Self {
             cached: Arc::new(RwLock::new(manifest)),
             db_path,
+            test_hooks: None,
         }
     }
 
@@ -73,7 +85,7 @@ impl ManifestCache {
     /// Save the current cached manifest to disk.
     pub fn save(&self) -> MidgeResult<()> {
         let manifest = self.get();
-        manifest.save_atomic(&self.db_path)
+        manifest.save_atomic_with_hooks(&self.db_path, self.test_hooks.as_ref())
     }
 
     /// Get the database path

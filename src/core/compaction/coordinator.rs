@@ -50,6 +50,7 @@ pub struct CompactionWorkerConfig {
     pub cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     pub compactor: Compactor,
     pub cf_set: Arc<crate::core::engine::column_family::ColumnFamilySet>,
+    pub test_hooks: Option<crate::common::test_hooks::TestHooks>,
 }
 
 /// Coordinates background compaction of LSM-tree levels.
@@ -86,6 +87,7 @@ impl CompactionCoordinator {
         let cloud_sst_manager = config.cloud_sst_manager.clone();
         let compactor = config.compactor;
         let cf_set = config.cf_set.clone();
+        let test_hooks = config.test_hooks.clone();
 
         let handle = thread::Builder::new()
             .name("midge-compaction-worker".to_string())
@@ -190,9 +192,23 @@ impl CompactionCoordinator {
                     if let Some(plan) = plan {
                         debug!("Compaction plan selected");
 
+                        // Call test hook before compaction starts (returns true if should fail)
+                        let should_fail = if let Some(ref hooks) = test_hooks {
+                            hooks.before_compaction()
+                        } else {
+                            false
+                        };
+
                         // Perform a simple compaction execution using the compaction executor
                         // Steps: collect versions -> sort -> tombstone filter -> apply filter -> dedupe -> write SST -> update manifest
                         match (|| -> Result<(), crate::error::MidgeError> {
+                            // Check for FailMidway test hook behavior
+                            if should_fail {
+                                return Err(crate::error::MidgeError::internal(
+                                    "Compaction failed midway (test hook)",
+                                ));
+                            }
+
                             // Collect versions from input files
                             let mut versions = super::executor::collect_compaction_versions(
                                 &sst_reader_factory,
@@ -291,9 +307,17 @@ impl CompactionCoordinator {
                         })() {
                             Ok(()) => {
                                 debug!("Compaction executed successfully");
+                                // Call hook after successful compaction
+                                if let Some(ref hooks) = test_hooks {
+                                    hooks.after_compaction();
+                                }
                             }
                             Err(e) => {
                                 debug!(error = ?e, "Compaction execution failed");
+                                // Call hook after failed compaction
+                                if let Some(ref hooks) = test_hooks {
+                                    hooks.compaction_failed();
+                                }
                             }
                         }
                     }
@@ -435,6 +459,7 @@ mod tests {
                 max_levels: 7,
             }),
             cf_set: Arc::new(crate::core::engine::column_family::ColumnFamilySet::new()),
+            test_hooks: None,
         }
     }
 

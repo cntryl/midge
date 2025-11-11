@@ -164,6 +164,7 @@ pub(super) fn setup_wal_writer(
                 }
             }
         }
+        // Read-only mode uses in-memory WAL (no test hooks needed for memory)
         Box::new(crate::wal::WalMem::new())
     } else if let Some(cloud_backend) = opts.storage_mode.cloud_backend() {
         // Cloud-backed mode: first attempt to replay WAL segments from cloud
@@ -228,7 +229,9 @@ pub(super) fn setup_wal_writer(
             }
         }
 
-        let wal = WalFile::open(wal_dir)?;
+        // Local filesystem WAL with test hooks if configured
+        let mut wal = WalFile::open(wal_dir)?;
+        wal.test_hooks = opts.test_hooks.clone();
         Box::new(wal)
     };
 
@@ -321,6 +324,7 @@ pub(crate) fn setup_compaction_coordinator(
             cloud_sst_manager: cloud_sst_manager_c,
             compactor,
             cf_set: cf_set_arc,
+            test_hooks: opts.test_hooks.clone(),
         };
 
         Ok(Some(crate::core::CompactionCoordinator::spawn(config)?))

@@ -8,6 +8,7 @@ pub mod error;
 pub mod internal_key;
 pub mod range_tombstone;
 pub mod rate_limiter;
+pub mod test_hooks;
 pub mod timestamp;
 pub mod tlv;
 

@@ -160,6 +160,17 @@ pub trait WalFactory: Send + Sync {
     /// Create a new WAL writer for the given directory.
     fn create_writer(&self, dir: &Path) -> MidgeResult<Box<dyn WalWriter>>;
 
+    /// Create a new WAL writer with optional test hooks for fault injection.
+    fn create_writer_with_hooks(
+        &self,
+        dir: &Path,
+        test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    ) -> MidgeResult<Box<dyn WalWriter>> {
+        // Default implementation ignores hooks for backward compatibility
+        let _ = test_hooks;
+        self.create_writer(dir)
+    }
+
     /// Create a new WAL reader for the given directory.
     fn create_reader(&self, dir: &Path) -> MidgeResult<Box<dyn WalReaderDyn>>;
 

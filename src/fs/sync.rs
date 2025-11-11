@@ -13,6 +13,11 @@ use std::io;
 /// - Unix: ~20-30% faster than fsync() for WAL/SST writes
 /// - Windows: Same as fsync() (no performance difference)
 ///
+/// # Test Hooks
+///
+/// If test_hooks are provided, they will be called before fsync to allow
+/// skipping or recording the operation for testing.
+///
 /// # Examples
 ///
 /// ```rust,no_run
@@ -21,10 +26,21 @@ use std::io;
 ///
 /// let file = File::create("data.db").unwrap();
 /// // ... write data ...
-/// sync_data_only(&file).unwrap(); // Fast data-only sync
+/// sync_data_only(&file, None).unwrap(); // Fast data-only sync
 /// ```
 #[inline]
-pub fn sync_data_only(file: &std::fs::File) -> io::Result<()> {
+pub fn sync_data_only(
+    file: &std::fs::File,
+    test_hooks: Option<&crate::common::test_hooks::TestHooks>,
+) -> io::Result<()> {
+    // Call test hook before fsync
+    if let Some(hooks) = test_hooks {
+        if !hooks.before_fsync() {
+            // Test hook wants to skip fsync (simulate crash before sync)
+            return Ok(());
+        }
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -87,7 +103,7 @@ mod tests {
 
         // Act
         file.write_all(b"test data").unwrap();
-        let result = sync_data_only(&file);
+        let result = sync_data_only(&file, None);
 
         // Assert
         assert!(result.is_ok());
@@ -104,7 +120,7 @@ mod tests {
         {
             let mut file = File::create(&path).unwrap();
             file.write_all(data).unwrap();
-            sync_data_only(&file).unwrap();
+            sync_data_only(&file, None).unwrap();
         }
 
         // Assert

@@ -53,6 +53,8 @@ pub struct Wal {
     file_number: u64,
     /// Parallel encoder for batch operations
     encoder: WalEncoder<crate::wal::encode_pipeline::DefaultBodyEncoder>,
+    /// Test hooks for fault injection (test builds only)
+    pub(crate) test_hooks: Option<crate::common::test_hooks::TestHooks>,
 }
 
 impl Wal {
@@ -107,6 +109,7 @@ impl Wal {
             group_commit,
             file_number,
             encoder,
+            test_hooks: None, // Will be set by factory if needed
         };
         // Ensure header exists for a fresh file
         let _ = wal.write_header(0);
@@ -181,6 +184,11 @@ impl Wal {
 
 impl WalWriter for Wal {
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
+        // Call test hook before WAL append
+        if let Some(hooks) = &self.test_hooks {
+            hooks.before_wal_append();
+        }
+
         let mut inner = self.inner.lock();
         // Encode using the shared WalEncoder so we can leverage any streaming CRC
         // it provides and avoid a second pass over the encoded body.
@@ -207,6 +215,11 @@ impl WalWriter for Wal {
     fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
         if records.is_empty() {
             return Ok(self.current_pos());
+        }
+
+        // Call test hook before WAL append (once per batch)
+        if let Some(hooks) = &self.test_hooks {
+            hooks.before_wal_append();
         }
 
         // OPTIMIZATION: Use parallel encoder for batch encoding + CRC computation.
@@ -401,7 +414,7 @@ impl WalWriter for Wal {
                 #[cfg(test)]
                 TEST_SYNC_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
                 let t0 = std::time::Instant::now();
-                let res = fs::sync_data_only(&file_clone);
+                let res = fs::sync_data_only(&file_clone, self.test_hooks.as_ref());
                 let dur = t0.elapsed();
                 global_performance_metrics().wal.record_fsync(dur);
                 Ok(res?)
@@ -411,7 +424,7 @@ impl WalWriter for Wal {
             #[cfg(test)]
             TEST_SYNC_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
             let t0 = std::time::Instant::now();
-            fs::sync_data_only(&file_clone)?;
+            fs::sync_data_only(&file_clone, self.test_hooks.as_ref())?;
             let dur = t0.elapsed();
             global_performance_metrics().wal.record_fsync(dur);
         }
@@ -637,6 +650,16 @@ impl Default for FsWalFactory {
 impl crate::wal::WalFactory for FsWalFactory {
     fn create_writer(&self, dir: &Path) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
         Ok(Box::new(Wal::open(dir)?))
+    }
+
+    fn create_writer_with_hooks(
+        &self,
+        dir: &Path,
+        test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    ) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
+        let mut wal = Wal::open(dir)?;
+        wal.test_hooks = test_hooks;
+        Ok(Box::new(wal))
     }
 
     fn create_reader(&self, _dir: &Path) -> MidgeResult<Box<dyn crate::wal::WalReaderDyn>> {
