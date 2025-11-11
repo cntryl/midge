@@ -136,6 +136,7 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
     let snap = engine.snapshot();
     let first_scan = engine
         .scan_at(
+            &cf,
             cntryl_midge::Query {
                 prefix: Some(Bytes::from("key")),
                 ..Default::default()
@@ -149,6 +150,7 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
     // Act
     let second_scan = engine
         .scan_at(
+            &cf,
             cntryl_midge::Query {
                 prefix: Some(Bytes::from("key")),
                 ..Default::default()

@@ -26,7 +26,7 @@ fn should_hide_newer_writes_given_snapshot_when_get_at() {
     eng.put(&cf, b"k", b"v2").unwrap();
 
     // Act
-    let at = eng.get_at(b"k", &snap).unwrap();
+    let at = eng.get_at(&cf, b"k", &snap).unwrap();
     let full = eng.get(&cf, b"k").unwrap();
 
     // Assert
@@ -55,6 +55,7 @@ fn should_scan_at_hides_newer_writes_given_snapshot() {
     // Act: scan_at should see the older version (v1) and hide v2
     let rows_at = eng
         .scan_at(
+            &cf,
             Query::new()
                 .start_key(Bytes::from_static(b"a"))
                 .end_key(Bytes::from_static(b"z")),

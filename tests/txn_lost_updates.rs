@@ -29,8 +29,8 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
     let snap1 = engine.snapshot();
     let snap2 = engine.snapshot();
 
-    let val1 = engine.get_at(b"counter", &snap1).expect("get");
-    let val2 = engine.get_at(b"counter", &snap2).expect("get");
+    let val1 = engine.get_at(&cf, b"counter", &snap1).expect("get");
+    let val2 = engine.get_at(&cf, b"counter", &snap2).expect("get");
 
     let count1: i32 = String::from_utf8(val1.unwrap().to_vec())
         .unwrap()
@@ -87,7 +87,7 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
     engine.put(&cf, b"key", b"v1").expect("put");
 
     let snap = engine.snapshot();
-    let expected = engine.get_at(b"key", &snap).expect("get");
+    let expected = engine.get_at(&cf, b"key", &snap).expect("get");
 
     engine.put(&cf, b"key", b"v2").expect("concurrent update");
 

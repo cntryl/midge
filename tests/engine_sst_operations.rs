@@ -234,7 +234,7 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     eng.put(&cf, b"k", b"v2").unwrap();
 
     // Act: get_at and full get
-    let at = eng.get_at(b"k", &snap).unwrap();
+    let at = eng.get_at(&cf, b"k", &snap).unwrap();
     let full = eng.get(&cf, b"k").unwrap();
 
     // Assert: snapshot sees v1 from SST; latest sees v2 from memtable
@@ -244,6 +244,7 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     // Act: scan_at separately to verify snapshot-scoped scan behavior
     let rows_at = eng
         .scan_at(
+            &cf,
             Query::new()
                 .start_key(Bytes::from_static(b"a"))
                 .end_key(Bytes::from_static(b"z")),

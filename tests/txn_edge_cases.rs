@@ -45,7 +45,7 @@ fn should_handle_read_only_transaction_given_no_writes_when_commit() {
         .begin_transaction(&cf)
         .expect("Transaction creation failed");
     let snap = engine.snapshot();
-    let _value = engine.get_at(b"key", &snap).expect("get_at");
+    let _value = engine.get_at(&cf, b"key", &snap).expect("get_at");
 
     // Act
     let result = engine.commit_transaction(readonly_txn, cntryl_midge::WriteOptions::default());

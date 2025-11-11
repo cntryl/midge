@@ -75,7 +75,7 @@ impl MidgeEngine {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
                 size_bytes,
-                cf_id: 0, // Default CF
+                cf_id: cf_id.as_u32(), // Use the actual CF ID
                 smallest_key: file_meta.smallest_key,
                 largest_key: file_meta.largest_key,
                 smallest_seq: file_meta.smallest_seq,

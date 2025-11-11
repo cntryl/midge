@@ -85,12 +85,9 @@ impl MidgeEngine {
             let frozen = column_family.try_freeze_memtable();
 
             if frozen {
-                // Successfully froze memtable, trigger flush
-                // TODO Phase 4: Enqueue per-CF FlushJob instead of legacy flush
-                // For now, only the default CF flush is fully implemented
-                if cf_id == DEFAULT_CF_ID {
-                    let _ = self.flush();
-                }
+                // Successfully froze memtable, trigger flush for this CF
+                // Use a background flush to avoid blocking the write path
+                let _ = self.flush_cf(cf);
             } else {
                 // Immutable queue is full - implement write stall
                 if column_family.should_stall_writes() {
@@ -397,10 +394,19 @@ impl MidgeEngine {
             self.wal_coordinator.sync()?;
         }
 
-        // Check if any memtables are full after batch
-        // TODO Phase 4: Implement per-CF flush triggering
-        if self.with_default_memtable(|mt| mt.is_full(self.memtable_size)) {
-            let _ = self.flush();
+        // Check if any memtables are full after batch and trigger per-CF flushes
+        let cfs = self.list_column_families();
+        for cf in cfs {
+            let is_full = if cf.id() == DEFAULT_CF_ID {
+                self.with_default_memtable(|mt| mt.is_full(self.memtable_size))
+            } else {
+                self.with_cf_memtable(cf.id(), |mt| mt.is_full(self.memtable_size))
+                    .unwrap_or(false)
+            };
+
+            if is_full {
+                let _ = self.flush_cf(&cf);
+            }
         }
 
         Ok(())
@@ -579,9 +585,9 @@ impl MidgeEngine {
     ) -> MidgeResult<bool> {
         self.check_read_only()?;
 
-        // Check if key exists
-        // TODO: Use snapshot isolation for consistent read across CFs
-        let exists = self.get(cf, key)?.is_some();
+        // Use snapshot isolation for consistent read-then-write
+        let snapshot = self.snapshot();
+        let exists = self.get_at(cf, key, &snapshot)?.is_some();
 
         if exists {
             return Ok(false);

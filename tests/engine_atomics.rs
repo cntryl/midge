@@ -186,9 +186,9 @@ fn should_respect_snapshot_isolation_given_insert() {
     // Assert
     assert!(inserted1);
     assert!(!inserted2);
-    assert_eq!(engine.get_at(key.as_ref(), &snap1).unwrap(), None);
+    assert_eq!(engine.get_at(&cf, key.as_ref(), &snap1).unwrap(), None);
     assert_eq!(
-        engine.get_at(key.as_ref(), &snap2).unwrap(),
+        engine.get_at(&cf, key.as_ref(), &snap2).unwrap(),
         Some(value1.clone())
     );
     assert_eq!(engine.get(&cf, key.as_ref()).unwrap(), Some(value1));
@@ -244,7 +244,7 @@ fn should_use_latest_value_given_cas_after_concurrent_put() {
         CasResult::Mismatch(Some(Bytes::from("B"))),
         "CAS should see the updated value"
     );
-    assert_eq!(engine.get_at(&key, &snap).unwrap(), Some(Bytes::from("A")));
+    assert_eq!(engine.get_at(&cf, &key, &snap).unwrap(), Some(Bytes::from("A")));
 }
 
 // ============================================================================

@@ -294,7 +294,7 @@ cargo test test_guidelines_compliance
 Before suggesting a test, verify:
 
 - [ ] Name starts with `should_`
-- [ ] If >5 lines, includes `// Arrange`, `// Act`, `// Assert`
+- [ ] If >4 lines, includes `// Arrange`, `// Act`, `// Assert`
 - [ ] Only **one** `// Act` section
 - [ ] Verifies **one** behavior per test
 - [ ] Multiple assertions only if validating **facets of one operation**

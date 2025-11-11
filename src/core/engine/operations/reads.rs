@@ -286,32 +286,62 @@ impl MidgeEngine {
         Ok(iter.collect())
     }
 
-    /// Get at a specific snapshot sequence.
+    /// Get at a specific snapshot sequence from a specific column family.
     ///
     /// Returns the value visible at the given snapshot, respecting MVCC semantics.
-    pub fn get_at(&self, key: &[u8], snap: &Snapshot) -> MidgeResult<Option<Bytes>> {
-        // 1) Check MemTable visible value at snapshot
-        if let Some(v) = self.with_default_memtable(|mt| mt.get_at(key, snap.seq)) {
-            return Ok(Some(v));
+    pub fn get_at(&self, cf: &ColumnFamilyHandle, key: &[u8], snap: &Snapshot) -> MidgeResult<Option<Bytes>> {
+        let cf_id = cf.id();
+        let column_family = self.cf_set.get_cf(cf_id).ok_or_else(|| {
+            crate::error::MidgeError::invalid_config(format!(
+                "Column family '{}' does not exist",
+                cf.name()
+            ))
+        })?;
+
+        // 1) Check active memtable visible value at snapshot
+        {
+            let mt = column_family.memtable.read();
+            if let Some(v) = mt.get_at(key, snap.seq) {
+                return Ok(Some(v));
+            }
         }
-        // 2) If MemTable has a visible tombstone at snapshot, it's deleted
+
+        // 2) Check immutable memtables (newest to oldest)
+        {
+            let immutables = column_family.immutable_memtables.lock();
+            for immutable_mt in immutables.iter().rev() {
+                if let Some(v) = immutable_mt.get_at(key, snap.seq) {
+                    return Ok(Some(v));
+                }
+            }
+        }
+
+        // 3) Check if MemTable has a visible tombstone at snapshot
         let end_key = {
             let mut v = key.to_vec();
             v.push(0);
             v
         };
-        let tombs = self.with_default_memtable(|mt| {
+        let tombs = {
+            let mt = column_family.memtable.read();
             mt.tombstones_range_at(Some(key), Some(end_key.as_slice()), snap.seq)
-        });
+        };
         if !tombs.is_empty() {
             return Ok(None);
         }
-        // 3) Probe SSTs newest->oldest using snapshot-aware state
-        let manifest = Manifest::load(&self.db_path).unwrap_or_default();
+
+        // 4) Probe SSTs newest->oldest using snapshot-aware state, filtered by CF
+        let manifest = self.get_manifest();
         let now_millis = timestamp::now_millis();
 
-        for name in manifest.ssts.iter().rev() {
-            let p = self.sst_dir.join(name);
+        let cf_files: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| f.cf_id == cf_id.as_u32())
+            .collect();
+
+        for file in cf_files.iter().rev() {
+            let p = self.sst_dir.join(&file.name);
             // CloudSstReaderFactory will download from cloud if not in local cache
             if let Ok(sst) = self.sst_reader_factory.open(&p) {
                 match sst.get_state_at(key, snap.seq) {
@@ -343,10 +373,18 @@ impl MidgeEngine {
         Ok(None)
     }
 
-    /// Scan at a specific snapshot.
+    /// Scan at a specific snapshot from a specific column family.
     ///
     /// Returns key-value pairs visible at the given snapshot, respecting MVCC semantics.
-    pub fn scan_at(&self, q: Query, snap: &Snapshot) -> MidgeResult<Vec<(Bytes, Bytes)>> {
+    pub fn scan_at(&self, cf: &ColumnFamilyHandle, q: Query, snap: &Snapshot) -> MidgeResult<Vec<(Bytes, Bytes)>> {
+        let cf_id = cf.id();
+        let column_family = self.cf_set.get_cf(cf_id).ok_or_else(|| {
+            crate::error::MidgeError::invalid_config(format!(
+                "Column family '{}' does not exist",
+                cf.name()
+            ))
+        })?;
+
         let start = q
             .start
             .as_ref()
@@ -365,19 +403,44 @@ impl MidgeEngine {
             (None, Some(ep)) => Some(ep),
             (None, None) => None,
         };
-        // Pre-compute MemTable tombstones visible at snapshot
-        let mem_tombs: std::collections::BTreeSet<Vec<u8>> = self
-            .with_default_memtable(|mt| mt.tombstones_range_at(start, end, snap.seq))
-            .into_iter()
-            .map(|b| b.to_vec())
-            .collect();
 
-        // Scan MemTable
-        let mem_rows = self.with_default_memtable(|mt| mt.scan_range_at(start, end, snap.seq));
+        // Pre-compute MemTable tombstones visible at snapshot (active + immutable)
+        let mut mem_tombs: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+        {
+            let mt = column_family.memtable.read();
+            let tombs = mt.tombstones_range_at(start, end, snap.seq);
+            mem_tombs.extend(tombs.into_iter().map(|b| b.to_vec()));
+        }
+        {
+            let immutables = column_family.immutable_memtables.lock();
+            for immutable_mt in immutables.iter() {
+                let tombs = immutable_mt.tombstones_range_at(start, end, snap.seq);
+                mem_tombs.extend(tombs.into_iter().map(|b| b.to_vec()));
+            }
+        }
 
-        // Scan SSTs newest-to-oldest
-        let manifest = Manifest::load(&self.db_path).unwrap_or_default();
+        // Scan MemTable (active + immutable)
+        let mut mem_rows = Vec::new();
+        {
+            let mt = column_family.memtable.read();
+            mem_rows.extend(mt.scan_range_at(start, end, snap.seq));
+        }
+        {
+            let immutables = column_family.immutable_memtables.lock();
+            for immutable_mt in immutables.iter() {
+                mem_rows.extend(immutable_mt.scan_range_at(start, end, snap.seq));
+            }
+        }
+
+        // Scan SSTs newest-to-oldest, filtered by CF
+        let manifest = self.get_manifest();
         let now_millis = timestamp::now_millis();
+
+        let cf_files: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| f.cf_id == cf_id.as_u32())
+            .collect();
 
         let mut collected: std::collections::BTreeMap<Vec<u8>, Option<Bytes>> =
             std::collections::BTreeMap::new();
@@ -388,8 +451,8 @@ impl MidgeEngine {
             collected.insert(k.clone(), None);
         }
 
-        for name in manifest.ssts.iter().rev() {
-            let p = self.sst_dir.join(name);
+        for file in cf_files.iter().rev() {
+            let p = self.sst_dir.join(&file.name);
             if let Ok(sst) = self.sst_reader_factory.open(&p) {
                 if let Ok(rows) = sst.scan_range_state_at(start, end, snap.seq) {
                     for (k, st) in rows {

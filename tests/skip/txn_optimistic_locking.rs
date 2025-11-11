@@ -19,7 +19,7 @@ fn should_validate_version_given_read_set_when_committing_transaction() {
 
     let reading_txn = Transaction::with_options(1, engine.snapshot().seq, None, 100 * 1024 * 1024);
     let snap = engine.snapshot();
-    let _read_value = engine.get_at(b"key", &snap).expect("get_at");
+    let _read_value = engine.get_at(&cf, b"key", &snap).expect("get_at");
 
     engine.put(&cf, b"key", b"v2").expect("external put");
 
@@ -73,8 +73,8 @@ fn should_track_read_set_given_transaction_gets_when_validating() {
 
     let reading_txn = Transaction::with_options(3, engine.snapshot().seq, None, 100 * 1024 * 1024);
     let snap = engine.snapshot();
-    let _v1 = engine.get_at(b"k1", &snap);
-    let _v2 = engine.get_at(b"k2", &snap);
+    let _v1 = engine.get_at(&cf, b"k1", &snap);
+    let _v2 = engine.get_at(&cf, b"k2", &snap);
 
     // Act
     // (Currently no explicit read-set tracking API, so Act is observation)

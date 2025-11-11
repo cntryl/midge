@@ -85,7 +85,7 @@ fn should_preserve_snapshot_visibility_across_compaction() {
     let current = eng.get(&cf, b"a").expect("get current");
     assert_eq!(current, None);
 
-    let snapshot_view = eng.get_at(b"a", &snap).expect("get_at snapshot");
+    let snapshot_view = eng.get_at(&cf, b"a", &snap).expect("get_at snapshot");
     assert_eq!(snapshot_view, Some(Bytes::from_static(b"v1")));
 }
 

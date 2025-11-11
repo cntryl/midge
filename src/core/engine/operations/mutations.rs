@@ -51,13 +51,13 @@ impl MidgeEngine {
             return Err(crate::error::MidgeError::ReadOnly);
         }
 
-        // Check if key exists
-        // TODO: Use snapshot isolation for consistent read across CFs
-        if let Some(existing) = self.get(cf, key)? {
+        // Use snapshot isolation for consistent read-then-write
+        let snapshot = self.snapshot();
+        if let Some(existing) = self.get_at(cf, key, &snapshot)? {
             return Ok(InsertResult::AlreadyExists(existing));
         }
 
-        // Key doesn't exist, perform the put
+        // Key doesn't exist at snapshot time, perform the put
         self.put_with_ttl(cf, key, value, 0)?;
         Ok(InsertResult::Inserted)
     }
@@ -117,9 +117,9 @@ impl MidgeEngine {
     ) -> MidgeResult<CasResult> {
         self.check_read_only()?;
 
-        // Check current value
-        // TODO: Use snapshot isolation for consistent read across CFs
-        let current = self.get(cf, key)?;
+        // Use snapshot isolation for consistent read-then-write
+        let snapshot = self.snapshot();
+        let current = self.get_at(cf, key, &snapshot)?;
 
         // Compare current value with expected
         if current != expected {

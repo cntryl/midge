@@ -62,26 +62,27 @@ impl MidgeEngine {
     ///
     /// Tuple of (SST path, file metadata) for manifest updates
     pub(crate) fn flush_memtable_to_sst(&self, cf_id: ColumnFamilyId) -> MidgeResult<(std::path::PathBuf, crate::manifest::FileMeta)> {
-        // Resolve any pending merge operations before flushing
-        self.resolve_memtable_merges(cf_id)?;
-
         // Get CF config
         let cf_config = self.cf_set.get_cf_config(cf_id).unwrap_or_default();
 
+        // Resolve merge operations BEFORE drain (while OpType is still available in skiplist)
+        self.resolve_memtable_merges(cf_id)?;
+
+        // Drain memtable
+        let (entries, range_tombstones) = if cf_id == DEFAULT_CF_ID {
+            let entries = self.with_default_memtable_mut(|mt| mt.drain_with_meta_internal());
+            let range_tombstones =
+                self.with_default_memtable_mut(|mt| mt.drain_range_tombstones());
+            (entries, range_tombstones)
+        } else {
+            let entries = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_with_meta_internal()).unwrap_or_default();
+            let range_tombstones = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_range_tombstones()).unwrap_or_default();
+            (entries, range_tombstones)
+        };
+
         crate::core::flush::flush_memtable_to_sst(
             cf_id,
-            || {
-                if cf_id == DEFAULT_CF_ID {
-                    let entries = self.with_default_memtable_mut(|mt| mt.drain_with_meta_internal());
-                    let range_tombstones =
-                        self.with_default_memtable_mut(|mt| mt.drain_range_tombstones());
-                    (entries, range_tombstones)
-                } else {
-                    let entries = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_with_meta_internal()).unwrap_or_default();
-                    let range_tombstones = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_range_tombstones()).unwrap_or_default();
-                    (entries, range_tombstones)
-                }
-            },
+            || (entries, range_tombstones),
             crate::core::flush::FlushConfig {
                 sst_factory: &self.sst_factory,
                 compression: cf_config.compression.into(),
@@ -96,8 +97,9 @@ impl MidgeEngine {
 
     /// Resolve all pending merge operations in the memtable before flushing.
     ///
-    /// This combines all merge operands for each key into a single resolved value
-    /// using the registered merge operator. Only processes keys with actual merge operations.
+    /// This method collects all versions for keys with merge operations, resolves them
+    /// using the registered merge operator, and writes back the resolved value with a new
+    /// sequence number. The drain operation will then pick up the newest (resolved) version.
     ///
     /// # Arguments
     ///
@@ -122,17 +124,7 @@ impl MidgeEngine {
                 continue;
             }
 
-            // Check if the latest operation is a Delete or Put - if so, don't resolve
-            // (only resolve if we have Merge operations)
-            if let Some((_value, _exp, op_type)) = versions.first() {
-                if *op_type == crate::core::skiplist::OpType::Delete
-                    || *op_type == crate::core::skiplist::OpType::Put
-                {
-                    continue; // Skip non-merge operations
-                }
-            }
-
-            // Check if there are any merge operations
+            // Check if there are any merge operations - if so, resolve them
             let has_merges = versions
                 .iter()
                 .any(|(_, _, op)| *op == crate::core::skiplist::OpType::Merge);
@@ -140,10 +132,11 @@ impl MidgeEngine {
                 continue; // Skip keys without merges
             }
 
-            // Resolve the merges using cf_manager
-            if let Some(resolved_value) = self.resolve_merges(key, versions)? {
+            // Resolve the merges using cf_manager with the correct CF ID
+            if let Some(resolved_value) = self.resolve_merges(cf_id, key, versions)? {
                 // Replace all versions with a single Put containing the resolved value
-                let seq = self.seq.load(Ordering::SeqCst);
+                // Use fetch_add to get a new sequence number that's higher than all existing ones
+                let seq = self.seq.fetch_add(1, Ordering::SeqCst);
                 if cf_id == DEFAULT_CF_ID {
                     self.with_default_memtable_mut(|mt| {
                         mt.put_with_seq_and_exp(key, &resolved_value, seq, None);

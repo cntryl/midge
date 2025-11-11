@@ -290,12 +290,12 @@ impl MidgeEngine {
     /// This is an internal method used during memtable flush and compaction.
     pub(crate) fn resolve_merges(
         &self,
+        cf_id: ColumnFamilyId,
         key: &[u8],
         versions: Vec<(Option<Bytes>, Option<u64>, crate::core::skiplist::OpType)>,
     ) -> MidgeResult<Option<Bytes>> {
-        // TODO: Currently uses default CF's merge operator
-        // Need to pass CF ID to support per-CF merge operators
-        let cf_id = DEFAULT_CF_ID.as_u32();
+        // Use the provided CF ID to lookup the correct merge operator
+        let cf_id = cf_id.as_u32();
 
         let ops = self.merge_operators.read();
         let Some(merge_op) = ops.get(&cf_id) else {
@@ -311,9 +311,9 @@ impl MidgeEngine {
             // Iterate oldest -> newest
             match op_type {
                 crate::core::skiplist::OpType::Put => {
-                    // Base value found
+                    // Base value found - reset and start collecting from here
                     base_value = value_opt.clone();
-                    break;
+                    operands.clear(); // Clear any operands before this Put
                 }
                 crate::core::skiplist::OpType::Merge => {
                     if let Some(val) = value_opt {
@@ -321,9 +321,9 @@ impl MidgeEngine {
                     }
                 }
                 crate::core::skiplist::OpType::Delete => {
-                    // Tombstone terminates the merge chain
+                    // Tombstone resets the chain - clear everything and continue
                     base_value = None;
-                    break;
+                    operands.clear();
                 }
             }
         }
