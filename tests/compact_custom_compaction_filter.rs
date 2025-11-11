@@ -42,7 +42,7 @@ fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
     // Write keys to trigger compaction
     bulk_put(&eng, &cf, "key_", 50, b"value");
 
-    // Act - flush and compact (both are synchronous/blocking operations - no sleeps needed!)
+    // Act
     eng.flush_cf(&cf).expect("flush");
     eng.compact_all().expect("compact");
 
@@ -99,7 +99,7 @@ fn should_drop_key_given_filter_returns_remove_decision() {
     bulk_put(&eng, &cf, "keep_", 10, b"value");
     bulk_put(&eng, &cf, "remove_", 10, b"value");
 
-    // Act - flush memtable to SST, then compact all SSTs
+    // Act
     eng.flush_cf(&cf).expect("flush");
     eng.compact_all().expect("compact");
 
@@ -168,7 +168,7 @@ fn should_keep_key_given_filter_returns_keep_decision() {
     // Write data
     bulk_put(&eng, &cf, "key_", 30, b"important_data");
 
-    // Act - flush and compact synchronously
+    // Act
     eng.flush_cf(&cf).expect("flush");
     eng.compact_all().expect("compact");
 
