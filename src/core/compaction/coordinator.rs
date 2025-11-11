@@ -231,10 +231,8 @@ impl CompactionCoordinator {
                                 );
 
                             // Retrieve compaction filter for this CF, or use NoOpFilter as fallback
-                            let filter_arc: Option<Arc<dyn super::filter::CompactionFilter>> = cf_set
-                                .cfs
-                                .get(&plan.cf_id)
-                                .and_then(|cf| {
+                            let filter_arc: Option<Arc<dyn super::filter::CompactionFilter>> =
+                                cf_set.cfs.get(&plan.cf_id).and_then(|cf| {
                                     let guard = cf.compaction_filter.read();
                                     if let Some(ref arc) = *guard {
                                         Some(Arc::clone(arc))
@@ -242,7 +240,7 @@ impl CompactionCoordinator {
                                         None
                                     }
                                 });
-                            
+
                             let versions_after_cf = if let Some(filter) = filter_arc {
                                 super::executor::apply_compaction_filter(
                                     &versions_after_filter,
@@ -268,11 +266,8 @@ impl CompactionCoordinator {
                                 sst_dir: &sst_dir,
                                 cloud_sst_manager: cloud_sst_manager.as_ref(),
                             };
-                            let write_res = super::executor::write_compacted_sst(
-                                &ctx,
-                                &deduped,
-                                plan.cf_id,
-                            )?;
+                            let write_res =
+                                super::executor::write_compacted_sst(&ctx, &deduped, plan.cf_id)?;
 
                             if let Some((_path, meta)) = write_res {
                                 // Update manifest on disk: remove inputs, add new file meta

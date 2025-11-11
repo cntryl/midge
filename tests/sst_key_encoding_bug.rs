@@ -16,9 +16,9 @@ fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
         db_path: dir.path().to_path_buf(),
     };
     opts.enable_compaction = false;
-    opts.wal_buffer_size = 1024 * 1024;  // Large to avoid rotation
+    opts.wal_buffer_size = 1024 * 1024; // Large to avoid rotation
     opts.memtable_size = 1024 * 1024;
-    
+
     let eng = MidgeEngine::open(opts).expect("open");
     let cf = eng.default_column_family();
 
@@ -26,7 +26,7 @@ fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
     eng.put(&cf, b"a", b"1").unwrap();
     eng.put(&cf, b"ab", b"2").unwrap();
     eng.put(&cf, b"ac", b"3").unwrap();
-    
+
     // Flush to SST
     eng.flush().unwrap();
 
@@ -36,14 +36,14 @@ fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
         .expect("scan");
 
     // Assert: Keys should be user keys, not internal keys with sequence suffixes
-    
+
     // Debug: Print what we actually got
     for (i, (key, val)) in rows.iter().enumerate() {
         eprintln!("Row {}: key={:?}, value={:?}", i, key, val);
     }
-    
+
     assert_eq!(rows.len(), 3, "Should have 3 keys");
-    
+
     // Check first key
     assert_eq!(
         rows[0].0.as_ref(),
@@ -51,7 +51,7 @@ fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
         "First key should be 'a', not 'a' with sequence suffix. Got: {:?}",
         rows[0].0
     );
-    
+
     // Check second key
     assert_eq!(
         rows[1].0.as_ref(),
@@ -59,7 +59,7 @@ fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
         "Second key should be 'ab', not 'ab' with sequence suffix. Got: {:?}",
         rows[1].0
     );
-    
+
     // Check third key
     assert_eq!(
         rows[2].0.as_ref(),
@@ -67,7 +67,7 @@ fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
         "Third key should be 'ac', not 'ac' with sequence suffix. Got: {:?}",
         rows[2].0
     );
-    
+
     // Additional check: keys should not contain \xff bytes (internal key marker)
     for (key, _value) in &rows {
         assert!(
@@ -89,7 +89,7 @@ fn should_return_user_keys_for_tombstones_in_sst() {
     opts.enable_compaction = false;
     opts.wal_buffer_size = 1024 * 1024;
     opts.memtable_size = 1024 * 1024;
-    
+
     let eng = MidgeEngine::open(opts).expect("open");
     let cf = eng.default_column_family();
 
@@ -97,7 +97,7 @@ fn should_return_user_keys_for_tombstones_in_sst() {
     eng.put(&cf, b"key1", b"value1").unwrap();
     eng.delete(&cf, b"key1").unwrap();
     eng.put(&cf, b"key2", b"value2").unwrap();
-    
+
     eng.flush().unwrap();
 
     // Act: Scan should filter out tombstones but if we did see them, they should be user keys
@@ -106,10 +106,12 @@ fn should_return_user_keys_for_tombstones_in_sst() {
     // Assert: Only key2 should be returned (key1 is deleted)
     assert_eq!(rows.len(), 1, "Should only return non-deleted keys");
     assert_eq!(rows[0].0.as_ref(), b"key2");
-    
+
     // The tombstone for key1 should not leak through as an internal key
-    assert!(!rows.iter().any(|(k, _)| k.contains(&0xff)), 
-            "No internal keys should be returned");
+    assert!(
+        !rows.iter().any(|(k, _)| k.contains(&0xff)),
+        "No internal keys should be returned"
+    );
 }
 
 #[test]
@@ -123,17 +125,17 @@ fn should_not_expose_internal_key_format_in_multi_version_scan() {
     opts.enable_compaction = false;
     opts.wal_buffer_size = 1024 * 1024;
     opts.memtable_size = 1024 * 1024;
-    
+
     let eng = MidgeEngine::open(opts).expect("open");
     let cf = eng.default_column_family();
 
     // Write same key multiple times (creates multiple versions with different sequences)
     eng.put(&cf, b"key", b"v1").unwrap();
     eng.flush().unwrap();
-    
+
     eng.put(&cf, b"key", b"v2").unwrap();
     eng.flush().unwrap();
-    
+
     eng.put(&cf, b"key", b"v3").unwrap();
     eng.flush().unwrap();
 
@@ -144,7 +146,10 @@ fn should_not_expose_internal_key_format_in_multi_version_scan() {
     assert_eq!(rows.len(), 1, "Should only return latest version");
     assert_eq!(rows[0].0.as_ref(), b"key", "Key should be plain user key");
     assert_eq!(rows[0].1.as_ref(), b"v3", "Value should be latest");
-    
+
     // Verify no internal key format leaked
-    assert!(!rows[0].0.contains(&0xff), "Key should not contain internal markers");
+    assert!(
+        !rows[0].0.contains(&0xff),
+        "Key should not contain internal markers"
+    );
 }

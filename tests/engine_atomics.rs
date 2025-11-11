@@ -244,7 +244,10 @@ fn should_use_latest_value_given_cas_after_concurrent_put() {
         CasResult::Mismatch(Some(Bytes::from("B"))),
         "CAS should see the updated value"
     );
-    assert_eq!(engine.get_at(&cf, &key, &snap).unwrap(), Some(Bytes::from("A")));
+    assert_eq!(
+        engine.get_at(&cf, &key, &snap).unwrap(),
+        Some(Bytes::from("A"))
+    );
 }
 
 // ============================================================================

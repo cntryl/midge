@@ -18,10 +18,10 @@ use std::collections::{HashMap, HashSet};
 pub struct ConflictTracker {
     /// Keys that have been read (cf_id, key)
     read_set: HashSet<(u32, Bytes)>,
-    
+
     /// Keys that have been written (cf_id, key)
     write_set: HashSet<(u32, Bytes)>,
-    
+
     /// Sequence numbers at which keys were read (cf_id, key) -> version
     read_versions: HashMap<(u32, Bytes), u64>,
 }

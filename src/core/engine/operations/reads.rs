@@ -37,13 +37,13 @@ impl MidgeEngine {
         {
             let mt = column_family.memtable.read();
             let versions = mt.get_versions_for_merge(key, u64::MAX);
-            
+
             if !versions.is_empty() {
                 // Check if there are any merge operations
                 let has_merges = versions
                     .iter()
                     .any(|(_, _, op)| *op == crate::core::skiplist::OpType::Merge);
-                
+
                 if has_merges {
                     // Resolve merges using the engine's merge operator registry
                     let ops = self.merge_operators.read();
@@ -51,7 +51,7 @@ impl MidgeEngine {
                         // Collect merge operands and base value (oldest to newest)
                         let mut operands: Vec<Bytes> = Vec::new();
                         let mut base_value: Option<Bytes> = None;
-                        
+
                         for (value_opt, _exp, op_type) in versions.iter().rev() {
                             match op_type {
                                 crate::core::skiplist::OpType::Put => {
@@ -69,10 +69,13 @@ impl MidgeEngine {
                                 }
                             }
                         }
-                        
+
                         if !operands.is_empty() {
-                            let operand_refs: Vec<&[u8]> = operands.iter().map(|b| b.as_ref()).collect();
-                            if let Ok(resolved) = merge_op.merge_many(key, base_value.as_deref(), &operand_refs) {
+                            let operand_refs: Vec<&[u8]> =
+                                operands.iter().map(|b| b.as_ref()).collect();
+                            if let Ok(resolved) =
+                                merge_op.merge_many(key, base_value.as_deref(), &operand_refs)
+                            {
                                 return Ok(Some(Bytes::from(resolved)));
                             }
                         } else if let Some(base) = base_value {
@@ -96,18 +99,18 @@ impl MidgeEngine {
             // Iterate in reverse order (newest to oldest)
             for immutable_mt in immutables.iter().rev() {
                 let versions = immutable_mt.get_versions_for_merge(key, u64::MAX);
-                
+
                 if !versions.is_empty() {
                     let has_merges = versions
                         .iter()
                         .any(|(_, _, op)| *op == crate::core::skiplist::OpType::Merge);
-                    
+
                     if has_merges {
                         let ops = self.merge_operators.read();
                         if let Some(merge_op) = ops.get(&cf_id.as_u32()) {
                             let mut operands: Vec<Bytes> = Vec::new();
                             let mut base_value: Option<Bytes> = None;
-                            
+
                             for (value_opt, _exp, op_type) in versions.iter().rev() {
                                 match op_type {
                                     crate::core::skiplist::OpType::Put => {
@@ -125,10 +128,13 @@ impl MidgeEngine {
                                     }
                                 }
                             }
-                            
+
                             if !operands.is_empty() {
-                                let operand_refs: Vec<&[u8]> = operands.iter().map(|b| b.as_ref()).collect();
-                                if let Ok(resolved) = merge_op.merge_many(key, base_value.as_deref(), &operand_refs) {
+                                let operand_refs: Vec<&[u8]> =
+                                    operands.iter().map(|b| b.as_ref()).collect();
+                                if let Ok(resolved) =
+                                    merge_op.merge_many(key, base_value.as_deref(), &operand_refs)
+                                {
                                     return Ok(Some(Bytes::from(resolved)));
                                 }
                             } else if let Some(base) = base_value {
@@ -193,7 +199,7 @@ impl MidgeEngine {
             ))
         })?;
 
-                // Scan active memtable
+        // Scan active memtable
         let (mem_items, mem_tombs) = {
             let mt = column_family.memtable.read();
             let items = mt
@@ -212,12 +218,12 @@ impl MidgeEngine {
         // Build sources for merging iterator
         let mut sources: Vec<Box<dyn crate::core::merge_iterator::IteratorSource>> = vec![];
         if query.reverse {
-            sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(
-                mem_items,
-            )));
-            sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(
-                mem_tombs,
-            )));
+            sources.push(Box::new(
+                crate::core::merge_iterator::VecSource::new_reverse(mem_items),
+            ));
+            sources.push(Box::new(
+                crate::core::merge_iterator::VecSource::new_reverse(mem_tombs),
+            ));
         } else {
             sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
                 mem_items,
@@ -244,9 +250,9 @@ impl MidgeEngine {
 
                 if !immut_items.is_empty() {
                     if query.reverse {
-                        sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(
-                            immut_items,
-                        )));
+                        sources.push(Box::new(
+                            crate::core::merge_iterator::VecSource::new_reverse(immut_items),
+                        ));
                     } else {
                         sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
                             immut_items,
@@ -255,9 +261,9 @@ impl MidgeEngine {
                 }
                 if !immut_tombs.is_empty() {
                     if query.reverse {
-                        sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(
-                            immut_tombs,
-                        )));
+                        sources.push(Box::new(
+                            crate::core::merge_iterator::VecSource::new_reverse(immut_tombs),
+                        ));
                     } else {
                         sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
                             immut_tombs,
@@ -304,9 +310,12 @@ impl MidgeEngine {
                         .collect();
                     if !items.is_empty() {
                         if query.reverse {
-                            sources.push(Box::new(crate::core::merge_iterator::VecSource::new_reverse(items)));
+                            sources.push(Box::new(
+                                crate::core::merge_iterator::VecSource::new_reverse(items),
+                            ));
                         } else {
-                            sources.push(Box::new(crate::core::merge_iterator::VecSource::new(items)));
+                            sources
+                                .push(Box::new(crate::core::merge_iterator::VecSource::new(items)));
                         }
                     }
                 }
@@ -407,7 +416,12 @@ impl MidgeEngine {
     /// Get at a specific snapshot sequence from a specific column family.
     ///
     /// Returns the value visible at the given snapshot, respecting MVCC semantics.
-    pub fn get_at(&self, cf: &ColumnFamilyHandle, key: &[u8], snap: &Snapshot) -> MidgeResult<Option<Bytes>> {
+    pub fn get_at(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        snap: &Snapshot,
+    ) -> MidgeResult<Option<Bytes>> {
         let cf_id = cf.id();
         let column_family = self.cf_set.get_cf(cf_id).ok_or_else(|| {
             crate::error::MidgeError::invalid_config(format!(
@@ -494,7 +508,12 @@ impl MidgeEngine {
     /// Scan at a specific snapshot from a specific column family.
     ///
     /// Returns key-value pairs visible at the given snapshot, respecting MVCC semantics.
-    pub fn scan_at(&self, cf: &ColumnFamilyHandle, q: Query, snap: &Snapshot) -> MidgeResult<Vec<(Bytes, Bytes)>> {
+    pub fn scan_at(
+        &self,
+        cf: &ColumnFamilyHandle,
+        q: Query,
+        snap: &Snapshot,
+    ) -> MidgeResult<Vec<(Bytes, Bytes)>> {
         let cf_id = cf.id();
         let column_family = self.cf_set.get_cf(cf_id).ok_or_else(|| {
             crate::error::MidgeError::invalid_config(format!(

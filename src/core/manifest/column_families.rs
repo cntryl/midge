@@ -33,9 +33,9 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::FileMeta;
     use super::*;
     use crate::api::column_family::{CompactionStyle, CompressionType, DEFAULT_CF_ID};
-    use super::super::types::FileMeta;
 
     #[test]
     fn should_add_column_family_with_config() {

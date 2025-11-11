@@ -203,8 +203,8 @@ impl MidgeEngine {
     /// let snapshot = engine.metrics_snapshot();
     /// println!("Total gets: {}", snapshot.get_count);
     /// println!("Total puts: {}", snapshot.put_count);
-    /// println!("Cache hit rate: {:.2}%", 
-    ///     snapshot.block_cache_hits as f64 / 
+    /// println!("Cache hit rate: {:.2}%",
+    ///     snapshot.block_cache_hits as f64 /
     ///     (snapshot.block_cache_hits + snapshot.block_cache_misses) as f64 * 100.0
     /// );
     /// ```
@@ -230,7 +230,7 @@ impl MidgeEngine {
     pub fn read_amplification(&self) -> f64 {
         let snapshot = self.metrics.snapshot();
         let manifest = self.manifest_cache.get();
-        
+
         // Estimate: average number of SST levels checked per read
         // More accurate calculation would need per-level metrics
         let avg_levels_checked = if manifest.files.is_empty() {
@@ -240,14 +240,14 @@ impl MidgeEngine {
             let max_level = manifest.files.iter().map(|f| f.level).max().unwrap_or(0);
             (max_level as f64 + 1.0) / 2.0
         };
-        
+
         // Factor in bloom filter effectiveness
         let bloom_effectiveness = if snapshot.bloom_filter_checks > 0 {
             1.0 - (snapshot.bloom_filter_positives as f64 / snapshot.bloom_filter_checks as f64)
         } else {
             0.5
         };
-        
+
         avg_levels_checked * (1.0 - bloom_effectiveness * 0.5)
     }
 
@@ -266,26 +266,26 @@ impl MidgeEngine {
     /// ```
     pub fn write_amplification(&self) -> f64 {
         let snapshot = self.metrics.snapshot();
-        
+
         if snapshot.put_count == 0 {
             return 0.0;
         }
-        
+
         // Estimate total bytes written:
         // 1. WAL writes (1x)
-        // 2. Memtable flushes (1x) 
+        // 2. Memtable flushes (1x)
         // 3. Compaction rewrites (varies by level)
         let wal_factor = 1.0;
         let flush_factor = 1.0;
-        
+
         // Compaction factor depends on compaction bytes
         let compaction_factor = if snapshot.compaction_bytes_written > 0 {
-            snapshot.compaction_bytes_written as f64 / 
-            (snapshot.put_count as f64 * 100.0) // Assume ~100 bytes per put
+            snapshot.compaction_bytes_written as f64 / (snapshot.put_count as f64 * 100.0)
+        // Assume ~100 bytes per put
         } else {
             0.0
         };
-        
+
         wal_factor + flush_factor + compaction_factor
     }
 

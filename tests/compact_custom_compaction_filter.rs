@@ -54,10 +54,13 @@ fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
         "Filter should have been invoked for each key (50), got {}",
         invocations
     );
-    
+
     // Verify data is still accessible after filtered compaction
     let result = eng.get(&cf, b"key_000").expect("get failed");
-    assert!(result.is_some(), "Data should be present after filtered compaction");
+    assert!(
+        result.is_some(),
+        "Data should be present after filtered compaction"
+    );
 }
 
 // ============================================================================
@@ -107,14 +110,14 @@ fn should_drop_key_given_filter_returns_remove_decision() {
     let db_path = _dir.path().to_path_buf();
     drop(cf);
     drop(eng);
-    
+
     // Delete WAL files to prevent replay (since flush_cf doesn't truncate WAL)
     // This ensures we're only reading from the compacted SST
     let wal_dir = db_path.join("wal");
     if wal_dir.exists() {
         std::fs::remove_dir_all(&wal_dir).expect("remove wal dir");
     }
-    
+
     // Reopen the engine
     let opts = cntryl_midge::MidgeOptions {
         storage_mode: cntryl_midge::StorageMode::LocalDisk {
@@ -132,10 +135,16 @@ fn should_drop_key_given_filter_returns_remove_decision() {
 
     // Removed keys should be gone after compaction
     let result = eng2.get(&cf2, b"remove_000").expect("get failed");
-    assert!(result.is_none(), "Keys with 'remove_' prefix should be filtered out after compaction");
-    
+    assert!(
+        result.is_none(),
+        "Keys with 'remove_' prefix should be filtered out after compaction"
+    );
+
     let result = eng2.get(&cf2, b"remove_005").expect("get failed");
-    assert!(result.is_none(), "All keys with 'remove_' prefix should be filtered out after compaction");
+    assert!(
+        result.is_none(),
+        "All keys with 'remove_' prefix should be filtered out after compaction"
+    );
 }
 
 // ============================================================================

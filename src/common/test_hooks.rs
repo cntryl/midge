@@ -77,7 +77,7 @@ pub struct TestHooks {
     manifest_behavior: Arc<parking_lot::RwLock<ManifestBehavior>>,
     /// Compaction behavior control
     compaction_behavior: Arc<parking_lot::RwLock<CompactionBehavior>>,
-    
+
     // Instrumentation counters
     /// Number of fsync calls made
     fsync_count: Arc<AtomicU64>,
@@ -91,7 +91,7 @@ pub struct TestHooks {
     compaction_complete_count: Arc<AtomicU64>,
     /// Number of compactions failed
     compaction_failed_count: Arc<AtomicU64>,
-    
+
     // Verification flags
     /// Whether WAL was truncated after manifest update
     wal_truncated_after_manifest: Arc<AtomicBool>,
@@ -183,23 +183,29 @@ impl TestHooks {
 
     /// Hook called after manifest fsync, before WAL truncation.
     pub fn manifest_fsynced_before_wal_truncate(&self) {
-        self.manifest_fsynced_before_wal_truncate.store(true, Ordering::SeqCst);
+        self.manifest_fsynced_before_wal_truncate
+            .store(true, Ordering::SeqCst);
     }
 
     /// Hook called after WAL truncation following manifest update.
     pub fn wal_truncated_after_manifest(&self) {
-        self.wal_truncated_after_manifest.store(true, Ordering::SeqCst);
+        self.wal_truncated_after_manifest
+            .store(true, Ordering::SeqCst);
     }
 
     /// Hook called before compaction starts. Returns whether to fail midway.
     pub fn before_compaction(&self) -> bool {
         self.compaction_start_count.fetch_add(1, Ordering::SeqCst);
-        matches!(*self.compaction_behavior.read(), CompactionBehavior::FailMidway)
+        matches!(
+            *self.compaction_behavior.read(),
+            CompactionBehavior::FailMidway
+        )
     }
 
     /// Hook called after compaction completes successfully.
     pub fn after_compaction(&self) {
-        self.compaction_complete_count.fetch_add(1, Ordering::SeqCst);
+        self.compaction_complete_count
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     /// Hook called when compaction fails.
@@ -209,7 +215,10 @@ impl TestHooks {
 
     /// Hook called before compaction output fsync. Returns whether to fail.
     pub fn before_compaction_fsync(&self) -> bool {
-        matches!(*self.compaction_behavior.read(), CompactionBehavior::CrashBeforeFsync)
+        matches!(
+            *self.compaction_behavior.read(),
+            CompactionBehavior::CrashBeforeFsync
+        )
     }
 
     // -------------------------------------------------------------------------
@@ -248,7 +257,8 @@ impl TestHooks {
 
     /// Verify that manifest was fsynced before WAL truncation.
     pub fn verify_manifest_fsynced_before_wal_truncate(&self) -> bool {
-        self.manifest_fsynced_before_wal_truncate.load(Ordering::SeqCst)
+        self.manifest_fsynced_before_wal_truncate
+            .load(Ordering::SeqCst)
     }
 
     /// Verify that WAL was truncated after manifest update.
@@ -264,8 +274,10 @@ impl TestHooks {
         self.compaction_start_count.store(0, Ordering::SeqCst);
         self.compaction_complete_count.store(0, Ordering::SeqCst);
         self.compaction_failed_count.store(0, Ordering::SeqCst);
-        self.wal_truncated_after_manifest.store(false, Ordering::SeqCst);
-        self.manifest_fsynced_before_wal_truncate.store(false, Ordering::SeqCst);
+        self.wal_truncated_after_manifest
+            .store(false, Ordering::SeqCst);
+        self.manifest_fsynced_before_wal_truncate
+            .store(false, Ordering::SeqCst);
     }
 }
 

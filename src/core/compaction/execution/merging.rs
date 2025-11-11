@@ -80,8 +80,8 @@ pub(crate) fn filter_safe_tombstones(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::collection::sort_versions_for_output;
+    use super::*;
     use bytes::Bytes;
 
     // Helper to create a version with minimal fields
@@ -380,7 +380,7 @@ mod tests {
     fn should_handle_large_dataset_when_deduplicating() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         let mut versions = Vec::new();
         for key_id in 0..100 {
             for version in 0..10 {
@@ -428,7 +428,7 @@ mod tests {
     fn should_detect_same_key_seq_different_tombstone_flags() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         // This should NEVER happen in a correct LSM-tree
         let mut versions = vec![
             make_version(b"key1", 100, false), // Value
@@ -454,7 +454,7 @@ mod tests {
     fn should_keep_value_when_value_and_tombstone_have_same_seq() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         // After sorting, value comes before tombstone
         let mut versions = vec![
             make_tombstone(b"key1", 100),      // Tombstone
@@ -478,7 +478,7 @@ mod tests {
     fn should_merge_entries_given_overlapping_key_ranges() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         let mut versions = vec![
             make_version(b"a", 100, false),
             make_version(b"c", 150, false),
@@ -500,7 +500,7 @@ mod tests {
     fn should_merge_and_sort_entries_given_multiple_levels() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         let mut versions = vec![
             // L0 entries (newer, higher seq)
             make_version(b"key1", 500, false),
@@ -526,7 +526,7 @@ mod tests {
     fn should_drop_obsolete_entries_below_smallest_snapshot() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         let mut versions = vec![
             make_version(b"key1", 200, false), // Newest
             make_version(b"key1", 100, false), // Obsolete (older version)
@@ -546,7 +546,7 @@ mod tests {
     fn should_return_sorted_and_deduplicated_entries_after_collection() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         let mut versions = vec![
             make_version(b"z", 50, false),
             make_version(b"a", 100, false),
@@ -570,7 +570,7 @@ mod tests {
     fn should_merge_tombstones_and_values_given_conflicting_versions() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         let mut versions = vec![
             make_version(b"key1", 100, false),
             make_tombstone(b"key2", 200),
@@ -592,7 +592,7 @@ mod tests {
     fn should_maintain_uniqueness_after_encode_decode_roundtrip() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         let mut versions = vec![
             make_version(b"key1", 200, false),
             make_version(b"key1", 100, false),
@@ -760,7 +760,7 @@ mod tests {
     fn should_merge_duplicate_keys_given_different_cf_ids() {
         // Arrange
         use crate::core::compaction::execution::collection::sort_versions_for_output;
-        
+
         // (CF info is encoded in internal key, not CompactionVersion)
         let mut versions = vec![
             make_version(b"key", 100, false),

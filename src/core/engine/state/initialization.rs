@@ -110,7 +110,9 @@ pub fn open(opts: crate::MidgeOptions) -> MidgeResult<MidgeEngine> {
         Box<dyn crate::wal::WalFactory>,
     ) = if mem_mode {
         (
-            Box::new(crate::sst::mem::MemSstReaderFactory::new(opts.paranoid_checksums)),
+            Box::new(crate::sst::mem::MemSstReaderFactory::new(
+                opts.paranoid_checksums,
+            )),
             Box::new(crate::wal::MemWalFactory),
         )
     } else if let Some(cloud_backend) = opts.storage_mode.cloud_backend() {
@@ -124,7 +126,9 @@ pub fn open(opts: crate::MidgeOptions) -> MidgeResult<MidgeEngine> {
         )
     } else {
         (
-            Box::new(crate::sst::fs::FsSstReaderFactory::new(opts.paranoid_checksums)),
+            Box::new(crate::sst::fs::FsSstReaderFactory::new(
+                opts.paranoid_checksums,
+            )),
             Box::new(crate::wal::FsWalFactory::new()),
         )
     };
@@ -245,10 +249,8 @@ pub fn open_with_factories(
     )?;
 
     // Initialize manifest cache for fast read access (with test hooks if provided)
-    let manifest_cache = crate::sst::ManifestCache::new_with_hooks(
-        db_path.clone(),
-        opts.test_hooks.clone(),
-    )?;
+    let manifest_cache =
+        crate::sst::ManifestCache::new_with_hooks(db_path.clone(), opts.test_hooks.clone())?;
     let manifest = manifest_cache.get();
 
     // Initialize bloom filter cache and populate from existing SSTs

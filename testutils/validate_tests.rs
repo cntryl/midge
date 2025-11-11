@@ -20,15 +20,16 @@ struct Args {
 impl Args {
     fn parse() -> Self {
         let args: Vec<String> = env::args().collect();
-        
+
         let summary = args.iter().any(|a| a == "--summary" || a == "-s");
         let organization = args.iter().any(|a| a == "--organization" || a == "-o");
-        
-        let file = args.iter()
+
+        let file = args
+            .iter()
             .position(|a| a == "--file" || a == "-f")
             .and_then(|i| args.get(i + 1))
             .map(PathBuf::from);
-        
+
         Args {
             summary,
             file,
@@ -157,9 +158,7 @@ pub fn test_single_test(
         if action_part.contains("_and_") {
             // Additional heuristic: allow common phrases that aren't multi-behavior
             // These are patterns where "and" is part of the description, not separate actions
-            let allowed_patterns = [
-                "with_id_and_name",          
-            ];
+            let allowed_patterns = ["with_id_and_name"];
 
             let is_allowed = allowed_patterns
                 .iter()

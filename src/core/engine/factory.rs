@@ -129,7 +129,11 @@ pub(super) fn replay_local_wal_segments(
                 if let Ok(recs) = crate::wal::fs::replay_wal_file_with_mode(path, wal_recovery_mode)
                 {
                     // Skip records that were already flushed to SST
-                    let replay_max = MidgeEngine::replay_wal_to_cfs_after_seq(cf_set, &recs, last_persisted_sequence);
+                    let replay_max = MidgeEngine::replay_wal_to_cfs_after_seq(
+                        cf_set,
+                        &recs,
+                        last_persisted_sequence,
+                    );
                     max_replay_seq = max_replay_seq.max(replay_max);
                 }
             }
@@ -225,7 +229,11 @@ pub(super) fn setup_wal_writer(
                     if let Ok(records) =
                         crate::wal::fs::replay_wal_file_with_mode(&wal_path, opts.wal_recovery_mode)
                     {
-                        let replay_max = MidgeEngine::replay_wal_to_cfs_after_seq(cf_set, &records, last_persisted);
+                        let replay_max = MidgeEngine::replay_wal_to_cfs_after_seq(
+                            cf_set,
+                            &records,
+                            last_persisted,
+                        );
                         max_replay_seq = max_replay_seq.max(replay_max);
                     }
                 }

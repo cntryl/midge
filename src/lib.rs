@@ -45,8 +45,8 @@ pub use crate::core::backup;
 pub mod cloud;
 pub mod compaction {
     //! Compaction filter API for custom compaction logic
-    pub use crate::core::compaction::filter::{CompactionFilter, FilterDecision};
     pub use crate::core::compaction::execution::types::CompactionVersion;
+    pub use crate::core::compaction::filter::{CompactionFilter, FilterDecision};
 }
 pub mod health;
 pub use crate::core::locking;
@@ -60,8 +60,8 @@ pub mod wal;
 pub use crate::api::{
     BytesAppendOperator, ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, CompactionStyle,
     CompressionType, DynKvStore, DynMergeOperator, IntegerAddOperator, KvStore, KvTransaction,
-    MergeOperator, Mutation, MutationOp, Query, Snapshot, StringAppendOperator,
-    WriteBatch, WriteOptions, DEFAULT_CF_ID, DEFAULT_CF_NAME,
+    MergeOperator, Mutation, MutationOp, Query, Snapshot, StringAppendOperator, WriteBatch,
+    WriteOptions, DEFAULT_CF_ID, DEFAULT_CF_NAME,
 };
 // Export EngineTransaction as the public Transaction type
 pub use crate::core::transaction::EngineTransaction as Transaction;
@@ -511,7 +511,7 @@ impl Default for MidgeOptions {
             wal_recovery_mode: WalRecoveryMode::default(), // Strict consistency
             cloud_upload_bytes_per_sec: 0,
             cloud_upload_max_burst_bytes: 0,
-            test_hooks: None,         // No test hooks by default
+            test_hooks: None,          // No test hooks by default
             paranoid_checksums: false, // Disabled by default for performance
         }
     }

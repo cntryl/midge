@@ -22,10 +22,7 @@ fn should_commit_large_transaction_given_many_writes() {
     // Act - Add 2MB of data (2000 keys × 1024 bytes each)
     for i in 0..2000 {
         large_txn
-            .put(
-                format!("key{:06}", i).as_bytes(),
-                &vec![0u8; 1024],
-            )
+            .put(format!("key{:06}", i).as_bytes(), &vec![0u8; 1024])
             .expect("put");
     }
 
@@ -75,11 +72,7 @@ fn should_preserve_data_integrity_given_large_transaction_with_values() {
     for i in 0..1500 {
         let key = format!("large_key_{:06}", i);
         let value = engine.get(&cf, key.as_bytes()).expect("get");
-        assert!(
-            value.is_some(),
-            "Key {} should exist after commit",
-            key
-        );
+        assert!(value.is_some(), "Key {} should exist after commit", key);
         assert_eq!(
             value.unwrap(),
             Bytes::from(vec![0xABu8; 1024]),
@@ -150,7 +143,11 @@ fn should_rollback_given_transaction_dropped_without_commit() {
     for i in (0..2000).step_by(100) {
         let key = format!("abort_key_{:06}", i);
         let value = engine.get(&cf, key.as_bytes()).expect("get");
-        assert!(value.is_none(), "Key {} should not exist after rollback", key);
+        assert!(
+            value.is_none(),
+            "Key {} should not exist after rollback",
+            key
+        );
     }
 }
 
@@ -168,10 +165,7 @@ fn should_handle_very_large_transaction_given_many_writes() {
     // Act - Add 10MB of data (will cause multiple spills)
     for i in 0..10000 {
         huge_txn
-            .put(
-                format!("huge_key_{:06}", i).as_bytes(),
-                &vec![0xEEu8; 1024],
-            )
+            .put(format!("huge_key_{:06}", i).as_bytes(), &vec![0xEEu8; 1024])
             .expect("put");
     }
 

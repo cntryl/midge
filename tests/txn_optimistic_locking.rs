@@ -22,7 +22,10 @@ fn should_commit_transaction_given_no_conflicts() {
     let result = engine.commit_transaction(txn, cntryl_midge::WriteOptions::default());
 
     // Assert - Should commit successfully
-    assert!(result.is_ok(), "Transaction without conflicts should commit");
+    assert!(
+        result.is_ok(),
+        "Transaction without conflicts should commit"
+    );
 }
 
 #[test]

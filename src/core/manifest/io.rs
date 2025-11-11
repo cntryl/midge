@@ -149,9 +149,11 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::api::column_family::{ColumnFamilyConfig, ColumnFamilyId, CompactionStyle, CompressionType, DEFAULT_CF_ID};
     use super::super::types::FileMeta;
+    use super::*;
+    use crate::api::column_family::{
+        ColumnFamilyConfig, ColumnFamilyId, CompactionStyle, CompressionType, DEFAULT_CF_ID,
+    };
 
     #[test]
     fn should_create_default_manifest_when_file_does_not_exist() {

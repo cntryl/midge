@@ -243,7 +243,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         let engine_txn = any_txn
             .downcast::<crate::core::transaction::EngineTransaction>()
             .map_err(|_| MidgeError::internal("Transaction type not supported"))?;
-        
+
         // Extract the internal Transaction by moving out of the box
         let txn = engine_txn.txn;
 
@@ -326,7 +326,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         let engine_txn = any_txn
             .downcast::<crate::core::transaction::EngineTransaction>()
             .map_err(|_| MidgeError::internal("Transaction type not supported"))?;
-        
+
         // Extract the internal Transaction by moving out of the box
         let txn = engine_txn.txn;
 

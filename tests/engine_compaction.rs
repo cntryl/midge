@@ -106,19 +106,22 @@ fn should_background_compact_when_threshold_exceeded() {
     opts.compaction_check_interval_ms = 50;
     opts.wal_buffer_size = 64;
     opts.memtable_size = 1024;
-    
+
     // Create 3 SSTs by writing, closing, and reopening (ensures memtable is fresh each time)
     for i in 0..3 {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
-        eng.put(&cf, format!("key{}", i).as_bytes(), b"value").unwrap();
-        eng.put(&cf, format!("padding{}", i).as_bytes(), &[b'x'; 128]).unwrap();
+        eng.put(&cf, format!("key{}", i).as_bytes(), b"value")
+            .unwrap();
+        eng.put(&cf, format!("padding{}", i).as_bytes(), &[b'x'; 128])
+            .unwrap();
         eng.flush_cf(&cf).unwrap();
         // Wait for flush to complete before closing
-        eng.wait_for_flush(std::time::Duration::from_millis(100)).unwrap();
+        eng.wait_for_flush(std::time::Duration::from_millis(100))
+            .unwrap();
         drop(eng);
     }
-    
+
     // Open engine and wait for background compaction to complete multiple rounds
     {
         let _eng = MidgeEngine::open(opts.clone()).expect("open");
@@ -127,7 +130,8 @@ fn should_background_compact_when_threshold_exceeded() {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(10);
         loop {
-            let m = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
+            let m =
+                cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
             if m.ssts.len() <= 1 {
                 break;
             }
@@ -143,16 +147,32 @@ fn should_background_compact_when_threshold_exceeded() {
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
     let cf = eng.default_column_family();
     let m = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
-    
+
     println!("SSTs found: {}", m.ssts.len());
-    println!("Files: {:?}", m.files.iter().map(|f| &f.name).collect::<Vec<_>>());
-    
+    println!(
+        "Files: {:?}",
+        m.files.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+
     // Background compaction should have reduced file count from 3
     // (won't necessarily be 1 file - LSM compacts L0->L1, which can have multiple files)
-    assert!(m.ssts.len() < 3, "Expected compaction to reduce SST count, got {}", m.ssts.len());
-    
+    assert!(
+        m.ssts.len() < 3,
+        "Expected compaction to reduce SST count, got {}",
+        m.ssts.len()
+    );
+
     // Verify data is intact after compaction
-    assert_eq!(eng.get(&cf, b"key0").unwrap(), Some(Bytes::from_static(b"value")));
-    assert_eq!(eng.get(&cf, b"key1").unwrap(), Some(Bytes::from_static(b"value")));
-    assert_eq!(eng.get(&cf, b"key2").unwrap(), Some(Bytes::from_static(b"value")));
+    assert_eq!(
+        eng.get(&cf, b"key0").unwrap(),
+        Some(Bytes::from_static(b"value"))
+    );
+    assert_eq!(
+        eng.get(&cf, b"key1").unwrap(),
+        Some(Bytes::from_static(b"value"))
+    );
+    assert_eq!(
+        eng.get(&cf, b"key2").unwrap(),
+        Some(Bytes::from_static(b"value"))
+    );
 }

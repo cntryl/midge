@@ -34,14 +34,19 @@ impl MidgeEngine {
             &self.db_path.join("wal"),
             || {
                 if cf_id == DEFAULT_CF_ID {
-                    let entries = self.with_default_memtable_mut(|mt| mt.drain_with_meta_internal());
+                    let entries =
+                        self.with_default_memtable_mut(|mt| mt.drain_with_meta_internal());
                     let range_tombstones =
                         self.with_default_memtable_mut(|mt| mt.drain_range_tombstones());
                     (entries, range_tombstones)
                 } else {
                     // For non-default CFs, use with_cf_memtable_mut
-                    let entries = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_with_meta_internal()).unwrap_or_default();
-                    let range_tombstones = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_range_tombstones()).unwrap_or_default();
+                    let entries = self
+                        .with_cf_memtable_mut(cf_id, |mt| mt.drain_with_meta_internal())
+                        .unwrap_or_default();
+                    let range_tombstones = self
+                        .with_cf_memtable_mut(cf_id, |mt| mt.drain_range_tombstones())
+                        .unwrap_or_default();
                     (entries, range_tombstones)
                 }
             },
@@ -61,7 +66,10 @@ impl MidgeEngine {
     /// # Returns
     ///
     /// Tuple of (SST path, file metadata) for manifest updates
-    pub(crate) fn flush_memtable_to_sst(&self, cf_id: ColumnFamilyId) -> MidgeResult<(std::path::PathBuf, crate::manifest::FileMeta)> {
+    pub(crate) fn flush_memtable_to_sst(
+        &self,
+        cf_id: ColumnFamilyId,
+    ) -> MidgeResult<(std::path::PathBuf, crate::manifest::FileMeta)> {
         // Get CF config
         let cf_config = self.cf_set.get_cf_config(cf_id).unwrap_or_default();
 
@@ -71,12 +79,15 @@ impl MidgeEngine {
         // Drain memtable
         let (entries, range_tombstones) = if cf_id == DEFAULT_CF_ID {
             let entries = self.with_default_memtable_mut(|mt| mt.drain_with_meta_internal());
-            let range_tombstones =
-                self.with_default_memtable_mut(|mt| mt.drain_range_tombstones());
+            let range_tombstones = self.with_default_memtable_mut(|mt| mt.drain_range_tombstones());
             (entries, range_tombstones)
         } else {
-            let entries = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_with_meta_internal()).unwrap_or_default();
-            let range_tombstones = self.with_cf_memtable_mut(cf_id, |mt| mt.drain_range_tombstones()).unwrap_or_default();
+            let entries = self
+                .with_cf_memtable_mut(cf_id, |mt| mt.drain_with_meta_internal())
+                .unwrap_or_default();
+            let range_tombstones = self
+                .with_cf_memtable_mut(cf_id, |mt| mt.drain_range_tombstones())
+                .unwrap_or_default();
             (entries, range_tombstones)
         };
 
@@ -109,7 +120,8 @@ impl MidgeEngine {
         let all_keys = if cf_id == DEFAULT_CF_ID {
             self.with_default_memtable(|mt| mt.get_all_keys())
         } else {
-            self.with_cf_memtable(cf_id, |mt| mt.get_all_keys()).unwrap_or_default()
+            self.with_cf_memtable(cf_id, |mt| mt.get_all_keys())
+                .unwrap_or_default()
         };
 
         // For each key, check if it has merge operands and resolve them
@@ -117,7 +129,8 @@ impl MidgeEngine {
             let versions = if cf_id == DEFAULT_CF_ID {
                 self.with_default_memtable(|mt| mt.get_versions_for_merge(key, u64::MAX))
             } else {
-                self.with_cf_memtable(cf_id, |mt| mt.get_versions_for_merge(key, u64::MAX)).unwrap_or_default()
+                self.with_cf_memtable(cf_id, |mt| mt.get_versions_for_merge(key, u64::MAX))
+                    .unwrap_or_default()
             };
 
             if versions.is_empty() {

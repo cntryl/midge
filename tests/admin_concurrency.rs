@@ -8,16 +8,19 @@ fn should_block_backup_start_given_active_compaction_when_requested() {
     // Arrange
     let (_dir, eng) = new_engine_with_opts(1024, true);
     let cf = eng.default_column_family();
-    
+
     // Act
     bulk_put_fn(&eng, &cf, "key", 200, |_| b"value".to_vec());
-    
+
     // TODO: Attempt backup during compaction
     // Verify backup either waits or proceeds with consistent snapshot
-    
+
     // Assert
     let result = eng.get(&cf, b"key025").expect("get");
-    assert!(result.is_some(), "Data should be consistent during backup/compaction");
+    assert!(
+        result.is_some(),
+        "Data should be consistent during backup/compaction"
+    );
 }
 
 #[test]
@@ -25,13 +28,13 @@ fn should_fail_cf_drop_given_inflight_flush() {
     // Arrange
     let (_dir, eng) = new_engine_with_opts(1024, false);
     let cf = eng.default_column_family();
-    
+
     // Act
     bulk_put_fn(&eng, &cf, "key", 100, |_| b"value".to_vec());
-    
+
     // TODO: Attempt CF drop during flush
     // Should either fail gracefully or wait for flush completion
-    
+
     // Assert
     let result = eng.get(&cf, b"key050").expect("get");
     assert!(result.is_some(), "CF should remain functional");
@@ -42,23 +45,26 @@ fn should_allow_backup_readonly_mode_given_active_writes() {
     // Arrange
     let (_dir, eng) = new_engine();
     let eng = Arc::new(eng);
-    
+
     // Act
     let eng_clone = Arc::clone(&eng);
     let write_handle = thread::spawn(move || {
         let cf = eng_clone.default_column_family();
         bulk_put_fn(&eng_clone, &cf, "key", 100, |_| b"value".to_vec());
     });
-    
+
     // TODO: Initiate readonly backup concurrently
     // Backup should get consistent snapshot without blocking writes
-    
+
     write_handle.join().unwrap();
-    
+
     // Assert
     let cf = eng.default_column_family();
     let result = eng.get(&cf, b"key050").expect("get");
-    assert!(result.is_some(), "Writes should complete during readonly backup");
+    assert!(
+        result.is_some(),
+        "Writes should complete during readonly backup"
+    );
 }
 
 #[test]
@@ -66,16 +72,19 @@ fn should_handle_config_reload_during_compaction_without_panic() {
     // Arrange
     let (_dir, eng) = new_engine_with_opts(1024, true);
     let cf = eng.default_column_family();
-    
+
     // Act
     bulk_put_fn(&eng, &cf, "key", 200, |_| b"value".to_vec());
-    
+
     // TODO: Reload config during compaction
     // Should not panic or corrupt state
-    
+
     // Assert
     let result = eng.get(&cf, b"key025").expect("get");
-    assert!(result.is_some(), "Database should remain functional after config reload");
+    assert!(
+        result.is_some(),
+        "Database should remain functional after config reload"
+    );
 }
 
 #[test]

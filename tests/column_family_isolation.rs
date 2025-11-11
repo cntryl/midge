@@ -14,8 +14,7 @@ fn should_not_return_key_from_different_cf_given_same_user_key_when_read() {
     // Act - write same key to both CFs
     eng.put(&default_cf, b"shared_key", b"default_value")
         .expect("put default");
-    eng.put(&cf2, b"shared_key", b"cf2_value")
-        .expect("put cf2");
+    eng.put(&cf2, b"shared_key", b"cf2_value").expect("put cf2");
 
     // Assert - each CF should only see its own value
     assert_get_equals_cf(&eng, &default_cf, b"shared_key", b"default_value");
@@ -53,7 +52,10 @@ fn should_compact_cf_independently_given_multiple_cfs_when_threshold_exceeded() 
 
     // Verify cf2 has more data than default
     let cf2_key_not_in_default = eng.get(&default_cf, b"key150").expect("get");
-    assert!(cf2_key_not_in_default.is_none(), "Key should only exist in cf2");
+    assert!(
+        cf2_key_not_in_default.is_none(),
+        "Key should only exist in cf2"
+    );
 }
 
 #[test]

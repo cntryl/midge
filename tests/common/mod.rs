@@ -286,11 +286,7 @@ pub fn assert_get_equals_cf(
 /// - The get operation fails
 /// - The key exists when it shouldn't
 #[allow(dead_code)]
-pub fn assert_key_absent_cf(
-    eng: &MidgeEngine,
-    cf: &cntryl_midge::ColumnFamilyHandle,
-    key: &[u8],
-) {
+pub fn assert_key_absent_cf(eng: &MidgeEngine, cf: &cntryl_midge::ColumnFamilyHandle, key: &[u8]) {
     let result = eng.get(cf, key).expect("Get operation failed");
     assert!(
         result.is_none(),
@@ -419,10 +415,7 @@ pub fn compaction_test_opts() -> MidgeOptions {
 /// populate_multi_level_data(&engine, &cf);
 /// ```
 #[allow(dead_code)]
-pub fn populate_multi_level_data(
-    engine: &MidgeEngine,
-    cf: &cntryl_midge::ColumnFamilyHandle,
-) {
+pub fn populate_multi_level_data(engine: &MidgeEngine, cf: &cntryl_midge::ColumnFamilyHandle) {
     // Write batch 1 and flush to L0
     for i in 0..50 {
         let key = format!("key{:03}", i);
@@ -468,7 +461,10 @@ pub fn populate_multi_level_data(
 /// let cf = engine.default_column_family();
 /// ```
 #[allow(dead_code)]
-pub fn new_engine_with_opts(memtable_size: usize, enable_compaction: bool) -> (TempDir, MidgeEngine) {
+pub fn new_engine_with_opts(
+    memtable_size: usize,
+    enable_compaction: bool,
+) -> (TempDir, MidgeEngine) {
     let dir = test_temp_dir();
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
@@ -592,7 +588,8 @@ pub fn bulk_put_fn<F>(
     for i in 0..count {
         let key = format!("{}{:03}", prefix, i);
         let value = value_fn(i);
-        eng.put(cf, key.as_bytes(), &value).expect("bulk_put_fn failed");
+        eng.put(cf, key.as_bytes(), &value)
+            .expect("bulk_put_fn failed");
     }
 }
 

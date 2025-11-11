@@ -39,12 +39,13 @@ impl MidgeEngine {
         }
 
         let cf_id = cf.id();
-        
+
         // Check if memtable is empty
         let is_empty = if cf_id == crate::api::column_family::DEFAULT_CF_ID {
             self.with_default_memtable(|mt| mt.is_empty())
         } else {
-            self.with_cf_memtable(cf_id, |mt| mt.is_empty()).unwrap_or(true)
+            self.with_cf_memtable(cf_id, |mt| mt.is_empty())
+                .unwrap_or(true)
         };
 
         if is_empty {
@@ -309,18 +310,15 @@ impl MidgeEngine {
 
         // Apply compaction filter from default CF
         let cf_id = crate::api::column_family::DEFAULT_CF_ID;
-        let filter_arc = self.cf_set
-            .cfs
-            .get(&cf_id.as_u32())
-            .and_then(|cf| {
-                let guard = cf.compaction_filter.read();
-                if let Some(ref arc) = *guard {
-                    Some(Arc::clone(arc))
-                } else {
-                    None
-                }
-            });
-        
+        let filter_arc = self.cf_set.cfs.get(&cf_id.as_u32()).and_then(|cf| {
+            let guard = cf.compaction_filter.read();
+            if let Some(ref arc) = *guard {
+                Some(Arc::clone(arc))
+            } else {
+                None
+            }
+        });
+
         let versions = if let Some(filter) = filter_arc {
             crate::core::compaction::apply_compaction_filter(&versions, filter.as_ref(), 0)
         } else {
@@ -377,22 +375,16 @@ impl MidgeEngine {
         m.ssts.push(sst_name.clone());
 
         // Compute metadata for the new SST
-        let size_bytes = std::fs::metadata(&sst_path)
-            .map(|md| md.len())
-            .unwrap_or(0);
-        let smallest_key = versions
-            .first()
-            .map(|v| v.user_key.clone());
-        let largest_key = versions
-            .last()
-            .map(|v| v.user_key.clone());
+        let size_bytes = std::fs::metadata(&sst_path).map(|md| md.len()).unwrap_or(0);
+        let smallest_key = versions.first().map(|v| v.user_key.clone());
+        let largest_key = versions.last().map(|v| v.user_key.clone());
         let smallest_seq = versions.iter().map(|v| v.seq).min();
         let largest_seq = versions.iter().map(|v| v.seq).max();
         let point_tombstone_count = versions.iter().filter(|v| v.tombstone).count() as u64;
 
         // compact_all operates on the default CF
         let cf_id = crate::api::column_family::DEFAULT_CF_ID.as_u32();
-        
+
         m.files.push(crate::manifest::FileMeta {
             name: sst_name.clone(),
             level: 0,
@@ -471,7 +463,7 @@ impl MidgeEngine {
         filter: Arc<dyn crate::core::compaction::filter::CompactionFilter>,
     ) -> MidgeResult<()> {
         let cf_id = cf.id();
-        
+
         if let Some(cf_entry) = self.cf_set.cfs.get(&cf_id.as_u32()) {
             let mut filter_lock = cf_entry.compaction_filter.write();
             *filter_lock = Some(filter);
@@ -486,7 +478,7 @@ impl MidgeEngine {
     /// Clear the compaction filter for a column family.
     pub fn clear_compaction_filter(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
         let cf_id = cf.id();
-        
+
         if let Some(cf_entry) = self.cf_set.cfs.get(&cf_id.as_u32()) {
             let mut filter_lock = cf_entry.compaction_filter.write();
             *filter_lock = None;

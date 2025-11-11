@@ -1,6 +1,6 @@
 mod common;
-use common::{assert_key_absent, test_temp_dir, with_engine_restart};
 use cntryl_midge::{MidgeOptions, StorageMode};
+use common::{assert_key_absent, test_temp_dir, with_engine_restart};
 
 #[test]
 fn should_produce_identical_output_given_same_input_runs_when_compacting() {
@@ -14,7 +14,7 @@ fn should_produce_identical_output_given_same_input_runs_when_compacting() {
         enable_compaction: true,
         ..Default::default()
     };
-    
+
     // Act & Assert
     with_engine_restart(
         opts,
@@ -23,8 +23,12 @@ fn should_produce_identical_output_given_same_input_runs_when_compacting() {
             // Write overlapping keys to trigger compaction
             for round in 0..3 {
                 for i in 0..50 {
-                    eng.put(&cf, format!("key{:02}", i).as_bytes(), format!("v{}", round).as_bytes())
-                        .expect("put");
+                    eng.put(
+                        &cf,
+                        format!("key{:02}", i).as_bytes(),
+                        format!("v{}", round).as_bytes(),
+                    )
+                    .expect("put");
                 }
             }
             // TODO: Capture compaction output hash/checksum for determinism verification
@@ -33,10 +37,12 @@ fn should_produce_identical_output_given_same_input_runs_when_compacting() {
             // Assert - latest values should be present
             let cf = eng.default_column_family();
             for i in 0..50 {
-                let result = eng.get(&cf, format!("key{:02}", i).as_bytes()).expect("get");
+                let result = eng
+                    .get(&cf, format!("key{:02}", i).as_bytes())
+                    .expect("get");
                 assert!(result.is_some(), "Compacted data should be present");
             }
-        }
+        },
     );
 }
 
@@ -52,7 +58,7 @@ fn should_remove_deleted_keys_given_tombstones_when_compaction_runs() {
         enable_compaction: true,
         ..Default::default()
     };
-    
+
     // Act & Assert
     with_engine_restart(
         opts,
@@ -60,11 +66,13 @@ fn should_remove_deleted_keys_given_tombstones_when_compaction_runs() {
             let cf = eng.default_column_family();
             // Write and delete keys
             for i in 0..100 {
-                eng.put(&cf, format!("key{:03}", i).as_bytes(), b"value").expect("put");
+                eng.put(&cf, format!("key{:03}", i).as_bytes(), b"value")
+                    .expect("put");
             }
             // Delete half of them
             for i in 0..50 {
-                eng.delete(&cf, format!("key{:03}", i).as_bytes()).expect("delete");
+                eng.delete(&cf, format!("key{:03}", i).as_bytes())
+                    .expect("delete");
             }
             // Force compaction to merge tombstones
             eng.flush_cf(&cf).expect("flush");
@@ -78,10 +86,12 @@ fn should_remove_deleted_keys_given_tombstones_when_compaction_runs() {
             // Remaining keys should be present
             let cf = eng.default_column_family();
             for i in 50..100 {
-                let result = eng.get(&cf, format!("key{:03}", i).as_bytes()).expect("get");
+                let result = eng
+                    .get(&cf, format!("key{:03}", i).as_bytes())
+                    .expect("get");
                 assert!(result.is_some(), "Non-deleted key should exist");
             }
-        }
+        },
     );
 }
 
@@ -97,7 +107,7 @@ fn should_keep_write_amplification_under_target_given_mixed_workload() {
         enable_compaction: true,
         ..Default::default()
     };
-    
+
     // Act & Assert
     with_engine_restart(
         opts,
@@ -107,13 +117,21 @@ fn should_keep_write_amplification_under_target_given_mixed_workload() {
             for round in 0..5 {
                 for i in 0..100 {
                     if i % 3 == 0 {
-                        eng.put(&cf, format!("key{:03}", i).as_bytes(), format!("v{}", round).as_bytes())
-                            .expect("update");
+                        eng.put(
+                            &cf,
+                            format!("key{:03}", i).as_bytes(),
+                            format!("v{}", round).as_bytes(),
+                        )
+                        .expect("update");
                     } else if i % 3 == 1 {
                         eng.delete(&cf, format!("key{:03}", i).as_bytes()).ok();
                     } else {
-                        eng.put(&cf, format!("new_key{:03}_{}", i, round).as_bytes(), b"value")
-                            .expect("insert");
+                        eng.put(
+                            &cf,
+                            format!("new_key{:03}_{}", i, round).as_bytes(),
+                            b"value",
+                        )
+                        .expect("insert");
                     }
                 }
             }
@@ -124,6 +142,6 @@ fn should_keep_write_amplification_under_target_given_mixed_workload() {
             let cf = eng.default_column_family();
             let result = eng.get(&cf, b"key000").expect("get");
             assert!(result.is_some(), "Database should handle mixed workload");
-        }
+        },
     );
 }

@@ -62,11 +62,8 @@ impl CloudLeaseLock {
                     meta.renew();
                     if let Ok(new_data) = meta.encode() {
                         // Try to update with CAS
-                        let _ = backend.put_if_match(
-                            &lock_id,
-                            Bytes::from(new_data),
-                            &current_etag,
-                        );
+                        let _ =
+                            backend.put_if_match(&lock_id, Bytes::from(new_data), &current_etag);
                     }
                 }
             }

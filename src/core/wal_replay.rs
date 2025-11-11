@@ -52,7 +52,7 @@ pub(crate) fn replay_wal_to_memtables_after_seq(
         if skip_before_seq > 0 && rec.seq <= skip_before_seq {
             continue;
         }
-        
+
         if rec.op == WalOpKind::TxnCommit {
             if let Some(txn_id) = rec.txn_id {
                 committed_txns.insert(txn_id);
@@ -67,7 +67,7 @@ pub(crate) fn replay_wal_to_memtables_after_seq(
         if skip_before_seq > 0 && rec.seq <= skip_before_seq {
             continue;
         }
-        
+
         max_seq = max_seq.max(rec.seq);
 
         match rec.op {

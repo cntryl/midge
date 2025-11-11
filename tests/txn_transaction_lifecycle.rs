@@ -86,7 +86,7 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
     // Once a transaction is completed (committed or aborted), it cannot be reused.
     // Rust's ownership system enforces this at compile time for commit
     // (transaction is moved/consumed).
-    
+
     // Test 1: Verify committed transaction cannot be double-committed
     let mut txn1 = engine.begin_transaction(&cf).unwrap();
     txn1.put(b"key1", b"value1").unwrap();
@@ -98,7 +98,7 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
     // Act & Assert - verify the data was written
     let result = engine.get(&cf, b"key1").expect("get should work");
     assert_eq!(result.as_deref(), Some(b"value1".as_ref()));
-    
+
     // Test 2: Verify transaction can be properly aborted and data is not visible
     let mut txn2 = engine.begin_transaction(&cf).unwrap();
     txn2.put(b"key2", b"value2").unwrap();
@@ -106,7 +106,11 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
 
     // Assert - aborted transaction data should not be visible
     let result = engine.get(&cf, b"key2").expect("get should work");
-    assert_eq!(result.as_deref(), None, "aborted transaction data should not be visible");
+    assert_eq!(
+        result.as_deref(),
+        None,
+        "aborted transaction data should not be visible"
+    );
 }
 
 #[test]

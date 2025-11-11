@@ -22,11 +22,7 @@ impl MidgeEngine {
     ///
     /// Used by `batch()` (with database-level sync) and `commit_transaction()`
     /// (with per-transaction sync).
-    pub(crate) fn batch_internal(
-        &self,
-        mutations: Vec<Mutation>,
-        sync: bool,
-    ) -> MidgeResult<()> {
+    pub(crate) fn batch_internal(&self, mutations: Vec<Mutation>, sync: bool) -> MidgeResult<()> {
         self.check_read_only()?;
 
         if mutations.is_empty() {
@@ -215,10 +211,7 @@ impl MidgeEngine {
     /// txn.put(b"key2", b"value2").unwrap();
     /// engine.commit_transaction(txn, Default::default()).unwrap();
     /// ```
-    pub fn begin_transaction(
-        &self,
-        _cf: &ColumnFamilyHandle,
-    ) -> MidgeResult<EngineTransaction> {
+    pub fn begin_transaction(&self, _cf: &ColumnFamilyHandle) -> MidgeResult<EngineTransaction> {
         let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
         let begin_sequence = self.seq.load(Ordering::SeqCst);
         let txn = Transaction::new(txn_id, begin_sequence);

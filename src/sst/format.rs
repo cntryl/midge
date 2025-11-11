@@ -200,7 +200,11 @@ impl Block {
     /// checksum pass. This detects memory corruption, decompression bugs, or bit flips
     /// that occur after initial CRC verification but before use (~5-10% overhead).
     #[inline]
-    pub fn decode_with_options(data: &[u8], block_type: BlockType, paranoid: bool) -> MidgeResult<Self> {
+    pub fn decode_with_options(
+        data: &[u8],
+        block_type: BlockType,
+        paranoid: bool,
+    ) -> MidgeResult<Self> {
         if data.len() < BLOCK_TRAILER_SIZE {
             return Err(MidgeError::InvalidData("Block too small".into()));
         }
@@ -271,9 +275,9 @@ impl Block {
                 let mut out = BytesMut::with_capacity(body_decompressed.len() + restarts.len());
                 out.put(body_decompressed);
                 out.put_slice(restarts);
-                
+
                 let final_data = out.freeze();
-                
+
                 // Paranoid mode: verify decompressed data integrity
                 if paranoid {
                     let verify_crc = crc32c::crc32c(&final_data);
@@ -285,7 +289,7 @@ impl Block {
                         verify_crc
                     );
                 }
-                
+
                 Ok(Block::new(final_data, block_type, compression))
             }
             _ => {
@@ -304,7 +308,7 @@ impl Block {
                     | CompressionType::Zstd5
                     | CompressionType::Zstd9 => Bytes::from(zstd::decode_all(payload)?),
                 };
-                
+
                 // Paranoid mode: verify decompressed data integrity
                 if paranoid {
                     let verify_crc = crc32c::crc32c(&body_decompressed);
@@ -315,7 +319,7 @@ impl Block {
                         verify_crc
                     );
                 }
-                
+
                 Ok(Block::new(body_decompressed, block_type, compression))
             }
         }

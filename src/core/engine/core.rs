@@ -8,10 +8,10 @@ use std::time::Duration;
 use tracing::warn;
 
 use crate::api::column_family::ColumnFamilyId;
-use crate::error::{MidgeError, MidgeResult};
 use crate::core::memtable::MemTable;
 use crate::core::metrics::Metrics;
 use crate::core::wal_replay::replay_wal_to_memtables_after_seq;
+use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
 
 // Import from sibling modules
@@ -264,7 +264,6 @@ impl MidgeEngine {
 
         replay_wal_to_memtables_after_seq(&mut cf_map, records, skip_before_seq)
     }
-
 }
 
 // KvStore trait implementation moved to operations/kv_store.rs
@@ -328,7 +327,7 @@ mod tests {
     #[test]
     fn should_create_kv_store_adapter() {
         use crate::api::KvStore;
-        
+
         // Arrange
         let engine = create_test_engine();
 
@@ -455,7 +454,10 @@ mod tests {
         let result = engine.with_default_memtable_mut(|mt| mt.size_bytes());
 
         // Assert
-        assert_eq!(result, 0, "Default memtable should have zero size on creation");
+        assert_eq!(
+            result, 0,
+            "Default memtable should have zero size on creation"
+        );
     }
 
     #[test]
@@ -519,9 +521,24 @@ mod tests {
         // Arrange
         let engine = create_test_engine();
         let records = vec![
-            crate::wal::WalRecord::new(WalOpKind::Put, bytes::Bytes::from(&b"key1"[..]), Some(bytes::Bytes::from(&b"val1"[..])), 1),
-            crate::wal::WalRecord::new(WalOpKind::Put, bytes::Bytes::from(&b"key2"[..]), Some(bytes::Bytes::from(&b"val2"[..])), 5),
-            crate::wal::WalRecord::new(WalOpKind::Put, bytes::Bytes::from(&b"key3"[..]), Some(bytes::Bytes::from(&b"val3"[..])), 3),
+            crate::wal::WalRecord::new(
+                WalOpKind::Put,
+                bytes::Bytes::from(&b"key1"[..]),
+                Some(bytes::Bytes::from(&b"val1"[..])),
+                1,
+            ),
+            crate::wal::WalRecord::new(
+                WalOpKind::Put,
+                bytes::Bytes::from(&b"key2"[..]),
+                Some(bytes::Bytes::from(&b"val2"[..])),
+                5,
+            ),
+            crate::wal::WalRecord::new(
+                WalOpKind::Put,
+                bytes::Bytes::from(&b"key3"[..]),
+                Some(bytes::Bytes::from(&b"val3"[..])),
+                3,
+            ),
         ];
 
         // Act
@@ -536,8 +553,18 @@ mod tests {
         // Arrange
         let engine = create_test_engine();
         let records = vec![
-            crate::wal::WalRecord::new(WalOpKind::Put, bytes::Bytes::from(&b"key1"[..]), Some(bytes::Bytes::from(&b"value1"[..])), 1),
-            crate::wal::WalRecord::new(WalOpKind::Put, bytes::Bytes::from(&b"key2"[..]), Some(bytes::Bytes::from(&b"value2"[..])), 2),
+            crate::wal::WalRecord::new(
+                WalOpKind::Put,
+                bytes::Bytes::from(&b"key1"[..]),
+                Some(bytes::Bytes::from(&b"value1"[..])),
+                1,
+            ),
+            crate::wal::WalRecord::new(
+                WalOpKind::Put,
+                bytes::Bytes::from(&b"key2"[..]),
+                Some(bytes::Bytes::from(&b"value2"[..])),
+                2,
+            ),
         ];
 
         // Act
@@ -553,15 +580,13 @@ mod tests {
         // Arrange
         let engine = create_test_engine();
         let nonexistent_cf_id = 999;
-        let records = vec![
-            crate::wal::WalRecord::new_cf(
-                crate::api::column_family::ColumnFamilyId::new(nonexistent_cf_id),
-                WalOpKind::Put,
-                bytes::Bytes::from(&b"key1"[..]),
-                Some(bytes::Bytes::from(&b"value1"[..])),
-                1,
-            ),
-        ];
+        let records = vec![crate::wal::WalRecord::new_cf(
+            crate::api::column_family::ColumnFamilyId::new(nonexistent_cf_id),
+            WalOpKind::Put,
+            bytes::Bytes::from(&b"key1"[..]),
+            Some(bytes::Bytes::from(&b"value1"[..])),
+            1,
+        )];
 
         // Act - should not panic
         let max_seq = MidgeEngine::replay_wal_to_cfs(&engine.cf_set, &records);
@@ -608,11 +633,10 @@ mod tests {
     fn should_flush_wal_when_dropped() {
         // Arrange
         let engine = create_test_engine();
-        
+
         // Act
         drop(engine);
 
         // Assert - if we get here without panic, WAL was flushed successfully
     }
 }
-

@@ -10,7 +10,9 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 
-use crate::api::column_family::{ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, DEFAULT_CF_ID};
+use crate::api::column_family::{
+    ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, DEFAULT_CF_ID,
+};
 use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
 
@@ -238,10 +240,7 @@ impl MidgeEngine {
             .get_cf_by_name(name)
             .map(|cf| cf.handle())
             .ok_or_else(|| {
-                MidgeError::invalid_config(format!(
-                    "Column family '{}' does not exist",
-                    name
-                ))
+                MidgeError::invalid_config(format!("Column family '{}' does not exist", name))
             })
     }
 

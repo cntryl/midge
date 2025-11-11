@@ -13,6 +13,4 @@ mod tests;
 // Re-export public API
 pub use backup_engine::BackupEngine;
 pub use restore_engine::RestoreEngine;
-pub use types::{
-    BackupInfo, BackupOptions, BackupType, RestoreOptions, SstFileInfo, VerifyResult,
-};
+pub use types::{BackupInfo, BackupOptions, BackupType, RestoreOptions, SstFileInfo, VerifyResult};

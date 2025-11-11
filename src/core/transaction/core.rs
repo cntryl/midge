@@ -38,7 +38,12 @@ impl Transaction {
         Self::with_options(txn_id, begin_seq, None, 100 * 1024 * 1024)
     }
 
-    pub fn with_options(txn_id: u64, begin_seq: u64, timeout: Option<Duration>, mem_limit: usize) -> Self {
+    pub fn with_options(
+        txn_id: u64,
+        begin_seq: u64,
+        timeout: Option<Duration>,
+        mem_limit: usize,
+    ) -> Self {
         let created_at = Instant::now();
         let deadline = timeout.map(|t| created_at + t);
         Self {
@@ -57,9 +62,15 @@ impl Transaction {
     // -------------------------------------------------------------------------
     // Basic accessors
     // -------------------------------------------------------------------------
-    pub(crate) fn txn_id(&self) -> u64 { self.txn_id }
-    pub(crate) fn begin_seq(&self) -> u64 { self.begin_seq }
-    pub(crate) fn is_expired(&self) -> bool { self.deadline.is_some_and(|d| Instant::now() > d) }
+    pub(crate) fn txn_id(&self) -> u64 {
+        self.txn_id
+    }
+    pub(crate) fn begin_seq(&self) -> u64 {
+        self.begin_seq
+    }
+    pub(crate) fn is_expired(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() > d)
+    }
 
     // -------------------------------------------------------------------------
     // Conflict tracking
@@ -70,9 +81,15 @@ impl Transaction {
     pub(crate) fn track_write(&mut self, cf: u32, key: Bytes) {
         self.conflicts.track_write(cf, key);
     }
-    pub(crate) fn write_set(&self) -> &HashSet<(u32, Bytes)> { self.conflicts.write_set() }
-    pub(crate) fn read_set(&self) -> &HashSet<(u32, Bytes)> { self.conflicts.read_set() }
-    pub(crate) fn read_versions(&self) -> &HashMap<(u32, Bytes), u64> { self.conflicts.read_versions() }
+    pub(crate) fn write_set(&self) -> &HashSet<(u32, Bytes)> {
+        self.conflicts.write_set()
+    }
+    pub(crate) fn read_set(&self) -> &HashSet<(u32, Bytes)> {
+        self.conflicts.read_set()
+    }
+    pub(crate) fn read_versions(&self) -> &HashMap<(u32, Bytes), u64> {
+        self.conflicts.read_versions()
+    }
     #[cfg(test)]
     pub(crate) fn read_version(&self, cf: u32, key: &[u8]) -> Option<u64> {
         self.conflicts.read_version(cf, key)
@@ -81,7 +98,6 @@ impl Transaction {
     pub(crate) fn has_write_conflict(&self, other: &HashSet<(u32, Bytes)>) -> bool {
         self.conflicts.has_write_conflict(other)
     }
-
 
     // -------------------------------------------------------------------------
     // Spill management
@@ -129,7 +145,12 @@ impl Transaction {
     // -------------------------------------------------------------------------
     // Mutation helpers
     // -------------------------------------------------------------------------
-    fn stage(&mut self, cf: crate::api::ColumnFamilyId, m: Mutation, key: Bytes) -> Result<(), MidgeError> {
+    fn stage(
+        &mut self,
+        cf: crate::api::ColumnFamilyId,
+        m: Mutation,
+        key: Bytes,
+    ) -> Result<(), MidgeError> {
         if self.completed {
             return Err(MidgeError::internal("cannot modify completed transaction"));
         }
@@ -140,11 +161,26 @@ impl Transaction {
 
     #[inline]
     pub fn put(&mut self, key: &[u8], val: &[u8]) -> Result<(), MidgeError> {
-        self.put_cf(crate::api::DEFAULT_CF_ID, Bytes::copy_from_slice(key), Bytes::copy_from_slice(val), None)
+        self.put_cf(
+            crate::api::DEFAULT_CF_ID,
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(val),
+            None,
+        )
     }
 
-    pub fn put_with_ttl(&mut self, key: &[u8], val: &[u8], ttl: Duration) -> Result<(), MidgeError> {
-        self.put_cf(crate::api::DEFAULT_CF_ID, Bytes::copy_from_slice(key), Bytes::copy_from_slice(val), Some(ttl))
+    pub fn put_with_ttl(
+        &mut self,
+        key: &[u8],
+        val: &[u8],
+        ttl: Duration,
+    ) -> Result<(), MidgeError> {
+        self.put_cf(
+            crate::api::DEFAULT_CF_ID,
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(val),
+            Some(ttl),
+        )
     }
 
     pub fn put_cf(
@@ -158,7 +194,12 @@ impl Transaction {
         self.stage(cf, m, key)
     }
 
-    pub fn insert(&mut self, key: Bytes, val: Bytes, ttl: Option<Duration>) -> Result<(), MidgeError> {
+    pub fn insert(
+        &mut self,
+        key: Bytes,
+        val: Bytes,
+        ttl: Option<Duration>,
+    ) -> Result<(), MidgeError> {
         self.insert_cf(crate::api::DEFAULT_CF_ID, key, val, ttl)
     }
 
@@ -177,7 +218,11 @@ impl Transaction {
         self.delete_cf(crate::api::DEFAULT_CF_ID, key)
     }
 
-    pub fn delete_cf(&mut self, cf: crate::api::ColumnFamilyId, key: Bytes) -> Result<(), MidgeError> {
+    pub fn delete_cf(
+        &mut self,
+        cf: crate::api::ColumnFamilyId,
+        key: Bytes,
+    ) -> Result<(), MidgeError> {
         let m = Mutation::delete_cf(cf, key.clone());
         self.stage(cf, m, key)
     }
@@ -925,7 +970,7 @@ mod tests {
 
         // Act - Mix of spilled and in-memory writes
         txn.put(b"key1", &vec![0; 600]).unwrap(); // Spills
-        txn.put(b"key2", b"small").unwrap();       // In memory
+        txn.put(b"key2", b"small").unwrap(); // In memory
         txn.put(b"key3", &vec![0; 600]).unwrap(); // Spills again
 
         let mutations = txn.commit().unwrap();
@@ -983,7 +1028,10 @@ mod tests {
         let result = txn.put(b"key2", b"value2");
 
         // Assert
-        assert!(result.is_err(), "Should reject put on rolled-back transaction");
+        assert!(
+            result.is_err(),
+            "Should reject put on rolled-back transaction"
+        );
         assert!(result.unwrap_err().to_string().contains("completed"));
     }
 
@@ -997,7 +1045,10 @@ mod tests {
         let result = txn.delete(Bytes::from("key"));
 
         // Assert
-        assert!(result.is_err(), "Should reject delete on rolled-back transaction");
+        assert!(
+            result.is_err(),
+            "Should reject delete on rolled-back transaction"
+        );
     }
 
     #[test]
@@ -1012,8 +1063,14 @@ mod tests {
         let result = txn.commit();
 
         // Assert
-        assert!(result.is_err(), "Should reject commit on already completed transaction");
-        assert!(result.unwrap_err().to_string().contains("already completed"));
+        assert!(
+            result.is_err(),
+            "Should reject commit on already completed transaction"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("already completed"));
     }
 
     #[test]
@@ -1040,7 +1097,11 @@ mod tests {
         txn.rollback();
 
         // Assert
-        assert_eq!(txn.staged.len(), 0, "Staged mutations should be cleared on rollback");
+        assert_eq!(
+            txn.staged.len(),
+            0,
+            "Staged mutations should be cleared on rollback"
+        );
         assert!(txn.completed, "Transaction should be marked as completed");
     }
 }

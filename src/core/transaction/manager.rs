@@ -139,11 +139,12 @@ impl TransactionManager {
                 if let Some(neighbors) = inner.wait_for.get(&node) {
                     for &n in neighbors {
                         if path.contains(&n) {
-                            let idx = path.iter().position(|&x| x == n)
+                            let idx = path
+                                .iter()
+                                .position(|&x| x == n)
                                 .expect("position should exist since path.contains returned true");
                             let cycle = path[idx..].to_vec();
-                            let victim = *cycle.iter().max()
-                                .expect("cycle should not be empty");
+                            let victim = *cycle.iter().max().expect("cycle should not be empty");
                             return Some((victim, cycle));
                         }
                         let mut next = path.clone();
@@ -345,8 +346,7 @@ mod tests {
         for i in 0..1100 {
             let mut ws = HashSet::new();
             ws.insert(k(&format!("k{i}")));
-            tm.begin(i, i, ws, HashSet::new(), HashMap::new())
-                .unwrap();
+            tm.begin(i, i, ws, HashSet::new(), HashMap::new()).unwrap();
             tm.try_commit(i, 1000 + i).unwrap();
         }
 

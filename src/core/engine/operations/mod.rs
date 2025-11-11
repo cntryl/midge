@@ -9,12 +9,12 @@
 //! - `maintenance`: Flush, compaction, and checkpoint operations
 //! - `observability`: Metrics and cache access
 
-pub(crate) mod reads;
-pub(crate) mod writes;
 pub(crate) mod maintenance;
 pub(crate) mod mutations;
-pub(crate) mod transactions;
-pub(crate) mod snapshots;
 pub(crate) mod observability;
+pub(crate) mod reads;
+pub(crate) mod snapshots;
+pub(crate) mod transactions;
+pub(crate) mod writes;
 
 // No re-exports needed - methods are implemented directly on MidgeEngine

@@ -13,14 +13,14 @@
 //! - Automatic read-only fallback on renewal failure
 //! - Graceful release on shutdown
 
-mod traits;
+mod cloud;
+mod local;
 mod meta;
 mod renewal;
-mod local;
-mod cloud;
+mod traits;
 
 // Re-export public API
-pub use traits::DbLock;
-pub use meta::LockMeta;
-pub use local::LocalFileLock;
 pub use cloud::CloudLeaseLock;
+pub use local::LocalFileLock;
+pub use meta::LockMeta;
+pub use traits::DbLock;

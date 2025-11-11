@@ -30,7 +30,10 @@ impl SstMemReader {
     }
 
     /// Create reader with paranoid checksum verification enabled
-    pub(crate) fn from_bytes_with_paranoid(raw: Vec<u8>, paranoid_checksums: bool) -> MidgeResult<Self> {
+    pub(crate) fn from_bytes_with_paranoid(
+        raw: Vec<u8>,
+        paranoid_checksums: bool,
+    ) -> MidgeResult<Self> {
         // Use common metadata parsing logic
         let metadata = SstMetadata::from_bytes(&raw)?;
 

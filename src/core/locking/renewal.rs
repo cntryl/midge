@@ -104,7 +104,11 @@ mod tests {
 
         // Assert
         let count = counter.load(Ordering::SeqCst);
-        assert!((2..=5).contains(&count), "Expected 2-5 renewals, got {}", count);
+        assert!(
+            (2..=5).contains(&count),
+            "Expected 2-5 renewals, got {}",
+            count
+        );
 
         // Cleanup
         renewal.stop();
@@ -124,7 +128,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(100));
         let count_before_stop = counter.load(Ordering::SeqCst);
-        
+
         renewal.stop();
         std::thread::sleep(Duration::from_millis(150));
         let count_after_stop = counter.load(Ordering::SeqCst);
