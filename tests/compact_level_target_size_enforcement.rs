@@ -108,7 +108,7 @@ fn should_respect_level_multiplier_given_cascading_compaction() {
         engine.flush().unwrap();
         // Wait for flush to complete
         engine
-            .wait_for_flush(Duration::from_secs(5))
+            .wait_for_flush(Duration::from_secs(1))
             .expect("flush should complete");
     }
 

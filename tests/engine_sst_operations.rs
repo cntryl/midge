@@ -31,7 +31,7 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         let big = vec![b'v'; 128];
         eng.put(&cf, b"zz", big.as_slice()).unwrap();
         // Wait for background flush to materialize SST and update manifest
-        eng.wait_for_flush(std::time::Duration::from_secs(5))
+        eng.wait_for_flush(std::time::Duration::from_secs(1))
             .expect("flush should complete");
     }
 
@@ -64,13 +64,13 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
         // rotate to flush first version
         let big = vec![b'v'; 128];
         eng.put(&cf, b"zz", big.as_slice()).unwrap();
-        eng.wait_for_flush(std::time::Duration::from_secs(5))
+        eng.wait_for_flush(std::time::Duration::from_secs(1))
             .expect("flush should complete");
         // delete and rotate again to flush tombstone
         eng.delete(&cf, b"k").unwrap();
         let big2 = vec![b'v'; 128];
         eng.put(&cf, b"zz2", big2.as_slice()).unwrap();
-        eng.wait_for_flush(std::time::Duration::from_secs(5))
+        eng.wait_for_flush(std::time::Duration::from_secs(1))
             .expect("flush should complete");
     }
 
@@ -104,7 +104,7 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
         let big = vec![b'v'; 256];
         eng.put(&cf1, b"zz", big.as_slice()).unwrap();
         // Wait for background flush
-        eng.wait_for_flush(std::time::Duration::from_secs(5))
+        eng.wait_for_flush(std::time::Duration::from_secs(1))
             .expect("flush should complete");
     }
     // Phase 2: reopen with large WAL so overlay remains in memtable

@@ -593,12 +593,12 @@ impl SstFile {
 
                 if in_range {
                     if tomb {
-                        out.push((Bytes::from(key), KeyState::Tombstone(seq)));
-                    } else if !is_covered_by_range_tombstone(&self.range_tombstones, &key, u64::MAX)
+                        out.push((Bytes::from(user_key.clone()), KeyState::Tombstone(seq)));
+                    } else if !is_covered_by_range_tombstone(&self.range_tombstones, &user_key, u64::MAX)
                     {
                         if let Some(val) = value_slice {
                             out.push((
-                                Bytes::from(key),
+                                Bytes::from(user_key.clone()),
                                 KeyState::Value(Bytes::copy_from_slice(val), seq, expiration),
                             ));
                         }
