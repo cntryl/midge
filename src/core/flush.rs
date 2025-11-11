@@ -158,7 +158,10 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     // Update manifest FIRST to establish the safe deletion point
     let mut m =
         Manifest::load_with_retry(&config.db_path, 10, std::time::Duration::from_millis(10))?;
-    m.last_persisted_sequence = seq_for_prune;
+    // Use largest_seq from entries (which includes resolved merge operations)
+    // instead of seq_for_prune (which is the WAL rotation sequence)
+    // Fall back to seq_for_prune if no entries were flushed
+    m.last_persisted_sequence = largest_seq.unwrap_or(seq_for_prune);
     let size_bytes = std::fs::metadata(&sst_path).map(|md| md.len()).unwrap_or(0);
 
     // Assign sublevel based on overlap with existing L0 files

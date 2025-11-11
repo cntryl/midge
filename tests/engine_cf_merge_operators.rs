@@ -309,6 +309,9 @@ fn should_persist_and_recover_merge_resolutions_across_restart() {
     let engine = MidgeEngine::open(opts).expect("reopen");
     let cf = engine.get_column_family("persist_cf").expect("get cf");
 
+    // Re-register merge operator (operators are not persisted, must be registered on startup)
+    engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
+
     // Assert - Resolved value persists
     let result = engine.get(&cf, b"total").expect("get");
     assert_eq!(result, Some(Bytes::from_static(b"200"))); // 100 + 25 + 75

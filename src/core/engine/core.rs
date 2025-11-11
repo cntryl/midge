@@ -11,7 +11,7 @@ use crate::api::column_family::ColumnFamilyId;
 use crate::error::{MidgeError, MidgeResult};
 use crate::core::memtable::MemTable;
 use crate::core::metrics::Metrics;
-use crate::core::wal_replay::replay_wal_to_memtables;
+use crate::core::wal_replay::replay_wal_to_memtables_after_seq;
 use crate::manifest::Manifest;
 
 // Import from sibling modules
@@ -237,6 +237,15 @@ impl MidgeEngine {
         cf_set: &ColumnFamilySet,
         records: &[crate::wal::WalRecord],
     ) -> u64 {
+        Self::replay_wal_to_cfs_after_seq(cf_set, records, 0)
+    }
+
+    /// Replay WAL records to column families, skipping records with sequence <= skip_before_seq.
+    pub(super) fn replay_wal_to_cfs_after_seq(
+        cf_set: &ColumnFamilySet,
+        records: &[crate::wal::WalRecord],
+        skip_before_seq: u64,
+    ) -> u64 {
         // Build a map of cf_id -> Arc<ColumnFamily> for replay
         // We clone the Arcs so they live long enough for the replay
         let cf_refs: Vec<Arc<ColumnFamily>> = cf_set
@@ -253,7 +262,7 @@ impl MidgeEngine {
             cf_map.insert(cf.id.as_u32(), &**guard);
         }
 
-        replay_wal_to_memtables(&mut cf_map, records)
+        replay_wal_to_memtables_after_seq(&mut cf_map, records, skip_before_seq)
     }
 
 }

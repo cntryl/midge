@@ -24,9 +24,20 @@ use crate::wal::{WalOpKind, WalRecord};
 /// # Returns
 ///
 /// Maximum sequence number seen during replay
+#[allow(dead_code)] // Used in tests
 pub(crate) fn replay_wal_to_memtables(
     cf_map: &mut std::collections::HashMap<u32, &MemTable>,
     records: &[WalRecord],
+) -> u64 {
+    replay_wal_to_memtables_after_seq(cf_map, records, 0)
+}
+
+/// Replay WAL records to memtables, skipping records with sequence <= skip_before_seq.
+/// This is used during recovery to avoid replaying records that were already flushed to SST.
+pub(crate) fn replay_wal_to_memtables_after_seq(
+    cf_map: &mut std::collections::HashMap<u32, &MemTable>,
+    records: &[WalRecord],
+    skip_before_seq: u64,
 ) -> u64 {
     use std::collections::HashMap;
 
@@ -36,6 +47,11 @@ pub(crate) fn replay_wal_to_memtables(
 
     // First pass: identify committed transactions
     for rec in records {
+        // Skip records that were already persisted
+        if rec.seq <= skip_before_seq {
+            continue;
+        }
+        
         if rec.op == WalOpKind::TxnCommit {
             if let Some(txn_id) = rec.txn_id {
                 committed_txns.insert(txn_id);
@@ -45,6 +61,11 @@ pub(crate) fn replay_wal_to_memtables(
 
     // Second pass: buffer transactional ops and apply committed ones
     for rec in records {
+        // Skip records that were already persisted
+        if rec.seq <= skip_before_seq {
+            continue;
+        }
+        
         max_seq = max_seq.max(rec.seq);
 
         match rec.op {

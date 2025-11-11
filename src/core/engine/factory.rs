@@ -128,7 +128,8 @@ pub(super) fn replay_local_wal_segments(
             for (_seq, path) in &wal_segments {
                 if let Ok(recs) = crate::wal::fs::replay_wal_file_with_mode(path, wal_recovery_mode)
                 {
-                    let replay_max = MidgeEngine::replay_wal_to_cfs(cf_set, &recs);
+                    // Skip records that were already flushed to SST
+                    let replay_max = MidgeEngine::replay_wal_to_cfs_after_seq(cf_set, &recs, last_persisted_sequence);
                     max_replay_seq = max_replay_seq.max(replay_max);
                 }
             }
@@ -215,6 +216,8 @@ pub(super) fn setup_wal_writer(
         Box::new(async_cloud_wal)
     } else {
         // Replay existing WAL files before opening a new one
+        // Skip records that were already flushed to SST (based on manifest.last_persisted_sequence)
+        let last_persisted = manifest.last_persisted_sequence;
         if wal_dir.exists() {
             if let Ok(latest_num) = crate::fs::find_latest_numbered_file(wal_dir, "wal") {
                 if latest_num > 0 {
@@ -222,7 +225,7 @@ pub(super) fn setup_wal_writer(
                     if let Ok(records) =
                         crate::wal::fs::replay_wal_file_with_mode(&wal_path, opts.wal_recovery_mode)
                     {
-                        let replay_max = MidgeEngine::replay_wal_to_cfs(cf_set, &records);
+                        let replay_max = MidgeEngine::replay_wal_to_cfs_after_seq(cf_set, &records, last_persisted);
                         max_replay_seq = max_replay_seq.max(replay_max);
                     }
                 }

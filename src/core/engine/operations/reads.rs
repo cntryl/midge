@@ -21,6 +21,7 @@ impl MidgeEngine {
     ///
     /// Returns `None` if the key doesn't exist or has been deleted.
     /// Checks memtables first (active + immutable), then SST files from newest to oldest.
+    /// Resolves merge operations if a merge operator is registered for the CF.
     pub fn get(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         self.metrics.record_get();
 
@@ -32,10 +33,59 @@ impl MidgeEngine {
             ))
         })?;
 
-        // Check active memtable first
+        // Check active memtable first - check for merge operations
         {
             let mt = column_family.memtable.read();
-            if let Some(v) = mt.get(key) {
+            let versions = mt.get_versions_for_merge(key, u64::MAX);
+            
+            if !versions.is_empty() {
+                // Check if there are any merge operations
+                let has_merges = versions
+                    .iter()
+                    .any(|(_, _, op)| *op == crate::core::skiplist::OpType::Merge);
+                
+                if has_merges {
+                    // Resolve merges using the engine's merge operator registry
+                    let ops = self.merge_operators.read();
+                    if let Some(merge_op) = ops.get(&cf_id.as_u32()) {
+                        // Collect merge operands and base value (oldest to newest)
+                        let mut operands: Vec<Bytes> = Vec::new();
+                        let mut base_value: Option<Bytes> = None;
+                        
+                        for (value_opt, _exp, op_type) in versions.iter().rev() {
+                            match op_type {
+                                crate::core::skiplist::OpType::Put => {
+                                    base_value = value_opt.clone();
+                                    operands.clear();
+                                }
+                                crate::core::skiplist::OpType::Merge => {
+                                    if let Some(val) = value_opt {
+                                        operands.push(val.clone());
+                                    }
+                                }
+                                crate::core::skiplist::OpType::Delete => {
+                                    base_value = None;
+                                    operands.clear();
+                                }
+                            }
+                        }
+                        
+                        if !operands.is_empty() {
+                            let operand_refs: Vec<&[u8]> = operands.iter().map(|b| b.as_ref()).collect();
+                            if let Ok(resolved) = merge_op.merge_many(key, base_value.as_deref(), &operand_refs) {
+                                return Ok(Some(Bytes::from(resolved)));
+                            }
+                        } else if let Some(base) = base_value {
+                            return Ok(Some(base));
+                        }
+                    }
+                } else {
+                    // No merges, just return the latest value
+                    if let Some(v) = mt.get(key) {
+                        return Ok(Some(v));
+                    }
+                }
+            } else if let Some(v) = mt.get(key) {
                 return Ok(Some(v));
             }
         }
@@ -45,7 +95,50 @@ impl MidgeEngine {
             let immutables = column_family.immutable_memtables.lock();
             // Iterate in reverse order (newest to oldest)
             for immutable_mt in immutables.iter().rev() {
-                if let Some(v) = immutable_mt.get(key) {
+                let versions = immutable_mt.get_versions_for_merge(key, u64::MAX);
+                
+                if !versions.is_empty() {
+                    let has_merges = versions
+                        .iter()
+                        .any(|(_, _, op)| *op == crate::core::skiplist::OpType::Merge);
+                    
+                    if has_merges {
+                        let ops = self.merge_operators.read();
+                        if let Some(merge_op) = ops.get(&cf_id.as_u32()) {
+                            let mut operands: Vec<Bytes> = Vec::new();
+                            let mut base_value: Option<Bytes> = None;
+                            
+                            for (value_opt, _exp, op_type) in versions.iter().rev() {
+                                match op_type {
+                                    crate::core::skiplist::OpType::Put => {
+                                        base_value = value_opt.clone();
+                                        operands.clear();
+                                    }
+                                    crate::core::skiplist::OpType::Merge => {
+                                        if let Some(val) = value_opt {
+                                            operands.push(val.clone());
+                                        }
+                                    }
+                                    crate::core::skiplist::OpType::Delete => {
+                                        base_value = None;
+                                        operands.clear();
+                                    }
+                                }
+                            }
+                            
+                            if !operands.is_empty() {
+                                let operand_refs: Vec<&[u8]> = operands.iter().map(|b| b.as_ref()).collect();
+                                if let Ok(resolved) = merge_op.merge_many(key, base_value.as_deref(), &operand_refs) {
+                                    return Ok(Some(Bytes::from(resolved)));
+                                }
+                            } else if let Some(base) = base_value {
+                                return Ok(Some(base));
+                            }
+                        }
+                    } else if let Some(v) = immutable_mt.get(key) {
+                        return Ok(Some(v));
+                    }
+                } else if let Some(v) = immutable_mt.get(key) {
                     return Ok(Some(v));
                 }
             }
