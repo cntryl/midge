@@ -225,6 +225,35 @@ impl MidgeEngine {
         Ok(EngineTransaction::new(txn, self))
     }
 
+    /// Begin a transaction with custom options (memory limit, timeout).
+    ///
+    /// # Arguments
+    /// * `cf` - Column family handle (currently unused but reserved for per-CF transactions)
+    /// * `timeout` - Optional timeout duration for the transaction
+    /// * `mem_limit` - Memory limit in bytes before spilling to disk
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # use std::time::Duration;
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// let cf = engine.default_column_family();
+    /// // Transaction with 10MB memory limit
+    /// let txn = engine.begin_transaction_with_options(&cf, None, 10 * 1024 * 1024).unwrap();
+    /// ```
+    pub fn begin_transaction_with_options(
+        &self,
+        _cf: &ColumnFamilyHandle,
+        timeout: Option<std::time::Duration>,
+        mem_limit: usize,
+    ) -> MidgeResult<EngineTransaction> {
+        let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
+        let begin_sequence = self.seq.load(Ordering::SeqCst);
+        let txn = Transaction::with_options(txn_id, begin_sequence, timeout, mem_limit);
+        Ok(EngineTransaction::new(txn, self))
+    }
+
     /// Commit a Transaction by applying its staged mutations to WAL and MemTable.
     ///
     /// The `opts` parameter allows per-transaction control over durability:

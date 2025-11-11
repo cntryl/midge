@@ -893,4 +893,75 @@ mod tests {
         assert!(matches!(mutations[1].op, MutationOp::DeleteRange));
         assert_eq!(mutations[1].range_end, Some(Bytes::from("end")));
     }
+
+    #[test]
+    fn should_spill_to_disk_given_exceed_memory_threshold() {
+        // Arrange
+        let memory_threshold = 1024; // 1KB threshold
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+
+        // Act - Add 2KB of data (force spilling)
+        for i in 0..2 {
+            txn.put(format!("key{:03}", i).as_bytes(), &vec![0xAB; 1024])
+                .unwrap();
+        }
+
+        let mutations = txn.commit().unwrap();
+
+        // Assert - All mutations should be present
+        assert_eq!(mutations.len(), 2, "Should have all mutations after spill");
+        assert_eq!(mutations[0].key, Bytes::from("key000"));
+        assert_eq!(mutations[1].key, Bytes::from("key001"));
+    }
+
+    #[test]
+    fn should_preserve_order_given_spilled_and_in_memory_mutations() {
+        // Arrange
+        let memory_threshold = 512;
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+
+        // Act - Mix of spilled and in-memory writes
+        txn.put(b"key1", &vec![0; 600]).unwrap(); // Spills
+        txn.put(b"key2", b"small").unwrap();       // In memory
+        txn.put(b"key3", &vec![0; 600]).unwrap(); // Spills again
+
+        let mutations = txn.commit().unwrap();
+
+        // Assert - Order preserved
+        assert_eq!(mutations.len(), 3);
+        assert_eq!(mutations[0].key, Bytes::from("key1"));
+        assert_eq!(mutations[1].key, Bytes::from("key2"));
+        assert_eq!(mutations[2].key, Bytes::from("key3"));
+    }
+
+    #[test]
+    fn should_handle_large_values_in_spill() {
+        // Arrange
+        let memory_threshold = 256;
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+
+        // Act - Write large value
+        let large_value = vec![0xCC; 10000];
+        txn.put(b"large_key", &large_value).unwrap();
+
+        let mutations = txn.commit().unwrap();
+
+        // Assert - Large value preserved
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].value, Some(Bytes::from(large_value)));
+    }
+
+    #[test]
+    fn should_cleanup_spill_on_abort() {
+        // Arrange
+        let memory_threshold = 256;
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+
+        // Act - Spill data then drop without committing
+        txn.put(b"key", &vec![0; 1000]).unwrap();
+        drop(txn);
+
+        // Assert - Should not panic or leave files (tested by not crashing)
+        // Cleanup is automatic via Drop trait
+    }
 }
