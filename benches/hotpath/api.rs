@@ -69,41 +69,42 @@ fn bench_batch_put(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark multi-get operations (hot path for batch reads)
-fn bench_multi_get(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_multi_get");
+/// Benchmark single get operations (hot path for reads)
+fn bench_single_get(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hotpath_single_get");
 
-    // Setup: pre-populate database
-    let engine = setup_db("multi_get");
+    let engine = setup_db("single_get");
     let cf = engine.default_column_family();
+
+    // Pre-populate with data
     for i in 0..10_000 {
         let key = format!("key_{:010}", i);
-        let value = format!("value_{:010}_padding", i);
+        let value = format!("value_{:010}_padding_to_increase_size", i);
         engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
     }
     engine.flush().unwrap();
 
-    for &batch_size in &[10, 100] {
-        let keys: Vec<String> = (0..batch_size).map(|i| format!("key_{:010}", i)).collect();
-        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes()).collect();
+    // Hit rate benchmark
+    let mut counter = 0;
+    group.bench_function("single_get_hit", |b| {
+        b.iter(|| {
+            let key = format!("key_{:010}", counter % 10_000);
+            counter += 1;
+            let result = engine.get(&cf, key.as_bytes()).unwrap();
+            black_box(result);
+        })
+    });
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            &batch_size,
-            |b, _| {
-                b.iter(|| {
-                    // Use get_cf per-key (CF-aware API) instead of deprecated multi_get
-                    let mut found = 0usize;
-                    for k in &key_refs {
-                        if engine.get(&cf, k).unwrap().is_some() {
-                            found += 1;
-                        }
-                    }
-                    black_box(found);
-                })
-            },
-        );
-    }
+    // Miss rate benchmark
+    let mut miss_counter = 10_000;
+    group.bench_function("single_get_miss", |b| {
+        b.iter(|| {
+            let key = format!("key_{:010}", miss_counter);
+            miss_counter += 1;
+            let result = engine.get(&cf, key.as_bytes()).unwrap();
+            black_box(result);
+        })
+    });
 
     group.finish();
 }
@@ -227,9 +228,51 @@ fn bench_batch_mixed(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark range scan operations
+fn bench_range_scan(c: &mut Criterion) {
+    use cntryl_midge::Query;
+
+    let mut group = c.benchmark_group("hotpath_range_scan");
+
+    let engine = setup_db("range_scan");
+    let cf = engine.default_column_family();
+
+    // Pre-populate with ordered keys
+    for i in 0..10_000 {
+        let key = format!("key_{:010}", i);
+        let value = format!("value_{:010}_data", i);
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+    }
+    engine.flush().unwrap();
+
+    // Scan 100 keys
+    group.bench_function("scan_100_keys", |b| {
+        b.iter(|| {
+            let query = Query::new()
+                .start_key(Bytes::from("key_0000000000"))
+                .end_key(Bytes::from("key_0000000100"));
+            let results = engine.scan(&cf, query).unwrap();
+            black_box(results.len());
+        })
+    });
+
+    // Scan 1000 keys
+    group.bench_function("scan_1000_keys", |b| {
+        b.iter(|| {
+            let query = Query::new()
+                .start_key(Bytes::from("key_0000000000"))
+                .end_key(Bytes::from("key_0000001000"));
+            let results = engine.scan(&cf, query).unwrap();
+            black_box(results.len());
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = hotpath_api;
     config = criterion_config();
-    targets = bench_batch_put, bench_multi_get, bench_single_put, bench_batch_delete, bench_batch_mixed
+    targets = bench_batch_put, bench_single_get, bench_single_put, bench_batch_delete, bench_batch_mixed, bench_range_scan
 }
 criterion_main!(hotpath_api);

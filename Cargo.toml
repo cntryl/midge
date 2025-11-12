@@ -200,18 +200,23 @@ harness = false
 
 # Tier 2 — Subsystem
 [[bench]]
-name = "subsystem_engine"
-path = "benches/subsystem/engine.rs"
+name = "subsystem_engine_basic"
+path = "benches/subsystem/engine_basic.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_concurrency_compaction"
-path = "benches/subsystem/concurrency_compaction.rs"
+name = "subsystem_engine_advanced"
+path = "benches/subsystem/engine_advanced.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_enhanced_concurrency"
-path = "benches/subsystem/enhanced_concurrency.rs"
+name = "subsystem_concurrency_stress"
+path = "benches/subsystem/concurrency_stress.rs"
+harness = false
+
+[[bench]]
+name = "subsystem_isolation_mvcc"
+path = "benches/subsystem/isolation_mvcc.rs"
 harness = false
 
 # Tier 3 — System

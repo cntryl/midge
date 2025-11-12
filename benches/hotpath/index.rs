@@ -6,6 +6,7 @@
 //! Covers critical index structures:
 //! - Bloom filter (build, query, encode/decode)
 //! - Sparse index (binary search lookups)
+//! - False positive rate variance
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -83,9 +84,40 @@ fn bench_bloom_query(c: &mut Criterion) {
     g.finish();
 }
 
+/// Benchmark false positive rate variance across different target FP rates
+fn bench_bloom_false_positive_rates(c: &mut Criterion) {
+    let mut g = c.benchmark_group("hotpath_bloom_fp_variance");
+
+    let n = 10_000;
+    let present = make_keys("p", n);
+    let absent = make_keys("q", 10_000); // More absents to get accurate FP rate
+
+    // Test different false positive targets
+    for &fp_rate in &[0.001, 0.01, 0.05] {
+        let mut f = BloomFilter::new(n, fp_rate);
+        for k in &present {
+            f.add(k);
+        }
+
+        g.bench_function(format!("fp_rate_{}", (fp_rate * 1000.0) as u32), |b| {
+            b.iter(|| {
+                let mut false_positives = 0;
+                for k in &absent {
+                    if f.may_contain(k) {
+                        false_positives += 1;
+                    }
+                }
+                black_box(false_positives)
+            })
+        });
+    }
+
+    g.finish();
+}
+
 criterion_group! {
     name = hotpath_index;
     config = criterion_config();
-    targets = bench_bloom_build, bench_bloom_query
+    targets = bench_bloom_build, bench_bloom_query, bench_bloom_false_positive_rates
 }
 criterion_main!(hotpath_index);

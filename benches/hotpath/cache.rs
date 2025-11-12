@@ -88,9 +88,113 @@ fn bench_cache_get_hit(c: &mut Criterion) {
     });
 }
 
+/// Benchmark cache get operations on missing keys (cache misses)
+fn bench_cache_get_miss(c: &mut Criterion) {
+    let cache_size = 10 * 1024 * 1024;
+    let block_size = 4 * 1024;
+    let num_blocks = 1000;
+
+    // Pre-populate cache with keys 0..1000
+    let cache = BlockCache::new(cache_size);
+    for i in 0..num_blocks {
+        let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
+        let block = make_cached_block(block_size);
+        cache.insert(key, block);
+    }
+
+    c.bench_function("hotpath_cache_get_miss", |b| {
+        b.iter(|| {
+            // Query keys that don't exist (1000..2000)
+            let mut count = 0;
+            for i in num_blocks..num_blocks * 2 {
+                let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
+                if cache.get(&key).is_some() {
+                    count += 1;
+                }
+            }
+            black_box(count);
+        })
+    });
+}
+
+/// Benchmark cache eviction under memory pressure
+fn bench_cache_eviction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hotpath_cache_eviction");
+
+    // Small cache to trigger eviction (2 MB, holds ~512 4KB blocks)
+    let cache_size = 2 * 1024 * 1024;
+    let block_size = 4 * 1024;
+
+    // Insert more blocks than cache can hold
+    group.bench_function("evict_under_pressure", |b| {
+        b.iter(|| {
+            let cache = BlockCache::new(cache_size);
+            // Try to insert 1000 blocks when only ~512 fit
+            for i in 0..1000 {
+                let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
+                let block = make_cached_block(block_size);
+                cache.insert(key, block);
+            }
+            black_box(cache);
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark concurrent cache access pattern (multiple threads, same keys)
+fn bench_cache_concurrent_access(c: &mut Criterion) {
+    use std::sync::Arc;
+    use std::thread;
+
+    let mut group = c.benchmark_group("hotpath_cache_concurrent");
+
+    let cache_size = 10 * 1024 * 1024;
+    let block_size = 4 * 1024;
+    let num_blocks = 1000;
+
+    // Pre-populate cache once
+    let cache = Arc::new(BlockCache::new(cache_size));
+    for i in 0..num_blocks {
+        let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
+        let block = make_cached_block(block_size);
+        cache.insert(key, block);
+    }
+
+    for &num_threads in &[2, 4] {
+        group.bench_function(format!("{}_threads", num_threads), |b| {
+            b.iter(|| {
+                let mut handles = vec![];
+                for _ in 0..num_threads {
+                    let cache_clone = Arc::clone(&cache);
+                    let handle = thread::spawn(move || {
+                        let mut count = 0;
+                        for i in 0..num_blocks {
+                            let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
+                            if cache_clone.get(&key).is_some() {
+                                count += 1;
+                            }
+                        }
+                        black_box(count)
+                    });
+                    handles.push(handle);
+                }
+
+                let mut total = 0;
+                for handle in handles {
+                    total += handle.join().unwrap();
+                }
+                black_box(total);
+            })
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = hotpath_cache;
     config = criterion_config();
-    targets = bench_cache_insert, bench_cache_get_hit
+    targets = bench_cache_insert, bench_cache_get_hit, bench_cache_get_miss, bench_cache_eviction, bench_cache_concurrent_access
 }
 criterion_main!(hotpath_cache);
