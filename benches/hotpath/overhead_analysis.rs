@@ -24,10 +24,50 @@ use criterion_helper::criterion_config;
 use cntryl_midge::core::memtable::MemTable;
 use cntryl_midge::wal::{WalOpKind, WalRecord, WalSyncMode, WalWriter};
 use cntryl_midge::wal::fs::Wal as FsWal;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
+use std::time::Instant;
+// Instant was added for aggregation but is not required now.
+
+// Helper: format fixed-width key "key{:016}" into Bytes without using `format!`.
+fn key_fixed(i: u64) -> Bytes {
+    // "key" + 16 digits = 19 bytes
+    let mut buf = [b'0'; 19];
+    buf[0] = b'k';
+    buf[1] = b'e';
+    buf[2] = b'y';
+    let mut n = i;
+    for pos in (3..19).rev() {
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    Bytes::copy_from_slice(&buf)
+}
+
+// Helper: create threaded key like "key_t{thread}_i{016}". Uses a small Vec to assemble bytes.
+fn key_threaded(thread_id: u32, i: u64) -> Bytes {
+    // Produce a threaded key without format! and return Bytes.
+    let mut v: Vec<u8> = Vec::with_capacity(32);
+    v.extend_from_slice(b"key_t");
+    // append thread_id in decimal
+    let tid = thread_id.to_string();
+    v.extend_from_slice(tid.as_bytes());
+    v.extend_from_slice(b"_i");
+    // append zero-padded 16-digit i
+    let mut num_buf = [b'0'; 16];
+    let mut n = i;
+    for pos in (0..16).rev() {
+        num_buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    v.extend_from_slice(&num_buf);
+    Bytes::from(v)
+}
+// key_threaded is now used in the concurrent multi-CF bench to avoid format!.
 
 // ============================================================================
 // Layer 1: Raw WAL Batch Append (Baseline)
@@ -55,7 +95,7 @@ fn bench_layer1_wal_only(c: &mut Criterion) {
                 let key_values: Vec<(Bytes, Bytes)> = (0..size)
                     .map(|i| {
                         (
-                            Bytes::from(format!("key{:016}", i)),
+                            key_fixed(i as u64),
                             Bytes::from(vec![42u8; 1000]),
                         )
                     })
@@ -113,7 +153,7 @@ fn bench_layer2_wal_with_seq(c: &mut Criterion) {
                 let key_values: Vec<(Bytes, Bytes)> = (0..size)
                     .map(|i| {
                         (
-                            Bytes::from(format!("key{:016}", i)),
+                            key_fixed(i as u64),
                             Bytes::from(vec![42u8; 1000]),
                         )
                     })
@@ -173,7 +213,7 @@ fn bench_layer3_wal_plus_memtable(c: &mut Criterion) {
                 let key_values: Vec<(Bytes, Bytes)> = (0..size)
                     .map(|i| {
                         (
-                            Bytes::from(format!("key{:016}", i)),
+                            key_fixed(i as u64),
                             Bytes::from(vec![42u8; 1000]),
                         )
                     })
@@ -244,7 +284,7 @@ fn bench_layer4_write_batch_construction(c: &mut Criterion) {
                 let key_values: Vec<(Bytes, Bytes)> = (0..size)
                     .map(|i| {
                         (
-                            Bytes::from(format!("key{:016}", i)),
+                            key_fixed(i as u64),
                             Bytes::from(vec![42u8; 1000]),
                         )
                     })
@@ -329,7 +369,7 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
                         .map(|i| {
                             WalRecord::new(
                                 WalOpKind::Put,
-                                Bytes::from(format!("key{:016}", i)),
+                                key_fixed(i as u64),
                                 Some(Bytes::from(vec![42u8; 1000])),
                                 seq.fetch_add(1, Ordering::SeqCst) + 1,
                             )
@@ -338,8 +378,11 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
 
                     // Simulate CF routing: assign each record to a CF
                     let mut cf_batches: Vec<Vec<_>> = vec![vec![]; cf_count];
-                    for (i, record) in records.iter().enumerate() {
-                        let cf_idx = i % cf_count;
+                    for record in records.iter() {
+                        // Hash the key bytes for a realistic CF distribution
+                        let mut hasher = DefaultHasher::new();
+                        record.key.as_ref().hash(&mut hasher);
+                        let cf_idx = (hasher.finish() as usize) % cf_count;
                         cf_batches[cf_idx].push(record.clone());
                     }
 
@@ -406,14 +449,12 @@ fn bench_layer6_concurrent_multi_cf(c: &mut Criterion) {
                                     // Each thread generates its own records and writes to multiple CFs
                                     for i in 0..batch_size {
                                         let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
-                                        let key = Bytes::from(format!(
-                                            "key_t{}_i{:016}",
-                                            thread_id, i
-                                        ));
+                                        // ensure types match helper signature
+                                        let key = key_threaded(thread_id as u32, i as u64);
                                         let value = Bytes::from(vec![42u8; 1000]);
 
-                                        // Route to a CF based on key hash
-                                        let cf_idx = i % cf_count;
+                                        // Route to a CF based on simple modulo (cast to usize for indexing)
+                                        let cf_idx = (i as usize) % (cf_count as usize);
                                         memtables[cf_idx].put_with_seq(&key, &value, s);
                                     }
                                 })
@@ -464,14 +505,9 @@ fn bench_layer7_wal_durability_modes(c: &mut Criterion) {
                         .expect("open WAL");
                 let seq = Arc::new(AtomicU64::new(0));
 
-                // Pre-create record templates
+                // Pre-create record templates using key_fixed to avoid format! allocations
                 let key_values: Vec<(Bytes, Bytes)> = (0..batch_size)
-                    .map(|i| {
-                        (
-                            Bytes::from(format!("key{:016}", i)),
-                            Bytes::from(vec![42u8; 1000]),
-                        )
-                    })
+                    .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
                     .collect();
 
                 b.iter(|| {
@@ -499,6 +535,140 @@ fn bench_layer7_wal_durability_modes(c: &mut Criterion) {
     }
 
     group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Manual Summary Aggregation (developer helper, not run by Criterion)
+// ---------------------------------------------------------------------------
+// This helper runs lightweight, manual timings for each layer and prints a
+// simple table of mean elapsed ms and percent delta relative to Layer 1.
+// It's intentionally standalone (not wired into Criterion) so you can invoke
+// it from a small dev harness or REPL while iterating.
+#[allow(dead_code)]
+fn overhead_aggregate_summary_once() {
+    let batch_size = 100usize;
+    let reps = 5usize;
+
+    // Helper to run a closure `reps` times and return mean ms.
+    fn mean_ms<F: Fn()>(reps: usize, f: F) -> f64 {
+        let mut totals: Vec<f64> = Vec::with_capacity(reps);
+        for _ in 0..reps {
+            let start = Instant::now();
+            f();
+            let elapsed = start.elapsed();
+            totals.push(elapsed.as_secs_f64() * 1000.0);
+        }
+        let sum: f64 = totals.iter().sum();
+        sum / (totals.len() as f64)
+    }
+
+    // Layer implementations mirror the Criterion benches but are simplified
+    // and run in-process to produce a quick, comparable number.
+    let layer1 = mean_ms(reps, || {
+        let tmp = tempdir().expect("tempdir");
+        let writer =
+            FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+
+        let key_values: Vec<(Bytes, Bytes)> = (0..batch_size)
+            .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
+            .collect();
+
+        // Build records and append
+        let records: Vec<WalRecord> = key_values
+            .iter()
+            .enumerate()
+            .map(|(i, (k, v))| WalRecord::new(WalOpKind::Put, k.clone(), Some(v.clone()), i as u64))
+            .collect();
+        writer.append_batch(&records).ok();
+        black_box(&writer);
+    });
+
+    let layer2 = mean_ms(reps, || {
+        let tmp = tempdir().expect("tempdir");
+        let writer =
+            FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let seq = Arc::new(AtomicU64::new(0));
+
+        let key_values: Vec<(Bytes, Bytes)> = (0..batch_size)
+            .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
+            .collect();
+
+        let mut records = Vec::with_capacity(batch_size);
+        for (key, value) in &key_values {
+            let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
+            records.push(WalRecord::new(WalOpKind::Put, key.clone(), Some(value.clone()), s));
+        }
+        writer.append_batch(&records).ok();
+        black_box(&writer);
+    });
+
+    let layer3 = mean_ms(reps, || {
+        let tmp = tempdir().expect("tempdir");
+        let writer =
+            FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let memtable = MemTable::new();
+        let seq = Arc::new(AtomicU64::new(0));
+
+        let key_values: Vec<(Bytes, Bytes)> = (0..batch_size)
+            .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
+            .collect();
+
+        let mut records = Vec::with_capacity(batch_size);
+        for (key, value) in &key_values {
+            let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
+            records.push(WalRecord::new(WalOpKind::Put, key.clone(), Some(value.clone()), s));
+        }
+
+        writer.append_batch(&records).ok();
+        for record in &records {
+            memtable.put_with_seq(&record.key, record.value.as_ref().unwrap(), record.seq);
+        }
+        black_box(&memtable);
+    });
+
+    let layer4 = mean_ms(reps, || {
+        let tmp = tempdir().expect("tempdir");
+        let writer =
+            FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let memtable = MemTable::new();
+        let seq = Arc::new(AtomicU64::new(0));
+
+        let key_values: Vec<(Bytes, Bytes)> = (0..batch_size)
+            .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
+            .collect();
+
+        let mut records = Vec::with_capacity(batch_size);
+        for (_, (key, value)) in key_values.iter().enumerate() {
+            let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
+            records.push(WalRecord {
+                cf_id: 0,
+                op: WalOpKind::Put,
+                key: key.clone(),
+                value: Some(value.clone()),
+                seq: s,
+                expiration: None,
+                range_end: None,
+                txn_id: None,
+                compression: None,
+            });
+        }
+
+        writer.append_batch(&records).ok();
+        for record in &records {
+            memtable.put_with_seq(&record.key, record.value.as_ref().unwrap(), record.seq);
+        }
+        black_box(&memtable);
+    });
+
+    // Simple printout
+    println!("Overhead summary (batch_size = {}, reps = {})", batch_size, reps);
+    println!("Layer | mean (ms) | % delta vs L1");
+    println!("1     | {:8.3}  | 0.00%", layer1);
+    println!("2     | {:8.3}  | {:+.2}%", layer2, (layer2 - layer1) / layer1 * 100.0);
+    println!("3     | {:8.3}  | {:+.2}%", layer3, (layer3 - layer1) / layer1 * 100.0);
+    println!("4     | {:8.3}  | {:+.2}%", layer4, (layer4 - layer1) / layer1 * 100.0);
+
+    // Note: Layers 5/6 are more environment-dependent; include if needed later.
 }
 
 criterion_group! {
