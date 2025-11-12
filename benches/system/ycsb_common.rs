@@ -13,8 +13,10 @@ use tempfile::TempDir;
 // Configuration Constants
 // ============================================================================
 
-
+#[allow(dead_code)]
 pub const OPS_PER_ITER: usize = 5_000;
+
+#[allow(dead_code)]
 pub const RECORD_COUNT: usize = 25_000;
 
 #[allow(dead_code)]

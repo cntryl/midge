@@ -55,7 +55,7 @@ fn run_workload_c(engine: &MidgeEngine, operations: usize, record_count: usize, 
         let cf = &cf_list[cf_index];
         
         let start = Instant::now();
-        let _ = black_box(engine.get(&cf, &key));
+        let _ = black_box(engine.get(cf, &key));
         let elapsed_us = start.elapsed().as_micros() as u64;
         let _ = histogram.record(elapsed_us.max(1));
     }
@@ -86,7 +86,7 @@ fn run_workload_c_concurrent(
         let cf = &cf_list[cf_index];
         
         let start = Instant::now();
-        let _ = black_box(engine.get(&cf, &key));
+        let _ = black_box(engine.get(cf, &key));
         let elapsed_us = start.elapsed().as_micros() as u64;
         let _ = histogram.record(elapsed_us.max(1));
     }

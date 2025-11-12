@@ -59,7 +59,7 @@ fn run_workload_a(engine: &MidgeEngine, operations: usize, record_count: usize, 
         let start = Instant::now();
         if rng.random_bool(0.5) {
             // Read operation
-            let _ = black_box(engine.get(&cf, &key));
+            let _ = black_box(engine.get(cf, &key));
         } else {
             // Write operation - add to batch
             let value = generate_value(key_id, rng.random());
@@ -110,7 +110,7 @@ fn run_workload_a_concurrent(
         let start = Instant::now();
         if rng.random_bool(0.5) {
             // Read operation
-            let _ = black_box(engine.get(&cf, &key));
+            let _ = black_box(engine.get(cf, &key));
         } else {
             // Write operation - add to batch
             let value = generate_value(key_id, rng.random());

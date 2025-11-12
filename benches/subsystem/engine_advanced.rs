@@ -122,7 +122,7 @@ fn bench_column_family_scaling(c: &mut Criterion) {
                             let cf_idx = i % num_cfs;
                             let cf = &cf_list[cf_idx];
                             engine
-                                .put(&cf, &make_key(i), &make_value(i, 100))
+                                .put(cf, &make_key(i), &make_value(i, 100))
                                 .unwrap();
                         }
                         black_box(());

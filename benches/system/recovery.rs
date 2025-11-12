@@ -17,13 +17,13 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use criterion_helper::criterion_config;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::hint::black_box;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
 
-fn setup_db_at_path(path: &PathBuf, enable_wal_sync: bool) -> MidgeEngine {
+fn setup_db_at_path(path: &Path, enable_wal_sync: bool) -> MidgeEngine {
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
-            db_path: path.clone(),
+            db_path: path.to_path_buf(),
         },
         memtable_size: 4 * 1024 * 1024,
         enable_compaction: false,

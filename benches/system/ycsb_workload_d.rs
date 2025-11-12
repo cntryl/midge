@@ -58,12 +58,12 @@ fn run_workload_d(engine: &MidgeEngine, operations: usize, record_count: usize, 
             // Read latest - skewed towards recently inserted keys
             let key_id = zipfian.next(&mut rng);
             let key = generate_key(key_id);
-            let _ = black_box(engine.get(&cf, &key));
+            let _ = black_box(engine.get(cf, &key));
         } else {
             // Insert new record
             let key = generate_key(insert_key_id);
             let value = generate_value(insert_key_id, rng.random());
-            engine.put(&cf, &key, &value).unwrap();
+            engine.put(cf, &key, &value).unwrap();
             insert_key_id += 1;
         }
         let elapsed_us = start.elapsed().as_micros() as u64;
@@ -100,12 +100,12 @@ fn run_workload_d_concurrent(
             // Read latest - skewed towards recently inserted keys
             let key_id = zipfian.next(&mut rng);
             let key = generate_key(key_id);
-            let _ = black_box(engine.get(&cf, &key));
+            let _ = black_box(engine.get(cf, &key));
         } else {
             // Insert new record
             let key = generate_key(insert_key_id);
             let value = generate_value(insert_key_id, rng.random());
-            engine.put(&cf, &key, &value).unwrap();
+            engine.put(cf, &key, &value).unwrap();
             insert_key_id += 1;
         }
         let elapsed_us = start.elapsed().as_micros() as u64;

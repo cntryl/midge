@@ -249,10 +249,10 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
                         let start = Instant::now();
                         thread::scope(|scope| {
                             // 2 threads per CF
-                            for cf_idx in 0..pairs {
+                            for (cf_idx, cf) in cf_list.iter().enumerate().take(pairs) {
                                 for tid in 0..2 {
                                     let engine = Arc::clone(&engine);
-                                    let cf = cf_list[cf_idx].clone();
+                                    let cf = cf.clone();
                                     scope.spawn(move || {
                                         let base = cf_idx * 2 * 2_500 + tid * 2_500;
                                         for i in 0..2_500 {

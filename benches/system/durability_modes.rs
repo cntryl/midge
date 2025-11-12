@@ -223,7 +223,7 @@ fn run_write_heavy_workload(engine: &MidgeEngine, operations: usize) {
 
     for i in 0..operations {
         let key = generate_key(RECORD_COUNT + i);
-        let value = generate_value(i as usize, rng.random());
+        let value = generate_value(i, rng.random());
         let _ = engine.put(&cf, &key, &value);
     }
 }

@@ -22,14 +22,11 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use criterion_helper::criterion_config;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use cntryl_midge::api::query::Query;
-use bytes::Bytes;
-use hdrhistogram::Histogram;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
 use ycsb_common::*;
 
 // ============================================================================
@@ -92,16 +89,16 @@ fn run_workload_e(engine: &MidgeEngine, operations: usize, cf_count: usize) -> u
             let end_key = generate_key(scan_start + scan_len);
 
             let query = Query::new()
-                .start_key(Bytes::from(start_key))
-                .end_key(Bytes::from(end_key));
-            let _ = black_box(engine.scan(&cf, query).unwrap_or_default());
+                .start_key(start_key)
+                .end_key(end_key);
+            let _ = black_box(engine.scan(cf, query).unwrap_or_default());
             scan_count += 1;
         } else {
             // Insert operation (5%)
             let new_id = RECORD_COUNT + rng.gen_range(0..10_000); // Insert new keys
             let key = generate_key(new_id);
             let value = generate_value(new_id, rng.random());
-            let _ = engine.put(&cf, &key, &value);
+            let _ = engine.put(cf, &key, &value);
         }
     }
 
@@ -202,9 +199,9 @@ fn bench_workload_e_scan_lengths(c: &mut Criterion) {
                             let end_key = generate_key(start_key_id + max_len);
 
                             let query = Query::new()
-                                .start_key(Bytes::from(start_key))
-                                .end_key(Bytes::from(end_key));
-                            let _ = black_box(engine.scan(&cf, query).unwrap_or_default());
+                                .start_key(start_key)
+                                .end_key(end_key);
+                            let _ = black_box(engine.scan(cf, query).unwrap_or_default());
                         }
                     },
                     criterion::BatchSize::SmallInput,

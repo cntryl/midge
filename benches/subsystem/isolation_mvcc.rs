@@ -92,7 +92,7 @@ fn bench_concurrent_puts_latency(c: &mut Criterion) {
     for &threads in &[1, 2, 4, 8] {
         for latency_pct in &["p50", "p99"] {
             group.bench_with_input(
-                BenchmarkId::new(&format!("put_{}_latency_us", latency_pct), threads),
+                BenchmarkId::new(format!("put_{}_latency_us", latency_pct), threads),
                 &threads,
                 |b, &tcount| {
                     b.iter_batched(
