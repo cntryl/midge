@@ -108,7 +108,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
         },
         |eng| {
             // Assert - latest values should be present
-            let cf = eng.default_column_family();
+            let _cf = eng.default_column_family();
             for i in 0..100 {
                 assert_get_equals(eng, format!("key{:04}", i).as_bytes(), b"v2");
             }

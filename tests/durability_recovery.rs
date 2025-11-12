@@ -144,7 +144,7 @@ fn should_deduplicate_replay_given_partial_flush_in_manifest() {
         },
         |eng| {
             // Assert - each key should have latest value only (no duplicates)
-            let cf = eng.default_column_family();
+            let _cf = eng.default_column_family();
             for i in 0..50 {
                 assert_get_equals(eng, format!("key{:04}", i).as_bytes(), b"v2");
             }
@@ -178,7 +178,6 @@ fn should_maintain_exactly_once_semantics_across_crash_recovery() {
 
     // Assert - all cycles should be present exactly once
     let eng = MidgeEngine::open(opts).expect("final open");
-    let cf = eng.default_column_family();
     for cycle in 0..5 {
         assert_get_equals(
             &eng,

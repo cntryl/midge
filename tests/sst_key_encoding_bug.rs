@@ -11,13 +11,15 @@ use common::test_temp_dir;
 fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
     // Arrange: Write keys to SST using explicit flush
     let dir = test_temp_dir();
-    let mut opts = MidgeOptions::default();
-    opts.storage_mode = StorageMode::LocalDisk {
-        db_path: dir.path().to_path_buf(),
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        enable_compaction: false,
+        wal_buffer_size: 1024 * 1024, // Large to avoid rotation
+        memtable_size: 1024 * 1024,
+        ..Default::default()
     };
-    opts.enable_compaction = false;
-    opts.wal_buffer_size = 1024 * 1024; // Large to avoid rotation
-    opts.memtable_size = 1024 * 1024;
 
     let eng = MidgeEngine::open(opts).expect("open");
     let cf = eng.default_column_family();
@@ -82,13 +84,15 @@ fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
 fn should_return_user_keys_for_tombstones_in_sst() {
     // Arrange
     let dir = test_temp_dir();
-    let mut opts = MidgeOptions::default();
-    opts.storage_mode = StorageMode::LocalDisk {
-        db_path: dir.path().to_path_buf(),
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        enable_compaction: false,
+        wal_buffer_size: 1024 * 1024,
+        memtable_size: 1024 * 1024,
+        ..Default::default()
     };
-    opts.enable_compaction = false;
-    opts.wal_buffer_size = 1024 * 1024;
-    opts.memtable_size = 1024 * 1024;
 
     let eng = MidgeEngine::open(opts).expect("open");
     let cf = eng.default_column_family();
@@ -118,13 +122,15 @@ fn should_return_user_keys_for_tombstones_in_sst() {
 fn should_not_expose_internal_key_format_in_multi_version_scan() {
     // Arrange: Create multiple versions of the same key in SST
     let dir = test_temp_dir();
-    let mut opts = MidgeOptions::default();
-    opts.storage_mode = StorageMode::LocalDisk {
-        db_path: dir.path().to_path_buf(),
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        enable_compaction: false,
+        wal_buffer_size: 1024 * 1024,
+        memtable_size: 1024 * 1024,
+        ..Default::default()
     };
-    opts.enable_compaction = false;
-    opts.wal_buffer_size = 1024 * 1024;
-    opts.memtable_size = 1024 * 1024;
 
     let eng = MidgeEngine::open(opts).expect("open");
     let cf = eng.default_column_family();

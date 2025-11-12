@@ -144,8 +144,10 @@ fn should_call_manifest_hook_on_save() {
     let dir = TempDir::new().unwrap();
     let hooks = TestHooks::new();
 
-    let mut manifest = Manifest::default();
-    manifest.last_persisted_sequence = 42;
+    let manifest = Manifest {
+        last_persisted_sequence: 42,
+        ..Default::default()
+    };
 
     // Act
     let initial_count = hooks.manifest_update_count();

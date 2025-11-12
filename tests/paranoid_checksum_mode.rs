@@ -127,8 +127,8 @@ fn should_use_paranoid_mode_with_default_off() {
     let opts = MidgeOptions::default();
 
     // Assert
-    assert_eq!(
-        opts.paranoid_checksums, false,
+    assert!(
+        !opts.paranoid_checksums,
         "paranoid_checksums should default to false for performance"
     );
 }
