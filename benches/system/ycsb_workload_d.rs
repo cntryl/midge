@@ -1,4 +1,7 @@
-//! YCSB Workload D: 95% Read Latest / 5% Insert - consolidated scenarios
+//! YCSB Workload D: 95% Read Latest / 5% Insert
+//!
+//! Benchmarks read-latest workload across column families (1, 2, 4, 8, 16)
+//! and scales concurrency (1, 2, 8 threads).
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -15,13 +18,22 @@ use std::sync::Arc;
 use std::thread;
 use ycsb_common::*;
 
-fn run_workload_d(engine: &MidgeEngine, operations: usize, record_count: usize) {
-    let cf = engine.default_column_family();
+const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
+
+// ============================================================================
+// Core workload logic
+// ============================================================================
+
+fn run_workload_d(engine: &MidgeEngine, operations: usize, record_count: usize, cf_count: usize) {
+    let cf_list = engine.list_column_families();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
     let mut insert_key_id = record_count;
 
     for _ in 0..operations {
+        let cf_index = rng.gen_range(0..cf_count);
+        let cf = &cf_list[cf_index];
+
         if rng.random_bool(0.95) {
             // Read latest - skewed towards recently inserted keys
             let key_id = zipfian.next(&mut rng);
@@ -37,97 +49,132 @@ fn run_workload_d(engine: &MidgeEngine, operations: usize, record_count: usize) 
     }
 }
 
-fn bench_workload_d(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ycsb_workload_d");
-    group.throughput(Throughput::Elements(OPS_PER_ITER as u64));
+fn run_workload_d_concurrent(
+    engine: Arc<MidgeEngine>,
+    operations_per_thread: usize,
+    record_count: usize,
+    thread_id: usize,
+    cf_count: usize,
+) {
+    let cf_list = engine.list_column_families();
+    let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
+    let zipfian = ZipfianGenerator::new(record_count, 0.99);
+    // Each thread uses an insert key offset to avoid collisions
+    let mut insert_key_id = record_count + thread_id * operations_per_thread;
 
-    // Non-concurrent scenarios
-    let scenarios = ["fs_nosync", "fs_sync", "cloud_nosync", "cloud_sync"];
+    for _ in 0..operations_per_thread {
+        let cf_index = rng.gen_range(0..cf_count);
+        let cf = &cf_list[cf_index];
 
-    for &scenario in &scenarios {
-        match scenario {
-            "fs_nosync" => {
-                let (engine, _temp_dir) = setup_engine_fs_nosync();
-                load_data(&engine, RECORD_COUNT);
-                group.bench_with_input(BenchmarkId::new("95r_5i", scenario), &engine, |b, e| {
-                    b.iter(|| run_workload_d(e, OPS_PER_ITER, RECORD_COUNT))
-                });
-            }
-            "fs_sync" => {
-                let (engine, _temp_dir) = setup_engine_fs_sync();
-                load_data(&engine, RECORD_COUNT);
-                group.bench_with_input(BenchmarkId::new("95r_5i", scenario), &engine, |b, e| {
-                    b.iter(|| run_workload_d(e, OPS_PER_ITER, RECORD_COUNT))
-                });
-            }
-            "cloud_nosync" => {
-                let (engine, _backend) = setup_engine_cloud_nosync();
-                load_data(&engine, RECORD_COUNT);
-                group.bench_with_input(BenchmarkId::new("95r_5i", scenario), &engine, |b, e| {
-                    b.iter(|| run_workload_d(e, OPS_PER_ITER, RECORD_COUNT))
-                });
-            }
-            "cloud_sync" => {
-                let (engine, _backend) = setup_engine_cloud_sync();
-                load_data(&engine, RECORD_COUNT);
-                group.bench_with_input(BenchmarkId::new("95r_5i", scenario), &engine, |b, e| {
-                    b.iter(|| run_workload_d(e, OPS_PER_ITER, RECORD_COUNT))
-                });
-            }
-            _ => unreachable!(),
+        if rng.random_bool(0.95) {
+            // Read latest - skewed towards recently inserted keys
+            let key_id = zipfian.next(&mut rng);
+            let key = generate_key(key_id);
+            let _ = black_box(engine.get(&cf, &key));
+        } else {
+            // Insert new record
+            let key = generate_key(insert_key_id);
+            let value = generate_value(insert_key_id, rng.random());
+            engine.put(&cf, &key, &value).unwrap();
+            insert_key_id += 1;
         }
     }
+}
 
-    // Concurrent scenarios (different thread counts) - centralized in `ycsb_common`
-    for &threads in &THREAD_COUNTS {
-        let total_ops = OPS_PER_ITER;
-        let ops_per_thread = total_ops / threads;
+// ============================================================================
+// Benchmark driver
+// ============================================================================
 
-        // For concurrent tests we use the fs_nosync setup, matching prior behavior
-        let (engine, _temp_dir) = setup_engine_fs_nosync();
-        load_data(&engine, RECORD_COUNT);
-        let engine = Arc::new(engine);
+fn bench_workload_d(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ycsb_workload_d_cf_variants");
+    group.throughput(Throughput::Elements(OPS_PER_ITER as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("concurrent_95r_5i", threads),
-            &threads,
-            |b, &_threads| {
-                b.iter(|| {
-                    let cf = engine.default_column_family();
-                    let handles: Vec<_> = (0..threads)
-                        .map(|thread_id| {
-                            let engine = Arc::clone(&engine);
-                            let cf = cf.clone();
-                            thread::spawn(move || {
-                                let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
-                                let zipfian = ZipfianGenerator::new(RECORD_COUNT, 0.99);
-                                // Each thread uses an insert key offset to avoid collisions
-                                let mut insert_key_id = RECORD_COUNT + thread_id * ops_per_thread;
+    let scenarios = ["fs_nosync", "fs_sync", "cloud_nosync", "cloud_sync"];
 
-                                for _ in 0..ops_per_thread {
-                                    if rng.random_bool(0.95) {
-                                        // Read latest - skewed towards recently inserted keys
-                                        let key_id = zipfian.next(&mut rng);
-                                        let key = generate_key(key_id);
-                                        let _ = black_box(engine.get(&cf, &key));
-                                    } else {
-                                        // Insert new record
-                                        let key = generate_key(insert_key_id);
-                                        let value = generate_value(insert_key_id, rng.random());
-                                        engine.put(&cf, &key, &value).unwrap();
-                                        insert_key_id += 1;
-                                    }
-                                }
+    for &cf_count in CF_COUNTS {
+        for &scenario in &scenarios {
+            let (engine, _backend) = match scenario {
+                "fs_nosync" => {
+                    let (e, _t) = setup_engine_fs_nosync();
+                    (e, None)
+                }
+                "fs_sync" => {
+                    let (e, _t) = setup_engine_fs_sync();
+                    (e, None)
+                }
+                "cloud_nosync" => {
+                    let (e, b) = setup_engine_cloud_nosync();
+                    (e, Some(b))
+                }
+                "cloud_sync" => {
+                    let (e, b) = setup_engine_cloud_sync();
+                    (e, Some(b))
+                }
+                _ => unreachable!(),
+            };
+
+            // Create additional column families
+            for i in 1..cf_count {
+                let _ = engine.create_column_family(
+                    &format!("cf{}", i),
+                    Default::default(),
+                );
+            }
+
+            load_data(&engine, RECORD_COUNT);
+
+            group.bench_with_input(
+                BenchmarkId::new(format!("{scenario}_cf{cf_count}"), "95r_5i"),
+                &cf_count,
+                |b, &_cf_count| {
+                    b.iter(|| run_workload_d(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count))
+                },
+            );
+        }
+
+        // Concurrent (threads × cf_count)
+        for &threads in &THREAD_COUNTS {
+            let (engine, _temp_dir) = setup_engine_fs_nosync();
+            
+            // Create additional column families
+            for i in 1..cf_count {
+                let _ = engine.create_column_family(
+                    &format!("cf{}", i),
+                    Default::default(),
+                );
+            }
+            
+            load_data(&engine, RECORD_COUNT);
+            let engine = Arc::new(engine);
+            let total_ops = OPS_PER_ITER;
+            let ops_per_thread = total_ops / threads;
+
+            group.bench_with_input(
+                BenchmarkId::new(format!("concurrent_cf{cf_count}"), threads),
+                &threads,
+                |b, &_threads| {
+                    b.iter(|| {
+                        let handles: Vec<_> = (0..threads)
+                            .map(|thread_id| {
+                                let engine = Arc::clone(&engine);
+                                thread::spawn(move || {
+                                    run_workload_d_concurrent(
+                                        engine,
+                                        ops_per_thread,
+                                        RECORD_COUNT,
+                                        thread_id,
+                                        cf_count,
+                                    )
+                                })
                             })
-                        })
-                        .collect();
-
-                    for handle in handles {
-                        handle.join().unwrap();
-                    }
-                })
-            },
-        );
+                            .collect();
+                        for h in handles {
+                            h.join().unwrap();
+                        }
+                    })
+                },
+            );
+        }
     }
 
     group.finish();
