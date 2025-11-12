@@ -379,9 +379,10 @@ impl MidgeEngine {
                     let items: Vec<(Bytes, Option<Bytes>, u64)> = rows
                         .into_iter()
                         .map(|(k, st)| {
-                            let user_key = crate::common::internal_key::decode_internal_key(k.as_ref())
-                                .map(|(u, s, _t)| (Bytes::from(u), s))
-                                .unwrap_or_else(|| (k, 0));
+                            let user_key =
+                                crate::common::internal_key::decode_internal_key(k.as_ref())
+                                    .map(|(u, s, _t)| (Bytes::from(u), s))
+                                    .unwrap_or_else(|| (k, 0));
                             match st {
                                 crate::sst::KeyState::Value(v, seq, expiration) => {
                                     // Check if key is expired

@@ -10,9 +10,9 @@
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
+use cntryl_midge::sst::BloomFilter;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use criterion_helper::criterion_config;
-use cntryl_midge::sst::BloomFilter;
 
 use std::hint::black_box;
 

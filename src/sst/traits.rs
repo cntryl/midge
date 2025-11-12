@@ -130,7 +130,7 @@ pub trait DynSstWriter: Send {
 pub trait SstFactory: Send + Sync {
     fn create(
         &self,
-    compression: crate::common::codec::CompressionType,
+        compression: crate::common::codec::CompressionType,
         block_size: usize,
         use_internal: bool,
     ) -> Box<dyn DynSstWriter>;
@@ -138,7 +138,7 @@ pub trait SstFactory: Send + Sync {
     /// Create an SST writer with custom bloom filter configuration.
     fn create_with_bloom(
         &self,
-    compression: crate::common::codec::CompressionType,
+        compression: crate::common::codec::CompressionType,
         block_size: usize,
         use_internal: bool,
         _bloom_bits_per_key: u32,

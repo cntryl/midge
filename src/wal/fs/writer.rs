@@ -1091,7 +1091,7 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let mut wal = Wal::open(dir.path()).expect("open");
 
-    let cf_id = crate::api::column_family::ColumnFamilyId::new(42);
+        let cf_id = crate::api::column_family::ColumnFamilyId::new(42);
         let rec = WalRecord::new_cf(
             cf_id,
             crate::wal::WalOpKind::Put,

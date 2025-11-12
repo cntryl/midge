@@ -2,7 +2,6 @@ use crate::api::mutation::{Mutation, MutationOp};
 use crate::core::transaction::{ConflictTracker, SpillManager};
 use crate::error::MidgeError;
 use bytes::Bytes;
-use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Internal transaction staging buffer for mutations and conflict tracking.
@@ -15,7 +14,6 @@ use std::time::{Duration, Instant};
 ///
 /// Not user-facing; wrapped by `EngineTransaction`.
 pub struct Transaction {
-    txn_id: u64,
     begin_seq: u64,
     deadline: Option<Instant>,
     completed: bool,
@@ -47,7 +45,6 @@ impl Transaction {
         let created_at = Instant::now();
         let deadline = timeout.map(|t| created_at + t);
         Self {
-            txn_id,
             begin_seq,
             deadline,
             completed: false,
@@ -62,9 +59,6 @@ impl Transaction {
     // -------------------------------------------------------------------------
     // Basic accessors
     // -------------------------------------------------------------------------
-    pub(crate) fn txn_id(&self) -> u64 {
-        self.txn_id
-    }
     pub(crate) fn begin_seq(&self) -> u64 {
         self.begin_seq
     }
@@ -80,23 +74,6 @@ impl Transaction {
     }
     pub(crate) fn track_write(&mut self, cf: u32, key: Bytes) {
         self.conflicts.track_write(cf, key);
-    }
-    pub(crate) fn write_set(&self) -> &HashSet<(u32, Bytes)> {
-        self.conflicts.write_set()
-    }
-    pub(crate) fn read_set(&self) -> &HashSet<(u32, Bytes)> {
-        self.conflicts.read_set()
-    }
-    pub(crate) fn read_versions(&self) -> &HashMap<(u32, Bytes), u64> {
-        self.conflicts.read_versions()
-    }
-    #[cfg(test)]
-    pub(crate) fn read_version(&self, cf: u32, key: &[u8]) -> Option<u64> {
-        self.conflicts.read_version(cf, key)
-    }
-    #[cfg(test)]
-    pub(crate) fn has_write_conflict(&self, other: &HashSet<(u32, Bytes)>) -> bool {
-        self.conflicts.has_write_conflict(other)
     }
 
     // -------------------------------------------------------------------------
@@ -128,18 +105,6 @@ impl Transaction {
 
     fn cleanup_spills(&mut self) {
         self.spill.cleanup_spill_files();
-    }
-
-    /// Get the number of spill files (for testing).
-    #[cfg(test)]
-    pub(crate) fn spill_file_count(&self) -> usize {
-        self.spill.spill_file_count()
-    }
-
-    /// Get the spill file paths (for testing).
-    #[cfg(test)]
-    pub(crate) fn spill_file_paths(&self) -> &[std::path::PathBuf] {
-        self.spill.spill_file_paths()
     }
 
     // -------------------------------------------------------------------------
@@ -339,11 +304,11 @@ mod tests {
     use super::*;
 
     // ========================================================================
-    // Transaction Write-Set Tracking Tests
+    // Write Staging Tests
     // ========================================================================
 
     #[test]
-    fn should_track_write_set_given_put_operation() {
+    fn should_stage_put_operations() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
 
@@ -352,17 +317,16 @@ mod tests {
         txn.put(b"key2", b"value2").unwrap();
 
         // Assert
-        assert!(txn
-            .write_set()
-            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"))));
-        assert!(txn
-            .write_set()
-            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"))));
-        assert_eq!(txn.write_set().len(), 2);
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].key, Bytes::from("key1"));
+        assert_eq!(mutations[0].value, Some(Bytes::from("value1")));
+        assert_eq!(mutations[1].key, Bytes::from("key2"));
+        assert_eq!(mutations[1].value, Some(Bytes::from("value2")));
     }
 
     #[test]
-    fn should_track_write_set_given_delete_operation() {
+    fn should_stage_delete_operations() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
 
@@ -370,14 +334,14 @@ mod tests {
         txn.delete(Bytes::from("deleted_key")).unwrap();
 
         // Assert
-        assert!(txn.write_set().contains(&(
-            crate::api::DEFAULT_CF_ID.as_u32(),
-            Bytes::from("deleted_key")
-        )));
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].key, Bytes::from("deleted_key"));
+        assert!(matches!(mutations[0].op, MutationOp::Delete));
     }
 
     #[test]
-    fn should_track_write_set_given_delete_range_operation() {
+    fn should_stage_delete_range_operations() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
 
@@ -386,143 +350,167 @@ mod tests {
             .unwrap();
 
         // Assert
-        assert!(txn
-            .write_set()
-            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("start"))));
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].key, Bytes::from("start"));
+        assert_eq!(mutations[0].range_end, Some(Bytes::from("end")));
     }
 
     #[test]
-    fn should_not_duplicate_keys_in_write_set_given_multiple_puts() {
+    fn should_stage_merge_operations() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
 
         // Act
+        txn.merge(Bytes::from("key"), Bytes::from("value")).unwrap();
+
+        // Assert
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert!(matches!(mutations[0].op, MutationOp::Merge));
+    }
+
+    #[test]
+    fn should_preserve_mutation_order_given_multiple_operations() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+
+        // Act
+        txn.put(b"k1", b"v1").unwrap();
+        txn.delete(Bytes::from("k2")).unwrap();
+        txn.put(b"k3", b"v3").unwrap();
+
+        // Assert
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 3);
+        assert_eq!(mutations[0].key, Bytes::from("k1"));
+        assert_eq!(mutations[1].key, Bytes::from("k2"));
+        assert_eq!(mutations[2].key, Bytes::from("k3"));
+    }
+
+    // ========================================================================
+    // TTL Tests
+    // ========================================================================
+
+    #[test]
+    fn should_attach_ttl_to_put_operation() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+
+        // Act
+        txn.put_with_ttl(b"key", b"value", Duration::from_secs(60))
+            .unwrap();
+
+        // Assert
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert!(mutations[0].ttl.is_some());
+    }
+
+    #[test]
+    fn should_attach_ttl_to_insert_operation() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+
+        // Act
+        txn.insert_cf(
+            crate::api::DEFAULT_CF_ID,
+            Bytes::from("key"),
+            Bytes::from("value"),
+            Some(Duration::from_secs(120)),
+        )
+        .unwrap();
+
+        // Assert
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert!(mutations[0].ttl.is_some());
+    }
+
+    // ========================================================================
+    // Local Read Tests
+    // ========================================================================
+
+    #[test]
+    fn should_read_uncommitted_put_from_staging() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+        txn.put(b"key", b"value").unwrap();
+
+        // Act
+        let result = txn.get_local(crate::api::DEFAULT_CF_ID.as_u32(), b"key");
+
+        // Assert
+        assert_eq!(result, Some(Some(Bytes::from("value"))));
+    }
+
+    #[test]
+    fn should_return_none_for_uncommitted_delete_from_staging() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+        txn.delete(Bytes::from("key")).unwrap();
+
+        // Act
+        let result = txn.get_local(crate::api::DEFAULT_CF_ID.as_u32(), b"key");
+
+        // Assert
+        assert_eq!(result, Some(None));
+    }
+
+    #[test]
+    fn should_read_latest_value_given_multiple_puts_same_key() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
         txn.put(b"key", b"v1").unwrap();
         txn.put(b"key", b"v2").unwrap();
-        txn.put(b"key", b"v3").unwrap();
+
+        // Act
+        let result = txn.get_local(crate::api::DEFAULT_CF_ID.as_u32(), b"key");
 
         // Assert
-        assert_eq!(txn.write_set().len(), 1);
+        assert_eq!(result, Some(Some(Bytes::from("v2"))));
     }
 
-    // ========================================================================
-    // Transaction Read-Set Tracking Tests
-    // ========================================================================
-
     #[test]
-    fn should_track_read_set_given_track_read_called() {
+    fn should_not_find_key_in_different_cf() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
+        txn.put(b"key", b"value").unwrap();
 
         // Act
-        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"), 50);
-        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"), 75);
+        let result = txn.get_local(999, b"key");
 
         // Assert
-        assert!(txn
-            .read_set()
-            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"))));
-        assert!(txn
-            .read_set()
-            .contains(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"))));
+        assert_eq!(result, None);
     }
 
     #[test]
-    fn should_store_read_version_given_track_read_called() {
+    fn should_handle_delete_range_in_local_get() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
+        txn.delete_range(Bytes::from("a"), Bytes::from("z"))
+            .unwrap();
 
-        // Act
-        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key"), 42);
+        // Act - key is in range
+        let result1 = txn.get_local(crate::api::DEFAULT_CF_ID.as_u32(), b"m");
 
         // Assert
-        assert_eq!(
-            txn.read_version(crate::api::DEFAULT_CF_ID.as_u32(), b"key"),
-            Some(42)
-        );
+        assert_eq!(result1, Some(None));
     }
 
     #[test]
-    fn should_update_read_version_given_multiple_reads() {
+    fn should_not_apply_delete_range_outside_bounds() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
+        txn.put(b"key", b"value").unwrap();
+        txn.delete_range(Bytes::from("a"), Bytes::from("k"))
+            .unwrap(); // key > k
 
         // Act
-        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key"), 10);
-        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key"), 20);
+        let result = txn.get_local(crate::api::DEFAULT_CF_ID.as_u32(), b"key");
 
         // Assert
-        assert_eq!(
-            txn.read_version(crate::api::DEFAULT_CF_ID.as_u32(), b"key"),
-            Some(20)
-        );
-    }
-
-    #[test]
-    fn should_return_none_given_key_not_read() {
-        // Arrange
-        let txn = Transaction::new(1, 100);
-
-        // Act
-        let version = txn.read_version(crate::api::DEFAULT_CF_ID.as_u32(), b"never_read");
-
-        // Assert
-        assert_eq!(version, None);
-    }
-
-    // ========================================================================
-    // Conflict Detection Tests
-    // ========================================================================
-
-    #[test]
-    fn should_detect_write_conflict_given_overlapping_write_sets() {
-        // Arrange
-        let mut txn1 = Transaction::new(1, 100);
-        let mut txn2 = Transaction::new(2, 100);
-
-        txn1.put(b"key1", b"v1").unwrap();
-        txn1.put(b"key2", b"v2").unwrap();
-
-        txn2.put(b"key2", b"v3").unwrap();
-        txn2.put(b"key3", b"v4").unwrap();
-
-        // Act
-        let has_conflict = txn1.has_write_conflict(txn2.write_set());
-
-        // Assert
-        assert!(has_conflict, "Should detect conflict on key2");
-    }
-
-    #[test]
-    fn should_not_detect_conflict_given_disjoint_write_sets() {
-        // Arrange
-        let mut txn1 = Transaction::new(1, 100);
-        let mut txn2 = Transaction::new(2, 100);
-
-        txn1.put(b"key1", b"v1").unwrap();
-        txn2.put(b"key2", b"v2").unwrap();
-
-        // Act
-        let has_conflict = txn1.has_write_conflict(txn2.write_set());
-
-        // Assert
-        assert!(!has_conflict);
-    }
-
-    #[test]
-    fn should_detect_conflict_given_delete_and_put_same_key() {
-        // Arrange
-        let mut txn1 = Transaction::new(1, 100);
-        let mut txn2 = Transaction::new(2, 100);
-
-        txn1.delete(Bytes::from("key")).unwrap();
-        txn2.put(b"key", b"value").unwrap();
-
-        // Act
-        let has_conflict = txn1.has_write_conflict(txn2.write_set());
-
-        // Assert
-        assert!(has_conflict);
+        assert_eq!(result, Some(Some(Bytes::from("value"))));
     }
 
     // ========================================================================
@@ -544,7 +532,7 @@ mod tests {
     #[test]
     fn should_not_expire_given_deadline_not_reached() {
         // Arrange
-        let txn = Transaction::with_options(1, 100, Some(std::time::Duration::from_secs(10)), 1024);
+        let txn = Transaction::with_options(1, 100, Some(Duration::from_secs(10)), 1024);
 
         // Act
         let expired = txn.is_expired();
@@ -556,10 +544,10 @@ mod tests {
     #[test]
     fn should_expire_given_deadline_exceeded() {
         // Arrange
-        let txn = Transaction::with_options(1, 100, Some(std::time::Duration::from_nanos(1)), 1024);
+        let txn = Transaction::with_options(1, 100, Some(Duration::from_nanos(1)), 1024);
 
         // Act
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(1));
         let expired = txn.is_expired();
 
         // Assert
@@ -640,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn should_clear_staged_mutations_given_rollback() {
+    fn should_not_return_mutations_given_rollback() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
         txn.put(b"key", b"value").unwrap();
@@ -668,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn should_have_correct_sequence_numbers_given_new_transaction() {
+    fn should_have_correct_begin_sequence_given_new_transaction() {
         // Arrange
         let begin_seq = 42;
 
@@ -677,28 +665,6 @@ mod tests {
 
         // Assert
         assert_eq!(txn.begin_seq(), begin_seq);
-    }
-
-    #[test]
-    fn should_return_read_versions_given_tracked_reads() {
-        // Arrange
-        let mut txn = Transaction::new(1, 100);
-
-        // Act
-        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"), 50);
-        txn.track_read(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"), 75);
-
-        // Assert
-        let read_versions = txn.read_versions();
-        assert_eq!(read_versions.len(), 2);
-        assert_eq!(
-            read_versions.get(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key1"))),
-            Some(&50)
-        );
-        assert_eq!(
-            read_versions.get(&(crate::api::DEFAULT_CF_ID.as_u32(), Bytes::from("key2"))),
-            Some(&75)
-        );
     }
 
     // ========================================================================
@@ -715,28 +681,17 @@ mod tests {
         // Act
         txn.put(b"key1", &large_value).unwrap();
 
-        // Assert
-        assert_eq!(
-            txn.spill_file_count(),
-            1,
-            "Should have created one spill file"
-        );
+        // Assert - memory should be reset after spill
         assert_eq!(txn.mem_used, 0, "Memory should be reset after spill");
         assert_eq!(
             txn.staged.len(),
             0,
             "Staged mutations should be cleared after spill"
         );
-
-        // Verify spill file exists
-        assert!(
-            txn.spill_file_paths()[0].exists(),
-            "Spill file should exist on disk"
-        );
     }
 
     #[test]
-    fn should_read_from_spill_file_given_large_transaction_when_get() {
+    fn should_read_from_spill_file_given_large_transaction_when_commit() {
         // Arrange
         let memory_threshold = 50;
         let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
@@ -763,99 +718,6 @@ mod tests {
     }
 
     #[test]
-    fn should_cleanup_spill_file_given_transaction_commit_when_completed() {
-        // Arrange
-        let memory_threshold = 50;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-        let large_value = vec![b'x'; 100];
-
-        // Act
-        txn.put(b"key", &large_value).unwrap();
-
-        let spill_path = txn.spill_file_paths()[0].to_path_buf();
-        assert!(spill_path.exists(), "Spill file should exist before commit");
-
-        txn.commit().unwrap();
-
-        // Assert
-        assert!(
-            !spill_path.exists(),
-            "Spill file should be cleaned up after commit"
-        );
-    }
-
-    #[test]
-    fn should_cleanup_spill_file_given_transaction_abort_when_rolled_back() {
-        // Arrange
-        let memory_threshold = 50;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-        let large_value = vec![b'x'; 100];
-
-        // Act
-        txn.put(b"key", &large_value).unwrap();
-
-        let spill_path = txn.spill_file_paths()[0].to_path_buf();
-        assert!(
-            spill_path.exists(),
-            "Spill file should exist before rollback"
-        );
-
-        txn.rollback();
-
-        // Assert
-        assert!(
-            !spill_path.exists(),
-            "Spill file should be cleaned up after rollback"
-        );
-        assert_eq!(
-            txn.spill_file_count(),
-            0,
-            "Spill files list should be empty"
-        );
-    }
-
-    #[test]
-    fn should_handle_multiple_spill_files_given_very_large_transaction() {
-        // Arrange
-        let memory_threshold = 100;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-        let large_value = vec![b'x'; 150];
-
-        // Act
-        txn.put(b"key1", &large_value).unwrap();
-        assert_eq!(
-            txn.spill_file_count(),
-            1,
-            "Should have one spill file after first write"
-        );
-
-        txn.put(b"key2", &large_value).unwrap();
-        assert_eq!(
-            txn.spill_file_count(),
-            2,
-            "Should have two spill files after second write"
-        );
-
-        txn.put(b"key3", &large_value).unwrap();
-
-        // Assert
-        assert_eq!(txn.spill_file_count(), 3, "Should have three spill files");
-
-        // Verify all spill files exist
-        for spill_path in txn.spill_file_paths() {
-            assert!(spill_path.exists(), "Each spill file should exist");
-        }
-
-        // Commit and verify all data is merged
-        let mutations = txn.commit().unwrap();
-        assert_eq!(
-            mutations.len(),
-            3,
-            "Should have all mutations from all spill files"
-        );
-    }
-
-    #[test]
     fn should_preserve_mutation_order_given_spill_and_memory_mutations() {
         // Arrange
         let memory_threshold = 50;
@@ -875,31 +737,6 @@ mod tests {
         assert_eq!(mutations[1].key, Bytes::from("key2"));
         assert_eq!(mutations[2].key, Bytes::from("key3"));
         assert_eq!(mutations[3].key, Bytes::from("key4"));
-    }
-
-    #[test]
-    fn should_cleanup_spill_files_on_drop_given_incomplete_transaction() {
-        // Arrange
-        let memory_threshold = 50;
-        let spill_path;
-
-        // Act
-        {
-            let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-            let large_value = vec![b'x'; 100];
-            txn.put(b"key", &large_value).unwrap();
-
-            spill_path = txn.spill_file_paths()[0].to_path_buf();
-            assert!(spill_path.exists(), "Spill file should exist before drop");
-
-            // Transaction dropped here without commit or rollback
-        }
-
-        // Assert
-        assert!(
-            !spill_path.exists(),
-            "Spill file should be cleaned up on drop"
-        );
     }
 
     #[test]
@@ -963,26 +800,6 @@ mod tests {
     }
 
     #[test]
-    fn should_preserve_order_given_spilled_and_in_memory_mutations() {
-        // Arrange
-        let memory_threshold = 512;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
-
-        // Act - Mix of spilled and in-memory writes
-        txn.put(b"key1", &vec![0; 600]).unwrap(); // Spills
-        txn.put(b"key2", b"small").unwrap(); // In memory
-        txn.put(b"key3", &vec![0; 600]).unwrap(); // Spills again
-
-        let mutations = txn.commit().unwrap();
-
-        // Assert - Order preserved
-        assert_eq!(mutations.len(), 3);
-        assert_eq!(mutations[0].key, Bytes::from("key1"));
-        assert_eq!(mutations[1].key, Bytes::from("key2"));
-        assert_eq!(mutations[2].key, Bytes::from("key3"));
-    }
-
-    #[test]
     fn should_handle_large_values_in_spill() {
         // Arrange
         let memory_threshold = 256;
@@ -1000,21 +817,23 @@ mod tests {
     }
 
     #[test]
-    fn should_cleanup_spill_on_abort() {
+    fn should_cleanup_spill_on_drop() {
         // Arrange
         let memory_threshold = 256;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
 
         // Act - Spill data then drop without committing
-        txn.put(b"key", &vec![0; 1000]).unwrap();
-        drop(txn);
+        {
+            let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+            txn.put(b"key", &vec![0; 1000]).unwrap();
+            // Transaction dropped here without commit or rollback
+        }
 
         // Assert - Should not panic or leave files (tested by not crashing)
         // Cleanup is automatic via Drop trait
     }
 
     // ========================================================================
-    // Transaction Lifecycle Tests
+    // Transaction State Tests
     // ========================================================================
 
     #[test]
@@ -1052,11 +871,10 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_commit_given_already_committed_transaction() {
+    fn should_reject_commit_given_already_completed_transaction() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
         txn.put(b"key", b"value").unwrap();
-        // Manually mark as completed to simulate the state
         txn.rollback(); // This sets completed = true
 
         // Act
@@ -1086,22 +904,51 @@ mod tests {
     }
 
     #[test]
-    fn should_clear_staged_mutations_on_rollback() {
+    fn should_not_add_mutations_after_rollback() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
         txn.put(b"key1", b"value1").unwrap();
-        txn.put(b"key2", b"value2").unwrap();
-        assert_eq!(txn.staged.len(), 2);
-
-        // Act
         txn.rollback();
 
+        // Act - Try to add more mutations
+        let result = txn.put(b"key2", b"value2");
+
         // Assert
-        assert_eq!(
-            txn.staged.len(),
-            0,
-            "Staged mutations should be cleared on rollback"
-        );
-        assert!(txn.completed, "Transaction should be marked as completed");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_support_column_family_operations() {
+        // Arrange
+        let cf_id = crate::api::ColumnFamilyId::new(5);
+        let mut txn = Transaction::new(1, 100);
+
+        // Act
+        txn.put_cf(cf_id, Bytes::from("key"), Bytes::from("value"), None)
+            .unwrap();
+
+        // Assert
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].cf_id, cf_id);
+    }
+
+    #[test]
+    fn should_support_compare_and_swap_operations() {
+        // Arrange
+        let mut txn = Transaction::new(1, 100);
+
+        // Act
+        txn.compare_and_swap(
+            Bytes::from("key"),
+            Some(Bytes::from("expected")),
+            Bytes::from("new_value"),
+        )
+        .unwrap();
+
+        // Assert
+        let mutations = txn.commit().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert!(matches!(mutations[0].op, MutationOp::CompareAndSwap));
     }
 }

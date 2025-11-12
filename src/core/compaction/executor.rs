@@ -515,7 +515,7 @@ mod tests {
         // Arrange: key with value at seq=100, tombstone at seq=200
         // Snapshot exists at seq=150, so it should see value at seq=100 (100 < 150)
         let mut versions = vec![
-            make_tombstone(b"key1", 200),      // Newest: tombstone (not visible to snapshot)
+            make_tombstone(b"key1", 200), // Newest: tombstone (not visible to snapshot)
             make_version(b"key1", 100, false), // Older: value (visible to snapshot at seq=150)
         ];
         sort_versions_for_output(&mut versions);
@@ -769,8 +769,7 @@ mod tests {
     fn should_return_none_given_empty_versions_when_writing_sst() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_test_context(&sst_factory, temp_dir.path());
         let versions: Vec<CompactionVersion> = vec![];
 
@@ -786,8 +785,7 @@ mod tests {
     fn should_write_single_version_correctly() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_test_context(&sst_factory, temp_dir.path());
         let versions = vec![make_version(b"test_key", 100, false)];
 
@@ -809,8 +807,7 @@ mod tests {
     fn should_count_tombstones_correctly_in_metadata() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_test_context(&sst_factory, temp_dir.path());
         let versions = vec![
             make_version(b"key1", 100, false),
@@ -832,8 +829,7 @@ mod tests {
     fn should_fail_given_duplicate_keys_when_writing_sst() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> =
-            Arc::new(crate::sst::mem::MemSstFactory);
+        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
         let ctx = create_test_context(&sst_factory, temp_dir.path());
 
         // Intentionally create duplicate keys (same user_key) - violates SST invariant

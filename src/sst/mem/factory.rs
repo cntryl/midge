@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn should_respect_snapshot_when_getting_state() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         // low-seq visible at snapshots > 5
         w.add_with_meta(b"a", Some(b"A1"), 5, false, None)
             .expect("add a");
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn should_filter_scan_range_by_snapshot_and_tombstone() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add_with_meta(b"a", Some(b"A"), 5, false, None)
             .expect("add a");
         w.add_with_meta(b"b", Some(b"B"), 15, false, None)
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn should_fast_fail_bloom_filter_on_missing_key() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"A").expect("add a");
         let reader = w.finish().expect("finish sst");
 
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn should_roundtrip_via_filesystem_factory() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"A").expect("add a");
         w.add(b"b", b"B").expect("add b");
         let bytes = w.finish_bytes().expect("finish bytes");
@@ -207,8 +207,11 @@ mod tests {
     #[test]
     fn should_roundtrip_internal_keys_encoding() {
         // Arrange
-        let mut w =
-            SstMemWriter::new_with_internal(crate::common::codec::CompressionType::None, 4096, true);
+        let mut w = SstMemWriter::new_with_internal(
+            crate::common::codec::CompressionType::None,
+            4096,
+            true,
+        );
         w.add_with_meta(b"a", Some(b"1"), 1, false, None).unwrap();
         w.add_with_meta(b"b", Some(b"2"), 2, false, None).unwrap();
 
@@ -228,7 +231,7 @@ mod tests {
 
         // Arrange
         let factory = MemSstFactory;
-    let mut writer = factory.create(crate::common::codec::CompressionType::None, 4096, true);
+        let mut writer = factory.create(crate::common::codec::CompressionType::None, 4096, true);
 
         // Act
         writer.add(b"a", b"1").unwrap();
@@ -244,7 +247,7 @@ mod tests {
     #[test]
     fn should_scan_range_state_at_with_snapshot() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add_with_meta(b"a", Some(b"A"), 5, false, None).unwrap();
         w.add_with_meta(b"b", Some(b"B"), 15, false, None).unwrap();
         w.add_with_meta(b"c", Some(b"C"), 10, false, None).unwrap();
@@ -279,9 +282,9 @@ mod tests {
     #[test]
     fn should_handle_compression_types() {
         // Arrange
-    let mut w1 = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w1 = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w1.add(b"key", b"value").unwrap();
-    let mut w2 = SstMemWriter::new(crate::common::codec::CompressionType::Lz4, 64);
+        let mut w2 = SstMemWriter::new(crate::common::codec::CompressionType::Lz4, 64);
         w2.add(b"key", b"value").unwrap();
 
         // Act
@@ -296,7 +299,7 @@ mod tests {
     #[test]
     fn should_handle_empty_sst() {
         // Arrange
-    let w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
 
         // Act
         let reader = w.finish().unwrap();
@@ -314,7 +317,7 @@ mod tests {
     #[test]
     fn should_handle_scan_with_start_and_end_bounds() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"1").unwrap();
         w.add(b"b", b"2").unwrap();
         w.add(b"c", b"3").unwrap();
@@ -341,7 +344,7 @@ mod tests {
     #[test]
     fn should_persist_and_read_expiration_metadata() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 4096);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 4096);
         let exp1 = Some(1000000000000);
         let exp2 = Some(2000000000000);
 
@@ -431,7 +434,7 @@ mod tests {
     #[test]
     fn should_fail_given_incomplete_footer_when_reading_sst() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"A").unwrap();
         let mut bytes = w.finish_bytes().unwrap();
 
@@ -448,7 +451,7 @@ mod tests {
     #[test]
     fn should_recover_partial_blocks_given_corrupted_trailer_when_reading_sst() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"A").unwrap();
         w.add(b"b", b"B").unwrap();
         let mut bytes = w.finish_bytes().unwrap();
@@ -475,8 +478,11 @@ mod tests {
     #[test]
     fn should_reject_given_duplicate_internal_keys_when_internal_mode_true() {
         // Arrange
-        let mut w =
-            SstMemWriter::new_with_internal(crate::common::codec::CompressionType::None, 4096, true);
+        let mut w = SstMemWriter::new_with_internal(
+            crate::common::codec::CompressionType::None,
+            4096,
+            true,
+        );
 
         // Add first key
         w.add_with_meta(b"key", Some(b"v1"), 100, false, None)
@@ -498,7 +504,7 @@ mod tests {
     #[test]
     fn should_validate_block_checksum_given_corrupted_data_block() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"A").unwrap();
         let reader = w.finish().unwrap();
 
@@ -516,7 +522,7 @@ mod tests {
     #[test]
     fn should_truncate_partial_last_block_given_unexpected_eof() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         for i in 0..100 {
             w.add(format!("key{:03}", i).as_bytes(), b"value").unwrap();
         }
@@ -535,7 +541,7 @@ mod tests {
     #[test]
     fn should_handle_compressed_data_correctly() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::Lz4, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::Lz4, 64);
         w.add(b"key", b"value_that_will_be_compressed").unwrap();
 
         // Act
@@ -549,7 +555,7 @@ mod tests {
     #[test]
     fn should_write_bloom_filter_to_footer_given_compression_enabled() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::Lz4, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::Lz4, 64);
         w.add(b"a", b"A").unwrap();
         w.add(b"b", b"B").unwrap();
 
@@ -564,7 +570,7 @@ mod tests {
     #[test]
     fn should_handle_non_utf8_keys_given_index_build() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(&[0x00, 0x01, 0x02], b"binary_key_1").unwrap();
         w.add(&[0xFF, 0xFE, 0xFD], b"binary_key_2").unwrap();
 
@@ -585,7 +591,7 @@ mod tests {
     #[test]
     fn should_propagate_io_error_when_flushing_writer() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"key", b"value").unwrap();
 
         // Act
@@ -598,7 +604,7 @@ mod tests {
     #[test]
     fn should_close_writer_idempotently_given_multiple_finish_calls() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"key", b"value").unwrap();
 
         // Act
@@ -611,7 +617,7 @@ mod tests {
     #[test]
     fn should_write_footer_magic_and_version_given_writer_finish() {
         // Arrange
-    let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
+        let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"A").unwrap();
 
         // Act

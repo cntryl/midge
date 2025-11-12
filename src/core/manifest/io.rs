@@ -151,9 +151,7 @@ impl Manifest {
 mod tests {
     use super::super::types::FileMeta;
     use super::*;
-    use crate::api::column_family::{
-        ColumnFamilyConfig, ColumnFamilyId, DEFAULT_CF_ID,
-    };
+    use crate::api::column_family::{ColumnFamilyConfig, ColumnFamilyId, DEFAULT_CF_ID};
     use crate::config::{CompactionStyle, CompressionType};
 
     #[test]

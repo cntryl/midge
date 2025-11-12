@@ -332,12 +332,13 @@ fn compute_bounds(
     // Process entries (expiration is ignored for bounds computation)
     for entry in entries {
         // Entries may contain internal-key encoded keys; decode to user key
-        let user_key =
-            if let Some((u, _s, _t)) = crate::common::internal_key::decode_internal_key(&entry.key) {
-                u
-            } else {
-                entry.key.clone()
-            };
+        let user_key = if let Some((u, _s, _t)) =
+            crate::common::internal_key::decode_internal_key(&entry.key)
+        {
+            u
+        } else {
+            entry.key.clone()
+        };
 
         if smallest_key.is_none() {
             smallest_key = Some(user_key.clone());
@@ -717,7 +718,8 @@ mod tests {
     #[test]
     fn should_handle_internal_key_encoding_when_computing_bounds() {
         // Arrange: Entry with internal-key encoded key
-    let internal_key = crate::common::internal_key::encode_internal_key(b"user_key", 12345, false);
+        let internal_key =
+            crate::common::internal_key::encode_internal_key(b"user_key", 12345, false);
         let entry = crate::EntryMeta {
             key: internal_key,
             value: Some(vec![1, 2, 3]),

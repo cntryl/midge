@@ -1,8 +1,6 @@
 mod common;
 use cntryl_midge::MidgeOptions;
-use common::{
-    assert_get_equals, durability_opts, flush_test_opts, test_temp_dir, with_engine_restart,
-};
+use common::{assert_get_equals, durability_opts, test_temp_dir, with_engine_restart};
 
 #[test]
 fn should_commit_new_ssts_and_manifest_together_given_compaction_successful() {

@@ -14,8 +14,7 @@ pub mod write_options;
 
 // Re-export all public API types
 pub use column_family::{
-    ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId,
-    DEFAULT_CF_ID, DEFAULT_CF_NAME,
+    ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, DEFAULT_CF_ID, DEFAULT_CF_NAME,
 };
 pub use kv_store::{DynKvStore, KvStore, KvTransaction};
 pub use merge_operator::{

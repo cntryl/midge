@@ -832,7 +832,10 @@ mod tests {
         // Assert
         assert_eq!(block.data, data);
         assert_eq!(block.block_type, BlockType::Data);
-    assert_eq!(block.compression, crate::common::codec::CompressionType::None);
+        assert_eq!(
+            block.compression,
+            crate::common::codec::CompressionType::None
+        );
     }
 
     #[test]
@@ -874,7 +877,10 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Lz4);
+        assert_eq!(
+            decoded.compression,
+            crate::common::codec::CompressionType::Lz4
+        );
     }
 
     #[test]
@@ -895,7 +901,10 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Zstd1);
+        assert_eq!(
+            decoded.compression,
+            crate::common::codec::CompressionType::Zstd1
+        );
     }
 
     #[test]
@@ -916,7 +925,10 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Zstd3);
+        assert_eq!(
+            decoded.compression,
+            crate::common::codec::CompressionType::Zstd3
+        );
     }
 
     #[test]
@@ -937,7 +949,10 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Zstd5);
+        assert_eq!(
+            decoded.compression,
+            crate::common::codec::CompressionType::Zstd5
+        );
     }
 
     #[test]
@@ -958,7 +973,10 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Zstd9);
+        assert_eq!(
+            decoded.compression,
+            crate::common::codec::CompressionType::Zstd9
+        );
     }
 
     #[test]
@@ -1167,7 +1185,10 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, data);
-    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Lz4);
+        assert_eq!(
+            decoded.compression,
+            crate::common::codec::CompressionType::Lz4
+        );
     }
 
     // Tests for Result-returning DataBlockBuilder methods
