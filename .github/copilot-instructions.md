@@ -1,14 +1,84 @@
-Absolutely — here’s your complete, polished version of the **GitHub Copilot Instructions for the Midge Project**, with consistent tone, typography, and structure, plus the new **Automation Scripts** section added cleanly at the top.
-
 # GitHub Copilot Instructions for Midge Project
+
+Midge is a **high-performance embedded LSM-tree storage engine** in Rust, offering high-level configuration, MVCC transactions, column families, compaction filters, and cloud storage backends.
+
+## Architecture Overview
+
+**Module Dependency Layers** (see `docs/DEPENDENCY_ANALYSIS.md`):
+
+```
+Layer 0 (Foundation):
+  api/        - Public traits (KvStore, KvTransaction, WriteBatch)
+  common/     - Error types, test hooks
+  fs/         - Filesystem abstractions
+  metrics/    - Cross-cutting performance metrics
+
+Layer 1 (Configuration & Cloud):
+  config/     - High-level ConfigBuilder + MidgeOptions
+  cloud/      - S3/Azure/GCS backends (mock for testing)
+
+Layer 2 (Storage Components):
+  wal/        - Write-ahead log (persistence layer)
+  sst/        - SSTable format, bloom filters, sparse index
+  health/     - Database health checks
+
+Layer 3 (Core Engine):
+  core/       - LSM engine, compaction, transactions, manifest
+    ├── engine/       - MidgeEngine and operations
+    ├── compaction/   - Background compaction coordinator
+    ├── transaction/  - MVCC TransactionManager
+    ├── memtable/     - In-memory skiplist
+    ├── persistence/  - Flush coordinator, WAL replay
+    ├── manifest/     - Metadata tracking
+    └── locking/      - Distributed locks (can use cloud)
+```
+
+**Key Constraint:** Lower layers must NOT depend on higher layers. Core may depend on cloud for distributed locking (user-approved exception).
+
+## Configuration Philosophy
+
+Midge offers **two initialization paths**:
+
+1. **High-Level Config API** (Recommended):
+   - Answer 3 questions: Goal (Latency/Throughput/Cost), Durability (Strict/Steady/CloudReplicated), Memory Budget
+   - All parameters auto-derived (block size, cache, compaction threads, etc.)
+   - Use `ConfigBuilder::new(path).goal(...).durability(...).build()`
+
+2. **Low-Level MidgeOptions**:
+   - Manual control over every parameter
+   - For advanced tuning only
+
+**Examples:** See `README.md` Quick Start section and `examples/config_complete.rs`
+
+## Development Workflows
+
+### Running Tests
+```bash
+cargo test                              # All tests
+cargo test test_guidelines_compliance   # Meta-test (validates naming/AAA)
+cargo test --test engine_basic_ops      # Specific integration test
+```
+
+### Benchmarks
+```bash
+cargo bench                             # All benchmarks
+cargo bench --bench point_lookup        # Specific benchmark
+```
+See `benches/README.md` for organization (api/, storage/, wal/, compaction/, etc.)
+
+### Test Validation
+```bash
+# Check test compliance (naming, AAA structure)
+cargo run --bin validate_tests -- --summary
+cargo run --bin validate_tests -- --file src/wal/wal_helpers.rs
+```
 
 ## Automation Scripts
 
-When writing automation for this project, **prefer Python over PowerShell**.
-
-- **Python** offers better **cross-platform compatibility**, **library support**, and **VS Code integration**.
-- **PowerShell** is acceptable for quick Windows-specific admin or shell tasks, but all **project automation (build helpers, generators, CI utilities)** must be written in **Python** for consistency and maintainability.
-- Use `.py` scripts in the `/tools` directory when adding new automation logic.
+**Prefer Python over PowerShell** for all project automation:
+- **Python**: Cross-platform, better library support, VS Code integration
+- **PowerShell**: Only for quick Windows-specific admin tasks
+- Store automation in `scripts/` directory (e.g., `benchmark_summary.py`)
 
 ## Test Writing Guidelines — STRICTLY ENFORCE
 
