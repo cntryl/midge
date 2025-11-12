@@ -111,6 +111,19 @@ impl MemTable {
         self.put_with_seq_and_exp(key, value, seq, None)
     }
 
+    /// Put a key/value where the caller already owns Bytes; avoids copying slices.
+    /// This is useful for hot paths where callers already have owned Bytes.
+    #[inline]
+    pub fn put_owned_with_seq(&self, key: Bytes, value: Bytes, seq: u64) {
+        self.put_owned_with_seq_and_exp(key, value, seq, None)
+    }
+
+    /// Put a key/value with expiration where caller owns Bytes.
+    #[inline]
+    pub fn put_owned_with_seq_and_exp(&self, key: Bytes, value: Bytes, seq: u64, expiration: Option<u64>) {
+        self.upsert_owned_with_op_type(key, Some(value), seq, expiration, OpType::Put)
+    }
+
     /// Put a key-value pair with a specific sequence number and optional expiration time.
     /// - expiration: Unix epoch time in milliseconds, or None for never-expiring
     #[inline]
@@ -154,6 +167,17 @@ impl MemTable {
 
         // Update byte count (simplified accounting - counts all data, some double-counting for updates)
         // This is acceptable as it's reset on drain and provides upper-bound for memory usage
+        self.bytes.fetch_add(total_bytes, Ordering::Relaxed);
+    }
+
+    /// Internal helper to upsert using owned Bytes (avoids copying when caller already owns Bytes)
+    fn upsert_owned_with_op_type(&self, key: Bytes, value: Option<Bytes>, seq: u64, expiration: Option<u64>, op_type: OpType) {
+        let total_bytes = key.len() + value.as_ref().map(|v| v.len()).unwrap_or(0);
+
+        // Perform the upsert directly with owned Bytes
+        self.inner.upsert_exp(key, value, seq, expiration, op_type);
+
+        // Update accounting
         self.bytes.fetch_add(total_bytes, Ordering::Relaxed);
     }
 

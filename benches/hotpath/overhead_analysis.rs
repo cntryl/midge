@@ -239,13 +239,9 @@ fn bench_layer3_wal_plus_memtable(c: &mut Criterion) {
                     writer.append_batch(&records).expect("append_batch");
 
                     // Insert into MemTable
-                    for record in &records {
-                        memtable.put_with_seq(
-                            &record.key,
-                            record.value.as_ref().unwrap(),
-                            record.seq,
-                        );
-                    }
+                        for record in &records {
+                            memtable.put_owned_with_seq(record.key.clone(), record.value.as_ref().unwrap().clone(), record.seq);
+                        }
 
                     black_box(&writer);
                     black_box(&memtable);
@@ -393,11 +389,7 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
                                 .append_batch(batch)
                                 .expect("append_batch");
                             for record in batch {
-                                memtables[cf_idx].put_with_seq(
-                                    &record.key,
-                                    record.value.as_ref().unwrap(),
-                                    record.seq,
-                                );
+                                memtables[cf_idx].put_owned_with_seq(record.key.clone(), record.value.as_ref().unwrap().clone(), record.seq);
                             }
                         }
                     }
@@ -455,7 +447,7 @@ fn bench_layer6_concurrent_multi_cf(c: &mut Criterion) {
 
                                         // Route to a CF based on simple modulo (cast to usize for indexing)
                                         let cf_idx = (i as usize) % (cf_count as usize);
-                                        memtables[cf_idx].put_with_seq(&key, &value, s);
+                            memtables[cf_idx].put_owned_with_seq(key.clone(), value.clone(), s);
                                     }
                                 })
                             })

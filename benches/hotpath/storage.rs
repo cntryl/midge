@@ -136,17 +136,17 @@ fn bench_memtable_sequential(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.iter(|| {
-                // Precompute key/value byte vectors to reduce allocation during the measured loop
-                let mut keys: Vec<Vec<u8>> = Vec::with_capacity(size);
-                let mut vals: Vec<Vec<u8>> = Vec::with_capacity(size);
+                // Precompute key/value Bytes to reduce allocation during the measured loop and use owned API
+                let mut keys: Vec<Bytes> = Vec::with_capacity(size);
+                let mut vals: Vec<Bytes> = Vec::with_capacity(size);
                 for i in 0..size {
-                    keys.push(format!("key_{:08}", i).into_bytes());
-                    vals.push(format!("value_{:08}", i).into_bytes());
+                    keys.push(Bytes::from(format!("key_{:08}", i)));
+                    vals.push(Bytes::from(format!("value_{:08}", i)));
                 }
 
                 let mt = MemTable::new();
                 for i in 0..size {
-                    mt.put_with_seq(&keys[i], &vals[i], i as u64);
+                    mt.put_owned_with_seq(keys[i].clone(), vals[i].clone(), i as u64);
                 }
                 black_box(mt);
             });
@@ -175,15 +175,15 @@ fn bench_memtable_random(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
-                let keys_bytes: Vec<Vec<u8>> = keys.iter().map(|k| k.as_bytes().to_vec()).collect();
-                let mut vals: Vec<Vec<u8>> = Vec::with_capacity(keys_bytes.len());
+                let keys_bytes: Vec<Bytes> = keys.iter().map(|k| Bytes::from(k.clone())).collect();
+                let mut vals: Vec<Bytes> = Vec::with_capacity(keys_bytes.len());
                 for i in 0..keys_bytes.len() {
-                    vals.push(format!("value_{:08}", i).into_bytes());
+                    vals.push(Bytes::from(format!("value_{:08}", i)));
                 }
 
                 let mt = MemTable::new();
                 for (i, key_b) in keys_bytes.iter().enumerate() {
-                    mt.put_with_seq(key_b, &vals[i], i as u64);
+                    mt.put_owned_with_seq(key_b.clone(), vals[i].clone(), i as u64);
                 }
                 black_box(mt);
             });
@@ -208,10 +208,10 @@ fn bench_memtable_concurrent(c: &mut Criterion) {
             for t in 0..num_threads {
                 let mt_clone = Arc::clone(&mt);
                 let handle = thread::spawn(move || {
-                    for i in 0..ops_per_thread {
-                        let key = format!("key_{}_{:08}", t, i);
-                        let val = format!("val_{}_{:08}", t, i);
-                        mt_clone.put_with_seq(key.as_bytes(), val.as_bytes(), i as u64);
+                        for i in 0..ops_per_thread {
+                        let key = Bytes::from(format!("key_{}_{:08}", t, i));
+                        let val = Bytes::from(format!("val_{}_{:08}", t, i));
+                        mt_clone.put_owned_with_seq(key, val, i as u64);
                     }
                 });
                 handles.push(handle);
