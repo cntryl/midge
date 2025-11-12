@@ -45,7 +45,7 @@ pub use crate::core::backup;
 pub mod cloud;
 pub mod compaction {
     //! Compaction filter API for custom compaction logic
-    pub use crate::core::compaction::execution::types::CompactionVersion;
+    pub use crate::core::compaction::executor::CompactionVersion;
     pub use crate::core::compaction::filter::{CompactionFilter, FilterDecision};
 }
 pub mod health;

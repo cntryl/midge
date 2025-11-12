@@ -328,7 +328,7 @@ impl MidgeEngine {
 
         // Deduplicate to ensure only one version per key in output SST
         // Use snapshot-aware deduplication to preserve versions visible to active snapshots
-        let mut versions = crate::core::compaction::deduplicate_versions_snapshot_aware(&versions, min_snapshot_seq);
+        let mut versions = crate::core::compaction::deduplicate_versions(&versions, min_snapshot_seq);
         
         // Re-sort after deduplication to ensure proper ordering
         crate::core::compaction::sort_versions_for_output(&mut versions);

@@ -256,7 +256,7 @@ impl CompactionCoordinator {
                                 )
                             };
 
-                            let deduped = super::executor::deduplicate_versions_snapshot_aware(&versions_after_cf, min_snapshot_seq);
+                            let deduped = super::executor::deduplicate_versions(&versions_after_cf, min_snapshot_seq);
 
                             // Write compacted SST
                             let ctx = super::executor::SstWriterContext {
