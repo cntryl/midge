@@ -9,7 +9,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::cache::{BlockCache, BlockKey, BlockType, CachedBlock};
+use cntryl_midge::sst::{BlockCache, BlockKey, CacheBlockType, CachedBlock};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
@@ -17,7 +17,7 @@ use std::hint::black_box;
 fn make_block_key(file_num: usize, offset: u64) -> BlockKey {
     BlockKey {
         file_name: format!("sst_{:06}.sst", file_num),
-        block_type: BlockType::Data,
+        block_type: CacheBlockType::Data,
         offset,
     }
 }

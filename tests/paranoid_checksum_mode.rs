@@ -90,7 +90,7 @@ fn should_verify_checksums_on_compressed_blocks_when_paranoid() {
             db_path: temp_dir.path().to_path_buf(),
         },
         paranoid_checksums: true,
-        compression: cntryl_midge::codec::CompressionType::Lz4, // Use compression
+        compression: cntryl_midge::common::codec::CompressionType::Lz4, // Use compression
         ..Default::default()
     };
 

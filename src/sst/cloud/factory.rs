@@ -63,7 +63,7 @@ impl CloudSstFactory {
 impl crate::sst::SstFactory for CloudSstFactory {
     fn create(
         &self,
-        compression: crate::codec::CompressionType,
+        compression: crate::common::codec::CompressionType,
         block_size: usize,
         use_internal: bool,
     ) -> Box<dyn crate::sst::DynSstWriter> {
@@ -80,7 +80,7 @@ impl crate::sst::SstFactory for CloudSstFactory {
 
     fn create_with_bloom(
         &self,
-        compression: crate::codec::CompressionType,
+        compression: crate::common::codec::CompressionType,
         block_size: usize,
         use_internal: bool,
         bloom_bits_per_key: u32,

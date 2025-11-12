@@ -33,7 +33,7 @@ pub(super) fn calculate_entries_end(data: &[u8]) -> Option<usize> {
 /// Decode an internal key with fallback to the raw key if decoding fails.
 #[inline]
 pub(super) fn decode_internal_key_or_raw(key: &[u8]) -> (Vec<u8>, u64, bool) {
-    if let Some((user_key, seq, is_tomb)) = crate::internal_key::decode_internal_key(key) {
+    if let Some((user_key, seq, is_tomb)) = crate::common::internal_key::decode_internal_key(key) {
         (user_key, seq, is_tomb)
     } else {
         (key.to_vec(), 0, false)

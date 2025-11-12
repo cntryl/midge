@@ -142,7 +142,7 @@ impl WriterState {
                 // Cache hit! Reuse the cached user key if present, otherwise decode again
                 if let Some(ref cached_user) = self.last_user_key_cache {
                     cached_user.clone()
-                } else if let Some((user, _s, _t)) = crate::internal_key::decode_internal_key(key) {
+                } else if let Some((user, _s, _t)) = crate::common::internal_key::decode_internal_key(key) {
                     // Populate the cache and return the decoded user key
                     let user_bytes = Bytes::copy_from_slice(&user);
                     self.last_user_key_cache = Some(user_bytes.clone());
@@ -153,7 +153,7 @@ impl WriterState {
                 }
             } else {
                 // Different key - decode and update cache
-                if let Some((user, _s, _t)) = crate::internal_key::decode_internal_key(key) {
+                if let Some((user, _s, _t)) = crate::common::internal_key::decode_internal_key(key) {
                     let user_bytes = Bytes::copy_from_slice(&user);
                     self.last_internal_key = Some(Bytes::copy_from_slice(key));
                     self.last_user_key_cache = Some(user_bytes.clone());
@@ -167,7 +167,7 @@ impl WriterState {
             }
         } else {
             // First call or cache miss - decode and populate cache
-            if let Some((user, _s, _t)) = crate::internal_key::decode_internal_key(key) {
+            if let Some((user, _s, _t)) = crate::common::internal_key::decode_internal_key(key) {
                 let user_bytes = Bytes::copy_from_slice(&user);
                 self.last_internal_key = Some(Bytes::copy_from_slice(key));
                 self.last_user_key_cache = Some(user_bytes.clone());
@@ -187,7 +187,7 @@ impl WriterState {
             self.bloom_builder.add_key(&user_key_bytes);
         } else {
             // Plain user key - encode it
-            let ik = crate::internal_key::encode_internal_key(key, seq, tombstone);
+            let ik = crate::common::internal_key::encode_internal_key(key, seq, tombstone);
             self.cur_block
                 .add_with_meta(&ik, value, seq, tombstone, true, expiration)?;
             self.last_key_in_block = Some(Bytes::copy_from_slice(&ik));

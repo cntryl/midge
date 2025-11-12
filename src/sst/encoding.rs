@@ -312,7 +312,7 @@ pub fn linear_search_data_block(
         // Match against target key
         if decode_internal {
             // Extract user key from internal key
-            if let Some((user, _seq, _tomb)) = crate::internal_key::decode_internal_key(&key) {
+            if let Some((user, _seq, _tomb)) = crate::common::internal_key::decode_internal_key(&key) {
                 last_key = key.clone();
                 if user.as_slice() == target_key {
                     return Ok(entry.value.map(Bytes::copy_from_slice));

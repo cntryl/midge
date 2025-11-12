@@ -89,7 +89,7 @@ impl SstMemReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&actual_key)
+                        crate::common::internal_key::decode_internal_key(&actual_key)
                     {
                         actual_key = user;
                         _key_slice = &actual_key;
@@ -193,7 +193,7 @@ impl SstMemReader {
                             // Decode key and extract metadata
                             let (key_slice, seq, tomb) = if self.use_internal_keys {
                                 if let Some((u_key, sseq, t)) =
-                                    crate::internal_key::decode_internal_key(&current_key)
+                                    crate::common::internal_key::decode_internal_key(&current_key)
                                 {
                                     // Store decoded user key back into current_key to avoid another allocation
                                     current_key.clear();
@@ -226,7 +226,7 @@ impl SstMemReader {
                         }
 
                         // Start new entry
-                        shared_len = Some(crate::tlv::parse_varint32_from_slice(tag_data)?);
+                        shared_len = Some(crate::common::tlv::parse_varint32_from_slice(tag_data)?);
                         key_delta = None;
                         value = None;
                         sequence = 0;
@@ -265,7 +265,7 @@ impl SstMemReader {
                 // Decode key and extract metadata
                 let (key_slice, seq, tomb) = if self.use_internal_keys {
                     if let Some((u_key, sseq, t)) =
-                        crate::internal_key::decode_internal_key(&current_key)
+                        crate::common::internal_key::decode_internal_key(&current_key)
                     {
                         // Store decoded user key back into current_key to avoid another allocation
                         current_key.clear();
@@ -379,7 +379,7 @@ impl SstMemReader {
 
                 if self.use_internal_keys {
                     let (k_user, seq, tomb) = if let Some((uk, s, t)) =
-                        crate::internal_key::decode_internal_key(&raw_key)
+                        crate::common::internal_key::decode_internal_key(&raw_key)
                     {
                         (uk, s, t)
                     } else {
@@ -445,7 +445,7 @@ impl SstMemReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&stored_key)
+                        crate::common::internal_key::decode_internal_key(&stored_key)
                     {
                         // Replace stored_key with decoded user key to avoid extra copies later
                         stored_key = user;
@@ -510,7 +510,7 @@ impl SstMemReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&actual_key)
+                        crate::common::internal_key::decode_internal_key(&actual_key)
                     {
                         actual_key = user;
                         _key_slice = &actual_key;
@@ -563,7 +563,7 @@ impl SstMemReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&actual_key)
+                        crate::common::internal_key::decode_internal_key(&actual_key)
                     {
                         actual_key = user;
                         key_slice = &actual_key;

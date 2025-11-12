@@ -24,7 +24,7 @@ impl MidgeEngine {
     ///     println!("Block cache enabled with capacity: {} bytes", cache.capacity());
     /// }
     /// ```
-    pub fn block_cache(&self) -> Option<&Arc<crate::cache::BlockCache>> {
+    pub fn block_cache(&self) -> Option<&Arc<crate::sst::BlockCache>> {
         self.block_cache.as_ref()
     }
 
@@ -43,7 +43,7 @@ impl MidgeEngine {
     ///     println!("Total hits: {}, misses: {}", stats.hits(), stats.misses());
     /// }
     /// ```
-    pub fn cache_stats(&self) -> Option<crate::cache::CacheStats> {
+    pub fn cache_stats(&self) -> Option<crate::sst::CacheStats> {
         self.block_cache.as_ref().map(|c| c.stats())
     }
 

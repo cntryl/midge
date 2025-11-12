@@ -188,7 +188,7 @@ pub use crate::wal::mem::WalMemReader as WalMemReaderHandle;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::column_family::ColumnFamilyId;
+    use crate::api::column_family::ColumnFamilyId;
     use bytes::Bytes;
 
     #[test]

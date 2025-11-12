@@ -125,34 +125,7 @@ pub mod tags {
     // Field ID 15 is reserved for future use
 }
 
-// Legacy compatibility modules - DEPRECATED, use `tags::*` instead
-#[deprecated(since = "0.1.0", note = "Use `tags::*` instead")]
-pub mod wal_tags {
-    use super::tags;
-    pub const OP_PACKED: u8 = tags::OPERATION;
-    pub const CF_ID_PACKED: u8 = tags::CF_ID;
-    pub const SEQUENCE_PACKED: u8 = tags::SEQUENCE;
-    pub const KEY_PACKED: u8 = tags::KEY;
-    pub const VALUE_PACKED: u8 = tags::VALUE;
-    pub const EXPIRATION_PACKED: u8 = tags::EXPIRATION;
-    pub const USER_TS_PACKED: u8 = tags::USER_TIMESTAMP;
-    pub const FLAGS_PACKED: u8 = tags::ENTRY_TYPE; // Mapped to ENTRY_TYPE
-    pub const RANGE_END_PACKED: u8 = tags::RANGE_END;
-    pub const TXN_ID_PACKED: u8 = tags::TRANSACTION_ID;
-    pub const COMPRESSION_PACKED: u8 = tags::COMPRESSION;
-    pub const VALUE_COMPRESSED: u8 = tags::VALUE_COMPRESSED;
-}
-
-#[deprecated(since = "0.1.0", note = "Use `tags::*` instead")]
-pub mod sst_tags {
-    use super::tags;
-    pub const SHARED_LEN_PACKED: u8 = tags::SHARED_PREFIX_LEN;
-    pub const KEY_DELTA_PACKED: u8 = tags::KEY_DELTA;
-    pub const VALUE_PACKED: u8 = tags::VALUE;
-    pub const SEQUENCE_PACKED: u8 = tags::SEQUENCE;
-    pub const ENTRY_TYPE_PACKED: u8 = tags::ENTRY_TYPE;
-    pub const EXPIRATION_PACKED: u8 = tags::EXPIRATION;
-}
+// (Removed legacy `wal_tags` and `sst_tags` compatibility modules.)
 
 /// TLV writer for encoding records.
 pub struct TlvWriter {

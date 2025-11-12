@@ -15,10 +15,6 @@
 // Note: unwrap is allowed in test modules via #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
-// Allow deprecated APIs across the crate for a transitional period while call sites
-// are migrated to the CF-aware APIs. This prevents deprecation warnings from
-// flooding test/bench output during the migration.
-#![allow(deprecated)]
 
 // Foundational modules with no internal dependencies
 pub mod common;
@@ -26,6 +22,9 @@ pub mod common;
 // Re-export error types at crate root for convenience and backwards compatibility
 pub use common::error;
 pub use common::{MidgeError, MidgeResult};
+// Backwards-compat module re-exports (legacy paths used widely across the codebase)
+// These preserve old `crate::...` paths after internal reorganization.
+// Note: legacy crate-root re-exports removed to prefer explicit module paths.
 
 // Re-export test hooks for testing
 pub use common::test_hooks;
@@ -49,7 +48,7 @@ pub use crate::core::backup;
 pub use crate::core::locking;
 pub use crate::core::manifest;
 pub use crate::core::storage_mode;
-pub use crate::core::transaction_manager;
+// TransactionManager is available via `core::transaction`; no legacy module re-export.
 
 // Compaction filter API for user-provided custom logic
 pub mod compaction {
@@ -73,97 +72,6 @@ pub use crate::core::engine::{CasResult, InsertResult, MidgeEngine};
 pub use crate::core::metrics::PerformanceMetrics;
 pub use crate::sst::bloom::Filter;
 pub use crate::storage_mode::{CloudStorageBuilder, StorageMode};
-
-// Legacy module re-exports for backward compatibility
-// These allow existing code to continue using `cntryl_midge::bloom::Filter` etc.
-// DEPRECATED: Use proper module paths like `cntryl_midge::index::bloom` instead
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `cntryl_midge::api::column_family` instead"
-)]
-pub use api::column_family;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `cntryl_midge::api::merge_operator` instead"
-)]
-pub use api::merge_operator;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::mutation` instead")]
-pub use api::mutation as mutation_compat;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::query` instead")]
-pub use api::query as query_compat;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::snapshot` instead")]
-pub use api::snapshot as snapshot_compat;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::api::write_batch` instead")]
-pub use api::write_batch;
-#[cfg(feature = "cloud-aws")]
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::aws` instead")]
-pub use cloud::aws as cloud_wal_aws;
-#[cfg(feature = "cloud-azure")]
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::azure` instead")]
-pub use cloud::azure as cloud_wal_azure;
-// cloud::cloud module removed during migration - cloud implementations now under wal::cloud
-// #[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::wal` instead")]
-// pub use cloud::cloud as cloud_wal;
-#[cfg(feature = "cloud-gcp")]
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::gcp` instead")]
-pub use cloud::gcp as cloud_wal_gcp;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::cloud::mock` instead")]
-pub use cloud::mock as cloud_wal_mock;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `cntryl_midge::common::range_tombstone` instead"
-)]
-pub use common::range_tombstone;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `cntryl_midge::core::compaction::filter` instead"
-)]
-pub use core::compaction::filter as compaction_filter;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::core::compactor` instead")]
-pub use core::compaction::strategy as compactor;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::core::memtable` instead")]
-pub use core::memtable;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::bloom` instead")]
-pub use sst::bloom;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `cntryl_midge::sst::file_manager` instead"
-)]
-pub use sst::file_manager;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `cntryl_midge::sst::sparse_index` instead"
-)]
-pub use sst::sparse_index;
-// NOTE: `crate::sst` is provided as the new top-level SST module. The old
-// `storage::sst` re-export was removed to avoid symbol conflicts during the
-// migration to the `src/sst/*` layout.
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::codec` instead")]
-pub use common::codec;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `cntryl_midge::common::internal_key` instead"
-)]
-pub use common::internal_key;
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `cntryl_midge::common::rate_limiter` instead"
-)]
-pub use common::rate_limiter;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::common::tlv` instead")]
-pub use common::tlv;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::block_cache` instead")]
-pub use sst::block_cache as cache;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::format` instead")]
-pub use sst::format;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::fs` instead")]
-pub use sst::fs as sst_fs;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::sst::mem` instead")]
-pub use sst::mem as sst_mem;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::wal::fs` instead")]
-pub use wal::fs as wal_fs;
-#[deprecated(since = "0.2.0", note = "Use `cntryl_midge::wal::mem` instead")]
-pub use wal::mem as wal_mem;
 
 /// Common entry metadata used across memtable/flush paths.
 ///

@@ -12,6 +12,7 @@ mod criterion_helper;
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use criterion_helper::criterion_config;
+use cntryl_midge::sst::BloomFilter;
 
 use std::hint::black_box;
 
@@ -29,7 +30,7 @@ fn bench_bloom_build(c: &mut Criterion) {
         let keys = make_keys("k", n);
         g.bench_function(format!("{}_keys", n), |b| {
             b.iter_batched(
-                || (cntryl_midge::bloom::BloomFilter::new(n, 0.01), &keys),
+                || (BloomFilter::new(n, 0.01), &keys),
                 |(mut f, keys)| {
                     for k in keys.iter() {
                         f.add(k);
@@ -50,7 +51,7 @@ fn bench_bloom_query(c: &mut Criterion) {
     let n = 10_000;
     let present = make_keys("p", n);
     let absent = make_keys("q", n);
-    let mut f = cntryl_midge::bloom::BloomFilter::new(n, 0.01);
+    let mut f = BloomFilter::new(n, 0.01);
     for k in &present {
         f.add(k);
     }

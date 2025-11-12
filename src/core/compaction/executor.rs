@@ -264,7 +264,7 @@ pub(crate) fn apply_compaction_filter(
 /// These are typically set once and reused across multiple writes.
 pub(crate) struct SstWriterContext<'a> {
     pub sst_factory: &'a Arc<dyn crate::sst::SstFactory>,
-    pub compression: crate::codec::CompressionType,
+    pub compression: crate::common::codec::CompressionType,
     pub block_size: usize,
     pub sst_dir: &'a std::path::Path,
     pub cloud_sst_manager: Option<&'a Arc<crate::sst::cloud::CloudSstManager>>,
@@ -758,7 +758,7 @@ mod tests {
     ) -> SstWriterContext<'a> {
         SstWriterContext {
             sst_factory,
-            compression: crate::codec::CompressionType::None,
+            compression: crate::common::codec::CompressionType::None,
             block_size: 4096,
             sst_dir,
             cloud_sst_manager: None,

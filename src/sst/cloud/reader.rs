@@ -116,7 +116,7 @@ impl SstCloudReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&actual_key)
+                        crate::common::internal_key::decode_internal_key(&actual_key)
                     {
                         actual_key = user;
                         actual_seq = s;
@@ -180,7 +180,7 @@ impl SstStateReader for SstCloudReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&actual_key)
+                        crate::common::internal_key::decode_internal_key(&actual_key)
                     {
                         actual_key = user;
                         actual_seq = s;
@@ -237,7 +237,7 @@ impl SstStateReader for SstCloudReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&actual_key)
+                        crate::common::internal_key::decode_internal_key(&actual_key)
                     {
                         actual_key = user;
                         actual_seq = s;
@@ -306,7 +306,7 @@ impl SstStateReader for SstCloudReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&actual_key)
+                        crate::common::internal_key::decode_internal_key(&actual_key)
                     {
                         actual_key = user;
                         actual_seq = s;
@@ -367,7 +367,7 @@ impl SstStateReader for SstCloudReader {
 
                 if self.use_internal_keys {
                     if let Some((user, s, t)) =
-                        crate::internal_key::decode_internal_key(&actual_key)
+                        crate::common::internal_key::decode_internal_key(&actual_key)
                     {
                         actual_key = user;
                         actual_seq = s;

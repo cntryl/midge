@@ -124,7 +124,7 @@ pub fn replay_wal_file(path: &std::path::Path) -> MidgeResult<Vec<WalRecord>> {
         let op_kind = crate::wal::WalOpKind::from_wire_format(op)?;
 
         let mut rec = WalRecord::new_cf(
-            crate::column_family::ColumnFamilyId::new(cf_id),
+            crate::api::column_family::ColumnFamilyId::new(cf_id),
             op_kind,
             key,
             value,

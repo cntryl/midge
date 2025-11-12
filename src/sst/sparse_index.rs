@@ -203,7 +203,7 @@ impl Default for SparseIndexBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::BlockHandle;
+    use crate::sst::format::BlockHandle;
     use bytes::Bytes;
 
     #[test]

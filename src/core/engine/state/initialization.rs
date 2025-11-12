@@ -312,7 +312,7 @@ pub fn open_with_factories(
         wal_sync: opts.wal_sync,
         snapshot_registry: snapshot_registry_arc,
         block_cache: if opts.cache_size_mb > 0 {
-            Some(Arc::new(crate::cache::BlockCache::new(
+            Some(Arc::new(crate::sst::BlockCache::new(
                 opts.cache_size_mb * 1024 * 1024,
             )))
         } else {
@@ -333,7 +333,6 @@ pub fn open_with_factories(
         cloud_sst_manager,
         db_lock,
         is_read_only: AtomicBool::new(opts.read_only),
-        txn_manager: crate::core::transaction::TransactionManager::new(),
         flush_mutex: Mutex::new(()),
         manifest_cache,
         bloom_cache,

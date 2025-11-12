@@ -3,7 +3,6 @@
 //! This module contains transaction commit logic and transaction-aware reads.
 
 use bytes::Bytes;
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 use crate::api::column_family::ColumnFamilyHandle;
@@ -286,69 +285,13 @@ impl MidgeEngine {
             return Err(MidgeError::transaction_conflict("transaction timed out"));
         }
 
-        // Register transaction with manager (tracks read/write sets)
-        let write_set = txn
-            .write_set()
-            .clone()
-            .into_iter()
-            .map(|(cf, key)| crate::core::transaction::Key::new(cf, key))
-            .collect::<HashSet<_>>();
-        let read_set = txn
-            .read_set()
-            .clone()
-            .into_iter()
-            .map(|(cf, key)| crate::core::transaction::Key::new(cf, key))
-            .collect::<HashSet<_>>();
-        let read_versions = txn
-            .read_versions()
-            .clone()
-            .into_iter()
-            .map(|((cf, key), v)| (crate::core::transaction::Key::new(cf, key), v))
-            .collect::<HashMap<_, _>>();
-
-        if let Err(e) = self.txn_manager.begin(
-            txn.txn_id(),
-            txn.begin_seq(),
-            write_set,
-            read_set,
-            read_versions,
-        ) {
-            return Err(MidgeError::transaction_conflict(e));
-        }
-
-        // Update wait-for graph and check for deadlocks before commit
-        if let Err(e) = self.txn_manager.update_wait_for_graph(txn.txn_id()) {
-            self.txn_manager.abort(txn.txn_id());
-            return Err(MidgeError::transaction_conflict(e));
-        }
-
-        // Check for deadlocks in wait-for graph
-        if let Some((victim_id, cycle)) = self.txn_manager.check_for_deadlock() {
-            // If this transaction is the victim, abort it
-            if victim_id == txn.txn_id() {
-                self.txn_manager.abort(txn.txn_id());
-                return Err(MidgeError::deadlock(victim_id, cycle));
-            }
-            // Otherwise, abort the victim transaction (it will fail when it tries to commit)
-        }
-
         // Allocate commit sequence for conflict detection
         // This ensures each committing transaction has a unique sequence number
-        let commit_seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _commit_seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
 
-        // Check for conflicts using transaction manager
-        match self.txn_manager.try_commit(txn.txn_id(), commit_seq) {
-            Ok(()) => {
-                // No conflicts, proceed with commit
-                let muts = txn.commit()?;
-                self.batch_internal(muts, opts.sync)
-            }
-            Err(e) => {
-                // Conflict detected, abort transaction
-                self.txn_manager.abort(txn.txn_id());
-                Err(MidgeError::transaction_conflict(e))
-            }
-        }
+        // Commit the transaction mutations
+        let muts = txn.commit()?;
+        self.batch_internal(muts, opts.sync)
     }
 
     /// Get a value within a transaction's snapshot isolation.

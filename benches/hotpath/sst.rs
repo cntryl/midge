@@ -24,7 +24,7 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
 
-use cntryl_midge::codec::CompressionType;
+use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::encoding::{decode, encode, TlvBlockIterator};
 use cntryl_midge::sst::format::DataBlockBuilder;
 use cntryl_midge::sst::mem::SstMemWriter;

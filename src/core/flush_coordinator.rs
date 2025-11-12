@@ -135,7 +135,7 @@ mod tests {
             .collect();
 
         FlushJob {
-            cf_id: crate::column_family::DEFAULT_CF_ID,
+            cf_id: crate::api::column_family::DEFAULT_CF_ID,
             seq,
             entries,
             range_tombstones: vec![],
@@ -295,7 +295,7 @@ mod tests {
         let coordinator = FlushCoordinator::spawn(config).unwrap();
 
         let empty_job = FlushJob {
-            cf_id: crate::column_family::DEFAULT_CF_ID,
+            cf_id: crate::api::column_family::DEFAULT_CF_ID,
             seq: 500,
             entries: vec![],
             range_tombstones: vec![],

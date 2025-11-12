@@ -1,4 +1,4 @@
-use crate::column_family::ColumnFamilyId;
+use crate::api::column_family::ColumnFamilyId;
 
 /// Entry types for internal keys
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

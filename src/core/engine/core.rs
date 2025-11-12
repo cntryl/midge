@@ -33,13 +33,13 @@ pub struct MidgeEngine {
     pub(crate) memtable_size: usize,
     pub(crate) sst_dir: PathBuf,
     pub(crate) block_size: usize,
-    pub(crate) compression: crate::codec::CompressionType,
+    pub(crate) compression: crate::common::codec::CompressionType,
     pub(crate) sst_factory: Arc<dyn crate::sst::SstFactory>,
     pub(crate) sst_reader_factory: Arc<dyn crate::sst::SstReaderFactory>,
     pub(crate) wal_buffer_size: usize,
     pub(crate) wal_sync: bool,
     pub(crate) snapshot_registry: Arc<crate::api::snapshot::SnapshotRegistry>,
-    pub(crate) block_cache: Option<Arc<crate::cache::BlockCache>>,
+    pub(crate) block_cache: Option<Arc<crate::sst::BlockCache>>,
     pub(crate) table_cache: Option<Arc<crate::sst::table_cache::TableCache>>,
     pub(crate) metrics: Arc<Metrics>,
     /// Performance metrics for real-time monitoring and optimization
@@ -56,7 +56,6 @@ pub struct MidgeEngine {
     /// Dynamic read-only flag that can be set during runtime (e.g., when lock renewal fails)
     pub(super) is_read_only: AtomicBool,
     /// Transaction manager for ACID guarantees
-    pub(crate) txn_manager: crate::core::transaction::TransactionManager,
     /// Flush mutex to serialize concurrent flush operations and prevent file conflicts
     pub(crate) flush_mutex: Mutex<()>,
     /// Cached manifest for fast read access without disk I/O

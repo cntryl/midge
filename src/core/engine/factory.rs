@@ -308,7 +308,7 @@ pub(crate) fn setup_compaction_coordinator(
         };
 
         let compactor =
-            crate::compactor::Compactor::with_config(crate::compactor::LeveledCompactionConfig {
+            crate::core::compaction::Compactor::with_config(crate::core::compaction::LeveledCompactionConfig {
                 l0_compaction_threshold: opts.compaction_sst_threshold,
                 level_multiplier: opts.level_multiplier,
                 l1_target_size: 10 * 1024 * 1024,

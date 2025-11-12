@@ -56,7 +56,7 @@ impl BlockEntryBuilder {
     }
 
     fn start_new_entry(&mut self, tag_data: &[u8]) -> MidgeResult<()> {
-        self.shared_len = Some(crate::tlv::parse_varint32_from_slice(tag_data)?);
+    self.shared_len = Some(crate::common::tlv::parse_varint32_from_slice(tag_data)?);
         self.key_delta = None;
         self.value = None;
         self.sequence = 0;
@@ -170,7 +170,7 @@ impl BlockEntryBuilder {
     /// Decode the key based on whether we're using internal keys
     fn decode_key(&self, key: &[u8]) -> MidgeResult<(Vec<u8>, u64, bool)> {
         if self.use_internal_keys {
-            if let Some((user_key, seq, tombstone)) = crate::internal_key::decode_internal_key(key)
+            if let Some((user_key, seq, tombstone)) = crate::common::internal_key::decode_internal_key(key)
             {
                 Ok((user_key, seq, tombstone))
             } else {
@@ -525,7 +525,7 @@ impl SstFile {
         if !self.use_internal_keys {
             return Ok(key);
         }
-        if let Some((user, _seq, _tomb)) = crate::internal_key::decode_internal_key(&key) {
+    if let Some((user, _seq, _tomb)) = crate::common::internal_key::decode_internal_key(&key) {
             Ok(user)
         } else {
             Ok(key)

@@ -21,15 +21,6 @@ pub mod storage_mode;
 pub mod transaction;
 pub mod wal_replay;
 
-// Deprecated: Use transaction::* instead
-#[deprecated(
-    since = "0.2.0",
-    note = "Use `core::transaction::TransactionManager` instead"
-)]
-pub mod transaction_manager {
-    pub use super::transaction::manager::*;
-}
-
 // Re-export commonly used types for convenience
 pub use compaction::CompactionCoordinator;
 pub use engine::*;

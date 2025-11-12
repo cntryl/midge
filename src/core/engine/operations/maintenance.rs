@@ -322,7 +322,7 @@ impl MidgeEngine {
         let versions = if let Some(filter) = filter_arc {
             crate::core::compaction::apply_compaction_filter(&versions, filter.as_ref(), 0)
         } else {
-            let noop = crate::compaction_filter::NoOpFilter;
+            let noop = crate::core::compaction::filter::NoOpFilter;
             crate::core::compaction::apply_compaction_filter(&versions, &noop, 0)
         };
 
@@ -352,7 +352,7 @@ impl MidgeEngine {
         for v in &versions {
             // When use_internal=true, the writer expects keys to be pre-encoded as internal keys
             let internal_key =
-                crate::internal_key::encode_internal_key(&v.user_key, v.seq, v.tombstone);
+                crate::common::internal_key::encode_internal_key(&v.user_key, v.seq, v.tombstone);
 
             if v.tombstone {
                 writer.add_with_meta(&internal_key, None, v.seq, true, v.expiration)?;

@@ -281,7 +281,7 @@ impl MemTable {
         // Transform keys into internal-key encoding
         let mut out: Vec<crate::EntryMeta> = Vec::with_capacity(raws.len());
         for (k, v_opt, seq, tomb, exp) in raws {
-            let ik = crate::internal_key::encode_internal_key(&k, seq, tomb);
+            let ik = crate::common::internal_key::encode_internal_key(&k, seq, tomb);
             out.push(crate::EntryMeta::new(
                 ik,
                 v_opt.map(|b| b.to_vec()),

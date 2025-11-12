@@ -27,12 +27,12 @@ pub enum CompressionType {
     Zstd,
 }
 
-impl From<CompressionType> for crate::codec::CompressionType {
+impl From<CompressionType> for crate::common::codec::CompressionType {
     fn from(ct: CompressionType) -> Self {
         match ct {
-            CompressionType::None => crate::codec::CompressionType::None,
-            CompressionType::Lz4 => crate::codec::CompressionType::Lz4,
-            CompressionType::Zstd => crate::codec::CompressionType::Zstd3, // Use balanced Zstd level
+            CompressionType::None => crate::common::codec::CompressionType::None,
+            CompressionType::Lz4 => crate::common::codec::CompressionType::Lz4,
+            CompressionType::Zstd => crate::common::codec::CompressionType::Zstd3, // Use balanced Zstd level
         }
     }
 }

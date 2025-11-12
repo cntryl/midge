@@ -33,7 +33,7 @@ use crate::manifest::Manifest;
 /// key-value pairs and range tombstones that need to be persisted.
 pub struct FlushJob {
     /// Column family ID that owns this flush job
-    pub cf_id: crate::column_family::ColumnFamilyId,
+    pub cf_id: crate::api::column_family::ColumnFamilyId,
     /// Sequence number of the rotated WAL segment
     pub seq: u64,
     /// Drained memtable entries: (key, value, sequence, is_tombstone)
@@ -333,7 +333,7 @@ fn compute_bounds(
     for entry in entries {
         // Entries may contain internal-key encoded keys; decode to user key
         let user_key =
-            if let Some((u, _s, _t)) = crate::internal_key::decode_internal_key(&entry.key) {
+            if let Some((u, _s, _t)) = crate::common::internal_key::decode_internal_key(&entry.key) {
                 u
             } else {
                 entry.key.clone()
@@ -425,7 +425,7 @@ pub(crate) struct FlushConfig<'a> {
 /// * `Ok((path, metadata))` - Path to created SST and its metadata
 /// * `Err(_)` - If memtable is empty or write fails
 pub(crate) fn flush_memtable_to_sst<F>(
-    cf_id: crate::column_family::ColumnFamilyId,
+    cf_id: crate::api::column_family::ColumnFamilyId,
     memtable_drain: F,
     config: FlushConfig,
 ) -> MidgeResult<(PathBuf, crate::manifest::FileMeta)>
@@ -534,7 +534,7 @@ where
 ///
 /// Returns the sequence number of the rotated WAL segment.
 pub(crate) fn rollover_and_queue_flush<F>(
-    cf_id: crate::column_family::ColumnFamilyId,
+    cf_id: crate::api::column_family::ColumnFamilyId,
     seq_counter: &std::sync::atomic::AtomicU64,
     wal: &parking_lot::RwLock<Box<dyn crate::wal::WalWriter>>,
     wal_factory: &Arc<dyn crate::wal::WalFactory>,
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn should_handle_internal_key_encoding_when_computing_bounds() {
         // Arrange: Entry with internal-key encoded key
-        let internal_key = crate::internal_key::encode_internal_key(b"user_key", 12345, false);
+    let internal_key = crate::common::internal_key::encode_internal_key(b"user_key", 12345, false);
         let entry = crate::EntryMeta {
             key: internal_key,
             value: Some(vec![1, 2, 3]),

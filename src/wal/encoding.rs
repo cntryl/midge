@@ -52,7 +52,7 @@ impl<'a> WalRecordRef<'a> {
         let range_end = self.range_end.map(bytes::Bytes::copy_from_slice);
 
         let mut rec = WalRecord::new_cf(
-            crate::column_family::ColumnFamilyId::new(self.cf_id),
+            crate::api::column_family::ColumnFamilyId::new(self.cf_id),
             op_kind,
             key,
             value,
@@ -653,7 +653,7 @@ mod tests {
         let key = Bytes::from_static(b"delete_me");
 
         let record = WalRecord::new_cf(
-            crate::column_family::ColumnFamilyId::new(cf_id),
+            crate::api::column_family::ColumnFamilyId::new(cf_id),
             WalOpKind::Delete,
             key.clone(),
             None,

@@ -107,7 +107,7 @@ impl SstRangeIter {
                 bytes_consumed = reader.position();
                 match tag {
                     tags::SHARED_PREFIX_LEN => {
-                        shared_len = Some(match crate::tlv::parse_varint32_from_slice(tag_data) {
+                        shared_len = Some(match crate::common::tlv::parse_varint32_from_slice(tag_data) {
                             Ok(v) => v,
                             Err(_) => {
                                 failed = true;
@@ -151,7 +151,7 @@ impl SstRangeIter {
 
             // Handle internal-on-disk format vs non-internal format
             let tombstone = if self.use_internal_keys {
-                if let Some((_u, _seq, t)) = crate::internal_key::decode_internal_key(&key) {
+                if let Some((_u, _seq, t)) = crate::common::internal_key::decode_internal_key(&key) {
                     t
                 } else {
                     false

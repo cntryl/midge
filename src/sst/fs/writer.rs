@@ -107,13 +107,13 @@ impl crate::sst::DynSstWriter for FsDynWriter {
 
         let write_key: Vec<u8> = key.to_vec();
         if self.use_internal_keys {
-            if let Some((user, _s, _t)) = crate::internal_key::decode_internal_key(key) {
+            if let Some((user, _s, _t)) = crate::common::internal_key::decode_internal_key(key) {
                 self.cur_block
                     .add_with_meta(key, value, seq, tombstone, true, expiration)?;
                 self.last_key_in_block = Some(key.to_vec());
                 self.bloom_builder.add_key(&user);
             } else {
-                let ik = crate::internal_key::encode_internal_key(key, seq, tombstone);
+                let ik = crate::common::internal_key::encode_internal_key(key, seq, tombstone);
                 self.cur_block
                     .add_with_meta(&ik, value, seq, tombstone, true, expiration)?;
                 self.last_key_in_block = Some(ik.clone());

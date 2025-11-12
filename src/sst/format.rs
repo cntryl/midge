@@ -440,10 +440,10 @@ impl DataBlockBuilder {
         }
         if internal_on_disk {
             if !self.last_key.is_empty() {
-                let last_user = crate::internal_key::decode_internal_key(&self.last_key)
+                let last_user = crate::common::internal_key::decode_internal_key(&self.last_key)
                     .map(|(u, _s, _t)| u)
                     .unwrap_or_else(|| self.last_key.clone());
-                let new_user = crate::internal_key::decode_internal_key(key)
+                let new_user = crate::common::internal_key::decode_internal_key(key)
                     .map(|(u, _s, _t)| u)
                     .unwrap_or_else(|| key.to_vec());
                 // Allow equal user keys as long as the full internal key bytes are
@@ -486,7 +486,7 @@ impl DataBlockBuilder {
             );
             // Try to decode internal keys for clearer debugging
             if let Some((user_last, seq_last, tomb_last)) =
-                crate::internal_key::decode_internal_key(&self.last_key)
+                crate::common::internal_key::decode_internal_key(&self.last_key)
             {
                 error!(
                     user = ?user_last,
@@ -496,7 +496,7 @@ impl DataBlockBuilder {
                 );
             }
             if let Some((user_new, seq_new, tomb_new)) =
-                crate::internal_key::decode_internal_key(key)
+                crate::common::internal_key::decode_internal_key(key)
             {
                 error!(
                     user = ?user_new,
@@ -826,13 +826,13 @@ mod tests {
         let block = Block::new(
             data.clone(),
             BlockType::Data,
-            crate::codec::CompressionType::None,
+            crate::common::codec::CompressionType::None,
         );
 
         // Assert
         assert_eq!(block.data, data);
         assert_eq!(block.block_type, BlockType::Data);
-        assert_eq!(block.compression, crate::codec::CompressionType::None);
+    assert_eq!(block.compression, crate::common::codec::CompressionType::None);
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod tests {
         let block = Block::new(
             Bytes::from(data),
             BlockType::Data,
-            crate::codec::CompressionType::None,
+            crate::common::codec::CompressionType::None,
         );
 
         // Act
@@ -865,7 +865,7 @@ mod tests {
         let block = Block::new(
             Bytes::from(data.clone()),
             BlockType::Data,
-            crate::codec::CompressionType::Lz4,
+            crate::common::codec::CompressionType::Lz4,
         );
 
         // Act
@@ -874,7 +874,7 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-        assert_eq!(decoded.compression, crate::codec::CompressionType::Lz4);
+    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Lz4);
     }
 
     #[test]
@@ -886,7 +886,7 @@ mod tests {
         let block = Block::new(
             Bytes::from(data.clone()),
             BlockType::Data,
-            crate::codec::CompressionType::Zstd1,
+            crate::common::codec::CompressionType::Zstd1,
         );
 
         // Act
@@ -895,7 +895,7 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-        assert_eq!(decoded.compression, crate::codec::CompressionType::Zstd1);
+    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Zstd1);
     }
 
     #[test]
@@ -907,7 +907,7 @@ mod tests {
         let block = Block::new(
             Bytes::from(data.clone()),
             BlockType::Data,
-            crate::codec::CompressionType::Zstd3,
+            crate::common::codec::CompressionType::Zstd3,
         );
 
         // Act
@@ -916,7 +916,7 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-        assert_eq!(decoded.compression, crate::codec::CompressionType::Zstd3);
+    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Zstd3);
     }
 
     #[test]
@@ -928,7 +928,7 @@ mod tests {
         let block = Block::new(
             Bytes::from(data.clone()),
             BlockType::Data,
-            crate::codec::CompressionType::Zstd5,
+            crate::common::codec::CompressionType::Zstd5,
         );
 
         // Act
@@ -937,7 +937,7 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-        assert_eq!(decoded.compression, crate::codec::CompressionType::Zstd5);
+    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Zstd5);
     }
 
     #[test]
@@ -949,7 +949,7 @@ mod tests {
         let block = Block::new(
             Bytes::from(data.clone()),
             BlockType::Data,
-            crate::codec::CompressionType::Zstd9,
+            crate::common::codec::CompressionType::Zstd9,
         );
 
         // Act
@@ -958,7 +958,7 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, Bytes::from(data));
-        assert_eq!(decoded.compression, crate::codec::CompressionType::Zstd9);
+    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Zstd9);
     }
 
     #[test]
@@ -968,7 +968,7 @@ mod tests {
         let block = Block::new(
             data.clone(),
             BlockType::Filter,
-            crate::codec::CompressionType::None,
+            crate::common::codec::CompressionType::None,
         );
 
         // Act
@@ -987,7 +987,7 @@ mod tests {
         let block = Block::new(
             data.clone(),
             BlockType::Index,
-            crate::codec::CompressionType::None,
+            crate::common::codec::CompressionType::None,
         );
 
         // Act
@@ -1008,7 +1008,7 @@ mod tests {
         let block = Block::new(
             Bytes::from(data),
             BlockType::Data,
-            crate::codec::CompressionType::None,
+            crate::common::codec::CompressionType::None,
         );
         let mut encoded = block.encode().expect("encode").to_vec();
 
@@ -1140,7 +1140,7 @@ mod tests {
         let block = Block::new(
             Bytes::from(data.clone()),
             BlockType::Data,
-            crate::codec::CompressionType::None,
+            crate::common::codec::CompressionType::None,
         );
 
         // Act
@@ -1158,7 +1158,7 @@ mod tests {
         let block = Block::new(
             data.clone(),
             BlockType::Filter,
-            crate::codec::CompressionType::Lz4,
+            crate::common::codec::CompressionType::Lz4,
         );
 
         // Act
@@ -1167,7 +1167,7 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.data, data);
-        assert_eq!(decoded.compression, crate::codec::CompressionType::Lz4);
+    assert_eq!(decoded.compression, crate::common::codec::CompressionType::Lz4);
     }
 
     // Tests for Result-returning DataBlockBuilder methods

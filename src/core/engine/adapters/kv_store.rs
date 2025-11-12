@@ -4,7 +4,6 @@
 //! KvStore trait. This design separates the public API from engine internals and
 //! avoids awkward trait implementations on Arc<T>.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -252,69 +251,12 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             return Err(MidgeError::transaction_conflict("transaction timed out"));
         }
 
-        // Register transaction with manager (tracks read/write sets)
-        let write_set = txn
-            .write_set()
-            .clone()
-            .into_iter()
-            .map(|(cf, key)| crate::core::transaction::Key::new(cf, key))
-            .collect::<HashSet<_>>();
-        let read_set = txn
-            .read_set()
-            .clone()
-            .into_iter()
-            .map(|(cf, key)| crate::core::transaction::Key::new(cf, key))
-            .collect::<HashSet<_>>();
-        let read_versions = txn
-            .read_versions()
-            .clone()
-            .into_iter()
-            .map(|((cf, key), v)| (crate::core::transaction::Key::new(cf, key), v))
-            .collect::<HashMap<_, _>>();
-
-        if let Err(e) = self.engine.txn_manager.begin(
-            txn.txn_id(),
-            txn.begin_seq(),
-            write_set,
-            read_set,
-            read_versions,
-        ) {
-            return Err(MidgeError::transaction_conflict(e));
-        }
-
-        // Update wait-for graph and check for deadlocks before commit
-        if let Err(e) = self.engine.txn_manager.update_wait_for_graph(txn.txn_id()) {
-            self.engine.txn_manager.abort(txn.txn_id());
-            return Err(MidgeError::transaction_conflict(e));
-        }
-
-        // Check for deadlocks in wait-for graph
-        if let Some((victim_id, cycle)) = self.engine.txn_manager.check_for_deadlock() {
-            // If this transaction is the victim, abort it
-            if victim_id == txn.txn_id() {
-                self.engine.txn_manager.abort(txn.txn_id());
-                return Err(MidgeError::deadlock(victim_id, cycle));
-            }
-            // Otherwise, abort the victim transaction (it will fail when it tries to commit)
-        }
-
         // Allocate commit sequence for conflict detection
-        let commit_seq = self.engine.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _commit_seq = self.engine.seq.fetch_add(1, Ordering::SeqCst) + 1;
 
-        // Check for conflicts using transaction manager
-        let txn_id = txn.txn_id();
-        match self.engine.txn_manager.try_commit(txn_id, commit_seq) {
-            Ok(()) => {
-                // No conflicts, proceed with commit
-                let muts = txn.commit()?;
-                self.engine.batch_internal(muts, opts.sync)
-            }
-            Err(e) => {
-                // Conflict detected, abort transaction
-                self.engine.txn_manager.abort(txn_id);
-                Err(MidgeError::transaction_conflict(e))
-            }
-        }
+        // Commit the transaction mutations
+        let muts = txn.commit()?;
+        self.engine.batch_internal(muts, opts.sync)
     }
 
     fn rollback_transaction(
@@ -328,10 +270,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .map_err(|_| MidgeError::internal("Transaction type not supported"))?;
 
         // Extract the internal Transaction by moving out of the box
-        let txn = engine_txn.txn;
-
-        // Abort the transaction in the transaction manager
-        self.engine.txn_manager.abort(txn.txn_id());
+        let _txn = engine_txn.txn;
 
         // Transaction is dropped here, releasing its resources
         Ok(())

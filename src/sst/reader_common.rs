@@ -122,7 +122,7 @@ pub fn parse_key_at_offset(
     let k = decode_key_at_offset(data, offset, limit)?;
     if decode_internal {
         // Only treat the key as internal when it has a valid entry type suffix.
-        if let Some((user, _seq, _entry_type)) = crate::internal_key::decode_internal_key_typed(&k)
+    if let Some((user, _seq, _entry_type)) = crate::common::internal_key::decode_internal_key_typed(&k)
         {
             return Ok(user);
         }
@@ -817,7 +817,7 @@ mod tests {
         // Arrange
         let user_key = b"user_key";
         let seq = 100u64;
-        let internal_key = crate::internal_key::encode_internal_key(user_key, seq, false);
+    let internal_key = crate::common::internal_key::encode_internal_key(user_key, seq, false);
         let mut builder = DataBlockBuilder::new(1);
         builder.add(&internal_key, b"value").unwrap();
         let data = builder.finish();
@@ -853,7 +853,7 @@ mod tests {
         // Arrange
         let user_key = b"deleted_key";
         let seq = 50u64;
-        let internal_key = crate::internal_key::encode_internal_key(user_key, seq, true);
+    let internal_key = crate::common::internal_key::encode_internal_key(user_key, seq, true);
         let mut builder = DataBlockBuilder::new(1);
         builder.add(&internal_key, b"").unwrap();
         let data = builder.finish();
@@ -1067,7 +1067,7 @@ mod tests {
         // Arrange
         let user_key = b"user_key";
         let seq = 100u64;
-        let internal_key = crate::internal_key::encode_internal_key(user_key, seq, false);
+    let internal_key = crate::common::internal_key::encode_internal_key(user_key, seq, false);
         let mut builder = DataBlockBuilder::new(4);
         builder.add(&internal_key, b"internal_value").unwrap();
         let data = builder.finish();
