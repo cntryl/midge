@@ -35,6 +35,7 @@ pub mod autotune;
 pub mod builder;
 pub mod cloud;
 pub mod cloud_builder;
+pub mod column_family;
 pub mod derivation;
 pub mod profile;
 pub mod validation;
@@ -48,6 +49,7 @@ use serde::{Deserialize, Serialize};
 pub use autotune::{Autotuner, ObservedMetrics};
 pub use builder::ConfigBuilder;
 pub use cloud_builder::CloudConfigBuilder;
+pub use column_family::{CompactionStyle, CompressionType};
 
 /// Performance optimization goal.
 ///

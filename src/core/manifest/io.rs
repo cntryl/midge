@@ -152,8 +152,9 @@ mod tests {
     use super::super::types::FileMeta;
     use super::*;
     use crate::api::column_family::{
-        ColumnFamilyConfig, ColumnFamilyId, CompactionStyle, CompressionType, DEFAULT_CF_ID,
+        ColumnFamilyConfig, ColumnFamilyId, DEFAULT_CF_ID,
     };
+    use crate::config::{CompactionStyle, CompressionType};
 
     #[test]
     fn should_create_default_manifest_when_file_does_not_exist() {

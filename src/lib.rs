@@ -2,15 +2,14 @@
 //!
 //! # Architecture
 //!
-//! Midge is organized into several major subsystems:
+//! Midge is organized into layers:
 //!
-//! - [`storage`]: Core LSM-tree storage (SST files, memtables, skip lists)
+//! - [`api`]: Public API layer - traits and types for users
+//! - [`core`]: Engine implementation - LSM-tree, compaction, transactions, manifests
+//! - [`sst`]: SSTable storage format and bloom filters
 //! - [`wal`]: Write-ahead logging for durability
-//! - [`cloud`]: Cloud-backed WAL implementations
-//! - [`compaction`]: Background compaction and flushing
-//! - [`index`]: Bloom filters, merge iterators, range tombstones
-//! - [`api`]: Public API types (queries, mutations, snapshots, transactions)
-//! - [`utils`]: Cross-cutting utilities (caching, encoding, metrics)
+//! - [`cloud`]: Cloud-backed storage implementations
+//! - [`compaction`]: User-extensible compaction filter API
 
 // Lint enforcement for production code quality
 // Note: unwrap is allowed in test modules via #![cfg_attr(test, allow(clippy::unwrap_used))]
@@ -31,38 +30,42 @@ pub use common::{MidgeError, MidgeResult};
 // Re-export test hooks for testing
 pub use common::test_hooks;
 
-// Core modules (grouped under `core` after reorganization)
+// Core modules
 pub mod config;
 pub mod core;
-// Note: write_buffer was explored but not needed - write_batch() API already provides batching
-
-// Shared filesystem utilities (used by wal/ and sst/)
 pub mod fs;
 
-// Feature modules
+// Public API layer
 pub mod api;
-pub use crate::core::backup;
+
+// Feature modules (implementation details, but exposed for extensibility)
 pub mod cloud;
+pub mod health;
+pub mod sst;
+pub mod wal;
+
+// Convenience re-exports from core (commonly needed internal types)
+pub use crate::core::backup;
+pub use crate::core::locking;
+pub use crate::core::manifest;
+pub use crate::core::storage_mode;
+pub use crate::core::transaction_manager;
+
+// Compaction filter API for user-provided custom logic
 pub mod compaction {
     //! Compaction filter API for custom compaction logic
     pub use crate::core::compaction::executor::CompactionVersion;
     pub use crate::core::compaction::filter::{CompactionFilter, FilterDecision};
 }
-pub mod health;
-pub use crate::core::locking;
-pub use crate::core::manifest;
-pub mod sst;
-pub use crate::core::storage_mode;
-pub use crate::core::transaction_manager;
-pub mod wal;
 
 // Re-export commonly used types at crate root for convenience
 pub use crate::api::{
-    BytesAppendOperator, ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, CompactionStyle,
-    CompressionType, DynKvStore, DynMergeOperator, IntegerAddOperator, KvStore, KvTransaction,
+    BytesAppendOperator, ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId,
+    DynKvStore, DynMergeOperator, IntegerAddOperator, KvStore, KvTransaction,
     MergeOperator, Mutation, MutationOp, Query, Snapshot, StringAppendOperator, WriteBatch,
     WriteOptions, DEFAULT_CF_ID, DEFAULT_CF_NAME,
 };
+pub use crate::config::{CompactionStyle, CompressionType};
 // Export EngineTransaction as the public Transaction type
 pub use crate::core::transaction::EngineTransaction as Transaction;
 // Re-export the engine API from the new `core` location for backwards compatibility
