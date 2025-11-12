@@ -21,12 +21,12 @@
 //!
 //! // Register merge operator for the default column family
 //! let cf = engine.default_column_family();
-//! engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator))?;
+//! engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
 //!
 //! // Increment counter without reading (applies to the specified CF)
-//! engine.merge_cf(&cf, Bytes::from("page_views"), Bytes::from("1"))?;
-//! engine.merge_cf(&cf, Bytes::from("page_views"), Bytes::from("1"))?;
-//! engine.merge_cf(&cf, Bytes::from("page_views"), Bytes::from("5"))?;
+//! engine.merge_cf(&cf, b"page_views", b"1");
+//! engine.merge_cf(&cf, b"page_views", b"1");
+//! engine.merge_cf(&cf, b"page_views", b"5");
 //!
 //! // Read combines all increments: 1 + 1 + 5 = 7
 //! let count = engine.get(&cf, b"page_views")?;

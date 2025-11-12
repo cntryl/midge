@@ -202,13 +202,13 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, KvTransaction, WriteOptions};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// # let cf = engine.default_column_family();
     /// let mut txn = engine.begin_transaction(&cf).unwrap();
     /// txn.put(b"key1", b"value1").unwrap();
     /// txn.put(b"key2", b"value2").unwrap();
-    /// engine.commit_transaction(txn, Default::default()).unwrap();
+    /// engine.commit_transaction(txn, WriteOptions::default()).unwrap();
     /// ```
     pub fn begin_transaction(&self, _cf: &ColumnFamilyHandle) -> MidgeResult<EngineTransaction> {
         let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
@@ -256,8 +256,7 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, WriteOptions};
-    /// # use bytes::Bytes;
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, WriteOptions, KvTransaction};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// # let cf = engine.default_column_family();
     /// // Critical transaction - sync immediately
@@ -336,19 +335,18 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # use bytes::Bytes;
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, KvTransaction};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let cf = engine.default_column_family();
-    /// let mut txn = engine.begin_transaction();
+    /// let mut txn = engine.begin_transaction(&cf).unwrap();
     ///
-    /// // Read with snapshot isolation
-    /// if let Some(value) = engine.transaction_get(&mut txn, &cf, b"key").unwrap() {
+    /// // Read with snapshot isolation (use the KvTransaction trait)
+    /// if let Some(value) = txn.get(b"key").unwrap() {
     ///     println!("Value: {:?}", value);
     /// }
     ///
     /// // Reads are tracked for conflict detection
-    /// txn.put(Bytes::from("other_key"), Bytes::from("value"), None).unwrap();
+    /// txn.put(b"other_key", b"value").unwrap();
     /// engine.commit_transaction(txn, cntryl_midge::WriteOptions::default()).unwrap();
     /// ```
     pub fn transaction_get(

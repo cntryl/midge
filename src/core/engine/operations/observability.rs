@@ -21,7 +21,8 @@ impl MidgeEngine {
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// if let Some(cache) = engine.block_cache() {
-    ///     println!("Block cache enabled with capacity: {} bytes", cache.capacity());
+    ///     // BlockCache exposes stats; use max_size_bytes as capacity
+    ///     println!("Block cache enabled with capacity: {} bytes", cache.stats().max_size_bytes);
     /// }
     /// ```
     pub fn block_cache(&self) -> Option<&Arc<crate::sst::BlockCache>> {
@@ -40,7 +41,8 @@ impl MidgeEngine {
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// if let Some(stats) = engine.cache_stats() {
     ///     println!("Cache hit rate: {:.2}%", stats.hit_rate() * 100.0);
-    ///     println!("Total hits: {}, misses: {}", stats.hits(), stats.misses());
+    ///     // CacheStats exposes fields for hits/misses
+    ///     println!("Total hits: {}, misses: {}", stats.hits, stats.misses);
     /// }
     /// ```
     pub fn cache_stats(&self) -> Option<crate::sst::CacheStats> {
@@ -93,7 +95,7 @@ impl MidgeEngine {
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let metrics = engine.metrics();
-    /// println!("Active snapshots: {}", metrics.active_snapshots());
+    /// println!("Active snapshots: {}", metrics.active_snapshot_count());
     /// ```
     pub fn metrics(&self) -> &Arc<Metrics> {
         &self.metrics

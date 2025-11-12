@@ -452,7 +452,7 @@ impl MidgeEngine {
     ///
     /// ```rust,no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # use cntryl_midge::compaction::filter::{CompactionFilter, FilterDecision, CompactionVersion};
+    /// # use cntryl_midge::compaction::{CompactionFilter, FilterDecision, CompactionVersion};
     /// # use std::sync::Arc;
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// struct MyFilter;

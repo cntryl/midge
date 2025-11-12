@@ -255,12 +255,12 @@ impl MidgeEngine {
     ///
     /// # Example
     /// ```no_run
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # use cntryl_midge::api::merge_operator::CounterMergeOperator;
-    /// # let engine = MidgeEngine::open(MidgeOptions::new("./db")).unwrap();
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, IntegerAddOperator};
+    /// # use std::sync::Arc;
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let cf = engine.default_column_family();
-    /// let operator = CounterMergeOperator;
-    /// engine.register_merge_operator(&cf, Box::new(operator));
+    /// let operator = IntegerAddOperator;
+    /// engine.register_merge_operator(&cf, Arc::new(operator));
     /// # Ok::<(), cntryl_midge::MidgeError>(())
     /// ```
     pub fn register_merge_operator(

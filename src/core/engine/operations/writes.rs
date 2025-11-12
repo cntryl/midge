@@ -432,7 +432,7 @@ impl MidgeEngine {
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let cf = engine.default_column_family();
-    /// engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator)).unwrap();
+    /// engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
     /// // Increment counter without reading current value
     /// engine.merge_cf(&cf, b"page_views", b"1").unwrap();
     /// engine.merge_cf(&cf, b"page_views", b"5").unwrap();
@@ -454,7 +454,7 @@ impl MidgeEngine {
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let cf = engine.default_column_family();
-    /// engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator)).unwrap();
+    /// engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
     /// // Temporary counter expires after 60 seconds
     /// engine.merge_with_ttl_cf(&cf, b"temp_counter", b"1", 60).unwrap();
     /// ```

@@ -40,7 +40,7 @@ impl MidgeEngine {
     /// engine.put(&cf, b"key", b"value2").unwrap();
     ///
     /// // Reading from snapshot sees the old value
-    /// let value = engine.get_at(&cf, b"key", snapshot.sequence()).unwrap();
+    /// let value = engine.get_at(&cf, b"key", &snapshot).unwrap();
     /// assert_eq!(value.as_deref(), Some(&b"value1"[..]));
     ///
     /// // Reading without snapshot sees the new value

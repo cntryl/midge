@@ -82,6 +82,7 @@ impl MidgeEngine {
     /// # Examples
     /// ```
     /// # use cntryl_midge::{MidgeOptions, MidgeEngine, CasResult};
+    /// # use bytes::Bytes;
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let cf = engine.default_column_family();
