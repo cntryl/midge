@@ -41,47 +41,61 @@ pub trait KvStore: Send + Sync {
         &self,
         name: &str,
         config: super::column_family::ColumnFamilyConfig,
-    ) -> MidgeResult<super::column_family::ColumnFamilyHandle>;
+    ) -> MidgeResult<super::column_family::ColumnFamilyId>;
 
-    fn column_family(&self, name: &str) -> MidgeResult<super::column_family::ColumnFamilyHandle>;
-    fn default_column_family(&self) -> super::column_family::ColumnFamilyHandle;
-    fn list_column_families(&self) -> Vec<super::column_family::ColumnFamilyHandle>;
-    fn drop_column_family(&self, cf: &super::column_family::ColumnFamilyHandle) -> MidgeResult<()>;
+    fn column_family(&self, name: &str) -> MidgeResult<super::column_family::ColumnFamilyId>;
+    fn default_column_family(&self) -> super::column_family::ColumnFamilyId;
+    fn list_column_families(&self) -> Vec<super::column_family::ColumnFamilyId>;
+    fn drop_column_family(&self, cf: super::column_family::ColumnFamilyId) -> MidgeResult<()>;
+
+    /// Convenience: look up a `ColumnFamilyHandle` by its `ColumnFamilyId`.
+    ///
+    /// Default implementation performs a linear scan of `list_column_families()` and
+    /// returns an error if not found. Implementors may provide a faster lookup.
+    fn column_family_by_id(&self, id: super::column_family::ColumnFamilyId) -> MidgeResult<super::column_family::ColumnFamilyId> {
+        // Default implementation: verify existence by scanning list_column_families
+        let found = self.list_column_families().into_iter().find(|h| h == &id);
+        if found.is_some() {
+            Ok(id)
+        } else {
+            Err(crate::MidgeError::internal(format!("column family id {} not found", id.as_u32())))
+        }
+    }
 
     // ==================== Core Data Ops ====================
 
     fn insert(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
         key: &[u8],
         value: &[u8],
     ) -> MidgeResult<()>;
 
     fn put(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
         key: &[u8],
         value: &[u8],
     ) -> MidgeResult<()>;
 
     fn get(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<Option<Bytes>>;
 
-    fn delete(&self, cf: &super::column_family::ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()>;
+    fn delete(&self, cf: super::column_family::ColumnFamilyId, key: &[u8]) -> MidgeResult<()>;
 
     fn delete_range(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
         start: &[u8],
         end: &[u8],
     ) -> MidgeResult<()>;
 
     fn scan(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
         start: &[u8],
         end: &[u8],
     ) -> MidgeResult<Vec<(Bytes, Bytes)>>;
@@ -92,7 +106,7 @@ pub trait KvStore: Send + Sync {
     /// - Returns `Ok(true)` if the swap succeeded, `Ok(false)` otherwise.
     fn compare_and_swap(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
         key: &[u8],
         expected: Option<&[u8]>,
         new_value: &[u8],
@@ -103,7 +117,7 @@ pub trait KvStore: Send + Sync {
     /// Merge operations are associative and may be applied lazily.
     fn merge(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
         key: &[u8],
         value: &[u8],
     ) -> MidgeResult<()>;
@@ -112,7 +126,7 @@ pub trait KvStore: Send + Sync {
 
     fn batch(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
         operations: Vec<BatchOperation>,
     ) -> MidgeResult<()>;
 
@@ -120,7 +134,7 @@ pub trait KvStore: Send + Sync {
 
     fn begin_transaction(
         &self,
-        cf: &super::column_family::ColumnFamilyHandle,
+        cf: super::column_family::ColumnFamilyId,
     ) -> MidgeResult<Box<dyn KvTransaction>>;
 
     fn commit_transaction(

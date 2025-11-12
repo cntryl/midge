@@ -102,7 +102,10 @@ pub fn open(opts: crate::MidgeOptions) -> MidgeResult<MidgeEngine> {
             Box::new(crate::sst::mem::MemSstFactory {})
         } else {
             // Default to filesystem-backed streaming SST writer factory
-            Box::new(crate::sst::fs::FsSstFactory::new(sst_dir.clone()))
+            Box::new(crate::sst::fs::FsSstFactory::new_with_hooks(
+                sst_dir.clone(),
+                opts.test_hooks.clone(),
+            ))
         };
 
     let (sst_reader_factory, wal_factory): (
@@ -299,6 +302,7 @@ pub fn open_with_factories(
         cf_set: cf_set_arc,
         seq: AtomicU64::new(max_replay_seq),
         txn_id: AtomicU64::new(0),
+    txn_manager: crate::core::transaction::TransactionManager::new(),
         db_path,
         mem_mode,
         read_only: opts.read_only,

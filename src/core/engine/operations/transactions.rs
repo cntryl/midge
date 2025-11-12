@@ -280,14 +280,37 @@ impl MidgeEngine {
         // Extract the internal transaction
         let txn = engine_txn.txn;
 
+        // Optimistic conflict detection: register with TransactionManager and try commit
+        let write_set: std::collections::HashSet<crate::core::transaction::manager::Key> =
+            txn.conflict_write_set()
+                .into_iter()
+                .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+                .collect();
+        let read_set: std::collections::HashSet<crate::core::transaction::manager::Key> =
+            txn.conflict_read_set()
+                .into_iter()
+                .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+                .collect();
+        let read_versions: std::collections::HashMap<crate::core::transaction::manager::Key, u64> =
+            txn.conflict_read_versions()
+                .into_iter()
+                .map(|((cf, k), v)| (crate::core::transaction::manager::Key::new(cf, k), v))
+                .collect();
+
+        let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
+        let commit_seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+
+        let _ = self
+            .txn_manager
+            .begin(txn_id, txn.begin_seq(), write_set, read_set, read_versions);
+        if let Err(_e) = self.txn_manager.try_commit(txn_id, commit_seq) {
+            return Err(MidgeError::transaction_conflict("write conflict detected"));
+        }
+
         // Check if transaction is expired (timeout)
         if txn.is_expired() {
             return Err(MidgeError::transaction_conflict("transaction timed out"));
         }
-
-        // Allocate commit sequence for conflict detection
-        // This ensures each committing transaction has a unique sequence number
-        let _commit_seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Commit the transaction mutations
         let muts = txn.commit()?;

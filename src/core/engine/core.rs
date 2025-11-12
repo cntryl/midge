@@ -38,6 +38,8 @@ pub struct MidgeEngine {
     pub(crate) sst_reader_factory: Arc<dyn crate::sst::SstReaderFactory>,
     pub(crate) wal_buffer_size: usize,
     pub(crate) wal_sync: bool,
+    /// Transaction manager for optimistic concurrency control
+    pub(crate) txn_manager: crate::core::transaction::TransactionManager,
     pub(crate) snapshot_registry: Arc<crate::api::snapshot::SnapshotRegistry>,
     pub(crate) block_cache: Option<Arc<crate::sst::BlockCache>>,
     pub(crate) table_cache: Option<Arc<crate::sst::table_cache::TableCache>>,
@@ -335,8 +337,9 @@ mod tests {
 
         // Assert
         // Verify adapter is created (type check via usage)
-        let cf = adapter.default_column_family();
-        assert_eq!(cf.id(), crate::api::column_family::DEFAULT_CF_ID);
+    let cf = adapter.default_column_family();
+    // `default_column_family()` now returns a `ColumnFamilyId`
+    assert_eq!(cf, crate::api::column_family::DEFAULT_CF_ID);
     }
 
     // ==================== Read-Only Mode Tests ====================

@@ -39,6 +39,8 @@ pub enum WalBehavior {
     Normal,
     /// Truncate WAL after write (simulate torn write)
     TruncateAfterWrite,
+    /// Truncate WAL after write but simulate a failing truncation (force fallback)
+    TruncateAfterWriteFail,
 }
 
 /// Behavior for manifest operations during tests.
@@ -140,6 +142,14 @@ impl TestHooks {
         self
     }
 
+    /// Whether tests should simulate a failing truncate operation (force fallback)
+    pub fn should_fail_truncate(&self) -> bool {
+        matches!(
+            *self.wal_behavior.read(),
+            WalBehavior::TruncateAfterWriteFail
+        )
+    }
+
     /// Set manifest behavior for testing.
     pub fn with_manifest_behavior(self, behavior: ManifestBehavior) -> Self {
         *self.manifest_behavior.write() = behavior;
@@ -172,7 +182,10 @@ impl TestHooks {
 
     /// Hook called after WAL append. Returns whether to truncate WAL.
     pub fn after_wal_append(&self) -> bool {
-        matches!(*self.wal_behavior.read(), WalBehavior::TruncateAfterWrite)
+        matches!(
+            *self.wal_behavior.read(),
+            WalBehavior::TruncateAfterWrite | WalBehavior::TruncateAfterWriteFail
+        )
     }
 
     /// Hook called before manifest update. Returns whether to fail the update.

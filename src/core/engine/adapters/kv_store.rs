@@ -41,100 +41,154 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         &self,
         name: &str,
         config: crate::api::column_family::ColumnFamilyConfig,
-    ) -> MidgeResult<crate::api::column_family::ColumnFamilyHandle> {
-        self.engine.create_column_family(name, config)
+    ) -> MidgeResult<crate::api::column_family::ColumnFamilyId> {
+        let handle = self.engine.create_column_family(name, config)?;
+        Ok(handle.id())
     }
 
-    fn column_family(
-        &self,
-        name: &str,
-    ) -> MidgeResult<crate::api::column_family::ColumnFamilyHandle> {
-        self.engine.get_column_family(name)
+    fn column_family(&self, name: &str) -> MidgeResult<crate::api::column_family::ColumnFamilyId> {
+        let handle = self.engine.get_column_family(name)?;
+        Ok(handle.id())
     }
 
-    fn default_column_family(&self) -> crate::api::column_family::ColumnFamilyHandle {
-        self.engine.default_column_family()
+    fn default_column_family(&self) -> crate::api::column_family::ColumnFamilyId {
+        self.engine.default_column_family().id()
     }
 
-    fn list_column_families(&self) -> Vec<crate::api::column_family::ColumnFamilyHandle> {
-        self.engine.list_column_families()
+    fn list_column_families(&self) -> Vec<crate::api::column_family::ColumnFamilyId> {
+        self.engine
+            .list_column_families()
+            .into_iter()
+            .map(|h| h.id())
+            .collect()
     }
 
-    fn drop_column_family(
-        &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
-    ) -> MidgeResult<()> {
-        self.engine.drop_column_family(cf)
+    fn drop_column_family(&self, cf: crate::api::column_family::ColumnFamilyId) -> MidgeResult<()> {
+        // Resolve handle by scanning engine handles (non-hot path)
+        if let Some(handle) = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+        {
+            return self.engine.drop_column_family(&handle);
+        }
+        Err(MidgeError::invalid_config(format!(
+            "Column family id {} does not exist",
+            cf.as_u32()
+        )))
     }
 
     // ==================== Data Operations (CF-Scoped) ====================
 
     fn put(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         key: &[u8],
         value: &[u8],
     ) -> MidgeResult<()> {
-        self.engine.put(cf, key, value)
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+        self.engine.put(&handle, key, value)
     }
 
     fn get(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<Option<Bytes>> {
-        self.engine.get(cf, key)
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+        self.engine.get(&handle, key)
     }
 
     fn delete(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<()> {
-        self.engine.delete(cf, key)
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+        self.engine.delete(&handle, key)
     }
 
     fn scan(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         start: &[u8],
         end: &[u8],
     ) -> MidgeResult<Vec<(Bytes, Bytes)>> {
         let q = crate::api::query::Query::new()
             .start_key(Bytes::copy_from_slice(start))
             .end_key(Bytes::copy_from_slice(end));
-        self.engine.scan(cf, q)
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+        self.engine.scan(&handle, q)
     }
 
     fn delete_range(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         start: &[u8],
         end: &[u8],
     ) -> MidgeResult<()> {
-        self.engine.delete_range(cf, start, end)
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+        self.engine.delete_range(&handle, start, end)
     }
 
     fn insert(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         key: &[u8],
         value: &[u8],
     ) -> MidgeResult<()> {
         // KvStore::insert is currently an alias for put
         // Use insert_with_value() for insert-if-absent semantics
-        self.engine.put(cf, key, value)
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+        self.engine.put(&handle, key, value)
     }
 
     fn compare_and_swap(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         key: &[u8],
         expected: Option<&[u8]>,
         new_value: &[u8],
     ) -> MidgeResult<bool> {
         // Read current value
-        let current = self.engine.get(cf, key)?;
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+        let current = self.engine.get(&handle, key)?;
 
         // Check if current value matches expected
         let matches = match (current.as_ref(), expected) {
@@ -145,7 +199,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
 
         // If matches, perform the swap
         if matches {
-            self.engine.put(cf, key, new_value)?;
+            self.engine.put(&handle, key, new_value)?;
             Ok(true)
         } else {
             Ok(false)
@@ -154,36 +208,48 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
 
     fn merge(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         key: &[u8],
         value: &[u8],
     ) -> MidgeResult<()> {
         // Delegate to the merge operation which handles merge operators
-        self.engine.merge_cf(cf, key, value)
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+        self.engine.merge_cf(&handle, key, value)
     }
 
     // ==================== Batch Operations ====================
 
     fn batch(
         &self,
-        cf: &crate::api::column_family::ColumnFamilyHandle,
+        cf: crate::api::column_family::ColumnFamilyId,
         operations: Vec<crate::api::kv_store::BatchOperation>,
     ) -> MidgeResult<()> {
         // Apply each operation individually to the specified CF
         // For atomic multi-operation batches, use write_batch() with WriteBatch
+        let handle = self
+            .engine
+            .list_column_families()
+            .into_iter()
+            .find(|h| h.id() == cf)
+            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
         for op in operations {
             match op {
                 crate::api::kv_store::BatchOperation::Insert { key, value } => {
-                    self.engine.put(cf, &key, &value)?;
+                    self.engine.put(&handle, &key, &value)?;
                 }
                 crate::api::kv_store::BatchOperation::Put { key, value } => {
-                    self.engine.put(cf, &key, &value)?;
+                    self.engine.put(&handle, &key, &value)?;
                 }
                 crate::api::kv_store::BatchOperation::Delete { key } => {
-                    self.engine.delete(cf, &key)?;
+                    self.engine.delete(&handle, &key)?;
                 }
                 crate::api::kv_store::BatchOperation::DeleteRange { start, end } => {
-                    self.engine.delete_range(cf, &start, &end)?;
+                    self.engine.delete_range(&handle, &start, &end)?;
                 }
                 crate::api::kv_store::BatchOperation::CompareAndSwap {
                     key,
@@ -192,19 +258,19 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
                 } => {
                     // For batch operations, CAS is not atomic across the batch
                     // Each CAS is applied individually
-                    let current = self.engine.get(cf, &key)?;
+                    let current = self.engine.get(&handle, &key)?;
                     let matches = match (current.as_ref(), expected.as_ref()) {
                         (None, None) => true,
                         (Some(c), Some(e)) => c.as_ref() == e.as_slice(),
                         _ => false,
                     };
                     if matches {
-                        self.engine.put(cf, &key, &new_value)?;
+                        self.engine.put(&handle, &key, &new_value)?;
                     }
                 }
                 crate::api::kv_store::BatchOperation::Merge { key, value } => {
                     // Delegate to merge operation which handles merge operators
-                    self.engine.merge_cf(cf, &key, &value)?;
+                    self.engine.merge_cf(&handle, &key, &value)?;
                 }
             }
         }
@@ -215,7 +281,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
 
     fn begin_transaction(
         &self,
-        _cf: &crate::api::column_family::ColumnFamilyHandle,
+        _cf: crate::api::column_family::ColumnFamilyId,
     ) -> MidgeResult<Box<dyn crate::api::kv_store::KvTransaction>> {
         // Transactions work across all column families
         // The CF parameter is accepted for trait compatibility but transactions

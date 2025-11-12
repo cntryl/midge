@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 ///
 /// Not user-facing; wrapped by `EngineTransaction`.
 pub struct Transaction {
+    #[allow(dead_code)]
+    pub(crate) txn_id: u64,
     begin_seq: u64,
     deadline: Option<Instant>,
     completed: bool,
@@ -45,6 +47,7 @@ impl Transaction {
         let created_at = Instant::now();
         let deadline = timeout.map(|t| created_at + t);
         Self {
+            txn_id,
             begin_seq,
             deadline,
             completed: false,
@@ -288,6 +291,21 @@ impl Transaction {
             self.cleanup_spills();
             self.completed = true;
         }
+    }
+
+    /// Return a clone of the tracked write set for external conflict checks.
+    pub(crate) fn conflict_write_set(&self) -> std::collections::HashSet<(u32, Bytes)> {
+        self.conflicts.write_set().clone()
+    }
+
+    /// Return a clone of the tracked read set for external conflict checks.
+    pub(crate) fn conflict_read_set(&self) -> std::collections::HashSet<(u32, Bytes)> {
+        self.conflicts.read_set().clone()
+    }
+
+    /// Return a clone of the tracked read versions map.
+    pub(crate) fn conflict_read_versions(&self) -> std::collections::HashMap<(u32, Bytes), u64> {
+        self.conflicts.read_versions().clone()
     }
 }
 

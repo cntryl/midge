@@ -31,6 +31,8 @@ pub struct FsDynWriter {
 
     // current file offset
     offset: u64,
+    // Optional test hooks for instrumentation/fault-injection
+    test_hooks: Option<crate::common::test_hooks::TestHooks>,
 }
 
 impl FsDynWriter {
@@ -39,6 +41,7 @@ impl FsDynWriter {
         compression: CompressionType,
         block_size: usize,
         use_internal: bool,
+        test_hooks: Option<crate::common::test_hooks::TestHooks>,
     ) -> MidgeResult<Self> {
         let id = uuid::Uuid::new_v4().to_string();
         let temp_path = temp_dir.join(format!("{}.sst.tmp", id));
@@ -62,6 +65,7 @@ impl FsDynWriter {
             bloom_builder: crate::sst::bloom::BloomFilterBuilder::with_bits_per_key(10),
             range_tombstones: Vec::new(),
             offset: 0,
+            test_hooks,
         })
     }
 
@@ -202,8 +206,8 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         s.file.write_all(&footer)?;
         s.offset += footer.len() as u64;
 
-        // Ensure all bytes flushed
-        crate::fs::sync_data_only(&s.file, None)?; // TODO: pass test_hooks when available
+        // Ensure all bytes flushed (honor test hooks when present)
+        crate::fs::sync_data_only(&s.file, s.test_hooks.as_ref())?;
 
         // Read file bytes back
         let mut buf = Vec::with_capacity(s.offset as usize);
@@ -277,7 +281,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         s.file.write_all(&footer)?;
         s.offset += footer.len() as u64;
 
-        crate::fs::sync_data_only(&s.file, None)?; // TODO: pass test_hooks when available
+        crate::fs::sync_data_only(&s.file, s.test_hooks.as_ref())?;
         drop(s.file);
 
         // Move temp file into place (atomic rename preferred)

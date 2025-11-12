@@ -204,7 +204,111 @@ impl WalWriter for Wal {
 
         crate::fs::write_vectored(file, &[&frag.header, &frag.body])?;
 
+        // Advance position to reflect newly-written bytes
         inner.pos += (frag.header.len() + frag.body.len()) as u64;
+        eprintln!(
+            "[wal] append path={} pos_before={} written={} new_pos={}",
+            self.path.display(),
+            pos_before,
+            (frag.header.len() + frag.body.len()),
+            inner.pos
+        );
+
+        // Test hook: allow truncating WAL immediately after append to simulate
+        // torn-write scenarios. If the hook requests truncation, truncate the
+        // underlying file back to `pos_before` and update the tracked position.
+        if let Some(hooks) = &self.test_hooks {
+            if hooks.after_wal_append() {
+                // Ensure buffered writer flushed and then truncate the file to
+                // simulate a partial/torn write (i.e., the last append didn't make it).
+                inner.file.flush()?;
+                let f = inner.file.get_mut();
+                eprintln!(
+                    "[wal] attempting truncate {} -> {}",
+                    self.path.display(),
+                    pos_before
+                );
+                // If tests request a simulated failing truncate, force the deterministic
+                // CRC-overwrite fallback so tests can exercise the code path.
+                if hooks.should_fail_truncate() {
+                    eprintln!(
+                        "[wal] simulating failing truncate on {} -> forcing fallback",
+                        self.path.display()
+                    );
+                    if let Err(e2) = (|| -> std::io::Result<()> {
+                        f.seek(SeekFrom::Start(pos_before))?;
+                        // Overwrite 4 CRC bytes with 0xFF to guarantee mismatch.
+                        f.write_all(&[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8])?;
+                        f.flush()?;
+                        Ok(())
+                    })() {
+                        eprintln!(
+                            "[wal][ERR] simulated fallback corrupt CRC write failed on {}: {}",
+                            self.path.display(),
+                            e2
+                        );
+                        return Err(e2.into());
+                    } else {
+                        // Make sure our tracked position reflects the truncated view
+                        if let Err(e) = f.seek(SeekFrom::Start(pos_before)) {
+                            eprintln!(
+                                "[wal][ERR] seek failed after simulated fallback on {}: {}",
+                                self.path.display(),
+                                e
+                            );
+                            return Err(e.into());
+                        }
+                        inner.pos = pos_before;
+                        eprintln!(
+                            "[wal] simulated fallback corrupt CRC write succeeded on {}",
+                            self.path.display()
+                        );
+                    }
+                } else if let Err(e) = f.set_len(pos_before) {
+                    eprintln!(
+                        "[wal][ERR] set_len failed on {}: {}",
+                        self.path.display(),
+                        e
+                    );
+                    // Fallback for platforms that disallow set_len while file is open.
+                    // Overwrite the stored CRC (first 4 bytes of the record header)
+                    // at `pos_before` so WAL replay will detect a CRC mismatch and
+                    // stop at the last valid record. Writing 4 bytes emulates the
+                    // manual corruption performed in unit tests (see
+                    // `should_detect_corrupted_crc`).
+                    if let Err(e2) = (|| -> std::io::Result<()> {
+                        f.seek(SeekFrom::Start(pos_before))?;
+                        // Overwrite 4 CRC bytes with 0xFF to guarantee mismatch.
+                        f.write_all(&[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8])?;
+                        f.flush()?;
+                        Ok(())
+                    })() {
+                        eprintln!(
+                            "[wal][ERR] fallback corrupt CRC write failed on {}: {}",
+                            self.path.display(),
+                            e2
+                        );
+                        return Err(e.into());
+                    } else {
+                        eprintln!(
+                            "[wal] fallback corrupt CRC write succeeded on {}",
+                            self.path.display()
+                        );
+                    }
+                } else {
+                    if let Err(e) = f.seek(SeekFrom::Start(pos_before)) {
+                        eprintln!("[wal][ERR] seek failed on {}: {}", self.path.display(), e);
+                        return Err(e.into());
+                    }
+                    inner.pos = pos_before;
+                    eprintln!(
+                        "[wal] truncate succeeded {} -> {}",
+                        self.path.display(),
+                        pos_before
+                    );
+                }
+            }
+        }
 
         Ok(pos_before)
     }
@@ -272,6 +376,66 @@ impl WalWriter for Wal {
             inner.pos = inner.pos.saturating_add(total_size as u64);
             // Return scratch buffer for reuse
             inner.scratch = scratch;
+
+            // Test hook: optionally truncate after batch append to simulate torn write
+            if let Some(hooks) = &self.test_hooks {
+                if hooks.after_wal_append() {
+                    inner.file.flush()?;
+                    let f = inner.file.get_mut();
+                    eprintln!(
+                        "[wal] attempting truncate (batch) {} -> {}",
+                        self.path.display(),
+                        pos_before
+                    );
+                    // If tests request simulated failing truncate, perform the
+                    // deterministic CRC-overwrite fallback instead of set_len.
+                    if hooks.should_fail_truncate() {
+                        eprintln!(
+                            "[wal] simulating failing truncate (batch) on {} -> forcing fallback",
+                            self.path.display()
+                        );
+                        if let Err(e) = (|| -> std::io::Result<()> {
+                            f.seek(SeekFrom::Start(pos_before))?;
+                            f.write_all(&[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8])?;
+                            f.flush()?;
+                            Ok(())
+                        })() {
+                            eprintln!("[wal][ERR] simulated fallback corrupt CRC write failed (batch) on {}: {}", self.path.display(), e);
+                            return Err(e.into());
+                        } else {
+                            if let Err(e) = f.seek(SeekFrom::Start(pos_before)) {
+                                eprintln!("[wal][ERR] seek failed after simulated fallback (batch) on {}: {}", self.path.display(), e);
+                                return Err(e.into());
+                            }
+                            inner.pos = pos_before;
+                            eprintln!("[wal] simulated fallback corrupt CRC write succeeded (batch) on {}", self.path.display());
+                        }
+                    } else {
+                        if let Err(e) = f.set_len(pos_before) {
+                            eprintln!(
+                                "[wal][ERR] set_len failed (batch) on {}: {}",
+                                self.path.display(),
+                                e
+                            );
+                            return Err(e.into());
+                        }
+                        if let Err(e) = f.seek(SeekFrom::Start(pos_before)) {
+                            eprintln!(
+                                "[wal][ERR] seek failed (batch) on {}: {}",
+                                self.path.display(),
+                                e
+                            );
+                            return Err(e.into());
+                        }
+                        inner.pos = pos_before;
+                        eprintln!(
+                            "[wal] truncate succeeded (batch) {} -> {}",
+                            self.path.display(),
+                            pos_before
+                        );
+                    }
+                }
+            }
         } else {
             // Very large batch -- avoid copying body bytes into scratch. Use
             // vectored writes (write_vectored) to emit headers + bodies in
@@ -358,6 +522,17 @@ impl WalWriter for Wal {
             }
 
             inner.pos = inner.pos.saturating_add(total_size as u64);
+
+            // Test hook: optionally truncate after large-batch direct writes
+            if let Some(hooks) = &self.test_hooks {
+                if hooks.after_wal_append() {
+                    // We wrote directly via file descriptor; truncate to simulate torn write
+                    let file = inner.file.get_mut();
+                    file.set_len(pos_before)?;
+                    file.seek(SeekFrom::Start(pos_before))?;
+                    inner.pos = pos_before;
+                }
+            }
         }
 
         Ok(pos_before)
@@ -1134,6 +1309,96 @@ mod tests {
         if let Err(e) = result {
             assert!(matches!(e, crate::error::MidgeError::Corruption { .. }));
         }
+    }
+
+    #[test]
+    fn should_ignore_corrupted_tail_in_tolerant_mode() {
+        // Arrange
+        let dir = TempDir::new().expect("temp dir");
+        let wal_path = fs::numbered_file_path(dir.path(), 1, "wal");
+
+        // Write two valid records
+        {
+            let wal = Wal::open(dir.path()).expect("open");
+            wal.append_op(crate::wal::WalOpKind::Put, b"k1", Some(b"v1"))
+                .expect("append");
+            wal.append_op(crate::wal::WalOpKind::Put, b"k2", Some(b"v2"))
+                .expect("append");
+        }
+
+        // Corrupt the CRC of the second record (the tail) by overwriting its CRC
+        {
+            use std::io::{Read, Seek, SeekFrom, Write};
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&wal_path)
+                .expect("open for corruption");
+
+            // Skip WAL header
+            file.seek(SeekFrom::Start(16))
+                .expect("seek to first record");
+
+            // Read first record header: CRC (4) + LEN (4)
+            let mut hdr = [0u8; 8];
+            file.read_exact(&mut hdr).expect("read first header");
+            let len1 = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
+
+            // Skip first body
+            file.seek(SeekFrom::Current(len1 as i64))
+                .expect("skip first body");
+
+            // Now at start of second record header; overwrite CRC bytes
+            file.write_all(&[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8])
+                .expect("corrupt second crc");
+            file.flush().expect("flush corruption");
+        }
+
+        // Act
+        let recs =
+            replay_wal_file_with_mode(&wal_path, crate::WalRecoveryMode::TolerateCorruptedTail)
+                .expect("replay in tolerant mode");
+
+        // Assert
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].key.as_ref(), b"k1");
+        assert_eq!(recs[0].value.as_ref().map(|v| v.as_ref()), Some(&b"v1"[..]));
+    }
+
+    #[test]
+    fn should_invoke_fallback_when_truncate_simulation_fails() {
+        // Arrange
+        let dir = TempDir::new().expect("temp dir");
+        let wal_path = fs::numbered_file_path(dir.path(), 1, "wal");
+
+        let mut wal = Wal::open(dir.path()).expect("open");
+
+        // Attach test hooks that request truncation but also force the truncate
+        // to fail so the writer uses the CRC-overwrite fallback.
+        let hooks = crate::common::test_hooks::TestHooks::new()
+            .with_wal_behavior(crate::common::test_hooks::WalBehavior::TruncateAfterWriteFail);
+        wal.test_hooks = Some(hooks.clone());
+
+        // Act - append two records where the second will be 'torn' by the hook
+        wal.append_op(crate::wal::WalOpKind::Put, b"hk1", Some(b"hv1"))
+            .expect("append");
+        wal.append_op(crate::wal::WalOpKind::Put, b"hk2", Some(b"hv2"))
+            .expect("append");
+
+        // Close writer to flush state
+        drop(wal);
+
+        // Assert - replay in tolerant mode should only return the first record
+        let recs =
+            replay_wal_file_with_mode(&wal_path, crate::WalRecoveryMode::TolerateCorruptedTail)
+                .expect("replay in tolerant mode");
+
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].key.as_ref(), b"hk1");
+        assert_eq!(
+            recs[0].value.as_ref().map(|v| v.as_ref()),
+            Some(&b"hv1"[..])
+        );
     }
 
     #[test]

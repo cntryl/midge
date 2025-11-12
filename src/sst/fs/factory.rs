@@ -29,10 +29,20 @@ impl SstReaderFactory for FsSstReaderFactory {
 #[derive(Clone)]
 pub struct FsSstFactory {
     pub temp_dir: std::path::PathBuf,
+    pub test_hooks: Option<crate::common::test_hooks::TestHooks>,
 }
 
 impl FsSstFactory {
     pub fn new(temp_dir: std::path::PathBuf) -> Self {
+        Self::new_with_hooks(temp_dir, None)
+    }
+
+    /// Create a new FsSstFactory and optionally attach `test_hooks` so SST
+    /// writers created by this factory can honor fsync/test instrumentation.
+    pub fn new_with_hooks(
+        temp_dir: std::path::PathBuf,
+        test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    ) -> Self {
         // Ensure temp directory exists (tests / ephemeral envs may not create it).
         if !temp_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(&temp_dir) {
@@ -66,7 +76,10 @@ impl FsSstFactory {
             }
         }
 
-        Self { temp_dir }
+        Self {
+            temp_dir,
+            test_hooks,
+        }
     }
 }
 
@@ -77,7 +90,16 @@ impl SstFactory for FsSstFactory {
         block_size: usize,
         use_internal: bool,
     ) -> Box<dyn crate::sst::DynSstWriter> {
-        match FsDynWriter::new(&self.temp_dir, compression, block_size, use_internal) {
+        // Propagate test hooks through the SST factory if available later.
+        // Currently create() is called from engine initialization where
+        // test hooks are not readily available; use None by default.
+        match FsDynWriter::new(
+            &self.temp_dir,
+            compression,
+            block_size,
+            use_internal,
+            self.test_hooks.clone(),
+        ) {
             Ok(w) => Box::new(w),
             Err(e) => {
                 tracing::error!(
@@ -87,7 +109,13 @@ impl SstFactory for FsSstFactory {
                 );
                 // Try falling back to the OS temp dir as a best-effort recovery for tests
                 let sys_tmp = std::env::temp_dir();
-                match FsDynWriter::new(&sys_tmp, compression, block_size, use_internal) {
+                match FsDynWriter::new(
+                    &sys_tmp,
+                    compression,
+                    block_size,
+                    use_internal,
+                    self.test_hooks.clone(),
+                ) {
                     Ok(w2) => {
                         tracing::warn!(
                             "FsDynWriter fell back to system temp dir: {}",
