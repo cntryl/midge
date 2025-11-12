@@ -12,9 +12,9 @@ mod criterion_helper;
 #[path = "ycsb_common.rs"]
 mod ycsb_common;
 
+use cntryl_midge::MidgeEngine;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
-use cntryl_midge::MidgeEngine;
 use hdrhistogram::Histogram;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -42,7 +42,12 @@ struct LatencyStats {
 // Core workload logic
 // ============================================================================
 
-fn run_workload_c(engine: &MidgeEngine, operations: usize, record_count: usize, cf_count: usize) -> LatencyStats {
+fn run_workload_c(
+    engine: &MidgeEngine,
+    operations: usize,
+    record_count: usize,
+    cf_count: usize,
+) -> LatencyStats {
     let cf_list = engine.list_column_families();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
@@ -53,7 +58,7 @@ fn run_workload_c(engine: &MidgeEngine, operations: usize, record_count: usize, 
         let key = generate_key(key_id);
         let cf_index = rng.gen_range(0..cf_count);
         let cf = &cf_list[cf_index];
-        
+
         let start = Instant::now();
         let _ = black_box(engine.get(cf, &key));
         let elapsed_us = start.elapsed().as_micros() as u64;
@@ -84,7 +89,7 @@ fn run_workload_c_concurrent(
         let key = generate_key(key_id);
         let cf_index = rng.gen_range(0..cf_count);
         let cf = &cf_list[cf_index];
-        
+
         let start = Instant::now();
         let _ = black_box(engine.get(cf, &key));
         let elapsed_us = start.elapsed().as_micros() as u64;
@@ -127,10 +132,7 @@ fn bench_workload_c(c: &mut Criterion) {
 
             // Create additional column families
             for i in 1..cf_count {
-                let _ = engine.create_column_family(
-                    &format!("cf{}", i),
-                    Default::default(),
-                );
+                let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
             }
 
             load_data(&engine, RECORD_COUNT);
@@ -150,15 +152,12 @@ fn bench_workload_c(c: &mut Criterion) {
         // Concurrent (threads × cf_count)
         for &threads in &THREAD_COUNTS {
             let (engine, _temp_dir) = setup_engine_fs_nosync();
-            
+
             // Create additional column families
             for i in 1..cf_count {
-                let _ = engine.create_column_family(
-                    &format!("cf{}", i),
-                    Default::default(),
-                );
+                let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
             }
-            
+
             load_data(&engine, RECORD_COUNT);
             let engine = Arc::new(engine);
             let total_ops = OPS_PER_ITER;
@@ -183,7 +182,8 @@ fn bench_workload_c(c: &mut Criterion) {
                                 })
                             })
                             .collect();
-                        let _stats: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+                        let _stats: Vec<_> =
+                            handles.into_iter().map(|h| h.join().unwrap()).collect();
                         black_box(_stats)
                     })
                 },

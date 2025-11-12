@@ -15,9 +15,9 @@ mod criterion_helper;
 #[path = "ycsb_common.rs"]
 mod ycsb_common;
 
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
@@ -136,7 +136,10 @@ fn bench_durability_concurrent(c: &mut Criterion) {
             |b, &mode_name| {
                 b.iter_batched(
                     || {
-                        setup_db_with_wal_sync(&format!("concurrent_{}", mode_name), mode_name == "sync_every")
+                        setup_db_with_wal_sync(
+                            &format!("concurrent_{}", mode_name),
+                            mode_name == "sync_every",
+                        )
                     },
                     |engine| {
                         let engine = Arc::new(engine);
@@ -198,7 +201,12 @@ fn bench_durability_read_heavy(c: &mut Criterion) {
             mode_name,
             |b, &mode_name| {
                 b.iter_batched(
-                    || setup_db_with_wal_sync(&format!("read_heavy_{}", mode_name), mode_name == "sync_every"),
+                    || {
+                        setup_db_with_wal_sync(
+                            &format!("read_heavy_{}", mode_name),
+                            mode_name == "sync_every",
+                        )
+                    },
                     |engine| {
                         run_workload_b_variant(&engine, OPS_PER_THREAD);
                         black_box(());
@@ -240,7 +248,12 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
             mode_name,
             |b, &mode_name| {
                 b.iter_batched(
-                    || setup_db_with_wal_sync(&format!("write_heavy_{}", mode_name), mode_name == "sync_every"),
+                    || {
+                        setup_db_with_wal_sync(
+                            &format!("write_heavy_{}", mode_name),
+                            mode_name == "sync_every",
+                        )
+                    },
                     |engine| {
                         run_write_heavy_workload(&engine, OPS_PER_THREAD);
                         black_box(());

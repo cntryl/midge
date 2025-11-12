@@ -109,10 +109,8 @@ fn bench_column_family_scaling(c: &mut Criterion) {
                         let engine = setup_db(&format!("cf_scale_{}", num_cfs), false);
                         // Create additional CFs
                         for i in 1..num_cfs {
-                            let _ = engine.create_column_family(
-                                &format!("cf{}", i),
-                                Default::default(),
-                            );
+                            let _ = engine
+                                .create_column_family(&format!("cf{}", i), Default::default());
                         }
                         engine
                     },
@@ -121,9 +119,7 @@ fn bench_column_family_scaling(c: &mut Criterion) {
                         for i in 0..1_000 {
                             let cf_idx = i % num_cfs;
                             let cf = &cf_list[cf_idx];
-                            engine
-                                .put(cf, &make_key(i), &make_value(i, 100))
-                                .unwrap();
+                            engine.put(cf, &make_key(i), &make_value(i, 100)).unwrap();
                         }
                         black_box(());
                     },
@@ -154,9 +150,7 @@ fn bench_large_values(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         for i in 0..10 {
-                            engine
-                                .put(&cf, &make_key(i), &make_value(i, size))
-                                .unwrap();
+                            engine.put(&cf, &make_key(i), &make_value(i, size)).unwrap();
                         }
                         black_box(());
                     },
@@ -172,9 +166,7 @@ fn bench_large_values(c: &mut Criterion) {
                 let engine = setup_db(&format!("large_get_{}", size), false);
                 let cf = engine.default_column_family();
                 for i in 0..10 {
-                    engine
-                        .put(&cf, &make_key(i), &make_value(i, size))
-                        .unwrap();
+                    engine.put(&cf, &make_key(i), &make_value(i, size)).unwrap();
                 }
 
                 b.iter(|| {

@@ -78,12 +78,12 @@ pub enum WalSyncMode {
     /// Throughput: Baseline (≈100%)
     /// Data loss window: Unbounded (OS decides)
     NoSync,
-    
+
     /// Sync after every write (slowest, most durable)
     /// Throughput: ≈5-10% of NoSync (per-write fsync overhead)
     /// Data loss window: 0 writes (durable immediately)
     EveryWrite,
-    
+
     /// Batched sync - group commits together for amortized fsync overhead (balanced, default)
     /// Throughput: ≈50-80% of NoSync (amortized fsync across batch)
     /// Data loss window: Current batch (typically 1-100ms, configurable)

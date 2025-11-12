@@ -208,7 +208,7 @@ fn bench_memtable_concurrent(c: &mut Criterion) {
             for t in 0..num_threads {
                 let mt_clone = Arc::clone(&mt);
                 let handle = thread::spawn(move || {
-                        for i in 0..ops_per_thread {
+                    for i in 0..ops_per_thread {
                         let key = Bytes::from(format!("key_{}_{:08}", t, i));
                         let val = Bytes::from(format!("val_{}_{:08}", t, i));
                         mt_clone.put_owned_with_seq(key, val, i as u64);

@@ -18,10 +18,10 @@ mod criterion_helper;
 #[path = "ycsb_common.rs"]
 mod ycsb_common;
 
+use cntryl_midge::api::query::Query;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use cntryl_midge::api::query::Query;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
@@ -58,10 +58,7 @@ fn setup_workload_e_db(cf_count: usize) -> MidgeEngine {
 
     // Create column families
     for i in 1..cf_count {
-        let _ = engine.create_column_family(
-            &format!("cf{}", i),
-            Default::default(),
-        );
+        let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
     }
 
     // Load initial dataset
@@ -88,9 +85,7 @@ fn run_workload_e(engine: &MidgeEngine, operations: usize, cf_count: usize) -> u
             let start_key = generate_key(scan_start);
             let end_key = generate_key(scan_start + scan_len);
 
-            let query = Query::new()
-                .start_key(start_key)
-                .end_key(end_key);
+            let query = Query::new().start_key(start_key).end_key(end_key);
             let _ = black_box(engine.scan(cf, query).unwrap_or_default());
             scan_count += 1;
         } else {
@@ -198,9 +193,7 @@ fn bench_workload_e_scan_lengths(c: &mut Criterion) {
                             let start_key = generate_key(start_key_id);
                             let end_key = generate_key(start_key_id + max_len);
 
-                            let query = Query::new()
-                                .start_key(start_key)
-                                .end_key(end_key);
+                            let query = Query::new().start_key(start_key).end_key(end_key);
                             let _ = black_box(engine.scan(cf, query).unwrap_or_default());
                         }
                     },

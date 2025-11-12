@@ -3,8 +3,8 @@
 //! Provides cached access to the database manifest to eliminate disk I/O
 //! on every read operation. The cache is thread-safe and supports atomic updates.
 
-use crate::error::MidgeResult;
 use crate::core::manifest::Manifest;
+use crate::error::MidgeResult;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;

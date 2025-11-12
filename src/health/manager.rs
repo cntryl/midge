@@ -5,8 +5,8 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::common::timestamp;
-use crate::error::{MidgeError, MidgeResult};
 use crate::core::manifest::Manifest;
+use crate::error::{MidgeError, MidgeResult};
 
 use super::rehydration::{RehydrationProgress, RehydrationStatus};
 use super::state::{

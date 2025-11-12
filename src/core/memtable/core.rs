@@ -120,7 +120,13 @@ impl MemTable {
 
     /// Put a key/value with expiration where caller owns Bytes.
     #[inline]
-    pub fn put_owned_with_seq_and_exp(&self, key: Bytes, value: Bytes, seq: u64, expiration: Option<u64>) {
+    pub fn put_owned_with_seq_and_exp(
+        &self,
+        key: Bytes,
+        value: Bytes,
+        seq: u64,
+        expiration: Option<u64>,
+    ) {
         self.upsert_owned_with_op_type(key, Some(value), seq, expiration, OpType::Put)
     }
 
@@ -171,7 +177,14 @@ impl MemTable {
     }
 
     /// Internal helper to upsert using owned Bytes (avoids copying when caller already owns Bytes)
-    fn upsert_owned_with_op_type(&self, key: Bytes, value: Option<Bytes>, seq: u64, expiration: Option<u64>, op_type: OpType) {
+    fn upsert_owned_with_op_type(
+        &self,
+        key: Bytes,
+        value: Option<Bytes>,
+        seq: u64,
+        expiration: Option<u64>,
+        op_type: OpType,
+    ) {
         let total_bytes = key.len() + value.as_ref().map(|v| v.len()).unwrap_or(0);
 
         // Perform the upsert directly with owned Bytes

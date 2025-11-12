@@ -42,7 +42,12 @@ struct LatencyStats {
 // Core workload logic
 // ============================================================================
 
-fn run_workload_b(engine: &MidgeEngine, operations: usize, record_count: usize, cf_count: usize) -> LatencyStats {
+fn run_workload_b(
+    engine: &MidgeEngine,
+    operations: usize,
+    record_count: usize,
+    cf_count: usize,
+) -> LatencyStats {
     let cf_list = engine.list_column_families();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
@@ -172,10 +177,7 @@ fn bench_workload_b(c: &mut Criterion) {
 
             // Create additional column families
             for i in 1..cf_count {
-                let _ = engine.create_column_family(
-                    &format!("cf{}", i),
-                    Default::default(),
-                );
+                let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
             }
 
             load_data(&engine, RECORD_COUNT);
@@ -195,15 +197,12 @@ fn bench_workload_b(c: &mut Criterion) {
         // Concurrent (threads × cf_count)
         for &threads in &THREAD_COUNTS {
             let (engine, _temp_dir) = setup_engine_fs_nosync();
-            
+
             // Create additional column families
             for i in 1..cf_count {
-                let _ = engine.create_column_family(
-                    &format!("cf{}", i),
-                    Default::default(),
-                );
+                let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
             }
-            
+
             load_data(&engine, RECORD_COUNT);
             let engine = Arc::new(engine);
             let total_ops = OPS_PER_ITER;
@@ -228,7 +227,8 @@ fn bench_workload_b(c: &mut Criterion) {
                                 })
                             })
                             .collect();
-                        let _stats: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+                        let _stats: Vec<_> =
+                            handles.into_iter().map(|h| h.join().unwrap()).collect();
                         black_box(_stats)
                     })
                 },

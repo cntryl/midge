@@ -188,7 +188,10 @@ fn should_track_amplification_over_time_given_workload() {
     let _write_amp_sample_count = write_amp_samples.len();
 
     // Metrics API is working (values depend on runtime behavior)
-    let _ = (total_compactions, "Metrics API verified: {} compactions tracked");
+    let _ = (
+        total_compactions,
+        "Metrics API verified: {} compactions tracked",
+    );
     let result = eng.get(&cf, b"key_p0_i0").expect("get failed");
     assert_eq!(
         result.unwrap().as_ref(),

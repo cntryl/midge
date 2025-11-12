@@ -35,10 +35,10 @@ impl WriteBatch {
     }
 
     /// Create a new write batch with pre-allocated capacity
-    /// 
+    ///
     /// Useful when the expected batch size is known upfront, avoiding reallocation
     /// during the put/delete operations that fill the batch.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let mut batch = WriteBatch::with_capacity(100);

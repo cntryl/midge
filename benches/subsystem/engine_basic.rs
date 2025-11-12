@@ -13,9 +13,10 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
-use std::time::Duration;
 use criterion_helper::criterion_config;
+use std::time::Duration;
 
+use cntryl_midge::api::column_family::ColumnFamilyConfig;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
@@ -65,40 +66,32 @@ fn bench_put_variants(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         for i in 0..n {
-                            engine
-                                .put(&cf, &make_key(i), &make_value(i, 80))
-                                .unwrap();
-                        }
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-    );
-
-        group.throughput(Throughput::Elements(op_count as u64));
-        group.bench_with_input(
-            BenchmarkId::new("random", op_count),
-            &op_count,
-            |b, &n| {
-                b.iter_batched(
-                    || {
-                        let mut rng = StdRng::seed_from_u64(42);
-                        let mut indices: Vec<usize> = (0..n).collect();
-                        indices.shuffle(&mut rng);
-                        (setup_db("random", false), indices)
-                    },
-                    |(engine, indices)| {
-                        let cf = engine.default_column_family();
-                        for i in indices {
-                            engine
-                                .put(&cf, &make_key(i), &make_value(i, 80))
-                                .unwrap();
+                            engine.put(&cf, &make_key(i), &make_value(i, 80)).unwrap();
                         }
                     },
                     BatchSize::SmallInput,
                 )
             },
         );
+
+        group.throughput(Throughput::Elements(op_count as u64));
+        group.bench_with_input(BenchmarkId::new("random", op_count), &op_count, |b, &n| {
+            b.iter_batched(
+                || {
+                    let mut rng = StdRng::seed_from_u64(42);
+                    let mut indices: Vec<usize> = (0..n).collect();
+                    indices.shuffle(&mut rng);
+                    (setup_db("random", false), indices)
+                },
+                |(engine, indices)| {
+                    let cf = engine.default_column_family();
+                    for i in indices {
+                        engine.put(&cf, &make_key(i), &make_value(i, 80)).unwrap();
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
     }
 
     group.finish();
@@ -266,6 +259,67 @@ fn bench_memory_mode(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Full-stack end-to-end throughput
+// ============================================================================
+fn bench_full_stack_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_end_to_end");
+    let cf_counts = [1usize, 4, 8, 16];
+    let n_ops = 10_000usize;
+
+    for &n_cfs in &cf_counts {
+        group.throughput(Throughput::Elements(n_ops as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n_cfs), &n_cfs, |b, &n_cfs| {
+            b.iter_batched(
+                || {
+                    let engine = setup_db(&format!("end_to_end_{}", n_cfs), false);
+                    // create CF handles (default + extras)
+                    let mut cfs = vec![engine.default_column_family()];
+                    for i in 1..n_cfs {
+                        let name = format!("bench_cf_{}", i);
+                        let cf = engine
+                            .create_column_family(&name, ColumnFamilyConfig::default())
+                            .unwrap();
+                        cfs.push(cf);
+                    }
+
+                    let keys: Vec<Bytes> = (0..n_ops).map(make_key).collect();
+                    (engine, cfs, keys)
+                },
+                |(engine, cfs, keys)| {
+                    // 1) Writes spread across CFs
+                    for (i, k) in keys.iter().enumerate() {
+                        let cf = &cfs[i % n_cfs];
+                        engine.put(cf, k, &make_value(i, 100)).unwrap();
+                    }
+
+                    // 2) Mixed reads (hits then misses)
+                    for k in keys.iter().take(9_000) {
+                        black_box(engine.get(&cfs[0], k).unwrap());
+                    }
+                    for i in 0..1_000 {
+                        black_box(engine.get(&cfs[0], &make_key(n_ops + i)).unwrap());
+                    }
+
+                    // 3) Deletes
+                    for (i, k) in keys.iter().take(2_000).enumerate() {
+                        let cf = &cfs[i % n_cfs];
+                        engine.delete(cf, k).unwrap();
+                    }
+
+                    // 4) Flush all CFs
+                    for cf in &cfs {
+                        engine.flush_cf(cf).unwrap();
+                    }
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = subsystem_engine_basic;
     config = criterion_config();
@@ -274,6 +328,7 @@ criterion_group! {
         bench_get_hit_miss,
         bench_delete,
         bench_write_modes,
-        bench_memory_mode
+        bench_memory_mode,
+        bench_full_stack_throughput
 }
 criterion_main!(subsystem_engine_basic);

@@ -182,7 +182,8 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
             |b, &tcount| {
                 b.iter_batched(
                     || {
-                        let engine = Arc::new(setup_db(&format!("delete_concurrent_{}", tcount), false));
+                        let engine =
+                            Arc::new(setup_db(&format!("delete_concurrent_{}", tcount), false));
                         let cf = engine.default_column_family();
                         // Prefill with 10k keys
                         for i in 0..10_000 {
@@ -236,10 +237,7 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
                         // Create N column families
                         for i in 1..pairs {
                             engine
-                                .create_column_family(
-                                    &format!("cf{}", i),
-                                    Default::default(),
-                                )
+                                .create_column_family(&format!("cf{}", i), Default::default())
                                 .ok();
                         }
                         engine

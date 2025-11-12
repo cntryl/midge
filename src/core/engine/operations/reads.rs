@@ -101,9 +101,9 @@ impl MidgeEngine {
                 let versions = immutable_mt.get_versions_for_merge(key, u64::MAX);
 
                 if !versions.is_empty() {
-                    let has_merges = versions
-                        .iter()
-                        .any(|(_, _, op)| *op == crate::core::data_structures::skiplist::OpType::Merge);
+                    let has_merges = versions.iter().any(|(_, _, op)| {
+                        *op == crate::core::data_structures::skiplist::OpType::Merge
+                    });
 
                     if has_merges {
                         let ops = self.merge_operators.read();

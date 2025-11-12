@@ -23,9 +23,9 @@ use std::thread::{self, JoinHandle};
 type KeyBounds = (Option<Vec<u8>>, Option<Vec<u8>>, Option<u64>, Option<u64>);
 
 use crate::common::codec::CompressionType;
-use crate::metrics::Metrics;
-use crate::error::{MidgeError, MidgeResult};
 use crate::core::manifest::Manifest;
+use crate::error::{MidgeError, MidgeResult};
+use crate::metrics::Metrics;
 
 /// A batch of memtable entries to be flushed to an SST file.
 ///

@@ -295,7 +295,7 @@ impl Config {
     /// ```
     pub fn to_options(&self) -> crate::MidgeOptions {
         use crate::common::codec::CompressionType;
-        use crate::{MidgeOptions};
+        use crate::MidgeOptions;
 
         // Determine storage mode based on cloud configuration
         let storage_mode = if let Some(cloud_cfg) = &self.cloud_config {

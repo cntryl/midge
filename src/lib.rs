@@ -61,7 +61,10 @@ pub use crate::api::{
     MutationOp, Query, Snapshot, StringAppendOperator, WriteBatch, WriteOptions, DEFAULT_CF_ID,
     DEFAULT_CF_NAME,
 };
-pub use crate::config::{CompactionStyle, CompressionType, MidgeOptions, WalRecoveryMode, StorageMode, CloudStorageBuilder};
+pub use crate::config::{
+    CloudStorageBuilder, CompactionStyle, CompressionType, MidgeOptions, StorageMode,
+    WalRecoveryMode,
+};
 // Export EngineTransaction as the public Transaction type
 pub use crate::core::transaction::EngineTransaction as Transaction;
 // Re-export the engine API from the new `core` location

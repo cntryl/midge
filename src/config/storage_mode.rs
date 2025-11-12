@@ -216,7 +216,10 @@ impl CloudStorageBuilder {
     ///
     /// * `local_cache_path` - Directory for local cache and temporary files
     /// * `cloud_backend` - Cloud storage backend implementation
-    pub fn new(local_cache_path: PathBuf, cloud_backend: Arc<dyn crate::cloud::StorageBackend>) -> Self {
+    pub fn new(
+        local_cache_path: PathBuf,
+        cloud_backend: Arc<dyn crate::cloud::StorageBackend>,
+    ) -> Self {
         Self {
             local_cache_path,
             cloud_backend,

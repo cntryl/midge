@@ -11,8 +11,8 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::core::engine::column_family::ColumnFamilySet;
 use crate::core::engine::MidgeEngine;
-use crate::metrics::Metrics;
 use crate::error::MidgeResult;
+use crate::metrics::Metrics;
 
 /// Open or create a database using the high-level `Config` API.
 ///

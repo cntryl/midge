@@ -109,5 +109,5 @@ pub use transaction::{Key, TransactionManager};
 pub use crate::config::{CloudStorageBuilder, StorageMode};
 
 // Re-export data structure internals for direct access
-pub use data_structures::skiplist;
 pub use data_structures::merge_iterator;
+pub use data_structures::skiplist;

@@ -22,15 +22,15 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use criterion_helper::criterion_config;
 
 use cntryl_midge::core::memtable::MemTable;
-use cntryl_midge::wal::{WalOpKind, WalRecord, WalSyncMode, WalWriter};
 use cntryl_midge::wal::fs::Wal as FsWal;
-use std::hash::{Hash, Hasher};
+use cntryl_midge::wal::{WalOpKind, WalRecord, WalSyncMode, WalWriter};
 use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tempfile::tempdir;
 use std::time::Instant;
+use tempfile::tempdir;
 // Instant was added for aggregation but is not required now.
 
 // Helper: format fixed-width key "key{:016}" into Bytes without using `format!`.
@@ -77,7 +77,7 @@ fn key_threaded(thread_id: u32, i: u64) -> Bytes {
 /// This is the theoretical minimum for write throughput.
 fn bench_layer1_wal_only(c: &mut Criterion) {
     let mut group = c.benchmark_group("overhead_analysis_layer1");
-    
+
     for &batch_size in &[10, 100, 1000] {
         group.throughput(Throughput::Elements(batch_size as u64));
 
@@ -88,17 +88,11 @@ fn bench_layer1_wal_only(c: &mut Criterion) {
                 // Create tempdir once, outside the timing loop
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
-                        .expect("open WAL");
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
 
                 // Pre-create record templates (matches Layer 2 for fair comparison)
                 let key_values: Vec<(Bytes, Bytes)> = (0..size)
-                    .map(|i| {
-                        (
-                            key_fixed(i as u64),
-                            Bytes::from(vec![42u8; 1000]),
-                        )
-                    })
+                    .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
                     .collect();
 
                 b.iter(|| {
@@ -107,12 +101,7 @@ fn bench_layer1_wal_only(c: &mut Criterion) {
                         .iter()
                         .enumerate()
                         .map(|(i, (k, v))| {
-                            WalRecord::new(
-                                WalOpKind::Put,
-                                k.clone(),
-                                Some(v.clone()),
-                                i as u64,
-                            )
+                            WalRecord::new(WalOpKind::Put, k.clone(), Some(v.clone()), i as u64)
                         })
                         .collect();
 
@@ -145,24 +134,18 @@ fn bench_layer2_wal_with_seq(c: &mut Criterion) {
                 // Create WAL outside the timing loop
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
-                        .expect("open WAL");
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
                 let seq = Arc::new(AtomicU64::new(0));
 
                 // Pre-create record templates (without seq)
                 let key_values: Vec<(Bytes, Bytes)> = (0..size)
-                    .map(|i| {
-                        (
-                            key_fixed(i as u64),
-                            Bytes::from(vec![42u8; 1000]),
-                        )
-                    })
+                    .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
                     .collect();
 
                 b.iter(|| {
                     // Reset sequence counter for each iteration
                     seq.store(0, Ordering::Relaxed);
-                    
+
                     // Allocate sequence numbers
                     let mut records = Vec::with_capacity(size);
                     for (key, value) in &key_values {
@@ -204,25 +187,19 @@ fn bench_layer3_wal_plus_memtable(c: &mut Criterion) {
             |b, &size| {
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
-                        .expect("open WAL");
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
                 let memtable = MemTable::new();
                 let seq = Arc::new(AtomicU64::new(0));
 
                 // Pre-create record templates
                 let key_values: Vec<(Bytes, Bytes)> = (0..size)
-                    .map(|i| {
-                        (
-                            key_fixed(i as u64),
-                            Bytes::from(vec![42u8; 1000]),
-                        )
-                    })
+                    .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
                     .collect();
 
                 b.iter(|| {
                     // Reset sequence counter for clean iterations
                     seq.store(0, Ordering::Relaxed);
-                    
+
                     // Allocate sequence numbers and create records
                     let mut records = Vec::with_capacity(size);
                     for (key, value) in &key_values {
@@ -239,9 +216,13 @@ fn bench_layer3_wal_plus_memtable(c: &mut Criterion) {
                     writer.append_batch(&records).expect("append_batch");
 
                     // Insert into MemTable
-                        for record in &records {
-                            memtable.put_owned_with_seq(record.key.clone(), record.value.as_ref().unwrap().clone(), record.seq);
-                        }
+                    for record in &records {
+                        memtable.put_owned_with_seq(
+                            record.key.clone(),
+                            record.value.as_ref().unwrap().clone(),
+                            record.seq,
+                        );
+                    }
 
                     black_box(&writer);
                     black_box(&memtable);
@@ -271,25 +252,19 @@ fn bench_layer4_write_batch_construction(c: &mut Criterion) {
             |b, &size| {
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
-                        .expect("open WAL");
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
                 let memtable = MemTable::new();
                 let seq = Arc::new(AtomicU64::new(0));
 
                 // Pre-create key/value templates (matches Layer 2 for fair comparison)
                 let key_values: Vec<(Bytes, Bytes)> = (0..size)
-                    .map(|i| {
-                        (
-                            key_fixed(i as u64),
-                            Bytes::from(vec![42u8; 1000]),
-                        )
-                    })
+                    .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
                     .collect();
 
                 b.iter(|| {
                     // Reset state for clean iterations
                     seq.store(0, Ordering::Relaxed);
-                    
+
                     // Construct records with pre-allocated templates (simulating WriteBatch::with_capacity)
                     let mut records = Vec::with_capacity(size);
 
@@ -351,15 +326,14 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
             |b, &cf_count| {
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
-                        .expect("open WAL");
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
                 let memtables: Vec<MemTable> = (0..cf_count).map(|_| MemTable::new()).collect();
                 let seq = Arc::new(AtomicU64::new(0));
 
                 b.iter(|| {
                     // Reset state for clean iterations
                     seq.store(0, Ordering::Relaxed);
-                    
+
                     // Create records inside timing loop for fair measurement
                     let records: Vec<WalRecord> = (0..batch_size)
                         .map(|i| {
@@ -385,11 +359,13 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
                     // Write to all CFs
                     for (cf_idx, batch) in cf_batches.iter().enumerate() {
                         if !batch.is_empty() {
-                            writer
-                                .append_batch(batch)
-                                .expect("append_batch");
+                            writer.append_batch(batch).expect("append_batch");
                             for record in batch {
-                                memtables[cf_idx].put_owned_with_seq(record.key.clone(), record.value.as_ref().unwrap().clone(), record.seq);
+                                memtables[cf_idx].put_owned_with_seq(
+                                    record.key.clone(),
+                                    record.value.as_ref().unwrap().clone(),
+                                    record.seq,
+                                );
                             }
                         }
                     }
@@ -412,30 +388,33 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
 /// This quantifies the cost of concurrent skiplist operations and synchronization.
 fn bench_layer6_concurrent_multi_cf(c: &mut Criterion) {
     use std::thread;
-    
+
     let mut group = c.benchmark_group("overhead_analysis_layer6_concurrent");
-    
+
     for &num_threads in &[1, 2, 4] {
         for &num_cfs in &[1, 4, 8] {
             let batch_size = 100;
             group.throughput(Throughput::Elements((batch_size * num_threads) as u64));
 
             group.bench_with_input(
-                BenchmarkId::new(format!("threads_{}", num_threads), format!("cf_{}", num_cfs)),
+                BenchmarkId::new(
+                    format!("threads_{}", num_threads),
+                    format!("cf_{}", num_cfs),
+                ),
                 &(num_threads, num_cfs),
                 |b, &(threads, cf_count)| {
-                    let memtables: Vec<Arc<MemTable>> = (0..cf_count)
-                        .map(|_| Arc::new(MemTable::new()))
-                        .collect();
+                    let memtables: Vec<Arc<MemTable>> =
+                        (0..cf_count).map(|_| Arc::new(MemTable::new())).collect();
                     let seq = Arc::new(AtomicU64::new(0));
 
                     b.iter(|| {
                         // Reset state for clean iterations
                         seq.store(0, Ordering::Relaxed);
-                        
+
                         let handles: Vec<_> = (0..threads)
                             .map(|thread_id| {
-                                let memtables = memtables.iter().map(Arc::clone).collect::<Vec<_>>();
+                                let memtables =
+                                    memtables.iter().map(Arc::clone).collect::<Vec<_>>();
                                 let seq = Arc::clone(&seq);
                                 thread::spawn(move || {
                                     // Each thread generates its own records and writes to multiple CFs
@@ -447,7 +426,11 @@ fn bench_layer6_concurrent_multi_cf(c: &mut Criterion) {
 
                                         // Route to a CF based on simple modulo (cast to usize for indexing)
                                         let cf_idx = (i as usize) % (cf_count as usize);
-                            memtables[cf_idx].put_owned_with_seq(key.clone(), value.clone(), s);
+                                        memtables[cf_idx].put_owned_with_seq(
+                                            key.clone(),
+                                            value.clone(),
+                                            s,
+                                        );
                                     }
                                 })
                             })
@@ -476,13 +459,13 @@ fn bench_layer6_concurrent_multi_cf(c: &mut Criterion) {
 /// - EveryWrite: Per-write fsync, minimum throughput (maximum safety)
 fn bench_layer7_wal_durability_modes(c: &mut Criterion) {
     let mut group = c.benchmark_group("overhead_analysis_layer7_durability");
-    
+
     let durability_modes = vec![
         ("NoSync", WalSyncMode::NoSync),
         ("BatchedSync", WalSyncMode::BatchedSync),
         ("EveryWrite", WalSyncMode::EveryWrite),
     ];
-    
+
     for (mode_name, sync_mode) in durability_modes {
         let batch_size = 100;
         group.throughput(Throughput::Elements(batch_size as u64));
@@ -492,9 +475,7 @@ fn bench_layer7_wal_durability_modes(c: &mut Criterion) {
             &sync_mode,
             |b, &sync_mode| {
                 let tmp = tempdir().expect("tempdir");
-                let writer =
-                    FsWal::open_with_mode(tmp.path(), sync_mode)
-                        .expect("open WAL");
+                let writer = FsWal::open_with_mode(tmp.path(), sync_mode).expect("open WAL");
                 let seq = Arc::new(AtomicU64::new(0));
 
                 // Pre-create record templates using key_fixed to avoid format! allocations
@@ -505,7 +486,7 @@ fn bench_layer7_wal_durability_modes(c: &mut Criterion) {
                 b.iter(|| {
                     // Reset sequence counter for clean iterations
                     seq.store(0, Ordering::Relaxed);
-                    
+
                     // Create records with sequence numbers
                     let mut records = Vec::with_capacity(batch_size);
                     for (key, value) in &key_values {
@@ -558,8 +539,7 @@ fn overhead_aggregate_summary_once() {
     // and run in-process to produce a quick, comparable number.
     let layer1 = mean_ms(reps, || {
         let tmp = tempdir().expect("tempdir");
-        let writer =
-            FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let writer = FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
 
         let key_values: Vec<(Bytes, Bytes)> = (0..batch_size)
             .map(|i| (key_fixed(i as u64), Bytes::from(vec![42u8; 1000])))
@@ -577,8 +557,7 @@ fn overhead_aggregate_summary_once() {
 
     let layer2 = mean_ms(reps, || {
         let tmp = tempdir().expect("tempdir");
-        let writer =
-            FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let writer = FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
         let seq = Arc::new(AtomicU64::new(0));
 
         let key_values: Vec<(Bytes, Bytes)> = (0..batch_size)
@@ -588,7 +567,12 @@ fn overhead_aggregate_summary_once() {
         let mut records = Vec::with_capacity(batch_size);
         for (key, value) in &key_values {
             let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
-            records.push(WalRecord::new(WalOpKind::Put, key.clone(), Some(value.clone()), s));
+            records.push(WalRecord::new(
+                WalOpKind::Put,
+                key.clone(),
+                Some(value.clone()),
+                s,
+            ));
         }
         writer.append_batch(&records).ok();
         black_box(&writer);
@@ -596,8 +580,7 @@ fn overhead_aggregate_summary_once() {
 
     let layer3 = mean_ms(reps, || {
         let tmp = tempdir().expect("tempdir");
-        let writer =
-            FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let writer = FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
         let memtable = MemTable::new();
         let seq = Arc::new(AtomicU64::new(0));
 
@@ -608,7 +591,12 @@ fn overhead_aggregate_summary_once() {
         let mut records = Vec::with_capacity(batch_size);
         for (key, value) in &key_values {
             let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
-            records.push(WalRecord::new(WalOpKind::Put, key.clone(), Some(value.clone()), s));
+            records.push(WalRecord::new(
+                WalOpKind::Put,
+                key.clone(),
+                Some(value.clone()),
+                s,
+            ));
         }
 
         writer.append_batch(&records).ok();
@@ -620,8 +608,7 @@ fn overhead_aggregate_summary_once() {
 
     let layer4 = mean_ms(reps, || {
         let tmp = tempdir().expect("tempdir");
-        let writer =
-            FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
+        let writer = FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync).expect("open WAL");
         let memtable = MemTable::new();
         let seq = Arc::new(AtomicU64::new(0));
 
@@ -653,12 +640,27 @@ fn overhead_aggregate_summary_once() {
     });
 
     // Simple printout
-    println!("Overhead summary (batch_size = {}, reps = {})", batch_size, reps);
+    println!(
+        "Overhead summary (batch_size = {}, reps = {})",
+        batch_size, reps
+    );
     println!("Layer | mean (ms) | % delta vs L1");
     println!("1     | {:8.3}  | 0.00%", layer1);
-    println!("2     | {:8.3}  | {:+.2}%", layer2, (layer2 - layer1) / layer1 * 100.0);
-    println!("3     | {:8.3}  | {:+.2}%", layer3, (layer3 - layer1) / layer1 * 100.0);
-    println!("4     | {:8.3}  | {:+.2}%", layer4, (layer4 - layer1) / layer1 * 100.0);
+    println!(
+        "2     | {:8.3}  | {:+.2}%",
+        layer2,
+        (layer2 - layer1) / layer1 * 100.0
+    );
+    println!(
+        "3     | {:8.3}  | {:+.2}%",
+        layer3,
+        (layer3 - layer1) / layer1 * 100.0
+    );
+    println!(
+        "4     | {:8.3}  | {:+.2}%",
+        layer4,
+        (layer4 - layer1) / layer1 * 100.0
+    );
 
     // Note: Layers 5/6 are more environment-dependent; include if needed later.
 }

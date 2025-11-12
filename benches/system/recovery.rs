@@ -13,9 +13,9 @@
 mod criterion_helper;
 
 use bytes::Bytes;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::hint::black_box;
 use std::path::Path;
 use std::time::Instant;
@@ -64,8 +64,8 @@ fn bench_recovery_throughput(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         // Step 1: Setup and prefill database
-                        let db_path = std::env::temp_dir()
-                            .join(format!("midge_recovery_replay_{}", num_ops));
+                        let db_path =
+                            std::env::temp_dir().join(format!("midge_recovery_replay_{}", num_ops));
                         let _ = std::fs::remove_dir_all(&db_path);
 
                         let engine = setup_db_at_path(&db_path, false); // async WAL
@@ -73,9 +73,7 @@ fn bench_recovery_throughput(c: &mut Criterion) {
 
                         // Write records to create WAL entries
                         for i in 0..num_ops {
-                            engine
-                                .put(&cf, &make_key(i), &make_value(i))
-                                .unwrap();
+                            engine.put(&cf, &make_key(i), &make_value(i)).unwrap();
                         }
 
                         // Step 2: Simulate crash (drop engine, don't clean up DB)
@@ -126,17 +124,15 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
             |b, &num_ops| {
                 b.iter_batched(
                     || {
-                        let db_path = std::env::temp_dir()
-                            .join(format!("midge_recovery_sync_{}", num_ops));
+                        let db_path =
+                            std::env::temp_dir().join(format!("midge_recovery_sync_{}", num_ops));
                         let _ = std::fs::remove_dir_all(&db_path);
 
                         let engine = setup_db_at_path(&db_path, true); // sync WAL
                         let cf = engine.default_column_family();
 
                         for i in 0..num_ops {
-                            engine
-                                .put(&cf, &make_key(i), &make_value(i))
-                                .unwrap();
+                            engine.put(&cf, &make_key(i), &make_value(i)).unwrap();
                         }
 
                         drop(engine);
@@ -181,8 +177,8 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
             |b, &num_ops| {
                 b.iter_batched(
                     || {
-                        let db_path = std::env::temp_dir()
-                            .join(format!("midge_recovery_l0_{}", num_ops));
+                        let db_path =
+                            std::env::temp_dir().join(format!("midge_recovery_l0_{}", num_ops));
                         let _ = std::fs::remove_dir_all(&db_path);
 
                         let engine = setup_db_at_path(&db_path, false);
@@ -190,9 +186,7 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
 
                         // Write half the data
                         for i in 0..(num_ops / 2) {
-                            engine
-                                .put(&cf, &make_key(i), &make_value(i))
-                                .unwrap();
+                            engine.put(&cf, &make_key(i), &make_value(i)).unwrap();
                         }
 
                         // Flush memtable to L0
@@ -200,9 +194,7 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
 
                         // Write remaining data (stays in WAL)
                         for i in (num_ops / 2)..num_ops {
-                            engine
-                                .put(&cf, &make_key(i), &make_value(i))
-                                .unwrap();
+                            engine.put(&cf, &make_key(i), &make_value(i)).unwrap();
                         }
 
                         drop(engine);
