@@ -8,6 +8,10 @@
 //! - 5% inserts (to maintain dataset size)
 //! - Scales by thread count (1, 2, 8) and column families (1-16)
 //! - Realistic for analytical/reporting queries
+//!
+//! **Enhanced with Latency Tracking:**
+//! - Measures p50, p99, p99.9 scan operation latencies
+//! - Reports range scan performance characteristics
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -19,11 +23,13 @@ use criterion_helper::criterion_config;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use cntryl_midge::api::query::Query;
 use bytes::Bytes;
+use hdrhistogram::Histogram;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 use ycsb_common::*;
 
 // ============================================================================

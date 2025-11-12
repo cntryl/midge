@@ -86,7 +86,7 @@ impl Wal {
         let file = BufWriter::with_capacity(BUF_CAP, file);
 
         // Create group commit coordinator if needed
-        let group_commit = if sync_mode == WalSyncMode::GroupCommit {
+        let group_commit = if sync_mode == WalSyncMode::BatchedSync {
             Some(Arc::new(GroupCommitCoordinator::new(
                 GroupCommitConfig::default(),
             )))
@@ -723,8 +723,8 @@ mod tests {
 
         // Arrange
         let dir = TempDir::new().expect("temp dir");
-        // Ensure GroupCommit mode is enabled so syncs may be batched by the coordinator
-        let wal = Wal::open_with_mode(dir.path(), WalSyncMode::GroupCommit).expect("open");
+        // Ensure BatchedSync mode is enabled so syncs may be batched by the coordinator
+        let wal = Wal::open_with_mode(dir.path(), WalSyncMode::BatchedSync).expect("open");
         // Seed some data so file has content
         wal.append_op(crate::wal::WalOpKind::Put, b"key1", Some(b"value1"))
             .expect("append");
@@ -1446,10 +1446,10 @@ mod tests {
     }
 
     #[test]
-    fn should_sync_data_with_group_commit_mode() {
+    fn should_sync_data_with_batch_sync_mode() {
         // Arrange
         let dir = tempfile::TempDir::new().unwrap();
-        let mut wal = Wal::open_with_mode(dir.path(), WalSyncMode::GroupCommit).unwrap();
+        let mut wal = Wal::open_with_mode(dir.path(), WalSyncMode::BatchedSync).unwrap();
 
         // Act
         wal.append_op(crate::wal::WalOpKind::Put, b"key1", Some(b"value1"))
@@ -1489,7 +1489,7 @@ mod tests {
     fn should_use_fdatasync_for_better_performance() {
         // Arrange
         let dir = tempfile::TempDir::new().unwrap();
-        let mut wal = Wal::open_with_mode(dir.path(), WalSyncMode::GroupCommit).unwrap();
+        let mut wal = Wal::open_with_mode(dir.path(), WalSyncMode::BatchedSync).unwrap();
         let test_key = b"perf_test_key";
         let test_value = b"perf_test_value";
 

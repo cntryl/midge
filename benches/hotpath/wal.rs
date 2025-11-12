@@ -468,7 +468,7 @@ fn bench_wal_append_individual(c: &mut Criterion) {
     let sync_modes = [
         ("nosync", WalSyncMode::NoSync),
         ("everywrite", WalSyncMode::EveryWrite),
-        ("groupcommit", WalSyncMode::GroupCommit),
+        ("batchedsync", WalSyncMode::BatchedSync),
     ];
 
     for (mode_name, sync_mode) in &sync_modes {
@@ -542,7 +542,7 @@ fn bench_wal_append_batch(c: &mut Criterion) {
     let sync_modes = [
         ("nosync", WalSyncMode::NoSync),
         ("everywrite", WalSyncMode::EveryWrite),
-        ("groupcommit", WalSyncMode::GroupCommit),
+        ("batchedsync", WalSyncMode::BatchedSync),
     ];
 
     for (mode_name, sync_mode) in &sync_modes {

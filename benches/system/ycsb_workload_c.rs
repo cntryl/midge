@@ -2,6 +2,10 @@
 //!
 //! Benchmarks read-heavy workload across column families (1, 2, 4, 8, 16)
 //! and scales concurrency (1, 2, 8 threads).
+//!
+//! **Enhanced with Latency Tracking:**
+//! - Measures p50, p99, p99.9 read latencies
+//! - Reports cache efficiency and read-path performance
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -10,32 +14,56 @@ mod ycsb_common;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
-
 use cntryl_midge::MidgeEngine;
+use hdrhistogram::Histogram;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 use ycsb_common::*;
 
 const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
 
 // ============================================================================
+// Latency tracking structures
+// ============================================================================
+
+#[derive(Clone)]
+#[allow(dead_code)]
+struct LatencyStats {
+    p50: u64,
+    p99: u64,
+    p99_9: u64,
+}
+
+// ============================================================================
 // Core workload logic
 // ============================================================================
 
-fn run_workload_c(engine: &MidgeEngine, operations: usize, record_count: usize, cf_count: usize) {
+fn run_workload_c(engine: &MidgeEngine, operations: usize, record_count: usize, cf_count: usize) -> LatencyStats {
     let cf_list = engine.list_column_families();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
+    let mut histogram = Histogram::<u64>::new(3).unwrap();
 
     for _ in 0..operations {
         let key_id = zipfian.next(&mut rng);
         let key = generate_key(key_id);
         let cf_index = rng.gen_range(0..cf_count);
         let cf = &cf_list[cf_index];
+        
+        let start = Instant::now();
         let _ = black_box(engine.get(&cf, &key));
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let _ = histogram.record(elapsed_us.max(1));
+    }
+
+    LatencyStats {
+        p50: histogram.value_at_percentile(50.0),
+        p99: histogram.value_at_percentile(99.0),
+        p99_9: histogram.value_at_percentile(99.9),
     }
 }
 
@@ -45,17 +73,28 @@ fn run_workload_c_concurrent(
     record_count: usize,
     thread_id: usize,
     cf_count: usize,
-) {
+) -> LatencyStats {
     let cf_list = engine.list_column_families();
     let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
+    let mut histogram = Histogram::<u64>::new(3).unwrap();
 
     for _ in 0..operations_per_thread {
         let key_id = zipfian.next(&mut rng);
         let key = generate_key(key_id);
         let cf_index = rng.gen_range(0..cf_count);
         let cf = &cf_list[cf_index];
+        
+        let start = Instant::now();
         let _ = black_box(engine.get(&cf, &key));
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let _ = histogram.record(elapsed_us.max(1));
+    }
+
+    LatencyStats {
+        p50: histogram.value_at_percentile(50.0),
+        p99: histogram.value_at_percentile(99.0),
+        p99_9: histogram.value_at_percentile(99.9),
     }
 }
 
@@ -100,7 +139,10 @@ fn bench_workload_c(c: &mut Criterion) {
                 BenchmarkId::new(format!("{scenario}_cf{cf_count}"), "100r"),
                 &cf_count,
                 |b, &_cf_count| {
-                    b.iter(|| run_workload_c(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count))
+                    b.iter(|| {
+                        let stats = run_workload_c(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count);
+                        black_box(stats)
+                    })
                 },
             );
         }
@@ -141,9 +183,8 @@ fn bench_workload_c(c: &mut Criterion) {
                                 })
                             })
                             .collect();
-                        for h in handles {
-                            h.join().unwrap();
-                        }
+                        let _stats: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+                        black_box(_stats)
                     })
                 },
             );

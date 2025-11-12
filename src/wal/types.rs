@@ -69,15 +69,26 @@ impl WalOpKind {
 /// WAL synchronization modes
 ///
 /// Controls when the WAL is flushed to disk.
+///
+/// **Naming convention**: Each variant communicates *when* data reaches disk,
+/// not implementation details. This makes the behavior clear without documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WalSyncMode {
     /// No explicit sync - let OS decide when to flush (fastest, least durable)
+    /// Throughput: Baseline (≈100%)
+    /// Data loss window: Unbounded (OS decides)
     NoSync,
+    
     /// Sync after every write (slowest, most durable)
+    /// Throughput: ≈5-10% of NoSync (per-write fsync overhead)
+    /// Data loss window: 0 writes (durable immediately)
     EveryWrite,
-    /// Group commits together for batched sync (balanced)
+    
+    /// Batched sync - group commits together for amortized fsync overhead (balanced, default)
+    /// Throughput: ≈50-80% of NoSync (amortized fsync across batch)
+    /// Data loss window: Current batch (typically 1-100ms, configurable)
     #[default]
-    GroupCommit,
+    BatchedSync,
 }
 
 /// A single WAL record using TLV encoding format.

@@ -23,6 +23,7 @@ use criterion_helper::criterion_config;
 
 use cntryl_midge::core::memtable::MemTable;
 use cntryl_midge::wal::{WalOpKind, WalRecord, WalSyncMode, WalWriter};
+use cntryl_midge::wal::fs::Wal as FsWal;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -44,12 +45,13 @@ fn bench_layer1_wal_only(c: &mut Criterion) {
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
             |b, &size| {
+                // Create tempdir once, outside the timing loop
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
                         .expect("open WAL");
 
-                // Pre-create records
+                // Pre-create records template
                 let records: Vec<WalRecord> = (0..size)
                     .map(|i| {
                         WalRecord::new(
@@ -88,9 +90,10 @@ fn bench_layer2_wal_with_seq(c: &mut Criterion) {
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
             |b, &size| {
+                // Create WAL outside the timing loop
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
                         .expect("open WAL");
                 let seq = Arc::new(AtomicU64::new(0));
 
@@ -105,6 +108,9 @@ fn bench_layer2_wal_with_seq(c: &mut Criterion) {
                     .collect();
 
                 b.iter(|| {
+                    // Reset sequence counter for each iteration
+                    seq.store(0, Ordering::Relaxed);
+                    
                     // Allocate sequence numbers
                     let mut records = Vec::with_capacity(size);
                     for (key, value) in &key_values {
@@ -146,7 +152,7 @@ fn bench_layer3_wal_plus_memtable(c: &mut Criterion) {
             |b, &size| {
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
                         .expect("open WAL");
                 let memtable = MemTable::new();
                 let seq = Arc::new(AtomicU64::new(0));
@@ -162,6 +168,9 @@ fn bench_layer3_wal_plus_memtable(c: &mut Criterion) {
                     .collect();
 
                 b.iter(|| {
+                    // Reset sequence counter for clean iterations
+                    seq.store(0, Ordering::Relaxed);
+                    
                     // Allocate sequence numbers and create records
                     let mut records = Vec::with_capacity(size);
                     for (key, value) in &key_values {
@@ -214,12 +223,15 @@ fn bench_layer4_write_batch_construction(c: &mut Criterion) {
             |b, &size| {
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
                         .expect("open WAL");
                 let memtable = MemTable::new();
                 let seq = Arc::new(AtomicU64::new(0));
 
                 b.iter(|| {
+                    // Reset state for clean iterations
+                    seq.store(0, Ordering::Relaxed);
+                    
                     // Manually construct records (simulating WriteBatch overhead)
                     let mut records = Vec::with_capacity(size);
 
@@ -283,7 +295,7 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
             |b, &cf_count| {
                 let tmp = tempdir().expect("tempdir");
                 let writer =
-                    cntryl_midge::wal::fs::Wal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
+                    FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
                         .expect("open WAL");
                 let memtables: Vec<MemTable> = (0..cf_count).map(|_| MemTable::new()).collect();
                 let seq = Arc::new(AtomicU64::new(0));
@@ -301,6 +313,9 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
                     .collect();
 
                 b.iter(|| {
+                    // Reset state for clean iterations
+                    seq.store(0, Ordering::Relaxed);
+                    
                     // Simulate CF routing: assign each record to a CF
                     let mut cf_batches: Vec<Vec<_>> = vec![vec![]; cf_count];
                     for (i, record) in records.iter().enumerate() {
@@ -360,6 +375,9 @@ fn bench_layer6_concurrent_multi_cf(c: &mut Criterion) {
                     let seq = Arc::new(AtomicU64::new(0));
 
                     b.iter(|| {
+                        // Reset state for clean iterations
+                        seq.store(0, Ordering::Relaxed);
+                        
                         let handles: Vec<_> = (0..threads)
                             .map(|thread_id| {
                                 let memtables = memtables.iter().map(Arc::clone).collect::<Vec<_>>();
@@ -394,6 +412,75 @@ fn bench_layer6_concurrent_multi_cf(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Layer 7: WAL Durability Mode Comparison
+// ============================================================================
+
+/// Measure the cost of different WAL synchronization modes.
+/// This quantifies the throughput trade-off for durability guarantees:
+/// - NoSync: Maximum throughput, async flush (data loss on crash)
+/// - BatchedSync: Batched fsync, balanced throughput/safety (default)
+/// - EveryWrite: Per-write fsync, minimum throughput (maximum safety)
+fn bench_layer7_wal_durability_modes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("overhead_analysis_layer7_durability");
+    
+    let durability_modes = vec![
+        ("NoSync", WalSyncMode::NoSync),
+        ("BatchedSync", WalSyncMode::BatchedSync),
+        ("EveryWrite", WalSyncMode::EveryWrite),
+    ];
+    
+    for (mode_name, sync_mode) in durability_modes {
+        let batch_size = 100;
+        group.throughput(Throughput::Elements(batch_size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(mode_name),
+            &sync_mode,
+            |b, &sync_mode| {
+                let tmp = tempdir().expect("tempdir");
+                let writer =
+                    FsWal::open_with_mode(tmp.path(), sync_mode)
+                        .expect("open WAL");
+                let seq = Arc::new(AtomicU64::new(0));
+
+                // Pre-create record templates
+                let key_values: Vec<(Bytes, Bytes)> = (0..batch_size)
+                    .map(|i| {
+                        (
+                            Bytes::from(format!("key{:016}", i)),
+                            Bytes::from(vec![42u8; 1000]),
+                        )
+                    })
+                    .collect();
+
+                b.iter(|| {
+                    // Reset sequence counter for clean iterations
+                    seq.store(0, Ordering::Relaxed);
+                    
+                    // Create records with sequence numbers
+                    let mut records = Vec::with_capacity(batch_size);
+                    for (key, value) in &key_values {
+                        let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
+                        records.push(WalRecord::new(
+                            WalOpKind::Put,
+                            key.clone(),
+                            Some(value.clone()),
+                            s,
+                        ));
+                    }
+
+                    // Write to WAL with specified durability mode
+                    writer.append_batch(&records).expect("append_batch");
+                    black_box(&writer);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = hotpath_overhead_analysis;
     config = criterion_config();
@@ -403,6 +490,7 @@ criterion_group! {
         bench_layer3_wal_plus_memtable,
         bench_layer4_write_batch_construction,
         bench_layer5_column_family_routing,
-        bench_layer6_concurrent_multi_cf
+        bench_layer6_concurrent_multi_cf,
+        bench_layer7_wal_durability_modes
 }
 criterion_main!(hotpath_overhead_analysis);

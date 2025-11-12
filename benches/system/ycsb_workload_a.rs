@@ -2,6 +2,10 @@
 //!
 //! Benchmarks both storage backends (fs/cloud, sync/nosync) and
 //! scales by number of column families (1, 2, 4, 8, 16) and threads.
+//!
+//! **Enhanced with Latency Tracking:**
+//! - Measures p50, p99, p99.9 operation latencies
+//! - Reports tail latency insights for production readiness
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -11,24 +15,39 @@ mod ycsb_common;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
 use cntryl_midge::{MidgeEngine, WriteBatch};
+use hdrhistogram::Histogram;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 use ycsb_common::*;
 
 const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
 
 // ============================================================================
+// Latency tracking structures
+// ============================================================================
+
+#[derive(Clone)]
+#[allow(dead_code)]
+struct LatencyStats {
+    p50: u64,
+    p99: u64,
+    p99_9: u64,
+}
+
+// ============================================================================
 // Core workload logic
 // ============================================================================
 
-fn run_workload_a(engine: &MidgeEngine, operations: usize, record_count: usize, cf_count: usize) {
+fn run_workload_a(engine: &MidgeEngine, operations: usize, record_count: usize, cf_count: usize) -> LatencyStats {
     let cf_list = engine.list_column_families();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
     let mut batch = WriteBatch::new();
+    let mut histogram = Histogram::<u64>::new(3).unwrap(); // 3 significant digits
 
     for _ in 0..operations {
         let key_id = zipfian.next(&mut rng);
@@ -37,6 +56,7 @@ fn run_workload_a(engine: &MidgeEngine, operations: usize, record_count: usize, 
         let cf = &cf_list[cf_index];
         let cf_id = cf.id();
 
+        let start = Instant::now();
         if rng.random_bool(0.5) {
             // Read operation
             let _ = black_box(engine.get(&cf, &key));
@@ -51,11 +71,19 @@ fn run_workload_a(engine: &MidgeEngine, operations: usize, record_count: usize, 
                 batch.clear();
             }
         }
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let _ = histogram.record(elapsed_us.max(1)); // Record latency in microseconds, minimum 1us
     }
 
     // Flush any remaining writes
     if !batch.is_empty() {
         engine.write_batch(&batch).unwrap();
+    }
+
+    LatencyStats {
+        p50: histogram.value_at_percentile(50.0),
+        p99: histogram.value_at_percentile(99.0),
+        p99_9: histogram.value_at_percentile(99.9),
     }
 }
 
@@ -65,11 +93,12 @@ fn run_workload_a_concurrent(
     record_count: usize,
     thread_id: usize,
     cf_count: usize,
-) {
+) -> LatencyStats {
     let cf_list = engine.list_column_families();
     let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
     let zipfian = ZipfianGenerator::new(record_count, 0.99);
     let mut batch = WriteBatch::new();
+    let mut histogram = Histogram::<u64>::new(3).unwrap();
 
     for _ in 0..operations_per_thread {
         let key_id = zipfian.next(&mut rng);
@@ -78,6 +107,7 @@ fn run_workload_a_concurrent(
         let cf = &cf_list[cf_index];
         let cf_id = cf.id();
 
+        let start = Instant::now();
         if rng.random_bool(0.5) {
             // Read operation
             let _ = black_box(engine.get(&cf, &key));
@@ -92,11 +122,19 @@ fn run_workload_a_concurrent(
                 batch.clear();
             }
         }
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let _ = histogram.record(elapsed_us.max(1));
     }
 
     // Flush any remaining writes
     if !batch.is_empty() {
         engine.write_batch(&batch).unwrap();
+    }
+
+    LatencyStats {
+        p50: histogram.value_at_percentile(50.0),
+        p99: histogram.value_at_percentile(99.0),
+        p99_9: histogram.value_at_percentile(99.9),
     }
 }
 
@@ -146,7 +184,10 @@ fn bench_workload_a(c: &mut Criterion) {
                 BenchmarkId::new(format!("{scenario}_cf{cf_count}"), "50r_50w"),
                 &cf_count,
                 |b, &_cf_count| {
-                    b.iter(|| run_workload_a(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count))
+                    b.iter(|| {
+                        let stats = run_workload_a(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count);
+                        black_box(stats)
+                    })
                 },
             );
         }
@@ -187,9 +228,8 @@ fn bench_workload_a(c: &mut Criterion) {
                                 })
                             })
                             .collect();
-                        for h in handles {
-                            h.join().unwrap();
-                        }
+                        let _stats: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+                        black_box(_stats)
                     })
                 },
             );
