@@ -7,7 +7,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::{CloudMode, ConfigError, ConfigResult, Goal};
-use crate::wal::cloud::CloudStorageBackend;
 
 /// Context for storage naming (hierarchical path / logical namespace).
 ///
@@ -65,7 +64,7 @@ pub struct CloudConfig {
     pub mode: CloudMode,
 
     /// Cloud storage backend (S3, GCS, Azure, or mock)
-    pub backend: Arc<dyn CloudStorageBackend>,
+    pub backend: Arc<dyn crate::cloud::StorageBackend>,
 
     /// Bucket name
     pub bucket: String,
@@ -128,7 +127,7 @@ impl CloudConfig {
     /// Create a new cloud configuration.
     pub fn new(
         mode: CloudMode,
-        backend: Arc<dyn CloudStorageBackend>,
+        backend: Arc<dyn crate::cloud::StorageBackend>,
         bucket: String,
         prefix: Option<String>,
         goal: Goal,

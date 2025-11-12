@@ -37,6 +37,7 @@ pub mod cloud;
 pub mod cloud_builder;
 pub mod column_family;
 pub mod derivation;
+pub mod options;
 pub mod profile;
 pub mod storage_mode;
 pub mod validation;
@@ -51,6 +52,7 @@ pub use autotune::{Autotuner, ObservedMetrics};
 pub use builder::ConfigBuilder;
 pub use cloud_builder::CloudConfigBuilder;
 pub use column_family::{CompactionStyle, CompressionType};
+pub use options::{MidgeOptions, WalRecoveryMode};
 pub use storage_mode::{CloudStorageBuilder, StorageMode};
 
 /// Performance optimization goal.

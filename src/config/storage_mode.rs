@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::cloud::StorageContext;
-use crate::wal::cloud::CloudStorageBackend;
 
 /// Storage mode configuration for the engine
 ///
@@ -75,7 +74,7 @@ pub enum StorageMode {
         local_cache_path: PathBuf,
 
         /// Cloud storage backend (S3, Azure Blob, GCS, or mock)
-        cloud_backend: Arc<dyn CloudStorageBackend>,
+        cloud_backend: Arc<dyn crate::cloud::StorageBackend>,
 
         /// Cloud storage context for hierarchical naming
         ///
@@ -171,7 +170,7 @@ impl StorageMode {
     }
 
     /// Get the cloud backend if this is cloud-backed mode
-    pub fn cloud_backend(&self) -> Option<Arc<dyn CloudStorageBackend>> {
+    pub fn cloud_backend(&self) -> Option<Arc<dyn crate::cloud::StorageBackend>> {
         match self {
             StorageMode::CloudBacked { cloud_backend, .. } => Some(Arc::clone(cloud_backend)),
             _ => None,
@@ -203,7 +202,7 @@ impl StorageMode {
 #[derive(Clone)]
 pub struct CloudStorageBuilder {
     local_cache_path: PathBuf,
-    cloud_backend: Arc<dyn CloudStorageBackend>,
+    cloud_backend: Arc<dyn crate::cloud::StorageBackend>,
     storage_context: StorageContext,
     local_wal_sync: bool,
     wal_batch_size: usize,
@@ -217,7 +216,7 @@ impl CloudStorageBuilder {
     ///
     /// * `local_cache_path` - Directory for local cache and temporary files
     /// * `cloud_backend` - Cloud storage backend implementation
-    pub fn new(local_cache_path: PathBuf, cloud_backend: Arc<dyn CloudStorageBackend>) -> Self {
+    pub fn new(local_cache_path: PathBuf, cloud_backend: Arc<dyn crate::cloud::StorageBackend>) -> Self {
         Self {
             local_cache_path,
             cloud_backend,

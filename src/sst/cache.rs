@@ -3,7 +3,7 @@
 //! Optimized cache that reads SST files once to extract both bloom filters
 //! and sparse indexes, avoiding duplicate file I/O.
 
-use crate::manifest::Manifest;
+use crate::core::manifest::Manifest;
 use crate::sst::bloom::BloomFilter;
 use crate::sst::bloom_cache::BloomCache;
 use crate::sst::mem::SstMemReader;
@@ -77,7 +77,7 @@ impl SstCache {
 mod tests {
     use super::*;
     use crate::common::codec::CompressionType;
-    use crate::manifest::{FileMeta, Manifest};
+    use crate::core::manifest::{FileMeta, Manifest};
     use crate::sst::mem::SstMemWriter;
     use std::io::Write;
     use tempfile::TempDir;

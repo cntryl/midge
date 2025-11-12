@@ -37,6 +37,65 @@ pub mod memtable;
 pub mod persistence;
 pub mod transaction;
 
+/// Common entry metadata used across memtable/flush paths.
+///
+/// Represents a single database entry with all its associated metadata.
+/// This is an internal type used by the core persistence and memtable subsystems.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryMeta {
+    /// The entry's key
+    pub key: Vec<u8>,
+    /// The entry's value (None for tombstones)
+    pub value: Option<Vec<u8>>,
+    /// Sequence number for MVCC
+    pub sequence: u64,
+    /// Whether this entry is a delete tombstone
+    pub is_tombstone: bool,
+    /// Optional TTL expiration timestamp in milliseconds since epoch
+    pub expiration_millis: Option<u64>,
+}
+
+impl EntryMeta {
+    /// Create a new entry metadata
+    pub fn new(
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+        sequence: u64,
+        is_tombstone: bool,
+        expiration_millis: Option<u64>,
+    ) -> Self {
+        Self {
+            key,
+            value,
+            sequence,
+            is_tombstone,
+            expiration_millis,
+        }
+    }
+
+    /// Convert from legacy tuple format
+    pub fn from_tuple(tuple: (Vec<u8>, Option<Vec<u8>>, u64, bool, Option<u64>)) -> Self {
+        Self {
+            key: tuple.0,
+            value: tuple.1,
+            sequence: tuple.2,
+            is_tombstone: tuple.3,
+            expiration_millis: tuple.4,
+        }
+    }
+
+    /// Convert to legacy tuple format for backward compatibility
+    pub fn to_tuple(self) -> (Vec<u8>, Option<Vec<u8>>, u64, bool, Option<u64>) {
+        (
+            self.key,
+            self.value,
+            self.sequence,
+            self.is_tombstone,
+            self.expiration_millis,
+        )
+    }
+}
+
 // Re-export commonly used types for convenience
 pub use compaction::CompactionCoordinator;
 pub use data_structures::{MergingIterator, SkipList};
@@ -49,10 +108,6 @@ pub use transaction::{Key, TransactionManager};
 // Re-export configuration types from config module
 pub use crate::config::{CloudStorageBuilder, StorageMode};
 
-// Backward compatibility: re-export from new locations
-pub use persistence::flush as flush_module;
-pub use persistence::flush_coordinator as flush_coordinator_module;
-pub use persistence::wal_replay as wal_replay_module;
-
+// Re-export data structure internals for direct access
 pub use data_structures::skiplist;
 pub use data_structures::merge_iterator;

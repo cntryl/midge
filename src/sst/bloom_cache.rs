@@ -3,7 +3,7 @@
 //! Provides fast bloom filter lookups to avoid unnecessary SST file opens.
 //! Caches parsed BloomFilter objects to eliminate deserialization overhead.
 
-use crate::manifest::Manifest;
+use crate::core::manifest::Manifest;
 use crate::sst::bloom::BloomFilter;
 use crate::sst::mem::SstMemReader;
 use crate::sst::metadata_cache::{collect_sst_names, SstMetadataCache};
@@ -106,7 +106,7 @@ impl BloomCache {
 mod tests {
     use super::*;
     use crate::common::codec::CompressionType;
-    use crate::manifest::{FileMeta, Manifest};
+    use crate::core::manifest::{FileMeta, Manifest};
     use crate::sst::mem::SstMemWriter;
     use std::io::Write;
     use tempfile::TempDir;

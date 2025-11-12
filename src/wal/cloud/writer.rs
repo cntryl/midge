@@ -37,7 +37,7 @@ impl CloudWalWriter {
     pub fn new(
         backend: Arc<dyn super::shared::CloudStorageBackend>,
         batch_size: usize,
-        manifest: Option<Arc<parking_lot::Mutex<crate::manifest::Manifest>>>,
+        manifest: Option<Arc<parking_lot::Mutex<crate::core::manifest::Manifest>>>,
         db_path: Option<std::path::PathBuf>,
     ) -> Self {
         let batch_manager = Arc::new(WalBatchManager::new(backend, batch_size, manifest, db_path));

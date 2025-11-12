@@ -3,7 +3,7 @@
 //! Provides a generic cache for SST file metadata (bloom filters, sparse indexes, etc.)
 //! to eliminate code duplication and optimize SST file reads.
 
-use crate::manifest::Manifest;
+use crate::core::manifest::Manifest;
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -220,7 +220,7 @@ mod tests {
     fn should_collect_sst_names_from_files_field() {
         // Arrange
         let manifest = Manifest {
-            files: vec![crate::manifest::FileMeta {
+            files: vec![crate::core::manifest::FileMeta {
                 name: "sst_001.blob".to_string(),
                 level: 0,
                 size_bytes: 1024,
@@ -254,7 +254,7 @@ mod tests {
         // Arrange
         let manifest = Manifest {
             ssts: vec!["sst_001.blob".to_string()],
-            files: vec![crate::manifest::FileMeta {
+            files: vec![crate::core::manifest::FileMeta {
                 name: "sst_001.blob".to_string(),
                 level: 0,
                 size_bytes: 1024,

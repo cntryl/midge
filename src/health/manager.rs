@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::common::timestamp;
 use crate::error::{MidgeError, MidgeResult};
-use crate::manifest::Manifest;
+use crate::core::manifest::Manifest;
 
 use super::rehydration::{RehydrationProgress, RehydrationStatus};
 use super::state::{

@@ -25,7 +25,7 @@ type KeyBounds = (Option<Vec<u8>>, Option<Vec<u8>>, Option<u64>, Option<u64>);
 use crate::common::codec::CompressionType;
 use crate::metrics::Metrics;
 use crate::error::{MidgeError, MidgeResult};
-use crate::manifest::Manifest;
+use crate::core::manifest::Manifest;
 
 /// A batch of memtable entries to be flushed to an SST file.
 ///
@@ -37,7 +37,7 @@ pub struct FlushJob {
     /// Sequence number of the rotated WAL segment
     pub seq: u64,
     /// Drained memtable entries: (key, value, sequence, is_tombstone)
-    pub entries: Vec<crate::EntryMeta>,
+    pub entries: Vec<crate::core::EntryMeta>,
     /// Range tombstones drained from the memtable
     pub range_tombstones: Vec<(Vec<u8>, Vec<u8>, u64)>,
 }
@@ -179,7 +179,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let seq_range_for_upload = (smallest_seq, largest_seq);
 
     m.ssts.push(fname.clone());
-    m.files.push(crate::manifest::FileMeta {
+    m.files.push(crate::core::manifest::FileMeta {
         name: fname.clone(),
         level: 0,
         size_bytes,
@@ -324,7 +324,7 @@ fn prune_old_wal_files(wal_dir: &Path, safe_sequence: u64) -> MidgeResult<usize>
 /// Compute key bounds and sequence range from entries and range tombstones.
 #[inline]
 fn compute_bounds(
-    entries: &[crate::EntryMeta],
+    entries: &[crate::core::EntryMeta],
     range_tombstones: &[(Vec<u8>, Vec<u8>, u64)],
 ) -> KeyBounds {
     let mut smallest_key: Option<Vec<u8>> = None;
@@ -432,9 +432,9 @@ pub(crate) fn flush_memtable_to_sst<F>(
     cf_id: crate::api::column_family::ColumnFamilyId,
     memtable_drain: F,
     config: FlushConfig,
-) -> MidgeResult<(PathBuf, crate::manifest::FileMeta)>
+) -> MidgeResult<(PathBuf, crate::core::manifest::FileMeta)>
 where
-    F: FnOnce() -> (Vec<crate::EntryMeta>, Vec<(Vec<u8>, Vec<u8>, u64)>),
+    F: FnOnce() -> (Vec<crate::core::EntryMeta>, Vec<(Vec<u8>, Vec<u8>, u64)>),
 {
     config.metrics.record_memtable_flush();
 
@@ -489,7 +489,7 @@ where
     boxed.finish_to_path(&file_path)?;
 
     // Build FileMeta (size to be filled by caller)
-    let fm = crate::manifest::FileMeta {
+    let fm = crate::core::manifest::FileMeta {
         name: fname.clone(),
         level: 0,
         size_bytes: 0,
@@ -547,7 +547,7 @@ pub(crate) fn rollover_and_queue_flush<F>(
     flush_coordinator: &crate::core::FlushCoordinator,
 ) -> MidgeResult<u64>
 where
-    F: FnOnce() -> (Vec<crate::EntryMeta>, Vec<(Vec<u8>, Vec<u8>, u64)>),
+    F: FnOnce() -> (Vec<crate::core::EntryMeta>, Vec<(Vec<u8>, Vec<u8>, u64)>),
 {
     // Increment sequence
     let seq = seq_counter.fetch_add(1, Ordering::SeqCst) + 1;

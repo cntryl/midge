@@ -3,7 +3,7 @@
 //! Provides fast sparse index lookups to avoid unnecessary SST file reads.
 //! Caches parsed SparseIndex objects to eliminate deserialization overhead.
 
-use crate::manifest::Manifest;
+use crate::core::manifest::Manifest;
 use crate::sst::metadata_cache::{collect_sst_names, SstMetadataCache};
 use crate::sst::reader_common::SstMetadata;
 use crate::sst::sparse_index::SparseIndex;
@@ -96,7 +96,7 @@ impl SparseIndexCache {
 mod tests {
     use super::*;
     use crate::common::codec::CompressionType;
-    use crate::manifest::{FileMeta, Manifest};
+    use crate::core::manifest::{FileMeta, Manifest};
     use crate::sst::mem::SstMemWriter;
     use std::io::Write;
     use tempfile::TempDir;

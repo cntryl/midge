@@ -261,13 +261,13 @@ impl MemTable {
     /// Drain with metadata for flushing: returns (key, value_opt, seq, tombstone, expiration)
     /// and resets the memtable. Useful for writing seq/tombstone/expiration to SST.
     /// Note: With lock-free skiplist, this creates a snapshot rather than true drain.
-    pub fn drain_with_meta(&self) -> Vec<crate::EntryMeta> {
+    pub fn drain_with_meta(&self) -> Vec<crate::core::EntryMeta> {
         let out = self.inner.drain_with_meta_with_exp();
         self.bytes.store(0, Ordering::Relaxed);
         // Convert Bytes to Vec<u8> at API boundary and wrap in EntryMeta
         out.into_iter()
             .map(|(k, v, seq, tomb, exp)| {
-                crate::EntryMeta::new(k.to_vec(), v.map(|b| b.to_vec()), seq, tomb, exp)
+                crate::core::EntryMeta::new(k.to_vec(), v.map(|b| b.to_vec()), seq, tomb, exp)
             })
             .collect()
     }
@@ -275,14 +275,14 @@ impl MemTable {
     /// Drain with metadata but encode the keys as internal keys: userkey || seq (BE) || kind(u8)
     /// This is useful for SST writers that expect internal-key encoded keys on disk.
     /// Note: With lock-free skiplist, this creates a snapshot rather than true drain.
-    pub fn drain_with_meta_internal(&self) -> Vec<crate::EntryMeta> {
+    pub fn drain_with_meta_internal(&self) -> Vec<crate::core::EntryMeta> {
         let raws = self.inner.drain_with_meta_with_exp();
         self.bytes.store(0, Ordering::Relaxed);
         // Transform keys into internal-key encoding
-        let mut out: Vec<crate::EntryMeta> = Vec::with_capacity(raws.len());
+        let mut out: Vec<crate::core::EntryMeta> = Vec::with_capacity(raws.len());
         for (k, v_opt, seq, tomb, exp) in raws {
             let ik = crate::common::internal_key::encode_internal_key(&k, seq, tomb);
-            out.push(crate::EntryMeta::new(
+            out.push(crate::core::EntryMeta::new(
                 ik,
                 v_opt.map(|b| b.to_vec()),
                 seq,

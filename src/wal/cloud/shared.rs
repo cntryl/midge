@@ -200,7 +200,7 @@ impl WalBatchManager {
     pub fn new(
         backend: Arc<dyn CloudStorageBackend>,
         max_batch_size: usize,
-        _manifest: Option<Arc<parking_lot::Mutex<crate::manifest::Manifest>>>,
+        _manifest: Option<Arc<parking_lot::Mutex<crate::core::manifest::Manifest>>>,
         _db_path: Option<std::path::PathBuf>,
     ) -> Self {
         Self {

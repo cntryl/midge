@@ -4,7 +4,7 @@
 //! on every read operation. The cache is thread-safe and supports atomic updates.
 
 use crate::error::MidgeResult;
-use crate::manifest::Manifest;
+use crate::core::manifest::Manifest;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -98,7 +98,7 @@ impl ManifestCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{FileMeta, Manifest};
+    use crate::core::manifest::{FileMeta, Manifest};
     use tempfile::TempDir;
 
     fn create_test_manifest(last_seq: u64, num_ssts: usize) -> Manifest {

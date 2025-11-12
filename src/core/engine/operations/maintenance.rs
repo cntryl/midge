@@ -73,7 +73,7 @@ impl MidgeEngine {
                 };
 
             // preserve metadata computed by flush_memtable_to_sst
-            m.files.push(crate::manifest::FileMeta {
+            m.files.push(crate::core::manifest::FileMeta {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
                 size_bytes,

@@ -9,7 +9,6 @@ use super::{
     cloud::CloudConfig, derivation::DerivedParams, profile::ProfileAdjustments, validation,
     CloudMode, Config, ConfigError, ConfigResult, Durability, Goal, MemoryBudget, WorkloadProfile,
 };
-use crate::wal::cloud::CloudStorageBackend;
 
 /// Builder for Midge configuration.
 ///
@@ -36,7 +35,7 @@ pub struct ConfigBuilder {
     autotune_enabled: bool,
 
     // Cloud-specific
-    cloud_backend: Option<Arc<dyn CloudStorageBackend>>,
+    cloud_backend: Option<Arc<dyn crate::cloud::StorageBackend>>,
     cloud_bucket: Option<String>,
     cloud_prefix: Option<String>,
 }
@@ -107,7 +106,7 @@ impl ConfigBuilder {
     /// Configure cloud storage backend.
     pub fn cloud_backend(
         mut self,
-        backend: Arc<dyn CloudStorageBackend>,
+        backend: Arc<dyn crate::cloud::StorageBackend>,
         bucket: impl Into<String>,
     ) -> Self {
         self.cloud_backend = Some(backend);

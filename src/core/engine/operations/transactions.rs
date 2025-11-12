@@ -11,7 +11,7 @@ use crate::common::timestamp;
 use crate::core::transaction::{EngineTransaction, Transaction};
 use crate::core::persistence::wal_replay::wal_record_encoded_len;
 use crate::error::{MidgeError, MidgeResult};
-use crate::manifest::Manifest;
+use crate::core::manifest::Manifest;
 use crate::wal::WalOpKind;
 
 use super::super::MidgeEngine;
