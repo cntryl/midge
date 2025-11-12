@@ -62,11 +62,15 @@ benches/
 │   └── isolation_mvcc.rs          # Tier 3: Snapshots, MVCC, transactions, compaction interaction
 │
 ├── system/           # Tier 3 — System-Level Benchmarks
-│   ├── compaction.rs # Full compaction cycles
-│   ├── ycsb_workload_a.rs # Read/write mix (50/50)
-│   ├── ycsb_workload_b.rs # Read-heavy (95/5)
-│   ├── ycsb_workload_c.rs # Read-only
-│   └── ycsb_workload_d.rs # Latest data (recency bias)
+│   ├── compaction.rs       # Full compaction cycles
+│   ├── recovery.rs         # Crash recovery & WAL replay
+│   ├── durability_modes.rs # WAL sync modes comparison
+│   ├── ycsb_workload_a.rs  # Read/write mix (50/50)
+│   ├── ycsb_workload_b.rs  # Read-heavy (95/5)
+│   ├── ycsb_workload_c.rs  # Read-only
+│   ├── ycsb_workload_d.rs  # Latest data (recency bias)
+│   ├── ycsb_workload_e.rs  # Range scans (95% scans, 5% inserts)
+│   └── ycsb_common.rs      # YCSB utilities (Zipfian, keygen, data loading)
 │
 └── (standalone benchmarks)
     ├── codec.rs          # Compression codec performance
@@ -107,10 +111,19 @@ Integrated benchmarks that test multiple components together:
 **Run Frequency:** Nightly / Release validation
 
 Full-system workload benchmarks:
-- YCSB workloads (Read/write mix, read-heavy, read-only, recency bias)
-- Full compaction cycle performance
 
-## Running Benchmarks
+| File | Runtime | Purpose | Key Metrics |
+|------|---------|---------|------------|
+| **ycsb_workload_a.rs** | ~15s | Read/write mix (50/50) | Throughput ops/sec (1-16 CFs, 1-8 threads) |
+| **ycsb_workload_b.rs** | ~15s | Read-heavy (95/5) | Read throughput with minimal write load |
+| **ycsb_workload_c.rs** | ~10s | Read-only | Cache efficiency, read-path latency |
+| **ycsb_workload_d.rs** | ~12s | Recency bias (latest 95%) | Zipfian distribution realism |
+| **ycsb_workload_e.rs** | ~12s | Range scans (95% scans, 5% inserts) | Scan throughput, iterator efficiency |
+| **recovery.rs** | ~20s | Crash recovery & WAL replay | Recovery throughput (10K-500K records) |
+| **durability_modes.rs** | ~30s | WAL sync modes (async, sync-every) | Write throughput vs durability trade-off |
+| **compaction.rs** | ~5s | Full compaction cycles | Flush + compact throughput |
+
+### Running Benchmarks
 
 ### Run All Benchmarks
 
@@ -129,6 +142,22 @@ cargo bench --bench subsystem_isolation_mvcc
 
 # Or run a specific subsystem benchmark
 cargo bench subsystem_engine_basic -- --list  # List all benchmarks in this tier
+```
+
+### Run System Benchmarks (Nightly)
+
+```bash
+# Full system workloads (YCSB A-E)
+cargo bench --bench ycsb_workload_a
+cargo bench --bench ycsb_workload_b
+cargo bench --bench ycsb_workload_c
+cargo bench --bench ycsb_workload_d
+cargo bench --bench ycsb_workload_e
+
+# Durability & Recovery
+cargo bench --bench system_recovery
+cargo bench --bench system_durability_modes
+cargo bench --bench system_compaction
 ```
 
 ### Run Specific Benchmark Category

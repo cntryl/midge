@@ -244,3 +244,19 @@ harness = false
 name = "ycsb_workload_d"
 path = "benches/system/ycsb_workload_d.rs"
 harness = false
+
+[[bench]]
+name = "ycsb_workload_e"
+path = "benches/system/ycsb_workload_e.rs"
+harness = false
+
+[[bench]]
+name = "system_recovery"
+path = "benches/system/recovery.rs"
+harness = false
+
+[[bench]]
+name = "system_durability_modes"
+path = "benches/system/durability_modes.rs"
+harness = false
+
