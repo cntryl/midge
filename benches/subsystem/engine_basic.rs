@@ -14,7 +14,11 @@ mod criterion_helper;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
+use hdrhistogram::Histogram;
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use cntryl_midge::api::column_family::ColumnFamilyConfig;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
@@ -91,6 +95,106 @@ fn bench_put_variants(c: &mut Criterion) {
                 },
                 BatchSize::SmallInput,
             )
+        });
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Concurrent CF scaling (2-8 threads)
+// Captures 99th-percentile latencies and measures write amplification.
+// ============================================================================
+
+fn bench_concurrent_cf_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_concurrent_cf_scaling");
+
+    // thread counts to test
+    let thread_counts = [2usize, 4, 8usize];
+
+    // per-thread operations per iteration (keeps runs short but measurable)
+    let ops_per_thread = 200usize;
+
+    for &threads in &thread_counts {
+        group.throughput(Throughput::Elements((threads * ops_per_thread) as u64));
+
+        group.bench_with_input(BenchmarkId::from_parameter(threads), &threads, |b, &threads| {
+            b.iter_custom(|iters| {
+                // We'll run `iters` internal iterations; each iteration spawns `threads`
+                // threads and each thread performs `ops_per_thread` writes.
+                let mut total_elapsed = Duration::ZERO;
+
+                for _ in 0..iters {
+                    // fresh engine per iteration for isolation
+                    let engine = Arc::new(setup_db(&format!("concurrent_{}", threads), true));
+
+                    // create column families (one per thread)
+                    let mut cfs = vec![engine.default_column_family()];
+                    for i in 1..threads {
+                        let name = format!("bench_cf_{}", i);
+                        let cf = engine.create_column_family(&name, ColumnFamilyConfig::default()).unwrap();
+                        cfs.push(cf);
+                    }
+
+                    // prepare keys for each thread to avoid shared allocations during timing
+                    let keys: Vec<Vec<Bytes>> = (0..threads)
+                        .map(|t| (0..ops_per_thread).map(|i| make_key(i + t * ops_per_thread)).collect())
+                        .collect();
+
+                    // capture baseline write amplification
+                    let wa_before = engine.write_amplification();
+
+                    let start = Instant::now();
+
+                    // per-thread histograms
+                    let mut thread_handles = Vec::with_capacity(threads);
+                    for t in 0..threads {
+                        let engine = Arc::clone(&engine);
+                        let cf = cfs[t].clone();
+                        let thread_keys = keys[t].clone();
+
+                        thread_handles.push(thread::spawn(move || {
+                            let mut hist = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
+                            for k in thread_keys.iter() {
+                                let before = Instant::now();
+                                engine.put(&cf, k, &make_value(0, 128)).unwrap();
+                                let us = before.elapsed().as_micros() as u64;
+                                let _ = hist.record(us);
+                            }
+                            hist
+                        }));
+                    }
+
+                    // collect and merge histograms
+                    let mut merged = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
+                    for handle in thread_handles {
+                        let h = handle.join().expect("thread join");
+                        merged.add(&h).unwrap();
+                    }
+
+                    let elapsed = start.elapsed();
+                    total_elapsed += elapsed;
+
+                    // compute 99th percentile (microseconds)
+                    let p99 = merged.value_at_percentile(99.0);
+
+                    // measure write amplification after workload
+                    let wa_after = engine.write_amplification();
+
+                    // Print a brief summary for this iteration so CI logs capture it.
+                    println!(
+                        "concurrent_cf scaling: threads={} ops={} elapsed_ms={:.3} p99_us={} wa_before={:.2}x wa_after={:.2}x",
+                        threads,
+                        threads * ops_per_thread,
+                        elapsed.as_secs_f64() * 1000.0,
+                        p99,
+                        wa_before,
+                        wa_after
+                    );
+                }
+
+                total_elapsed
+            });
         });
     }
 
@@ -330,5 +434,7 @@ criterion_group! {
         bench_write_modes,
         bench_memory_mode,
         bench_full_stack_throughput
+        ,
+        bench_concurrent_cf_scaling
 }
 criterion_main!(subsystem_engine_basic);
