@@ -12,7 +12,8 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use std::time::Duration;
 use criterion_helper::criterion_config;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
@@ -47,8 +48,14 @@ fn make_value(i: usize, base: usize) -> Bytes {
 
 fn bench_put_variants(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_put_variants");
+    // Treat each benchmark invocation as N element operations so Criterion
+    // reports ns/op and ops/sec. Use a shorter measurement window for
+    // quick CI microbenchmarks; switch to CRITERION_FULL=1 for full mode.
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
 
     for &op_count in &[100, 1000] {
+        group.throughput(Throughput::Elements(op_count as u64));
         group.bench_with_input(
             BenchmarkId::new("sequential", op_count),
             &op_count,
@@ -66,8 +73,9 @@ fn bench_put_variants(c: &mut Criterion) {
                     BatchSize::SmallInput,
                 )
             },
-        );
+    );
 
+        group.throughput(Throughput::Elements(op_count as u64));
         group.bench_with_input(
             BenchmarkId::new("random", op_count),
             &op_count,
@@ -102,7 +110,10 @@ fn bench_put_variants(c: &mut Criterion) {
 
 fn bench_get_hit_miss(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_get");
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
 
+    group.throughput(Throughput::Elements(250));
     group.bench_function("hit_mixed", |b| {
         let engine = setup_db("get_hit", false);
         let cf = engine.default_column_family();
@@ -117,6 +128,7 @@ fn bench_get_hit_miss(c: &mut Criterion) {
         })
     });
 
+    group.throughput(Throughput::Elements(100));
     group.bench_function("miss_random", |b| {
         let engine = setup_db("get_miss", false);
         let cf = engine.default_column_family();
@@ -137,7 +149,10 @@ fn bench_get_hit_miss(c: &mut Criterion) {
 
 fn bench_delete(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_delete");
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
 
+    group.throughput(Throughput::Elements(1000));
     group.bench_function("delete_existing", |b| {
         b.iter_batched(
             || {
@@ -167,7 +182,10 @@ fn bench_delete(c: &mut Criterion) {
 
 fn bench_write_modes(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_write_modes");
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
 
+    group.throughput(Throughput::Elements(500));
     group.bench_function("nosync_batched", |b| {
         b.iter_batched(
             || setup_db("nosync", false),
@@ -181,6 +199,7 @@ fn bench_write_modes(c: &mut Criterion) {
         )
     });
 
+    group.throughput(Throughput::Elements(500));
     group.bench_function("sync_every_write", |b| {
         b.iter_batched(
             || setup_db("sync", true),
@@ -194,6 +213,7 @@ fn bench_write_modes(c: &mut Criterion) {
         )
     });
 
+    group.throughput(Throughput::Elements(500));
     group.bench_function("small_batch_write", |b| {
         b.iter_batched(
             || setup_db("batch", false),
@@ -216,7 +236,11 @@ fn bench_write_modes(c: &mut Criterion) {
 
 fn bench_memory_mode(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_memory_mode");
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
 
+    // 100 writes + 50 reads per iteration = 150 element operations
+    group.throughput(Throughput::Elements(150));
     group.bench_function("read_write_mix", |b| {
         b.iter_batched(
             || setup_db("memory_mode", false),

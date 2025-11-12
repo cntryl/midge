@@ -293,7 +293,7 @@ fn bench_layer4_write_batch_construction(c: &mut Criterion) {
                     // Construct records with pre-allocated templates (simulating WriteBatch::with_capacity)
                     let mut records = Vec::with_capacity(size);
 
-                    for (_, (key, value)) in key_values.iter().enumerate() {
+                    for (key, value) in key_values.iter() {
                         let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
 
                         // Simulate the overhead of record construction (field assignment only)
@@ -630,7 +630,7 @@ fn overhead_aggregate_summary_once() {
             .collect();
 
         let mut records = Vec::with_capacity(batch_size);
-        for (_, (key, value)) in key_values.iter().enumerate() {
+        for (key, value) in key_values.iter() {
             let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
             records.push(WalRecord {
                 cf_id: 0,
