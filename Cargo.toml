@@ -209,6 +209,11 @@ name = "subsystem_concurrency_compaction"
 path = "benches/subsystem/concurrency_compaction.rs"
 harness = false
 
+[[bench]]
+name = "subsystem_enhanced_concurrency"
+path = "benches/subsystem/enhanced_concurrency.rs"
+harness = false
+
 # Tier 3 — System
 [[bench]]
 name = "system_compaction"

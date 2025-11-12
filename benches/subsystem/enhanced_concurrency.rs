@@ -232,7 +232,6 @@ fn bench_contention_breakdown(c: &mut Criterion) {
             || Arc::new(setup_db("writes_only", false)),
             |engine| {
                 let cf = engine.default_column_family();
-                let mut stats = LatencyStats::default();
 
                 thread::scope(|scope| {
                     for tid in 0..4 {
@@ -251,7 +250,7 @@ fn bench_contention_breakdown(c: &mut Criterion) {
                     }
                 });
 
-                black_box(stats);
+                black_box(());
             },
             BatchSize::SmallInput,
         )
@@ -386,7 +385,7 @@ fn bench_reads_during_compaction(c: &mut Criterion) {
                     engine.put(&cf, &make_key(i), &make_value(256)).unwrap();
                 }
                 let _ = engine.flush();
-                engine
+                Arc::new(engine)
             },
             |engine| {
                 let cf = engine.default_column_family();
