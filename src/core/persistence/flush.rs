@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 type KeyBounds = (Option<Vec<u8>>, Option<Vec<u8>>, Option<u64>, Option<u64>);
 
 use crate::common::codec::CompressionType;
-use crate::core::metrics::Metrics;
+use crate::metrics::Metrics;
 use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
 

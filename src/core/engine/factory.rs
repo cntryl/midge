@@ -24,7 +24,7 @@ use crate::core::engine::core::MidgeEngine;
 use crate::core::persistence::flush::FlushWorkerConfig;
 use crate::core::locking::DbLock;
 use crate::core::manifest::Manifest;
-use crate::core::metrics::Metrics;
+use crate::metrics::Metrics;
 use crate::wal::WalFile;
 
 /// Acquire database lock to prevent concurrent writers.

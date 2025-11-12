@@ -4,8 +4,14 @@
 //! This reduces WAL overhead by batching multiple operations into single writes.
 
 use crate::api::ColumnFamilyId;
-use crate::wal::WalOpKind;
 use bytes::Bytes;
+
+/// Internal operation kind (mirrors WAL operation types)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpKind {
+    Put,
+    Delete,
+}
 
 /// A batch of write operations to be committed atomically
 #[derive(Debug, Default)]
@@ -16,7 +22,7 @@ pub struct WriteBatch {
 #[derive(Debug, Clone)]
 pub(crate) struct WriteOp {
     cf_id: ColumnFamilyId,
-    kind: WalOpKind,
+    kind: OpKind,
     key: Bytes,
     value: Option<Bytes>,
     ttl_seconds: u64,
@@ -32,7 +38,7 @@ impl WriteBatch {
     pub fn put(&mut self, cf_id: ColumnFamilyId, key: Bytes, value: Bytes) {
         self.operations.push(WriteOp {
             cf_id,
-            kind: WalOpKind::Put,
+            kind: OpKind::Put,
             key,
             value: Some(value),
             ttl_seconds: 0,
@@ -49,7 +55,7 @@ impl WriteBatch {
     ) {
         self.operations.push(WriteOp {
             cf_id,
-            kind: WalOpKind::Put,
+            kind: OpKind::Put,
             key,
             value: Some(value),
             ttl_seconds,
@@ -60,7 +66,7 @@ impl WriteBatch {
     pub fn delete(&mut self, cf_id: ColumnFamilyId, key: Bytes) {
         self.operations.push(WriteOp {
             cf_id,
-            kind: WalOpKind::Delete,
+            kind: OpKind::Delete,
             key,
             value: None,
             ttl_seconds: 0,
@@ -93,7 +99,7 @@ impl WriteOp {
         self.cf_id
     }
 
-    pub(crate) fn kind(&self) -> WalOpKind {
+    pub(crate) fn kind(&self) -> OpKind {
         self.kind
     }
 

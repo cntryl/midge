@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::core::metrics::global_performance_metrics;
 use crate::error::{MidgeError, MidgeResult};
 use crate::wal::arena::Arena;
 use crate::wal::encode_pipeline::WalEncoder;
@@ -157,8 +156,6 @@ impl Wal {
 
         let written = (frag.header.len() + frag.body.len()) as u64;
         inner.pos += written;
-        // Record write metrics
-        global_performance_metrics().wal.record_write(written);
         Ok(())
     }
 
@@ -273,9 +270,6 @@ impl WalWriter for Wal {
 
             inner.file.write_all(s)?;
             inner.pos = inner.pos.saturating_add(total_size as u64);
-            global_performance_metrics()
-                .wal
-                .record_write(total_size as u64);
             // Return scratch buffer for reuse
             inner.scratch = scratch;
         } else {
@@ -364,9 +358,6 @@ impl WalWriter for Wal {
             }
 
             inner.pos = inner.pos.saturating_add(total_size as u64);
-            global_performance_metrics()
-                .wal
-                .record_write(total_size as u64);
         }
 
         Ok(pos_before)
@@ -415,8 +406,7 @@ impl WalWriter for Wal {
                 TEST_SYNC_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
                 let t0 = std::time::Instant::now();
                 let res = fs::sync_data_only(&file_clone, self.test_hooks.as_ref());
-                let dur = t0.elapsed();
-                global_performance_metrics().wal.record_fsync(dur);
+                let _dur = t0.elapsed();
                 Ok(res?)
             })?;
         } else {
@@ -425,8 +415,7 @@ impl WalWriter for Wal {
             TEST_SYNC_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
             let t0 = std::time::Instant::now();
             fs::sync_data_only(&file_clone, self.test_hooks.as_ref())?;
-            let dur = t0.elapsed();
-            global_performance_metrics().wal.record_fsync(dur);
+            let _dur = t0.elapsed();
         }
 
         Ok(())

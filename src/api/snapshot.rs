@@ -39,7 +39,7 @@ impl Drop for Snapshot {
 #[derive(Default)]
 pub struct SnapshotRegistry {
     inner: Mutex<SnapshotRegistryState>,
-    pub(crate) metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    pub(crate) metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 #[derive(Default)]
@@ -57,7 +57,7 @@ impl SnapshotRegistry {
         }
     }
 
-    pub fn with_metrics(metrics: Arc<crate::core::metrics::Metrics>) -> Self {
+    pub fn with_metrics(metrics: Arc<crate::metrics::Metrics>) -> Self {
         Self {
             inner: Mutex::new(SnapshotRegistryState::default()),
             metrics: Some(metrics),

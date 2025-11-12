@@ -18,10 +18,12 @@
 
 // Foundational modules with no internal dependencies
 pub mod common;
+pub mod metrics;
 
 // Re-export error types at crate root for convenience and backwards compatibility
 pub use common::error;
 pub use common::{MidgeError, MidgeResult};
+pub use metrics::PerformanceMetrics;
 // Backwards-compat module re-exports (legacy paths used widely across the codebase)
 // These preserve old `crate::...` paths after internal reorganization.
 // Note: legacy crate-root re-exports removed to prefer explicit module paths.
@@ -48,6 +50,7 @@ pub use crate::core::backup;
 pub use crate::core::locking;
 pub use crate::core::manifest;
 pub use crate::config::storage_mode;
+// Note: metrics is now a top-level module, use `crate::metrics::*` directly
 // TransactionManager is available via `core::transaction`; no legacy module re-export.
 
 // Compaction filter API for user-provided custom logic
@@ -69,7 +72,6 @@ pub use crate::config::{CompactionStyle, CompressionType};
 pub use crate::core::transaction::EngineTransaction as Transaction;
 // Re-export the engine API from the new `core` location for backwards compatibility
 pub use crate::core::engine::{CasResult, InsertResult, MidgeEngine};
-pub use crate::core::metrics::PerformanceMetrics;
 pub use crate::sst::bloom::Filter;
 pub use crate::storage_mode::{CloudStorageBuilder, StorageMode};
 

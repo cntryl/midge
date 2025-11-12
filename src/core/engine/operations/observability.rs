@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::core::metrics::Metrics;
+use crate::metrics::Metrics;
 
 use super::super::MidgeEngine;
 
@@ -119,7 +119,7 @@ impl MidgeEngine {
     /// println!("Cache hit rate: {:.2}%", metrics.cache.hit_rate() * 100.0);
     /// println!("WAL ops/sec: {}", metrics.wal.total_operations());
     /// ```
-    pub fn performance_metrics(&self) -> &Arc<crate::core::metrics::PerformanceMetrics> {
+    pub fn performance_metrics(&self) -> &Arc<crate::metrics::PerformanceMetrics> {
         &self.performance_metrics
     }
 
@@ -208,7 +208,7 @@ impl MidgeEngine {
     ///     (snapshot.block_cache_hits + snapshot.block_cache_misses) as f64 * 100.0
     /// );
     /// ```
-    pub fn metrics_snapshot(&self) -> crate::core::metrics::MetricsSnapshot {
+    pub fn metrics_snapshot(&self) -> crate::metrics::MetricsSnapshot {
         self.metrics.snapshot()
     }
 

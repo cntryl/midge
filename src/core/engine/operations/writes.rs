@@ -19,13 +19,12 @@ use crate::api::column_family::DEFAULT_CF_ID;
 use crate::common::timestamp;
 use crate::core::engine::core::MidgeEngine;
 use crate::error::MidgeResult;
-use crate::wal::WalOpKind;
 use bytes::Bytes;
 use std::sync::atomic::Ordering;
 
 /// Helper to predict WAL record size
 fn wal_record_encoded_len(
-    _op: WalOpKind,
+    _op: crate::api::write_batch::OpKind,
     key_len: usize,
     value_len: Option<usize>,
     _range_end_len: Option<usize>,
@@ -339,9 +338,15 @@ impl MidgeEngine {
 
             sequences.push((op, seq, expiration));
 
+            // Convert internal OpKind to WalOpKind
+            let wal_op_kind = match op.kind() {
+                crate::api::write_batch::OpKind::Put => crate::wal::WalOpKind::Put,
+                crate::api::write_batch::OpKind::Delete => crate::wal::WalOpKind::Delete,
+            };
+
             let record = crate::wal::WalRecord {
                 cf_id: op.cf_id().as_u32(),
-                op: op.kind(),
+                op: wal_op_kind,
                 key: op.key().clone(),
                 value: op.value().cloned(),
                 seq,
@@ -368,7 +373,7 @@ impl MidgeEngine {
             })?;
 
             match op.kind() {
-                WalOpKind::Put => {
+                crate::api::write_batch::OpKind::Put => {
                     self.metrics.record_put();
                     self.metrics.record_memtable_write();
 
@@ -377,14 +382,13 @@ impl MidgeEngine {
                         mt.put_with_seq_and_exp(op.key(), value, seq, expiration);
                     }
                 }
-                WalOpKind::Delete => {
+                crate::api::write_batch::OpKind::Delete => {
                     self.metrics.record_delete();
                     self.metrics.record_memtable_write();
                     self.metrics.record_point_tombstone_created();
                     let mt = column_family.memtable.read();
                     mt.delete_with_seq(op.key(), seq);
                 }
-                _ => {}
             }
         }
 

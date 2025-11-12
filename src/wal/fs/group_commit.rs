@@ -139,7 +139,7 @@ impl GroupCommitCoordinator {
                     // Avoid a hard dependency on a metrics crate when not used by
                     // tests; record only when available at runtime.
                     if batch > 0 {
-                        crate::core::metrics::global_performance_metrics()
+                        crate::metrics::global_performance_metrics()
                             .wal
                             .record_group_commit(batch);
                     }

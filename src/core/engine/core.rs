@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::api::column_family::ColumnFamilyId;
 use crate::core::memtable::MemTable;
-use crate::core::metrics::Metrics;
+use crate::metrics::Metrics;
 use crate::core::persistence::wal_replay::replay_wal_to_memtables_after_seq;
 use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
@@ -43,7 +43,7 @@ pub struct MidgeEngine {
     pub(crate) table_cache: Option<Arc<crate::sst::table_cache::TableCache>>,
     pub(crate) metrics: Arc<Metrics>,
     /// Performance metrics for real-time monitoring and optimization
-    pub(crate) performance_metrics: Arc<crate::core::metrics::PerformanceMetrics>,
+    pub(crate) performance_metrics: Arc<crate::metrics::PerformanceMetrics>,
     /// Background flush coordinator
     pub(crate) flush_coordinator: crate::core::FlushCoordinator,
     /// Background compaction coordinator (optional - may be disabled)

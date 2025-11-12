@@ -21,7 +21,11 @@
 //!   - storage_mode - Memory/disk/cloud mode selection
 //! - **locking** - Distributed locking
 //! - **backup** - Backup and restore
-//! - **metrics** - Performance metrics collection
+//!
+//! ## Note on Metrics
+//!
+//! Metrics have been moved to the top-level `metrics` module to avoid circular dependencies.
+//! Use `crate::metrics::*` instead of `crate::core::metrics::*`.
 
 pub mod backup;
 pub mod compaction;
@@ -30,7 +34,6 @@ pub mod engine;
 pub mod locking;
 pub mod manifest;
 pub mod memtable;
-pub mod metrics;
 pub mod persistence;
 pub mod transaction;
 

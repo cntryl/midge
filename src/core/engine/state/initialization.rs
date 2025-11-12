@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::core::engine::column_family::ColumnFamilySet;
 use crate::core::engine::MidgeEngine;
-use crate::core::metrics::Metrics;
+use crate::metrics::Metrics;
 use crate::error::MidgeResult;
 
 /// Open or create a database using the high-level `Config` API.
@@ -326,7 +326,7 @@ pub fn open_with_factories(
             None
         },
         metrics: metrics_arc,
-        performance_metrics: Arc::new(crate::core::metrics::PerformanceMetrics::new()),
+        performance_metrics: Arc::new(crate::metrics::PerformanceMetrics::new()),
         flush_coordinator,
         compaction_coordinator,
         merge_operators: RwLock::new(HashMap::new()),
