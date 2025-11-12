@@ -34,6 +34,25 @@ impl WriteBatch {
         Self::default()
     }
 
+    /// Create a new write batch with pre-allocated capacity
+    /// 
+    /// Useful when the expected batch size is known upfront, avoiding reallocation
+    /// during the put/delete operations that fill the batch.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let mut batch = WriteBatch::with_capacity(100);
+    /// for i in 0..100 {
+    ///     batch.put(0, key, value);
+    /// }
+    /// // No reallocations during puts
+    /// ```
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            operations: Vec::with_capacity(capacity),
+        }
+    }
+
     /// Add a put operation to the batch for a specific column family
     pub fn put(&mut self, cf_id: ColumnFamilyId, key: Bytes, value: Bytes) {
         self.operations.push(WriteOp {

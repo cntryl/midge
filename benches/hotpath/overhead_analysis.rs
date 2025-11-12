@@ -51,19 +51,31 @@ fn bench_layer1_wal_only(c: &mut Criterion) {
                     FsWal::open_with_mode(tmp.path(), WalSyncMode::NoSync)
                         .expect("open WAL");
 
-                // Pre-create records template
-                let records: Vec<WalRecord> = (0..size)
+                // Pre-create record templates (matches Layer 2 for fair comparison)
+                let key_values: Vec<(Bytes, Bytes)> = (0..size)
                     .map(|i| {
-                        WalRecord::new(
-                            WalOpKind::Put,
+                        (
                             Bytes::from(format!("key{:016}", i)),
-                            Some(Bytes::from(vec![42u8; 1000])),
-                            i as u64,
+                            Bytes::from(vec![42u8; 1000]),
                         )
                     })
                     .collect();
 
                 b.iter(|| {
+                    // Create records from pre-allocated templates (minimal formatting overhead)
+                    let records: Vec<WalRecord> = key_values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (k, v))| {
+                            WalRecord::new(
+                                WalOpKind::Put,
+                                k.clone(),
+                                Some(v.clone()),
+                                i as u64,
+                            )
+                        })
+                        .collect();
+
                     writer.append_batch(&records).expect("append_batch");
                     black_box(&writer);
                 });
@@ -228,19 +240,27 @@ fn bench_layer4_write_batch_construction(c: &mut Criterion) {
                 let memtable = MemTable::new();
                 let seq = Arc::new(AtomicU64::new(0));
 
+                // Pre-create key/value templates (matches Layer 2 for fair comparison)
+                let key_values: Vec<(Bytes, Bytes)> = (0..size)
+                    .map(|i| {
+                        (
+                            Bytes::from(format!("key{:016}", i)),
+                            Bytes::from(vec![42u8; 1000]),
+                        )
+                    })
+                    .collect();
+
                 b.iter(|| {
                     // Reset state for clean iterations
                     seq.store(0, Ordering::Relaxed);
                     
-                    // Manually construct records (simulating WriteBatch overhead)
+                    // Construct records with pre-allocated templates (simulating WriteBatch::with_capacity)
                     let mut records = Vec::with_capacity(size);
 
-                    for i in 0..size {
+                    for (_, (key, value)) in key_values.iter().enumerate() {
                         let s = seq.fetch_add(1, Ordering::SeqCst) + 1;
-                        let key = Bytes::from(format!("key{:016}", i));
-                        let value = Bytes::from(vec![42u8; 1000]);
 
-                        // Simulate the overhead of record construction
+                        // Simulate the overhead of record construction (field assignment only)
                         records.push(WalRecord {
                             cf_id: 0,
                             op: WalOpKind::Put,
@@ -300,22 +320,22 @@ fn bench_layer5_column_family_routing(c: &mut Criterion) {
                 let memtables: Vec<MemTable> = (0..cf_count).map(|_| MemTable::new()).collect();
                 let seq = Arc::new(AtomicU64::new(0));
 
-                // Pre-create records
-                let records: Vec<WalRecord> = (0..batch_size)
-                    .map(|i| {
-                        WalRecord::new(
-                            WalOpKind::Put,
-                            Bytes::from(format!("key{:016}", i)),
-                            Some(Bytes::from(vec![42u8; 1000])),
-                            seq.fetch_add(1, Ordering::SeqCst) + 1,
-                        )
-                    })
-                    .collect();
-
                 b.iter(|| {
                     // Reset state for clean iterations
                     seq.store(0, Ordering::Relaxed);
                     
+                    // Create records inside timing loop for fair measurement
+                    let records: Vec<WalRecord> = (0..batch_size)
+                        .map(|i| {
+                            WalRecord::new(
+                                WalOpKind::Put,
+                                Bytes::from(format!("key{:016}", i)),
+                                Some(Bytes::from(vec![42u8; 1000])),
+                                seq.fetch_add(1, Ordering::SeqCst) + 1,
+                            )
+                        })
+                        .collect();
+
                     // Simulate CF routing: assign each record to a CF
                     let mut cf_batches: Vec<Vec<_>> = vec![vec![]; cf_count];
                     for (i, record) in records.iter().enumerate() {
