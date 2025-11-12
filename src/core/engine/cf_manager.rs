@@ -38,7 +38,7 @@ impl MidgeEngine {
     /// ```no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # use cntryl_midge::api::column_family::ColumnFamilyConfig;
-    /// # let engine = MidgeEngine::open(MidgeOptions::new("./db")).unwrap();
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let config = ColumnFamilyConfig::default();
     /// let cf = engine.create_column_family("my_cf", config)?;
     /// # Ok::<(), cntryl_midge::MidgeError>(())
@@ -96,7 +96,7 @@ impl MidgeEngine {
     /// ```no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # use cntryl_midge::api::column_family::ColumnFamilyConfig;
-    /// # let engine = MidgeEngine::open(MidgeOptions::new("./db")).unwrap();
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// # let cf = engine.create_column_family("temp_cf", ColumnFamilyConfig::default())?;
     /// engine.flush_cf(&cf)?; // Flush before dropping
     /// engine.drop_column_family(&cf)?;
@@ -184,7 +184,7 @@ impl MidgeEngine {
     /// # Example
     /// ```no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::new("./db")).unwrap();
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// for cf in engine.list_column_families() {
     ///     println!("Column family: {}", cf.name());
     /// }
@@ -205,7 +205,7 @@ impl MidgeEngine {
     /// # Example
     /// ```no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::new("./db")).unwrap();
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let default_cf = engine.default_column_family();
     /// engine.put(&default_cf, b"key", b"value")?;
     /// # Ok::<(), cntryl_midge::MidgeError>(())
@@ -229,7 +229,7 @@ impl MidgeEngine {
     /// ```no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # use cntryl_midge::api::column_family::ColumnFamilyConfig;
-    /// # let engine = MidgeEngine::open(MidgeOptions::new("./db")).unwrap();
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// # engine.create_column_family("my_cf", ColumnFamilyConfig::default())?;
     /// let cf = engine.get_column_family("my_cf")?;
     /// engine.put(&cf, b"key", b"value")?;

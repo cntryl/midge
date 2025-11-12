@@ -11,23 +11,25 @@
 //!
 //! ```
 //! use cntryl_midge::{MidgeEngine, MidgeOptions};
-//! use cntryl_midge::merge_operator::IntegerAddOperator;
+//! use cntryl_midge::IntegerAddOperator;
 //! use bytes::Bytes;
+//! use std::sync::Arc;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut opts = MidgeOptions::default();
+//! let opts = MidgeOptions::default();
 //! let engine = MidgeEngine::open(opts)?;
 //!
-//! // Register merge operator for a column family
-//! engine.register_merge_operator(0, Box::new(IntegerAddOperator))?;
+//! // Register merge operator for the default column family
+//! let cf = engine.default_column_family();
+//! engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator))?;
 //!
-//! // Increment counter without reading
-//! engine.merge(Bytes::from("page_views"), Bytes::from("1"))?;
-//! engine.merge(Bytes::from("page_views"), Bytes::from("1"))?;
-//! engine.merge(Bytes::from("page_views"), Bytes::from("5"))?;
+//! // Increment counter without reading (applies to the specified CF)
+//! engine.merge_cf(&cf, Bytes::from("page_views"), Bytes::from("1"))?;
+//! engine.merge_cf(&cf, Bytes::from("page_views"), Bytes::from("1"))?;
+//! engine.merge_cf(&cf, Bytes::from("page_views"), Bytes::from("5"))?;
 //!
 //! // Read combines all increments: 1 + 1 + 5 = 7
-//! let count = engine.get(b"page_views")?;
+//! let count = engine.get(&cf, b"page_views")?;
 //! # Ok(())
 //! # }
 //! ```
@@ -70,7 +72,7 @@ pub trait MergeOperator: Send + Sync {
     /// # Example
     ///
     /// ```
-    /// # use cntryl_midge::merge_operator::MergeOperator;
+    /// # use cntryl_midge::MergeOperator;
     /// # use cntryl_midge::error::MidgeError;
     /// struct CounterOperator;
     ///
@@ -141,7 +143,7 @@ pub type DynMergeOperator = Arc<dyn MergeOperator>;
 /// # Example
 ///
 /// ```
-/// use cntryl_midge::merge_operator::{IntegerAddOperator, MergeOperator};
+/// use cntryl_midge::{IntegerAddOperator, MergeOperator};
 ///
 /// let op = IntegerAddOperator;
 /// let result = op.merge(b"key", Some(b"10"), b"5").unwrap();
@@ -181,7 +183,7 @@ impl MergeOperator for IntegerAddOperator {
 /// # Example
 ///
 /// ```
-/// use cntryl_midge::merge_operator::{StringAppendOperator, MergeOperator};
+/// use cntryl_midge::{StringAppendOperator, MergeOperator};
 ///
 /// let op = StringAppendOperator::new(b",");
 /// let result = op.merge(b"key", Some(b"hello"), b"world").unwrap();
@@ -252,7 +254,7 @@ impl MergeOperator for StringAppendOperator {
 /// # Example
 ///
 /// ```
-/// use cntryl_midge::merge_operator::{BytesAppendOperator, MergeOperator};
+/// use cntryl_midge::{BytesAppendOperator, MergeOperator};
 ///
 /// let op = BytesAppendOperator;
 /// let result = op.merge(b"key", Some(&[1, 2, 3]), &[4, 5, 6]).unwrap();
