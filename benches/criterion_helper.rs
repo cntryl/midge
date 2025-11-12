@@ -26,7 +26,7 @@ pub fn criterion_config() -> Criterion {
     } else {
         // Quick mode (default): fast CI runs
         Criterion::default()
-            .sample_size(10)
+            .sample_size(20)
             .measurement_time(Duration::from_secs(2))
             .warm_up_time(Duration::from_millis(500))
             .confidence_level(0.95)

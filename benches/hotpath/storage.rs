@@ -33,11 +33,17 @@ fn bench_skiplist_sequential(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.iter(|| {
+                // Precompute keys/values as Bytes to avoid allocating inside the measured loop
+                let mut keys: Vec<Bytes> = Vec::with_capacity(size);
+                let mut vals: Vec<Bytes> = Vec::with_capacity(size);
+                for i in 0..size {
+                    keys.push(Bytes::from(format!("key_{:08}", i)));
+                    vals.push(Bytes::from(format!("value_{:08}", i)));
+                }
+
                 let sl = SkipList::new();
                 for i in 0..size {
-                    let key = format!("key_{:08}", i);
-                    let val = format!("value_{:08}", i);
-                    sl.upsert(Bytes::from(key), Some(Bytes::from(val)), i as u64);
+                    sl.upsert(keys[i].clone(), Some(vals[i].clone()), i as u64);
                 }
                 black_box(sl);
             });
@@ -53,7 +59,7 @@ fn bench_skiplist_random(c: &mut Criterion) {
     for size in [1_000, 5_000] {
         group.throughput(Throughput::Elements(size as u64));
 
-        // Generate shuffled keys
+        // Generate shuffled keys (as Bytes) so measured loop doesn't allocate
         let mut keys: Vec<String> = (0..size).map(|i| format!("key_{:08}", i)).collect();
         let mut seed = 12345u64;
         for i in (1..keys.len()).rev() {
@@ -63,13 +69,18 @@ fn bench_skiplist_random(c: &mut Criterion) {
             let j = (seed as usize) % (i + 1);
             keys.swap(i, j);
         }
-
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
+                // Convert shuffled keys to Bytes once
+                let keys_bytes: Vec<Bytes> = keys.iter().map(|k| Bytes::from(k.clone())).collect();
+                let mut vals: Vec<Bytes> = Vec::with_capacity(keys_bytes.len());
+                for i in 0..keys_bytes.len() {
+                    vals.push(Bytes::from(format!("value_{:08}", i)));
+                }
+
                 let sl = SkipList::new();
-                for (i, key) in keys.iter().enumerate() {
-                    let val = format!("value_{:08}", i);
-                    sl.upsert(Bytes::from(key.clone()), Some(Bytes::from(val)), i as u64);
+                for (i, key_b) in keys_bytes.iter().enumerate() {
+                    sl.upsert(key_b.clone(), Some(vals[i].clone()), i as u64);
                 }
                 black_box(sl);
             });
@@ -125,11 +136,17 @@ fn bench_memtable_sequential(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.iter(|| {
+                // Precompute key/value byte vectors to reduce allocation during the measured loop
+                let mut keys: Vec<Vec<u8>> = Vec::with_capacity(size);
+                let mut vals: Vec<Vec<u8>> = Vec::with_capacity(size);
+                for i in 0..size {
+                    keys.push(format!("key_{:08}", i).into_bytes());
+                    vals.push(format!("value_{:08}", i).into_bytes());
+                }
+
                 let mt = MemTable::new();
                 for i in 0..size {
-                    let key = format!("key_{:08}", i);
-                    let val = format!("value_{:08}", i);
-                    mt.put_with_seq(key.as_bytes(), val.as_bytes(), i as u64);
+                    mt.put_with_seq(&keys[i], &vals[i], i as u64);
                 }
                 black_box(mt);
             });
@@ -145,7 +162,7 @@ fn bench_memtable_random(c: &mut Criterion) {
     for size in [1_000, 5_000] {
         group.throughput(Throughput::Elements(size as u64));
 
-        // Generate shuffled keys
+        // Generate shuffled keys and precompute key/value bytes
         let mut keys: Vec<String> = (0..size).map(|i| format!("key_{:08}", i)).collect();
         let mut seed = 12345u64;
         for i in (1..keys.len()).rev() {
@@ -158,10 +175,15 @@ fn bench_memtable_random(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &_size| {
             b.iter(|| {
+                let keys_bytes: Vec<Vec<u8>> = keys.iter().map(|k| k.as_bytes().to_vec()).collect();
+                let mut vals: Vec<Vec<u8>> = Vec::with_capacity(keys_bytes.len());
+                for i in 0..keys_bytes.len() {
+                    vals.push(format!("value_{:08}", i).into_bytes());
+                }
+
                 let mt = MemTable::new();
-                for (i, key) in keys.iter().enumerate() {
-                    let val = format!("value_{:08}", i);
-                    mt.put_with_seq(key.as_bytes(), val.as_bytes(), i as u64);
+                for (i, key_b) in keys_bytes.iter().enumerate() {
+                    mt.put_with_seq(key_b, &vals[i], i as u64);
                 }
                 black_box(mt);
             });
