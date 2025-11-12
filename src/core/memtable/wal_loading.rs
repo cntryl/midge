@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::core::skiplist::OpType;
+use crate::core::data_structures::skiplist::OpType;
 use crate::error::MidgeResult;
 use crate::wal::WalRecord;
 

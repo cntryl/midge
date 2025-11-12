@@ -10,7 +10,7 @@ use tracing::warn;
 use crate::api::column_family::ColumnFamilyId;
 use crate::core::memtable::MemTable;
 use crate::core::metrics::Metrics;
-use crate::core::wal_replay::replay_wal_to_memtables_after_seq;
+use crate::core::persistence::wal_replay::replay_wal_to_memtables_after_seq;
 use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
 

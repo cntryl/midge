@@ -42,8 +42,7 @@ use std::time::Duration;
 
 use crate::cloud::{HybridStorage, HybridStorageBackend, StorageBackend};
 use crate::config::cloud::StorageContext;
-use crate::config::{CloudMode, Durability};
-use crate::core::storage_mode::{CloudStorageBuilder, StorageMode};
+use crate::config::{CloudMode, CloudStorageBuilder, Durability, StorageMode};
 
 /// Builder for cloud storage configurations with opinionated defaults.
 ///

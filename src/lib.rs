@@ -47,7 +47,7 @@ pub mod wal;
 pub use crate::core::backup;
 pub use crate::core::locking;
 pub use crate::core::manifest;
-pub use crate::core::storage_mode;
+pub use crate::config::storage_mode;
 // TransactionManager is available via `core::transaction`; no legacy module re-export.
 
 // Compaction filter API for user-provided custom logic

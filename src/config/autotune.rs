@@ -8,8 +8,6 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
-use crate::core::metrics::Metrics;
-
 /// Autotuner for adaptive parameter adjustment.
 ///
 /// Adjusts WAL sync interval, compaction threads, and bloom bits
@@ -35,9 +33,6 @@ pub struct Autotuner {
 
     /// Observed metrics
     metrics: Arc<RwLock<ObservedMetrics>>,
-
-    /// Metrics collector (optional, for recording adjustments)
-    metrics_collector: Option<Metrics>,
 }
 
 /// Baseline configuration values.
@@ -82,14 +77,7 @@ impl Autotuner {
             last_adjustment: Arc::new(RwLock::new(Instant::now())),
             adjustment_interval: Duration::from_secs(5 * 60), // 5 minutes
             metrics: Arc::new(RwLock::new(ObservedMetrics::default())),
-            metrics_collector: None,
         }
-    }
-
-    /// Set the metrics collector for recording adjustments.
-    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
-        self.metrics_collector = Some(metrics);
-        self
     }
 
     /// Set adjustment interval (primarily for testing).
@@ -176,11 +164,6 @@ impl Autotuner {
         if new_interval != current {
             self.wal_interval_ms.store(new_interval, Ordering::Relaxed);
 
-            // Record metric if collector is available
-            if let Some(ref metrics) = self.metrics_collector {
-                metrics.record_wal_interval_adjustment(current, new_interval);
-            }
-
             log::info!(
                 "Autotuned WAL interval: {} ms -> {} ms (baseline: {} ms)",
                 current,
@@ -220,11 +203,6 @@ impl Autotuner {
             self.compaction_threads
                 .store(new_threads, Ordering::Relaxed);
 
-            // Record metric if collector is available
-            if let Some(ref metrics) = self.metrics_collector {
-                metrics.record_compaction_thread_adjustment(current, new_threads);
-            }
-
             log::info!(
                 "Autotuned compaction threads: {} -> {} (L0 count: {})",
                 current,
@@ -263,11 +241,6 @@ impl Autotuner {
 
         if new_bits != current {
             self.bloom_bits.store(new_bits, Ordering::Relaxed);
-
-            // Record metric if collector is available
-            if let Some(ref metrics) = self.metrics_collector {
-                metrics.record_bloom_bits_adjustment(current as u32, new_bits as u32);
-            }
 
             log::info!(
                 "Autotuned bloom bits: {} -> {} (FPR: {:.2}%)",

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::common::timestamp;
-use crate::core::skiplist::{OpType, SkipList};
+use crate::core::data_structures::skiplist::{OpType, SkipList};
 use crate::error::MidgeResult;
 use crate::wal::WalRecord;
 

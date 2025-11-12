@@ -42,7 +42,7 @@ impl MidgeEngine {
                 // Check if there are any merge operations
                 let has_merges = versions
                     .iter()
-                    .any(|(_, _, op)| *op == crate::core::skiplist::OpType::Merge);
+                    .any(|(_, _, op)| *op == crate::core::data_structures::skiplist::OpType::Merge);
 
                 if has_merges {
                     // Resolve merges using the engine's merge operator registry
@@ -54,16 +54,16 @@ impl MidgeEngine {
 
                         for (value_opt, _exp, op_type) in versions.iter().rev() {
                             match op_type {
-                                crate::core::skiplist::OpType::Put => {
+                                crate::core::data_structures::skiplist::OpType::Put => {
                                     base_value = value_opt.clone();
                                     operands.clear();
                                 }
-                                crate::core::skiplist::OpType::Merge => {
+                                crate::core::data_structures::skiplist::OpType::Merge => {
                                     if let Some(val) = value_opt {
                                         operands.push(val.clone());
                                     }
                                 }
-                                crate::core::skiplist::OpType::Delete => {
+                                crate::core::data_structures::skiplist::OpType::Delete => {
                                     base_value = None;
                                     operands.clear();
                                 }
@@ -103,7 +103,7 @@ impl MidgeEngine {
                 if !versions.is_empty() {
                     let has_merges = versions
                         .iter()
-                        .any(|(_, _, op)| *op == crate::core::skiplist::OpType::Merge);
+                        .any(|(_, _, op)| *op == crate::core::data_structures::skiplist::OpType::Merge);
 
                     if has_merges {
                         let ops = self.merge_operators.read();
@@ -113,16 +113,16 @@ impl MidgeEngine {
 
                             for (value_opt, _exp, op_type) in versions.iter().rev() {
                                 match op_type {
-                                    crate::core::skiplist::OpType::Put => {
+                                    crate::core::data_structures::skiplist::OpType::Put => {
                                         base_value = value_opt.clone();
                                         operands.clear();
                                     }
-                                    crate::core::skiplist::OpType::Merge => {
+                                    crate::core::data_structures::skiplist::OpType::Merge => {
                                         if let Some(val) = value_opt {
                                             operands.push(val.clone());
                                         }
                                     }
-                                    crate::core::skiplist::OpType::Delete => {
+                                    crate::core::data_structures::skiplist::OpType::Delete => {
                                         base_value = None;
                                         operands.clear();
                                     }

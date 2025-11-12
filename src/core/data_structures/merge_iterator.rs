@@ -9,10 +9,10 @@ use std::collections::{BinaryHeap, HashSet};
 
 /// Entry from a source with priority for min-heap ordering.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct HeapEntry {
     key: Bytes,
     value: Option<Bytes>, // None = tombstone
-    #[allow(dead_code)]
     seq: u64,
     source_id: usize, // Unique ID per source, lower = newer
     reverse: bool,

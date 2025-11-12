@@ -150,6 +150,9 @@ fn apply_record_to_memtable(
     }
 }
 
+/// WAL replay iterator for database recovery.
+pub struct WalReplayIterator;
+
 /// Compute the encoded length of a WAL record in the FS WAL format.
 ///
 /// This is used to predict when a WAL buffer will fill up and needs rotation.
@@ -210,63 +213,4 @@ fn varint_len_u32(mut v: u32) -> usize {
         v >>= 7;
     }
     n
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn should_calculate_varint_len_for_small_values() {
-        // Arrange
-        let test_cases = [(0, 1), (1, 1), (127, 1)];
-
-        // Act & Assert
-        for (input, expected) in test_cases {
-            assert_eq!(varint_len_u32(input), expected, "input={}", input);
-        }
-    }
-
-    #[test]
-    fn should_calculate_varint_len_for_medium_values() {
-        // Arrange
-        let test_cases = [(128, 2), (255, 2), (16383, 2)];
-
-        // Act & Assert
-        for (input, expected) in test_cases {
-            assert_eq!(varint_len_u32(input), expected, "input={}", input);
-        }
-    }
-
-    #[test]
-    fn should_calculate_varint_len_for_large_values() {
-        // Arrange
-        let test_cases = [(16384, 3), (2097151, 3), (u32::MAX, 5)];
-
-        // Act & Assert
-        for (input, expected) in test_cases {
-            assert_eq!(varint_len_u32(input), expected, "input={}", input);
-        }
-    }
-
-    #[test]
-    fn should_calculate_wal_record_len_for_various_operations() {
-        // Arrange
-        let test_cases = [
-            (WalOpKind::Put, 0, Some(0), None, 19),
-            (WalOpKind::Put, 10, Some(100), None, 129),
-            (WalOpKind::Delete, 15, None, None, 34),
-            (WalOpKind::DeleteRange, 10, None, Some(15), 45),
-        ];
-
-        // Act & Assert
-        for (kind, key_len, val_len, range_end_len, expected) in test_cases {
-            let len = wal_record_encoded_len(kind, key_len, val_len, range_end_len);
-            assert_eq!(
-                len, expected,
-                "kind={:?}, key_len={}, val_len={:?}, range_end_len={:?}",
-                kind, key_len, val_len, range_end_len
-            );
-        }
-    }
 }

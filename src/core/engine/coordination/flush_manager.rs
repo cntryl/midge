@@ -26,7 +26,7 @@ impl MidgeEngine {
     ///
     /// Sequence number at rollover time for tracking flush progress
     pub(crate) fn rollover_and_queue_flush(&self, cf_id: ColumnFamilyId) -> MidgeResult<u64> {
-        crate::core::flush::rollover_and_queue_flush(
+        crate::core::persistence::flush::rollover_and_queue_flush(
             cf_id,
             &self.seq,
             self.wal_coordinator.writer_lock(),
@@ -91,10 +91,10 @@ impl MidgeEngine {
             (entries, range_tombstones)
         };
 
-        crate::core::flush::flush_memtable_to_sst(
+        crate::core::persistence::flush::flush_memtable_to_sst(
             cf_id,
             || (entries, range_tombstones),
-            crate::core::flush::FlushConfig {
+            crate::core::persistence::flush::FlushConfig {
                 sst_factory: &self.sst_factory,
                 compression: cf_config.compression.into(),
                 block_size: self.block_size,

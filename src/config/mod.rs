@@ -38,6 +38,7 @@ pub mod cloud_builder;
 pub mod column_family;
 pub mod derivation;
 pub mod profile;
+pub mod storage_mode;
 pub mod validation;
 
 use std::path::PathBuf;
@@ -50,6 +51,7 @@ pub use autotune::{Autotuner, ObservedMetrics};
 pub use builder::ConfigBuilder;
 pub use cloud_builder::CloudConfigBuilder;
 pub use column_family::{CompactionStyle, CompressionType};
+pub use storage_mode::{CloudStorageBuilder, StorageMode};
 
 /// Performance optimization goal.
 ///
@@ -291,7 +293,7 @@ impl Config {
     /// ```
     pub fn to_options(&self) -> crate::MidgeOptions {
         use crate::common::codec::CompressionType;
-        use crate::{MidgeOptions, StorageMode};
+        use crate::{MidgeOptions};
 
         // Determine storage mode based on cloud configuration
         let storage_mode = if let Some(cloud_cfg) = &self.cloud_config {
