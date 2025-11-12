@@ -52,16 +52,18 @@ struct LruCacheInner {
     head: Option<usize>,
     /// Tail of the list (least recently used)
     tail: Option<usize>,
-    /// Next free slot in the list array
-    free_head: Option<usize>,
+    /// Stack of free slot indices (reusable slots)
+    free_slots: Vec<usize>,
     /// Maximum size in bytes
     max_size_bytes: usize,
     /// Current size in bytes
     current_size_bytes: usize,
-    /// Cache hit count
-    hits: u64,
+    /// Cache hit count (atomic for future lock-free reads)
+    hits: AtomicU64,
     /// Cache miss count
-    misses: u64,
+    misses: AtomicU64,
+    /// Oversized entry rejection counter
+    oversize_rejections: AtomicU64,
 }
 
 struct ListNode {
@@ -80,11 +82,12 @@ impl BlockCache {
                 list: Vec::new(),
                 head: None,
                 tail: None,
-                free_head: None,
+                free_slots: Vec::new(),
                 max_size_bytes,
                 current_size_bytes: 0,
-                hits: 0,
-                misses: 0,
+                hits: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
+                oversize_rejections: AtomicU64::new(0),
             })),
         }
     }
@@ -94,14 +97,14 @@ impl BlockCache {
     pub fn get(&self, key: &BlockKey) -> Option<CachedBlock> {
         let mut inner = self.inner.lock();
         if let Some(&node_idx) = inner.map.get(key) {
-            inner.hits += 1;
+            inner.hits.fetch_add(1, Ordering::Relaxed);
             // Fast path: skip move_to_front if already at head
             if Some(node_idx) != inner.head {
                 inner.move_to_front(node_idx);
             }
             inner.list[node_idx].as_ref().map(|n| n.value.clone())
         } else {
-            inner.misses += 1;
+            inner.misses.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
@@ -135,6 +138,8 @@ impl BlockCache {
 
         // Don't cache if block is larger than max size
         if block_size > inner.max_size_bytes {
+            // increment oversize counter for observability
+            inner.oversize_rejections.fetch_add(1, Ordering::Relaxed);
             return;
         }
 
@@ -146,11 +151,8 @@ impl BlockCache {
             next: inner.head,
         };
 
-        let node_idx = if let Some(free_idx) = inner.free_head {
+        let node_idx = if let Some(free_idx) = inner.free_slots.pop() {
             // Reuse a free slot
-            if let Some(free_node) = &inner.list[free_idx] {
-                inner.free_head = free_node.next;
-            }
             inner.list[free_idx] = Some(node);
             free_idx
         } else {
@@ -185,7 +187,7 @@ impl BlockCache {
         inner.list.clear();
         inner.head = None;
         inner.tail = None;
-        inner.free_head = None;
+        inner.free_slots.clear();
         inner.current_size_bytes = 0;
     }
 
@@ -193,8 +195,8 @@ impl BlockCache {
     pub fn stats(&self) -> CacheStats {
         let inner = self.inner.lock();
         CacheStats {
-            hits: inner.hits,
-            misses: inner.misses,
+            hits: inner.hits.load(Ordering::Relaxed),
+            misses: inner.misses.load(Ordering::Relaxed),
             size_bytes: inner.current_size_bytes,
             max_size_bytes: inner.max_size_bytes,
             entry_count: inner.map.len(),
@@ -204,6 +206,7 @@ impl BlockCache {
 
 impl LruCacheInner {
     /// Move a node to the front of the list (most recently used)
+    #[inline(always)]
     fn move_to_front(&mut self, node_idx: usize) {
         if Some(node_idx) == self.head {
             return; // Already at front
@@ -281,12 +284,9 @@ impl LruCacheInner {
             self.head = None;
         }
 
-        // Add to free list
-        if let Some(node) = &mut self.list[tail_idx] {
-            node.next = self.free_head;
-        }
-        self.free_head = Some(tail_idx);
+        // Add to free_slots stack
         self.list[tail_idx] = None;
+        self.free_slots.push(tail_idx);
     }
 }
 

@@ -161,7 +161,7 @@ fn bench_cache_concurrent_access(c: &mut Criterion) {
         cache.insert(key, block);
     }
 
-    for &num_threads in &[2, 4] {
+    for &num_threads in &[2, 4, 8, 16, 32] {
         group.bench_function(format!("{}_threads", num_threads), |b| {
             b.iter(|| {
                 let mut handles = vec![];
