@@ -62,6 +62,10 @@ struct MetricsInner {
     tombstones_coalesced: AtomicU64,
     tombstone_checks: AtomicU64,
 
+    // Write stall metrics
+    write_stalls: AtomicU64,
+    write_stall_duration_ms: AtomicU64,
+
     // Autotuning metrics
     autotune_wal_interval_adjustments: AtomicU64,
     autotune_compaction_thread_adjustments: AtomicU64,
@@ -119,6 +123,9 @@ impl Metrics {
                 tombstones_removed_compaction: AtomicU64::new(0),
                 tombstones_coalesced: AtomicU64::new(0),
                 tombstone_checks: AtomicU64::new(0),
+
+                write_stalls: AtomicU64::new(0),
+                write_stall_duration_ms: AtomicU64::new(0),
 
                 autotune_wal_interval_adjustments: AtomicU64::new(0),
                 autotune_compaction_thread_adjustments: AtomicU64::new(0),
@@ -369,6 +376,22 @@ impl Metrics {
 
     pub fn get_tombstone_checks(&self) -> u64 {
         self.inner.tombstone_checks.load(Ordering::Relaxed)
+    }
+
+    // Write stall metrics
+    pub fn record_write_stall(&self, stall_attempts: usize) {
+        self.inner.write_stalls.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .write_stall_duration_ms
+            .fetch_add(stall_attempts as u64, Ordering::Relaxed);
+    }
+
+    pub fn get_write_stalls(&self) -> u64 {
+        self.inner.write_stalls.load(Ordering::Relaxed)
+    }
+
+    pub fn get_write_stall_duration_ms(&self) -> u64 {
+        self.inner.write_stall_duration_ms.load(Ordering::Relaxed)
     }
 
     // Autotuning metrics

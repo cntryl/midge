@@ -113,17 +113,18 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 
 ---
 
-### 🟠 HIGH — Engine Correctness (5 items)
+### 🟠 HIGH — Engine Correctness (2 items remaining, 3/5 complete)
 
-**Merge Semantics:**
-- `src/core/memtable/core.rs` (line 232) — TODO: Implement proper merge semantics
-- `src/core/engine/operations/transactions.rs` (line 151) — TODO: Implement proper merge semantics with merge operators
+**Merge Semantics:** ✅ COMPLETE
+- ✅ `src/core/memtable/core.rs` (line 232) — IMPLEMENTED: Proper merge semantics with `merge_with_seq_and_exp()`
+- ✅ `src/core/engine/operations/transactions.rs` (line 151) — IMPLEMENTED: Merge semantics in transaction layer
 
-**Write Stall Mechanism:**
-- `src/core/engine/operations/writes.rs` (line 93) — TODO: Implement proper write stall mechanism
-- `src/core/engine/operations/writes.rs` (line 319) — TODO: Track which CF triggered the WAL rotation and flush that one
+**Write Stall Mechanism:** ✅ COMPLETE
+- ✅ `src/core/engine/operations/writes.rs` (line 93) — IMPLEMENTED: Exponential backoff with configurable timeout (max 1000 attempts, 1-100ms backoff)
+- ✅ Added metrics tracking: `write_stalls` count and `write_stall_duration_ms` for monitoring backpressure
 
 **WAL Rotation & Flushing:**
+- `src/core/engine/operations/writes.rs` (line 319) — TODO: Track which CF triggered the WAL rotation and flush that one
 - `src/core/engine/operations/maintenance.rs` (line 107) — TODO: After manifest is persisted, we should replace memtable with new empty one
 
 ---
