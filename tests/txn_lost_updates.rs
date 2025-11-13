@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod common;
 use common::new_engine;
+
 #[test]
 fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
     // Arrange
@@ -141,4 +142,75 @@ fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commi
         engine.get(&cf, b"key2").expect("get"),
         Some(Bytes::from("value2"))
     );
+}
+
+#[test]
+fn should_handle_concurrent_read_modify_writes_without_panic() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
+    let cf = engine.default_column_family();
+    engine.put(&cf, b"concurrent_counter", b"0").unwrap();
+
+    // Act: Spawn 20 threads, each doing read-modify-write
+    let handles: Vec<_> = (0..20)
+        .map(|thread_id| {
+            let eng = engine.clone();
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for _ in 0..5 {
+                    let mut txn = eng.begin_transaction(&cf_clone).unwrap();
+                    let current = txn.get(b"concurrent_counter").unwrap();
+                    let num: i32 = String::from_utf8(current.unwrap_or_default().to_vec())
+                        .unwrap_or_else(|_| "0".to_string())
+                        .parse()
+                        .unwrap_or(0);
+                    txn.put(
+                        b"concurrent_counter",
+                        format!("{}_{}", num + 1, thread_id).as_bytes(),
+                    )
+                    .unwrap();
+                    let _ = eng.commit_transaction(txn, cntryl_midge::WriteOptions::default());
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Assert: Counter is readable
+    assert!(engine.get(&cf, b"concurrent_counter").is_ok());
+}
+
+#[test]
+fn should_persist_lost_update_prevention_after_restart() {
+    // Arrange
+    let dir = common::test_temp_dir();
+    let opts = common::durability_opts(dir.path().to_path_buf());
+    let engine = cntryl_midge::MidgeEngine::open(opts.clone()).expect("initial open");
+    let cf = engine.default_column_family();
+
+    engine.put(&cf, b"persist_counter", b"100").unwrap();
+    engine
+        .commit_transaction(
+            {
+                let mut txn = engine.begin_transaction(&cf).unwrap();
+                txn.put(b"persist_counter", b"101").unwrap();
+                txn
+            },
+            cntryl_midge::WriteOptions::default(),
+        )
+        .unwrap();
+
+    drop(engine);
+
+    // Act: Restart and verify value persisted
+    let engine = cntryl_midge::MidgeEngine::open(opts).expect("restart open");
+    let cf = engine.default_column_family();
+
+    // Assert: Value should persist
+    let result = engine.get(&cf, b"persist_counter").unwrap();
+    assert_eq!(result.as_deref(), Some(b"101".as_ref()));
 }

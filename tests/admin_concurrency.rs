@@ -107,3 +107,151 @@ fn should_return_current_cf_list_given_admin_query_when_changes_in_progress() {
     let result = eng.get(&cf, b"key1").expect("get");
     assert!(result.is_some(), "Default CF should be functional");
 }
+
+#[test]
+fn should_handle_concurrent_column_family_operations_without_deadlock_when_multiple_threads_operate() {
+    // Arrange
+    let (_dir, eng) = new_engine();
+    let eng = Arc::new(eng);
+    const NUM_THREADS: usize = 10;
+    const ITERATIONS: usize = 100;
+
+    // Act - multiple threads querying and operating on column families
+    let handles: Vec<_> = (0..NUM_THREADS)
+        .map(|i| {
+            let eng_clone = Arc::clone(&eng);
+            std::thread::spawn(move || {
+                for j in 0..ITERATIONS {
+                    let cf = eng_clone.default_column_family();
+                    let key = format!("admin_key_{}_{}_{}", i, j, i * j).into_bytes();
+                    let value = format!("admin_value_{}", i * ITERATIONS + j).into_bytes();
+                    
+                    // Perform put operation
+                    eng_clone.put(&cf, &key, &value).expect("put during admin ops");
+                    
+                    // Periodically query CF list
+                    if j % 25 == 0 {
+                        let _cf_list = eng_clone.list_column_families();
+                    }
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("Thread panicked");
+    }
+
+    // Assert - verify engine remained stable
+    let cf = eng.default_column_family();
+    let result = eng.get(&cf, b"admin_key_0_0_0").expect("get after admin ops");
+    assert!(
+        result.is_some(),
+        "Engine should remain stable during concurrent admin operations"
+    );
+}
+
+#[test]
+fn should_preserve_data_during_high_concurrency_writes_with_admin_queries_when_stress_tested() {
+    // Arrange
+    let (_dir, eng) = new_engine_with_opts(16384, false);
+    let cf = eng.default_column_family();
+    let eng = Arc::new(eng);
+    const NUM_WRITER_THREADS: usize = 15;
+    const NUM_ADMIN_THREADS: usize = 5;
+    const ITERATIONS: usize = 50;
+
+    // Act - mix of write threads and admin query threads
+    let mut handles = Vec::new();
+
+    // Spawn write threads
+    for i in 0..NUM_WRITER_THREADS {
+        let eng_clone = Arc::clone(&eng);
+        let cf_clone = cf.clone();
+        handles.push(std::thread::spawn(move || {
+            for j in 0..ITERATIONS {
+                let key = format!("write_{}_{}_{}", i, j, i * j).into_bytes();
+                let value = format!("write_value_{}", i * ITERATIONS + j).into_bytes();
+                eng_clone.put(&cf_clone, &key, &value).expect("write during admin stress");
+            }
+        }));
+    }
+
+    // Spawn admin query threads
+    for _ in 0..NUM_ADMIN_THREADS {
+        let eng_clone = Arc::clone(&eng);
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..ITERATIONS * 2 {
+                let _cf_list = eng_clone.list_column_families();
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("Thread panicked");
+    }
+
+    // Assert - verify data persisted through admin stress
+    for i in (0..NUM_WRITER_THREADS).step_by(3) {
+        let key = format!("write_{}_0_{}", i, 0).into_bytes();
+        let result = eng.get(&cf, &key).expect("get after admin stress");
+        assert!(
+            result.is_some(),
+            "Data should persist during admin query stress"
+        );
+    }
+}
+
+#[test]
+fn should_recover_all_data_after_restart_despite_admin_operations_when_engine_reopened() {
+    // Arrange
+    let dir = common::test_temp_dir();
+    let path = dir.path().to_path_buf();
+    
+    let eng = {
+        let (_d, e) = new_engine_with_opts(8192, false);
+        let cf = e.default_column_family();
+        
+        // Write 500 keys while performing admin operations
+        for i in 0..500 {
+            let key = format!("admin_recovery_key_{:04}", i).into_bytes();
+            let value = format!("admin_recovery_value_{}", i).into_bytes();
+            e.put(&cf, &key, &value).expect("put during admin phase");
+            
+            // Periodically list column families
+            if i % 50 == 0 {
+                let _cf_list = e.list_column_families();
+            }
+        }
+        
+        e
+    };
+
+    drop(eng);
+
+    // Act - reopen engine
+    let opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::LocalDisk {
+            db_path: path,
+        },
+        memtable_size: 8192,
+        ..Default::default()
+    };
+    let engine_reopen = cntryl_midge::MidgeEngine::open(opts).expect("reopen");
+    let cf = engine_reopen.default_column_family();
+
+    // Assert - verify data persisted across restart
+    for i in (0..500).step_by(50) {
+        let key = format!("admin_recovery_key_{:04}", i).into_bytes();
+        let result = engine_reopen
+            .get(&cf, &key)
+            .expect("get after restart")
+            .expect("key should persist after admin operations");
+        let expected = format!("admin_recovery_value_{}", i).into_bytes();
+        assert_eq!(
+            result, expected,
+            "Data mismatch for key {} after restart with admin ops",
+            i
+        );
+    }
+}

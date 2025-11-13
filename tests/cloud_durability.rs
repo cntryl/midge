@@ -1,6 +1,7 @@
 mod common;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::{assert_get_equals, test_temp_dir};
+use std::sync::Arc;
 
 #[test]
 fn should_preserve_local_file_given_upload_in_progress_when_crash() {
@@ -102,4 +103,144 @@ fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_r
     // Assert - data should remain accessible
     assert_get_equals(&eng, b"key1", b"value1");
     assert_get_equals(&eng, b"key2", b"value2");
+}
+
+#[test]
+fn should_handle_concurrent_writes_with_local_persistence() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 512 * 1024,
+        ..Default::default()
+    };
+    let eng = Arc::new(MidgeEngine::open(opts).expect("open"));
+    let cf = eng.default_column_family();
+
+    // Act: Spawn 10 threads, each writing 50 keys
+    let handles: Vec<_> = (0..10)
+        .map(|thread_id| {
+            let eng = eng.clone();
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for i in 0..50 {
+                    let key = format!("concurrent_key_t{}_i{}", thread_id, i);
+                    eng.put(&cf_clone, key.as_bytes(), b"value")
+                        .expect("put");
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("Thread panicked");
+    }
+
+    // Assert: All 500 keys should be readable
+    let mut count = 0;
+    for thread_id in 0..10 {
+        for i in 0..50 {
+            let key = format!("concurrent_key_t{}_i{}", thread_id, i);
+            if eng.get(&cf, key.as_bytes()).expect("get").is_some() {
+                count += 1;
+            }
+        }
+    }
+    assert_eq!(count, 500, "All concurrent writes should persist");
+}
+
+#[test]
+fn should_preserve_data_after_large_batch_write_and_restart() {
+    // Arrange
+    let dir = test_temp_dir();
+    let db_path = dir.path().to_path_buf();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: db_path.clone(),
+        },
+        memtable_size: 2 * 1024 * 1024,
+        ..Default::default()
+    };
+
+    let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
+
+    // Write 1000 keys to force multiple SST files
+    for i in 0..1000 {
+        let key = format!("large_batch_key_{:04}", i);
+        eng.put(&cf, key.as_bytes(), format!("value_{}", i).as_bytes())
+            .expect("put");
+    }
+
+    drop(eng);
+
+    // Act: Restart and verify all keys
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path },
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("reopen");
+    let cf = eng.default_column_family();
+
+    // Assert: Sample verification of persisted data
+    let mut found_count = 0;
+    for i in (0..1000).step_by(10) {
+        let key = format!("large_batch_key_{:04}", i);
+        if eng.get(&cf, key.as_bytes()).expect("get").is_some() {
+            found_count += 1;
+        }
+    }
+    assert!(
+        found_count >= 95,
+        "Most keys should persist after restart: {}/100",
+        found_count
+    );
+}
+
+#[test]
+fn should_handle_rapid_sequential_restarts() {
+    // Arrange
+    let dir = test_temp_dir();
+    let db_path = dir.path().to_path_buf();
+
+    // Act: Perform 5 rapid restart cycles
+    for cycle in 0..5 {
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk {
+                db_path: db_path.clone(),
+            },
+            ..Default::default()
+        };
+        let eng = MidgeEngine::open(opts).expect("open");
+        let cf = eng.default_column_family();
+
+        // Write some data
+        for i in 0..20 {
+            let key = format!("cycle_{}_key_{}", cycle, i);
+            eng.put(&cf, key.as_bytes(), b"value").expect("put");
+        }
+
+        drop(eng);
+    }
+
+    // Assert: Final restart and verify data from all cycles
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path },
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("final open");
+    let cf = eng.default_column_family();
+
+    let mut found = 0;
+    for cycle in 0..5 {
+        for i in 0..20 {
+            let key = format!("cycle_{}_key_{}", cycle, i);
+            if eng.get(&cf, key.as_bytes()).expect("get").is_some() {
+                found += 1;
+            }
+        }
+    }
+    assert!(found >= 95, "Data from all cycles should persist: {}/100", found);
 }

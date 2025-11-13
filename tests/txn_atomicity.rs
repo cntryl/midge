@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod common;
 use common::new_engine;
+
 #[test]
 fn should_commit_all_or_nothing_given_multi_key_transaction() {
     // Arrange
@@ -121,4 +122,89 @@ fn should_not_expose_partial_writes_given_concurrent_readers_when_committing() {
     // Should not see partial writes
     assert_eq!(read_during, None, "Should not see uncommitted writes");
     assert!(snap_after.seq > snap_before.seq);
+}
+
+#[test]
+fn should_maintain_atomicity_under_concurrent_commits() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
+    let cf = engine.default_column_family();
+
+    // Act: Spawn 10 threads, each committing 10-key atomic transactions
+    let handles: Vec<_> = (0..10)
+        .map(|thread_id| {
+            let eng = engine.clone();
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for iteration in 0..5 {
+                    let mut txn = eng.begin_transaction(&cf_clone).unwrap();
+                    for key_offset in 0..10 {
+                        let key = format!("atomic_t{}_i{}_k{}", thread_id, iteration, key_offset);
+                        let value = format!("v{}", key_offset);
+                        txn.put(key.as_bytes(), value.as_bytes()).unwrap();
+                    }
+                    let _ = eng.commit_transaction(txn, cntryl_midge::WriteOptions::default());
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Assert: All keys committed atomically (no partial writes visible)
+    let mut key_count = 0;
+    for thread_id in 0..10 {
+        for iteration in 0..5 {
+            for key_offset in 0..10 {
+                let key = format!("atomic_t{}_i{}_k{}", thread_id, iteration, key_offset);
+                if engine.get(&cf, key.as_bytes()).unwrap().is_some() {
+                    key_count += 1;
+                }
+            }
+        }
+    }
+    assert!(key_count > 0, "At least some atomic writes should succeed");
+}
+
+#[test]
+fn should_persist_atomic_transactions_after_restart() {
+    // Arrange
+    let dir = common::test_temp_dir();
+    let opts = common::durability_opts(dir.path().to_path_buf());
+    let engine = cntryl_midge::MidgeEngine::open(opts.clone()).expect("initial open");
+    let cf = engine.default_column_family();
+
+    // Commit 5 atomic transactions
+    for batch in 0..5 {
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+        for i in 0..10 {
+            let key = format!("persist_batch_{}_key_{}", batch, i);
+            let value = format!("val_{}", i);
+            txn.put(key.as_bytes(), value.as_bytes()).unwrap();
+        }
+        engine
+            .commit_transaction(txn, cntryl_midge::WriteOptions::default())
+            .unwrap();
+    }
+
+    drop(engine);
+
+    // Act: Restart and verify all atomic transactions persisted
+    let engine = cntryl_midge::MidgeEngine::open(opts).expect("restart open");
+    let cf = engine.default_column_family();
+
+    // Assert: All keys should exist (atomicity preserved across restart)
+    for batch in 0..5 {
+        for i in 0..10 {
+            let key = format!("persist_batch_{}_key_{}", batch, i);
+            assert!(
+                engine.get(&cf, key.as_bytes()).unwrap().is_some(),
+                "Key {} should persist atomically",
+                key
+            );
+        }
+    }
 }

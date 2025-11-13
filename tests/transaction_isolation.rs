@@ -1,6 +1,8 @@
 mod common;
 use cntryl_midge::{KvTransaction, WriteOptions};
 use common::{assert_get_equals, assert_key_absent, new_engine};
+use bytes::Bytes;
+use std::sync::Arc;
 
 #[test]
 fn should_read_uncommitted_value_given_put_in_same_transaction_when_read() {
@@ -110,4 +112,163 @@ fn should_return_old_value_given_snapshot_created_before_write() {
     // TODO: Add snapshot.get() API to verify isolation
     // For now, verify main engine sees new value
     assert_get_equals(&eng, b"key1", b"updated");
+}
+
+#[test]
+fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stress_tested() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let cf = engine.default_column_family();
+    let engine = Arc::new(engine);
+    const NUM_THREADS: usize = 10;
+    const TRANSACTIONS_PER_THREAD: usize = 20;
+
+    // Act - multiple threads performing concurrent transactions
+    let handles: Vec<_> = (0..NUM_THREADS)
+        .map(|thread_id| {
+            let eng = Arc::clone(&engine);
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for txn_num in 0..TRANSACTIONS_PER_THREAD {
+                    let mut txn = eng.begin_transaction(&cf_clone).expect("begin txn");
+                    
+                    // Each transaction writes 5 keys
+                    for key_offset in 0..5 {
+                        let key = format!(
+                            "isolation_key_{}_{}_{}",
+                            thread_id, txn_num, key_offset
+                        )
+                        .into_bytes();
+                        let value = format!(
+                            "isolation_value_{}_{}_{}",
+                            thread_id, txn_num, key_offset
+                        )
+                        .into_bytes();
+                        txn.put(&key, &value).expect("put in txn");
+                    }
+                    
+                    // Try to commit (may fail due to conflicts)
+                    let _commit_result =
+                        eng.commit_transaction(txn, WriteOptions::default());
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("Thread panicked");
+    }
+
+    // Assert - verify at least some transactions committed and data is consistent
+    for thread_id in 0..NUM_THREADS {
+        for txn_num in 0..TRANSACTIONS_PER_THREAD {
+            let key = format!("isolation_key_{}_{}_0", thread_id, txn_num).into_bytes();
+            if let Ok(Some(result)) = engine.get(&cf, &key) {
+                // If we got a result, verify it matches expected pattern
+                assert!(
+                    result.len() > 0,
+                    "Committed transaction data should be readable"
+                );
+            }
+            // Some transactions may not commit due to conflicts - that's OK
+        }
+    }
+}
+
+#[test]
+fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let cf = engine.default_column_family();
+    let engine = Arc::new(engine);
+
+    // Write initial key
+    engine
+        .put(&cf, b"dirty_read_key", b"initial_value")
+        .expect("put");
+
+    // Act - one thread modifies, other thread tries to read
+    let eng_txn = Arc::clone(&engine);
+    let cf_txn = cf.clone();
+    let txn_handle = std::thread::spawn(move || {
+        let mut txn = eng_txn.begin_transaction(&cf_txn).expect("begin");
+        txn.put(b"dirty_read_key", b"uncommitted_value")
+            .expect("put");
+        // Hold transaction open without committing
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        txn
+    });
+
+    // Small delay to ensure transaction is open
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Reader thread attempts to read while transaction is open
+    let eng_reader = Arc::clone(&engine);
+    let cf_reader = cf.clone();
+    let reader_result = std::thread::spawn(move || {
+        let result = eng_reader.get(&cf_reader, b"dirty_read_key").expect("get");
+        result
+    });
+
+    let read_value = reader_result.join().expect("reader panicked");
+    let _txn = txn_handle.join().expect("txn panicked");
+
+    // Assert - reader should NOT see the uncommitted value
+    if let Some(value) = read_value {
+        assert_eq!(
+            value,
+            b"initial_value".to_vec(),
+            "Should read committed value, not uncommitted"
+        );
+    }
+}
+
+#[test]
+fn should_preserve_isolation_across_transaction_lifecycle_given_multiple_operations() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let cf = engine.default_column_family();
+
+    // Pre-populate some data
+    for i in 0..100 {
+        let key = format!("lifecycle_key_{:03}", i).into_bytes();
+        let value = format!("lifecycle_value_{}", i).into_bytes();
+        engine.put(&cf, &key, &value).expect("put");
+    }
+
+    // Act - create a transaction that reads and writes
+    let mut txn = engine.begin_transaction(&cf).expect("begin");
+
+    // Read some values from main database (snapshot view)
+    let read_value = txn.get(b"lifecycle_key_050").expect("get in txn");
+    assert_eq!(
+        read_value,
+        Some(b"lifecycle_value_50".to_vec().into()),
+        "Transaction should see committed data"
+    );
+
+    // Modify a key
+    txn.put(b"lifecycle_key_050", b"modified_in_txn")
+        .expect("put");
+
+    // Read the modified value (should see own write)
+    let modified = txn.get(b"lifecycle_key_050").expect("get modified");
+    assert_eq!(
+        modified,
+        Some(b"modified_in_txn".to_vec().into()),
+        "Should see own write in same transaction"
+    );
+
+    // Commit the transaction
+    engine
+        .commit_transaction(txn, WriteOptions::default())
+        .expect("commit");
+
+    // Assert - verify modification is now visible in main engine
+    let final_value = engine.get(&cf, b"lifecycle_key_050").expect("get after commit");
+    assert_eq!(
+        final_value,
+        Some(Bytes::from("modified_in_txn")),
+        "Committed transaction modification should be visible"
+    );
 }

@@ -4,6 +4,7 @@ use common::{
     with_engine_restart,
 };
 use std::thread;
+use std::sync::Arc;
 
 #[test]
 fn should_generate_strictly_increasing_sequence_numbers_given_parallel_writes() {
@@ -115,4 +116,146 @@ fn should_trigger_flush_given_memtable_exceeds_threshold_when_background_thread_
             }
         },
     );
+}
+
+#[test]
+fn should_handle_extreme_concurrency_with_high_contention_writes_to_shared_memtable() {
+    // Arrange
+    let (_dir, eng) = new_shared_engine();
+    let cf = eng.default_column_family();
+    const NUM_THREADS: usize = 20;
+    const ITERATIONS: usize = 100;
+
+    // Act - high concurrency writes
+    let handles: Vec<_> = (0..NUM_THREADS)
+        .map(|thread_id| {
+            let eng = eng.clone();
+            let cf_clone = cf.clone();
+            thread::spawn(move || {
+                for i in 0..ITERATIONS {
+                    eng.put(
+                        &cf_clone,
+                        format!("memtable_key_{}_{}", thread_id, i).as_bytes(),
+                        format!("memtable_value_{}", thread_id * ITERATIONS + i).as_bytes(),
+                    )
+                    .expect("put under high concurrency");
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("Thread panicked");
+    }
+
+    // Assert - verify all writes succeeded
+    for thread_id in 0..NUM_THREADS {
+        for i in 0..ITERATIONS {
+            let result = eng
+                .get(&cf, format!("memtable_key_{}_{}", thread_id, i).as_bytes())
+                .expect("get");
+            assert!(
+                result.is_some(),
+                "Write from thread {} iteration {} should be visible",
+                thread_id,
+                i
+            );
+        }
+    }
+}
+
+#[test]
+fn should_maintain_isolation_between_concurrent_memtable_operations_during_freeze() {
+    // Arrange
+    let (_dir, engine) = new_engine_with_opts(4096, true);
+    let cf = engine.default_column_family();
+    let engine = Arc::new(engine);
+    const NUM_THREADS: usize = 15;
+
+    // Act - concurrent writes that may trigger memtable freeze
+    let handles: Vec<_> = (0..NUM_THREADS)
+        .map(|thread_id| {
+            let eng = Arc::clone(&engine);
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for batch in 0..50 {
+                    for i in 0..10 {
+                        let key = format!(
+                            "freeze_test_{}_{}_{}",
+                            thread_id, batch, i
+                        )
+                        .into_bytes();
+                        let value = format!("value_{}", thread_id * 500 + batch * 10 + i)
+                            .into_bytes();
+                        eng.put(&cf_clone, &key, &value)
+                            .expect("put during freeze");
+                    }
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("Thread panicked");
+    }
+
+    // Assert - verify all data persisted despite potential memtable freezes
+    for thread_id in 0..NUM_THREADS {
+        for batch in 0..50 {
+            for i in 0..10 {
+                let key = format!("freeze_test_{}_{}_{}",thread_id, batch, i).into_bytes();
+                let result = engine.get(&cf, &key).expect("get after freeze");
+                assert!(
+                    result.is_some(),
+                    "Data from thread {} batch {} should be visible",
+                    thread_id,
+                    batch
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn should_track_sequence_numbers_correctly_across_concurrent_writes_with_overlapping_keys() {
+    // Arrange
+    let (_dir, engine) = new_shared_engine();
+    let cf = engine.default_column_family();
+    const NUM_THREADS: usize = 10;
+    const WRITES_PER_THREAD: usize = 50;
+
+    // Act - concurrent writes with overlapping key ranges
+    let handles: Vec<_> = (0..NUM_THREADS)
+        .map(|thread_id| {
+            let eng = engine.clone();
+            let cf_clone = cf.clone();
+            thread::spawn(move || {
+                for i in 0..WRITES_PER_THREAD {
+                    let key = format!("seq_key_{:04}", (thread_id * 10 + i) % 100).into_bytes();
+                    let value = format!(
+                        "seq_value_{}_{}_{}",
+                        thread_id, i, thread_id * WRITES_PER_THREAD + i
+                    )
+                    .into_bytes();
+                    eng.put(&cf_clone, &key, &value)
+                        .expect("put with overlapping keys");
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("Thread panicked");
+    }
+
+    // Assert - final values should exist and be consistent
+    for i in 0..100 {
+        let key = format!("seq_key_{:04}", i).into_bytes();
+        let result = engine.get(&cf, &key).expect("get").expect("key should exist");
+        assert!(
+            result.len() > 0,
+            "Key should have a value from sequence numbering"
+        );
+    }
+    // TODO: Add instrumentation to verify sequence numbers are strictly increasing
 }
