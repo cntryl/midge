@@ -111,10 +111,9 @@ impl ColumnFamily {
     ///
     /// Returns `None` if the immutable queue is empty.
     ///
-    /// TODO: This will be used in Phase 5 when implementing proper per-CF
-    /// background flush coordination. Currently, flush directly accesses
-    /// the immutable queue.
-    #[allow(dead_code)]
+    /// Called after successfully flushing a memtable to SST and persisting
+    /// the manifest. This removes the flushed memtable from the queue to
+    /// free memory and prevent re-flushing the same data.
     pub(crate) fn pop_immutable(&self) -> Option<MemTable> {
         let mut immutables = self.immutable_memtables.lock();
         if let Some(mt) = immutables.pop_front() {

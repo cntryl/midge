@@ -336,7 +336,11 @@ impl MidgeEngine {
 
         // Check if we need to rotate WAL before writing the batch
         let mut total_size: u64 = 0;
+        let mut first_cf: Option<crate::api::column_family::ColumnFamilyId> = None;
         for op in batch.operations() {
+            if first_cf.is_none() {
+                first_cf = Some(op.cf_id());
+            }
             let predicted = wal_record_encoded_len(
                 op.kind(),
                 op.key().len(),
@@ -352,9 +356,10 @@ impl MidgeEngine {
             .saturating_add(total_size)
             > self.wal_buffer_size as u64
         {
-            // For batches with multiple CFs, flush the default CF
-            // TODO: Track which CF triggered the WAL rotation and flush that one
-            let _ = self.rollover_and_queue_flush(crate::api::column_family::DEFAULT_CF_ID);
+            // Flush the CF that triggered the rotation (first op in batch)
+            // If batch is empty (shouldn't happen due to early return), flush default
+            let cf_to_flush = first_cf.unwrap_or(crate::api::column_family::DEFAULT_CF_ID);
+            let _ = self.rollover_and_queue_flush(cf_to_flush);
         }
 
         // Build WAL records for batch

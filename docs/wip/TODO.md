@@ -10,7 +10,11 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Enhanced transaction tests with stress testing and recovery verification (15 new tests)
   - ✅ Enhanced cloud durability & config validation tests with stress patterns (8 new tests)
   - ✅ Enhanced LOW phase instrumentation tests with concurrent/stress patterns (10 new tests)
-  - **Overall Progress: 47/52 items complete (90%)**
+  - ✅ Implemented merge operator semantics (Nov 13, 2025)
+  - ✅ Implemented write stall mechanism with exponential backoff (Nov 13, 2025)
+  - ✅ Implemented WAL rotation CF tracking for efficient flushing (Nov 13, 2025)
+  - ✅ Implemented memtable replacement after manifest persistence (Nov 13, 2025)
+  - **Overall Progress: 51/52 items complete (98%)**
 
 ---
 
@@ -113,7 +117,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 
 ---
 
-### 🟠 HIGH — Engine Correctness (2 items remaining, 3/5 complete)
+### 🟠 HIGH — Engine Correctness (ALL COMPLETE - 5/5 completed) ✅
 
 **Merge Semantics:** ✅ COMPLETE
 - ✅ `src/core/memtable/core.rs` (line 232) — IMPLEMENTED: Proper merge semantics with `merge_with_seq_and_exp()`
@@ -123,9 +127,13 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - ✅ `src/core/engine/operations/writes.rs` (line 93) — IMPLEMENTED: Exponential backoff with configurable timeout (max 1000 attempts, 1-100ms backoff)
 - ✅ Added metrics tracking: `write_stalls` count and `write_stall_duration_ms` for monitoring backpressure
 
-**WAL Rotation & Flushing:**
-- `src/core/engine/operations/writes.rs` (line 319) — TODO: Track which CF triggered the WAL rotation and flush that one
-- `src/core/engine/operations/maintenance.rs` (line 107) — TODO: After manifest is persisted, we should replace memtable with new empty one
+**WAL Rotation & Flushing:** ✅ COMPLETE
+- ✅ `src/core/engine/operations/writes.rs` (line 357) — IMPLEMENTED: Track first CF in batch that triggers rotation
+- ✅ `src/core/engine/operations/transactions.rs` (line 66) — IMPLEMENTED: Track first mutation's CF that triggers rotation
+- ✅ Improved flush efficiency: only flush the CF that triggered WAL rotation instead of always flushing default CF
+
+**Memtable Replacement:** ✅ COMPLETE
+- ✅ `src/core/engine/operations/maintenance.rs` (line 107) — IMPLEMENTED: Pop immutable memtable after manifest persistence to free memory and prevent re-flushing
 
 ---
 

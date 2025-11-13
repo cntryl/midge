@@ -5,7 +5,7 @@
 use bytes::Bytes;
 use std::sync::atomic::Ordering;
 
-use crate::api::column_family::ColumnFamilyHandle;
+use crate::api::column_family::{ColumnFamilyHandle, ColumnFamilyId};
 use crate::api::mutation::Mutation;
 use crate::common::timestamp;
 use crate::core::manifest::Manifest;
@@ -38,6 +38,7 @@ impl MidgeEngine {
 
         // Pre-compute a sequence per mutation to keep ordering stable for MemTable apply
         let mut seqs: Vec<u64> = Vec::with_capacity(mutations.len());
+        let mut rotation_cf: Option<ColumnFamilyId> = None; // Track which CF triggers rotation
         for m in &mutations {
             let (kind, vlen, rend_len) = match m.op {
                 crate::api::mutation::MutationOp::Put
@@ -61,9 +62,11 @@ impl MidgeEngine {
                 > self.wal_buffer_size as u64
             {
                 // Rotate before appending this record
-                // For transactions with multiple CFs, flush the default CF
-                // TODO: Track which CF triggered the WAL rotation and flush that one
-                let _ = self.rollover_and_queue_flush(crate::api::column_family::DEFAULT_CF_ID);
+                // Track the first CF that triggers rotation (only flush once)
+                if rotation_cf.is_none() {
+                    rotation_cf = Some(m.cf_id);
+                    let _ = self.rollover_and_queue_flush(m.cf_id);
+                }
             }
             let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
             seqs.push(seq);

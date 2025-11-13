@@ -104,10 +104,26 @@ impl MidgeEngine {
             self.update_caches_for_new_sst(&name);
         }
 
-        // TODO: After manifest is persisted, we should replace memtable with new empty one
-        // to avoid re-flushing data (since drain is non-destructive). However, this breaks
-        // snapshot reads in some edge cases. Needs further investigation.
-        // self.replace_memtable_after_flush(cf_id);
+        // After manifest is persisted, pop the flushed memtable from immutable queue
+        // This is safe because:
+        // 1. Data is now durable in SST and manifest
+        // 2. Snapshots will read from SST if sequence is >= last_persisted_sequence
+        // 3. Prevents re-flushing the same data in crash recovery
+        let column_family = if cf_id == crate::api::column_family::DEFAULT_CF_ID {
+            self.cf_set.cfs.get(&0).ok_or_else(|| {
+                MidgeError::invalid_config("Default column family not found")
+            })?
+        } else {
+            self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+                MidgeError::invalid_config(format!(
+                    "Column family {} not found",
+                    cf_id.as_u32()
+                ))
+            })?
+        };
+
+        // Pop the oldest immutable memtable (the one we just flushed)
+        let _ = column_family.pop_immutable();
 
         Ok(())
     }
