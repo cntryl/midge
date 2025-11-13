@@ -61,7 +61,14 @@ pub(crate) fn init_manifest(db_path: &Path, read_only: bool) -> MidgeResult<(Man
         );
         // Save manifest with default CF for new DBs
         if !read_only {
-            manifest.save_atomic(db_path)?;
+            println!("[diag-lib] saving manifest to {}", db_path.display());
+            match manifest.save_atomic(db_path) {
+                Ok(_) => println!("[diag-lib] manifest.save_atomic succeeded"),
+                Err(e) => {
+                    println!("[diag-lib] manifest.save_atomic failed: {:?}", e);
+                    return Err(e);
+                }
+            }
         }
     }
 

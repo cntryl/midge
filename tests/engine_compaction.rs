@@ -93,8 +93,13 @@ fn should_preserve_snapshot_visibility_across_compaction() {
 }
 
 #[test]
-#[ignore] // TODO: Background compaction doesn't fully compact in one round. Needs investigation.
 fn should_background_compact_when_threshold_exceeded() {
+    // Initialize tracing for this test
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    
     // Arrange: enable compaction with low threshold so it triggers
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
@@ -107,36 +112,52 @@ fn should_background_compact_when_threshold_exceeded() {
     opts.wal_buffer_size = 64;
     opts.memtable_size = 1024;
 
-    // Create 3 SSTs by writing, closing, and reopening (ensures memtable is fresh each time)
-    for i in 0..3 {
+    // Create 4 SSTs with overlapping keys so compaction can merge them
+    // The strategy compacts all L0 sublevels when file count >= 4
+    for i in 0..4 {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
-        eng.put(&cf, format!("key{}", i).as_bytes(), b"value")
+        
+        // Write overlapping keys - newer versions will supersede older ones
+        eng.put(&cf, b"key_a", format!("value_v{}", i).as_bytes())
             .unwrap();
-        eng.put(&cf, format!("padding{}", i).as_bytes(), &[b'x'; 128])
+        eng.put(&cf, b"key_b", format!("value_v{}", i).as_bytes())
             .unwrap();
+        eng.put(&cf, b"key_c", format!("value_v{}", i).as_bytes())
+            .unwrap();
+        
+        // Add padding to ensure we trigger flush threshold
+        for j in 0..5 {
+            eng.put(&cf, format!("padding_{}_{}", i, j).as_bytes(), &[b'x'; 128])
+                .unwrap();
+        }
+        
         eng.flush_cf(&cf).unwrap();
-        // Wait for flush to complete before closing
         eng.wait_for_flush(std::time::Duration::from_millis(100))
             .unwrap();
         drop(eng);
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // Open engine and wait for background compaction to complete multiple rounds
+    // Open engine with background compaction enabled
     {
-        let _eng = MidgeEngine::open(opts.clone()).expect("open");
-        // Background compaction runs every 50ms. Wait up to 10 seconds for all rounds to complete.
-        // Check every 500ms to see if we're down to 1 SST.
+        let _eng = MidgeEngine::open(opts.clone()).expect("open for background compaction");
+        
+        // Background compaction runs every 50ms. Wait up to 10 seconds for compaction to reduce file count.
+        // Check every 500ms to see if file count has decreased.
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(10);
+        let db_path = opts.storage_mode.local_path();
+        
         loop {
-            let m =
-                cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
-            if m.ssts.len() <= 1 {
-                break;
+            if let Ok(m) = cntryl_midge::manifest::Manifest::load(&db_path) {
+                if m.ssts.len() < 4 {
+                    println!("Compaction succeeded: SST count reduced to {}", m.ssts.len());
+                    break;
+                }
             }
             if start.elapsed() > timeout {
-                println!("Timeout waiting for compaction to complete");
+                eprintln!("Timeout: compaction did not reduce SST count within 10 seconds");
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -154,25 +175,25 @@ fn should_background_compact_when_threshold_exceeded() {
         m.files.iter().map(|f| &f.name).collect::<Vec<_>>()
     );
 
-    // Background compaction should have reduced file count from 3
-    // (won't necessarily be 1 file - LSM compacts L0->L1, which can have multiple files)
+    // Background compaction should have reduced file count from 4
+    // With overlapping keys, compaction merges them into fewer files
     assert!(
-        m.ssts.len() < 3,
-        "Expected compaction to reduce SST count, got {}",
+        m.ssts.len() < 4,
+        "Expected compaction to reduce SST count from 4, got {}",
         m.ssts.len()
     );
 
-    // Verify data is intact after compaction
+    // Verify data is intact after compaction - should see latest version (v3 from iteration 3)
     assert_eq!(
-        eng.get(&cf, b"key0").unwrap(),
-        Some(Bytes::from_static(b"value"))
+        eng.get(&cf, b"key_a").unwrap(),
+        Some(Bytes::from_static(b"value_v3"))
     );
     assert_eq!(
-        eng.get(&cf, b"key1").unwrap(),
-        Some(Bytes::from_static(b"value"))
+        eng.get(&cf, b"key_b").unwrap(),
+        Some(Bytes::from_static(b"value_v3"))
     );
     assert_eq!(
-        eng.get(&cf, b"key2").unwrap(),
-        Some(Bytes::from_static(b"value"))
+        eng.get(&cf, b"key_c").unwrap(),
+        Some(Bytes::from_static(b"value_v3"))
     );
 }

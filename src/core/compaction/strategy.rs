@@ -87,6 +87,14 @@ impl Compactor {
         // Check L0 first (special case - can have overlapping files)
         let l0_size: u64 = levels[0].iter().map(|f| f.size_bytes).sum();
         let l0_file_count = levels[0].len();
+        
+        tracing::debug!(
+            cf_id = cf_id,
+            l0_file_count = l0_file_count,
+            l0_size = l0_size,
+            l0_threshold = self.config.l0_compaction_threshold,
+            "checking L0 compaction trigger"
+        );
 
         if l0_size > self.config.l0_compaction_threshold as u64 || l0_file_count >= 4 {
             // With L0 sublevels, we have two strategies:
@@ -94,6 +102,12 @@ impl Compactor {
             // 2. If just size threshold exceeded, compact oldest sublevel incrementally
 
             let compact_all_sublevels = l0_file_count >= 4;
+            tracing::debug!(
+                cf_id = cf_id,
+                l0_file_count = l0_file_count,
+                compact_all_sublevels = compact_all_sublevels,
+                "selecting L0 compaction strategy"
+            );
 
             let input_files: Vec<String> = if compact_all_sublevels {
                 // Compact all L0 files when file count is high
@@ -107,6 +121,11 @@ impl Compactor {
                 }
 
                 // Pick the oldest sublevel (lowest number) that has files
+                tracing::debug!(
+                    cf_id = cf_id,
+                    sublevel_count = l0_by_sublevel.len(),
+                    "picking oldest sublevel for incremental L0 compaction"
+                );
                 let (_sublevel, sublevel_files) = match l0_by_sublevel.iter().next() {
                     Some((sl, files)) => (*sl, files.clone()),
                     None => return None,
@@ -169,6 +188,15 @@ impl Compactor {
                 level as u32,
                 cf_level_multiplier,
                 cf_target_file_size,
+            );
+            
+            tracing::trace!(
+                cf_id = cf_id,
+                level = level,
+                level_size = level_size,
+                target_size = target_size,
+                file_count = levels[level].len(),
+                "checking level for compaction trigger"
             );
 
             if level_size > target_size as u64 {

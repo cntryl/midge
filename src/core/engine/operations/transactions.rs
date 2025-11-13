@@ -148,10 +148,11 @@ impl MidgeEngine {
                     }
                 }
                 crate::api::mutation::MutationOp::Merge => {
-                    // TODO: Implement proper merge semantics with merge operators
-                    // For now, treat as a regular put
+                    // Store merge operand (will be resolved during read/flush using registered merge operator)
                     if let Some(v) = m.value {
-                        self.with_cf_memtable_mut(cf_id, |mt| mt.put_with_seq(&m.key, &v, s));
+                        self.with_cf_memtable_mut(cf_id, |mt| {
+                            mt.merge_with_seq_and_exp(&m.key, &v, s, None)
+                        });
                     }
                 }
                 crate::api::mutation::MutationOp::Delete => {

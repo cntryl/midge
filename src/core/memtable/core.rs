@@ -229,10 +229,9 @@ impl MemTable {
                     }
                 }
                 crate::api::mutation::MutationOp::Merge => {
-                    // TODO: Implement proper merge semantics
-                    // For now, treat as a regular put
+                    // Store merge operand (will be resolved during read/flush)
                     if let Some(v) = m.value {
-                        self.put(&m.key, &v);
+                        self.merge_with_seq_and_exp(&m.key, &v, 0, None);
                     }
                 }
                 crate::api::mutation::MutationOp::Delete => {

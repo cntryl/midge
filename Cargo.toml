@@ -96,6 +96,7 @@ tempfile = "3.23"
 hdrhistogram = "7.3"
 regex = "1.11"
 clap = { version = "4.5", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # -----------------------------------------------------------------------------
 # Optional dependencies

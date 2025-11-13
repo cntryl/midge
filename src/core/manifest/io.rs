@@ -128,13 +128,26 @@ impl Manifest {
         let tmp = db_path.join("manifest.json.tmp");
 
         // Write serialized data to temp file
-        std::fs::write(&tmp, &data)?;
+        println!("[diag-lib] about to write tmp manifest: {}", tmp.display());
+        if let Err(e) = std::fs::write(&tmp, &data) {
+            println!("[diag-lib] write(tmp) failed: {:?}", e);
+            return Err(e.into());
+        }
 
         // Atomic replace via rename
-        std::fs::rename(&tmp, &manifest_path)?;
+        println!("[diag-lib] about to rename {} -> {}", tmp.display(), manifest_path.display());
+        if let Err(e) = std::fs::rename(&tmp, &manifest_path) {
+            println!("[diag-lib] rename failed: {:?}", e);
+            return Err(e.into());
+        }
 
         // Update CURRENT pointer
-        std::fs::write(db_path.join("CURRENT"), b"manifest.json")?;
+        let current_path = db_path.join("CURRENT");
+        println!("[diag-lib] about to write CURRENT at {}", current_path.display());
+        if let Err(e) = std::fs::write(&current_path, b"manifest.json") {
+            println!("[diag-lib] write(CURRENT) failed: {:?}", e);
+            return Err(e.into());
+        }
 
         // Ensure the manifest file and directory entry are durable. Call
         // `sync_data_only` on the manifest file and sync the parent directory
@@ -143,12 +156,27 @@ impl Manifest {
         // configured behavior (e.g., RecordOnly/Skip) and allow fault injection.
         {
             // Sync the manifest file data to stable storage
-            let f = std::fs::OpenOptions::new().read(true).open(&manifest_path)?;
-            crate::fs::sync_data_only(&f, test_hooks)?;
+            println!("[diag-lib] about to open manifest for sync: {}", manifest_path.display());
+                match std::fs::OpenOptions::new().read(true).write(true).open(&manifest_path) {
+                Ok(f) => {
+                    if let Err(e) = crate::fs::sync_data_only(&f, test_hooks) {
+                        println!("[diag-lib] sync_data_only failed: {:?}", e);
+                        return Err(e.into());
+                    }
+                }
+                Err(e) => {
+                    println!("[diag-lib] open(manifest) for sync failed: {:?}", e);
+                    return Err(e.into());
+                }
+            }
         }
 
         // Sync the parent directory (CURRENT and manifest dir entry)
-        crate::fs::sync_parent(db_path)?;
+        println!("[diag-lib] about to sync_parent for {}", db_path.display());
+        if let Err(e) = crate::fs::sync_parent(db_path) {
+            println!("[diag-lib] sync_parent failed: {:?}", e);
+            return Err(e.into());
+        }
 
         // Signal test hooks that the manifest has been fsynced and is durable
         // before any WAL truncation that may follow.

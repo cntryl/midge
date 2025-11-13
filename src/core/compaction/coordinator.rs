@@ -95,6 +95,7 @@ impl CompactionCoordinator {
                 // Track barrier waiters that want an ack when the worker becomes idle
                 let mut barrier_waiters: Vec<channel::Sender<()>> = Vec::new();
                 loop {
+                    tracing::trace!("compaction worker: starting iteration");
                     // Check for manual compaction requests (non-blocking)
                     let manual_plan = match rx.try_recv() {
                         Ok(CompactionMsg::CompactLevel { cf_id, level }) => {
@@ -172,6 +173,7 @@ impl CompactionCoordinator {
                         thread::sleep(interval);
 
                         let manifest = Manifest::load(&db_path).unwrap_or_default();
+                        tracing::debug!(sst_count = manifest.ssts.len(), file_count = manifest.files.len(), "loaded manifest for automatic compaction check");
 
                         // Get default CF config for compaction settings
                         let default_cf_config = manifest
@@ -180,17 +182,36 @@ impl CompactionCoordinator {
                             .and_then(|cf| cf.config.clone())
                             .unwrap_or_default();
 
-                        compactor.pick_leveled_compaction(
+                        let plan = compactor.pick_leveled_compaction(
                             &manifest.files,
                             0, // Default CF
                             default_cf_config.level_size_multiplier,
                             default_cf_config.target_file_size,
-                        )
+                        );
+                        
+                        if let Some(ref p) = plan {
+                            tracing::info!(
+                                cf_id = p.cf_id,
+                                source_level = p.source_level,
+                                target_level = p.target_level,
+                                input_count = p.input_files.len(),
+                                "automatic compaction plan selected"
+                            );
+                        } else {
+                            tracing::trace!("no compaction plan selected this iteration");
+                        }
+                        plan
                     };
 
                     // Execute compaction plan if we have one
                     if let Some(plan) = plan {
-                        debug!("Compaction plan selected");
+                        tracing::info!(
+                            cf_id = plan.cf_id,
+                            source_level = plan.source_level,
+                            target_level = plan.target_level,
+                            input_files = ?plan.input_files,
+                            "executing compaction plan"
+                        );
 
                         // Call test hook before compaction starts (returns true if should fail)
                         let should_fail = if let Some(ref hooks) = test_hooks {
@@ -304,14 +325,14 @@ impl CompactionCoordinator {
                             Ok(())
                         })() {
                             Ok(()) => {
-                                debug!("Compaction executed successfully");
+                                tracing::info!("compaction executed successfully");
                                 // Call hook after successful compaction
                                 if let Some(ref hooks) = test_hooks {
                                     hooks.after_compaction();
                                 }
                             }
                             Err(e) => {
-                                debug!(error = ?e, "Compaction execution failed");
+                                tracing::warn!(error = ?e, "compaction execution failed");
                                 // Call hook after failed compaction
                                 if let Some(ref hooks) = test_hooks {
                                     hooks.compaction_failed();
