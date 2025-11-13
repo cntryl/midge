@@ -68,6 +68,12 @@ impl Transaction {
     pub(crate) fn is_expired(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() > d)
     }
+    
+    /// Access staged mutations for transaction-aware operations (e.g., scans).
+    /// Returns a slice of in-memory staged mutations.
+    pub(crate) fn staged_mutations(&self) -> &[Mutation] {
+        &self.staged
+    }
 
     // -------------------------------------------------------------------------
     // Conflict tracking

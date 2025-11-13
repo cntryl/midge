@@ -80,17 +80,70 @@ impl KvTransaction for EngineTransaction {
     }
 
     fn scan(&mut self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<(Bytes, Bytes)>> {
-        // Use engine's scan with transaction's snapshot
+        // Transaction-aware scan: merge uncommitted writes with engine data
         let q = crate::api::query::Query::new()
             .start_key(Bytes::copy_from_slice(start))
             .end_key(Bytes::copy_from_slice(end));
 
-        // TODO: Implement transaction-aware scan in engine
-        // For now, run a column-family scoped scan on the engine's default CF
         // Safety: Engine pointer is valid for the transaction's lifetime
         let engine = unsafe { &*self.engine };
         let cf = engine.default_column_family();
-        engine.scan(&cf, q)
+        
+        // Create snapshot at transaction's begin sequence for consistent reads
+        let snapshot = engine.snapshot();
+        let mut results = engine.scan_at(&cf, q, &snapshot)?;
+        
+        // Build map of uncommitted writes in the transaction
+        // This includes both staged and potentially spilled mutations
+        use std::collections::BTreeMap;
+        let mut uncommitted: BTreeMap<Bytes, Option<Bytes>> = BTreeMap::new();
+        
+        // Process staged mutations (in-memory buffer)
+        for mutation in self.txn.staged_mutations() {
+            // Only process mutations in the scan range for default CF
+            if mutation.cf_id == crate::api::DEFAULT_CF_ID 
+                && mutation.key.as_ref() >= start 
+                && mutation.key.as_ref() < end 
+            {
+                match mutation.op {
+                    crate::api::mutation::MutationOp::Put 
+                    | crate::api::mutation::MutationOp::Insert => {
+                        uncommitted.insert(mutation.key.clone(), mutation.value.clone());
+                    }
+                    crate::api::mutation::MutationOp::Delete => {
+                        uncommitted.insert(mutation.key.clone(), None);
+                    }
+                    crate::api::mutation::MutationOp::DeleteRange => {
+                        // Handle range deletion
+                        if let Some(range_end) = &mutation.range_end {
+                            // Mark all keys in range as deleted
+                            let range_start = mutation.key.clone();
+                            // Remove from results any keys in this range
+                            results.retain(|(k, _)| k < &range_start || k >= range_end);
+                        }
+                    }
+                    _ => {} // Merge, CompareAndSwap handled separately
+                }
+            }
+        }
+        
+        // Apply uncommitted writes: remove deletes, update/add puts
+        results.retain(|(k, _)| {
+            !uncommitted.get(k).map_or(false, |v| v.is_none())
+        });
+        
+        for (key, value_opt) in uncommitted {
+            if let Some(value) = value_opt {
+                // Remove existing entry and add updated value
+                results.retain(|(k, _)| k != &key);
+                results.push((key, value));
+            }
+        }
+        
+        // Sort results by key (uncommitted writes may have disrupted order)
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        
+        Ok(results)
     }
 
     fn delete_range(&mut self, start: &[u8], end: &[u8]) -> MidgeResult<()> {

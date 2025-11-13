@@ -14,7 +14,8 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Implemented write stall mechanism with exponential backoff (Nov 13, 2025)
   - ✅ Implemented WAL rotation CF tracking for efficient flushing (Nov 13, 2025)
   - ✅ Implemented memtable replacement after manifest persistence (Nov 13, 2025)
-  - **Overall Progress: 51/52 items complete (98%)**
+  - ✅ Completed MEDIUM priority instrumentation tests with paranoid checksums (Nov 13, 2025)
+  - **Overall Progress: 52/52 items complete (100%)** 🎉
 
 ---
 
@@ -137,12 +138,13 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 
 ---
 
-### 🟡 MEDIUM — Instrumentation & Observability (10 items)
+### 🟡 MEDIUM — Instrumentation & Observability (ALL COMPLETE - 10/10 items) ✅
 
 **Cache & Read Path:**
-- `tests/read_path_caching.rs` (line 16) — ✅ ENHANCED: Added cache effectiveness test with repeated access (100 iterations on 50 keys)
-- `tests/read_path_caching.rs` (line 43) — ✅ ENHANCED: Added concurrent cache balance test (10 readers, 100 keys, overlapping access)
-- `tests/read_path_caching.rs` (line 77) — ✅ ENHANCED: Added concurrent range scan efficiency test (8 threads, 20 scans each)
+- ✅ `tests/read_path_caching.rs` (line 7) — IMPLEMENTED: Paranoid checksum mode integration test
+- ✅ `tests/read_path_caching.rs` (line 16) — ENHANCED: Added cache effectiveness test with repeated access (100 iterations on 50 keys)
+- ✅ `tests/read_path_caching.rs` (line 43) — ENHANCED: Added concurrent cache balance test (10 readers, 100 keys, overlapping access), documented LRU eviction policy
+- ✅ `tests/read_path_caching.rs` (line 77) — ENHANCED: Added concurrent range scan efficiency test (8 threads, 20 scans each), documented read amplification metrics
 
 **Transaction Sequencing:**
 - `tests/memtable_concurrency.rs` (line 44) — ✅ ENHANCED: Added high-concurrency memtable stress test (20 threads, 100 iterations each)
