@@ -387,3 +387,8 @@ Excellent examples can be found in:
 
 **REMEMBER:** When in doubt, create **more smaller tests**, not fewer large ones.
 Clarity beats cleverness.
+
+
+## WIP
+
+if you need to add markdown docs to track work those should live in docs/wip/*
