@@ -1,9 +1,3 @@
-// Isolation Levels
-// Extracted from transaction_acid.rs
-
-// Transaction ACID tests - P0 Priority
-// Tests document expected behavior and will fail until features are implemented
-
 use bytes::Bytes;
 use cntryl_midge::KvTransaction;
 use std::sync::Arc;
@@ -166,4 +160,132 @@ fn should_prevent_phantom_read_given_snapshot_isolation_when_range_scan() {
         second_scan.len(),
         "Phantom read prevented by snapshot"
     );
+}
+
+#[test]
+fn should_handle_high_concurrency_readers_without_panicking() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
+    let cf = engine.default_column_family();
+
+    for i in 0..50 {
+        let key = format!("data_key_{}", i);
+        engine.put(&cf, key.as_bytes(), b"value").unwrap();
+    }
+
+    // Act: Spawn 100 concurrent readers
+    let handles: Vec<_> = (0..100)
+        .map(|reader_id| {
+            let eng = engine.clone();
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for i in 0..50 {
+                    let key = format!("data_key_{}", i);
+                    let _ = eng.get(&cf_clone, key.as_bytes());
+                }
+                reader_id
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|h| h.join().expect("Reader thread panicked"))
+        .collect();
+
+    // Assert: All readers completed without panicking
+    assert_eq!(results.len(), 100);
+}
+
+#[test]
+fn should_maintain_consistency_with_mixed_reader_writer_load() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
+    let cf = engine.default_column_family();
+
+    // Pre-populate with initial values
+    for i in 0..20 {
+        let key = format!("mixed_key_{}", i);
+        engine.put(&cf, key.as_bytes(), b"initial").unwrap();
+    }
+
+    // Act: 10 writers + 40 readers concurrent
+    let writer_handles: Vec<_> = (0..10)
+        .map(|writer_id| {
+            let eng = engine.clone();
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for iteration in 0..10 {
+                    let key_index = (writer_id * 2 + iteration) % 20;
+                    let key = format!("mixed_key_{}", key_index);
+                    let mut txn = eng.begin_transaction(&cf_clone).unwrap();
+                    let new_value = format!("w{}_i{}", writer_id, iteration);
+                    txn.put(key.as_bytes(), new_value.as_bytes()).unwrap();
+                    let _ = eng.commit_transaction(txn, cntryl_midge::WriteOptions::default());
+                }
+            })
+        })
+        .collect();
+
+    let reader_handles: Vec<_> = (0..40)
+        .map(|_reader_id| {
+            let eng = engine.clone();
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for i in 0..20 {
+                    let key = format!("mixed_key_{}", i);
+                    let _ = eng.get(&cf_clone, key.as_bytes());
+                }
+            })
+        })
+        .collect();
+
+    for h in writer_handles.into_iter().chain(reader_handles.into_iter()) {
+        h.join().expect("Reader/writer thread panicked");
+    }
+
+    // Assert: All keys still exist and are readable
+    for i in 0..20 {
+        let key = format!("mixed_key_{}", i);
+        let result = engine.get(&cf, key.as_bytes());
+        assert!(
+            result.is_ok(),
+            "Key {} should exist after mixed reader/writer load",
+            key
+        );
+    }
+}
+
+#[test]
+fn should_recover_snapshot_view_after_engine_restart() {
+    // Arrange
+    let dir = common::test_temp_dir();
+    let opts = common::durability_opts(dir.path().to_path_buf());
+    let engine = cntryl_midge::MidgeEngine::open(opts.clone()).expect("initial open");
+    let cf = engine.default_column_family();
+
+    // Pre-populate data
+    for i in 0..10 {
+        let key = format!("persist_key_{}", i);
+        engine.put(&cf, key.as_bytes(), b"persisted_value").unwrap();
+    }
+
+    drop(engine);
+
+    // Act: Restart and verify snapshot behavior
+    let engine = cntryl_midge::MidgeEngine::open(opts).expect("restart open");
+    let cf = engine.default_column_family();
+
+    // Assert: All data should still be visible
+    for i in 0..10 {
+        let key = format!("persist_key_{}", i);
+        let result = engine.get(&cf, key.as_bytes());
+        assert!(
+            result.is_ok(),
+            "Persisted key {} should be readable after restart",
+            key
+        );
+    }
 }

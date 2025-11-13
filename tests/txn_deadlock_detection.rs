@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 mod common;
 use common::new_engine;
+
 #[test]
 fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
     // Arrange
@@ -153,4 +154,92 @@ fn should_detect_deadlock_given_three_way_circular_dependency() {
     let _ = first_three_way_result;
     let _ = second_three_way_result;
     let _ = third_three_way_result;
+}
+
+#[test]
+fn should_handle_high_concurrency_without_livelock() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
+    let cf = engine.default_column_family();
+
+    // Pre-populate keys
+    for i in 0..10 {
+        let key = format!("resource_{}", i);
+        engine.put(&cf, key.as_bytes(), b"initial").unwrap();
+    }
+
+    // Act: Spawn 10 threads with potential for circular waits
+    let handles: Vec<_> = (0..10)
+        .map(|thread_id| {
+            let eng = engine.clone();
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for iteration in 0..5 {
+                    let mut txn = eng.begin_transaction(&cf_clone).unwrap();
+                    
+                    // Each thread writes to multiple keys in different order
+                    let key1 = format!("resource_{}", (thread_id + iteration) % 10);
+                    let key2 = format!("resource_{}", (thread_id + iteration + 1) % 10);
+                    
+                    txn.put(key1.as_bytes(), format!("t{}_{}", thread_id, iteration).as_bytes())
+                        .unwrap();
+                    txn.put(key2.as_bytes(), format!("t{}_{}", thread_id, iteration).as_bytes())
+                        .unwrap();
+                    
+                    let _ = eng.commit_transaction(txn, cntryl_midge::WriteOptions::default());
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Assert: No livelock - engine responds to queries
+    for i in 0..10 {
+        let key = format!("resource_{}", i);
+        let result = engine.get(&cf, key.as_bytes());
+        assert!(result.is_ok(), "Engine should remain responsive");
+    }
+}
+
+#[test]
+fn should_handle_recovery_after_complex_deadlock_scenario() {
+    // Arrange
+    let dir = common::test_temp_dir();
+    let opts = common::durability_opts(dir.path().to_path_buf());
+    let engine = cntryl_midge::MidgeEngine::open(opts.clone()).expect("initial open");
+    let cf = engine.default_column_family();
+
+    // Pre-populate resources
+    for i in 0..5 {
+        let key = format!("dlk_resource_{}", i);
+        engine.put(&cf, key.as_bytes(), b"initial").unwrap();
+    }
+
+    // Simulate multiple transactions with potential conflicts
+    for j in 0..3 {
+        for i in 0..5 {
+            let mut txn = engine.begin_transaction(&cf).unwrap();
+            let key = format!("dlk_resource_{}", i);
+            let value = format!("batch_{}_key_{}", j, i);
+            txn.put(key.as_bytes(), value.as_bytes()).unwrap();
+            let _ = engine.commit_transaction(txn, cntryl_midge::WriteOptions::default());
+        }
+    }
+
+    drop(engine);
+
+    // Act: Restart and verify consistency
+    let engine = cntryl_midge::MidgeEngine::open(opts).expect("restart open");
+    let cf = engine.default_column_family();
+
+    // Assert: All resources still exist and are readable
+    for i in 0..5 {
+        let key = format!("dlk_resource_{}", i);
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
+        assert!(result.is_some(), "Resource {} should exist after restart", key);
+    }
 }

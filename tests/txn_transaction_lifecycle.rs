@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 mod common;
 use common::new_engine;
+
 #[test]
 fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     // Arrange
@@ -132,4 +133,107 @@ fn should_reject_operations_given_committed_transaction_when_reused() {
     // Transaction consumed by commit(), cannot be reused
     // Rust ownership prevents this at compile time
     // This test documents the behavior
+}
+
+#[test]
+fn should_handle_rapid_transaction_creation_and_commit() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
+    let cf = engine.default_column_family();
+
+    // Act: Create and commit 100 transactions rapidly
+    for i in 0..100 {
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+        let key = format!("rapid_key_{}", i);
+        let value = format!("rapid_value_{}", i);
+        txn.put(key.as_bytes(), value.as_bytes()).unwrap();
+        let result = engine.commit_transaction(txn, cntryl_midge::WriteOptions::default());
+        assert!(result.is_ok(), "Transaction {} should commit", i);
+    }
+
+    // Assert: All data persisted
+    for i in 0..100 {
+        let key = format!("rapid_key_{}", i);
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
+        assert!(result.is_some(), "Key {} should exist", key);
+    }
+}
+
+#[test]
+fn should_handle_concurrent_transaction_lifecycles_without_panic() {
+    // Arrange
+    let (_dir, engine) = new_engine();
+    let engine = Arc::new(engine);
+    let cf = engine.default_column_family();
+
+    // Act: Spawn 20 threads with overlapping transaction lifecycles
+    let handles: Vec<_> = (0..20)
+        .map(|thread_id| {
+            let eng = engine.clone();
+            let cf_clone = cf.clone();
+            std::thread::spawn(move || {
+                for iteration in 0..10 {
+                    let mut txn = eng.begin_transaction(&cf_clone).unwrap();
+                    let key = format!("lifecycle_t{}_i{}", thread_id, iteration);
+                    let value = format!("v_t{}_i{}", thread_id, iteration);
+                    txn.put(key.as_bytes(), value.as_bytes()).unwrap();
+                    let _ = eng.commit_transaction(txn, cntryl_midge::WriteOptions::default());
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Assert: All threads completed successfully
+    let mut count = 0;
+    for i in 0..20 {
+        for j in 0..10 {
+            let key = format!("lifecycle_t{}_i{}", i, j);
+            if engine.get(&cf, key.as_bytes()).unwrap().is_some() {
+                count += 1;
+            }
+        }
+    }
+    assert!(count > 0, "At least some transactions should have committed");
+}
+
+#[test]
+fn should_persist_transaction_commits_after_engine_restart() {
+    // Arrange
+    let dir = common::test_temp_dir();
+    let opts = common::durability_opts(dir.path().to_path_buf());
+    let engine = cntryl_midge::MidgeEngine::open(opts.clone()).expect("initial open");
+    let cf = engine.default_column_family();
+
+    // Create and commit 20 transactions
+    for i in 0..20 {
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+        let key = format!("persist_txn_{}", i);
+        let value = format!("value_{}", i);
+        txn.put(key.as_bytes(), value.as_bytes()).unwrap();
+        engine
+            .commit_transaction(txn, cntryl_midge::WriteOptions::default())
+            .unwrap();
+    }
+
+    drop(engine);
+
+    // Act: Restart engine and verify all data persisted
+    let engine = cntryl_midge::MidgeEngine::open(opts).expect("restart open");
+    let cf = engine.default_column_family();
+
+    // Assert: All committed transactions preserved
+    for i in 0..20 {
+        let key = format!("persist_txn_{}", i);
+        let result = engine.get(&cf, key.as_bytes()).unwrap();
+        assert!(
+            result.is_some(),
+            "Committed transaction data {} should persist after restart",
+            key
+        );
+    }
 }
