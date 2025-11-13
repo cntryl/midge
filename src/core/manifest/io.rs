@@ -136,6 +136,26 @@ impl Manifest {
         // Update CURRENT pointer
         std::fs::write(db_path.join("CURRENT"), b"manifest.json")?;
 
+        // Ensure the manifest file and directory entry are durable. Call
+        // `sync_data_only` on the manifest file and sync the parent directory
+        // so tests can deterministically verify ordering with WAL truncation.
+        // If `test_hooks` is provided, `sync_data_only` will honor the
+        // configured behavior (e.g., RecordOnly/Skip) and allow fault injection.
+        {
+            // Sync the manifest file data to stable storage
+            let f = std::fs::OpenOptions::new().read(true).open(&manifest_path)?;
+            crate::fs::sync_data_only(&f, test_hooks)?;
+        }
+
+        // Sync the parent directory (CURRENT and manifest dir entry)
+        crate::fs::sync_parent(db_path)?;
+
+        // Signal test hooks that the manifest has been fsynced and is durable
+        // before any WAL truncation that may follow.
+        if let Some(hooks) = test_hooks {
+            hooks.manifest_fsynced_before_wal_truncate();
+        }
+
         // TODO: Implement CorruptAfterSave behavior if needed
         // if let Some(hooks) = test_hooks {
         //     if hooks.manifest_behavior() == ManifestBehavior::CorruptAfterSave {
