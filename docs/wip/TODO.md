@@ -9,7 +9,8 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Implemented detailed health validation with SST continuity and WAL checks (Nov 15, 2025)
   - ✅ Implemented autotuner initialization from config (Nov 15, 2025)
   - ✅ Refactored in-memory WAL to NoOpWal for proper durability semantics (Nov 15, 2025)
-  - **Overall Progress: 17/52 items complete (33%)** 📈
+  - ✅ Completed transaction conflict detection: write-write conflicts, deadlock detection, lost updates prevention, and isolation levels enforcement (Nov 15, 2025)
+  - **Overall Progress: 19/52 items complete (37%)** 📈
 
 ---
 
@@ -63,7 +64,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 ### 🔴 CRITICAL — Transaction Conflict Detection (6 items)
 
 **Write-Write Conflicts:**
-- `tests/txn_write_write_conflicts.rs` (line 138) — TODO: Implement conflict detection for overlapping ranges
+- ✅ `tests/txn_write_write_conflicts.rs` (line 138) — IMPLEMENTED: Conflict detection for overlapping ranges prevents concurrent writes to same keys
 
 **Deadlock Detection:**
 - ✅ `tests/txn_deadlock_detection.rs` (line 83) — IMPLEMENTED: Conflict detection resolves circular waits by aborting conflicting transactions
@@ -73,7 +74,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - ✅ `tests/txn_lost_updates.rs` (line 106) — IMPLEMENTED: CAS validation prevents lost updates by checking values at commit time
 
 **Isolation Levels:**
-- `tests/txn_isolation_levels.rs` (line 54) — TODO: Should prevent dirty write when locking is implemented
+- ✅ `tests/txn_isolation_levels.rs` (line 54) — IMPLEMENTED: Prevents dirty writes through conflict detection (no explicit locking required for optimistic concurrency)
 
 **Transaction Lifecycle:**
 - `tests/txn_transaction_lifecycle.rs` (line 31) — TODO: Should timeout if transaction exceeds deadline
@@ -149,7 +150,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 | WAL & Fsync Tests | ✅ Complete | 4 tests |
 | Manifest Durability Tests | ✅ Complete | 4 tests |
 | Compaction Durability Tests | ✅ Complete | 6 tests |
-| Transaction Conflict Detection | 🔴 Not Started | 0/10 |
+| Transaction Conflict Detection | 🟡 5/6 Complete | 5/6 |
 | Engine Correctness | 🔴 Not Started | 0/5 |
 | Instrumentation | 🔴 Not Started | 0/10 |
 | **Total** | **31% Complete** | **14/52** |
@@ -158,11 +159,11 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 
 | Priority | Count | Status | Timeline |
 |----------|-------|--------|----------|
-| 🔴 CRITICAL | 12 | 12/12 Complete ✅ | COMPLETE |
+| 🔴 CRITICAL | 12 | 11/12 Complete ✅ | COMPLETE (1 remaining) |
 | 🟠 HIGH | 15 | 0/15 | Week 1 START |
 | 🟡 MEDIUM | 18 | 0/18 | Week 2-3 |
 | 🔵 LOW | 7 | 0/7 | Month 2+ |
-| **TOTAL** | **52** | **14/52 (27%)** | |
+| **TOTAL** | **52** | **19/52 (37%)** | |
 
 ---
 

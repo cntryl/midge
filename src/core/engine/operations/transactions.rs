@@ -3,6 +3,7 @@
 //! This module contains transaction commit logic and transaction-aware reads.
 
 use bytes::Bytes;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 use crate::api::column_family::{ColumnFamilyHandle, ColumnFamilyId};
@@ -218,6 +219,17 @@ impl MidgeEngine {
         let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
         let begin_sequence = self.seq.load(Ordering::SeqCst);
         let txn = Transaction::new(txn_id, begin_sequence);
+
+        // Register transaction with manager for conflict detection
+        let _ = self.txn_manager.begin(
+            txn_id,
+            begin_sequence,
+            HashSet::new(), // write_set - will be updated on commit
+            HashSet::new(), // write_ranges - will be updated on commit
+            HashSet::new(), // read_set - will be updated on commit
+            HashMap::new(), // read_versions - will be updated on commit
+        );
+
         Ok(EngineTransaction::new(txn, self))
     }
 
@@ -301,13 +313,14 @@ impl MidgeEngine {
                 .map(|((cf, k), v)| (crate::core::transaction::manager::Key::new(cf, k), v))
                 .collect();
 
-        let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
+        let txn_id = txn.txn_id; // Use the existing transaction ID
         let commit_seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
 
+        // Update transaction info with actual conflict sets
         let _ = self
             .txn_manager
-            .begin(txn_id, txn.begin_seq(), write_set, write_ranges, read_set, read_versions);
-        if let Err(_e) = self.txn_manager.try_commit(txn_id, commit_seq) {
+            .update(txn_id, write_set.clone(), write_ranges.clone(), read_set.clone(), read_versions.clone());
+        if let Err(_e) = self.txn_manager.try_commit(txn_id, commit_seq, &write_set, &write_ranges, &read_set, &read_versions) {
             return Err(MidgeError::transaction_conflict("write conflict detected"));
         }
 

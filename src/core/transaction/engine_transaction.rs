@@ -4,6 +4,7 @@
 //! to enable read operations that query the storage engine.
 
 use bytes::Bytes;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::api::kv_store::KvTransaction;
@@ -65,7 +66,31 @@ impl KvTransaction for EngineTransaction {
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        self.txn.put(key, value)
+        self.txn.put(key, value)?;
+        
+        // Update transaction manager with current conflict sets
+        // Safety: Engine pointer is valid for the transaction's lifetime
+        let engine = unsafe { &*self.engine };
+        let write_set: HashSet<crate::core::transaction::manager::Key> =
+            self.txn.conflict_write_set()
+                .into_iter()
+                .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+                .collect();
+        let write_ranges = self.txn.conflict_write_ranges().clone();
+        let read_set: HashSet<crate::core::transaction::manager::Key> =
+            self.txn.conflict_read_set()
+                .into_iter()
+                .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+                .collect();
+        let read_versions: HashMap<crate::core::transaction::manager::Key, u64> =
+            self.txn.conflict_read_versions()
+                .into_iter()
+                .map(|((cf, k), v)| (crate::core::transaction::manager::Key::new(cf, k), v))
+                .collect();
+        
+        let _ = engine.txn_manager.update(self.txn.txn_id, write_set, write_ranges, read_set, read_versions);
+        
+        Ok(())
     }
 
     fn get(&mut self, key: &[u8]) -> MidgeResult<Option<Bytes>> {

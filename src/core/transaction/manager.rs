@@ -59,28 +59,43 @@ impl TransactionManager {
         Ok(())
     }
 
-    pub fn try_commit(&self, txn_id: u64, commit_seq: u64) -> Result<(), String> {
-        let mut inner = self.inner.write();
-        let txn = inner
-            .active
-            .get(&txn_id)
-            .ok_or_else(|| "Transaction not found".to_string())?
-            .clone();
+    pub fn try_commit(
+        &self,
+        txn_id: u64,
+        commit_seq: u64,
+        write_set: &HashSet<Key>,
+        write_ranges: &HashSet<(u32, Bytes, Bytes)>,
+        read_set: &HashSet<Key>,
+        read_versions: &HashMap<Key, u64>,
+    ) -> Result<(), String> {
+        let inner = self.inner.read();
 
-        if Self::has_write_conflict(&txn, &inner.active, txn_id) {
+        // Create a temporary TxnInfo with the actual conflict sets
+        let txn_info = TxnInfo {
+            begin_seq: inner.active.get(&txn_id).ok_or("Transaction not found")?.begin_seq,
+            write_set: write_set.clone(),
+            write_ranges: write_ranges.clone(),
+            read_set: read_set.clone(),
+            read_versions: read_versions.clone(),
+        };
+
+        if Self::has_write_conflict(&txn_info, &inner.active, txn_id) {
             return Err("Write-write conflict with active transaction".into());
         }
-        if Self::has_commit_conflict(&txn, &inner.committed, txn_id) {
+        if Self::has_commit_conflict(&txn_info, &inner.committed, txn_id) {
             return Err("Write-write conflict with committed transaction".into());
         }
-        if Self::has_commit_range_conflict(&txn, &inner.committed, txn_id) {
+        if Self::has_commit_range_conflict(&txn_info, &inner.committed, txn_id) {
             return Err("Write-range conflict with committed transaction".into());
         }
-        if Self::has_read_conflict(&txn, &inner.committed) {
+        if Self::has_read_conflict(&txn_info, &inner.committed) {
             return Err("Read-write conflict detected".into());
         }
 
-        inner.committed.insert(commit_seq, (txn_id, txn.write_set, txn.write_ranges));
+        // Now update the committed state
+        drop(inner);
+        let mut inner = self.inner.write();
+        inner.committed.insert(commit_seq, (txn_id, write_set.clone(), write_ranges.clone()));
         inner.active.remove(&txn_id);
 
         // Keep only N most recent commits
@@ -127,6 +142,26 @@ impl TransactionManager {
 
         inner.wait_for.insert(txn_id, waits);
         Ok(())
+    }
+
+    pub fn update(
+        &self,
+        txn_id: u64,
+        write_set: HashSet<Key>,
+        write_ranges: HashSet<(u32, Bytes, Bytes)>,
+        read_set: HashSet<Key>,
+        read_versions: HashMap<Key, u64>,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.write();
+        if let Some(txn) = inner.active.get_mut(&txn_id) {
+            txn.write_set = write_set;
+            txn.write_ranges = write_ranges;
+            txn.read_set = read_set;
+            txn.read_versions = read_versions;
+            Ok(())
+        } else {
+            Err("Transaction not found".to_string())
+        }
     }
 
     pub fn check_for_deadlock(&self) -> Option<(u64, Vec<u64>)> {
@@ -177,7 +212,7 @@ impl TransactionManager {
         id: u64,
     ) -> bool {
         committed.iter().any(|(&seq, (cid, ws, _))| {
-            seq >= txn.begin_seq && *cid != id && !txn.write_set.is_disjoint(ws)
+            *cid != id && !txn.write_set.is_disjoint(ws)
         })
     }
 
@@ -259,10 +294,10 @@ mod tests {
         let tm = TransactionManager::new();
         let mut ws = HashSet::new();
         ws.insert(k("a"));
-        tm.begin(1, 10, ws, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(1, 10, ws.clone(), HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
 
         // Act
-        let result = tm.try_commit(1, 20);
+        let result = tm.try_commit(1, 20, &ws, &HashSet::new(), &HashSet::new(), &HashMap::new());
 
         // Assert
         assert!(result.is_ok());
@@ -277,14 +312,14 @@ mod tests {
         ws1.insert(k("a"));
         let mut ws2 = HashSet::new();
         ws2.insert(k("b"));
-        tm.begin(1, 10, ws1, HashSet::new(), HashSet::new(), HashMap::new())
+        tm.begin(1, 10, ws1.clone(), HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
-        tm.begin(2, 10, ws2, HashSet::new(), HashSet::new(), HashMap::new())
+        tm.begin(2, 10, ws2.clone(), HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
 
         // Act
-        let r1 = tm.try_commit(1, 20);
-        let r2 = tm.try_commit(2, 21);
+        let r1 = tm.try_commit(1, 20, &ws1, &HashSet::new(), &HashSet::new(), &HashMap::new());
+        let r2 = tm.try_commit(2, 21, &ws2, &HashSet::new(), &HashSet::new(), &HashMap::new());
 
         // Assert
         assert!(r1.is_ok());
@@ -304,10 +339,10 @@ mod tests {
         let mut ws2 = HashSet::new();
         ws2.insert(k("x"));
         tm.begin(1, 1, ws1, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
-        tm.begin(2, 1, ws2, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2.clone(), HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
 
         // Act
-        let result = tm.try_commit(2, 5);
+        let result = tm.try_commit(2, 5, &ws2, &HashSet::new(), &HashSet::new(), &HashMap::new());
 
         // Assert
         assert!(result.is_err());
@@ -322,11 +357,11 @@ mod tests {
         ws.insert(k("shared"));
         tm.begin(1, 10, ws.clone(), HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
-        tm.try_commit(1, 20).unwrap();
-        tm.begin(2, 15, ws, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+        tm.try_commit(1, 20, &ws, &HashSet::new(), &HashSet::new(), &HashMap::new()).unwrap();
+        tm.begin(2, 15, ws.clone(), HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
 
         // Act
-        let result = tm.try_commit(2, 25);
+        let result = tm.try_commit(2, 25, &ws, &HashSet::new(), &HashSet::new(), &HashMap::new());
 
         // Assert
         assert!(result.is_err());
@@ -339,17 +374,17 @@ mod tests {
         let tm = TransactionManager::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("data"));
-        tm.begin(1, 10, ws1, HashSet::new(), HashSet::new(), HashMap::new())
+        tm.begin(1, 10, ws1.clone(), HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
-        tm.try_commit(1, 20).unwrap();
+        tm.try_commit(1, 20, &ws1, &HashSet::new(), &HashSet::new(), &HashMap::new()).unwrap();
 
         let mut reads = HashMap::new();
         reads.insert(k("data"), 15);
-        tm.begin(2, 15, HashSet::new(), HashSet::new(), HashSet::new(), reads)
+        tm.begin(2, 15, HashSet::new(), HashSet::new(), HashSet::new(), reads.clone())
             .unwrap();
 
         // Act
-        let result = tm.try_commit(2, 30);
+        let result = tm.try_commit(2, 30, &HashSet::new(), &HashSet::new(), &HashSet::new(), &reads);
 
         // Assert
         assert!(result.is_err());
@@ -369,8 +404,8 @@ mod tests {
         for i in 0..1100 {
             let mut ws = HashSet::new();
             ws.insert(k(&format!("k{i}")));
-            tm.begin(i, i, ws, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
-            tm.try_commit(i, 1000 + i).unwrap();
+            tm.begin(i, i, ws.clone(), HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+            tm.try_commit(i, 1000 + i, &ws, &HashSet::new(), &HashSet::new(), &HashMap::new()).unwrap();
         }
 
         // Assert
