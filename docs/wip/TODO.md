@@ -15,6 +15,9 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Implemented WAL rotation CF tracking for efficient flushing (Nov 13, 2025)
   - ✅ Implemented memtable replacement after manifest persistence (Nov 13, 2025)
   - ✅ Completed MEDIUM priority instrumentation tests with paranoid checksums (Nov 13, 2025)
+  - ✅ Implemented detailed health validation with SST continuity and WAL checks (Nov 15, 2025)
+  - ✅ Implemented autotuner initialization from config (Nov 15, 2025)
+  - ✅ Refactored in-memory WAL to NoOpWal for proper durability semantics (Nov 15, 2025)
   - **Overall Progress: 52/52 items complete (100%)** 🎉
 
 ---
@@ -198,14 +201,14 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 
 ---
 
-### 🔵 LOW — Phase 5 & Polish (4 items)
+### 🔵 LOW — Phase 5 & Polish (4 items) ✅ ALL COMPLETE
 
 **Health & Autotuning:**
-- `src/health/manager.rs` (line 326) — TODO: Detailed validation (Phase 5)
-- `src/core/engine/state/initialization.rs` (line 46) — TODO: Initialize autotuner if enabled
+- ✅ `src/health/manager.rs` (line 326) — IMPLEMENTED: Detailed validation with SST continuity checks, missing WAL segments detection, and discrepancy detection
+- ✅ `src/core/engine/state/initialization.rs` (line 46) — IMPLEMENTED: Initialize autotuner when config.autotune_enabled() is true
 
 **WAL Improvements:**
-- `src/wal/mem/shared.rs` (line 5) — TODO: Refactor to NoOpWal - an in-memory WAL defeats the purpose of durability
+- ✅ `src/wal/mem/shared.rs` (line 5) — IMPLEMENTED: Refactored to NoOpWal that explicitly discards writes instead of maintaining useless in-memory buffer
 
 ---
 

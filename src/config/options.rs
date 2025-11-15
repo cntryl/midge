@@ -4,6 +4,8 @@
 //! - [`crate::config::ConfigBuilder`]: High-level API (beginner-friendly)
 //! - [`MidgeOptions`]: Low-level API (fine-grained control)
 
+use std::sync::Arc;
+
 use crate::common::test_hooks::TestHooks;
 
 use super::storage_mode::StorageMode;
@@ -204,6 +206,13 @@ pub struct MidgeOptions {
     /// internal behavior. Set to `None` for normal operation (default).
     pub test_hooks: Option<TestHooks>,
 
+    /// Optional autotuner for adaptive parameter adjustment.
+    ///
+    /// When set, the engine will automatically adjust parameters like WAL sync
+    /// interval, compaction threads, and bloom filter bits based on observed metrics.
+    /// Set to `None` to disable autotuning (default).
+    pub autotuner: Option<Arc<crate::config::Autotuner>>,
+
     /// Enable paranoid checksum verification on every SST block read.
     ///
     /// When enabled, checksums are verified on every SST block read, not just
@@ -246,6 +255,7 @@ impl Default for MidgeOptions {
             cloud_upload_bytes_per_sec: 0,
             cloud_upload_max_burst_bytes: 0,
             test_hooks: None,          // No test hooks by default
+            autotuner: None,           // No autotuner by default
             paranoid_checksums: false, // Disabled by default for performance
         }
     }

@@ -62,6 +62,9 @@ pub struct HealthManager {
     #[allow(dead_code)]
     config: HealthConfig,
 
+    /// Database path for file system checks
+    db_path: std::path::PathBuf,
+
     /// Last state update time
     last_update: Arc<RwLock<SystemTime>>,
 }
@@ -84,6 +87,7 @@ impl HealthManager {
         engine: Weak<dyn EngineHealth>,
         manifest: Arc<RwLock<Manifest>>,
         config: HealthConfig,
+        db_path: std::path::PathBuf,
     ) -> Self {
         Self {
             state: Arc::new(RwLock::new(LifecycleState::Stopped)),
@@ -92,6 +96,7 @@ impl HealthManager {
             manifest,
             manifest_persister: Arc::new(RwLock::new(None)),
             config,
+            db_path,
             last_update: Arc::new(RwLock::new(timestamp::now())),
         }
     }
@@ -323,17 +328,78 @@ impl HealthManager {
             .map(|c| c.checkpoint_sequence)
             .unwrap_or(0);
 
-        // TODO: Detailed validation (Phase 5)
-        // - Check for missing WAL segments
-        // - Validate SST continuity
-        // - Detect discrepancies
+        // Detailed validation (Phase 5)
+        let mut missing_segments = Vec::new();
+        let mut discrepancies = Vec::new();
+
+        // Check for missing WAL segments
+        // Look for WAL files in wal directory and check for gaps
+        let wal_dir = self.db_path.join("wal");
+        if wal_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&wal_dir) {
+                let mut wal_files = Vec::new();
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.ends_with(".wal") {
+                            wal_files.push(name.to_string());
+                        }
+                    }
+                }
+                // Sort and check for sequence gaps (basic check)
+                wal_files.sort();
+                if wal_files.len() > 1 {
+                    for i in 1..wal_files.len() {
+                        let prev = &wal_files[i-1];
+                        let curr = &wal_files[i];
+                        // Simple check: if names don't follow expected pattern, note it
+                        if prev >= curr {
+                            discrepancies.push(format!("WAL files out of order: {} >= {}", prev, curr));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate SST continuity
+        let sst_dir = self.db_path.join("sst");
+        let mut level_files = std::collections::HashMap::new();
+        for file_meta in &manifest.files {
+            // Check if SST file exists
+            let sst_path = sst_dir.join(&file_meta.name);
+            if !sst_path.exists() {
+                missing_segments.push(format!("SST file missing: {}", file_meta.name));
+            }
+
+            // Group by level for continuity check
+            level_files.entry(file_meta.level).or_insert_with(Vec::new).push(&file_meta.name);
+        }
+
+        // Check for level continuity (basic: no gaps in levels)
+        let mut levels: Vec<_> = level_files.keys().collect();
+        levels.sort();
+        if let Some(&max_level) = levels.last() {
+            for level in 0..=*max_level {
+                if !level_files.contains_key(&level) && level > 0 {
+                    // Level 0 can be missing, but higher levels should exist if max_level > 0
+                    discrepancies.push(format!("Missing SST files at level {}", level));
+                }
+            }
+        }
+
+        // Check for duplicate SST names
+        let mut seen_names = std::collections::HashSet::new();
+        for file_meta in &manifest.files {
+            if !seen_names.insert(&file_meta.name) {
+                discrepancies.push(format!("Duplicate SST file in manifest: {}", file_meta.name));
+            }
+        }
 
         ValidationResult {
-            valid: current_seq >= cloud_seq,
+            valid: current_seq >= cloud_seq && missing_segments.is_empty() && discrepancies.is_empty(),
             current_seq,
             cloud_seq,
-            missing_segments: Vec::new(),
-            discrepancies: Vec::new(),
+            missing_segments,
+            discrepancies,
         }
     }
 

@@ -43,6 +43,7 @@ pub mod storage_mode;
 pub mod validation;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -365,6 +366,11 @@ impl Config {
                 .map(|c| c.upload_params.chunk_size as u64)
                 .unwrap_or(0),
             test_hooks: None,          // No test hooks when using Config API
+            autotuner: if self.autotune_enabled {
+                Some(Arc::new(crate::config::Autotuner::new()))
+            } else {
+                None
+            },
             paranoid_checksums: false, // Default to false for performance
         }
     }

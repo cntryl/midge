@@ -43,13 +43,6 @@ pub fn open_with_config(config: crate::config::Config) -> MidgeResult<MidgeEngin
     // Convert high-level Config to low-level MidgeOptions
     let opts = config.to_options();
 
-    // TODO: Initialize autotuner if enabled
-    // let autotuner = if config.autotune_enabled() {
-    //     Some(crate::config::Autotuner::new())
-    // } else {
-    //     None
-    // };
-
     // Open engine with derived options
     open(opts)
 }
@@ -353,5 +346,6 @@ pub fn open_with_factories(
         manifest_cache,
         bloom_cache,
         sparse_index_cache,
+        autotuner: opts.autotuner.clone(),
     })
 }

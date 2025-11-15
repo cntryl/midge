@@ -69,6 +69,8 @@ pub struct MidgeEngine {
     /// Sparse index cache for fast block lookups
     /// OPTIMIZATION: Avoids SST metadata reads and index deserialization overhead
     pub(super) sparse_index_cache: crate::sst::sparse_index_cache::SparseIndexCache,
+    /// Optional autotuner for adaptive parameter adjustment
+    pub(crate) autotuner: Option<Arc<crate::config::Autotuner>>,
 }
 
 impl MidgeEngine {
