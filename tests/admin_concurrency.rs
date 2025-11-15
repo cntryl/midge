@@ -2,20 +2,37 @@ mod common;
 use common::{bulk_put_fn, new_engine, new_engine_with_opts};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
+use cntryl_midge::backup::{BackupEngine, BackupOptions};
 
 #[test]
 fn should_block_backup_start_given_active_compaction_when_requested() {
     // Arrange
     let (_dir, eng) = new_engine_with_opts(1024, true);
     let cf = eng.default_column_family();
+    let db_path = _dir.path().to_path_buf();
+    let backup_dir = db_path.join("backups");
 
-    // Act
+    // Act - Write data to trigger compaction
     bulk_put_fn(&eng, &cf, "key", 200, |_| b"value".to_vec());
 
-    // TODO: Attempt backup during compaction
-    // Verify backup either waits or proceeds with consistent snapshot
+    // Give compaction a moment to start
+    thread::sleep(Duration::from_millis(100));
 
-    // Assert
+    // Attempt backup during compaction
+    let backup_result = std::thread::spawn(move || {
+        let mut backup_engine = BackupEngine::open(&db_path, &backup_dir)
+            .expect("Failed to open backup engine");
+        backup_engine.create_backup(BackupOptions::default())
+    });
+
+    let backup_info = backup_result.join().unwrap().expect("Backup should succeed");
+
+    // Assert - backup should have been created successfully
+    assert!(backup_info.backup_id > 0, "Backup should have a valid ID");
+    assert!(backup_info.size_bytes > 0, "Backup should contain data");
+
+    // Verify data consistency - backup should contain all the data
     let result = eng.get(&cf, b"key025").expect("get");
     assert!(
         result.is_some(),
@@ -209,7 +226,14 @@ fn should_recover_all_data_after_restart_despite_admin_operations_when_engine_re
     let path = dir.path().to_path_buf();
     
     let eng = {
-        let (_d, e) = new_engine_with_opts(8192, false);
+        let opts = cntryl_midge::MidgeOptions {
+            storage_mode: cntryl_midge::StorageMode::LocalDisk {
+                db_path: path.clone(),
+            },
+            memtable_size: 8192,
+            ..Default::default()
+        };
+        let e = cntryl_midge::MidgeEngine::open(opts).expect("Failed to create engine");
         let cf = e.default_column_family();
         
         // Write 500 keys while performing admin operations

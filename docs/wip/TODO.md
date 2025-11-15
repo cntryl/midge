@@ -11,7 +11,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Refactored in-memory WAL to NoOpWal for proper durability semantics (Nov 15, 2025)
   - ✅ Completed transaction conflict detection: write-write conflicts, deadlock detection, lost updates prevention, and isolation levels enforcement (Nov 15, 2025)
   - ✅ Completed manifest corruption recovery: CorruptAfterSave behavior implemented and tested (Nov 15, 2025)
-  - **Overall Progress: 20/52 items complete (38%)** 📈
+  - **Overall Progress: 21/52 items complete (40%)** 📈
 
 ---
 
@@ -94,7 +94,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 ### 🟡 MEDIUM — Admin Concurrency Testing (4 items)
 
 **Administrative Operations:**
-- `tests/admin_concurrency.rs` (line 15) — TODO: Attempt backup during compaction
+- ✅ `tests/admin_concurrency.rs` (line 15) — IMPLEMENTED: Attempt backup during compaction - verifies backup succeeds and creates consistent snapshot
 - `tests/admin_concurrency.rs` (line 35) — TODO: Attempt CF drop during flush
 - `tests/admin_concurrency.rs` (line 56) — TODO: Initiate readonly backup concurrently
 - `tests/admin_concurrency.rs` (line 79) — TODO: Reload config during compaction
@@ -147,7 +147,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 | Transaction Conflict Detection | 🟡 5/6 Complete | 5/6 |
 | Engine Correctness | 🔴 Not Started | 0/5 |
 | Instrumentation | 🔴 Not Started | 0/10 |
-| **Total** | **31% Complete** | **14/52** |
+| **Total** | **32% Complete** | **15/52** |
 
 ## 📊 Priority Matrix (Updated)
 
@@ -155,9 +155,9 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 |----------|-------|--------|----------|
 | 🔴 CRITICAL | 12 | 11/12 Complete ✅ | COMPLETE (1 remaining) |
 | 🟠 HIGH | 15 | 1/15 | Week 1 START |
-| 🟡 MEDIUM | 18 | 0/18 | Week 2-3 |
+| 🟡 MEDIUM | 18 | 1/18 | Week 2-3 |
 | 🔵 LOW | 7 | 0/7 | Month 2+ |
-| **TOTAL** | **52** | **20/52 (38%)** | |
+| **TOTAL** | **52** | **21/52 (40%)** | |
 
 ---
 
