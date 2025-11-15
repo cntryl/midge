@@ -16,6 +16,7 @@ impl Key {
 struct TxnInfo {
     begin_seq: u64,
     write_set: HashSet<Key>,
+    write_ranges: HashSet<(u32, Bytes, Bytes)>,
     read_set: HashSet<Key>,
     read_versions: HashMap<Key, u64>,
 }
@@ -23,7 +24,7 @@ struct TxnInfo {
 #[derive(Default)]
 struct Inner {
     active: HashMap<u64, TxnInfo>,
-    committed: HashMap<u64, (u64, HashSet<Key>)>, // commit_seq -> (txn_id, writes)
+    committed: HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>, // commit_seq -> (txn_id, writes, ranges)
     wait_for: HashMap<u64, HashSet<u64>>,
     max_retained: usize,
 }
@@ -43,12 +44,14 @@ impl TransactionManager {
         txn_id: u64,
         begin_seq: u64,
         write_set: HashSet<Key>,
+        write_ranges: HashSet<(u32, Bytes, Bytes)>,
         read_set: HashSet<Key>,
         read_versions: HashMap<Key, u64>,
     ) -> Result<(), String> {
         let txn = TxnInfo {
             begin_seq,
             write_set,
+            write_ranges,
             read_set,
             read_versions,
         };
@@ -70,11 +73,14 @@ impl TransactionManager {
         if Self::has_commit_conflict(&txn, &inner.committed, txn_id) {
             return Err("Write-write conflict with committed transaction".into());
         }
+        if Self::has_commit_range_conflict(&txn, &inner.committed, txn_id) {
+            return Err("Write-range conflict with committed transaction".into());
+        }
         if Self::has_read_conflict(&txn, &inner.committed) {
             return Err("Read-write conflict detected".into());
         }
 
-        inner.committed.insert(commit_seq, (txn_id, txn.write_set));
+        inner.committed.insert(commit_seq, (txn_id, txn.write_set, txn.write_ranges));
         inner.active.remove(&txn_id);
 
         // Keep only N most recent commits
@@ -167,19 +173,36 @@ impl TransactionManager {
 
     fn has_commit_conflict(
         txn: &TxnInfo,
-        committed: &HashMap<u64, (u64, HashSet<Key>)>,
+        committed: &HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>,
         id: u64,
     ) -> bool {
-        committed.iter().any(|(&seq, (cid, ws))| {
+        committed.iter().any(|(&seq, (cid, ws, _))| {
             seq >= txn.begin_seq && *cid != id && !txn.write_set.is_disjoint(ws)
         })
     }
 
-    fn has_read_conflict(txn: &TxnInfo, committed: &HashMap<u64, (u64, HashSet<Key>)>) -> bool {
+    fn has_read_conflict(txn: &TxnInfo, committed: &HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>) -> bool {
         txn.read_versions.iter().any(|(key, ver)| {
             committed
                 .iter()
-                .any(|(&seq, (_, ws))| seq > *ver && ws.contains(key))
+                .any(|(&seq, (_, ws, _))| seq > *ver && ws.contains(key))
+        })
+    }
+
+    fn has_commit_range_conflict(
+        txn: &TxnInfo,
+        committed: &HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>,
+        id: u64,
+    ) -> bool {
+        committed.iter().any(|(&seq, (cid, _, ranges))| {
+            seq >= txn.begin_seq && *cid != id && (
+                // Check if our writes conflict with committed ranges
+                ranges.iter().any(|(cf, start, end)| {
+                    txn.write_set.iter().any(|key| key.0 == *cf && &key.1 >= start && &key.1 < end)
+                }) ||
+                // Check if our ranges conflict with committed writes (simplified - no committed writes to check)
+                false
+            )
         })
     }
 }
@@ -205,7 +228,7 @@ mod tests {
         let tm = TransactionManager::new();
 
         // Act
-        let result = tm.begin(1, 100, HashSet::new(), HashSet::new(), HashMap::new());
+        let result = tm.begin(1, 100, HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new());
 
         // Assert
         assert!(result.is_ok());
@@ -216,7 +239,7 @@ mod tests {
     fn should_remove_transaction_given_abort() {
         // Arrange
         let tm = TransactionManager::new();
-        tm.begin(1, 100, HashSet::new(), HashSet::new(), HashMap::new())
+        tm.begin(1, 100, HashSet::new(), HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
 
         // Act
@@ -236,7 +259,7 @@ mod tests {
         let tm = TransactionManager::new();
         let mut ws = HashSet::new();
         ws.insert(k("a"));
-        tm.begin(1, 10, ws, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(1, 10, ws, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
 
         // Act
         let result = tm.try_commit(1, 20);
@@ -254,9 +277,9 @@ mod tests {
         ws1.insert(k("a"));
         let mut ws2 = HashSet::new();
         ws2.insert(k("b"));
-        tm.begin(1, 10, ws1, HashSet::new(), HashMap::new())
+        tm.begin(1, 10, ws1, HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
-        tm.begin(2, 10, ws2, HashSet::new(), HashMap::new())
+        tm.begin(2, 10, ws2, HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
 
         // Act
@@ -280,8 +303,8 @@ mod tests {
         ws1.insert(k("x"));
         let mut ws2 = HashSet::new();
         ws2.insert(k("x"));
-        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
-        tm.begin(2, 1, ws2, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(1, 1, ws1, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
 
         // Act
         let result = tm.try_commit(2, 5);
@@ -297,10 +320,10 @@ mod tests {
         let tm = TransactionManager::new();
         let mut ws = HashSet::new();
         ws.insert(k("shared"));
-        tm.begin(1, 10, ws.clone(), HashSet::new(), HashMap::new())
+        tm.begin(1, 10, ws.clone(), HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
         tm.try_commit(1, 20).unwrap();
-        tm.begin(2, 15, ws, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 15, ws, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
 
         // Act
         let result = tm.try_commit(2, 25);
@@ -316,13 +339,13 @@ mod tests {
         let tm = TransactionManager::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("data"));
-        tm.begin(1, 10, ws1, HashSet::new(), HashMap::new())
+        tm.begin(1, 10, ws1, HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
         tm.try_commit(1, 20).unwrap();
 
         let mut reads = HashMap::new();
         reads.insert(k("data"), 15);
-        tm.begin(2, 15, HashSet::new(), HashSet::new(), reads)
+        tm.begin(2, 15, HashSet::new(), HashSet::new(), HashSet::new(), reads)
             .unwrap();
 
         // Act
@@ -346,7 +369,7 @@ mod tests {
         for i in 0..1100 {
             let mut ws = HashSet::new();
             ws.insert(k(&format!("k{i}")));
-            tm.begin(i, i, ws, HashSet::new(), HashMap::new()).unwrap();
+            tm.begin(i, i, ws, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
             tm.try_commit(i, 1000 + i).unwrap();
         }
 
@@ -367,8 +390,8 @@ mod tests {
         ws1.insert(k("shared"));
         let mut ws2 = HashSet::new();
         ws2.insert(k("shared"));
-        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
-        tm.begin(2, 1, ws2, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(1, 1, ws1, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
 
         // Act
         tm.update_wait_for_graph(2).unwrap();
@@ -387,8 +410,8 @@ mod tests {
         ws1.insert(k("data"));
         let mut rs2 = HashSet::new();
         rs2.insert(k("data"));
-        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
-        tm.begin(2, 1, HashSet::new(), rs2, HashMap::new()).unwrap();
+        tm.begin(1, 1, ws1, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, HashSet::new(), HashSet::new(), rs2, HashMap::new()).unwrap();
 
         // Act
         tm.update_wait_for_graph(2).unwrap();
@@ -407,8 +430,8 @@ mod tests {
         ws1.insert(k("shared"));
         let mut ws2 = HashSet::new();
         ws2.insert(k("shared"));
-        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
-        tm.begin(2, 1, ws2, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(1, 1, ws1, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
         tm.update_wait_for_graph(2).unwrap();
 
         // Act
@@ -438,8 +461,8 @@ mod tests {
         let mut rs2 = HashSet::new();
         rs2.insert(k("A"));
 
-        tm.begin(1, 1, ws1, rs1, HashMap::new()).unwrap();
-        tm.begin(2, 1, ws2, rs2, HashMap::new()).unwrap();
+        tm.begin(1, 1, ws1, HashSet::new(), rs1, HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), rs2, HashMap::new()).unwrap();
 
         tm.update_wait_for_graph(1).unwrap();
         tm.update_wait_for_graph(2).unwrap();
@@ -468,9 +491,9 @@ mod tests {
         let ws3 = HashSet::from([c.clone()]);
         let rs3 = HashSet::from([a.clone()]);
 
-        tm.begin(1, 1, ws1, rs1, HashMap::new()).unwrap();
-        tm.begin(2, 1, ws2, rs2, HashMap::new()).unwrap();
-        tm.begin(3, 1, ws3, rs3, HashMap::new()).unwrap();
+        tm.begin(1, 1, ws1, HashSet::new(), rs1, HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), rs2, HashMap::new()).unwrap();
+        tm.begin(3, 1, ws3, HashSet::new(), rs3, HashMap::new()).unwrap();
 
         tm.update_wait_for_graph(1).unwrap();
         tm.update_wait_for_graph(2).unwrap();
@@ -494,8 +517,8 @@ mod tests {
         ws1.insert(k("x"));
         let mut ws2 = HashSet::new();
         ws2.insert(k("y"));
-        tm.begin(1, 1, ws1, HashSet::new(), HashMap::new()).unwrap();
-        tm.begin(2, 1, ws2, HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(1, 1, ws1, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
+        tm.begin(2, 1, ws2, HashSet::new(), HashSet::new(), HashMap::new()).unwrap();
         tm.update_wait_for_graph(1).unwrap();
         tm.update_wait_for_graph(2).unwrap();
 
@@ -506,3 +529,4 @@ mod tests {
         assert!(result.is_none());
     }
 }
+

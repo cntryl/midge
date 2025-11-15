@@ -84,6 +84,9 @@ impl Transaction {
     pub(crate) fn track_write(&mut self, cf: u32, key: Bytes) {
         self.conflicts.track_write(cf, key);
     }
+    pub(crate) fn track_write_range(&mut self, cf: u32, start_key: Bytes, end_key: Bytes) {
+        self.conflicts.track_write_range(cf, start_key, end_key);
+    }
 
     // -------------------------------------------------------------------------
     // Spill management
@@ -128,7 +131,22 @@ impl Transaction {
         if self.completed {
             return Err(MidgeError::internal("cannot modify completed transaction"));
         }
-        self.track_write(cf.as_u32(), key);
+
+        // Track the operation for conflict detection
+        match m.op {
+            crate::api::MutationOp::DeleteRange => {
+                if let Some(end_key) = &m.range_end {
+                    self.track_write_range(cf.as_u32(), key, end_key.clone());
+                } else {
+                    // Fallback to tracking just the start key if no end key
+                    self.track_write(cf.as_u32(), key);
+                }
+            }
+            _ => {
+                self.track_write(cf.as_u32(), key);
+            }
+        }
+
         self.staged.push(m);
         self.maybe_spill()
     }
@@ -302,6 +320,11 @@ impl Transaction {
     /// Return a clone of the tracked write set for external conflict checks.
     pub(crate) fn conflict_write_set(&self) -> std::collections::HashSet<(u32, Bytes)> {
         self.conflicts.write_set().clone()
+    }
+
+    /// Return a clone of the tracked write ranges for external conflict checks.
+    pub(crate) fn conflict_write_ranges(&self) -> &std::collections::HashSet<(u32, Bytes, Bytes)> {
+        self.conflicts.write_ranges()
     }
 
     /// Return a clone of the tracked read set for external conflict checks.

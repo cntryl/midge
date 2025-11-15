@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 /// The tracker maintains:
 /// - Read set: Keys that have been read by the transaction
 /// - Write set: Keys that have been modified by the transaction  
+/// - Write ranges: Ranges that have been modified by the transaction
 /// - Read versions: Sequence numbers at which keys were read
 ///
 /// This enables optimistic concurrency control by detecting conflicts at commit time.
@@ -22,6 +23,9 @@ pub struct ConflictTracker {
     /// Keys that have been written (cf_id, key)
     write_set: HashSet<(u32, Bytes)>,
 
+    /// Ranges that have been written (cf_id, start_key, end_key)
+    write_ranges: HashSet<(u32, Bytes, Bytes)>,
+
     /// Sequence numbers at which keys were read (cf_id, key) -> version
     read_versions: HashMap<(u32, Bytes), u64>,
 }
@@ -32,6 +36,7 @@ impl ConflictTracker {
         Self {
             read_set: HashSet::new(),
             write_set: HashSet::new(),
+            write_ranges: HashSet::new(),
             read_versions: HashMap::new(),
         }
     }
@@ -53,9 +58,22 @@ impl ConflictTracker {
         self.write_set.insert((cf_id, key));
     }
 
+    /// Track a range write operation for conflict detection.
+    ///
+    /// Records that the transaction modified the given key range.
+    /// This is used to detect write-write conflicts during commit.
+    pub fn track_write_range(&mut self, cf_id: u32, start_key: Bytes, end_key: Bytes) {
+        self.write_ranges.insert((cf_id, start_key, end_key));
+    }
+
     /// Get the write set (keys modified by this transaction).
     pub fn write_set(&self) -> &HashSet<(u32, Bytes)> {
         &self.write_set
+    }
+
+    /// Get the write ranges (ranges modified by this transaction).
+    pub fn write_ranges(&self) -> &HashSet<(u32, Bytes, Bytes)> {
+        &self.write_ranges
     }
 
     /// Get the read set (keys read by this transaction).
@@ -82,16 +100,46 @@ impl ConflictTracker {
         !self.write_set.is_disjoint(other_writes)
     }
 
+    /// Check if there's a write-write conflict with given write ranges.
+    ///
+    /// Returns true if this transaction's write set overlaps with the provided write ranges.
+    pub fn has_write_range_conflict(&self, other_ranges: &HashSet<(u32, Bytes, Bytes)>) -> bool {
+        // Check if any of our individual writes conflict with the other transaction's ranges
+        for (cf, key) in &self.write_set {
+            for (other_cf, start, end) in other_ranges {
+                if cf == other_cf && key >= start && key < end {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if there's a write-write conflict between two range sets.
+    ///
+    /// Returns true if the ranges overlap.
+    pub fn has_range_range_conflict(&self, other_ranges: &HashSet<(u32, Bytes, Bytes)>) -> bool {
+        for (cf, start, end) in &self.write_ranges {
+            for (other_cf, other_start, other_end) in other_ranges {
+                if cf == other_cf && ranges_overlap(start, end, other_start, other_end) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Clear all tracked operations.
     pub fn clear(&mut self) {
         self.read_set.clear();
         self.write_set.clear();
+        self.write_ranges.clear();
         self.read_versions.clear();
     }
 
     /// Check if any operations have been tracked.
     pub fn is_empty(&self) -> bool {
-        self.read_set.is_empty() && self.write_set.is_empty()
+        self.read_set.is_empty() && self.write_set.is_empty() && self.write_ranges.is_empty()
     }
 
     /// Get the number of read operations tracked.
@@ -101,8 +149,14 @@ impl ConflictTracker {
 
     /// Get the number of write operations tracked.
     pub fn write_count(&self) -> usize {
-        self.write_set.len()
+        self.write_set.len() + self.write_ranges.len()
     }
+}
+
+/// Check if two key ranges overlap.
+/// Returns true if the ranges [start1, end1) and [start2, end2) overlap.
+fn ranges_overlap(start1: &[u8], end1: &[u8], start2: &[u8], end2: &[u8]) -> bool {
+    start1 < end2 && start2 < end1
 }
 
 impl Default for ConflictTracker {

@@ -49,9 +49,8 @@ fn should_prevent_dirty_write_given_uncommitted_update_when_read_committed() {
         engine.commit_transaction(second_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
-    // second_txn should be able to commit (no locking currently)
-    assert!(second_result.is_ok());
-    // TODO: Should prevent dirty write when locking is implemented
+    // With conflict detection implemented, dirty writes are prevented
+    assert!(second_result.is_err(), "Should prevent dirty write with conflict detection");
 
     drop(first_txn);
 }

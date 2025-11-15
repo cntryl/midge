@@ -134,8 +134,8 @@ fn should_detect_conflict_on_delete_range_given_overlapping_keys() {
     // Assert
     assert!(range_result.is_ok());
     assert!(
-        overlap_result.is_ok(),
-        "TODO: implement conflict detection for overlapping ranges"
+        overlap_result.is_err(),
+        "Transaction should fail due to range conflict with delete_range operation"
     );
 }
 

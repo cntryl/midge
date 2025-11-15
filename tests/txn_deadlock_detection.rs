@@ -80,10 +80,12 @@ fn should_abort_victim_transaction_given_deadlock_when_detected() {
 
     // Assert
     // One transaction should be chosen as victim and aborted
-    // Currently no deadlock detection
-    // TODO: Verify one is aborted with deadlock error
-    let _ = first_deadlock_result;
-    let _ = second_deadlock_result;
+    // With conflict detection implemented, exactly one should succeed and one should fail
+    assert!(
+        (first_deadlock_result.is_ok() && second_deadlock_result.is_err()) ||
+        (first_deadlock_result.is_err() && second_deadlock_result.is_ok()),
+        "Exactly one transaction should succeed, the other should fail due to conflict"
+    );
 }
 
 #[test]
@@ -149,11 +151,15 @@ fn should_detect_deadlock_given_three_way_circular_dependency() {
         engine.commit_transaction(third_three_way_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
-    // Should detect 3-way deadlock: txn1->r2, txn2->r3, txn3->r1
-    // TODO: At least one should be aborted when deadlock detection is implemented
-    let _ = first_three_way_result;
-    let _ = second_three_way_result;
-    let _ = third_three_way_result;
+    // Should detect circular conflicts: at least one transaction should be aborted
+    let success_count = [first_three_way_result, second_three_way_result, third_three_way_result]
+        .iter()
+        .filter(|r| r.is_ok())
+        .count();
+    assert!(
+        success_count >= 1 && success_count < 3,
+        "At least one transaction should succeed, but not all three (circular conflicts should cause some failures)"
+    );
 }
 
 #[test]

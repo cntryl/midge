@@ -289,6 +289,7 @@ impl MidgeEngine {
                 .into_iter()
                 .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
                 .collect();
+        let write_ranges = txn.conflict_write_ranges().clone();
         let read_set: std::collections::HashSet<crate::core::transaction::manager::Key> =
             txn.conflict_read_set()
                 .into_iter()
@@ -305,7 +306,7 @@ impl MidgeEngine {
 
         let _ = self
             .txn_manager
-            .begin(txn_id, txn.begin_seq(), write_set, read_set, read_versions);
+            .begin(txn_id, txn.begin_seq(), write_set, write_ranges, read_set, read_versions);
         if let Err(_e) = self.txn_manager.try_commit(txn_id, commit_seq) {
             return Err(MidgeError::transaction_conflict("write conflict detected"));
         }
@@ -315,8 +316,38 @@ impl MidgeEngine {
             return Err(MidgeError::transaction_conflict("transaction timed out"));
         }
 
-        // Commit the transaction mutations
+        // Validate Compare-And-Swap operations
         let muts = txn.commit()?;
+        for mutation in &muts {
+            if let crate::api::mutation::MutationOp::CompareAndSwap = mutation.op {
+                // For CAS validation, we need to check the current value
+                // For now, assume default CF and create a handle
+                let cf_handle = crate::api::column_family::ColumnFamilyHandle::new(
+                    mutation.cf_id,
+                    "default".to_string() // TODO: Get actual CF name
+                );
+                let expected = mutation.range_end.as_ref();
+                let current = self.get(&cf_handle, &mutation.key)?;
+                match (expected, current) {
+                    (Some(exp), Some(cur)) => {
+                        if exp != &cur {
+                            return Err(MidgeError::transaction_conflict("CAS validation failed: value changed"));
+                        }
+                    }
+                    (None, Some(_)) => {
+                        return Err(MidgeError::transaction_conflict("CAS validation failed: expected no value but found one"));
+                    }
+                    (Some(_), None) => {
+                        return Err(MidgeError::transaction_conflict("CAS validation failed: expected value but found none"));
+                    }
+                    (None, None) => {
+                        // Both expect no value - OK
+                    }
+                }
+            }
+        }
+
+        // Commit the transaction mutations
         self.batch_internal(muts, opts.sync)
     }
 
@@ -438,3 +469,4 @@ impl MidgeEngine {
         self.transaction_get(txn, cf, key).map(|opt| opt.is_some())
     }
 }
+
