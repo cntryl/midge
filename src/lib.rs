@@ -60,6 +60,7 @@ pub use crate::api::{
     DynMergeOperator, IntegerAddOperator, KvStore, KvTransaction, MergeOperator, Mutation,
     MutationOp, Query, Snapshot, StringAppendOperator, WriteBatch, WriteOptions, DEFAULT_CF_ID,
     DEFAULT_CF_NAME,
+    transaction::IsolationLevel,
 };
 pub use crate::config::{
     CloudStorageBuilder, CompactionStyle, CompressionType, MidgeOptions, StorageMode,

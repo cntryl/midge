@@ -128,8 +128,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 ### 🟡 MEDIUM — Transaction Isolation (2 items)
 
 **Isolation Verification:**
-- `tests/transaction_isolation.rs` (line 97) — TODO: Verify conflict detection behavior based on isolation level
-- `tests/transaction_isolation.rs` (line 112) — TODO: Add snapshot.get() API to verify isolation
+✅ `tests/transaction_isolation.rs` (line 97) — IMPLEMENTED: Added tests to verify conflict detection under Snapshot vs ReadCommitted isolation
 
 ### 🟡 MEDIUM — Durability Recovery (1 item)
 

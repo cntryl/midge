@@ -255,10 +255,11 @@ impl MidgeEngine {
         _cf: &ColumnFamilyHandle,
         timeout: Option<std::time::Duration>,
         mem_limit: usize,
+        isolation: crate::api::IsolationLevel,
     ) -> MidgeResult<EngineTransaction> {
         let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
         let begin_sequence = self.seq.load(Ordering::SeqCst);
-        let txn = Transaction::with_options(txn_id, begin_sequence, timeout, mem_limit);
+        let txn = Transaction::with_options(txn_id, begin_sequence, timeout, mem_limit, isolation);
 
         // Register transaction with manager for conflict detection
         let _ = self.txn_manager.begin(
@@ -442,6 +443,14 @@ impl MidgeEngine {
         cf: &ColumnFamilyHandle,
         key: &[u8],
     ) -> MidgeResult<Option<Bytes>> {
+        // If the transaction requests read-committed isolation then don't use
+        // snapshot semantics — allow reading the current latest committed value
+        // and do not record read versions for conflict detection.
+        if txn.isolation() == crate::api::IsolationLevel::ReadCommitted {
+            // Reads are not tracked for conflict detection under read-committed
+            // semantics; use engine.get which reads the latest committed state.
+            return self.get(cf, key);
+        }
         let cf_id = cf.id();
 
         // First check transaction's local staged mutations

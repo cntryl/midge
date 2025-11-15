@@ -22,6 +22,21 @@ impl Snapshot {
             id,
         }
     }
+
+    /// Convenience helper to read a key at this snapshot.
+    ///
+    /// This calls `engine.get_at(cf, key, snapshot)` for callers that already
+    /// hold a snapshot and prefer a succinct way to read from it.
+    ///
+    /// Returns the value visible at the snapshot (respecting MVCC semantics).
+    pub fn get(
+        &self,
+        engine: &crate::MidgeEngine,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+        key: &[u8],
+    ) -> crate::MidgeResult<Option<bytes::Bytes>> {
+        engine.get_at(cf, key, self)
+    }
 }
 
 impl Drop for Snapshot {

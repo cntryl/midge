@@ -9,6 +9,7 @@ pub mod merge_operator;
 pub mod mutation;
 pub mod query;
 pub mod snapshot;
+pub mod transaction;
 pub mod write_batch;
 pub mod write_options;
 
@@ -23,6 +24,7 @@ pub use merge_operator::{
 pub use mutation::{Mutation, MutationOp};
 pub use query::Query;
 pub use snapshot::Snapshot;
+pub use transaction::IsolationLevel;
 // Transaction is now internal - use EngineTransaction exported from lib.rs
 pub use write_batch::WriteBatch;
 pub use write_options::WriteOptions;

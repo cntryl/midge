@@ -32,6 +32,56 @@ fn should_read_uncommitted_value_given_put_in_same_transaction_when_read() {
 }
 
 #[test]
+fn should_detect_read_write_conflict_under_snapshot() {
+    // Arrange
+    let (_dir, eng) = new_engine();
+    let cf = eng.default_column_family();
+    eng.put(&cf, b"rw_key", b"initial").expect("put");
+
+    // Act - start a transaction with default Snapshot isolation and read key
+    let mut txn_a = eng.begin_transaction(&cf).expect("begin");
+    let _ = txn_a.get(b"rw_key").expect("get");
+
+    // Another transaction updates and commits
+    let mut txn_b = eng.begin_transaction(&cf).expect("begin");
+    txn_b.put(b"rw_key", b"updated").expect("put");
+    assert!(eng.commit_transaction(txn_b, WriteOptions::default()).is_ok());
+
+    // Act - now txn_a tries to commit a write, should conflict due to read-write
+    txn_a.put(b"some_key", b"value").expect("put");
+    let res = eng.commit_transaction(txn_a, WriteOptions::default());
+
+    // Assert
+    assert!(res.is_err(), "Snapshot isolation should detect read-write conflict");
+}
+
+#[test]
+fn should_allow_commit_under_read_committed_when_other_commits() {
+    // Arrange - setup and initial value
+    let (_dir, eng) = new_engine();
+    let cf = eng.default_column_family();
+    eng.put(&cf, b"rw_key", b"initial").expect("put");
+
+    // Act - start txn with ReadCommitted isolation and read key
+    let mut txn_a = eng
+        .begin_transaction_with_options(&cf, None, 1024 * 1024, cntryl_midge::IsolationLevel::ReadCommitted)
+        .expect("begin");
+    let _ = txn_a.get(b"rw_key").expect("get");
+
+    // Another transaction updates and commits
+    let mut txn_b = eng.begin_transaction(&cf).expect("begin");
+    txn_b.put(b"rw_key", b"updated").expect("put");
+    assert!(eng.commit_transaction(txn_b, WriteOptions::default()).is_ok());
+
+    // Act - txn_a tries to commit and should NOT be treated as conflicting
+    txn_a.put(b"some_key", b"value").expect("put");
+    let res = eng.commit_transaction(txn_a, WriteOptions::default());
+
+    // Assert - should succeed for read committed
+    assert!(res.is_ok(), "ReadCommitted should not track reads and should allow commit");
+}
+
+#[test]
 fn should_not_see_uncommitted_write_given_other_transaction_when_read() {
     // Arrange
     let (_dir, eng) = new_engine();
@@ -105,12 +155,14 @@ fn should_return_old_value_given_snapshot_created_before_write() {
     eng.put(&cf, b"key1", b"original").expect("put");
 
     // Act - create snapshot, then update value
-    let _snapshot = eng.snapshot();
+    let snap = eng.snapshot();
     eng.put(&cf, b"key1", b"updated").expect("update");
 
-    // Assert - snapshot should see old value (once snapshot API is fully implemented)
-    // TODO: Add snapshot.get() API to verify isolation
-    // For now, verify main engine sees new value
+    // Assert - snapshot should see old value and engine should see new value
+    let snap_val = snap.get(&eng, &cf, b"key1").expect("get at snapshot");
+    assert_eq!(snap_val.as_deref(), Some(&b"original"[..]));
+
+    // For backward-compat check the main engine sees the new value
     assert_get_equals(&eng, b"key1", b"updated");
 }
 

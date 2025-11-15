@@ -28,6 +28,7 @@ pub struct Transaction {
 
     // Conflict tracking
     conflicts: ConflictTracker,
+    isolation: crate::api::IsolationLevel,
 }
 
 impl Transaction {
@@ -35,7 +36,7 @@ impl Transaction {
     // Constructors
     // -------------------------------------------------------------------------
     pub fn new(txn_id: u64, begin_seq: u64) -> Self {
-        Self::with_options(txn_id, begin_seq, None, 100 * 1024 * 1024)
+        Self::with_options(txn_id, begin_seq, None, 100 * 1024 * 1024, crate::api::IsolationLevel::default())
     }
 
     pub fn with_options(
@@ -43,6 +44,7 @@ impl Transaction {
         begin_seq: u64,
         timeout: Option<Duration>,
         mem_limit: usize,
+        isolation: crate::api::IsolationLevel,
     ) -> Self {
         let created_at = Instant::now();
         let deadline = timeout.map(|t| created_at + t);
@@ -56,6 +58,7 @@ impl Transaction {
             mem_used: 0,
             spill: SpillManager::new(txn_id),
             conflicts: ConflictTracker::new(),
+            isolation,
         }
     }
 
@@ -86,6 +89,11 @@ impl Transaction {
     }
     pub(crate) fn track_write_range(&mut self, cf: u32, start_key: Bytes, end_key: Bytes) {
         self.conflicts.track_write_range(cf, start_key, end_key);
+    }
+
+    /// Transaction isolation mode.
+    pub(crate) fn isolation(&self) -> crate::api::IsolationLevel {
+        self.isolation
     }
 
     // -------------------------------------------------------------------------
@@ -579,7 +587,7 @@ mod tests {
     #[test]
     fn should_not_expire_given_deadline_not_reached() {
         // Arrange
-        let txn = Transaction::with_options(1, 100, Some(Duration::from_secs(10)), 1024);
+        let txn = Transaction::with_options(1, 100, Some(Duration::from_secs(10)), 1024, crate::api::IsolationLevel::default());
 
         // Act
         let expired = txn.is_expired();
@@ -591,7 +599,7 @@ mod tests {
     #[test]
     fn should_expire_given_deadline_exceeded() {
         // Arrange
-        let txn = Transaction::with_options(1, 100, Some(Duration::from_nanos(1)), 1024);
+        let txn = Transaction::with_options(1, 100, Some(Duration::from_nanos(1)), 1024, crate::api::IsolationLevel::default());
 
         // Act
         std::thread::sleep(Duration::from_millis(1));
@@ -722,7 +730,7 @@ mod tests {
     fn should_spill_to_disk_given_exceed_threshold_when_staging_writes() {
         // Arrange
         let memory_threshold = 100; // Very small threshold to trigger spill
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold, crate::api::IsolationLevel::default());
         let large_value = vec![b'x'; 200]; // Larger than threshold
 
         // Act
@@ -741,7 +749,7 @@ mod tests {
     fn should_read_from_spill_file_given_large_transaction_when_commit() {
         // Arrange
         let memory_threshold = 50;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold, crate::api::IsolationLevel::default());
         let value1 = vec![b'a'; 100];
         let value2 = vec![b'b'; 20];
 
@@ -768,7 +776,7 @@ mod tests {
     fn should_preserve_mutation_order_given_spill_and_memory_mutations() {
         // Arrange
         let memory_threshold = 50;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold, crate::api::IsolationLevel::default());
 
         // Act
         txn.put(b"key1", &[b'a'; 100]).unwrap(); // Spill
@@ -790,7 +798,7 @@ mod tests {
     fn should_handle_delete_operations_in_spill_file() {
         // Arrange
         let memory_threshold = 50;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold, crate::api::IsolationLevel::default());
 
         txn.put(b"key1", &[b'a'; 100]).unwrap();
         txn.delete(Bytes::from("key2")).unwrap(); // Small, stays in memory
@@ -810,7 +818,7 @@ mod tests {
     fn should_handle_delete_range_in_spill_file() {
         // Arrange
         let memory_threshold = 50;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold, crate::api::IsolationLevel::default());
 
         // Act
         txn.put(b"key1", &[b'a'; 100]).unwrap();
@@ -830,7 +838,7 @@ mod tests {
     fn should_spill_to_disk_given_exceed_memory_threshold() {
         // Arrange
         let memory_threshold = 1024; // 1KB threshold
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold, crate::api::IsolationLevel::default());
 
         // Act - Add 2KB of data (force spilling)
         for i in 0..2 {
@@ -850,7 +858,7 @@ mod tests {
     fn should_handle_large_values_in_spill() {
         // Arrange
         let memory_threshold = 256;
-        let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+        let mut txn = Transaction::with_options(1, 100, None, memory_threshold, crate::api::IsolationLevel::default());
 
         // Act - Write large value
         let large_value = vec![0xCC; 10000];
@@ -870,7 +878,7 @@ mod tests {
 
         // Act - Spill data then drop without committing
         {
-            let mut txn = Transaction::with_options(1, 100, None, memory_threshold);
+            let mut txn = Transaction::with_options(1, 100, None, memory_threshold, crate::api::IsolationLevel::default());
             txn.put(b"key", &vec![0; 1000]).unwrap();
             // Transaction dropped here without commit or rollback
         }

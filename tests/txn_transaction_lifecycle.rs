@@ -18,7 +18,7 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     let cf = engine.default_column_family();
 
     // Create transaction with a very short timeout (1ms)
-    let mut timeout_txn = engine.begin_transaction_with_options(&cf, Some(std::time::Duration::from_millis(1)), 1024 * 1024).unwrap();
+    let mut timeout_txn = engine.begin_transaction_with_options(&cf, Some(std::time::Duration::from_millis(1)), 1024 * 1024, cntryl_midge::IsolationLevel::default()).unwrap();
     timeout_txn.put(b"key", b"value").unwrap();
 
     // Sleep longer than the timeout
