@@ -106,13 +106,6 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - `tests/cloud_durability.rs` (line 70) — TODO: Test cloud mode with simulated network failures
 - `tests/cloud_durability.rs` (line 98) — TODO: Simulate cloud manifest drift
 
-### 🟡 MEDIUM — Configuration Management (3 items)
-
-**Runtime Config:**
-- `tests/config_validation.rs` (line 45) — TODO: Add API for runtime config updates
-- `tests/config_validation.rs` (line 62) — TODO: Add API for config reload
-- `tests/config_validation.rs` (line 68) — TODO: Add instrumentation to verify no component restarts occurred
-
 ### 🟡 MEDIUM — Compaction Observability (2 items)
 
 **Compaction Metrics:**
