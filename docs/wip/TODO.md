@@ -10,7 +10,8 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Implemented autotuner initialization from config (Nov 15, 2025)
   - ✅ Refactored in-memory WAL to NoOpWal for proper durability semantics (Nov 15, 2025)
   - ✅ Completed transaction conflict detection: write-write conflicts, deadlock detection, lost updates prevention, and isolation levels enforcement (Nov 15, 2025)
-  - **Overall Progress: 19/52 items complete (37%)** 📈
+  - ✅ Completed manifest corruption recovery: CorruptAfterSave behavior implemented and tested (Nov 15, 2025)
+  - **Overall Progress: 20/52 items complete (38%)** 📈
 
 ---
 
@@ -80,10 +81,10 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - `tests/txn_transaction_lifecycle.rs` (line 31) — TODO: Should timeout if transaction exceeds deadline
 - `tests/txn_transaction_lifecycle.rs` (line 55) — TODO: Verify locks released after timeout/abort
 
-### 🟠 HIGH — Manifest Corruption Recovery (1 item)
+### 🟠 HIGH — Manifest Corruption Recovery (1 item) ✅
 
 **Manifest Corruption:**
-- `src/core/manifest/io.rs` (line 187) — TODO: Implement CorruptAfterSave behavior if needed
+- ✅ `src/core/manifest/io.rs` (line 187) — IMPLEMENTED: CorruptAfterSave behavior corrupts manifest after fsync to test recovery boundaries
 
 ### 🟡 MEDIUM — Multi-CF Support (1 item)
 
@@ -160,10 +161,10 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 | Priority | Count | Status | Timeline |
 |----------|-------|--------|----------|
 | 🔴 CRITICAL | 12 | 11/12 Complete ✅ | COMPLETE (1 remaining) |
-| 🟠 HIGH | 15 | 0/15 | Week 1 START |
+| 🟠 HIGH | 15 | 1/15 | Week 1 START |
 | 🟡 MEDIUM | 18 | 0/18 | Week 2-3 |
 | 🔵 LOW | 7 | 0/7 | Month 2+ |
-| **TOTAL** | **52** | **19/52 (37%)** | |
+| **TOTAL** | **52** | **20/52 (38%)** | |
 
 ---
 

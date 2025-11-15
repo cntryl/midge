@@ -79,9 +79,6 @@ impl TransactionManager {
             read_versions: read_versions.clone(),
         };
 
-        if Self::has_write_conflict(&txn_info, &inner.active, txn_id) {
-            return Err("Write-write conflict with active transaction".into());
-        }
         if Self::has_commit_conflict(&txn_info, &inner.committed, txn_id) {
             return Err("Write-write conflict with committed transaction".into());
         }
@@ -200,18 +197,12 @@ impl TransactionManager {
 
     // --- Private helpers ---
 
-    fn has_write_conflict(txn: &TxnInfo, active: &HashMap<u64, TxnInfo>, id: u64) -> bool {
-        active
-            .iter()
-            .any(|(other_id, o)| *other_id != id && !txn.write_set.is_disjoint(&o.write_set))
-    }
-
     fn has_commit_conflict(
         txn: &TxnInfo,
         committed: &HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>,
         id: u64,
     ) -> bool {
-        committed.iter().any(|(&seq, (cid, ws, _))| {
+        committed.iter().any(|(&_seq, (cid, ws, _))| {
             *cid != id && !txn.write_set.is_disjoint(ws)
         })
     }

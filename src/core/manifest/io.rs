@@ -184,12 +184,21 @@ impl Manifest {
             hooks.manifest_fsynced_before_wal_truncate();
         }
 
-        // TODO: Implement CorruptAfterSave behavior if needed
-        // if let Some(hooks) = test_hooks {
-        //     if hooks.manifest_behavior() == ManifestBehavior::CorruptAfterSave {
-        //         // Intentionally corrupt the manifest file
-        //     }
-        // }
+        // Implement CorruptAfterSave behavior for testing manifest corruption recovery
+        if let Some(hooks) = test_hooks {
+            if hooks.should_corrupt_manifest_after_save() {
+                // Intentionally corrupt the manifest file by truncating it to simulate corruption
+                println!("[diag-lib] corrupting manifest file for CorruptAfterSave test behavior");
+                if let Err(e) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&manifest_path)
+                {
+                    println!("[diag-lib] failed to corrupt manifest: {:?}", e);
+                    return Err(e.into());
+                }
+            }
+        }
 
         Ok(())
     }

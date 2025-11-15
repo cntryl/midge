@@ -2,7 +2,7 @@ mod common;
 use common::{
     assert_get_equals, durability_opts, flush_test_opts, test_temp_dir, with_engine_restart,
 };
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, test_hooks::{TestHooks, FsyncBehavior}, WalRecoveryMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, test_hooks::{TestHooks, FsyncBehavior, ManifestBehavior}, WalRecoveryMode};
 
 #[test]
 fn should_detect_and_ignore_already_compacted_wal_entries_given_manifest_sequence() {
@@ -175,7 +175,17 @@ fn should_recover_last_committed_state_given_crash_during_write() {
 fn should_rebuild_manifest_up_to_last_fsynced_sequence() {
     // Arrange
     let dir = test_temp_dir();
-    let opts = flush_test_opts(dir.path().to_path_buf(), 1024);
+    let hooks = TestHooks::new().with_manifest_behavior(ManifestBehavior::CorruptAfterSave);
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 1024,
+        wal_sync: true,
+        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
+        test_hooks: Some(hooks.clone()),
+        ..Default::default()
+    };
 
     // Act & Assert
     with_engine_restart(
@@ -186,7 +196,7 @@ fn should_rebuild_manifest_up_to_last_fsynced_sequence() {
                 eng.put(&cf, format!("key{:04}", i).as_bytes(), b"value")
                     .expect("put");
             }
-            // TODO: Corrupt manifest and verify rebuild stops at fsync boundary
+            // Manifest will be corrupted after save due to CorruptAfterSave behavior
         },
         |eng| {
             // Assert - rebuilt manifest should contain all fsynced data
