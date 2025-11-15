@@ -152,7 +152,6 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         for (k, h) in &s.offsets {
             s.index.add_index_entry(k.as_ref(), *h)?;
         }
-        eprintln!("DEBUG: Added {} index entries", s.offsets.len());
         let index_payload = s.index.finish();
         let index_block =
             Block::new(index_payload, BlockType::Index, CompressionType::None).encode()?;

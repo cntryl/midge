@@ -447,8 +447,6 @@ where
         ));
     }
 
-    eprintln!("DEBUG: Flushing {} entries and {} range tombstones", entries.len(), range_tombstones.len());
-
     let mut dyn_writer = config.sst_factory.create_with_bloom(
         config.compression,
         config.block_size,

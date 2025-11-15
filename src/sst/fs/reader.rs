@@ -412,18 +412,15 @@ impl SstFile {
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
 
         if let Some(block_handle) = sparse_index.find_block(key) {
-            eprintln!("DEBUG: Found block for key {:?}: offset={}, size={}", String::from_utf8_lossy(key), block_handle.offset, block_handle.size);
             if self.use_internal_keys {
                 // For internal-on-disk layout, reuse the snapshot-aware logic
                 // with an effectively infinite snapshot so any seq is visible.
                 return self.get_state_at_internal(key, u64::MAX);
             }
             let data_block = self.read_data_block(*block_handle)?;
-            eprintln!("DEBUG: Read data block successfully, size={}", data_block.data.len());
             return self.search_data_block_state(&data_block.data, key);
         }
 
-        eprintln!("DEBUG: No block found for key {:?}", String::from_utf8_lossy(key));
         Ok(KeyState::Absent)
     }
 
@@ -707,8 +704,6 @@ impl SstFile {
         let restarts_start = total_len - 4 - restarts_len;
         let entries_end = restarts_start;
 
-        eprintln!("DEBUG: Data block: version={}, num_restarts={}, restarts_start={}, entries_end={}", version, restart_count, restarts_start, entries_end);
-
         let restart_offset = binary_search_restart_points(
             data,
             restart_count,
@@ -718,7 +713,6 @@ impl SstFile {
             |d, offset, limit| self.parse_key_at_offset(d, offset, limit),
         );
 
-        eprintln!("DEBUG: Binary search found restart_offset={}", restart_offset);
         self.linear_search_data_block_state(data, restart_offset, entries_end, target_key)
     }
 
@@ -797,15 +791,10 @@ impl SstFile {
     ) -> MidgeResult<KeyState> {
         self.log_search_start(target_key, snapshot_seq, start_offset, limit, data.len());
 
-        eprintln!("DEBUG: Raw data block (first 100 bytes): {:?}", &data[start_offset..std::cmp::min(start_offset + 100, limit)]);
-        eprintln!("DEBUG: Data block length: {}", data.len());
-
         let mut entry_builder = BlockEntryBuilder::new(self.use_internal_keys);
         let now = now_millis();
         let mut entry_count = 0;
         let mut pos = start_offset;
-
-        eprintln!("DEBUG: Starting linear search for key {:?}, data range {}..{}", String::from_utf8_lossy(target_key), start_offset, limit);
 
         while pos < limit {
             // Read shared_len
@@ -859,13 +848,10 @@ impl SstFile {
                 now,
                 entry_count,
             )? {
-                eprintln!("DEBUG: Found matching entry for key {:?}", String::from_utf8_lossy(target_key));
                 return Ok(result);
             }
             entry_count += entry_builder.entry_count();
         }
-
-        eprintln!("DEBUG: Key {:?} not found in block after processing {} entries", String::from_utf8_lossy(target_key), entry_count);
         trace!(
             entry_count,
             "key not found in block"

@@ -211,20 +211,13 @@ impl<'a> Iterator for TlvBlockIterator<'a> {
     type Item = TlvEntryResult<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        eprintln!("DEBUG: TlvBlockIterator next, cursor={}, limit={}", self.cursor, self.limit);
         if self.cursor >= self.limit {
-            eprintln!("DEBUG: cursor >= limit, returning None");
             return None;
         }
 
-        eprintln!("DEBUG: calling decode at cursor {}", self.cursor);
         let entry = match decode(self.data, self.cursor, self.limit) {
-            Ok(e) => {
-                eprintln!("DEBUG: decoded entry: shared_len={}, key_delta_len={}, value_len={}", e.shared_len, e.key_delta.len(), e.value.as_ref().map(|v| v.len()).unwrap_or(0));
-                e
-            }
+            Ok(e) => e,
             Err(e) => {
-                eprintln!("DEBUG: decode error: {:?}", e);
                 return Some(Err(e));
             }
         };

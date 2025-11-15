@@ -435,10 +435,6 @@ impl DataBlockBuilder {
         internal_on_disk: bool,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        eprintln!("DEBUG: DataBlockBuilder add_with_meta key len: {}, key: {:?}", key.len(), key);
-        if let Some(v) = value {
-            eprintln!("DEBUG: value len: {}", v.len());
-        }
         if key.is_empty() {
             return Err(MidgeError::InvalidData("Key cannot be empty".into()));
         }
@@ -537,9 +533,6 @@ impl DataBlockBuilder {
             expiration,
         );
 
-        eprintln!("DEBUG: DataBlockBuilder adding entry: key={:?}, shared_len={}, key_delta_len={}, encoded_len={}", 
-            String::from_utf8_lossy(key), shared_len, key_delta.len(), encoded.len());
-
         self.buffer.extend_from_slice(&encoded);
 
         self.last_key.clear();
@@ -618,7 +611,6 @@ impl DataBlockBuilder {
 
         let buffer_len = self.buffer.len();
         let result = self.buffer.freeze();
-        eprintln!("DEBUG: DataBlockBuilder finish: buffer_len={}, result_len={}", buffer_len, result.len());
         result
     }
 

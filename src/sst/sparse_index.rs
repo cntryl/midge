@@ -51,28 +51,17 @@ impl SparseIndex {
     #[inline]
     pub fn find_block(&self, key: &[u8]) -> Option<&BlockHandle> {
         if self.entries.is_empty() {
-            eprintln!("DEBUG: SparseIndex entries is empty");
             return None;
-        }
-
-        eprintln!("DEBUG: SparseIndex find_block for key: {:?}", String::from_utf8_lossy(key));
-        eprintln!("DEBUG: SparseIndex entries count: {}", self.entries.len());
-        for (i, e) in self.entries.iter().enumerate() {
-            eprintln!("DEBUG: Entry {}: key={:?}", i, String::from_utf8_lossy(&e.key));
         }
 
         // partition_point finds the first index where predicate is false
         // predicate: entry.key <= key  => we want first entry.key > key
-        let idx = self.entries.partition_point(|e| e.key.as_ref() <= key);
-
-        eprintln!("DEBUG: partition_point returned idx: {}", idx);
+        let idx = self.entries.partition_point(|e| e.key.as_slice() <= key);
 
         // idx is now the first entry GREATER than key
         // We want the last entry LESS THAN OR EQUAL to key, which is idx - 1
         // saturating_sub handles idx == 0 case (returns 0)
         let block_idx = idx.saturating_sub(1);
-
-        eprintln!("DEBUG: block_idx: {}", block_idx);
 
         Some(&self.entries[block_idx].block_handle)
     }
