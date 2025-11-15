@@ -228,7 +228,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
             s.index.add_index_entry(k.as_ref(), *h)?;
         }
         let index = s.index.finish();
-        let index_payload = index.encode();
+        let index_payload = index;
         let index_block =
             Block::new(index_payload, BlockType::Index, CompressionType::None).encode()?;
         let index_off = s.offset;

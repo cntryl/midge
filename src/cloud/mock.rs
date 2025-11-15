@@ -25,6 +25,8 @@ pub struct MockCloudBackend {
     sst_download_count: AtomicUsize,
     /// If set, fail uploads after this many successful uploads
     fail_upload_after: AtomicUsize,
+    /// Simulated cloud manifest for drift testing
+    cloud_manifest: Mutex<Option<crate::core::manifest::Manifest>>,
 }
 
 static NEXT_ROOT_ID: AtomicU64 = AtomicU64::new(0);
@@ -56,12 +58,18 @@ impl MockCloudBackend {
             sst_upload_count: AtomicUsize::new(0),
             sst_download_count: AtomicUsize::new(0),
             fail_upload_after: AtomicUsize::new(usize::MAX),
+            cloud_manifest: Mutex::new(None),
         }
     }
 
     pub fn with_latency(mut self, latency: Duration) -> Self {
         self.latency = Some(latency);
         self
+    }
+
+    /// Set a simulated cloud manifest for drift testing
+    pub fn set_cloud_manifest(&self, manifest: crate::core::manifest::Manifest) {
+        *self.cloud_manifest.lock() = Some(manifest);
     }
 
     /// Get the number of successful uploads
@@ -153,11 +161,31 @@ impl StorageBackend for MockCloudBackend {
             self.sst_upload_count.fetch_add(1, Ordering::SeqCst);
         }
 
+        // If this is a manifest upload, store it for drift testing
+        if key == "manifest.json" {
+            match serde_json::from_slice(&data) {
+                Ok(manifest) => {
+                    *self.cloud_manifest.lock() = Some(manifest);
+                }
+                Err(e) => {
+                    eprintln!("Failed to parse uploaded manifest: {}", e);
+                }
+            }
+        }
+
         Ok(())
     }
 
     fn get_blob(&self, key: &str) -> MidgeResult<Bytes> {
         self.simulate_latency();
+
+        // Special handling for manifest.json - return the cloud manifest if set
+        if key == "manifest.json" {
+            if let Some(ref manifest) = *self.cloud_manifest.lock() {
+                let data = serde_json::to_vec_pretty(manifest)?;
+                return Ok(Bytes::from(data));
+            }
+        }
 
         // Track SST downloads
         if Self::is_sst_key(key) {

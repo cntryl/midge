@@ -11,10 +11,10 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Refactored in-memory WAL to NoOpWal for proper durability semantics (Nov 15, 2025)
   - ✅ Completed transaction conflict detection: write-write conflicts, deadlock detection, lost updates prevention, and isolation levels enforcement (Nov 15, 2025)
   - ✅ Completed manifest corruption recovery: CorruptAfterSave behavior implemented and tested (Nov 15, 2025)
-  - ✅ Implemented CF drop during flush concurrency test (Nov 15, 2025)
-  - **Overall Progress: 24/52 items complete (46%)** 📈
-
----
+- ✅ Implemented CF drop during flush concurrency test (Nov 15, 2025)
+- ✅ Completed compaction observability: determinism verification via logical data hashing and write amplification monitoring via SST size tracking (Nov 15, 2025)
+- ✅ Implemented cloud manifest drift simulation for durability testing (Nov 15, 2025)
+- **Overall Progress: 27/52 items complete (52%)** 📈---
 
 ## 🎯 Completed Items (Nov 2025)
 
@@ -105,13 +105,13 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 **Cloud Storage:**
 - ✅ `tests/cloud_durability.rs` (line 48) — IMPLEMENTED: Test cloud mode with mock backend to verify upload retry logic
 - ✅ `tests/cloud_durability.rs` (line 70) — IMPLEMENTED: Test cloud mode with simulated network failures
-- `tests/cloud_durability.rs` (line 98) — TODO: Simulate cloud manifest drift
+- ✅ `tests/cloud_durability.rs` (line 98) — IMPLEMENTED: Simulate cloud manifest drift
 
-### 🟡 MEDIUM — Compaction Observability (2 items)
+### 🟡 MEDIUM — Compaction Observability (2 items) ✅
 
 **Compaction Metrics:**
-- `tests/compaction_correctness.rs` (line 35) — TODO: Capture compaction output hash/checksum for determinism verification
-- `tests/compaction_correctness.rs` (line 139) — TODO: Monitor write amplification metrics
+- ✅ `tests/compaction_correctness.rs` (line 35) — IMPLEMENTED: Capture compaction output hash/checksum for determinism verification
+- ✅ `tests/compaction_correctness.rs` (line 139) — IMPLEMENTED: Monitor write amplification metrics
 
 ### 🟡 MEDIUM — Sequence Number Validation (2 items)
 

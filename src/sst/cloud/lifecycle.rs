@@ -116,6 +116,11 @@ impl CloudSstManager {
         Ok(Self { config, backend })
     }
 
+    /// Get the cloud storage backend for direct access.
+    pub fn backend(&self) -> &Arc<dyn StorageBackend> {
+        &self.backend
+    }
+
     /// Upload an SST's bytes with provided metadata.
     pub fn upload(&self, meta: SstUploadMeta, bytes: &[u8]) -> MidgeResult<SstMetadata> {
         let key = self.sst_key(&meta.sst_id);

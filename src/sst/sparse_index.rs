@@ -56,7 +56,7 @@ impl SparseIndex {
 
         // partition_point finds the first index where predicate is false
         // predicate: entry.key <= key  => we want first entry.key > key
-        let idx = self.entries.partition_point(|e| e.key.as_slice() <= key);
+        let idx = self.entries.partition_point(|e| e.key.as_ref() <= key);
 
         // idx is now the first entry GREATER than key
         // We want the last entry LESS THAN OR EQUAL to key, which is idx - 1

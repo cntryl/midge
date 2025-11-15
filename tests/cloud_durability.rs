@@ -2,6 +2,9 @@ mod common;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use cntryl_midge::cloud::mock::MockCloudBackend;
 use cntryl_midge::config::cloud::StorageContext;
+use cntryl_midge::core::manifest::{FileMeta, Manifest};
+use cntryl_midge::common::timestamp;
+use cntryl_midge::sst::cloud::SstLifecycleState;
 use common::test_temp_dir;
 use std::sync::Arc;
 
@@ -133,14 +136,36 @@ fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_r
     eng.wait_for_flush(std::time::Duration::from_secs(5))
         .expect("wait for flush");
 
+    // Simulate cloud manifest drift by creating a different manifest in cloud
+    let local_manifest = eng.get_manifest();
+    let mut drifted_manifest = local_manifest.clone();
+    // Add a fake SST to simulate drift
+    let fake_file = FileMeta {
+        name: "fake_drifted_sst.sst".to_string(),
+        level: 0,
+        cf_id: cf.id().as_u32(),
+        size_bytes: 1024,
+        smallest_key: Some(b"drift_key".to_vec()),
+        largest_key: Some(b"drift_key".to_vec()),
+        smallest_seq: Some(1000),
+        largest_seq: Some(1000),
+        sublevel: 0,
+        cloud_location: Some("fake_location".to_string()),
+        cloud_checksum: Some(12345),
+        cloud_uploaded_at: Some(std::time::SystemTime::now()),
+        cloud_state: Some(SstLifecycleState::Active),
+        point_tombstone_count: 0,
+        range_tombstone_count: 0,
+        total_entries: 1,
+    };
+    drifted_manifest.files.push(fake_file);
+    mock_backend.set_cloud_manifest(drifted_manifest);
+
     // Run check_cloud command
     let inconsistencies = eng.check_cloud().expect("check cloud should complete");
 
-    // Assert
-    // check_cloud should complete without error
-    // In the current implementation, it may return 0, but the operation should work
-    // This test establishes the API and can be enhanced when drift detection is implemented
-    let _ = inconsistencies; // Use the result to avoid unused variable warning
+    // Assert that inconsistencies were detected
+    assert!(inconsistencies > 0, "Should detect cloud manifest drift");
 
     // Verify data remains accessible
     for i in 0..50 {

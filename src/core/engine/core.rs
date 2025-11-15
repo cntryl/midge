@@ -160,7 +160,7 @@ impl MidgeEngine {
     /// OPTIMIZATION: Avoids disk I/O on every read operation
     /// Delegates to ManifestCache which clones to avoid holding RwLock during SST iteration
     #[inline]
-    pub(crate) fn get_manifest(&self) -> Manifest {
+    pub fn get_manifest(&self) -> Manifest {
         self.manifest_cache.get()
     }
 

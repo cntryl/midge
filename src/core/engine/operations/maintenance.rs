@@ -571,24 +571,59 @@ impl MidgeEngine {
             return Ok(0);
         }
 
-        let _cloud_mgr = self.cloud_sst_manager.as_ref().unwrap();
-        let manifest = self.manifest_cache.get();
+        let cloud_mgr = self.cloud_sst_manager.as_ref().unwrap();
+        let local_manifest = self.manifest_cache.get();
 
-        debug!("check_cloud: checking {} files in manifest", manifest.files.len());
+        debug!("check_cloud: checking {} files in local manifest", local_manifest.files.len());
 
-        // For now, implement a basic check that counts SSTs marked as uploaded
-        // In a full implementation, this would verify against actual cloud storage
-        let mut uploaded_count = 0;
-        for file_meta in &manifest.files {
-            if file_meta.cloud_location.is_some() {
-                uploaded_count += 1;
+        // Download manifest from cloud
+        let cloud_manifest_bytes = match cloud_mgr.backend().get_blob("manifest.json") {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                debug!("check_cloud: failed to download cloud manifest: {}", e);
+                return Ok(0); // No cloud manifest to compare against
+            }
+        };
+
+        let cloud_manifest: crate::core::manifest::Manifest = match serde_json::from_slice(cloud_manifest_bytes.as_ref()) {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                debug!("check_cloud: failed to parse cloud manifest: {}", e);
+                return Ok(0); // Invalid cloud manifest
+            }
+        };
+
+        debug!("check_cloud: comparing with {} files in cloud manifest", cloud_manifest.files.len());
+
+        // Compare manifests - count differences
+        let mut inconsistencies = 0;
+
+        // Check for files in local manifest that are missing from cloud
+        for local_file in &local_manifest.files {
+            let exists_in_cloud = cloud_manifest.files.iter().any(|cloud_file| {
+                cloud_file.name == local_file.name
+            });
+            if !exists_in_cloud {
+                debug!("check_cloud: local file {} not found in cloud manifest", local_file.name);
+                inconsistencies += 1;
             }
         }
 
-        debug!("check_cloud: found {} SSTs marked as uploaded", uploaded_count);
+        // Check for files in cloud manifest that are missing from local
+        for cloud_file in &cloud_manifest.files {
+            let exists_locally = local_manifest.files.iter().any(|local_file| {
+                local_file.name == cloud_file.name
+            });
+            if !exists_locally {
+                debug!("check_cloud: cloud file {} not found in local manifest", cloud_file.name);
+                inconsistencies += 1;
+            }
+        }
 
-        // Placeholder: in a real implementation, this would check cloud storage
-        // For the test, we'll simulate drift detection
-        Ok(0)
+        debug!("check_cloud: found {} inconsistencies", inconsistencies);
+
+        // TODO: Implement reconciliation logic (download missing SSTs, update local manifest, etc.)
+
+        Ok(inconsistencies)
     }
 }
