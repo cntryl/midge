@@ -1,5 +1,7 @@
 mod common;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::cloud::mock::MockCloudBackend;
+use cntryl_midge::config::cloud::StorageContext;
 use common::{assert_get_equals, test_temp_dir};
 use std::sync::Arc;
 
@@ -52,31 +54,46 @@ fn should_preserve_local_file_given_upload_in_progress_when_crash() {
 fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_flaky() {
     // Arrange
     let dir = test_temp_dir();
+    let mock_backend = Arc::new(MockCloudBackend::new());
+    
+    // Configure mock to fail uploads after 2 successful ones (simulating network issues)
+    mock_backend.set_fail_upload_after(2);
+    
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
+        storage_mode: StorageMode::CloudBacked {
+            local_cache_path: dir.path().to_path_buf(),
+            cloud_backend: mock_backend.clone(),
+            storage_context: StorageContext::new("test"),
+            local_wal_sync: true,
+            wal_batch_size: 1024 * 1024, // 1MB
+            sst_cache_capacity: 10,
         },
+        memtable_size: 1024, // Small memtable to trigger flushes
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
     let cf = eng.default_column_family();
 
-    // Act - write data
+    // Act - write data that will trigger SST creation and uploads
     for i in 0..50 {
         eng.put(&cf, format!("key{:02}", i).as_bytes(), b"value")
             .expect("put");
     }
+    
+    // Force compaction to trigger SST uploads with simulated failures
+    eng.compact_range(&cf, ..).expect("compaction should succeed despite upload failures");
 
-    // TODO: Test cloud mode with simulated network failures
-    // Verify retries produce idempotent results
-
-    // Assert - data should be consistent
+    // Assert - data should be consistent despite upload retries/failures
     for i in 0..50 {
         let result = eng
             .get(&cf, format!("key{:02}", i).as_bytes())
             .expect("get");
-        assert!(result.is_some(), "Data should be available despite retries");
+        assert!(result.is_some(), "Data should be available despite upload failures");
     }
+    
+    // Verify that uploads were attempted (some succeeded, some failed)
+    assert!(mock_backend.upload_count() > 0, "Should have attempted uploads");
+    assert!(mock_backend.upload_failure_count() > 0, "Should have experienced upload failures");
 }
 
 #[test]

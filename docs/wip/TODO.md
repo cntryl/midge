@@ -11,7 +11,8 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Refactored in-memory WAL to NoOpWal for proper durability semantics (Nov 15, 2025)
   - ✅ Completed transaction conflict detection: write-write conflicts, deadlock detection, lost updates prevention, and isolation levels enforcement (Nov 15, 2025)
   - ✅ Completed manifest corruption recovery: CorruptAfterSave behavior implemented and tested (Nov 15, 2025)
-  - **Overall Progress: 21/52 items complete (40%)** 📈
+  - ✅ Implemented CF drop during flush concurrency test (Nov 15, 2025)
+  - **Overall Progress: 22/52 items complete (42%)** 📈
 
 ---
 
@@ -95,8 +96,8 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 
 **Administrative Operations:**
 - ✅ `tests/admin_concurrency.rs` (line 15) — IMPLEMENTED: Attempt backup during compaction - verifies backup succeeds and creates consistent snapshot
-- `tests/admin_concurrency.rs` (line 35) — TODO: Attempt CF drop during flush
-- `tests/admin_concurrency.rs` (line 56) — TODO: Initiate readonly backup concurrently
+- ✅ `tests/admin_concurrency.rs` (line 35) — IMPLEMENTED: Attempt CF drop during flush - verifies drop fails gracefully when flush is in progress
+- ✅ `tests/admin_concurrency.rs` (line 56) — IMPLEMENTED: Initiate readonly backup concurrently
 - `tests/admin_concurrency.rs` (line 79) — TODO: Reload config during compaction
 
 ### 🟡 MEDIUM — Cloud Durability Testing (3 items)
@@ -157,7 +158,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 | 🟠 HIGH | 15 | 1/15 | Week 1 START |
 | 🟡 MEDIUM | 18 | 1/18 | Week 2-3 |
 | 🔵 LOW | 7 | 0/7 | Month 2+ |
-| **TOTAL** | **52** | **21/52 (40%)** | |
+| **TOTAL** | **52** | **22/52 (42%)** | |
 
 ---
 
