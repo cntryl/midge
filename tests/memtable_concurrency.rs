@@ -10,6 +10,7 @@ use std::sync::Arc;
 fn should_generate_strictly_increasing_sequence_numbers_given_parallel_writes() {
     // Arrange
     let (_dir, eng) = new_shared_engine();
+    let initial_seq = eng.current_sequence();
 
     // Act - concurrent writes from multiple threads
     let handles: Vec<_> = (0..10)
@@ -42,7 +43,15 @@ fn should_generate_strictly_increasing_sequence_numbers_given_parallel_writes() 
             assert!(result.is_some(), "All concurrent writes should succeed");
         }
     }
-    // TODO: Add instrumentation to verify sequence numbers are strictly increasing
+
+    // Verify sequence numbers are strictly increasing
+    let final_seq = eng.current_sequence();
+    let expected_operations = 10 * 50; // 10 threads * 50 writes each
+    assert_eq!(
+        final_seq,
+        initial_seq + expected_operations as u64,
+        "Sequence numbers should increase by exactly the number of operations"
+    );
 }
 
 #[test]
@@ -223,6 +232,7 @@ fn should_track_sequence_numbers_correctly_across_concurrent_writes_with_overlap
     let cf = engine.default_column_family();
     const NUM_THREADS: usize = 10;
     const WRITES_PER_THREAD: usize = 50;
+    let initial_seq = engine.current_sequence();
 
     // Act - concurrent writes with overlapping key ranges
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -257,5 +267,13 @@ fn should_track_sequence_numbers_correctly_across_concurrent_writes_with_overlap
             "Key should have a value from sequence numbering"
         );
     }
-    // TODO: Add instrumentation to verify sequence numbers are strictly increasing
+
+    // Verify sequence numbers are strictly increasing
+    let final_seq = engine.current_sequence();
+    let expected_operations = NUM_THREADS * WRITES_PER_THREAD; // 10 threads * 50 writes each
+    assert_eq!(
+        final_seq,
+        initial_seq + expected_operations as u64,
+        "Sequence numbers should increase by exactly the number of operations"
+    );
 }

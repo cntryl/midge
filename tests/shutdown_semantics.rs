@@ -1,7 +1,7 @@
 mod common;
-use cntryl_midge::MidgeOptions;
+use cntryl_midge::{cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode};
 use common::{durability_opts, flush_test_opts, test_temp_dir, with_engine_restart};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 #[test]
 fn should_flush_and_fsync_all_memtables_given_shutdown_signal() {
@@ -78,7 +78,23 @@ fn should_complete_pending_compactions_given_shutdown_signal() {
 fn should_abort_long_running_uploads_given_shutdown_signal() {
     // Arrange
     let dir = test_temp_dir();
-    let opts = durability_opts(dir.path().to_path_buf());
+    let backend = Arc::new(
+        MockCloudBackend::new().with_latency(Duration::from_millis(500)),
+    );
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::CloudBacked {
+            local_cache_path: dir.path().to_path_buf(),
+            cloud_backend: backend.clone(),
+            storage_context: StorageContext::new("shutdown"),
+            local_wal_sync: true,
+            wal_batch_size: 1024 * 1024,
+            sst_cache_capacity: 8,
+        },
+        memtable_size: 1024,
+        wal_sync: true,
+        wal_recovery_mode: cntryl_midge::WalRecoveryMode::TolerateCorruptedTail,
+        ..Default::default()
+    };
 
     // Act & Assert
     with_engine_restart(
@@ -86,14 +102,16 @@ fn should_abort_long_running_uploads_given_shutdown_signal() {
         |eng| {
             let cf = eng.default_column_family();
             eng.put(&cf, b"key1", b"value1").expect("put");
-            // TODO: Test cloud storage mode with long-running uploads
-            // Shutdown should abort gracefully without data loss
+            eng.flush_cf(&cf).expect("flush");
+            std::thread::sleep(Duration::from_millis(100));
         },
         |eng| {
-            // Assert - local data should be consistent
+            // Assert - local data should be consistent after long uploads
             let cf = eng.default_column_family();
             let result = eng.get(&cf, b"key1").expect("get");
-            assert!(result.is_some(), "Data should survive aborted uploads");
+            assert!(result.is_some(), "Data should survive slow uploads");
+            assert!(backend.upload_count() > 0, "Uploads should be attempted");
+            assert_eq!(backend.upload_failure_count(), 0, "Uploads should not fail");
         },
     );
 }

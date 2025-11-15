@@ -14,7 +14,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - ✅ Implemented CF drop during flush concurrency test (Nov 15, 2025)
 - ✅ Completed compaction observability: determinism verification via logical data hashing and write amplification monitoring via SST size tracking (Nov 15, 2025)
 - ✅ Implemented cloud manifest drift simulation for durability testing (Nov 15, 2025)
-- **Overall Progress: 27/52 items complete (52%)** 📈---
+- **Overall Progress: 30/52 items complete (58%)** 📈---
 
 ## 🎯 Completed Items (Nov 2025)
 
@@ -113,16 +113,16 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - ✅ `tests/compaction_correctness.rs` (line 35) — IMPLEMENTED: Capture compaction output hash/checksum for determinism verification
 - ✅ `tests/compaction_correctness.rs` (line 139) — IMPLEMENTED: Monitor write amplification metrics
 
-### 🟡 MEDIUM — Sequence Number Validation (2 items)
+### 🟡 MEDIUM — Sequence Number Validation (2 items) ✅
 
 **Memtable Concurrency:**
-- `tests/memtable_concurrency.rs` (line 45) — TODO: Add instrumentation to verify sequence numbers are strictly increasing
-- `tests/memtable_concurrency.rs` (line 260) — TODO: Add instrumentation to verify sequence numbers are strictly increasing
+- ✅ `tests/memtable_concurrency.rs` (line 45) — IMPLEMENTED: Added instrumentation to verify sequence numbers are strictly increasing
+- ✅ `tests/memtable_concurrency.rs` (line 260) — IMPLEMENTED: Added instrumentation to verify sequence numbers are strictly increasing
 
 ### 🟡 MEDIUM — Shutdown Semantics (2 items)
 
 **Cloud Shutdown:**
-- `tests/shutdown_semantics.rs` (line 89) — TODO: Test cloud storage mode with long-running uploads
+- ✅ `tests/shutdown_semantics.rs` (line 89) — IMPLEMENTED: Test cloud storage mode with long-running uploads
 - `tests/shutdown_semantics.rs` (line 163) — TODO: Add instrumentation to verify no WAL replay occurred
 
 ### 🟡 MEDIUM — Transaction Isolation (2 items)
