@@ -157,25 +157,39 @@ impl MidgeEngine {
             .filter(|f| f.cf_id == cf_id.as_u32())
             .collect();
 
+        println!("DEBUG: Found {} SST files for CF {}", cf_files.len(), cf_id.as_u32());
+        for file in &cf_files {
+            println!("DEBUG: Checking SST file: {} (level: {}, cf_id: {})", file.name, file.level, file.cf_id);
+        }
+
         for file in cf_files.iter().rev() {
             let p = self.sst_dir.join(&file.name);
+            println!("DEBUG: Opening SST file: {} at path: {:?}", file.name, p);
             // CloudSstReaderFactory will download from cloud if not in local cache
-            if let Ok(sst) = self.sst_reader_factory.open(&p) {
-                match sst.get_state(key) {
-                    Ok(crate::sst::KeyState::Value(v, _, expiration)) => {
-                        // Check if key is expired
-                        if let Some(exp_ts) = expiration {
-                            let now_millis = timestamp::now_millis();
-                            if exp_ts <= now_millis {
-                                // Key is expired, treat as deleted
-                                return Ok(None);
+            match self.sst_reader_factory.open(&p) {
+                Ok(sst) => {
+                    println!("DEBUG: Successfully opened SST file: {}", file.name);
+                    println!("DEBUG: Calling get_state for key: {:?}", key);
+                    match sst.get_state(key) {
+                        Ok(crate::sst::KeyState::Value(v, _, expiration)) => {
+                            // Check if key is expired
+                            if let Some(exp_ts) = expiration {
+                                let now_millis = timestamp::now_millis();
+                                if exp_ts <= now_millis {
+                                    // Key is expired, treat as deleted
+                                    return Ok(None);
+                                }
                             }
+                            return Ok(Some(v));
                         }
-                        return Ok(Some(v));
+                        Ok(crate::sst::KeyState::Tombstone(_)) => return Ok(None),
+                        Ok(crate::sst::KeyState::Absent) => continue,
+                        Err(_) => continue,
                     }
-                    Ok(crate::sst::KeyState::Tombstone(_)) => return Ok(None),
-                    Ok(crate::sst::KeyState::Absent) => continue,
-                    Err(_) => continue,
+                }
+                Err(e) => {
+                    println!("DEBUG: Failed to open SST file {}: {:?}", file.name, e);
+                    continue;
                 }
             }
         }

@@ -435,6 +435,10 @@ impl DataBlockBuilder {
         internal_on_disk: bool,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        eprintln!("DEBUG: DataBlockBuilder add_with_meta key len: {}, key: {:?}", key.len(), key);
+        if let Some(v) = value {
+            eprintln!("DEBUG: value len: {}", v.len());
+        }
         if key.is_empty() {
             return Err(MidgeError::InvalidData("Key cannot be empty".into()));
         }
@@ -533,6 +537,9 @@ impl DataBlockBuilder {
             expiration,
         );
 
+        eprintln!("DEBUG: DataBlockBuilder adding entry: key={:?}, shared_len={}, key_delta_len={}, encoded_len={}", 
+            String::from_utf8_lossy(key), shared_len, key_delta.len(), encoded.len());
+
         self.buffer.extend_from_slice(&encoded);
 
         self.last_key.clear();
@@ -598,18 +605,21 @@ impl DataBlockBuilder {
     }
 
     pub fn finish(mut self) -> Bytes {
-        // Add version marker for TLV format
-        self.buffer.put_u8(3); // Version 3 = TLV format
+        let header_size = 1 + 4 + 4 * self.restarts.len();
+        // Write entries first
+        // self.buffer already has the entries
 
-        // Append restart points
+        // Then write header at the end
+        self.buffer.put_u8(3); // Version 3 = TLV format
+        self.buffer.put_u32_le(self.restarts.len() as u32);
         for restart in &self.restarts {
-            self.buffer.put_u32_le(*restart);
+            self.buffer.put_u32_le(*restart as u32);
         }
 
-        // Append number of restart points
-        self.buffer.put_u32_le(self.restarts.len() as u32);
-
-        self.buffer.freeze()
+        let buffer_len = self.buffer.len();
+        let result = self.buffer.freeze();
+        eprintln!("DEBUG: DataBlockBuilder finish: buffer_len={}, result_len={}", buffer_len, result.len());
+        result
     }
 
     pub fn is_empty(&self) -> bool {

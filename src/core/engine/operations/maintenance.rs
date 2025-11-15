@@ -48,11 +48,16 @@ impl MidgeEngine {
                 .unwrap_or(true)
         };
 
+        println!("flush_cf: cf_id={:?}, is_empty={}", cf_id, is_empty);
+
         if is_empty {
             return Ok(());
         }
 
+        println!("flush_cf: calling flush_memtable_to_sst");
         let (file_path, file_meta) = self.flush_memtable_to_sst(cf_id)?;
+        println!("flush_cf: flush_memtable_to_sst returned file_path={:?}", file_path);
+
         let mut m =
             Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
         let name = file_path

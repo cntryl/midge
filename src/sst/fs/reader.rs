@@ -3,7 +3,6 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use tracing::{debug, trace};
 
-use crate::common::tlv::TlvReader;
 use crate::error::{MidgeError, MidgeResult};
 use crate::fs;
 use crate::sst::bloom::BloomFilter;
@@ -413,15 +412,18 @@ impl SstFile {
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
 
         if let Some(block_handle) = sparse_index.find_block(key) {
+            eprintln!("DEBUG: Found block for key {:?}: offset={}, size={}", String::from_utf8_lossy(key), block_handle.offset, block_handle.size);
             if self.use_internal_keys {
                 // For internal-on-disk layout, reuse the snapshot-aware logic
                 // with an effectively infinite snapshot so any seq is visible.
                 return self.get_state_at_internal(key, u64::MAX);
             }
             let data_block = self.read_data_block(*block_handle)?;
+            eprintln!("DEBUG: Read data block successfully, size={}", data_block.data.len());
             return self.search_data_block_state(&data_block.data, key);
         }
 
+        eprintln!("DEBUG: No block found for key {:?}", String::from_utf8_lossy(key));
         Ok(KeyState::Absent)
     }
 
@@ -681,31 +683,42 @@ impl SstFile {
             data.len()
         );
 
-        let entries_end = match calculate_entries_end(data) {
-            Some(end) => end,
-            None => {
-                trace!("Data too small, returning Absent");
-                return Ok(KeyState::Absent);
-            }
-        };
+        if data.len() < 5 {
+            trace!("Data too small, returning Absent");
+            return Ok(KeyState::Absent);
+        }
 
-        let num_restarts = u32::from_le_bytes([
-            data[data.len() - 4],
-            data[data.len() - 3],
-            data[data.len() - 2],
-            data[data.len() - 1],
+        // Parse header from the end
+        let total_len = data.len();
+        let restart_count = u32::from_le_bytes([
+            data[total_len - 4],
+            data[total_len - 3],
+            data[total_len - 2],
+            data[total_len - 1],
         ]) as usize;
-        let restarts_start = data.len() - 4 - (num_restarts * 4);
+        let restarts_len = restart_count * 4;
+        if total_len < 4 + restarts_len + 1 {
+            return Err(MidgeError::InvalidData("Data block too small".into()));
+        }
+        let version = data[total_len - 4 - restarts_len - 1];
+        if version != 3 {
+            return Err(MidgeError::InvalidData(format!("Unsupported data block version: {}", version)));
+        }
+        let restarts_start = total_len - 4 - restarts_len;
+        let entries_end = restarts_start;
+
+        eprintln!("DEBUG: Data block: version={}, num_restarts={}, restarts_start={}, entries_end={}", version, restart_count, restarts_start, entries_end);
 
         let restart_offset = binary_search_restart_points(
             data,
-            num_restarts,
+            restart_count,
             restarts_start,
             entries_end,
             target_key,
             |d, offset, limit| self.parse_key_at_offset(d, offset, limit),
         );
 
+        eprintln!("DEBUG: Binary search found restart_offset={}", restart_offset);
         self.linear_search_data_block_state(data, restart_offset, entries_end, target_key)
     }
 
@@ -784,51 +797,77 @@ impl SstFile {
     ) -> MidgeResult<KeyState> {
         self.log_search_start(target_key, snapshot_seq, start_offset, limit, data.len());
 
-        use crate::common::tlv::tags;
-        let reader = TlvReader::new(&data[start_offset..limit]);
+        eprintln!("DEBUG: Raw data block (first 100 bytes): {:?}", &data[start_offset..std::cmp::min(start_offset + 100, limit)]);
+        eprintln!("DEBUG: Data block length: {}", data.len());
+
         let mut entry_builder = BlockEntryBuilder::new(self.use_internal_keys);
         let now = now_millis();
         let mut entry_count = 0;
+        let mut pos = start_offset;
 
-        for (tag, tag_data) in reader {
-            trace!(
-                tag = format!("0x{:02x}", tag),
-                data_len = tag_data.len(),
-                "processing TLV tag"
-            );
+        eprintln!("DEBUG: Starting linear search for key {:?}, data range {}..{}", String::from_utf8_lossy(target_key), start_offset, limit);
 
-            match tag {
-                tags::SHARED_PREFIX_LEN => {
-                    // Process completed entry before starting new one
-                    if let Some(result) = entry_builder.try_process_entry(
-                        target_key,
-                        snapshot_seq,
-                        now,
-                        entry_count,
-                    )? {
-                        return Ok(result);
-                    }
-                    entry_count += entry_builder.entry_count();
-                    entry_builder.start_new_entry(tag_data)?;
-                }
-                tags::KEY_DELTA => entry_builder.set_key_delta(tag_data),
-                tags::VALUE => entry_builder.set_value(tag_data),
-                tags::EXPIRATION => entry_builder.set_expiration(tag_data),
-                tags::SEQUENCE => entry_builder.set_sequence(tag_data),
-                tags::ENTRY_TYPE => entry_builder.set_entry_type(tag_data),
-                _ => {}
+        while pos < limit {
+            // Read shared_len
+            if pos + 4 > limit {
+                break;
             }
+            let shared_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            pos += 4;
+
+            // Read key_delta_len
+            if pos + 4 > limit {
+                break;
+            }
+            let key_delta_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+
+            // Read key_delta
+            if pos + key_delta_len > limit {
+                break;
+            }
+            let key_delta = &data[pos..pos + key_delta_len];
+            pos += key_delta_len;
+
+            // Read value_len
+            if pos + 4 > limit {
+                break;
+            }
+            let value_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+
+            // Read value
+            if pos + value_len > limit {
+                break;
+            }
+            let value = &data[pos..pos + value_len];
+            pos += value_len;
+
+            // Set entry builder fields
+            entry_builder.shared_len = Some(shared_len);
+            entry_builder.key_delta = Some(key_delta.to_vec());
+            entry_builder.value = Some(value.to_vec());
+            entry_builder.sequence = 0; // Default
+            entry_builder.entry_type = 0; // Default
+            entry_builder.expiration = None;
+            entry_builder.entry_complete = true;
+
+            // Process the entry
+            if let Some(result) = entry_builder.try_process_entry(
+                target_key,
+                snapshot_seq,
+                now,
+                entry_count,
+            )? {
+                eprintln!("DEBUG: Found matching entry for key {:?}", String::from_utf8_lossy(target_key));
+                return Ok(result);
+            }
+            entry_count += entry_builder.entry_count();
         }
 
-        // Process final entry
-        if let Some(result) =
-            entry_builder.try_process_entry(target_key, snapshot_seq, now, entry_count)?
-        {
-            return Ok(result);
-        }
-
+        eprintln!("DEBUG: Key {:?} not found in block after processing {} entries", String::from_utf8_lossy(target_key), entry_count);
         trace!(
-            entry_count = entry_count + entry_builder.entry_count(),
+            entry_count,
             "key not found in block"
         );
         Ok(KeyState::Absent)

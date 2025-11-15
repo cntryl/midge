@@ -1,4 +1,5 @@
 use crate::error::{MidgeError, MidgeResult};
+use crate::sst::encoding::TlvBlockIterator;
 use crate::sst::format::BlockHandle;
 use bytes::Bytes;
 
@@ -21,107 +22,27 @@ impl SparseIndex {
         &self.entries
     }
 
+    pub fn encode(&self) -> Bytes {
+        let mut builder = crate::sst::format::IndexBlockBuilder::new();
+        for entry in &self.entries {
+            builder.add_index_entry(&entry.key, entry.block_handle);
+        }
+        builder.finish()
+    }
+
     pub fn decode(data: &[u8]) -> MidgeResult<Self> {
-        use crate::common::tlv::{parse_varint32_from_slice, tags, TlvReader};
-
-        // Decode an index block encoded with DataBlockBuilder where value is a BlockHandle encoding
-        let len = data.len();
-        if len < 9 {
-            // Need at least version + restart_count
-            return Ok(SparseIndex::default());
-        }
-
-        // Read restart count (last 4 bytes)
-        let num_restarts =
-            u32::from_le_bytes([data[len - 4], data[len - 3], data[len - 2], data[len - 1]])
-                as usize;
-        if num_restarts == 0 {
-            return Ok(SparseIndex::default());
-        }
-
-        // Calculate where entries end (before version marker + restart array)
-        let restarts_start = len
-            .checked_sub(4 + num_restarts * 4)
-            .ok_or_else(|| MidgeError::InvalidData("index block too small".into()))?;
-
-        // Version marker is before restart array
-        let version_offset = restarts_start
-            .checked_sub(1)
-            .ok_or_else(|| MidgeError::InvalidData("index block too small for version".into()))?;
-        let entries_end = version_offset;
-
-        // Single TlvReader for all entries
-        let reader = TlvReader::new(&data[..entries_end]);
-        let mut last_key: Vec<u8> = Vec::new();
-        // Pre-allocate with estimated capacity based on restart points
-        let mut out: Vec<IndexEntry> = Vec::with_capacity(num_restarts.saturating_mul(4));
-
-        // State for current entry
-        let mut shared_len: Option<u32> = None;
-        let mut key_delta: Option<&[u8]> = None;
-        let mut value: Option<&[u8]> = None;
-
-        // Helper closure to reconstruct and push entry
-        let process_entry = |shared_len: u32,
-                             key_delta: &[u8],
-                             val_bytes: &[u8],
-                             last_key: &mut Vec<u8>,
-                             out: &mut Vec<IndexEntry>|
-         -> MidgeResult<()> {
-            // Reconstruct full key
-            let mut key = Vec::with_capacity(shared_len as usize + key_delta.len());
-            if shared_len as usize > last_key.len() {
-                return Err(MidgeError::InvalidData(format!(
-                    "shared_len {} exceeds last_key len {}",
-                    shared_len,
-                    last_key.len()
-                )));
-            }
-            key.extend_from_slice(&last_key[..shared_len as usize]);
-            key.extend_from_slice(key_delta);
-
-            // Decode block handle from value
-            let (bh, _bh_sz) = BlockHandle::decode(val_bytes)?;
-
-            *last_key = key.clone();
-            out.push(IndexEntry {
-                key: Bytes::from(key),
-                block_handle: bh,
+        let iterator = TlvBlockIterator::new(data);
+        let mut entries = Vec::new();
+        for entry in iterator {
+            let (key, value, _, _, _) = entry?;
+            let value = value.ok_or(MidgeError::InvalidData("Missing value in index entry".to_string()))?;
+            let (block_handle, _) = BlockHandle::decode(value)?;
+            entries.push(IndexEntry {
+                key: key.into(),
+                block_handle,
             });
-            Ok(())
-        };
-
-        for (tag, tag_data) in reader {
-            match tag {
-                tags::SHARED_PREFIX_LEN => {
-                    // Process previous entry if complete
-                    if let (Some(sl), Some(kd), Some(val_bytes)) = (shared_len, key_delta, value) {
-                        process_entry(sl, kd, val_bytes, &mut last_key, &mut out)?;
-                    }
-
-                    // Start new entry
-                    shared_len = Some(parse_varint32_from_slice(tag_data)?);
-                    key_delta = None;
-                    value = None;
-                }
-                tags::KEY_DELTA => {
-                    key_delta = Some(tag_data);
-                }
-                tags::VALUE => {
-                    value = Some(tag_data);
-                }
-                _ => {
-                    // Skip other tags (sequence, entry_type, etc.)
-                }
-            }
         }
-
-        // Process last entry
-        if let (Some(sl), Some(kd), Some(val_bytes)) = (shared_len, key_delta, value) {
-            process_entry(sl, kd, val_bytes, &mut last_key, &mut out)?;
-        }
-
-        Ok(SparseIndex::new(out))
+        Ok(Self::new(entries))
     }
 
     /// Find the block that might contain the given key.
@@ -130,17 +51,28 @@ impl SparseIndex {
     #[inline]
     pub fn find_block(&self, key: &[u8]) -> Option<&BlockHandle> {
         if self.entries.is_empty() {
+            eprintln!("DEBUG: SparseIndex entries is empty");
             return None;
+        }
+
+        eprintln!("DEBUG: SparseIndex find_block for key: {:?}", String::from_utf8_lossy(key));
+        eprintln!("DEBUG: SparseIndex entries count: {}", self.entries.len());
+        for (i, e) in self.entries.iter().enumerate() {
+            eprintln!("DEBUG: Entry {}: key={:?}", i, String::from_utf8_lossy(&e.key));
         }
 
         // partition_point finds the first index where predicate is false
         // predicate: entry.key <= key  => we want first entry.key > key
         let idx = self.entries.partition_point(|e| e.key.as_ref() <= key);
 
+        eprintln!("DEBUG: partition_point returned idx: {}", idx);
+
         // idx is now the first entry GREATER than key
         // We want the last entry LESS THAN OR EQUAL to key, which is idx - 1
         // saturating_sub handles idx == 0 case (returns 0)
         let block_idx = idx.saturating_sub(1);
+
+        eprintln!("DEBUG: block_idx: {}", block_idx);
 
         Some(&self.entries[block_idx].block_handle)
     }
@@ -182,6 +114,12 @@ impl SparseIndexBuilder {
         Self {
             entries: Vec::new(),
         }
+    }
+    pub fn add_index_entry(&mut self, key: &[u8], handle: BlockHandle) {
+        self.entries.push(IndexEntry {
+            key: key.to_vec().into(),
+            block_handle: handle,
+        });
     }
     pub fn add(&mut self, key: Bytes, handle: BlockHandle) {
         self.entries.push(IndexEntry {
