@@ -117,6 +117,10 @@ impl TransactionManager {
         self.inner.read().active.len()
     }
 
+    pub fn is_active(&self, txn_id: u64) -> bool {
+        self.inner.read().active.contains_key(&txn_id)
+    }
+
     pub fn update_wait_for_graph(&self, txn_id: u64) -> Result<(), String> {
         let mut inner = self.inner.write();
         let txn = inner

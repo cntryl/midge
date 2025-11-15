@@ -55,6 +55,13 @@ impl EngineTransaction {
     }
 }
 
+// Public accessor for transaction ID (used in tests)
+impl EngineTransaction {
+    pub fn txn_id(&self) -> u64 {
+        self.txn.txn_id
+    }
+}
+
 // Implement the public KvTransaction trait for EngineTransaction
 impl KvTransaction for EngineTransaction {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {

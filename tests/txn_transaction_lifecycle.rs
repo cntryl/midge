@@ -17,18 +17,20 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
     let engine = Arc::new(engine);
     let cf = engine.default_column_family();
 
-    let mut timeout_txn = engine.begin_transaction(&cf).unwrap();
+    // Create transaction with a very short timeout (1ms)
+    let mut timeout_txn = engine.begin_transaction_with_options(&cf, Some(std::time::Duration::from_millis(1)), 1024 * 1024).unwrap();
     timeout_txn.put(b"key", b"value").unwrap();
 
+    // Sleep longer than the timeout
     std::thread::sleep(std::time::Duration::from_millis(10));
 
     // Act
     let result = engine.commit_transaction(timeout_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
-    // No timeout mechanism currently
-    assert!(result.is_ok());
-    // TODO: Should timeout if transaction exceeds deadline
+    assert!(result.is_err(), "Transaction should timeout");
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("timed out"), "Error should mention timeout: {}", err);
 }
 
 #[test]
@@ -39,20 +41,24 @@ fn should_release_locks_given_transaction_timeout_when_aborted() {
     let cf = engine.default_column_family();
 
     let mut aborted_lock_txn = engine.begin_transaction(&cf).unwrap();
+    let txn_id = aborted_lock_txn.txn_id();
     aborted_lock_txn.put(b"locked_key", b"value").unwrap();
 
-    drop(aborted_lock_txn);
+    // Verify transaction is active before abort
+    assert!(engine.is_transaction_active(txn_id), "Transaction should be active before abort");
 
+    // Act - abort the transaction explicitly
+    engine.abort_transaction(aborted_lock_txn);
+
+    // Assert - verify transaction is cleaned up
+    assert!(!engine.is_transaction_active(txn_id), "Transaction should be removed from active set after abort");
+
+    // Verify subsequent transactions can operate on the same keys
     let mut subsequent_txn = engine.begin_transaction(&cf).unwrap();
     subsequent_txn.put(b"locked_key", b"value2").unwrap();
 
-    // Act
     let result = engine.commit_transaction(subsequent_txn, cntryl_midge::WriteOptions::default());
-
-    // Assert
-    // No locking currently, so always succeeds
-    assert!(result.is_ok());
-    // TODO: Verify locks released after timeout/abort
+    assert!(result.is_ok(), "Subsequent transaction should succeed after aborted transaction cleanup");
 }
 
 #[test]

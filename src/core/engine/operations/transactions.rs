@@ -259,6 +259,17 @@ impl MidgeEngine {
         let txn_id = self.txn_id.fetch_add(1, Ordering::SeqCst);
         let begin_sequence = self.seq.load(Ordering::SeqCst);
         let txn = Transaction::with_options(txn_id, begin_sequence, timeout, mem_limit);
+
+        // Register transaction with manager for conflict detection
+        let _ = self.txn_manager.begin(
+            txn_id,
+            begin_sequence,
+            HashSet::new(), // write_set - will be updated on commit
+            HashSet::new(), // write_ranges - will be updated on commit
+            HashSet::new(), // read_set - will be updated on commit
+            HashMap::new(), // read_versions - will be updated on commit
+        );
+
         Ok(EngineTransaction::new(txn, self))
     }
 
@@ -362,6 +373,34 @@ impl MidgeEngine {
 
         // Commit the transaction mutations
         self.batch_internal(muts, opts.sync)
+    }
+
+    /// Abort a Transaction by cleaning up its state without applying mutations.
+    ///
+    /// This method removes the transaction from the transaction manager's active set
+    /// and cleans up any conflict tracking state. The transaction becomes unusable
+    /// after this call.
+    ///
+    /// # Arguments
+    ///
+    /// * `engine_txn` - The transaction to abort
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, KvTransaction};
+    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// # let cf = engine.default_column_family();
+    /// let mut txn = engine.begin_transaction(&cf).unwrap();
+    /// txn.put(b"key", b"value").unwrap();
+    /// // Something goes wrong...
+    /// engine.abort_transaction(txn);
+    /// ```
+    pub fn abort_transaction(&self, engine_txn: EngineTransaction) {
+        // Clean up transaction manager state
+        self.txn_manager.abort(engine_txn.txn.txn_id);
+        // The transaction is now unusable (completed = true)
+        drop(engine_txn);
     }
 
     /// Get a value within a transaction's snapshot isolation.

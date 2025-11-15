@@ -267,6 +267,11 @@ impl MidgeEngine {
 
         replay_wal_to_memtables_after_seq(&mut cf_map, records, skip_before_seq)
     }
+
+    /// Check if a transaction is currently active (for testing purposes)
+    pub fn is_transaction_active(&self, txn_id: u64) -> bool {
+        self.txn_manager.is_active(txn_id)
+    }
 }
 
 // KvStore trait implementation moved to operations/kv_store.rs

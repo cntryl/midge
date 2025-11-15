@@ -3,7 +3,7 @@
 This document collects and prioritizes outstanding TODOs found across the repository. It is a short, actionable backlog to help triage and assign work.
 
 **Summary**
-- Total TODO count: ~35 items (updated Nov 15, 2025 - fresh inventory from codebase)
+- Total TODO count: ~33 items (updated Nov 15, 2025 - lock release verification implemented)
 - Focus areas: transaction conflict detection, deadlock prevention, manifest corruption recovery, comprehensive testing
 - **Recent Progress**: 
   - ✅ Implemented detailed health validation with SST continuity and WAL checks (Nov 15, 2025)
@@ -12,7 +12,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
   - ✅ Completed transaction conflict detection: write-write conflicts, deadlock detection, lost updates prevention, and isolation levels enforcement (Nov 15, 2025)
   - ✅ Completed manifest corruption recovery: CorruptAfterSave behavior implemented and tested (Nov 15, 2025)
   - ✅ Implemented CF drop during flush concurrency test (Nov 15, 2025)
-  - **Overall Progress: 22/52 items complete (42%)** 📈
+  - **Overall Progress: 24/52 items complete (46%)** 📈
 
 ---
 
@@ -79,8 +79,8 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - ✅ `tests/txn_isolation_levels.rs` (line 54) — IMPLEMENTED: Prevents dirty writes through conflict detection (no explicit locking required for optimistic concurrency)
 
 **Transaction Lifecycle:**
-- `tests/txn_transaction_lifecycle.rs` (line 31) — TODO: Should timeout if transaction exceeds deadline
-- `tests/txn_transaction_lifecycle.rs` (line 55) — TODO: Verify locks released after timeout/abort
+- ✅ `tests/txn_transaction_lifecycle.rs` (line 31) — IMPLEMENTED: Transaction timeout enforcement with begin_transaction_with_options and deadline checking
+- ✅ `tests/txn_transaction_lifecycle.rs` (line 55) — IMPLEMENTED: Lock release verification - transactions properly cleaned up from active set when aborted
 
 ### 🟠 HIGH — Manifest Corruption Recovery (1 item) ✅
 
@@ -98,13 +98,13 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - ✅ `tests/admin_concurrency.rs` (line 15) — IMPLEMENTED: Attempt backup during compaction - verifies backup succeeds and creates consistent snapshot
 - ✅ `tests/admin_concurrency.rs` (line 35) — IMPLEMENTED: Attempt CF drop during flush - verifies drop fails gracefully when flush is in progress
 - ✅ `tests/admin_concurrency.rs` (line 56) — IMPLEMENTED: Initiate readonly backup concurrently
-- `tests/admin_concurrency.rs` (line 79) — TODO: Reload config during compaction
+- ✅ `tests/admin_concurrency.rs` (line 79) — IMPLEMENTED: Reload config during compaction
 
 ### 🟡 MEDIUM — Cloud Durability Testing (3 items)
 
 **Cloud Storage:**
-- `tests/cloud_durability.rs` (line 48) — TODO: Test cloud mode with mock backend to verify upload retry logic
-- `tests/cloud_durability.rs` (line 70) — TODO: Test cloud mode with simulated network failures
+- ✅ `tests/cloud_durability.rs` (line 48) — IMPLEMENTED: Test cloud mode with mock backend to verify upload retry logic
+- ✅ `tests/cloud_durability.rs` (line 70) — IMPLEMENTED: Test cloud mode with simulated network failures
 - `tests/cloud_durability.rs` (line 98) — TODO: Simulate cloud manifest drift
 
 ### 🟡 MEDIUM — Compaction Observability (2 items)
@@ -154,11 +154,11 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 
 | Priority | Count | Status | Timeline |
 |----------|-------|--------|----------|
-| 🔴 CRITICAL | 12 | 11/12 Complete ✅ | COMPLETE (1 remaining) |
+| 🔴 CRITICAL | 12 | 12/12 Complete ✅ | COMPLETE |
 | 🟠 HIGH | 15 | 1/15 | Week 1 START |
 | 🟡 MEDIUM | 18 | 1/18 | Week 2-3 |
 | 🔵 LOW | 7 | 0/7 | Month 2+ |
-| **TOTAL** | **52** | **22/52 (42%)** | |
+| **TOTAL** | **52** | **24/52 (46%)** | |
 
 ---
 
