@@ -156,12 +156,17 @@ impl MidgeEngine {
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())
             .collect();
-
         for file in cf_files.iter().rev() {
             let p = self.sst_dir.join(&file.name);
             // CloudSstReaderFactory will download from cloud if not in local cache
             match self.sst_reader_factory.open(&p) {
                 Ok(sst) => {
+                    match sst.get_state(key) {
+                        Ok(state) => {
+                        }
+                        Err(e) => {
+                        }
+                    }
                     match sst.get_state(key) {
                         Ok(crate::sst::KeyState::Value(v, _, expiration)) => {
                             // Check if key is expired

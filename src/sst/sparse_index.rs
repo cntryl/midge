@@ -50,7 +50,8 @@ impl SparseIndex {
     }
 
     /// Find the block that might contain the given key.
-    /// Returns the block whose first key is <= the search key.
+    /// Sparse index keys represent the LAST key in each block.
+    /// Returns the block whose last key is >= the search key.
     /// Uses partition_point for optimized binary search.
     #[inline]
     pub fn find_block(&self, key: &[u8]) -> Option<&BlockHandle> {
@@ -59,15 +60,17 @@ impl SparseIndex {
         }
 
         // partition_point finds the first index where predicate is false
-        // predicate: entry.key <= key  => we want first entry.key > key
-        let idx = self.entries.partition_point(|e| e.key.as_ref() <= key);
+        // Since index keys are LAST keys in blocks, we want the first block
+        // whose last key is >= the search key
+        let idx = self.entries.partition_point(|e| e.key.as_ref() < key);
 
-        // idx is now the first entry GREATER than key
-        // We want the last entry LESS THAN OR EQUAL to key, which is idx - 1
-        // saturating_sub handles idx == 0 case (returns 0)
-        let block_idx = idx.saturating_sub(1);
+        // If idx == entries.len(), key is beyond all blocks
+        if idx >= self.entries.len() {
+            // Return last block as a fallback (key might be in range due to deletions)
+            return Some(&self.entries[self.entries.len() - 1].block_handle);
+        }
 
-        Some(&self.entries[block_idx].block_handle)
+        Some(&self.entries[idx].block_handle)
     }
 
     /// Find blocks in a range without allocating.

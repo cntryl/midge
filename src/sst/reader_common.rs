@@ -231,7 +231,8 @@ pub fn should_skip_key(
     }
 
     // Range tombstone check
-    is_covered_by_range_tombstone(range_tombstones, key, snapshot_seq)
+    let covered = is_covered_by_range_tombstone(range_tombstones, key, snapshot_seq);
+    covered
 }
 
 #[cfg(test)]

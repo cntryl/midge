@@ -42,7 +42,6 @@ impl MidgeEngine {
     ) -> MidgeResult<()> {
         // Serialize flush operations to prevent concurrent file conflicts
         let _flush_guard = self.flush_mutex.lock();
-
         if self.read_only {
             return Ok(());
         }
@@ -50,10 +49,11 @@ impl MidgeEngine {
         let cf_id = cf.id();
 
         // Check if the frozen memtable is empty
+        let _guard = self.flush_mutex.lock();
+
         if memtable.is_empty() {
             return Ok(());
         }
-
         // Get CF config
         let cf_config = self.cf_set.get_cf_config(cf_id).unwrap_or_default();
 
@@ -65,10 +65,13 @@ impl MidgeEngine {
         // Drain the frozen memtable
         let entries = memtable.drain_with_meta_internal();
         let range_tombstones = memtable.drain_range_tombstones();
+        if entries.is_empty() {
+            return Ok(());
+        }
 
         // Flush to SST
         // NOTE: flush_memtable_to_sst() already updates the manifest with the new SST file
-        let (_file_path, _file_meta) = crate::core::persistence::flush::flush_memtable_to_sst(
+        let result = crate::core::persistence::flush::flush_memtable_to_sst(
             cf_id,
             || (entries, range_tombstones),
             crate::core::persistence::flush::FlushConfig {
@@ -80,13 +83,32 @@ impl MidgeEngine {
                 metrics: &self.metrics,
                 cloud_sst_mgr: self.cloud_sst_manager.as_ref().map(|m| m.as_ref()),
             },
-        )?;
+        );
+        let (file_path, mut file_meta) = result?;
+        // Fill in the file size (flush_memtable_to_sst sets it to 0)
+        file_meta.size_bytes = std::fs::metadata(&file_path)
+            .map(|md| md.len())
+            .unwrap_or(0);
+        // Update manifest with the new SST file
+        let mut m = Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
+        
+        // Update last_persisted_sequence to the largest sequence in the flushed data
+        if let Some(largest_seq) = file_meta.largest_seq {
+            m.last_persisted_sequence = largest_seq;
+        }
+        
+        // Assign sublevel based on overlap with existing L0 files
+        file_meta.sublevel = if let (Some(ref sk), Some(ref lk)) = (&file_meta.smallest_key, &file_meta.largest_key) {
+            m.assign_l0_sublevel(sk, lk)
+        } else {
+            0
+        };
 
-        // Manifest update and cache updates are already handled by flush_memtable_to_sst
-        // Just update the cached manifest from disk to ensure consistency
-        let m = Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
+        m.ssts.push(file_meta.name.clone());
+        m.files.push(file_meta);
+        m.save_atomic(&self.db_path)?;
+        // Update the cached manifest
         self.update_manifest_cache(m);
-
         Ok(())
     }
 
@@ -96,8 +118,7 @@ impl MidgeEngine {
     /// The old memtable is flushed to SST. This is necessary because the skiplist-based
     /// memtable doesn't support true draining - drain() only creates a snapshot.
     pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
-        // Serialize flush operations to prevent concurrent file conflicts
-        let _flush_guard = self.flush_mutex.lock();
+        // Note: We don't acquire flush_mutex here because flush_frozen_memtable already does
 
         if self.read_only {
             return Ok(());
@@ -122,7 +143,6 @@ impl MidgeEngine {
             let mt = column_family.memtable.read();
             mt.is_empty()
         };
-
         if is_empty {
             return Ok(());
         }
@@ -139,8 +159,8 @@ impl MidgeEngine {
             *mt_write = crate::core::memtable::MemTable::new();
             old
         };
-
         // Now flush the old memtable using the frozen memtable path
+        // (flush_frozen_memtable already acquires the flush_mutex)
         self.flush_frozen_memtable(cf, old_memtable)
     }
 

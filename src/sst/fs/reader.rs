@@ -229,17 +229,17 @@ impl SstFile {
             );
             eprintln!("range tombstones: {}", self.range_tombstones.len());
         }
-
         if should_skip_key(&self.bloom_filter, &self.range_tombstones, key, u64::MAX) {
             trace!("Bloom filter or tombstone check: key not present");
             return Ok(KeyState::Absent);
         }
-
         let sparse_index = self
             .sparse_index
             .as_ref()
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
-
+        for (i, entry) in sparse_index.entries().iter().enumerate().take(5) {
+        }
+        
         // TEMP DEBUG: print sparse index keys to help diagnose failing tests
         // NOTE: This is a temporary diagnostic change; it will be removed after debugging
         #[cfg(test)]
@@ -252,7 +252,6 @@ impl SstFile {
                 eprintln!("  entry key={}", String::from_utf8_lossy(en.key.as_ref()));
             }
         }
-
         if let Some(block_handle) = sparse_index.find_block(key) {
             if self.use_internal_keys {
                 // For internal-on-disk layout, reuse the snapshot-aware logic
@@ -261,6 +260,7 @@ impl SstFile {
             }
             let data_block = self.read_data_block(*block_handle)?;
             return self.search_data_block_state(&data_block.data, key);
+        } else {
         }
 
         Ok(KeyState::Absent)
@@ -283,7 +283,14 @@ impl SstFile {
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
         if let Some(block_handle) = sparse_index.find_block(key) {
             // Use snapshot-aware search to find first version with seq <= snapshot_seq
-            let blk = self.read_data_block(*block_handle)?;
+            let blk = match self.read_data_block(*block_handle) {
+                Ok(b) => {
+                    b
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            };
             let state = self.search_data_block_state_at(&blk.data, key, snapshot_seq)?;
             trace!(
                 "get_state_at key={:?} seq={} state={:?}",
@@ -586,8 +593,12 @@ impl SstFile {
         snapshot_seq: u64,
     ) -> MidgeResult<KeyState> {
         let entries_end = match calculate_entries_end(data) {
-            Some(end) => end,
-            None => return Ok(KeyState::Absent),
+            Some(end) => {
+                end
+            },
+            None => {
+                return Ok(KeyState::Absent);
+            }
         };
 
         let num_restarts = u32::from_le_bytes([
@@ -672,6 +683,7 @@ impl SstFile {
             raw_key.extend_from_slice(entry.key_delta);
             last_key = raw_key.clone();
 
+            let raw_key_len = raw_key.len(); // Save length before moving
             let (user_key, seq, tomb) = if self.use_internal_keys {
                 if let Some((uk, s, t)) = crate::common::internal_key::decode_internal_key(&raw_key)
                 {
@@ -690,6 +702,8 @@ impl SstFile {
                 }
             }
 
+            if entry_count <= 5 || entry_count > 165 {
+            }
             if user_key.as_slice() == target_key {
                 return Ok(if tomb {
                     KeyState::Tombstone(seq)
