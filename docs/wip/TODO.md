@@ -15,6 +15,7 @@ This document collects and prioritizes outstanding TODOs found across the reposi
 - ✅ Completed compaction observability: determinism verification via logical data hashing and write amplification monitoring via SST size tracking (Nov 15, 2025)
 - ✅ Implemented cloud manifest drift simulation for durability testing (Nov 15, 2025)
 - **Overall Progress: 30/52 items complete (58%)** 📈---
+- ✅ `docs/wip/TRANSACTIONS.md` — IMPLEMENTED: Short user guide for `IsolationLevel` and `Snapshot::get` (Nov 15, 2025)
 
 ## 🎯 Completed Items (Nov 2025)
 

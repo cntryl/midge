@@ -33,6 +33,7 @@ A high-performance, embedded LSM-tree storage engine written in Rust.
 - [SPEC.md](docs/wip/SPEC.md) - Complete specification of LSM implementation
 - [TTL Architecture](docs/wip/TTL_ARCHITECTURE.md) - TTL implementation status and roadmap
 - [Compaction Filters](docs/wip/COMPACTION_FILTERS.md) - User-defined compaction logic
+- [Transactions & Snapshots](docs/wip/TRANSACTIONS.md) - Per-transaction isolation & snapshot usage
 - [Rate Limiting](docs/wip/RATE_LIMITING.md) - I/O throttling and resource management
 
 ## Quick Start
