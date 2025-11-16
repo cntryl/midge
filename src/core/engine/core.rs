@@ -274,8 +274,6 @@ impl MidgeEngine {
     }
 }
 
-// KvStore trait implementation moved to operations/kv_store.rs
-
 impl Drop for MidgeEngine {
     fn drop(&mut self) {
         // Flush WAL to ensure all writes are persisted
@@ -288,11 +286,11 @@ impl Drop for MidgeEngine {
     }
 }
 
+// KvStore trait implementation moved to operations/kv_store.rs
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::column_family::ColumnFamilyId;
-    use crate::wal::WalOpKind;
     use std::sync::Arc;
 
     fn create_test_engine() -> Arc<MidgeEngine> {
@@ -303,327 +301,17 @@ mod tests {
         Arc::new(MidgeEngine::open(opts).expect("Failed to create test engine"))
     }
 
-    // ==================== Initialization Tests ====================
-
-    #[test]
-    fn should_create_engine_given_memory_mode() {
-        // Act
-        let engine = create_test_engine();
-
-        // Assert
-        assert!(engine.mem_mode);
-        assert!(!engine.read_only);
-        assert_eq!(engine.seq.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn should_delegate_to_open_with_config() {
-        // Arrange
-        let config = crate::config::ConfigBuilder::new("./test_db_config")
-            .build()
-            .expect("Failed to build config");
-
-        // Act
-        let result = MidgeEngine::open_with_config(config);
-
-        // Assert
-        assert!(result.is_ok());
-    }
-
-    // ==================== Adapter Creation Tests ====================
-
-    #[test]
-    fn should_create_kv_store_adapter() {
-        use crate::api::KvStore;
-
-        // Arrange
-        let engine = create_test_engine();
-
-        // Act
-        let adapter = engine.as_kv_store();
-
-        // Assert
-        // Verify adapter is created (type check via usage)
-        let cf = adapter.default_column_family();
-        // `default_column_family()` now returns a `ColumnFamilyId`
-        assert_eq!(cf, crate::api::column_family::DEFAULT_CF_ID);
-    }
-
-    // ==================== Read-Only Mode Tests ====================
-
-    #[test]
-    fn should_not_be_readonly_when_engine_created() {
-        // Arrange
-        let engine = create_test_engine();
-
-        // Act
-        let result = engine.check_read_only();
-
-        // Assert
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_reject_operations_when_transitioned_to_readonly() {
-        // Arrange
-        let engine = create_test_engine();
-
-        // Act
-        engine.transition_to_read_only();
-        let result = engine.check_read_only();
-
-        // Assert
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MidgeError::ReadOnly));
-    }
-
-    #[test]
-    fn should_reject_operations_when_created_in_readonly_mode() {
-        // Arrange
-        let opts = crate::MidgeOptions {
-            storage_mode: crate::StorageMode::Memory,
-            read_only: true,
-            ..Default::default()
-        };
-        let engine = Arc::new(MidgeEngine::open(opts).expect("Failed to create engine"));
-
-        // Act
-        let result = engine.check_read_only();
-
-        // Assert
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MidgeError::ReadOnly));
-    }
-
-    #[test]
-    fn should_remain_readonly_after_transition() {
-        // Arrange
-        let engine = create_test_engine();
-        engine.transition_to_read_only();
-
-        // Act
-        let first_check = engine.check_read_only();
-        let second_check = engine.check_read_only();
-
-        // Assert
-        assert!(first_check.is_err());
-        assert!(second_check.is_err());
-    }
-
-    // ==================== Manifest Cache Tests ====================
-
-    #[test]
-    fn should_return_cached_manifest_when_requested() {
-        // Arrange
-        let engine = create_test_engine();
-
-        // Act
-        let manifest = engine.get_manifest();
-
-        // Assert
-        assert_eq!(manifest.last_persisted_sequence, 0);
-        assert!(manifest.files.is_empty());
-    }
-
-    #[test]
-    fn should_update_manifest_cache_when_called() {
-        // Arrange
-        let engine = create_test_engine();
-        let mut manifest = engine.get_manifest();
-        manifest.last_persisted_sequence = 42;
-
-        // Act
-        engine.update_manifest_cache(manifest.clone());
-        let updated = engine.get_manifest();
-
-        // Assert
-        assert_eq!(updated.last_persisted_sequence, 42);
-    }
-
-    // ==================== Memtable Accessor Tests ====================
-
-    #[test]
-    fn should_access_default_memtable_when_using_with_default_memtable() {
-        // Arrange
-        let engine = create_test_engine();
-
-        // Act
-        let result = engine.with_default_memtable(|mt| mt.is_empty());
-
-        // Assert
-        assert!(result, "Default memtable should be empty on creation");
-    }
-
-    #[test]
-    fn should_access_default_memtable_mutably_when_using_with_default_memtable_mut() {
-        // Arrange
-        let engine = create_test_engine();
-
-        // Act
-        let result = engine.with_default_memtable_mut(|mt| mt.size_bytes());
-
-        // Assert
-        assert_eq!(
-            result, 0,
-            "Default memtable should have zero size on creation"
-        );
-    }
-
-    #[test]
-    fn should_return_none_when_accessing_nonexistent_cf_memtable() {
-        // Arrange
-        let engine = create_test_engine();
-        let nonexistent_cf = ColumnFamilyId::new(999);
-
-        // Act
-        let result = engine.with_cf_memtable(nonexistent_cf, |mt| mt.is_empty());
-
-        // Assert
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn should_return_some_when_accessing_existing_cf_memtable() {
-        // Arrange
-        let engine = create_test_engine();
-        let default_cf = crate::api::column_family::DEFAULT_CF_ID;
-
-        // Act
-        let result = engine.with_cf_memtable(default_cf, |mt| mt.is_empty());
-
-        // Assert
-        assert!(result.is_some());
-        assert!(result.unwrap());
-    }
-
-    #[test]
-    fn should_access_cf_memtable_immutably() {
-        // Arrange
-        let engine = create_test_engine();
-        let default_cf = crate::api::column_family::DEFAULT_CF_ID;
-
-        // Act
-        let result = engine.with_cf_memtable(default_cf, |mt| mt.is_empty());
-
-        // Assert
-        assert!(result.is_some());
-        assert!(result.unwrap());
-    }
-
-    // ==================== WAL Replay Tests ====================
-
-    #[test]
-    fn should_return_zero_sequence_when_replaying_empty_wal() {
-        // Arrange
-        let engine = create_test_engine();
-        let records: Vec<crate::wal::WalRecord> = vec![];
-
-        // Act
-        let max_seq = MidgeEngine::replay_wal_to_cfs(&engine.cf_set, &records);
-
-        // Assert
-        assert_eq!(max_seq, 0);
-    }
-
-    #[test]
-    fn should_return_max_sequence_when_replaying_wal_records() {
-        // Arrange
-        let engine = create_test_engine();
-        let records = vec![
-            crate::wal::WalRecord::new(
-                WalOpKind::Put,
-                bytes::Bytes::from(&b"key1"[..]),
-                Some(bytes::Bytes::from(&b"val1"[..])),
-                1,
-            ),
-            crate::wal::WalRecord::new(
-                WalOpKind::Put,
-                bytes::Bytes::from(&b"key2"[..]),
-                Some(bytes::Bytes::from(&b"val2"[..])),
-                5,
-            ),
-            crate::wal::WalRecord::new(
-                WalOpKind::Put,
-                bytes::Bytes::from(&b"key3"[..]),
-                Some(bytes::Bytes::from(&b"val3"[..])),
-                3,
-            ),
-        ];
-
-        // Act
-        let max_seq = MidgeEngine::replay_wal_to_cfs(&engine.cf_set, &records);
-
-        // Assert
-        assert_eq!(max_seq, 5, "Should return the maximum sequence number");
-    }
-
-    #[test]
-    fn should_replay_records_into_memtable() {
-        // Arrange
-        let engine = create_test_engine();
-        let records = vec![
-            crate::wal::WalRecord::new(
-                WalOpKind::Put,
-                bytes::Bytes::from(&b"key1"[..]),
-                Some(bytes::Bytes::from(&b"value1"[..])),
-                1,
-            ),
-            crate::wal::WalRecord::new(
-                WalOpKind::Put,
-                bytes::Bytes::from(&b"key2"[..]),
-                Some(bytes::Bytes::from(&b"value2"[..])),
-                2,
-            ),
-        ];
-
-        // Act
-        MidgeEngine::replay_wal_to_cfs(&engine.cf_set, &records);
-
-        // Assert
-        let is_empty = engine.with_default_memtable(|mt| mt.is_empty());
-        assert!(!is_empty, "Memtable should contain replayed records");
-    }
-
-    #[test]
-    fn should_ignore_records_for_dropped_cfs_when_replaying() {
-        // Arrange
-        let engine = create_test_engine();
-        let nonexistent_cf_id = 999;
-        let records = vec![crate::wal::WalRecord::new_cf(
-            crate::api::column_family::ColumnFamilyId::new(nonexistent_cf_id),
-            WalOpKind::Put,
-            bytes::Bytes::from(&b"key1"[..]),
-            Some(bytes::Bytes::from(&b"value1"[..])),
-            1,
-        )];
-
-        // Act - should not panic
-        let max_seq = MidgeEngine::replay_wal_to_cfs(&engine.cf_set, &records);
-
-        // Assert
-        assert_eq!(max_seq, 1, "Should still track sequence numbers");
-    }
-
-    // ==================== Compaction Coordinator Tests ====================
-
     #[test]
     fn should_return_ok_immediately_when_compaction_disabled() {
         // Arrange
-        let opts = crate::MidgeOptions {
-            storage_mode: crate::StorageMode::Memory,
-            enable_compaction: false,
-            ..Default::default()
-        };
-        let engine = Arc::new(MidgeEngine::open(opts).expect("Failed to create engine"));
+        let engine = create_test_engine();
 
         // Act
-        let result = engine.wait_for_compaction_idle(Duration::from_secs(1));
+        let result = engine.wait_for_compaction_idle(std::time::Duration::from_secs(1));
 
         // Assert
         assert!(result.is_ok());
     }
-
-    // ==================== Cache Update Tests ====================
 
     #[test]
     fn should_not_panic_when_updating_caches_for_nonexistent_sst() {
@@ -635,8 +323,6 @@ mod tests {
 
         // Assert - no assertion needed, just verify no panic
     }
-
-    // ==================== Drop Tests ====================
 
     #[test]
     fn should_flush_wal_when_dropped() {

@@ -323,7 +323,7 @@ fn prune_old_wal_files(wal_dir: &Path, safe_sequence: u64) -> MidgeResult<usize>
 
 /// Compute key bounds and sequence range from entries and range tombstones.
 #[inline]
-fn compute_bounds(
+pub(crate) fn compute_bounds(
     entries: &[crate::core::EntryMeta],
     range_tombstones: &[(Vec<u8>, Vec<u8>, u64)],
 ) -> KeyBounds {
