@@ -524,7 +524,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir_all(temp_dir.path().join("sst")).unwrap();
         let config = create_test_config(&temp_dir);
-        let coordinator = CompactionCoordinator::spawn(config).unwrap();
+        let coordinator = CompactionController::spawn(config).unwrap();
 
         // Act
         let result = coordinator.compact_level(0, 0);
@@ -539,7 +539,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir_all(temp_dir.path().join("sst")).unwrap();
         let config = create_test_config(&temp_dir);
-        let coordinator = CompactionCoordinator::spawn(config).unwrap();
+        let coordinator = CompactionController::spawn(config).unwrap();
 
         // Act
         let result = coordinator.compact_range(0, Some(b"a".to_vec()), Some(b"z".to_vec()));

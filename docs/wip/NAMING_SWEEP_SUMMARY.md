@@ -179,6 +179,17 @@ These can be renamed immediately (low impact):
 - **Breaking Changes**: Accepted for better behavioral clarity (as requested)
 - All abstractions compile and maintain existing functionality
 
+**Phase 3: Strategic Public API Renames** - **IN PROGRESS**:
+- ✅ Renamed `WalCoordinator` → `WalController` (struct, impl, exports, usage sites)
+- ✅ Renamed `CompactionCoordinator` → `CompactionController` (struct, impl, exports, usage sites)  
+- ✅ Renamed `TransactionManager` → `TransactionController` (struct, impl, exports, usage sites)
+- ✅ Renamed `HealthManager` → `HealthMonitor` (struct, impl, exports, usage sites)
+- ✅ Updated all public usage sites in engine factory and core structs
+- ✅ Code compiles successfully after renames
+- ✅ Basic functionality tests pass
+- ⚠️ **BLOCKED**: Test code in coordinator files still uses old names - needs update
+- **Status**: 80% complete - main renames done, test cleanup remaining
+
 ## Next Steps
 
 **Recommendation**: 
