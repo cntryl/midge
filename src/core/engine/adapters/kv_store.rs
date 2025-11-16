@@ -92,7 +92,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         self.engine.put(&handle, key, value)
     }
 
@@ -106,21 +108,21 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         self.engine.get(&handle, key)
     }
 
-    fn delete(
-        &self,
-        cf: crate::api::column_family::ColumnFamilyId,
-        key: &[u8],
-    ) -> MidgeResult<()> {
+    fn delete(&self, cf: crate::api::column_family::ColumnFamilyId, key: &[u8]) -> MidgeResult<()> {
         let handle = self
             .engine
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         self.engine.delete(&handle, key)
     }
 
@@ -138,7 +140,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         self.engine.scan(&handle, q)
     }
 
@@ -153,7 +157,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         self.engine.delete_range(&handle, start, end)
     }
 
@@ -170,7 +176,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         self.engine.put(&handle, key, value)
     }
 
@@ -187,7 +195,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         let current = self.engine.get(&handle, key)?;
 
         // Check if current value matches expected
@@ -218,7 +228,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         self.engine.merge_cf(&handle, key, value)
     }
 
@@ -236,7 +248,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .list_column_families()
             .into_iter()
             .find(|h| h.id() == cf)
-            .ok_or_else(|| MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32())))?;
+            .ok_or_else(|| {
+                MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
+            })?;
         for op in operations {
             match op {
                 crate::api::kv_store::BatchOperation::Insert { key, value } => {

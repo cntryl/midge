@@ -365,7 +365,7 @@ impl Config {
                 .as_ref()
                 .map(|c| c.upload_params.chunk_size as u64)
                 .unwrap_or(0),
-            test_hooks: None,          // No test hooks when using Config API
+            test_hooks: None, // No test hooks when using Config API
             autotuner: if self.autotune_enabled {
                 Some(Arc::new(crate::config::Autotuner::new()))
             } else {

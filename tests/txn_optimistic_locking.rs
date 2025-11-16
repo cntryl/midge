@@ -114,11 +114,14 @@ fn should_handle_high_concurrency_optimistic_locking() {
                 for iteration in 0..10 {
                     let key_index = (thread_id * iteration) % 10;
                     let key = format!("opt_key_{}", key_index);
-                    
+
                     let mut txn = eng.begin_transaction(&cf_clone).unwrap();
                     let _ = txn.get(key.as_bytes());
-                    txn.put(key.as_bytes(), format!("t{}_i{}", thread_id, iteration).as_bytes())
-                        .unwrap();
+                    txn.put(
+                        key.as_bytes(),
+                        format!("t{}_i{}", thread_id, iteration).as_bytes(),
+                    )
+                    .unwrap();
                     let _ = eng.commit_transaction(txn, cntryl_midge::WriteOptions::default());
                 }
             })

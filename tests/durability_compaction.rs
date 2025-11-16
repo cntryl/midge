@@ -1,7 +1,7 @@
 mod common;
+use cntryl_midge::test_hooks::{CompactionBehavior, TestHooks};
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::{assert_get_equals, test_temp_dir};
-use cntryl_midge::test_hooks::{CompactionBehavior, TestHooks};
 use std::time::Duration;
 
 #[test]
@@ -10,7 +10,9 @@ fn should_commit_new_ssts_and_manifest_together_given_compaction_successful() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,
@@ -46,7 +48,11 @@ fn should_commit_new_ssts_and_manifest_together_given_compaction_successful() {
         let result = eng
             .get(&cf, format!("key{:04}", i).as_bytes())
             .expect("get");
-        assert!(result.is_some(), "Compacted key {} should exist after recovery", i);
+        assert!(
+            result.is_some(),
+            "Compacted key {} should exist after recovery",
+            i
+        );
     }
     assert!(compaction_complete, "Compaction should have started");
 }
@@ -57,7 +63,9 @@ fn should_cleanup_partial_output_given_compaction_failure() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_compaction_behavior(CompactionBehavior::FailMidway);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,
@@ -103,7 +111,9 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,
@@ -148,7 +158,9 @@ fn should_fsync_new_ssts_before_updating_manifest() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,
@@ -184,7 +196,10 @@ fn should_fsync_new_ssts_before_updating_manifest() {
             .expect("get");
         assert!(result.is_some(), "Compacted key should be durable");
     }
-    assert!(fsync_count_after >= fsync_count_before, "SST fsync should have occurred");
+    assert!(
+        fsync_count_after >= fsync_count_before,
+        "SST fsync should have occurred"
+    );
     assert!(compaction_completed, "Compaction should have completed");
 }
 
@@ -194,7 +209,9 @@ fn should_recover_consistent_state_given_crash_mid_compaction_when_restart() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_compaction_behavior(CompactionBehavior::CrashBeforeFsync);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,
@@ -227,7 +244,10 @@ fn should_recover_consistent_state_given_crash_mid_compaction_when_restart() {
             .expect("get");
         assert!(result.is_some(), "Data should survive crash mid-compaction");
     }
-    assert!(compaction_attempted, "Compaction should have been attempted");
+    assert!(
+        compaction_attempted,
+        "Compaction should have been attempted"
+    );
 }
 
 #[test]
@@ -236,7 +256,9 @@ fn should_preserve_source_ssts_when_compaction_output_not_fsynced() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_compaction_behavior(CompactionBehavior::CrashBeforeFsync);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,
@@ -269,5 +291,8 @@ fn should_preserve_source_ssts_when_compaction_output_not_fsynced() {
             .expect("get");
         assert!(result.is_some(), "Source SSTs should preserve data");
     }
-    assert!(compaction_attempted, "Compaction should have been attempted");
+    assert!(
+        compaction_attempted,
+        "Compaction should have been attempted"
+    );
 }

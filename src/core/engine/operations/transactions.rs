@@ -308,17 +308,17 @@ impl MidgeEngine {
         let txn = engine_txn.txn;
 
         // Optimistic conflict detection: register with TransactionManager and try commit
-        let write_set: std::collections::HashSet<crate::core::transaction::manager::Key> =
-            txn.conflict_write_set()
-                .into_iter()
-                .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
-                .collect();
+        let write_set: std::collections::HashSet<crate::core::transaction::manager::Key> = txn
+            .conflict_write_set()
+            .into_iter()
+            .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+            .collect();
         let write_ranges = txn.conflict_write_ranges().clone();
-        let read_set: std::collections::HashSet<crate::core::transaction::manager::Key> =
-            txn.conflict_read_set()
-                .into_iter()
-                .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
-                .collect();
+        let read_set: std::collections::HashSet<crate::core::transaction::manager::Key> = txn
+            .conflict_read_set()
+            .into_iter()
+            .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+            .collect();
         let read_versions: std::collections::HashMap<crate::core::transaction::manager::Key, u64> =
             txn.conflict_read_versions()
                 .into_iter()
@@ -329,10 +329,21 @@ impl MidgeEngine {
         let commit_seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Update transaction info with actual conflict sets
-        let _ = self
-            .txn_manager
-            .update(txn_id, write_set.clone(), write_ranges.clone(), read_set.clone(), read_versions.clone());
-        if let Err(_e) = self.txn_manager.try_commit(txn_id, commit_seq, &write_set, &write_ranges, &read_set, &read_versions) {
+        let _ = self.txn_manager.update(
+            txn_id,
+            write_set.clone(),
+            write_ranges.clone(),
+            read_set.clone(),
+            read_versions.clone(),
+        );
+        if let Err(_e) = self.txn_manager.try_commit(
+            txn_id,
+            commit_seq,
+            &write_set,
+            &write_ranges,
+            &read_set,
+            &read_versions,
+        ) {
             return Err(MidgeError::transaction_conflict("write conflict detected"));
         }
 
@@ -349,21 +360,27 @@ impl MidgeEngine {
                 // For now, assume default CF and create a handle
                 let cf_handle = crate::api::column_family::ColumnFamilyHandle::new(
                     mutation.cf_id,
-                    "default".to_string() // TODO: Get actual CF name
+                    "default".to_string(), // TODO: Get actual CF name
                 );
                 let expected = mutation.range_end.as_ref();
                 let current = self.get(&cf_handle, &mutation.key)?;
                 match (expected, current) {
                     (Some(exp), Some(cur)) => {
                         if exp != &cur {
-                            return Err(MidgeError::transaction_conflict("CAS validation failed: value changed"));
+                            return Err(MidgeError::transaction_conflict(
+                                "CAS validation failed: value changed",
+                            ));
                         }
                     }
                     (None, Some(_)) => {
-                        return Err(MidgeError::transaction_conflict("CAS validation failed: expected no value but found one"));
+                        return Err(MidgeError::transaction_conflict(
+                            "CAS validation failed: expected no value but found one",
+                        ));
                     }
                     (Some(_), None) => {
-                        return Err(MidgeError::transaction_conflict("CAS validation failed: expected value but found none"));
+                        return Err(MidgeError::transaction_conflict(
+                            "CAS validation failed: expected value but found none",
+                        ));
                     }
                     (None, None) => {
                         // Both expect no value - OK
@@ -530,4 +547,3 @@ impl MidgeEngine {
         self.transaction_get(txn, cf, key).map(|opt| opt.is_some())
     }
 }
-

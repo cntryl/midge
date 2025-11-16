@@ -56,7 +56,10 @@ impl MidgeEngine {
 
         println!("flush_cf: calling flush_memtable_to_sst");
         let (file_path, file_meta) = self.flush_memtable_to_sst(cf_id)?;
-        println!("flush_cf: flush_memtable_to_sst returned file_path={:?}", file_path);
+        println!(
+            "flush_cf: flush_memtable_to_sst returned file_path={:?}",
+            file_path
+        );
 
         let mut m =
             Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
@@ -115,15 +118,13 @@ impl MidgeEngine {
         // 2. Snapshots will read from SST if sequence is >= last_persisted_sequence
         // 3. Prevents re-flushing the same data in crash recovery
         let column_family = if cf_id == crate::api::column_family::DEFAULT_CF_ID {
-            self.cf_set.cfs.get(&0).ok_or_else(|| {
-                MidgeError::invalid_config("Default column family not found")
-            })?
+            self.cf_set
+                .cfs
+                .get(&0)
+                .ok_or_else(|| MidgeError::invalid_config("Default column family not found"))?
         } else {
             self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
-                MidgeError::invalid_config(format!(
-                    "Column family {} not found",
-                    cf_id.as_u32()
-                ))
+                MidgeError::invalid_config(format!("Column family {} not found", cf_id.as_u32()))
             })?
         };
 
@@ -574,7 +575,10 @@ impl MidgeEngine {
         let cloud_mgr = self.cloud_sst_manager.as_ref().unwrap();
         let local_manifest = self.manifest_cache.get();
 
-        debug!("check_cloud: checking {} files in local manifest", local_manifest.files.len());
+        debug!(
+            "check_cloud: checking {} files in local manifest",
+            local_manifest.files.len()
+        );
 
         // Download manifest from cloud
         let cloud_manifest_bytes = match cloud_mgr.backend().get_blob("manifest.json") {
@@ -585,37 +589,49 @@ impl MidgeEngine {
             }
         };
 
-        let cloud_manifest: crate::core::manifest::Manifest = match serde_json::from_slice(cloud_manifest_bytes.as_ref()) {
-            Ok(manifest) => manifest,
-            Err(e) => {
-                debug!("check_cloud: failed to parse cloud manifest: {}", e);
-                return Ok(0); // Invalid cloud manifest
-            }
-        };
+        let cloud_manifest: crate::core::manifest::Manifest =
+            match serde_json::from_slice(cloud_manifest_bytes.as_ref()) {
+                Ok(manifest) => manifest,
+                Err(e) => {
+                    debug!("check_cloud: failed to parse cloud manifest: {}", e);
+                    return Ok(0); // Invalid cloud manifest
+                }
+            };
 
-        debug!("check_cloud: comparing with {} files in cloud manifest", cloud_manifest.files.len());
+        debug!(
+            "check_cloud: comparing with {} files in cloud manifest",
+            cloud_manifest.files.len()
+        );
 
         // Compare manifests - count differences
         let mut inconsistencies = 0;
 
         // Check for files in local manifest that are missing from cloud
         for local_file in &local_manifest.files {
-            let exists_in_cloud = cloud_manifest.files.iter().any(|cloud_file| {
-                cloud_file.name == local_file.name
-            });
+            let exists_in_cloud = cloud_manifest
+                .files
+                .iter()
+                .any(|cloud_file| cloud_file.name == local_file.name);
             if !exists_in_cloud {
-                debug!("check_cloud: local file {} not found in cloud manifest", local_file.name);
+                debug!(
+                    "check_cloud: local file {} not found in cloud manifest",
+                    local_file.name
+                );
                 inconsistencies += 1;
             }
         }
 
         // Check for files in cloud manifest that are missing from local
         for cloud_file in &cloud_manifest.files {
-            let exists_locally = local_manifest.files.iter().any(|local_file| {
-                local_file.name == cloud_file.name
-            });
+            let exists_locally = local_manifest
+                .files
+                .iter()
+                .any(|local_file| local_file.name == cloud_file.name);
             if !exists_locally {
-                debug!("check_cloud: cloud file {} not found in local manifest", cloud_file.name);
+                debug!(
+                    "check_cloud: cloud file {} not found in local manifest",
+                    cloud_file.name
+                );
                 inconsistencies += 1;
             }
         }

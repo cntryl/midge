@@ -1,10 +1,10 @@
 mod common;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use cntryl_midge::cloud::mock::MockCloudBackend;
+use cntryl_midge::common::timestamp;
 use cntryl_midge::config::cloud::StorageContext;
 use cntryl_midge::core::manifest::{FileMeta, Manifest};
-use cntryl_midge::common::timestamp;
 use cntryl_midge::sst::cloud::SstLifecycleState;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
 use std::sync::Arc;
 
@@ -58,10 +58,10 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
     // Arrange
     let dir = test_temp_dir();
     let mock_backend = Arc::new(MockCloudBackend::new());
-    
+
     // Configure mock to fail uploads after 1 successful one (allow first upload, fail subsequent)
     mock_backend.set_fail_upload_after(1);
-    
+
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
             local_cache_path: dir.path().to_path_buf(),
@@ -82,10 +82,10 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
         eng.put(&cf, format!("key{:02}", i).as_bytes(), b"value")
             .expect("put");
     }
-    
+
     // Force flush - this may fail if cloud uploads fail, but data should still be available
     let _ = eng.flush_cf(&cf); // Ignore result - we want to test resilience to upload failures
-    
+
     // Force compaction to potentially trigger more operations
     let _ = eng.compact_range(&cf, None, None); // Ignore result
 
@@ -94,11 +94,17 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
         let result = eng
             .get(&cf, format!("key{:02}", i).as_bytes())
             .expect("get");
-        assert!(result.is_some(), "Data should be available despite upload failures");
+        assert!(
+            result.is_some(),
+            "Data should be available despite upload failures"
+        );
     }
-    
+
     // Verify that uploads were attempted (some may have succeeded, some failed due to simulated network issues)
-    assert!(mock_backend.upload_count() > 0, "Should have attempted uploads");
+    assert!(
+        mock_backend.upload_count() > 0,
+        "Should have attempted uploads"
+    );
 }
 
 #[test]
@@ -172,7 +178,10 @@ fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_r
         let result = eng
             .get(&cf, format!("key{:02}", i).as_bytes())
             .expect("get");
-        assert!(result.is_some(), "Data should be available after check_cloud");
+        assert!(
+            result.is_some(),
+            "Data should be available after check_cloud"
+        );
     }
 }
 
@@ -198,8 +207,7 @@ fn should_handle_concurrent_writes_with_local_persistence() {
             std::thread::spawn(move || {
                 for i in 0..50 {
                     let key = format!("concurrent_key_t{}_i{}", thread_id, i);
-                    eng.put(&cf_clone, key.as_bytes(), b"value")
-                        .expect("put");
+                    eng.put(&cf_clone, key.as_bytes(), b"value").expect("put");
                 }
             })
         })
@@ -313,5 +321,9 @@ fn should_handle_rapid_sequential_restarts() {
             }
         }
     }
-    assert!(found >= 95, "Data from all cycles should persist: {}/100", found);
+    assert!(
+        found >= 95,
+        "Data from all cycles should persist: {}/100",
+        found
+    );
 }

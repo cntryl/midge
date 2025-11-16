@@ -1,5 +1,7 @@
 mod common;
-use cntryl_midge::{cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode};
+use cntryl_midge::{
+    cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
+};
 use common::{durability_opts, flush_test_opts, test_temp_dir, with_engine_restart};
 use std::{sync::Arc, time::Duration};
 
@@ -78,9 +80,7 @@ fn should_complete_pending_compactions_given_shutdown_signal() {
 fn should_abort_long_running_uploads_given_shutdown_signal() {
     // Arrange
     let dir = test_temp_dir();
-    let backend = Arc::new(
-        MockCloudBackend::new().with_latency(Duration::from_millis(500)),
-    );
+    let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(500)));
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
             local_cache_path: dir.path().to_path_buf(),
@@ -217,11 +217,7 @@ fn should_handle_rapid_shutdown_and_restart_cycles_without_data_loss_when_stress
                 for i in 0..50 {
                     let key = format!("cycle{}_key{:02}", cycle, i).into_bytes();
                     let result = eng.get(&cf, &key).expect("get after cycle restart");
-                    assert!(
-                        result.is_some(),
-                        "Key from cycle {} should persist",
-                        cycle
-                    );
+                    assert!(result.is_some(), "Key from cycle {} should persist", cycle);
                 }
 
                 // Verify keys from all previous cycles are still present
@@ -267,7 +263,9 @@ fn should_preserve_data_consistency_across_multiple_concurrent_shutdown_attempts
             std::thread::spawn(move || {
                 for i in 0..ITERATIONS {
                     let key = format!("shutdown_key_{:04}", (i * 7) % 500).into_bytes();
-                    let _result = eng_clone.get(&cf_clone, &key).expect("read during shutdown");
+                    let _result = eng_clone
+                        .get(&cf_clone, &key)
+                        .expect("read during shutdown");
                 }
             })
         })

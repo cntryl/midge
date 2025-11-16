@@ -202,7 +202,10 @@ impl TestHooks {
 
     /// Hook called after manifest save and fsync. Returns whether to corrupt the manifest.
     pub fn should_corrupt_manifest_after_save(&self) -> bool {
-        matches!(*self.manifest_behavior.read(), ManifestBehavior::CorruptAfterSave)
+        matches!(
+            *self.manifest_behavior.read(),
+            ManifestBehavior::CorruptAfterSave
+        )
     }
 
     /// Hook called after WAL truncation following manifest update.

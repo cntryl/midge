@@ -95,14 +95,19 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
     let mut cas_txn = engine
         .begin_transaction(&cf)
         .expect("Transaction creation failed");
-    cas_txn.compare_and_swap(b"key", expected.as_ref().map(|b| b.as_ref()), b"v3").unwrap();
+    cas_txn
+        .compare_and_swap(b"key", expected.as_ref().map(|b| b.as_ref()), b"v3")
+        .unwrap();
 
     // Act
     let result = engine.commit_transaction(cas_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // With CAS validation implemented, this should fail because the value changed
-    assert!(result.is_err(), "CAS should fail when value changed since snapshot");
+    assert!(
+        result.is_err(),
+        "CAS should fail when value changed since snapshot"
+    );
     assert!(expected.is_some());
 }
 

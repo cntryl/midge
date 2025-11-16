@@ -52,13 +52,19 @@ pub trait KvStore: Send + Sync {
     ///
     /// Default implementation performs a linear scan of `list_column_families()` and
     /// returns an error if not found. Implementors may provide a faster lookup.
-    fn column_family_by_id(&self, id: super::column_family::ColumnFamilyId) -> MidgeResult<super::column_family::ColumnFamilyId> {
+    fn column_family_by_id(
+        &self,
+        id: super::column_family::ColumnFamilyId,
+    ) -> MidgeResult<super::column_family::ColumnFamilyId> {
         // Default implementation: verify existence by scanning list_column_families
         let found = self.list_column_families().into_iter().find(|h| h == &id);
         if found.is_some() {
             Ok(id)
         } else {
-            Err(crate::MidgeError::internal(format!("column family id {} not found", id.as_u32())))
+            Err(crate::MidgeError::internal(format!(
+                "column family id {} not found",
+                id.as_u32()
+            )))
         }
     }
 

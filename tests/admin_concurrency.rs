@@ -1,10 +1,10 @@
 mod common;
+use cntryl_midge::backup::{BackupEngine, BackupOptions};
+use cntryl_midge::{MidgeOptions, StorageMode};
 use common::{bulk_put_fn, new_engine, new_engine_with_opts};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use cntryl_midge::backup::{BackupEngine, BackupOptions};
-use cntryl_midge::{MidgeOptions, StorageMode};
 
 #[test]
 fn should_block_backup_start_given_active_compaction_when_requested() {
@@ -22,12 +22,15 @@ fn should_block_backup_start_given_active_compaction_when_requested() {
 
     // Attempt backup during compaction
     let backup_result = std::thread::spawn(move || {
-        let mut backup_engine = BackupEngine::open(&db_path, &backup_dir)
-            .expect("Failed to open backup engine");
+        let mut backup_engine =
+            BackupEngine::open(&db_path, &backup_dir).expect("Failed to open backup engine");
         backup_engine.create_backup(BackupOptions::default())
     });
 
-    let backup_info = backup_result.join().unwrap().expect("Backup should succeed");
+    let backup_info = backup_result
+        .join()
+        .unwrap()
+        .expect("Backup should succeed");
 
     // Assert - backup should have been created successfully
     assert!(backup_info.backup_id > 0, "Backup should have a valid ID");
@@ -55,9 +58,7 @@ fn should_fail_cf_drop_given_inflight_flush() {
     let eng_clone = Arc::clone(&eng);
     let cf_clone = cf.clone();
 
-    let flush_handle = thread::spawn(move || {
-        eng_clone.flush_cf(&cf_clone)
-    });
+    let flush_handle = thread::spawn(move || eng_clone.flush_cf(&cf_clone));
 
     let eng_clone2 = Arc::clone(&eng);
     let cf_clone2 = cf.clone();
@@ -80,8 +81,11 @@ fn should_fail_cf_drop_given_inflight_flush() {
     if drop_result.is_err() {
         // If drop failed, verify it's due to expected reasons
         let err = drop_result.unwrap_err();
-        assert!(err.to_string().contains("Cannot drop") || err.to_string().contains("flush"),
-                "Drop failure should be related to flush state, got: {}", err);
+        assert!(
+            err.to_string().contains("Cannot drop") || err.to_string().contains("flush"),
+            "Drop failure should be related to flush state, got: {}",
+            err
+        );
     }
 
     // If drop succeeded, CF should no longer be accessible
@@ -89,11 +93,17 @@ fn should_fail_cf_drop_given_inflight_flush() {
     if drop_succeeded {
         // CF was dropped successfully - should not be able to access it
         let get_result = eng.get(&cf, b"key050");
-        assert!(get_result.is_err(), "Should not be able to access dropped CF");
+        assert!(
+            get_result.is_err(),
+            "Should not be able to access dropped CF"
+        );
     } else {
         // CF drop failed - should still be functional
         let result = eng.get(&cf, b"key050").expect("get");
-        assert!(result.is_some(), "CF should remain functional if drop failed");
+        assert!(
+            result.is_some(),
+            "CF should remain functional if drop failed"
+        );
     }
 }
 
@@ -115,13 +125,16 @@ fn should_allow_backup_readonly_mode_given_active_writes() {
     // Initiate readonly backup concurrently
     // Backup should get consistent snapshot without blocking writes
     let backup_handle = thread::spawn(move || {
-        let mut backup_engine = BackupEngine::open(&db_path, &backup_dir)
-            .expect("Failed to open backup engine");
+        let mut backup_engine =
+            BackupEngine::open(&db_path, &backup_dir).expect("Failed to open backup engine");
         backup_engine.create_backup(BackupOptions::default())
     });
 
     write_handle.join().unwrap();
-    let backup_info = backup_handle.join().unwrap().expect("Backup should succeed");
+    let backup_info = backup_handle
+        .join()
+        .unwrap()
+        .expect("Backup should succeed");
 
     // Assert
     assert!(backup_info.backup_id > 0, "Backup should have a valid ID");
@@ -151,11 +164,12 @@ fn should_handle_config_reload_during_compaction_without_panic() {
         },
         memtable_size: 1024, // Keep same memtable size
         enable_compaction: true,
-        cache_size_mb: 64, // Different cache size
+        cache_size_mb: 64,     // Different cache size
         table_cache_size: 100, // Different table cache size
         ..Default::default()
     };
-    eng.reload_config(&new_config).expect("Config reload should succeed");
+    eng.reload_config(&new_config)
+        .expect("Config reload should succeed");
 
     // Assert
     let result = eng.get(&cf, b"key025").expect("get");
@@ -187,7 +201,8 @@ fn should_return_current_cf_list_given_admin_query_when_changes_in_progress() {
 }
 
 #[test]
-fn should_handle_concurrent_column_family_operations_without_deadlock_when_multiple_threads_operate() {
+fn should_handle_concurrent_column_family_operations_without_deadlock_when_multiple_threads_operate(
+) {
     // Arrange
     let (_dir, eng) = new_engine();
     let eng = Arc::new(eng);
@@ -203,10 +218,12 @@ fn should_handle_concurrent_column_family_operations_without_deadlock_when_multi
                     let cf = eng_clone.default_column_family();
                     let key = format!("admin_key_{}_{}_{}", i, j, i * j).into_bytes();
                     let value = format!("admin_value_{}", i * ITERATIONS + j).into_bytes();
-                    
+
                     // Perform put operation
-                    eng_clone.put(&cf, &key, &value).expect("put during admin ops");
-                    
+                    eng_clone
+                        .put(&cf, &key, &value)
+                        .expect("put during admin ops");
+
                     // Periodically query CF list
                     if j % 25 == 0 {
                         let _cf_list = eng_clone.list_column_families();
@@ -222,7 +239,9 @@ fn should_handle_concurrent_column_family_operations_without_deadlock_when_multi
 
     // Assert - verify engine remained stable
     let cf = eng.default_column_family();
-    let result = eng.get(&cf, b"admin_key_0_0_0").expect("get after admin ops");
+    let result = eng
+        .get(&cf, b"admin_key_0_0_0")
+        .expect("get after admin ops");
     assert!(
         result.is_some(),
         "Engine should remain stable during concurrent admin operations"
@@ -250,7 +269,9 @@ fn should_preserve_data_during_high_concurrency_writes_with_admin_queries_when_s
             for j in 0..ITERATIONS {
                 let key = format!("write_{}_{}_{}", i, j, i * j).into_bytes();
                 let value = format!("write_value_{}", i * ITERATIONS + j).into_bytes();
-                eng_clone.put(&cf_clone, &key, &value).expect("write during admin stress");
+                eng_clone
+                    .put(&cf_clone, &key, &value)
+                    .expect("write during admin stress");
             }
         }));
     }
@@ -285,7 +306,7 @@ fn should_recover_all_data_after_restart_despite_admin_operations_when_engine_re
     // Arrange
     let dir = common::test_temp_dir();
     let path = dir.path().to_path_buf();
-    
+
     let eng = {
         let opts = cntryl_midge::MidgeOptions {
             storage_mode: cntryl_midge::StorageMode::LocalDisk {
@@ -296,19 +317,19 @@ fn should_recover_all_data_after_restart_despite_admin_operations_when_engine_re
         };
         let e = cntryl_midge::MidgeEngine::open(opts).expect("Failed to create engine");
         let cf = e.default_column_family();
-        
+
         // Write 500 keys while performing admin operations
         for i in 0..500 {
             let key = format!("admin_recovery_key_{:04}", i).into_bytes();
             let value = format!("admin_recovery_value_{}", i).into_bytes();
             e.put(&cf, &key, &value).expect("put during admin phase");
-            
+
             // Periodically list column families
             if i % 50 == 0 {
                 let _cf_list = e.list_column_families();
             }
         }
-        
+
         e
     };
 
@@ -316,9 +337,7 @@ fn should_recover_all_data_after_restart_despite_admin_operations_when_engine_re
 
     // Act - reopen engine
     let opts = cntryl_midge::MidgeOptions {
-        storage_mode: cntryl_midge::StorageMode::LocalDisk {
-            db_path: path,
-        },
+        storage_mode: cntryl_midge::StorageMode::LocalDisk { db_path: path },
         memtable_size: 8192,
         ..Default::default()
     };

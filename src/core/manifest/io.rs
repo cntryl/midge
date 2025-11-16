@@ -135,7 +135,11 @@ impl Manifest {
         }
 
         // Atomic replace via rename
-        println!("[diag-lib] about to rename {} -> {}", tmp.display(), manifest_path.display());
+        println!(
+            "[diag-lib] about to rename {} -> {}",
+            tmp.display(),
+            manifest_path.display()
+        );
         if let Err(e) = std::fs::rename(&tmp, &manifest_path) {
             println!("[diag-lib] rename failed: {:?}", e);
             return Err(e.into());
@@ -143,7 +147,10 @@ impl Manifest {
 
         // Update CURRENT pointer
         let current_path = db_path.join("CURRENT");
-        println!("[diag-lib] about to write CURRENT at {}", current_path.display());
+        println!(
+            "[diag-lib] about to write CURRENT at {}",
+            current_path.display()
+        );
         if let Err(e) = std::fs::write(&current_path, b"manifest.json") {
             println!("[diag-lib] write(CURRENT) failed: {:?}", e);
             return Err(e.into());
@@ -156,8 +163,15 @@ impl Manifest {
         // configured behavior (e.g., RecordOnly/Skip) and allow fault injection.
         {
             // Sync the manifest file data to stable storage
-            println!("[diag-lib] about to open manifest for sync: {}", manifest_path.display());
-                match std::fs::OpenOptions::new().read(true).write(true).open(&manifest_path) {
+            println!(
+                "[diag-lib] about to open manifest for sync: {}",
+                manifest_path.display()
+            );
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&manifest_path)
+            {
                 Ok(f) => {
                     if let Err(e) = crate::fs::sync_data_only(&f, test_hooks) {
                         println!("[diag-lib] sync_data_only failed: {:?}", e);

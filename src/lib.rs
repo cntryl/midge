@@ -56,11 +56,10 @@ pub mod compaction {
 
 // Re-export commonly used types at crate root for convenience
 pub use crate::api::{
-    BytesAppendOperator, ColumnFamilyConfig, ColumnFamilyHandle, ColumnFamilyId, DynKvStore,
-    DynMergeOperator, IntegerAddOperator, KvStore, KvTransaction, MergeOperator, Mutation,
-    MutationOp, Query, Snapshot, StringAppendOperator, WriteBatch, WriteOptions, DEFAULT_CF_ID,
-    DEFAULT_CF_NAME,
-    transaction::IsolationLevel,
+    transaction::IsolationLevel, BytesAppendOperator, ColumnFamilyConfig, ColumnFamilyHandle,
+    ColumnFamilyId, DynKvStore, DynMergeOperator, IntegerAddOperator, KvStore, KvTransaction,
+    MergeOperator, Mutation, MutationOp, Query, Snapshot, StringAppendOperator, WriteBatch,
+    WriteOptions, DEFAULT_CF_ID, DEFAULT_CF_NAME,
 };
 pub use crate::config::{
     CloudStorageBuilder, CompactionStyle, CompressionType, MidgeOptions, StorageMode,

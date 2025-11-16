@@ -35,9 +35,11 @@ impl SparseIndex {
         let mut entries = Vec::new();
         for entry in iterator {
             // Debug: log iterator results to help diagnose missing KEY_DELTA for empty blocks
-            
+
             let (key, value, _, _, _) = entry?;
-            let value = value.ok_or(MidgeError::InvalidData("Missing value in index entry".to_string()))?;
+            let value = value.ok_or(MidgeError::InvalidData(
+                "Missing value in index entry".to_string(),
+            ))?;
             let (block_handle, _) = BlockHandle::decode(value)?;
             entries.push(IndexEntry {
                 key: key.into(),

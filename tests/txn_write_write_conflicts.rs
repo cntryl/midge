@@ -154,8 +154,11 @@ fn should_handle_high_contention_writes_without_panic() {
             std::thread::spawn(move || {
                 for j in 0..5 {
                     let mut txn = eng.begin_transaction(&cf_clone).unwrap();
-                    txn.put(b"contention_key", format!("thread_{}_iteration_{}", i, j).as_bytes())
-                        .unwrap();
+                    txn.put(
+                        b"contention_key",
+                        format!("thread_{}_iteration_{}", i, j).as_bytes(),
+                    )
+                    .unwrap();
                     let _ = eng.commit_transaction(txn, WriteOptions::default());
                 }
             })
@@ -198,8 +201,11 @@ fn should_allow_concurrent_writes_to_different_keys() {
 
     // Assert: All writes succeeded (no conflicts for different keys)
     let success_count = results.iter().filter(|r| r.is_ok()).count();
-    assert_eq!(success_count, 20, "All concurrent writes to different keys should succeed");
-    
+    assert_eq!(
+        success_count, 20,
+        "All concurrent writes to different keys should succeed"
+    );
+
     for i in 0..20 {
         let key = format!("key_{}", i);
         assert_get_equals(&engine, key.as_bytes(), b"value");
@@ -254,7 +260,7 @@ fn should_maintain_transaction_isolation_under_stress() {
                 for iteration in 0..10 {
                     let key_index = (thread_id * 10 + iteration) % 100;
                     let key = format!("stress_key_{}", key_index);
-                    
+
                     let mut txn = eng.begin_transaction(&cf_clone).unwrap();
                     let new_value = format!("t{}_i{}", thread_id, iteration);
                     txn.put(key.as_bytes(), new_value.as_bytes()).unwrap();

@@ -94,19 +94,19 @@ impl MidgeEngine {
                     let mut backoff_ms = 1; // Start with 1ms
                     let max_backoff_ms = 100; // Cap at 100ms
                     let max_stall_attempts = 1000; // ~55 seconds total max wait
-                    
+
                     for attempt in 0..max_stall_attempts {
                         std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                        
+
                         // Check if flush completed and we can proceed
                         if !column_family.should_stall_writes() {
                             self.metrics.record_write_stall(attempt + 1);
                             break;
                         }
-                        
+
                         // Exponential backoff with cap
                         backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
-                        
+
                         // If we've stalled too long, return error to prevent indefinite blocking
                         if attempt == max_stall_attempts - 1 {
                             return Err(crate::error::MidgeError::invalid_config(
@@ -206,17 +206,17 @@ impl MidgeEngine {
                 let mut backoff_ms = 1;
                 let max_backoff_ms = 100;
                 let max_stall_attempts = 1000;
-                
+
                 for attempt in 0..max_stall_attempts {
                     std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                    
+
                     if !column_family.should_stall_writes() {
                         self.metrics.record_write_stall(attempt + 1);
                         break;
                     }
-                    
+
                     backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
-                    
+
                     if attempt == max_stall_attempts - 1 {
                         return Err(crate::error::MidgeError::invalid_config(
                             "Write stall timeout: flush queue not draining",

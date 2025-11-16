@@ -74,29 +74,38 @@ impl KvTransaction for EngineTransaction {
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         self.txn.put(key, value)?;
-        
+
         // Update transaction manager with current conflict sets
         // Safety: Engine pointer is valid for the transaction's lifetime
         let engine = unsafe { &*self.engine };
-        let write_set: HashSet<crate::core::transaction::manager::Key> =
-            self.txn.conflict_write_set()
-                .into_iter()
-                .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
-                .collect();
+        let write_set: HashSet<crate::core::transaction::manager::Key> = self
+            .txn
+            .conflict_write_set()
+            .into_iter()
+            .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+            .collect();
         let write_ranges = self.txn.conflict_write_ranges().clone();
-        let read_set: HashSet<crate::core::transaction::manager::Key> =
-            self.txn.conflict_read_set()
-                .into_iter()
-                .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
-                .collect();
-        let read_versions: HashMap<crate::core::transaction::manager::Key, u64> =
-            self.txn.conflict_read_versions()
-                .into_iter()
-                .map(|((cf, k), v)| (crate::core::transaction::manager::Key::new(cf, k), v))
-                .collect();
-        
-        let _ = engine.txn_manager.update(self.txn.txn_id, write_set, write_ranges, read_set, read_versions);
-        
+        let read_set: HashSet<crate::core::transaction::manager::Key> = self
+            .txn
+            .conflict_read_set()
+            .into_iter()
+            .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+            .collect();
+        let read_versions: HashMap<crate::core::transaction::manager::Key, u64> = self
+            .txn
+            .conflict_read_versions()
+            .into_iter()
+            .map(|((cf, k), v)| (crate::core::transaction::manager::Key::new(cf, k), v))
+            .collect();
+
+        let _ = engine.txn_manager.update(
+            self.txn.txn_id,
+            write_set,
+            write_ranges,
+            read_set,
+            read_versions,
+        );
+
         Ok(())
     }
 
@@ -120,25 +129,25 @@ impl KvTransaction for EngineTransaction {
         // Safety: Engine pointer is valid for the transaction's lifetime
         let engine = unsafe { &*self.engine };
         let cf = engine.default_column_family();
-        
+
         // Create snapshot at transaction's begin sequence for consistent reads
         let snapshot = engine.snapshot();
         let mut results = engine.scan_at(&cf, q, &snapshot)?;
-        
+
         // Build map of uncommitted writes in the transaction
         // This includes both staged and potentially spilled mutations
         use std::collections::BTreeMap;
         let mut uncommitted: BTreeMap<Bytes, Option<Bytes>> = BTreeMap::new();
-        
+
         // Process staged mutations (in-memory buffer)
         for mutation in self.txn.staged_mutations() {
             // Only process mutations in the scan range for default CF
-            if mutation.cf_id == crate::api::DEFAULT_CF_ID 
-                && mutation.key.as_ref() >= start 
-                && mutation.key.as_ref() < end 
+            if mutation.cf_id == crate::api::DEFAULT_CF_ID
+                && mutation.key.as_ref() >= start
+                && mutation.key.as_ref() < end
             {
                 match mutation.op {
-                    crate::api::mutation::MutationOp::Put 
+                    crate::api::mutation::MutationOp::Put
                     | crate::api::mutation::MutationOp::Insert => {
                         uncommitted.insert(mutation.key.clone(), mutation.value.clone());
                     }
@@ -158,12 +167,10 @@ impl KvTransaction for EngineTransaction {
                 }
             }
         }
-        
+
         // Apply uncommitted writes: remove deletes, update/add puts
-        results.retain(|(k, _)| {
-            !uncommitted.get(k).map_or(false, |v| v.is_none())
-        });
-        
+        results.retain(|(k, _)| !uncommitted.get(k).map_or(false, |v| v.is_none()));
+
         for (key, value_opt) in uncommitted {
             if let Some(value) = value_opt {
                 // Remove existing entry and add updated value
@@ -171,10 +178,10 @@ impl KvTransaction for EngineTransaction {
                 results.push((key, value));
             }
         }
-        
+
         // Sort results by key (uncommitted writes may have disrupted order)
         results.sort_by(|a, b| a.0.cmp(&b.0));
-        
+
         Ok(results)
     }
 

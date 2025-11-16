@@ -349,11 +349,12 @@ impl HealthManager {
                 wal_files.sort();
                 if wal_files.len() > 1 {
                     for i in 1..wal_files.len() {
-                        let prev = &wal_files[i-1];
+                        let prev = &wal_files[i - 1];
                         let curr = &wal_files[i];
                         // Simple check: if names don't follow expected pattern, note it
                         if prev >= curr {
-                            discrepancies.push(format!("WAL files out of order: {} >= {}", prev, curr));
+                            discrepancies
+                                .push(format!("WAL files out of order: {} >= {}", prev, curr));
                         }
                     }
                 }
@@ -371,7 +372,10 @@ impl HealthManager {
             }
 
             // Group by level for continuity check
-            level_files.entry(file_meta.level).or_insert_with(Vec::new).push(&file_meta.name);
+            level_files
+                .entry(file_meta.level)
+                .or_insert_with(Vec::new)
+                .push(&file_meta.name);
         }
 
         // Check for level continuity (basic: no gaps in levels)
@@ -390,12 +394,17 @@ impl HealthManager {
         let mut seen_names = std::collections::HashSet::new();
         for file_meta in &manifest.files {
             if !seen_names.insert(&file_meta.name) {
-                discrepancies.push(format!("Duplicate SST file in manifest: {}", file_meta.name));
+                discrepancies.push(format!(
+                    "Duplicate SST file in manifest: {}",
+                    file_meta.name
+                ));
             }
         }
 
         ValidationResult {
-            valid: current_seq >= cloud_seq && missing_segments.is_empty() && discrepancies.is_empty(),
+            valid: current_seq >= cloud_seq
+                && missing_segments.is_empty()
+                && discrepancies.is_empty(),
             current_seq,
             cloud_seq,
             missing_segments,

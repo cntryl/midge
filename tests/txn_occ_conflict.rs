@@ -23,7 +23,8 @@ fn should_reject_second_committer_on_write_write_conflict() {
 
     // Act
     let first_result = engine.commit_transaction(first_txn, cntryl_midge::WriteOptions::default());
-    let second_result = engine.commit_transaction(second_txn, cntryl_midge::WriteOptions::default());
+    let second_result =
+        engine.commit_transaction(second_txn, cntryl_midge::WriteOptions::default());
 
     // Assert
     // With optimistic conflict detection, the second committer should be rejected due to write-write conflict.

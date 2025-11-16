@@ -24,12 +24,20 @@ impl Default for NoOpWal {
 }
 
 impl crate::wal::traits::WalWriter for NoOpWal {
-    fn append_record(&self, _record: &crate::wal::types::WalRecord) -> crate::error::MidgeResult<crate::wal::types::WalPos> {
+    fn append_record(
+        &self,
+        _record: &crate::wal::types::WalRecord,
+    ) -> crate::error::MidgeResult<crate::wal::types::WalPos> {
         // Explicitly discard - no durability in memory mode
         Ok(0)
     }
 
-    fn append_op(&self, _kind: crate::wal::types::WalOpKind, _key: &[u8], _value: Option<&[u8]>) -> crate::error::MidgeResult<crate::wal::types::WalPos> {
+    fn append_op(
+        &self,
+        _kind: crate::wal::types::WalOpKind,
+        _key: &[u8],
+        _value: Option<&[u8]>,
+    ) -> crate::error::MidgeResult<crate::wal::types::WalPos> {
         Ok(0)
     }
 
@@ -51,7 +59,10 @@ impl crate::wal::traits::WalWriter for NoOpWal {
 }
 
 impl crate::wal::traits::WalReaderDyn for NoOpWal {
-    fn read_at(&mut self, _pos: crate::wal::types::WalPos) -> crate::error::MidgeResult<Option<crate::wal::types::WalRecord>> {
+    fn read_at(
+        &mut self,
+        _pos: crate::wal::types::WalPos,
+    ) -> crate::error::MidgeResult<Option<crate::wal::types::WalRecord>> {
         // No records to read - all writes discarded
         Ok(None)
     }

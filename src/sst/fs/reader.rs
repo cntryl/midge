@@ -244,7 +244,10 @@ impl SstFile {
         // NOTE: This is a temporary diagnostic change; it will be removed after debugging
         #[cfg(test)]
         {
-            eprintln!("SST sparse index entries (count={}):", sparse_index.entries().len());
+            eprintln!(
+                "SST sparse index entries (count={}):",
+                sparse_index.entries().len()
+            );
             for en in sparse_index.entries() {
                 eprintln!("  entry key={}", String::from_utf8_lossy(en.key.as_ref()));
             }
@@ -538,7 +541,10 @@ impl SstFile {
         }
         let version = data[total_len - 4 - restarts_len - 1];
         if version != 3 {
-            return Err(MidgeError::InvalidData(format!("Unsupported data block version: {}", version)));
+            return Err(MidgeError::InvalidData(format!(
+                "Unsupported data block version: {}",
+                version
+            )));
         }
         let restarts_start = total_len - 4 - restarts_len;
         let entries_end = restarts_start;
@@ -667,7 +673,8 @@ impl SstFile {
             last_key = raw_key.clone();
 
             let (user_key, seq, tomb) = if self.use_internal_keys {
-                if let Some((uk, s, t)) = crate::common::internal_key::decode_internal_key(&raw_key) {
+                if let Some((uk, s, t)) = crate::common::internal_key::decode_internal_key(&raw_key)
+                {
                     (uk, s, t)
                 } else {
                     (raw_key.clone(), entry.sequence, entry.entry_type == 2)

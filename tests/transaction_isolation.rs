@@ -1,7 +1,7 @@
 mod common;
+use bytes::Bytes;
 use cntryl_midge::{KvTransaction, WriteOptions};
 use common::{assert_get_equals, assert_key_absent, new_engine};
-use bytes::Bytes;
 use std::sync::Arc;
 
 #[test]
@@ -45,14 +45,19 @@ fn should_detect_read_write_conflict_under_snapshot() {
     // Another transaction updates and commits
     let mut txn_b = eng.begin_transaction(&cf).expect("begin");
     txn_b.put(b"rw_key", b"updated").expect("put");
-    assert!(eng.commit_transaction(txn_b, WriteOptions::default()).is_ok());
+    assert!(eng
+        .commit_transaction(txn_b, WriteOptions::default())
+        .is_ok());
 
     // Act - now txn_a tries to commit a write, should conflict due to read-write
     txn_a.put(b"some_key", b"value").expect("put");
     let res = eng.commit_transaction(txn_a, WriteOptions::default());
 
     // Assert
-    assert!(res.is_err(), "Snapshot isolation should detect read-write conflict");
+    assert!(
+        res.is_err(),
+        "Snapshot isolation should detect read-write conflict"
+    );
 }
 
 #[test]
@@ -64,21 +69,31 @@ fn should_allow_commit_under_read_committed_when_other_commits() {
 
     // Act - start txn with ReadCommitted isolation and read key
     let mut txn_a = eng
-        .begin_transaction_with_options(&cf, None, 1024 * 1024, cntryl_midge::IsolationLevel::ReadCommitted)
+        .begin_transaction_with_options(
+            &cf,
+            None,
+            1024 * 1024,
+            cntryl_midge::IsolationLevel::ReadCommitted,
+        )
         .expect("begin");
     let _ = txn_a.get(b"rw_key").expect("get");
 
     // Another transaction updates and commits
     let mut txn_b = eng.begin_transaction(&cf).expect("begin");
     txn_b.put(b"rw_key", b"updated").expect("put");
-    assert!(eng.commit_transaction(txn_b, WriteOptions::default()).is_ok());
+    assert!(eng
+        .commit_transaction(txn_b, WriteOptions::default())
+        .is_ok());
 
     // Act - txn_a tries to commit and should NOT be treated as conflicting
     txn_a.put(b"some_key", b"value").expect("put");
     let res = eng.commit_transaction(txn_a, WriteOptions::default());
 
     // Assert - should succeed for read committed
-    assert!(res.is_ok(), "ReadCommitted should not track reads and should allow commit");
+    assert!(
+        res.is_ok(),
+        "ReadCommitted should not track reads and should allow commit"
+    );
 }
 
 #[test]
@@ -183,25 +198,19 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stress_t
             std::thread::spawn(move || {
                 for txn_num in 0..TRANSACTIONS_PER_THREAD {
                     let mut txn = eng.begin_transaction(&cf_clone).expect("begin txn");
-                    
+
                     // Each transaction writes 5 keys
                     for key_offset in 0..5 {
-                        let key = format!(
-                            "isolation_key_{}_{}_{}",
-                            thread_id, txn_num, key_offset
-                        )
-                        .into_bytes();
-                        let value = format!(
-                            "isolation_value_{}_{}_{}",
-                            thread_id, txn_num, key_offset
-                        )
-                        .into_bytes();
+                        let key = format!("isolation_key_{}_{}_{}", thread_id, txn_num, key_offset)
+                            .into_bytes();
+                        let value =
+                            format!("isolation_value_{}_{}_{}", thread_id, txn_num, key_offset)
+                                .into_bytes();
                         txn.put(&key, &value).expect("put in txn");
                     }
-                    
+
                     // Try to commit (may fail due to conflicts)
-                    let _commit_result =
-                        eng.commit_transaction(txn, WriteOptions::default());
+                    let _commit_result = eng.commit_transaction(txn, WriteOptions::default());
                 }
             })
         })
@@ -317,7 +326,9 @@ fn should_preserve_isolation_across_transaction_lifecycle_given_multiple_operati
         .expect("commit");
 
     // Assert - verify modification is now visible in main engine
-    let final_value = engine.get(&cf, b"lifecycle_key_050").expect("get after commit");
+    let final_value = engine
+        .get(&cf, b"lifecycle_key_050")
+        .expect("get after commit");
     assert_eq!(
         final_value,
         Some(Bytes::from("modified_in_txn")),

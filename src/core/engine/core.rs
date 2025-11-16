@@ -344,9 +344,9 @@ mod tests {
 
         // Assert
         // Verify adapter is created (type check via usage)
-    let cf = adapter.default_column_family();
-    // `default_column_family()` now returns a `ColumnFamilyId`
-    assert_eq!(cf, crate::api::column_family::DEFAULT_CF_ID);
+        let cf = adapter.default_column_family();
+        // `default_column_family()` now returns a `ColumnFamilyId`
+        assert_eq!(cf, crate::api::column_family::DEFAULT_CF_ID);
     }
 
     // ==================== Read-Only Mode Tests ====================

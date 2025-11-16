@@ -44,8 +44,8 @@ fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
     // With conflict detection implemented, exactly one transaction should succeed
     // since both transactions conflict with each other
     assert!(
-        (first_result.is_ok() && second_result.is_err()) ||
-        (first_result.is_err() && second_result.is_ok()),
+        (first_result.is_ok() && second_result.is_err())
+            || (first_result.is_err() && second_result.is_ok()),
         "Exactly one transaction should succeed, the other should fail due to conflict"
     );
 }
@@ -80,8 +80,8 @@ fn should_abort_victim_transaction_given_deadlock_when_detected() {
     // One transaction should be chosen as victim and aborted
     // With conflict detection implemented, exactly one should succeed and one should fail
     assert!(
-        (first_deadlock_result.is_ok() && second_deadlock_result.is_err()) ||
-        (first_deadlock_result.is_err() && second_deadlock_result.is_ok()),
+        (first_deadlock_result.is_ok() && second_deadlock_result.is_err())
+            || (first_deadlock_result.is_err() && second_deadlock_result.is_ok()),
         "Exactly one transaction should succeed, the other should fail due to conflict"
     );
 }
@@ -150,10 +150,14 @@ fn should_detect_deadlock_given_three_way_circular_dependency() {
 
     // Assert
     // Should detect circular conflicts: at least one transaction should be aborted
-    let success_count = [first_three_way_result, second_three_way_result, third_three_way_result]
-        .iter()
-        .filter(|r| r.is_ok())
-        .count();
+    let success_count = [
+        first_three_way_result,
+        second_three_way_result,
+        third_three_way_result,
+    ]
+    .iter()
+    .filter(|r| r.is_ok())
+    .count();
     assert!(
         success_count >= 1 && success_count < 3,
         "At least one transaction should succeed, but not all three (circular conflicts should cause some failures)"
@@ -181,16 +185,22 @@ fn should_handle_high_concurrency_without_livelock() {
             std::thread::spawn(move || {
                 for iteration in 0..5 {
                     let mut txn = eng.begin_transaction(&cf_clone).unwrap();
-                    
+
                     // Each thread writes to multiple keys in different order
                     let key1 = format!("resource_{}", (thread_id + iteration) % 10);
                     let key2 = format!("resource_{}", (thread_id + iteration + 1) % 10);
-                    
-                    txn.put(key1.as_bytes(), format!("t{}_{}", thread_id, iteration).as_bytes())
-                        .unwrap();
-                    txn.put(key2.as_bytes(), format!("t{}_{}", thread_id, iteration).as_bytes())
-                        .unwrap();
-                    
+
+                    txn.put(
+                        key1.as_bytes(),
+                        format!("t{}_{}", thread_id, iteration).as_bytes(),
+                    )
+                    .unwrap();
+                    txn.put(
+                        key2.as_bytes(),
+                        format!("t{}_{}", thread_id, iteration).as_bytes(),
+                    )
+                    .unwrap();
+
                     let _ = eng.commit_transaction(txn, cntryl_midge::WriteOptions::default());
                 }
             })
@@ -244,6 +254,10 @@ fn should_handle_recovery_after_complex_deadlock_scenario() {
     for i in 0..5 {
         let key = format!("dlk_resource_{}", i);
         let result = engine.get(&cf, key.as_bytes()).unwrap();
-        assert!(result.is_some(), "Resource {} should exist after restart", key);
+        assert!(
+            result.is_some(),
+            "Resource {} should exist after restart",
+            key
+        );
     }
 }

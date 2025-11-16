@@ -16,7 +16,12 @@ fn should_commit_large_transaction_given_many_writes() {
 
     // Create transaction with small memory limit (1MB) to force spilling
     let mut large_txn = engine
-        .begin_transaction_with_options(&cf, None, 1024 * 1024, cntryl_midge::IsolationLevel::default())
+        .begin_transaction_with_options(
+            &cf,
+            None,
+            1024 * 1024,
+            cntryl_midge::IsolationLevel::default(),
+        )
         .expect("begin");
 
     // Act - Add 2MB of data (2000 keys × 1024 bytes each)
@@ -51,7 +56,12 @@ fn should_preserve_data_integrity_given_large_transaction_with_values() {
 
     // Create transaction with small memory limit (512KB) to force spilling
     let mut large_txn = engine
-        .begin_transaction_with_options(&cf, None, 512 * 1024, cntryl_midge::IsolationLevel::default())
+        .begin_transaction_with_options(
+            &cf,
+            None,
+            512 * 1024,
+            cntryl_midge::IsolationLevel::default(),
+        )
         .expect("begin");
 
     // Act - Add 1.5MB of data with specific pattern
@@ -90,7 +100,12 @@ fn should_commit_successfully_given_large_transaction() {
 
     // Create transaction with small memory limit (256KB)
     let mut large_txn = engine
-        .begin_transaction_with_options(&cf, None, 256 * 1024, cntryl_midge::IsolationLevel::default())
+        .begin_transaction_with_options(
+            &cf,
+            None,
+            256 * 1024,
+            cntryl_midge::IsolationLevel::default(),
+        )
         .expect("begin");
 
     // Act - Add 2MB of data
@@ -125,7 +140,12 @@ fn should_rollback_given_transaction_dropped_without_commit() {
     // Act - Create transaction with large data, then drop without committing
     {
         let mut large_txn = engine
-            .begin_transaction_with_options(&cf, None, 256 * 1024, cntryl_midge::IsolationLevel::default())
+            .begin_transaction_with_options(
+                &cf,
+                None,
+                256 * 1024,
+                cntryl_midge::IsolationLevel::default(),
+            )
             .expect("begin");
 
         for i in 0..2000 {
@@ -159,7 +179,12 @@ fn should_handle_very_large_transaction_given_many_writes() {
 
     // Create transaction with very small memory limit (128KB) to force multiple spills
     let mut huge_txn = engine
-        .begin_transaction_with_options(&cf, None, 128 * 1024, cntryl_midge::IsolationLevel::default())
+        .begin_transaction_with_options(
+            &cf,
+            None,
+            128 * 1024,
+            cntryl_midge::IsolationLevel::default(),
+        )
         .expect("begin");
 
     // Act - Add 10MB of data (will cause multiple spills)

@@ -3,8 +3,8 @@ use common::{
     bulk_put_fn, compaction_opts, new_engine_with_opts, new_shared_engine, test_temp_dir,
     with_engine_restart,
 };
-use std::thread;
 use std::sync::Arc;
+use std::thread;
 
 #[test]
 fn should_generate_strictly_increasing_sequence_numbers_given_parallel_writes() {
@@ -189,15 +189,10 @@ fn should_maintain_isolation_between_concurrent_memtable_operations_during_freez
             std::thread::spawn(move || {
                 for batch in 0..50 {
                     for i in 0..10 {
-                        let key = format!(
-                            "freeze_test_{}_{}_{}",
-                            thread_id, batch, i
-                        )
-                        .into_bytes();
-                        let value = format!("value_{}", thread_id * 500 + batch * 10 + i)
-                            .into_bytes();
-                        eng.put(&cf_clone, &key, &value)
-                            .expect("put during freeze");
+                        let key = format!("freeze_test_{}_{}_{}", thread_id, batch, i).into_bytes();
+                        let value =
+                            format!("value_{}", thread_id * 500 + batch * 10 + i).into_bytes();
+                        eng.put(&cf_clone, &key, &value).expect("put during freeze");
                     }
                 }
             })
@@ -212,7 +207,7 @@ fn should_maintain_isolation_between_concurrent_memtable_operations_during_freez
     for thread_id in 0..NUM_THREADS {
         for batch in 0..50 {
             for i in 0..10 {
-                let key = format!("freeze_test_{}_{}_{}",thread_id, batch, i).into_bytes();
+                let key = format!("freeze_test_{}_{}_{}", thread_id, batch, i).into_bytes();
                 let result = engine.get(&cf, &key).expect("get after freeze");
                 assert!(
                     result.is_some(),
@@ -244,7 +239,9 @@ fn should_track_sequence_numbers_correctly_across_concurrent_writes_with_overlap
                     let key = format!("seq_key_{:04}", (thread_id * 10 + i) % 100).into_bytes();
                     let value = format!(
                         "seq_value_{}_{}_{}",
-                        thread_id, i, thread_id * WRITES_PER_THREAD + i
+                        thread_id,
+                        i,
+                        thread_id * WRITES_PER_THREAD + i
                     )
                     .into_bytes();
                     eng.put(&cf_clone, &key, &value)
@@ -261,7 +258,10 @@ fn should_track_sequence_numbers_correctly_across_concurrent_writes_with_overlap
     // Assert - final values should exist and be consistent
     for i in 0..100 {
         let key = format!("seq_key_{:04}", i).into_bytes();
-        let result = engine.get(&cf, &key).expect("get").expect("key should exist");
+        let result = engine
+            .get(&cf, &key)
+            .expect("get")
+            .expect("key should exist");
         assert!(
             result.len() > 0,
             "Key should have a value from sequence numbering"

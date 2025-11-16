@@ -99,7 +99,7 @@ fn should_background_compact_when_threshold_exceeded() {
         .with_max_level(tracing::Level::DEBUG)
         .with_test_writer()
         .try_init();
-    
+
     // Arrange: enable compaction with low threshold so it triggers
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
@@ -117,7 +117,7 @@ fn should_background_compact_when_threshold_exceeded() {
     for i in 0..4 {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
-        
+
         // Write overlapping keys - newer versions will supersede older ones
         eng.put(&cf, b"key_a", format!("value_v{}", i).as_bytes())
             .unwrap();
@@ -125,13 +125,13 @@ fn should_background_compact_when_threshold_exceeded() {
             .unwrap();
         eng.put(&cf, b"key_c", format!("value_v{}", i).as_bytes())
             .unwrap();
-        
+
         // Add padding to ensure we trigger flush threshold
         for j in 0..5 {
             eng.put(&cf, format!("padding_{}_{}", i, j).as_bytes(), &[b'x'; 128])
                 .unwrap();
         }
-        
+
         eng.flush_cf(&cf).unwrap();
         eng.wait_for_flush(std::time::Duration::from_millis(100))
             .unwrap();
@@ -142,17 +142,20 @@ fn should_background_compact_when_threshold_exceeded() {
     // Open engine with background compaction enabled
     {
         let _eng = MidgeEngine::open(opts.clone()).expect("open for background compaction");
-        
+
         // Background compaction runs every 50ms. Wait up to 10 seconds for compaction to reduce file count.
         // Check every 500ms to see if file count has decreased.
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(10);
         let db_path = opts.storage_mode.local_path();
-        
+
         loop {
             if let Ok(m) = cntryl_midge::manifest::Manifest::load(&db_path) {
                 if m.ssts.len() < 4 {
-                    println!("Compaction succeeded: SST count reduced to {}", m.ssts.len());
+                    println!(
+                        "Compaction succeeded: SST count reduced to {}",
+                        m.ssts.len()
+                    );
                     break;
                 }
             }

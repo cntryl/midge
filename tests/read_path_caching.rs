@@ -9,7 +9,7 @@ fn should_reject_block_given_checksum_mismatch_when_paranoid_mode_enabled() {
     // Arrange
     use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
     use tempfile::TempDir;
-    
+
     let temp_dir = TempDir::new().expect("temp dir");
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
@@ -99,9 +99,7 @@ fn should_hit_cache_for_frequently_accessed_keys_given_working_set_fits_in_cache
     // Act - write 500 keys, repeatedly access 50 of them (working set)
     for i in 0..500 {
         let key = format!("cache_test_key_{:04}", i).into_bytes();
-        engine
-            .put(&cf, &key, b"value_for_cache_test")
-            .expect("put");
+        engine.put(&cf, &key, b"value_for_cache_test").expect("put");
     }
 
     // Repeatedly access a small working set (should stay in cache)
@@ -111,7 +109,10 @@ fn should_hit_cache_for_frequently_accessed_keys_given_working_set_fits_in_cache
         for i in 0..WORKING_SET_SIZE {
             let key = format!("cache_test_key_{:04}", i).into_bytes();
             let result = engine.get(&cf, &key).expect("get");
-            assert!(result.is_some(), "Working set key should always be readable");
+            assert!(
+                result.is_some(),
+                "Working set key should always be readable"
+            );
         }
     }
 
@@ -157,7 +158,10 @@ fn should_balance_cache_between_multiple_concurrent_readers_when_working_sets_ov
                         let key_idx = (reader_id * KEYS_PER_READER + offset + iter) % TOTAL_KEYS;
                         let key = format!("overlap_key_{:04}", key_idx).into_bytes();
                         let result = eng.get(&cf_clone, &key).expect("get");
-                        assert!(result.is_some(), "Key should be readable in overlap pattern");
+                        assert!(
+                            result.is_some(),
+                            "Key should be readable in overlap pattern"
+                        );
                     }
                 }
             })

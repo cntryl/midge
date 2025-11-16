@@ -144,7 +144,11 @@ pub fn open_with_factories(
 ) -> MidgeResult<MidgeEngine> {
     let db_path = opts.storage_mode.local_path();
     let wal_dir = db_path.join("wal");
-    println!("[diag-lib] open_with_factories db_path={} wal_dir={}", db_path.display(), wal_dir.display());
+    println!(
+        "[diag-lib] open_with_factories db_path={} wal_dir={}",
+        db_path.display(),
+        wal_dir.display()
+    );
     if !mem_mode {
         std::fs::create_dir_all(&wal_dir)?;
     }
@@ -172,13 +176,19 @@ pub fn open_with_factories(
     println!("[diag-lib] initializing manifest...");
     let (manifest, max_cf_id) =
         crate::core::engine::factory::init_manifest(&db_path, opts.read_only)?;
-    println!("[diag-lib] manifest initialized: last_seq={}", manifest.last_persisted_sequence);
+    println!(
+        "[diag-lib] manifest initialized: last_seq={}",
+        manifest.last_persisted_sequence
+    );
     println!("[diag-lib] replaying WAL segments (if any)...");
     let cf_set_arc = Arc::new(ColumnFamilySet::new());
     crate::core::engine::factory::init_column_families(&manifest, &cf_set_arc, max_cf_id)?;
 
     // Replay WAL and setup WAL writer
-    println!("[diag-lib] replay_local_wal_segments start (wal_dir={})", wal_dir.display());
+    println!(
+        "[diag-lib] replay_local_wal_segments start (wal_dir={})",
+        wal_dir.display()
+    );
     let max_replay_seq = crate::core::engine::factory::replay_local_wal_segments(
         &wal_dir,
         &cf_set_arc,
@@ -186,7 +196,10 @@ pub fn open_with_factories(
         opts.wal_recovery_mode,
         mem_mode,
     )?;
-    println!("[diag-lib] replay_local_wal_segments done, max_replay_seq={}", max_replay_seq);
+    println!(
+        "[diag-lib] replay_local_wal_segments done, max_replay_seq={}",
+        max_replay_seq
+    );
     let (wal_writer_box, max_replay_seq) = crate::core::engine::factory::setup_wal_writer(
         &opts,
         &wal_dir,
@@ -307,7 +320,7 @@ pub fn open_with_factories(
         cf_set: cf_set_arc,
         seq: AtomicU64::new(max_replay_seq),
         txn_id: AtomicU64::new(0),
-    txn_manager: crate::core::transaction::TransactionManager::new(),
+        txn_manager: crate::core::transaction::TransactionManager::new(),
         db_path,
         mem_mode,
         read_only: opts.read_only,

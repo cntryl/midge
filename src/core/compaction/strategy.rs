@@ -87,7 +87,7 @@ impl Compactor {
         // Check L0 first (special case - can have overlapping files)
         let l0_size: u64 = levels[0].iter().map(|f| f.size_bytes).sum();
         let l0_file_count = levels[0].len();
-        
+
         tracing::debug!(
             cf_id = cf_id,
             l0_file_count = l0_file_count,
@@ -189,7 +189,7 @@ impl Compactor {
                 cf_level_multiplier,
                 cf_target_file_size,
             );
-            
+
             tracing::trace!(
                 cf_id = cf_id,
                 level = level,

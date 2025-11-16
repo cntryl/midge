@@ -173,7 +173,11 @@ impl CompactionCoordinator {
                         thread::sleep(interval);
 
                         let manifest = Manifest::load(&db_path).unwrap_or_default();
-                        tracing::debug!(sst_count = manifest.ssts.len(), file_count = manifest.files.len(), "loaded manifest for automatic compaction check");
+                        tracing::debug!(
+                            sst_count = manifest.ssts.len(),
+                            file_count = manifest.files.len(),
+                            "loaded manifest for automatic compaction check"
+                        );
 
                         // Get default CF config for compaction settings
                         let default_cf_config = manifest
@@ -188,7 +192,7 @@ impl CompactionCoordinator {
                             default_cf_config.level_size_multiplier,
                             default_cf_config.target_file_size,
                         );
-                        
+
                         if let Some(ref p) = plan {
                             tracing::info!(
                                 cf_id = p.cf_id,

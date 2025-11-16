@@ -43,10 +43,9 @@ impl SstMetadata {
         let idx_off = footer.index_handle.offset as usize;
         let idx_size = footer.index_handle.size as usize;
         let idx_raw = &raw[idx_off..idx_off + idx_size];
-        
+
         let idx_block = Block::decode(idx_raw, BlockType::Index)?;
-        
-        
+
         let sparse_index = SparseIndex::decode(&idx_block.data)?;
 
         // Optionally read meta index, bloom filter, and range tombstones
@@ -58,9 +57,8 @@ impl SstMetadata {
             let meta_off = footer.meta_index_handle.offset as usize;
             let meta_size = footer.meta_index_handle.size as usize;
             let meta_raw = &raw[meta_off..meta_off + meta_size];
-            
+
             let meta_block = Block::decode(meta_raw, BlockType::MetaIndex)?;
-            
 
             if let Some(bh) = find_bloom_filter_handle(&meta_block.data)? {
                 let off = bh.offset as usize;

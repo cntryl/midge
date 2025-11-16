@@ -1,15 +1,18 @@
 mod common;
+use cntryl_midge::{
+    test_hooks::{FsyncBehavior, ManifestBehavior, TestHooks},
+    MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode,
+};
 use common::{
     assert_get_equals, durability_opts, flush_test_opts, test_temp_dir, with_engine_restart,
 };
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, test_hooks::{TestHooks, FsyncBehavior, ManifestBehavior}, WalRecoveryMode};
 
 #[test]
 fn should_detect_and_ignore_already_compacted_wal_entries_given_manifest_sequence() {
     // Arrange
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
-    
+
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
             db_path: dir.path().to_path_buf(),
@@ -25,23 +28,23 @@ fn should_detect_and_ignore_already_compacted_wal_entries_given_manifest_sequenc
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
-        
+
         // Record initial WAL append count
         let wal_appends_before = hooks.wal_append_count();
-        
+
         // Write data that will flush to SST
         for i in 0..100 {
             eng.put(&cf, format!("key{:04}", i).as_bytes(), b"value")
                 .expect("put");
         }
-        
+
         // Verify WAL appends occurred
         let wal_appends_after_write = hooks.wal_append_count();
         assert!(
             wal_appends_after_write > wal_appends_before,
             "WAL appends should have occurred"
         );
-        
+
         // Force flush so data is in SST
         eng.flush_cf(&cf).expect("flush");
     }
@@ -74,7 +77,7 @@ fn should_replay_to_last_synced_sequence_given_fullsync_mode_when_recover() {
     // Arrange
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
-    
+
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
             db_path: dir.path().to_path_buf(),
@@ -89,13 +92,13 @@ fn should_replay_to_last_synced_sequence_given_fullsync_mode_when_recover() {
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
-        
+
         // Record fsync count before writes
         let fsync_count_before = hooks.fsync_count();
-        
+
         eng.put(&cf, b"synced1", b"value1").expect("put");
         eng.put(&cf, b"synced2", b"value2").expect("put");
-        
+
         // Verify fsyncs occurred (each put should trigger fsync in durability mode)
         let fsync_count_after = hooks.fsync_count();
         assert!(
@@ -126,7 +129,7 @@ fn should_recover_last_committed_state_given_crash_during_write() {
     // Arrange
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::Skip);
-    
+
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
             db_path: dir.path().to_path_buf(),
@@ -141,7 +144,7 @@ fn should_recover_last_committed_state_given_crash_during_write() {
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
-        
+
         eng.put(&cf, b"committed1", b"value1").expect("put");
         eng.put(&cf, b"committed2", b"value2").expect("put");
         // Simulate crash during third write by dropping without fsyncing

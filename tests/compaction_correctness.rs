@@ -1,27 +1,27 @@
 mod common;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::{assert_key_absent, test_temp_dir, with_engine_restart};
-use std::sync::Arc;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 fn compute_engine_data_hash(eng: &MidgeEngine) -> u32 {
     use cntryl_midge::api::query::Query;
-    
+
     let cf = eng.default_column_family();
     let entries = eng.scan(&cf, Query::new()).expect("scan");
-    
+
     // Sort for deterministic ordering
     let mut sorted_entries = entries;
     sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
-    
+
     // Hash the key-value pairs
     let mut combined_hash = 0u32;
     for (key, value) in sorted_entries {
         combined_hash = crc32c::crc32c_append(combined_hash, &key);
         combined_hash = crc32c::crc32c_append(combined_hash, &value);
     }
-    
+
     combined_hash
 }
 
@@ -58,7 +58,7 @@ fn should_produce_identical_output_given_same_input_runs_when_compacting() {
         std::fs::remove_dir_all(&temp_dir).unwrap();
     }
     std::fs::create_dir_all(&temp_dir).unwrap();
-    
+
     let opts = common::flush_test_opts(temp_dir.clone(), 4096);
 
     let mut first_run_hash = None;
@@ -132,8 +132,7 @@ fn should_produce_identical_output_given_same_input_runs_when_compacting() {
 
     // Assert - compaction output should be identical (deterministic)
     assert_eq!(
-        first_run_hash,
-        second_run_hash,
+        first_run_hash, second_run_hash,
         "Compaction should produce identical output for identical input"
     );
 }
@@ -214,9 +213,10 @@ fn should_keep_write_amplification_under_target_given_mixed_workload() {
                 )
                 .expect("insert");
             }
-            
+
             // Delete only some keys (not all)
-            for i in 0..100 {  // Delete half
+            for i in 0..100 {
+                // Delete half
                 eng.delete(&cf, format!("key{:03}", i).as_bytes()).ok();
             }
 
@@ -228,7 +228,10 @@ fn should_keep_write_amplification_under_target_given_mixed_workload() {
 
             // Basic write amplification monitoring: ensure compaction produces reasonable output
             // In a real scenario, you'd compare this against the logical input size
-            assert!(_size_after_compaction > 0, "Compaction should produce SST files");
+            assert!(
+                _size_after_compaction > 0,
+                "Compaction should produce SST files"
+            );
             // For mixed workloads, some amplification is expected but should be bounded
             // Here we just verify the compaction completed successfully
         },
@@ -268,8 +271,8 @@ fn should_maintain_data_consistency_during_high_concurrency_compaction_workload(
             std::thread::spawn(move || {
                 for i in 0..KEYS_PER_THREAD {
                     let key = format!("compact_key_{}_{:03}", thread_id, i).into_bytes();
-                    let value = format!("compact_value_{}", thread_id * KEYS_PER_THREAD + i)
-                        .into_bytes();
+                    let value =
+                        format!("compact_value_{}", thread_id * KEYS_PER_THREAD + i).into_bytes();
                     eng_clone
                         .put(&cf_clone, &key, &value)
                         .expect("put during compaction");
@@ -326,28 +329,30 @@ fn should_preserve_ordering_and_values_given_multiple_overwrites_during_compacti
                     eng.put(&cf, &key, &value).expect("put");
                 }
             }
-            
+
             // Check data before flush
             println!("Before flush:");
-            for i in 0..3 { // Check first 3 keys
+            for i in 0..3 {
+                // Check first 3 keys
                 let key = format!("overwrite_key_{:02}", i).into_bytes();
                 let result = eng.get(&cf, &key).expect("get before flush");
                 println!("  Key {}: {:?}", String::from_utf8_lossy(&key), result);
             }
-            
+
             // Trigger compaction to merge all overwrites
             println!("Calling flush_cf...");
             eng.flush_cf(&cf).expect("flush");
             println!("flush_cf completed");
-            
+
             // Check data after flush
             println!("After flush:");
-            for i in 0..3 { // Check first 3 keys
+            for i in 0..3 {
+                // Check first 3 keys
                 let key = format!("overwrite_key_{:02}", i).into_bytes();
                 let result = eng.get(&cf, &key).expect("get after flush");
                 println!("  Key {}: {:?}", String::from_utf8_lossy(&key), result);
             }
-            
+
             // eng.compact_all().expect("compact");
         },
         |eng| {
@@ -363,7 +368,8 @@ fn should_preserve_ordering_and_values_given_multiple_overwrites_during_compacti
                 }
                 let expected = format!("round_{:02}", 49).into_bytes();
                 assert_eq!(
-                    result.unwrap(), expected,
+                    result.unwrap(),
+                    expected,
                     "Final overwritten value should match last write"
                 );
             }

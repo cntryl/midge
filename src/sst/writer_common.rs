@@ -297,7 +297,7 @@ impl SstImageBuilder {
         let meta_index_block =
             Block::new(meta_index_data, BlockType::MetaIndex, CompressionType::None);
         let meta_index_encoded = meta_index_block.encode()?;
-        
+
         let meta_index_handle = BlockHandle {
             offset: current_offset,
             size: meta_index_encoded.len() as u64,
@@ -309,7 +309,7 @@ impl SstImageBuilder {
         let index_data = self.state.index.finish();
         let index_block = Block::new(index_data, BlockType::Index, CompressionType::None);
         let index_encoded = index_block.encode()?;
-        
+
         let index_handle = BlockHandle {
             offset: current_offset,
             size: index_encoded.len() as u64,

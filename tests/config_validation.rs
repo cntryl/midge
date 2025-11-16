@@ -65,9 +65,7 @@ fn should_handle_multiple_config_validations_concurrently_when_engines_open() {
             std::fs::create_dir_all(&path).expect("create dir");
             std::thread::spawn(move || {
                 let opts = MidgeOptions {
-                    storage_mode: StorageMode::LocalDisk {
-                        db_path: path,
-                    },
+                    storage_mode: StorageMode::LocalDisk { db_path: path },
                     memtable_size: 4096 * (i + 1),
                     ..Default::default()
                 };
@@ -124,7 +122,7 @@ fn should_recover_data_after_restart_with_same_valid_config_when_engine_reopened
     // Arrange
     let dir = test_temp_dir();
     let path = dir.path().to_path_buf();
-    
+
     let opts_original = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
             db_path: path.clone(),

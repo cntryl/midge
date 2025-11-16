@@ -70,7 +70,11 @@ impl Autotuner {
     }
 
     /// Create a new autotuner with baseline values.
-    pub fn with_baselines(wal_interval_ms: u64, compaction_threads: usize, bloom_bits: u32) -> Self {
+    pub fn with_baselines(
+        wal_interval_ms: u64,
+        compaction_threads: usize,
+        bloom_bits: u32,
+    ) -> Self {
         Self {
             wal_interval_ms: AtomicU64::new(wal_interval_ms),
             compaction_threads: AtomicUsize::new(compaction_threads),
@@ -295,7 +299,8 @@ mod tests {
     #[test]
     fn should_decrease_wal_interval_given_high_latency() {
         // Arrange
-        let tuner = Autotuner::with_baselines(20, 4, 10).with_adjustment_interval(Duration::from_secs(0));
+        let tuner =
+            Autotuner::with_baselines(20, 4, 10).with_adjustment_interval(Duration::from_secs(0));
         tuner.update_metrics(ObservedMetrics {
             write_latency_p99_us: 10000, // 10ms - too high
             ..Default::default()
@@ -312,7 +317,8 @@ mod tests {
     #[test]
     fn should_increase_compaction_threads_given_high_l0_count() {
         // Arrange
-        let tuner = Autotuner::with_baselines(20, 4, 10).with_adjustment_interval(Duration::from_secs(0));
+        let tuner =
+            Autotuner::with_baselines(20, 4, 10).with_adjustment_interval(Duration::from_secs(0));
         tuner.update_metrics(ObservedMetrics {
             l0_file_count: 16, // Too many
             ..Default::default()
@@ -329,7 +335,8 @@ mod tests {
     #[test]
     fn should_increase_bloom_bits_given_high_false_positive_rate() {
         // Arrange
-        let tuner = Autotuner::with_baselines(20, 4, 10).with_adjustment_interval(Duration::from_secs(0));
+        let tuner =
+            Autotuner::with_baselines(20, 4, 10).with_adjustment_interval(Duration::from_secs(0));
         tuner.update_metrics(ObservedMetrics {
             bloom_fpr: 0.02, // 2% - too high
             ..Default::default()
@@ -364,7 +371,8 @@ mod tests {
     #[test]
     fn should_enforce_bounds_on_adjusted_values() {
         // Arrange
-        let tuner = Autotuner::with_baselines(20, 4, 10).with_adjustment_interval(Duration::from_secs(0));
+        let tuner =
+            Autotuner::with_baselines(20, 4, 10).with_adjustment_interval(Duration::from_secs(0));
         // Try to push WAL interval above max (40ms)
         tuner.wal_interval_ms.store(50, Ordering::Relaxed);
         tuner.update_metrics(ObservedMetrics {
