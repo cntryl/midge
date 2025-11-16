@@ -69,7 +69,6 @@ impl TransactionManager {
         read_versions: &HashMap<Key, u64>,
     ) -> Result<(), String> {
         let inner = self.inner.read();
-
         // Create a temporary TxnInfo with the actual conflict sets
         let txn_info = TxnInfo {
             begin_seq: inner.active.get(&txn_id).ok_or("Transaction not found")?.begin_seq,
@@ -78,6 +77,11 @@ impl TransactionManager {
             read_set: read_set.clone(),
             read_versions: read_versions.clone(),
         };
+
+        // Detect conflicts with other active transactions (write-write and range overlaps)
+        if Self::has_active_conflict(&txn_info, &inner.active, txn_id) {
+            return Err("Write-write conflict with active transaction".into());
+        }
 
         if Self::has_commit_conflict(&txn_info, &inner.committed, txn_id) {
             return Err("Write-write conflict with committed transaction".into());
@@ -209,6 +213,46 @@ impl TransactionManager {
         committed.iter().any(|(&_seq, (cid, ws, _))| {
             *cid != id && !txn.write_set.is_disjoint(ws)
         })
+    }
+
+    fn has_active_conflict(txn: &TxnInfo, active: &HashMap<u64, TxnInfo>, id: u64) -> bool {
+        // Check for direct key write conflicts
+        for (&other_id, other) in active {
+            if other_id == id {
+                continue;
+            }
+            if !txn.write_set.is_disjoint(&other.write_set) {
+                return true;
+            }
+
+            // Check if our writes fall inside other's write ranges
+            for key in &txn.write_set {
+                if other
+                    .write_ranges
+                    .iter()
+                    .any(|(cf, start, end)| key.0 == *cf && &key.1 >= start && &key.1 < end)
+                {
+                    return true;
+                }
+            }
+
+            // Check if our write ranges conflict with other's writes
+            for (cf, start, end) in &txn.write_ranges {
+                if other.write_set.iter().any(|k| k.0 == *cf && &k.1 >= start && &k.1 < end) {
+                    return true;
+                }
+            }
+
+            // Check for range-range overlap
+            for (cf1, s1, e1) in &txn.write_ranges {
+                for (cf2, s2, e2) in &other.write_ranges {
+                    if cf1 == cf2 && s1 < e2 && s2 < e1 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn has_read_conflict(txn: &TxnInfo, committed: &HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>) -> bool {
