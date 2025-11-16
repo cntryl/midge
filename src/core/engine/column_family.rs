@@ -1,5 +1,6 @@
 //! Column family management for the storage engine.
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
@@ -19,12 +20,12 @@ use crate::error::MidgeResult;
 /// and SSTable hierarchy. Column families share the WAL and global sequence counter.
 ///
 /// # Memtable Lifecycle
-/// - **Active memtable**: Current writable memtable (wrapped in RwLock for atomic replacement)
+/// - **Active memtable**: Current writable memtable (lock-free via ArcSwap)
 /// - **Immutable memtables**: Bounded queue of frozen memtables waiting to be flushed
 /// - **Max immutables**: Configured limit (`ColumnFamilyConfig.max_immutable_memtables`)
 ///
 /// When active memtable exceeds size limit:
-/// 1. Freeze active memtable (move to immutable queue)
+/// 1. Freeze active memtable (move to immutable queue) - atomic swap
 /// 2. Create new empty active memtable
 /// 3. Enqueue flush job for oldest immutable
 /// 4. If immutable queue is full, stall writes until flush completes
@@ -33,8 +34,8 @@ pub(crate) struct ColumnFamily {
     pub(crate) name: String,
     pub(crate) config: ColumnFamilyConfig,
 
-    /// Active writable memtable (wrapped for atomic replacement during freeze)
-    pub(crate) memtable: Arc<RwLock<MemTable>>,
+    /// Active writable memtable (lock-free atomic swap for freeze)
+    pub(crate) memtable: ArcSwap<MemTable>,
 
     /// Queue of frozen memtables waiting to be flushed (oldest first)
     pub(crate) immutable_memtables: Arc<Mutex<VecDeque<MemTable>>>,
@@ -52,7 +53,7 @@ impl ColumnFamily {
             id,
             name,
             config,
-            memtable: Arc::new(RwLock::new(MemTable::new())),
+            memtable: ArcSwap::from_pointee(MemTable::new()),
             immutable_memtables: Arc::new(Mutex::new(VecDeque::new())),
             immutable_count: AtomicUsize::new(0),
             compaction_filter: Arc::new(RwLock::new(None)),
@@ -65,7 +66,7 @@ impl ColumnFamily {
 
     /// Check if the active memtable has exceeded its size limit.
     pub(crate) fn is_full(&self) -> bool {
-        let mt = self.memtable.read();
+        let mt = self.memtable.load();
         mt.is_full(self.config.memtable_max_bytes)
     }
 
@@ -88,17 +89,12 @@ impl ColumnFamily {
             return false;
         }
 
-        // Lock active memtable for replacement
-        let mut mt_write = self.memtable.write();
-
-        // Clone the old memtable (cheap Arc clone of inner skip-list)
-        let old_memtable = (*mt_write).clone();
-
-        // Replace with new empty memtable
-        *mt_write = MemTable::new();
-
-        // Release write lock before pushing to immutable queue
-        drop(mt_write);
+        // Atomic swap: replace active memtable with new empty one
+        let old_arc = self.memtable.swap(Arc::new(MemTable::new()));
+        
+        // Extract the memtable from Arc (cheap if refcount is 1, clone if shared)
+        let old_memtable = Arc::try_unwrap(old_arc)
+            .unwrap_or_else(|arc| (*arc).clone());
 
         // Add frozen memtable to immutable queue (oldest first, newest last)
         immutables.push_back(old_memtable);

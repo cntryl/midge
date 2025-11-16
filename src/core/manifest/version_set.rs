@@ -1,0 +1,201 @@
+//! VersionSet: Immutable snapshot of database state for lock-free reads
+//!
+//! The VersionSet provides an immutable view of:
+//! - Current manifest state (SST files, column families, etc.)
+//!
+//! Used with ArcSwap for atomic visibility transitions during flush/compaction.
+//! SST readers are opened on-demand using the manifest metadata.
+
+use arc_swap::ArcSwap;
+use std::sync::Arc;
+
+use crate::core::manifest::types::{FileMeta, Manifest};
+use crate::error::MidgeResult;
+
+/// Immutable snapshot of database state.
+/// Cloned and updated when files are added/removed, then published atomically.
+///
+/// Note: SST readers are NOT cached here - they're opened on-demand.
+/// This keeps VersionSet simple and cloneable. Reader caching happens
+/// at a different layer (table_cache, bloom_cache, etc.).
+#[derive(Clone)]
+pub struct VersionSet {
+    /// Current manifest state
+    pub manifest: Manifest,
+}
+
+impl VersionSet {
+    /// Create a new VersionSet from a manifest.
+    pub fn new(manifest: Manifest) -> Self {
+        Self { manifest }
+    }
+
+    /// Apply a version edit to create a new VersionSet.
+    /// This creates a clone with the edit applied.
+    pub fn apply_edit(&self, edit: VersionEdit) -> MidgeResult<Self> {
+        let mut new_manifest = self.manifest.clone();
+
+        match edit {
+            VersionEdit::AddFile { file } => {
+                // Add file metadata to manifest
+                new_manifest.files.push(file.clone());
+                new_manifest.ssts.push(file.name.clone());
+            }
+            VersionEdit::RemoveFiles { names } => {
+                // Remove files from manifest
+                new_manifest.files.retain(|f| !names.contains(&f.name));
+                new_manifest.ssts.retain(|s| !names.contains(s));
+            }
+            VersionEdit::UpdateSequence { sequence } => {
+                new_manifest.last_persisted_sequence = sequence;
+            }
+        }
+
+        Ok(Self {
+            manifest: new_manifest,
+        })
+    }
+}
+
+/// Edit operations that modify the VersionSet.
+/// Processed serially by the VersionManager actor.
+#[derive(Debug, Clone)]
+pub enum VersionEdit {
+    /// Add a new SST file to the version
+    AddFile { file: FileMeta },
+    /// Remove SST files from the version (compaction)
+    RemoveFiles { names: Vec<String> },
+    /// Update last persisted sequence number
+    UpdateSequence { sequence: u64 },
+}
+
+/// Wrapper for atomic version set operations.
+/// Provides convenience methods for common version transitions.
+pub struct AtomicVersionSet {
+    inner: Arc<ArcSwap<VersionSet>>,
+}
+
+impl AtomicVersionSet {
+    /// Create a new atomic version set.
+    pub fn new(version: VersionSet) -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(version)),
+        }
+    }
+
+    /// Load current version (lock-free).
+    pub fn load(&self) -> Arc<VersionSet> {
+        self.inner.load_full()
+    }
+
+    /// Store a new version atomically.
+    pub fn store(&self, version: Arc<VersionSet>) {
+        self.inner.store(version);
+    }
+
+    /// Get Arc reference to the ArcSwap for direct access.
+    pub fn as_arc(&self) -> Arc<ArcSwap<VersionSet>> {
+        Arc::clone(&self.inner)
+    }
+}
+
+impl Clone for AtomicVersionSet {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::manifest::types::{FileMeta, Manifest};
+
+    #[test]
+    fn should_create_empty_version_set() {
+        // Arrange
+        let manifest = Manifest::default();
+
+        // Act
+        let version = VersionSet::new(manifest);
+
+        // Assert
+        assert_eq!(version.manifest.ssts.len(), 0);
+    }
+
+    #[test]
+    fn should_apply_add_file_edit() {
+        // Arrange
+        let manifest = Manifest::default();
+        let version = VersionSet::new(manifest);
+
+        let file = FileMeta {
+            name: "test.sst".to_string(),
+            level: 0,
+            size_bytes: 1024,
+            ..Default::default()
+        };
+
+        // Act
+        let new_version = version
+            .apply_edit(VersionEdit::AddFile { file })
+            .unwrap();
+
+        // Assert
+        assert_eq!(new_version.manifest.ssts.len(), 1);
+        assert_eq!(new_version.manifest.files.len(), 1);
+        assert_eq!(new_version.manifest.files[0].name, "test.sst");
+    }
+
+    #[test]
+    fn should_apply_remove_files_edit() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        manifest.ssts.push("test1.sst".to_string());
+        manifest.ssts.push("test2.sst".to_string());
+        manifest.files.push(FileMeta {
+            name: "test1.sst".to_string(),
+            level: 0,
+            size_bytes: 1024,
+            ..Default::default()
+        });
+        manifest.files.push(FileMeta {
+            name: "test2.sst".to_string(),
+            level: 0,
+            size_bytes: 1024,
+            ..Default::default()
+        });
+
+        let version = VersionSet::new(manifest);
+
+        // Act
+        let new_version = version
+            .apply_edit(
+                VersionEdit::RemoveFiles {
+                    names: vec!["test1.sst".to_string()],
+                },
+            )
+            .unwrap();
+
+        // Assert
+        assert_eq!(new_version.manifest.ssts.len(), 1);
+        assert_eq!(new_version.manifest.files.len(), 1);
+        assert_eq!(new_version.manifest.files[0].name, "test2.sst");
+    }
+
+    #[test]
+    fn should_update_sequence_number() {
+        // Arrange
+        let manifest = Manifest::default();
+        let version = VersionSet::new(manifest);
+
+        // Act
+        let new_version = version
+            .apply_edit(VersionEdit::UpdateSequence { sequence: 100 })
+            .unwrap();
+
+        // Assert
+        assert_eq!(new_version.manifest.last_persisted_sequence, 100);
+    }
+}

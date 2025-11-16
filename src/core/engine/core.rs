@@ -201,7 +201,7 @@ impl MidgeEngine {
         F: FnOnce(&MemTable) -> R,
     {
         let cf = self.cf_set.default_cf();
-        let mt = cf.memtable.read();
+        let mt = cf.memtable.load();
         f(&mt)
     }
 
@@ -210,9 +210,9 @@ impl MidgeEngine {
         F: FnOnce(&MemTable) -> R,
     {
         // MemTable uses interior mutability (lock-free skiplist)
-        // No need for write lock for reads, just read lock
+        // ArcSwap provides atomic load - no locks needed
         let cf = self.cf_set.default_cf();
-        let mt = cf.memtable.read();
+        let mt = cf.memtable.load();
         f(&mt)
     }
 
@@ -222,7 +222,7 @@ impl MidgeEngine {
         F: FnOnce(&MemTable) -> R,
     {
         let cf = self.cf_set.cfs.get(&cf_id.as_u32())?;
-        let mt = cf.memtable.read();
+        let mt = cf.memtable.load();
         Some(f(&mt))
     }
 
@@ -231,8 +231,9 @@ impl MidgeEngine {
         F: FnOnce(&MemTable) -> R,
     {
         // MemTable uses interior mutability (lock-free skiplist)
+        // ArcSwap provides atomic load - no locks needed
         let cf = self.cf_set.cfs.get(&cf_id.as_u32())?;
-        let mt = cf.memtable.read();
+        let mt = cf.memtable.load();
         Some(f(&mt))
     }
 
@@ -259,12 +260,12 @@ impl MidgeEngine {
             .map(|entry| entry.value().clone())
             .collect();
 
-        // Acquire read locks on all memtables and build the cf_map
-        // Note: We hold all locks for the duration of replay for consistency
-        let guards: Vec<_> = cf_refs.iter().map(|cf| cf.memtable.read()).collect();
+        // Load memtables atomically and build the cf_map
+        // ArcSwap ensures consistent snapshot across all CFs
+        let mt_arcs: Vec<_> = cf_refs.iter().map(|cf| cf.memtable.load()).collect();
         let mut cf_map: HashMap<u32, &MemTable> = HashMap::new();
-        for (cf, guard) in cf_refs.iter().zip(guards.iter()) {
-            cf_map.insert(cf.id.as_u32(), &**guard);
+        for (cf, mt_arc) in cf_refs.iter().zip(mt_arcs.iter()) {
+            cf_map.insert(cf.id.as_u32(), &**mt_arc);
         }
 
         replay_wal_to_memtables_after_seq(&mut cf_map, records, skip_before_seq)

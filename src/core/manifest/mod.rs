@@ -9,6 +9,10 @@ mod column_families;
 mod io;
 mod queries;
 mod types;
+mod version_manager;
+mod version_set;
 
 // Re-export public API
 pub use types::{CloudCheckpoint, ColumnFamilyMeta, FileMeta, Manifest};
+pub use version_manager::VersionManager;
+pub use version_set::{AtomicVersionSet, VersionEdit, VersionSet};

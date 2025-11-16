@@ -140,7 +140,7 @@ impl MidgeEngine {
 
         // Check if active memtable is empty
         let is_empty = {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             mt.is_empty()
         };
         if is_empty {
@@ -148,17 +148,13 @@ impl MidgeEngine {
         }
 
         // CRITICAL: Capture the old memtable BEFORE replacing it.
-        // The drain operation on the skiplist-based memtable only creates a snapshot,
-        // it doesn't actually clear the skiplist. So we must capture the old memtable,
-        // replace with a new empty one, then flush the captured old memtable.
-        let old_memtable = {
-            let mut mt_write = column_family.memtable.write();
-            // Clone the Arc to the old memtable so we can flush it after replacement
-            let old = mt_write.clone();
-            // Replace with new empty memtable for subsequent writes
-            *mt_write = crate::core::memtable::MemTable::new();
-            old
-        };
+        // Atomic swap ensures no torn state - readers see old or new, never partial.
+        let old_arc = column_family.memtable.swap(Arc::new(crate::core::memtable::MemTable::new()));
+        
+        // Extract memtable from Arc (cheap if refcount is 1, clone if shared)
+        let old_memtable = Arc::try_unwrap(old_arc)
+            .unwrap_or_else(|arc| (*arc).clone());
+        
         // Now flush the old memtable using the frozen memtable path
         // (flush_frozen_memtable already acquires the flush_mutex)
         self.flush_frozen_memtable(cf, old_memtable)

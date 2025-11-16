@@ -48,7 +48,9 @@ crc32fast = "1.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Concurrency primitives
+arc-swap = "1.7"
 crossbeam = "0.8"
+crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
 dashmap = "6.1"
 parking_lot = "0.12"

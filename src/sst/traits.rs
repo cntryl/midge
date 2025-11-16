@@ -15,7 +15,7 @@ pub struct RangeTombstone {
 }
 
 /// Reader contract for SST implementations.
-pub trait SstReader {
+pub trait SstReader: Send + Sync {
     /// Get the value for a specific key, if present.
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>>;
 

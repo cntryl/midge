@@ -159,7 +159,7 @@ impl MidgeEngine {
         let mut total = 0usize;
 
         for entry in self.cf_set.cfs.iter() {
-            let mt = entry.value().memtable.read();
+            let mt = entry.value().memtable.load();
             total += mt.size_bytes();
         }
 
@@ -185,7 +185,7 @@ impl MidgeEngine {
         let mut result = HashMap::new();
 
         for entry in self.cf_set.cfs.iter() {
-            let mt = entry.value().memtable.read();
+            let mt = entry.value().memtable.load();
             result.insert(*entry.key(), mt.size_bytes());
         }
 

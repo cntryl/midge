@@ -125,9 +125,8 @@ impl MidgeEngine {
         let cf_id_u32 = cf_id.as_u32();
         if let Some(cf) = self.cf_set.cfs.get(&cf_id_u32) {
             // Check if active memtable has any data
-            let memtable = cf.memtable.read();
+            let memtable = cf.memtable.load();
             let is_empty = memtable.is_empty();
-            drop(memtable);
 
             if !is_empty {
                 return Err(MidgeError::invalid_config(format!(

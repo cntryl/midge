@@ -35,7 +35,7 @@ impl MidgeEngine {
 
         // Check active memtable first - check for merge operations
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             let versions = mt.get_versions_for_merge(key, u64::MAX);
 
             if !versions.is_empty() {
@@ -211,7 +211,7 @@ impl MidgeEngine {
 
         // Scan active memtable
         let (mem_items, mem_tombs) = {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             let items = mt
                 .scan_range(start, end_ref)
                 .into_iter()
@@ -443,7 +443,7 @@ impl MidgeEngine {
 
         // 1) Check active memtable visible value at snapshot
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             if let Some(v) = mt.get_at(key, snap.seq) {
                 return Ok(Some(v));
             }
@@ -466,7 +466,7 @@ impl MidgeEngine {
             v
         };
         let tombs = {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             mt.tombstones_range_at(Some(key), Some(end_key.as_slice()), snap.seq)
         };
         if !tombs.is_empty() {
@@ -555,7 +555,7 @@ impl MidgeEngine {
         // Pre-compute MemTable tombstones visible at snapshot (active + immutable)
         let mut mem_tombs: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             let tombs = mt.tombstones_range_at(start, end, snap.seq);
             mem_tombs.extend(tombs.into_iter().map(|b| b.to_vec()));
         }
@@ -570,7 +570,7 @@ impl MidgeEngine {
         // Scan MemTable (active + immutable)
         let mut mem_rows = Vec::new();
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             mem_rows.extend(mt.scan_range_at(start, end, snap.seq));
         }
         {

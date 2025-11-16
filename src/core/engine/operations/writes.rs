@@ -14,6 +14,8 @@
 //! - Automatic flush triggering
 //! - Write stall prevention
 
+use std::sync::Arc;
+
 use crate::api::column_family::ColumnFamilyHandle;
 use crate::api::column_family::DEFAULT_CF_ID;
 use crate::common::timestamp;
@@ -72,7 +74,7 @@ impl MidgeEngine {
 
         // MemTable uses interior mutability - acquire read lock and write
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             mt.put_with_seq(key, value, seq);
         }
 
@@ -80,12 +82,12 @@ impl MidgeEngine {
         let memtable_full = column_family.is_full();
 
         if memtable_full {
-            // Freeze the current memtable: replace it with a new empty one
-            // and move the old one to a temporary variable for flushing
-            let old_memtable = {
-                let mut mt_write = column_family.memtable.write();
-                std::mem::replace(&mut *mt_write, crate::core::memtable::MemTable::new())
-            };
+            // Freeze the current memtable: atomic swap with new empty one
+            let old_arc = column_family.memtable.swap(Arc::new(crate::core::memtable::MemTable::new()));
+            
+            // Extract memtable from Arc (cheap if refcount is 1, clone if shared)
+            let old_memtable = Arc::try_unwrap(old_arc)
+                .unwrap_or_else(|arc| (*arc).clone());
 
             // Flush the frozen memtable to SST by calling flush_frozen_memtable
             let _ = self.flush_frozen_memtable(cf, old_memtable);
@@ -162,7 +164,7 @@ impl MidgeEngine {
         })?;
 
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             mt.put_with_seq_and_exp(key, value, seq, expiration);
         }
 
@@ -236,7 +238,7 @@ impl MidgeEngine {
 
         // MemTable uses interior mutability - acquire read lock and delete
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             mt.delete_with_seq(key, seq);
         }
 
@@ -286,7 +288,7 @@ impl MidgeEngine {
         })?;
 
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             mt.delete_range_with_seq(start, end, seq);
         }
 
@@ -393,7 +395,7 @@ impl MidgeEngine {
                     self.metrics.record_memtable_write();
 
                     if let Some(value) = op.value() {
-                        let mt = column_family.memtable.read();
+                        let mt = column_family.memtable.load();
                         mt.put_with_seq_and_exp(op.key(), value, seq, expiration);
                     }
                 }
@@ -401,7 +403,7 @@ impl MidgeEngine {
                     self.metrics.record_delete();
                     self.metrics.record_memtable_write();
                     self.metrics.record_point_tombstone_created();
-                    let mt = column_family.memtable.read();
+                    let mt = column_family.memtable.load();
                     mt.delete_with_seq(op.key(), seq);
                 }
             }
@@ -533,7 +535,7 @@ impl MidgeEngine {
         })?;
 
         {
-            let mt = column_family.memtable.read();
+            let mt = column_family.memtable.load();
             mt.merge_with_seq_and_exp(key, value, seq, expiration);
         }
 
