@@ -307,7 +307,7 @@ pub(crate) fn setup_compaction_coordinator(
     snapshot_registry_arc: Arc<crate::api::snapshot::SnapshotRegistry>,
     metrics_arc: Arc<Metrics>,
     cf_set_arc: Arc<super::column_family::ColumnFamilySet>,
-) -> MidgeResult<Option<crate::core::CompactionCoordinator>> {
+) -> MidgeResult<Option<crate::core::CompactionController>> {
     if opts.enable_compaction && !opts.read_only {
         // Create CloudSstManager if in cloud-backed mode
         let cloud_sst_manager_c = if let Some(cloud_backend) = opts.storage_mode.cloud_backend() {
@@ -360,7 +360,7 @@ pub(crate) fn setup_compaction_coordinator(
             test_hooks: opts.test_hooks.clone(),
         };
 
-        Ok(Some(crate::core::CompactionCoordinator::spawn(config)?))
+        Ok(Some(crate::core::CompactionController::spawn(config)?))
     } else {
         Ok(None)
     }

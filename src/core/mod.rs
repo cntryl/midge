@@ -97,13 +97,13 @@ impl EntryMeta {
 }
 
 // Re-export commonly used types for convenience
-pub use compaction::CompactionCoordinator;
+pub use compaction::CompactionController;
 pub use data_structures::{MergingIterator, SkipList};
 pub use engine::*;
 pub use locking::{create_cloud_lock, create_local_lock, DbLock, LockMeta};
 pub use manifest::*;
 pub use persistence::{FlushCoordinator, FlushJob, FlushWorkerConfig};
-pub use transaction::{Key, TransactionManager};
+pub use transaction::{Key, TransactionController};
 
 // Re-export configuration types from config module
 pub use crate::config::{CloudStorageBuilder, StorageMode};

@@ -60,14 +60,14 @@ pub struct CompactionWorkerConfig {
 ///
 /// Encapsulates the compaction worker thread lifecycle and provides a clean API
 /// for requesting manual compactions and shutting down gracefully.
-pub struct CompactionCoordinator {
+pub struct CompactionController {
     /// Channel for sending compaction requests to the background worker
     tx: channel::Sender<CompactionMsg>,
     /// Handle to the background compaction worker thread
     handle: Option<JoinHandle<()>>,
 }
 
-impl CompactionCoordinator {
+impl CompactionController {
     /// Spawn a new background compaction worker thread.
     ///
     /// Creates a dedicated thread that monitors LSM-tree levels and performs
@@ -449,7 +449,7 @@ impl CompactionCoordinator {
     }
 }
 
-impl Drop for CompactionCoordinator {
+impl Drop for CompactionController {
     fn drop(&mut self) {
         // Best-effort shutdown signal
         let _ = self.tx.send(CompactionMsg::Shutdown);
@@ -510,7 +510,7 @@ mod tests {
         let config = create_test_config(&temp_dir);
 
         // Act
-        let coordinator = CompactionCoordinator::spawn(config);
+        let coordinator = CompactionController::spawn(config);
 
         // Assert
         assert!(coordinator.is_ok());

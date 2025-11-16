@@ -16,15 +16,15 @@ use std::sync::Arc;
 /// Provides thread-safe operations for appending records to the WAL,
 /// ensuring data persistence, and handling log rotation during flush operations.
 /// Acts as the primary interface for WAL operations in the storage engine.
-pub struct WalCoordinator {
+pub struct WalController {
     /// Current WAL writer (thread-safe via trait's &self methods)
     writer: RwLock<Box<dyn WalWriter>>,
     /// Factory for creating new WAL writers during rotation
     factory: Arc<dyn WalFactory>,
 }
 
-impl WalCoordinator {
-    /// Create a new WAL coordinator with the given writer and factory.
+impl WalController {
+    /// Create a new WAL controller with the given writer and factory.
     pub fn new(writer: Box<dyn WalWriter>, factory: Arc<dyn WalFactory>) -> Self {
         Self {
             writer: RwLock::new(writer),

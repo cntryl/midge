@@ -18,7 +18,7 @@ pub mod spill;
 // Re-export public types
 pub use conflict_tracking::ConflictTracker;
 pub use engine_transaction::EngineTransaction;
-pub use manager::{Key, TransactionManager};
+pub use manager::{Key, TransactionController};
 pub use spill::SpillManager;
 
 // Internal re-export for use within core module

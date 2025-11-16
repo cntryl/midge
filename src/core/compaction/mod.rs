@@ -6,7 +6,7 @@ pub mod filter;
 pub mod strategy;
 
 // Public API
-pub use coordinator::{CompactionCoordinator, CompactionMsg, CompactionWorkerConfig};
+pub use coordinator::{CompactionController, CompactionMsg, CompactionWorkerConfig};
 pub use executor::CompactionVersion;
 pub use filter::CompactionFilter;
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};

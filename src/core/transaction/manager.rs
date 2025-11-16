@@ -37,11 +37,11 @@ struct Inner {
 }
 
 #[derive(Clone, Default)]
-pub struct TransactionManager {
+pub struct TransactionController {
     inner: Arc<RwLock<Inner>>,
 }
 
-impl TransactionManager {
+impl TransactionController {
     pub fn new() -> Self {
         Self::default()
     }

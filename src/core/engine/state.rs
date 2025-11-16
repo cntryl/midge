@@ -320,7 +320,7 @@ pub fn open_with_factories(
 
     // Create WAL coordinator
     println!("[diag-lib] creating wal coordinator");
-    let wal_coordinator = crate::wal::WalCoordinator::new(wal_writer_box, wal_factory_arc);
+    let wal_coordinator = crate::wal::WalController::new(wal_writer_box, wal_factory_arc);
 
     // Initialize VersionSet and VersionManager for lock-free manifest access
     let current_manifest = manifest_cache.get();
@@ -336,7 +336,7 @@ pub fn open_with_factories(
         cf_set: cf_set_arc,
         seq: AtomicU64::new(max_replay_seq),
         txn_id: AtomicU64::new(0),
-        txn_manager: crate::core::transaction::TransactionManager::new(),
+        txn_manager: crate::core::transaction::TransactionController::new(),
         db_path,
         mem_mode,
         read_only: opts.read_only,

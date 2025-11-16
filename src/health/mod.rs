@@ -10,6 +10,6 @@ pub mod manager;
 pub mod rehydration;
 pub mod state;
 
-pub use manager::{HealthConfig, HealthManager};
+pub use manager::{HealthConfig, HealthMonitor};
 pub use rehydration::{RehydrationProgress, RehydrationStatus};
 pub use state::{DrainResult, LifecycleState, ReadinessStatus, SyncpointStatus, ValidationResult};

@@ -22,7 +22,7 @@ use super::column_family::{ColumnFamily, ColumnFamilySet};
 /// Supports column families, snapshot isolation, and configurable compression/caching.
 pub struct MidgeEngine {
     /// WAL coordinator managing write-ahead log operations
-    pub(crate) wal_coordinator: crate::wal::WalCoordinator,
+    pub(crate) wal_coordinator: crate::wal::WalController,
     pub(crate) cf_set: Arc<ColumnFamilySet>,
     pub(crate) seq: AtomicU64,
     pub(crate) txn_id: AtomicU64,
@@ -39,7 +39,7 @@ pub struct MidgeEngine {
     pub(crate) wal_buffer_size: usize,
     pub(crate) wal_sync: bool,
     /// Transaction manager for optimistic concurrency control
-    pub(crate) txn_manager: crate::core::transaction::TransactionManager,
+    pub(crate) txn_manager: crate::core::transaction::TransactionController,
     pub(crate) snapshot_registry: Arc<crate::api::snapshot::SnapshotRegistry>,
     pub(crate) block_cache: Option<Arc<dyn crate::sst::BlockCacheTrait>>,
     pub(crate) table_cache: Option<Arc<crate::sst::table_cache::TableCache>>,
@@ -49,7 +49,7 @@ pub struct MidgeEngine {
     /// Background flush coordinator
     pub(crate) flush_coordinator: crate::core::FlushCoordinator,
     /// Background compaction coordinator (optional - may be disabled)
-    pub(crate) compaction_coordinator: Option<crate::core::CompactionCoordinator>,
+    pub(crate) compaction_coordinator: Option<crate::core::CompactionController>,
     pub(crate) merge_operators: RwLock<HashMap<u32, crate::api::DynMergeOperator>>,
     pub(crate) cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     /// Database lock to prevent concurrent writers. Held for RAII - released on drop.

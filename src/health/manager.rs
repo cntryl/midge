@@ -50,7 +50,7 @@ impl Default for HealthConfig {
 /// Tracks database readiness, coordinates graceful shutdown procedures,
 /// monitors rehydration progress, and provides operational status for
 /// external health checks and maintenance operations.
-pub struct HealthManager {
+pub struct HealthMonitor {
     /// Current lifecycle state
     state: Arc<RwLock<LifecycleState>>,
 
@@ -90,7 +90,7 @@ pub trait EngineHealth: Send + Sync {
     fn last_checkpoint_seq(&self) -> u64;
 }
 
-impl HealthManager {
+impl HealthMonitor {
     /// Create a new health manager
     pub fn new(
         engine: Weak<dyn EngineHealth>,
