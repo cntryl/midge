@@ -1,8 +1,7 @@
 mod common;
 use cntryl_midge::cloud::mock::MockCloudBackend;
-use cntryl_midge::common::timestamp;
 use cntryl_midge::config::cloud::StorageContext;
-use cntryl_midge::core::manifest::{FileMeta, Manifest};
+use cntryl_midge::core::manifest::FileMeta;
 use cntryl_midge::sst::cloud::SstLifecycleState;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
