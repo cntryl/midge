@@ -68,8 +68,52 @@ impl BackupEngine {
         let backup_path = self.backup_path(backup_id);
         std::fs::create_dir_all(&backup_path)?;
 
-        // Load current manifest to get sequence number and file list
-        let manifest = crate::manifest::Manifest::load(&self.db_path)?;
+        // Read a consistent manifest snapshot. Because compaction and flush
+        // may update the manifest concurrently, we loop until we get a
+        // manifest that remains stable after copying the referenced SST
+        // files. This prevents the backup from observing a partial manifest
+        // where files referenced in the manifest are moved/deleted by
+        // compaction during our copy phase.
+        let mut retries = 5usize;
+        let manifest = loop {
+            let m = crate::manifest::Manifest::load_with_retry(
+                &self.db_path,
+                10,
+                std::time::Duration::from_millis(10),
+            )?;
+
+            // Copy all SST files referenced in this manifest
+            let sst_dir = self.db_path.join("sst");
+            for file_meta in &m.files {
+                let sst_path = sst_dir.join(&file_meta.name);
+                if !sst_path.exists() {
+                    continue; // File may have been removed; this manifest is stale
+                }
+
+                let dest_path = backup_path.join(&file_meta.name);
+                std::fs::copy(&sst_path, &dest_path)?;
+            }
+
+            // After copying, verify manifest hasn't changed to a new generation.
+            let m2 = crate::manifest::Manifest::load_with_retry(
+                &self.db_path,
+                10,
+                std::time::Duration::from_millis(10),
+            )?;
+
+            // If manifest is unchanged (same last_persisted_sequence and same files)
+            // we can proceed. Otherwise, retry with the new manifest.
+            if m.last_persisted_sequence == m2.last_persisted_sequence && m.ssts == m2.ssts {
+                break m;
+            }
+
+            if retries == 0 {
+                return Err(crate::error::MidgeError::internal(
+                    "backup failed to obtain stable manifest state after retries",
+                ));
+            }
+            retries -= 1;
+        };
         let sequence_number = manifest.last_persisted_sequence;
 
         // Collect SST files to backup
@@ -102,10 +146,7 @@ impl BackupEngine {
                         key_range,
                     });
 
-                    // Copy file to backup
-                    let dest_path = backup_path.join(&file_meta.name);
-                    std::fs::copy(&sst_path, &dest_path)?;
-
+                    // Already copied above in the stable-manifest loop. Use metadata only.
                     total_size += size_bytes;
                 }
             }

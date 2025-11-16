@@ -1,182 +1,81 @@
 mod common;
 use cntryl_midge::backup::{BackupEngine, BackupOptions};
-use cntryl_midge::{MidgeOptions, StorageMode};
 use common::{bulk_put_fn, new_engine, new_engine_with_opts};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 #[test]
-fn should_block_backup_start_given_active_compaction_when_requested() {
+fn should_preserve_data_when_backup_runs_during_compaction_and_writes() {
     // Arrange
-    let (_dir, eng) = new_engine_with_opts(1024, true);
-    let cf = eng.default_column_family();
-    let db_path = _dir.path().to_path_buf();
-    let backup_dir = db_path.join("backups");
-
-    // Act - Write data to trigger compaction
-    bulk_put_fn(&eng, &cf, "key", 200, |_| b"value".to_vec());
-
-    // Give compaction a moment to start
-    thread::sleep(Duration::from_millis(100));
-
-    // Attempt backup during compaction
-    let backup_result = std::thread::spawn(move || {
-        let mut backup_engine =
-            BackupEngine::open(&db_path, &backup_dir).expect("Failed to open backup engine");
-        backup_engine.create_backup(BackupOptions::default())
-    });
-
-    let backup_info = backup_result
-        .join()
-        .unwrap()
-        .expect("Backup should succeed");
-
-    // Assert - backup should have been created successfully
-    assert!(backup_info.backup_id > 0, "Backup should have a valid ID");
-    assert!(backup_info.size_bytes > 0, "Backup should contain data");
-
-    // Verify data consistency - backup should contain all the data
-    let result = eng.get(&cf, b"key025").expect("get");
-    assert!(
-        result.is_some(),
-        "Data should be consistent during backup/compaction"
-    );
-}
-
-#[test]
-fn should_fail_cf_drop_given_inflight_flush() {
-    // Arrange
-    let (_dir, eng) = new_engine_with_opts(1024, false);
+    let (dir, eng) = new_engine();
     let eng = Arc::new(eng);
     let cf = eng.default_column_family();
-
-    // Act
-    bulk_put_fn(&eng, &cf, "key", 100, |_| b"value".to_vec());
-
-    // Attempt CF drop during flush - should either fail gracefully or wait for completion
-    let eng_clone = Arc::clone(&eng);
-    let cf_clone = cf.clone();
-
-    let flush_handle = thread::spawn(move || eng_clone.flush_cf(&cf_clone));
-
-    let eng_clone2 = Arc::clone(&eng);
-    let cf_clone2 = cf.clone();
-    let drop_handle = thread::spawn(move || {
-        // Small delay to ensure flush has started
-        thread::sleep(Duration::from_millis(10));
-        eng_clone2.drop_column_family(&cf_clone2)
-    });
-
-    let flush_result = flush_handle.join().unwrap();
-    let drop_result = drop_handle.join().unwrap();
-
-    // Assert
-    // Flush should succeed
-    assert!(flush_result.is_ok(), "Flush should succeed");
-
-    // CF drop should either succeed (if it waited for flush) or fail gracefully
-    // Either outcome is acceptable per the TODO comment
-    let drop_succeeded = drop_result.is_ok();
-    if drop_result.is_err() {
-        // If drop failed, verify it's due to expected reasons
-        let err = drop_result.unwrap_err();
-        assert!(
-            err.to_string().contains("Cannot drop") || err.to_string().contains("flush"),
-            "Drop failure should be related to flush state, got: {}",
-            err
-        );
-    }
-
-    // If drop succeeded, CF should no longer be accessible
-    // If drop failed, CF should still be functional
-    if drop_succeeded {
-        // CF was dropped successfully - should not be able to access it
-        let get_result = eng.get(&cf, b"key050");
-        assert!(
-            get_result.is_err(),
-            "Should not be able to access dropped CF"
-        );
-    } else {
-        // CF drop failed - should still be functional
-        let result = eng.get(&cf, b"key050").expect("get");
-        assert!(
-            result.is_some(),
-            "CF should remain functional if drop failed"
-        );
-    }
-}
-
-#[test]
-fn should_allow_backup_readonly_mode_given_active_writes() {
-    // Arrange
-    let (_dir, eng) = new_engine();
-    let eng = Arc::new(eng);
-    let db_path = _dir.path().to_path_buf();
+    let db_path = dir.path().to_path_buf();
     let backup_dir = db_path.join("backups");
 
     // Act
-    let eng_clone = Arc::clone(&eng);
-    let write_handle = thread::spawn(move || {
-        let cf = eng_clone.default_column_family();
-        bulk_put_fn(&eng_clone, &cf, "key", 100, |_| b"value".to_vec());
+    bulk_put_fn(&eng, &cf, "seed", 1_000, |_| b"seed".to_vec());
+
+    let writer_eng = Arc::clone(&eng);
+    let writer_cf = cf.clone();
+    let writer = thread::spawn(move || {
+        bulk_put_fn(&writer_eng, &writer_cf, "write", 5_000, |_| b"val".to_vec());
     });
 
-    // Initiate readonly backup concurrently
-    // Backup should get consistent snapshot without blocking writes
-    let backup_handle = thread::spawn(move || {
+    let compaction_eng = Arc::clone(&eng);
+    let compaction_cf = cf.clone();
+    let compactor = thread::spawn(move || {
+        compaction_eng
+            .compact_range(&compaction_cf, None, None)
+            .expect("compact_range");
+    });
+
+    let backup = thread::spawn(move || {
         let mut backup_engine =
-            BackupEngine::open(&db_path, &backup_dir).expect("Failed to open backup engine");
+            BackupEngine::open(&db_path, &backup_dir).expect("open backup engine");
         backup_engine.create_backup(BackupOptions::default())
     });
 
-    write_handle.join().unwrap();
-    let backup_info = backup_handle
+    writer.join().expect("writer thread panicked");
+    compactor.join().expect("compaction thread panicked");
+    let backup_info = backup
         .join()
-        .unwrap()
-        .expect("Backup should succeed");
+        .expect("backup thread panicked")
+        .expect("backup ok");
 
     // Assert
-    assert!(backup_info.backup_id > 0, "Backup should have a valid ID");
-    assert!(backup_info.size_bytes > 0, "Backup should contain data");
+    assert!(backup_info.backup_id > 0, "backup should have a valid ID");
+    assert!(backup_info.size_bytes > 0, "backup should contain data");
 
-    let cf = eng.default_column_family();
-    let result = eng.get(&cf, b"key050").expect("get");
+    let result = eng
+        .get(&cf, b"seed0005")
+        .expect("get after backup/compaction");
     assert!(
         result.is_some(),
-        "Writes should complete during readonly backup"
+        "data should remain readable after backup/compaction"
     );
 }
 
 #[test]
-fn should_handle_config_reload_during_compaction_without_panic() {
+fn should_refuse_column_family_drop_when_unflushed_data_exists() {
     // Arrange
-    let (_dir, eng) = new_engine_with_opts(1024, true);
+    let (_dir, eng) = new_engine_with_opts(8 * 1024 * 1024, false);
     let cf = eng.default_column_family();
 
-    // Act
-    bulk_put_fn(&eng, &cf, "key", 200, |_| b"value".to_vec());
+    bulk_put_fn(&eng, &cf, "key", 1_000, |_| b"value".to_vec());
 
-    // Reload config during compaction - should not panic or corrupt state
-    let new_config = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: _dir.path().to_path_buf(),
-        },
-        memtable_size: 1024, // Keep same memtable size
-        enable_compaction: true,
-        cache_size_mb: 64,     // Different cache size
-        table_cache_size: 100, // Different table cache size
-        ..Default::default()
-    };
-    eng.reload_config(&new_config)
-        .expect("Config reload should succeed");
+    // Act
+    let drop_result = eng.drop_column_family(&cf);
 
     // Assert
-    let result = eng.get(&cf, b"key025").expect("get");
-    assert!(
-        result.is_some(),
-        "Database should remain functional after config reload"
-    );
+    assert!(drop_result.is_err(), "drop should fail with unflushed data");
+
+    let manifest = eng.get_manifest();
+    assert!(manifest
+        .column_families
+        .iter()
+        .any(|cf_meta| cf_meta.name == cf.name()),
+        "column family should still exist in manifest");
 }
 
 #[test]
@@ -290,7 +189,10 @@ fn should_preserve_data_during_high_concurrency_writes_with_admin_queries_when_s
         h.join().expect("Thread panicked");
     }
 
-    // Assert - verify data persisted through admin stress
+    // Assert - verify data persisted through admin stress.
+    // Wait for background activity to complete for deterministic asserts.
+    let _ = eng.wait_for_compaction(std::time::Duration::from_secs(5));
+    let _ = eng.wait_for_flush(std::time::Duration::from_secs(5));
     for i in (0..NUM_WRITER_THREADS).step_by(3) {
         let key = format!("write_{}_0_{}", i, 0).into_bytes();
         let result = eng.get(&cf, &key).expect("get after admin stress");

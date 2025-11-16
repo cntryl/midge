@@ -13,6 +13,7 @@
 //! - Consistency guarantees
 
 use crate::api::column_family::ColumnFamilyHandle;
+use crate::common::test_hooks::FlushGatePoint;
 use crate::core::engine::core::MidgeEngine;
 use crate::core::manifest::Manifest;
 use crate::error::{MidgeError, MidgeResult};
@@ -136,7 +137,8 @@ impl MidgeEngine {
         }
 
         // Now flush the old memtable (which is still referenced by the closure in flush_memtable_to_sst)
-        let (file_path, file_meta) = self.flush_memtable_to_sst(cf_id)?;        let mut m =
+        let (file_path, file_meta) = self.flush_memtable_to_sst(cf_id)?;
+        let mut m =
             Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
         let name = file_path
             .file_name()
@@ -177,6 +179,9 @@ impl MidgeEngine {
             m.ssts.push(name.clone());
         }
         m.last_persisted_sequence = self.seq.load(Ordering::SeqCst);
+        if let Some(ref hooks) = self.test_hooks {
+            hooks.maybe_pause_flush(FlushGatePoint::BeforeManifestUpdate);
+        }
         m.save_atomic(&self.db_path)?;
 
         // Update cached manifest after successful save

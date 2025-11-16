@@ -118,6 +118,10 @@ impl MidgeEngine {
         }
 
         // Check for unflushed data - refuse to drop if memtable or immutables are non-empty
+        // Acquire flush_mutex to synchronize with any in-flight flush operations.
+        // This avoids races where a flush is in progress and might return an error
+        // or modify the manifest concurrently while the CF drop proceeds.
+        let _flush_guard = self.flush_mutex.lock();
         let cf_id_u32 = cf_id.as_u32();
         if let Some(cf) = self.cf_set.cfs.get(&cf_id_u32) {
             // Check if active memtable has any data

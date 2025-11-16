@@ -20,8 +20,8 @@
 //! - Follower: Reads result with `Acquire` after epoch change
 
 use crate::error::{MidgeError, MidgeResult};
-use parking_lot::{Condvar, Mutex};
 use crossbeam::channel;
+use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::*};
 use std::time::Duration;
 
@@ -56,8 +56,6 @@ impl Default for GroupCommitConfig {
             spin_loops,
         }
     }
-
-
 }
 
 /// Lock-free group commit coordinator that batches fsync requests
@@ -141,7 +139,6 @@ impl GroupCommitCoordinator {
 
                 // Optionally sleep briefly to accumulate more followers (increases batch size)
                 if self.config.wait_micros > 0 {
-                    
                     std::thread::sleep(Duration::from_micros(self.config.wait_micros));
                 }
 
@@ -199,8 +196,8 @@ impl GroupCommitCoordinator {
 
                 // Spin briefly to avoid parking syscall overhead for very short batches
                 let mut spins = 0;
-                    while self.epoch.load(Acquire) == my_epoch {
-                        if spins < self.config.spin_loops {
+                while self.epoch.load(Acquire) == my_epoch {
+                    if spins < self.config.spin_loops {
                         std::hint::spin_loop();
                         spins += 1;
                         continue;
@@ -211,7 +208,7 @@ impl GroupCommitCoordinator {
                     if self.epoch.load(Acquire) == my_epoch {
                         self.park_cv.wait(&mut guard);
                     }
-                    
+
                     // Lock dropped here; re-check epoch in outer loop
                 }
 

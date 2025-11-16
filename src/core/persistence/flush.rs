@@ -23,6 +23,7 @@ use std::thread::{self, JoinHandle};
 type KeyBounds = (Option<Vec<u8>>, Option<Vec<u8>>, Option<u64>, Option<u64>);
 
 use crate::common::codec::CompressionType;
+use crate::common::test_hooks::FlushGatePoint;
 use crate::core::manifest::Manifest;
 use crate::error::{MidgeError, MidgeResult};
 use crate::metrics::Metrics;
@@ -65,6 +66,8 @@ pub struct FlushWorkerConfig {
     pub cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     /// Metrics collector to record memtable flushes from background worker
     pub metrics: Arc<Metrics>,
+    /// Optional test hooks for deterministic coordination
+    pub test_hooks: Option<crate::common::test_hooks::TestHooks>,
 }
 
 /// Spawn a background thread that processes flush jobs.
@@ -159,6 +162,10 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     boxed_writer.finish_to_path(&sst_path)?;
 
     // Update manifest FIRST to establish the safe deletion point
+    if let Some(ref hooks) = config.test_hooks {
+        hooks.maybe_pause_flush(FlushGatePoint::BeforeManifestUpdate);
+    }
+
     let mut m =
         Manifest::load_with_retry(&config.db_path, 10, std::time::Duration::from_millis(10))?;
     // Use largest_seq from entries (which includes resolved merge operations)

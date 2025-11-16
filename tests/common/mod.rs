@@ -32,7 +32,7 @@
 pub mod cloud;
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{test_hooks::TestHooks, MidgeEngine, MidgeOptions, StorageMode};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -472,6 +472,29 @@ pub fn new_engine_with_opts(
         },
         memtable_size,
         enable_compaction,
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("Failed to open engine");
+    (dir, engine)
+}
+
+/// Creates a new `MidgeEngine` configured with custom test hooks.
+///
+/// Useful for deterministic coordination in concurrency tests.
+#[allow(dead_code)]
+pub fn new_engine_with_test_hooks(
+    memtable_size: usize,
+    enable_compaction: bool,
+    hooks: TestHooks,
+) -> (TempDir, MidgeEngine) {
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size,
+        enable_compaction,
+        test_hooks: Some(hooks),
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("Failed to open engine");

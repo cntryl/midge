@@ -360,5 +360,6 @@ pub fn open_with_factories(
         bloom_cache,
         sparse_index_cache,
         autotuner: opts.autotuner.clone(),
+        test_hooks: opts.test_hooks.clone(),
     })
 }

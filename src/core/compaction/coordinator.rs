@@ -4,6 +4,7 @@
 //! spawning, job submission, and graceful shutdown.
 
 use super::strategy::Compactor;
+use crate::common::test_hooks::CompactionGatePoint;
 use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
 use crossbeam::channel;
@@ -219,6 +220,7 @@ impl CompactionCoordinator {
 
                         // Call test hook before compaction starts (returns true if should fail)
                         let should_fail = if let Some(ref hooks) = test_hooks {
+                            hooks.maybe_pause_compaction(CompactionGatePoint::BeforeExecution);
                             hooks.before_compaction()
                         } else {
                             false
@@ -299,6 +301,12 @@ impl CompactionCoordinator {
 
                             if let Some((_path, meta)) = write_res {
                                 // Update manifest on disk: remove inputs, add new file meta
+                                if let Some(ref hooks) = test_hooks {
+                                    hooks.maybe_pause_compaction(
+                                        CompactionGatePoint::BeforeManifestUpdate,
+                                    );
+                                }
+
                                 let mut m = crate::manifest::Manifest::load_with_retry(
                                     &db_path,
                                     10,
@@ -317,6 +325,12 @@ impl CompactionCoordinator {
 
                                 // Persist manifest
                                 m.save_atomic(&db_path)?;
+
+                                if let Some(ref hooks) = test_hooks {
+                                    hooks.maybe_pause_compaction(
+                                        CompactionGatePoint::AfterManifestUpdate,
+                                    );
+                                }
                             }
                             // After finishing a compaction, if there are any barrier waiters
                             // and no pending messages, notify them now (worker is idle).

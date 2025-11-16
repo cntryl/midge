@@ -71,6 +71,8 @@ pub struct MidgeEngine {
     pub(super) sparse_index_cache: crate::sst::sparse_index_cache::SparseIndexCache,
     /// Optional autotuner for adaptive parameter adjustment
     pub(crate) autotuner: Option<Arc<crate::config::Autotuner>>,
+    /// Optional test hooks for deterministic coordination in tests
+    pub(crate) test_hooks: Option<crate::common::test_hooks::TestHooks>,
 }
 
 impl MidgeEngine {

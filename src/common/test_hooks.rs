@@ -18,8 +18,11 @@
 //! };
 //! ```
 
+use crossbeam::channel;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Behavior for fsync operations during tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +68,102 @@ pub enum CompactionBehavior {
     CrashBeforeFsync,
 }
 
+/// Gate points for deterministic compaction coordination in tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionGatePoint {
+    /// Right after a compaction plan is selected, before any work runs.
+    BeforeExecution,
+    /// Immediately before manifest updates are applied.
+    BeforeManifestUpdate,
+    /// Immediately after manifest updates finish.
+    AfterManifestUpdate,
+}
+
+/// Gate points for deterministic flush coordination in tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushGatePoint {
+    /// Just before the flush pipeline updates the manifest.
+    BeforeManifestUpdate,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionGateState {
+    point: CompactionGatePoint,
+    ready_tx: channel::Sender<()>,
+    resume_rx: channel::Receiver<()>,
+}
+
+impl CompactionGateState {
+    fn wait(&self) {
+        let _ = self.ready_tx.send(());
+        let _ = self.resume_rx.recv();
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FlushGateState {
+    point: FlushGatePoint,
+    ready_tx: channel::Sender<()>,
+    resume_rx: channel::Receiver<()>,
+}
+
+impl FlushGateState {
+    fn wait(&self) {
+        let _ = self.ready_tx.send(());
+        let _ = self.resume_rx.recv();
+    }
+}
+
+/// Handle returned to tests for controlling a deterministic compaction gate.
+pub struct CompactionGateHandle {
+    ready_rx: channel::Receiver<()>,
+    resume_tx: channel::Sender<()>,
+}
+
+impl CompactionGateHandle {
+    fn new(ready_rx: channel::Receiver<()>, resume_tx: channel::Sender<()>) -> Self {
+        Self {
+            ready_rx,
+            resume_tx,
+        }
+    }
+
+    /// Wait until compaction reaches the requested gate.
+    pub fn wait_until_blocked(&self, timeout: Duration) -> bool {
+        self.ready_rx.recv_timeout(timeout).is_ok()
+    }
+
+    /// Allow the paused compaction to resume.
+    pub fn release(&self) {
+        let _ = self.resume_tx.send(());
+    }
+}
+
+/// Handle returned to tests for controlling a deterministic flush gate.
+pub struct FlushGateHandle {
+    ready_rx: channel::Receiver<()>,
+    resume_tx: channel::Sender<()>,
+}
+
+impl FlushGateHandle {
+    fn new(ready_rx: channel::Receiver<()>, resume_tx: channel::Sender<()>) -> Self {
+        Self {
+            ready_rx,
+            resume_tx,
+        }
+    }
+
+    /// Wait until flush reaches the requested gate.
+    pub fn wait_until_blocked(&self, timeout: Duration) -> bool {
+        self.ready_rx.recv_timeout(timeout).is_ok()
+    }
+
+    /// Allow the paused flush to resume.
+    pub fn release(&self) {
+        let _ = self.resume_tx.send(());
+    }
+}
+
 /// Test hooks for fault injection and instrumentation.
 ///
 /// This allows tests to intercept operations, inject failures, and verify
@@ -99,6 +198,10 @@ pub struct TestHooks {
     wal_truncated_after_manifest: Arc<AtomicBool>,
     /// Whether manifest was fsynced before WAL truncation
     manifest_fsynced_before_wal_truncate: Arc<AtomicBool>,
+    /// Optional deterministic gate for coordinating compaction
+    compaction_gate: Arc<Mutex<Option<Arc<CompactionGateState>>>>,
+    /// Optional deterministic gate for coordinating flushes
+    flush_gate: Arc<Mutex<Option<Arc<FlushGateState>>>>,
 }
 
 impl Default for TestHooks {
@@ -123,6 +226,8 @@ impl TestHooks {
             compaction_failed_count: Arc::new(AtomicU64::new(0)),
             wal_truncated_after_manifest: Arc::new(AtomicBool::new(false)),
             manifest_fsynced_before_wal_truncate: Arc::new(AtomicBool::new(false)),
+            compaction_gate: Arc::new(Mutex::new(None)),
+            flush_gate: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -160,6 +265,32 @@ impl TestHooks {
     pub fn with_compaction_behavior(self, behavior: CompactionBehavior) -> Self {
         *self.compaction_behavior.write() = behavior;
         self
+    }
+
+    /// Install a deterministic compaction gate for tests and return a handle to control it.
+    pub fn install_compaction_gate(&self, point: CompactionGatePoint) -> CompactionGateHandle {
+        let (ready_tx, ready_rx) = channel::bounded(1);
+        let (resume_tx, resume_rx) = channel::bounded(1);
+        let state = Arc::new(CompactionGateState {
+            point,
+            ready_tx,
+            resume_rx,
+        });
+        *self.compaction_gate.lock() = Some(state);
+        CompactionGateHandle::new(ready_rx, resume_tx)
+    }
+
+    /// Install a deterministic flush gate for tests and return a handle to control it.
+    pub fn install_flush_gate(&self, point: FlushGatePoint) -> FlushGateHandle {
+        let (ready_tx, ready_rx) = channel::bounded(1);
+        let (resume_tx, resume_rx) = channel::bounded(1);
+        let state = Arc::new(FlushGateState {
+            point,
+            ready_tx,
+            resume_rx,
+        });
+        *self.flush_gate.lock() = Some(state);
+        FlushGateHandle::new(ready_rx, resume_tx)
     }
 
     // -------------------------------------------------------------------------
@@ -223,6 +354,24 @@ impl TestHooks {
         )
     }
 
+    /// Internal helper for compaction code to honor deterministic gates.
+    pub(crate) fn maybe_pause_compaction(&self, point: CompactionGatePoint) {
+        let gate = { self.compaction_gate.lock().clone() };
+        if let Some(gate) = gate {
+            if gate.point == point {
+                gate.wait();
+                let mut guard = self.compaction_gate.lock();
+                if guard
+                    .as_ref()
+                    .map(|current| Arc::ptr_eq(current, &gate))
+                    .unwrap_or(false)
+                {
+                    guard.take();
+                }
+            }
+        }
+    }
+
     /// Hook called after compaction completes successfully.
     pub fn after_compaction(&self) {
         self.compaction_complete_count
@@ -240,6 +389,24 @@ impl TestHooks {
             *self.compaction_behavior.read(),
             CompactionBehavior::CrashBeforeFsync
         )
+    }
+
+    /// Internal helper for flush code to honor deterministic gates.
+    pub(crate) fn maybe_pause_flush(&self, point: FlushGatePoint) {
+        let gate = { self.flush_gate.lock().clone() };
+        if let Some(gate) = gate {
+            if gate.point == point {
+                gate.wait();
+                let mut guard = self.flush_gate.lock();
+                if guard
+                    .as_ref()
+                    .map(|current| Arc::ptr_eq(current, &gate))
+                    .unwrap_or(false)
+                {
+                    guard.take();
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -299,6 +466,8 @@ impl TestHooks {
             .store(false, Ordering::SeqCst);
         self.manifest_fsynced_before_wal_truncate
             .store(false, Ordering::SeqCst);
+        self.compaction_gate.lock().take();
+        self.flush_gate.lock().take();
     }
 }
 
@@ -372,5 +541,37 @@ mod tests {
         assert_eq!(hooks.fsync_count(), 0);
         assert_eq!(hooks.wal_append_count(), 0);
         assert_eq!(hooks.manifest_update_count(), 0);
+    }
+
+    #[test]
+    fn should_trigger_compaction_gate() {
+        use std::thread;
+        let hooks = TestHooks::new();
+        let gate = hooks.install_compaction_gate(CompactionGatePoint::BeforeManifestUpdate);
+
+        let hooks_clone = hooks.clone();
+        let handle = thread::spawn(move || {
+            hooks_clone.maybe_pause_compaction(CompactionGatePoint::BeforeManifestUpdate);
+        });
+
+        assert!(gate.wait_until_blocked(Duration::from_millis(100)));
+        gate.release();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn should_trigger_flush_gate() {
+        use std::thread;
+        let hooks = TestHooks::new();
+        let gate = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
+
+        let hooks_clone = hooks.clone();
+        let handle = thread::spawn(move || {
+            hooks_clone.maybe_pause_flush(FlushGatePoint::BeforeManifestUpdate);
+        });
+
+        assert!(gate.wait_until_blocked(Duration::from_millis(100)));
+        gate.release();
+        handle.join().unwrap();
     }
 }

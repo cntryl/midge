@@ -49,7 +49,11 @@ pub(crate) fn acquire_db_lock(
 
 /// Initialize manifest, ensuring default CF exists.
 /// Returns the manifest and the maximum CF ID for next_cf_id tracking.
-pub(crate) fn init_manifest(db_path: &Path, read_only: bool, memtable_size: usize) -> MidgeResult<(Manifest, u32)> {
+pub(crate) fn init_manifest(
+    db_path: &Path,
+    read_only: bool,
+    memtable_size: usize,
+) -> MidgeResult<(Manifest, u32)> {
     let mut manifest = Manifest::load(db_path).unwrap_or_default();
 
     // Ensure default CF is in manifest (for new DBs)
@@ -285,6 +289,7 @@ pub(crate) fn setup_flush_coordinator(
         mem_mode,
         cloud_sst_manager,
         metrics: metrics_arc,
+        test_hooks: opts.test_hooks.clone(),
     };
     crate::core::FlushCoordinator::spawn(config)
 }
@@ -391,7 +396,8 @@ mod tests {
     #[test]
     fn should_initialize_manifest_with_default_cf() {
         let temp_dir = TempDir::new().unwrap();
-        let (manifest, max_cf_id) = init_manifest(temp_dir.path(), false, 64 * 1024 * 1024).unwrap();
+        let (manifest, max_cf_id) =
+            init_manifest(temp_dir.path(), false, 64 * 1024 * 1024).unwrap();
 
         assert!(manifest.has_cf(DEFAULT_CF_ID));
         assert_eq!(max_cf_id, 0);
@@ -416,7 +422,8 @@ mod tests {
         manifest.save_atomic(temp_dir.path()).unwrap();
 
         // Load it back
-        let (loaded_manifest, max_cf_id) = init_manifest(temp_dir.path(), false, 64 * 1024 * 1024).unwrap();
+        let (loaded_manifest, max_cf_id) =
+            init_manifest(temp_dir.path(), false, 64 * 1024 * 1024).unwrap();
 
         assert!(loaded_manifest.has_cf(DEFAULT_CF_ID));
         assert!(loaded_manifest.has_cf(ColumnFamilyId::new(1)));

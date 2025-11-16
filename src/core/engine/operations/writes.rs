@@ -86,7 +86,7 @@ impl MidgeEngine {
                 let mut mt_write = column_family.memtable.write();
                 std::mem::replace(&mut *mt_write, crate::core::memtable::MemTable::new())
             };
-            
+
             // Flush the frozen memtable to SST by calling flush_frozen_memtable
             let _ = self.flush_frozen_memtable(cf, old_memtable);
         }
