@@ -152,6 +152,18 @@ impl BlockEntryBuilder {
         // Check visibility - snapshot isolation: only see writes with seq < snapshot_seq
         let is_visible = snapshot_seq.is_none_or(|snap_seq| seq < snap_seq);
 
+        #[cfg(test)]
+        {
+            eprintln!(
+                "try_process_entry: user_key={} seq={} tomb={} target={} is_visible={}",
+                String::from_utf8_lossy(&user_key),
+                seq,
+                is_tombstone,
+                String::from_utf8_lossy(target_key),
+                is_visible
+            );
+        }
+
         // Early exit if key is past target
         if user_key.as_slice() > target_key {
             trace!("key > target, stopping search");
@@ -401,6 +413,19 @@ impl SstFile {
         trace!("get_state_internal: key={:?}", String::from_utf8_lossy(key));
 
         // Early-out if bloom filter or range tombstones indicate key is not present
+        #[cfg(test)]
+        {
+            eprintln!(
+                "bloom_filter present={} may_contain={}",
+                self.bloom_filter.is_some(),
+                self.bloom_filter
+                    .as_ref()
+                    .map(|bf| bf.may_contain(key))
+                    .unwrap_or(false)
+            );
+            eprintln!("range tombstones: {}", self.range_tombstones.len());
+        }
+
         if should_skip_key(&self.bloom_filter, &self.range_tombstones, key, u64::MAX) {
             trace!("Bloom filter or tombstone check: key not present");
             return Ok(KeyState::Absent);
@@ -410,6 +435,16 @@ impl SstFile {
             .sparse_index
             .as_ref()
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
+
+        // TEMP DEBUG: print sparse index keys to help diagnose failing tests
+        // NOTE: This is a temporary diagnostic change; it will be removed after debugging
+        #[cfg(test)]
+        {
+            eprintln!("SST sparse index entries (count={}):", sparse_index.entries().len());
+            for en in sparse_index.entries() {
+                eprintln!("  entry key={}", String::from_utf8_lossy(en.key.as_ref()));
+            }
+        }
 
         if let Some(block_handle) = sparse_index.find_block(key) {
             if self.use_internal_keys {
@@ -713,6 +748,24 @@ impl SstFile {
             |d, offset, limit| self.parse_key_at_offset(d, offset, limit),
         );
 
+        #[cfg(test)]
+        {
+            // Dump all keys in block for debugging
+            use crate::sst::encoding::TlvBlockIterator;
+            let iterator = TlvBlockIterator::new(data);
+            eprintln!("Data block entries:");
+            for entry_result in iterator {
+                let (k, v, seq, t, _exp) = entry_result?;
+                eprintln!(
+                    "  key={} seq={} tomb={} val_len={}",
+                    String::from_utf8_lossy(&k),
+                    seq,
+                    t,
+                    v.as_ref().map(|b| b.len()).unwrap_or(0)
+                );
+            }
+        }
+
         self.linear_search_data_block_state(data, restart_offset, entries_end, target_key)
     }
 
@@ -842,6 +895,15 @@ impl SstFile {
             entry_builder.entry_complete = true;
 
             // Process the entry
+            #[cfg(test)]
+            {
+                eprintln!(
+                    "processing entry at pos={} shared={} key_delta={}",
+                    pos,
+                    shared_len,
+                    String::from_utf8_lossy(key_delta)
+                );
+            }
             if let Some(result) = entry_builder.try_process_entry(
                 target_key,
                 snapshot_seq,
