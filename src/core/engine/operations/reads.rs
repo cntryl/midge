@@ -150,8 +150,10 @@ impl MidgeEngine {
             }
         }
 
-        let manifest = self.get_manifest();
-        let cf_files: Vec<_> = manifest
+        // Load version set once for consistent SST snapshot (lock-free)
+        let version = self.version_set.load();
+        let cf_files: Vec<_> = version
+            .manifest
             .files
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())
@@ -284,8 +286,9 @@ impl MidgeEngine {
         }
 
         // Add SST sources for this CF
-        let manifest = self.get_manifest();
-        let cf_files: Vec<_> = manifest
+        let version = self.version_set.load();
+        let cf_files: Vec<_> = version
+            .manifest
             .files
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())
@@ -474,10 +477,11 @@ impl MidgeEngine {
         }
 
         // 4) Probe SSTs newest->oldest using snapshot-aware state, filtered by CF
-        let manifest = self.get_manifest();
+        let version = self.version_set.load();
         let now_millis = timestamp::now_millis();
 
-        let cf_files: Vec<_> = manifest
+        let cf_files: Vec<_> = version
+            .manifest
             .files
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())
@@ -581,10 +585,11 @@ impl MidgeEngine {
         }
 
         // Scan SSTs newest-to-oldest, filtered by CF
-        let manifest = self.get_manifest();
+        let version = self.version_set.load();
         let now_millis = timestamp::now_millis();
 
-        let cf_files: Vec<_> = manifest
+        let cf_files: Vec<_> = version
+            .manifest
             .files
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())

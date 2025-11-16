@@ -73,6 +73,10 @@ pub struct MidgeEngine {
     pub(crate) autotuner: Option<Arc<crate::config::Autotuner>>,
     /// Optional test hooks for deterministic coordination in tests
     pub(crate) test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    /// Atomic version set for lock-free reads of manifest state
+    pub(crate) version_set: crate::core::manifest::AtomicVersionSet,
+    /// Version manager actor for serialized manifest updates
+    pub(crate) version_manager: crate::core::manifest::VersionManager,
 }
 
 impl MidgeEngine {
@@ -281,6 +285,9 @@ impl Drop for MidgeEngine {
     fn drop(&mut self) {
         // Flush WAL to ensure all writes are persisted
         let _ = self.wal_coordinator.flush();
+
+        // Shutdown VersionManager actor gracefully
+        self.version_manager.shutdown();
 
         // FlushCoordinator will be automatically dropped and shutdown gracefully
 

@@ -322,6 +322,15 @@ pub fn open_with_factories(
     println!("[diag-lib] creating wal coordinator");
     let wal_coordinator = crate::wal::WalCoordinator::new(wal_writer_box, wal_factory_arc);
 
+    // Initialize VersionSet and VersionManager for lock-free manifest access
+    let current_manifest = manifest_cache.get();
+    let version_set = crate::core::manifest::VersionSet::new(current_manifest);
+    let version_set_atomic = crate::core::manifest::AtomicVersionSet::new(version_set);
+    let version_manager = crate::core::manifest::VersionManager::new(
+        version_set_atomic.clone(),
+        db_path.clone(),
+    );
+
     Ok(MidgeEngine {
         wal_coordinator,
         cf_set: cf_set_arc,
@@ -368,5 +377,7 @@ pub fn open_with_factories(
         sparse_index_cache,
         autotuner: opts.autotuner.clone(),
         test_hooks: opts.test_hooks.clone(),
+        version_set: version_set_atomic,
+        version_manager,
     })
 }
