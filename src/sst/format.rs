@@ -603,11 +603,14 @@ impl DataBlockBuilder {
         // self.buffer already has the entries
 
         // Then write header at the end
+        // TLV layout: [entries] [version: u8] [restarts: n * u32] [restart_count: u32]
+        // Version byte placed before restart array for compatibility with disk layout
         self.buffer.put_u8(3); // Version 3 = TLV format
-        self.buffer.put_u32_le(self.restarts.len() as u32);
         for restart in &self.restarts {
             self.buffer.put_u32_le(*restart as u32);
         }
+        // Restart count must be last (readers expect it at the final 4 bytes)
+        self.buffer.put_u32_le(self.restarts.len() as u32);
 
         let buffer_len = self.buffer.len();
         let result = self.buffer.freeze();
