@@ -278,6 +278,7 @@ pub(crate) fn setup_flush_coordinator(
     metrics_arc: Arc<Metrics>,
     cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     mem_mode: bool,
+    manifest_update_callback: Option<Arc<dyn Fn(crate::core::manifest::Manifest) + Send + Sync>>,
 ) -> MidgeResult<crate::core::FlushCoordinator> {
     let config = FlushWorkerConfig {
         sst_factory: sst_factory_arc,
@@ -290,6 +291,7 @@ pub(crate) fn setup_flush_coordinator(
         cloud_sst_manager,
         metrics: metrics_arc,
         test_hooks: opts.test_hooks.clone(),
+        manifest_update_callback,
     };
     crate::core::FlushCoordinator::spawn(config)
 }

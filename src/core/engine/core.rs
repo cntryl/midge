@@ -62,7 +62,7 @@ pub struct MidgeEngine {
     pub(crate) flush_mutex: Mutex<()>,
     /// Cached manifest for fast read access without disk I/O
     /// OPTIMIZATION: Eliminates manifest load on every get() - 75% performance improvement
-    pub(crate) manifest_cache: crate::sst::manifest_cache::ManifestCache,
+    pub(crate) manifest_cache: Arc<crate::sst::manifest_cache::ManifestCache>,
     /// Bloom filter cache for fast SST pre-checks
     /// OPTIMIZATION: Avoids SST opens when bloom says key is absent
     pub(super) bloom_cache: crate::sst::bloom_cache::BloomCache,

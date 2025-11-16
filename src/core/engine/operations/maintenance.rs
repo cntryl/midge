@@ -127,75 +127,21 @@ impl MidgeEngine {
             return Ok(());
         }
 
-        // CRITICAL: Replace active memtable with a new empty one BEFORE flushing.
+        // CRITICAL: Capture the old memtable BEFORE replacing it.
         // The drain operation on the skiplist-based memtable only creates a snapshot,
-        // it doesn't actually clear the skiplist. So we must create a new memtable
-        // to ensure new writes don't go to the memtable being flushed.
-        {
+        // it doesn't actually clear the skiplist. So we must capture the old memtable,
+        // replace with a new empty one, then flush the captured old memtable.
+        let old_memtable = {
             let mut mt_write = column_family.memtable.write();
+            // Clone the Arc to the old memtable so we can flush it after replacement
+            let old = mt_write.clone();
+            // Replace with new empty memtable for subsequent writes
             *mt_write = crate::core::memtable::MemTable::new();
-        }
+            old
+        };
 
-        // Now flush the old memtable (which is still referenced by the closure in flush_memtable_to_sst)
-        let (file_path, file_meta) = self.flush_memtable_to_sst(cf_id)?;
-        let mut m =
-            Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
-        let name = file_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        if !name.is_empty() {
-            let size_bytes = std::fs::metadata(&file_path)
-                .map(|md| md.len())
-                .unwrap_or(0);
-
-            let sublevel =
-                if let (Some(sk), Some(lk)) = (&file_meta.smallest_key, &file_meta.largest_key) {
-                    m.assign_l0_sublevel(sk, lk)
-                } else {
-                    0
-                };
-
-            // preserve metadata computed by flush_memtable_to_sst
-            m.files.push(crate::core::manifest::FileMeta {
-                name: file_meta.name.clone(),
-                level: file_meta.level,
-                size_bytes,
-                cf_id: cf_id.as_u32(), // Use the actual CF ID
-                smallest_key: file_meta.smallest_key,
-                largest_key: file_meta.largest_key,
-                smallest_seq: file_meta.smallest_seq,
-                largest_seq: file_meta.largest_seq,
-                sublevel,
-                cloud_location: file_meta.cloud_location,
-                cloud_checksum: file_meta.cloud_checksum,
-                cloud_uploaded_at: file_meta.cloud_uploaded_at,
-                cloud_state: file_meta.cloud_state,
-                point_tombstone_count: file_meta.point_tombstone_count,
-                range_tombstone_count: file_meta.range_tombstone_count,
-                total_entries: file_meta.total_entries,
-            });
-            m.ssts.push(name.clone());
-        }
-        m.last_persisted_sequence = self.seq.load(Ordering::SeqCst);
-        if let Some(ref hooks) = self.test_hooks {
-            hooks.maybe_pause_flush(FlushGatePoint::BeforeManifestUpdate);
-        }
-        m.save_atomic(&self.db_path)?;
-
-        // Update cached manifest after successful save
-        self.update_manifest_cache(m);
-
-        // Update bloom and sparse index caches for the new SST
-        if !name.is_empty() {
-            self.update_caches_for_new_sst(&name);
-        }
-
-        // Note: If we flushed an immutable memtable, we already popped it earlier
-        // If we flushed the active memtable, no need to pop anything
-
-        Ok(())
+        // Now flush the old memtable using the frozen memtable path
+        self.flush_frozen_memtable(cf, old_memtable)
     }
 
     /// Trigger manual compaction for a specific level in a column family.

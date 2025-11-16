@@ -18,18 +18,35 @@ fn should_preserve_data_when_backup_runs_during_compaction_and_writes() {
         let k = format!("seed{:04}", i);
         eng.put(&cf, k.as_bytes(), b"seedval").unwrap();
     }
+    
+    // Check if data is in memtable before flush
+    println!("[TEST] Checking memtable before flush");
+    let check_before = eng.get(&cf, b"seed0500").unwrap();
+    println!("[TEST] Data readable from memtable: {:?}", check_before.is_some());
 
     // Flush seed data and wait for flush to complete
     // (Ignore error if background flush coordinator already flushed)
-    let _ = eng.flush();
+    println!("[TEST] About to call flush()");
+    let flush_result = eng.flush();
+    println!("[TEST] flush() returned: {:?}", flush_result);
+    
+    println!("[TEST] About to wait_for_flush");
     eng.wait_for_flush(std::time::Duration::from_secs(5))
         .expect("wait for initial flush");
-
-    // Give a brief pause for system to stabilize after flush
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    println!("[TEST] wait_for_flush completed");
+    
+    // Check manifest state
+    let manifest = eng.get_manifest();
+    println!("[TEST] Manifest has {} files, {} SSTs", manifest.files.len(), manifest.ssts.len());
+    for (i, file) in manifest.files.iter().enumerate() {
+        println!("[TEST]   File {}: {} (level {}, {} bytes)", i, file.name, file.level, file.size_bytes);
+    }
 
     // Verify that seed data is readable before starting concurrent operations
+    // (manifest cache is now updated by flush worker callback)
+    println!("[TEST] About to check if seed0500 is readable");
     let check = eng.get(&cf, b"seed0500").unwrap();
+    println!("[TEST] check result: {:?}", check.is_some());
     assert!(
         check.is_some(),
         "seed data should be readable before concurrent ops"

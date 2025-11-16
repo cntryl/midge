@@ -246,6 +246,16 @@ pub fn open_with_factories(
         None
     };
 
+    // Initialize manifest cache for fast read access (with test hooks if provided)
+    let manifest_cache =
+        Arc::new(crate::sst::ManifestCache::new_with_hooks(db_path.clone(), opts.test_hooks.clone())?);
+
+    // Create callback to update manifest cache after flush completes
+    let manifest_cache_for_flush = Arc::clone(&manifest_cache);
+    let manifest_update_callback = Arc::new(move |manifest: crate::core::manifest::Manifest| {
+        manifest_cache_for_flush.update(manifest);
+    });
+
     // Delegate flush and compaction coordinator setup to factory module
     let flush_coordinator = crate::core::engine::factory::setup_flush_coordinator(
         &opts,
@@ -255,6 +265,7 @@ pub fn open_with_factories(
         metrics_arc.clone(),
         cloud_sst_manager.clone(),
         mem_mode,
+        Some(manifest_update_callback),
     )?;
 
     let compaction_coordinator = crate::core::engine::factory::setup_compaction_coordinator(
@@ -267,10 +278,6 @@ pub fn open_with_factories(
         metrics_arc.clone(),
         cf_set_arc.clone(),
     )?;
-
-    // Initialize manifest cache for fast read access (with test hooks if provided)
-    let manifest_cache =
-        crate::sst::ManifestCache::new_with_hooks(db_path.clone(), opts.test_hooks.clone())?;
     let manifest = manifest_cache.get();
 
     // Initialize bloom filter cache and populate from existing SSTs

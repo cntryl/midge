@@ -68,6 +68,9 @@ pub struct FlushWorkerConfig {
     pub metrics: Arc<Metrics>,
     /// Optional test hooks for deterministic coordination
     pub test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    /// Callback to update the engine's manifest cache after flush completes
+    /// This ensures reads can immediately see newly flushed SST files
+    pub manifest_update_callback: Option<Arc<dyn Fn(Manifest) + Send + Sync>>,
 }
 
 /// Spawn a background thread that processes flush jobs.
@@ -211,6 +214,15 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     );
     m.save_atomic(&config.db_path)?;
     tracing::info!("manifest persisted successfully");
+
+    // Update engine's cached manifest so reads can immediately see the new SST
+    if let Some(ref callback) = config.manifest_update_callback {
+        tracing::info!("invoking manifest update callback with {} files", m.files.len());
+        callback(m.clone());
+        tracing::info!("manifest update callback completed");
+    } else {
+        tracing::warn!("no manifest update callback configured!");
+    }
 
     // Upload SST to cloud if cloud manager is configured
     if let Some(cloud_manager) = &config.cloud_sst_manager {

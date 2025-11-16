@@ -70,7 +70,9 @@ impl ManifestCache {
     /// This replaces the entire cached manifest. Typically called after
     /// flush or compaction operations that modify the manifest.
     pub fn update(&self, manifest: Manifest) {
+        tracing::info!("ManifestCache::update called with {} files", manifest.files.len());
         *self.cached.write() = manifest;
+        tracing::info!("ManifestCache::update completed");
     }
 
     /// Reload the manifest from disk and update the cache.
