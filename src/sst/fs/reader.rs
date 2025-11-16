@@ -6,7 +6,7 @@ use tracing::{debug, trace};
 use crate::error::{MidgeError, MidgeResult};
 use crate::fs;
 use crate::sst::bloom::BloomFilter;
-use crate::sst::encoding::{decode_key_at_offset, TlvBlockIterator};
+use crate::sst::encoding::{decode, decode_key_at_offset, TlvBlockIterator};
 use crate::sst::format::{Block, BlockHandle, BlockType, Footer};
 use crate::sst::meta_index::{linear_search_meta_index, meta_index_contains};
 use crate::sst::range_tombstone::{decode_range_tombstones, is_covered_by_range_tombstone};
@@ -17,206 +17,10 @@ use crate::sst::traits::{KeyState, RangeTombstone, SstStateReader};
 use super::iterator::SstRangeIter;
 use super::utils::{
     binary_search_restart_points, calculate_entries_end, decode_data_block,
-    decode_data_block_paranoid, decode_internal_key_or_raw, now_millis,
+    decode_data_block_paranoid, decode_internal_key_or_raw,
 };
 
 /// Helper struct for building and processing block entries during linear search
-struct BlockEntryBuilder {
-    current_key: Vec<u8>,
-    shared_len: Option<u32>,
-    key_delta: Option<Vec<u8>>,
-    value: Option<Vec<u8>>,
-    sequence: u64,
-    entry_type: u8,
-    expiration: Option<u64>,
-    entry_complete: bool,
-    use_internal_keys: bool,
-    entries_processed: usize,
-}
-
-impl BlockEntryBuilder {
-    fn new(use_internal_keys: bool) -> Self {
-        Self {
-            current_key: Vec::new(),
-            shared_len: None,
-            key_delta: None,
-            value: None,
-            sequence: 0,
-            entry_type: 0,
-            expiration: None,
-            entry_complete: false,
-            use_internal_keys,
-            entries_processed: 0,
-        }
-    }
-
-    fn entry_count(&self) -> usize {
-        self.entries_processed
-    }
-
-    fn start_new_entry(&mut self, tag_data: &[u8]) -> MidgeResult<()> {
-        self.shared_len = Some(crate::common::tlv::parse_varint32_from_slice(tag_data)?);
-        self.key_delta = None;
-        self.value = None;
-        self.sequence = 0;
-        self.entry_type = 0;
-        self.expiration = None;
-        self.entry_complete = false;
-        Ok(())
-    }
-
-    fn set_key_delta(&mut self, tag_data: &[u8]) {
-        self.key_delta = Some(tag_data.to_vec());
-        if self.use_internal_keys {
-            self.entry_complete = true;
-        }
-    }
-
-    fn set_value(&mut self, tag_data: &[u8]) {
-        self.value = Some(tag_data.to_vec());
-    }
-
-    fn set_expiration(&mut self, tag_data: &[u8]) {
-        if tag_data.len() == 8 {
-            self.expiration = Some(u64::from_be_bytes([
-                tag_data[0],
-                tag_data[1],
-                tag_data[2],
-                tag_data[3],
-                tag_data[4],
-                tag_data[5],
-                tag_data[6],
-                tag_data[7],
-            ]));
-        }
-    }
-
-    fn set_sequence(&mut self, tag_data: &[u8]) {
-        if tag_data.len() == 8 {
-            self.sequence = u64::from_be_bytes([
-                tag_data[0],
-                tag_data[1],
-                tag_data[2],
-                tag_data[3],
-                tag_data[4],
-                tag_data[5],
-                tag_data[6],
-                tag_data[7],
-            ]);
-        }
-    }
-
-    fn set_entry_type(&mut self, tag_data: &[u8]) {
-        if tag_data.len() == 1 {
-            self.entry_type = tag_data[0];
-            if !self.use_internal_keys {
-                self.entry_complete = true;
-            }
-        }
-    }
-
-    /// Try to process a completed entry, returning Some(KeyState) if the target key is found
-    fn try_process_entry(
-        &mut self,
-        target_key: &[u8],
-        snapshot_seq: Option<u64>,
-        now: u64,
-        entry_count: usize,
-    ) -> MidgeResult<Option<KeyState>> {
-        if !self.entry_complete {
-            return Ok(None);
-        }
-
-        let (shared_len, key_delta) = match (self.shared_len, &self.key_delta) {
-            (Some(sl), Some(kd)) => (sl, kd),
-            _ => return Ok(None),
-        };
-
-        // Reconstruct the full key
-        self.current_key.truncate(shared_len as usize);
-        self.current_key.extend_from_slice(key_delta);
-        self.entries_processed += 1;
-
-        // Decode key based on format
-        let (user_key, seq, is_tombstone) = self.decode_key(&self.current_key.clone())?;
-
-        tracing::trace!(
-            entry_count = entry_count + self.entries_processed,
-            user_key = %String::from_utf8_lossy(&user_key),
-            seq,
-            tomb = is_tombstone,
-            snapshot_seq = ?snapshot_seq,
-            "processing entry"
-        );
-
-        // Check visibility - snapshot isolation: only see writes with seq < snapshot_seq
-        let is_visible = snapshot_seq.is_none_or(|snap_seq| seq < snap_seq);
-
-        #[cfg(test)]
-        {
-            eprintln!(
-                "try_process_entry: user_key={} seq={} tomb={} target={} is_visible={}",
-                String::from_utf8_lossy(&user_key),
-                seq,
-                is_tombstone,
-                String::from_utf8_lossy(target_key),
-                is_visible
-            );
-        }
-
-        // Early exit if key is past target
-        if user_key.as_slice() > target_key {
-            trace!("key > target, stopping search");
-            return Ok(Some(KeyState::Absent));
-        }
-
-        // Check if this is our target key
-        if user_key.as_slice() == target_key && is_visible {
-            return Ok(Some(self.build_key_state(seq, is_tombstone, now)?));
-        }
-
-        Ok(None)
-    }
-
-    /// Decode the key based on whether we're using internal keys
-    fn decode_key(&self, key: &[u8]) -> MidgeResult<(Vec<u8>, u64, bool)> {
-        if self.use_internal_keys {
-            if let Some((user_key, seq, tombstone)) =
-                crate::common::internal_key::decode_internal_key(key)
-            {
-                Ok((user_key, seq, tombstone))
-            } else {
-                tracing::warn!("failed to decode internal key");
-                Ok((key.to_vec(), 0, false))
-            }
-        } else {
-            Ok((key.to_vec(), self.sequence, self.entry_type == 2))
-        }
-    }
-
-    /// Build the final KeyState result, checking expiration
-    fn build_key_state(&self, seq: u64, is_tombstone: bool, now: u64) -> MidgeResult<KeyState> {
-        // Check if key is expired
-        if let Some(exp_millis) = self.expiration {
-            if now > exp_millis {
-                trace!("key expired: now={} > exp={}", now, exp_millis);
-                return Ok(KeyState::Absent);
-            }
-        }
-
-        if is_tombstone {
-            Ok(KeyState::Tombstone(seq))
-        } else if let Some(ref val) = self.value {
-            Ok(KeyState::Value(
-                Bytes::copy_from_slice(val),
-                seq,
-                self.expiration,
-            ))
-        } else {
-            Ok(KeyState::Tombstone(seq))
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct SstFile {
@@ -844,80 +648,57 @@ impl SstFile {
     ) -> MidgeResult<KeyState> {
         self.log_search_start(target_key, snapshot_seq, start_offset, limit, data.len());
 
-        let mut entry_builder = BlockEntryBuilder::new(self.use_internal_keys);
-        let now = now_millis();
+        let mut cursor = start_offset;
+        let mut last_key: Vec<u8> = Vec::new();
         let mut entry_count = 0;
-        let mut pos = start_offset;
 
-        while pos < limit {
-            // Read shared_len
-            if pos + 4 > limit {
-                break;
-            }
-            let shared_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-            pos += 4;
+        while cursor < limit {
+            let entry = match decode(data, cursor, limit) {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+            cursor += entry.bytes_consumed;
+            entry_count += 1;
 
-            // Read key_delta_len
-            if pos + 4 > limit {
-                break;
-            }
-            let key_delta_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-            pos += 4;
+            // Reconstruct full key
+            let mut raw_key = Vec::with_capacity(entry.shared_len as usize + entry.key_delta.len());
+            raw_key.extend_from_slice(&last_key[..entry.shared_len as usize]);
+            raw_key.extend_from_slice(entry.key_delta);
+            last_key = raw_key.clone();
 
-            // Read key_delta
-            if pos + key_delta_len > limit {
-                break;
-            }
-            let key_delta = &data[pos..pos + key_delta_len];
-            pos += key_delta_len;
+            let (user_key, seq, tomb) = if self.use_internal_keys {
+                if let Some((uk, s, t)) = crate::common::internal_key::decode_internal_key(&raw_key) {
+                    (uk, s, t)
+                } else {
+                    (raw_key.clone(), entry.sequence, entry.entry_type == 2)
+                }
+            } else {
+                (raw_key, entry.sequence, entry.entry_type == 2)
+            };
 
-            // Read value_len
-            if pos + 4 > limit {
-                break;
+            // Check snapshot visibility
+            if let Some(snapshot) = snapshot_seq {
+                if seq > snapshot {
+                    continue; // Skip newer entries
+                }
             }
-            let value_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-            pos += 4;
 
-            // Read value
-            if pos + value_len > limit {
-                break;
+            if user_key.as_slice() == target_key {
+                return Ok(if tomb {
+                    KeyState::Tombstone(seq)
+                } else if let Some(val) = entry.value {
+                    KeyState::Value(Bytes::copy_from_slice(val), seq, entry.expiration)
+                } else {
+                    KeyState::Tombstone(seq)
+                });
             }
-            let value = &data[pos..pos + value_len];
-            pos += value_len;
 
-            // Set entry builder fields
-            entry_builder.shared_len = Some(shared_len);
-            entry_builder.key_delta = Some(key_delta.to_vec());
-            entry_builder.value = Some(value.to_vec());
-            entry_builder.sequence = 0; // Default
-            entry_builder.entry_type = 0; // Default
-            entry_builder.expiration = None;
-            entry_builder.entry_complete = true;
-
-            // Process the entry
-            #[cfg(test)]
-            {
-                eprintln!(
-                    "processing entry at pos={} shared={} key_delta={}",
-                    pos,
-                    shared_len,
-                    String::from_utf8_lossy(key_delta)
-                );
+            if user_key.as_slice() > target_key {
+                break; // Past the target key
             }
-            if let Some(result) = entry_builder.try_process_entry(
-                target_key,
-                snapshot_seq,
-                now,
-                entry_count,
-            )? {
-                return Ok(result);
-            }
-            entry_count += entry_builder.entry_count();
         }
-        trace!(
-            entry_count,
-            "key not found in block"
-        );
+
+        trace!(entry_count, "key not found in block");
         Ok(KeyState::Absent)
     }
 
