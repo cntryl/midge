@@ -60,17 +60,23 @@ impl SparseIndex {
         }
 
         // partition_point finds the first index where predicate is false
-        // Since index keys are LAST keys in blocks, we want the first block
-        // whose last key is >= the search key
+        // i.e., the first entry where entry.key >= key
         let idx = self.entries.partition_point(|e| e.key.as_ref() < key);
 
-        // If idx == entries.len(), key is beyond all blocks
-        if idx >= self.entries.len() {
-            // Return last block as a fallback (key might be in range due to deletions)
-            return Some(&self.entries[self.entries.len() - 1].block_handle);
+        // If idx == 0, key <= first entry's key, so it's in first block
+        if idx == 0 {
+            return Some(&self.entries[0].block_handle);
         }
 
-        Some(&self.entries[idx].block_handle)
+        // If idx < entries.len(), check if we have an exact match
+        if idx < self.entries.len() && self.entries[idx].key.as_ref() == key {
+            // Exact match - return this block
+            return Some(&self.entries[idx].block_handle);
+        }
+
+        // Otherwise, key falls between entries[idx-1] and entries[idx]
+        // Since keys are LAST keys in blocks, return the previous block
+        Some(&self.entries[idx - 1].block_handle)
     }
 
     /// Find blocks in a range without allocating.
