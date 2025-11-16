@@ -82,9 +82,9 @@ pub struct MidgeEngine {
 impl MidgeEngine {
     /// Open or create a database using the high-level `Config` API.
     ///
-    /// Delegated to `state::initialization::open_with_config()`.
+    /// Delegated to `state::open_with_config()`.
     pub fn open_with_config(config: crate::config::Config) -> MidgeResult<Self> {
-        crate::core::engine::state::initialization::open_with_config(config)
+        crate::core::engine::state::open_with_config(config)
     }
 
     /// Create a KvStore adapter for this engine.
@@ -122,14 +122,14 @@ impl MidgeEngine {
 
     /// Open or create a database with the specified storage mode.
     ///
-    /// Delegated to `state::initialization::open()`.
+    /// Delegated to `state::open()`.
     pub fn open(opts: crate::MidgeOptions) -> MidgeResult<Self> {
-        crate::core::engine::state::initialization::open(opts)
+        crate::core::engine::state::open(opts)
     }
 
     /// Open with a provided `SstFactory` implementation.
     ///
-    /// Delegated to `state::initialization::open_with_factories()`.
+    /// Delegated to `state::open_with_factories()`.
     pub fn open_with_factories(
         opts: crate::MidgeOptions,
         sst_factory: Box<dyn crate::sst::SstFactory>,
@@ -137,7 +137,7 @@ impl MidgeEngine {
         wal_factory: Box<dyn crate::wal::WalFactory>,
         mem_mode: bool,
     ) -> MidgeResult<Self> {
-        crate::core::engine::state::initialization::open_with_factories(
+        crate::core::engine::state::open_with_factories(
             opts,
             sst_factory,
             sst_reader_factory,

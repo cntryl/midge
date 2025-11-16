@@ -5,7 +5,7 @@
 //! - `column_family.rs` - Column family management (ColumnFamily, ColumnFamilySet)
 //! - `factory.rs` - Engine construction and initialization helpers
 //! - `engine.rs` - Main MidgeEngine struct and internal helpers
-//! - `state/` - Engine state management and initialization
+//! - `state.rs` - Engine state management and initialization
 //! - `operations/` - Focused operation modules (reads, writes, transactions, etc.)
 //! - `adapters/` - Trait adapters for external API compatibility (KvStore, etc.)
 
@@ -15,7 +15,7 @@ pub(crate) mod column_family;
 mod coordination;
 mod core;
 pub(crate) mod factory;
-mod state;
+pub mod state;
 pub mod types;
 
 // Re-export adapters for public use
