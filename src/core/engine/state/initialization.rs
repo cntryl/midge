@@ -175,7 +175,7 @@ pub fn open_with_factories(
     println!("[diag-lib] acquired db lock (or running read-only/mem)");
     println!("[diag-lib] initializing manifest...");
     let (manifest, max_cf_id) =
-        crate::core::engine::factory::init_manifest(&db_path, opts.read_only)?;
+        crate::core::engine::factory::init_manifest(&db_path, opts.read_only, opts.memtable_size)?;
     println!(
         "[diag-lib] manifest initialized: last_seq={}",
         manifest.last_persisted_sequence

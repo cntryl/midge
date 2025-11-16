@@ -80,42 +80,15 @@ impl MidgeEngine {
         let memtable_full = column_family.is_full();
 
         if memtable_full {
-            // Try to freeze the active memtable
-            let frozen = column_family.try_freeze_memtable();
-
-            if frozen {
-                // Successfully froze memtable, trigger flush for this CF
-                // Use a background flush to avoid blocking the write path
-                let _ = self.flush_cf(cf);
-            } else {
-                // Immutable queue is full - implement write stall with exponential backoff
-                if column_family.should_stall_writes() {
-                    // Implement backpressure: sleep with exponential backoff
-                    let mut backoff_ms = 1; // Start with 1ms
-                    let max_backoff_ms = 100; // Cap at 100ms
-                    let max_stall_attempts = 1000; // ~55 seconds total max wait
-
-                    for attempt in 0..max_stall_attempts {
-                        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-
-                        // Check if flush completed and we can proceed
-                        if !column_family.should_stall_writes() {
-                            self.metrics.record_write_stall(attempt + 1);
-                            break;
-                        }
-
-                        // Exponential backoff with cap
-                        backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
-
-                        // If we've stalled too long, return error to prevent indefinite blocking
-                        if attempt == max_stall_attempts - 1 {
-                            return Err(crate::error::MidgeError::invalid_config(
-                                "Write stall timeout: flush queue not draining",
-                            ));
-                        }
-                    }
-                }
-            }
+            // Freeze the current memtable: replace it with a new empty one
+            // and move the old one to a temporary variable for flushing
+            let old_memtable = {
+                let mut mt_write = column_family.memtable.write();
+                std::mem::replace(&mut *mt_write, crate::core::memtable::MemTable::new())
+            };
+            
+            // Flush the frozen memtable to SST by calling flush_frozen_memtable
+            let _ = self.flush_frozen_memtable(cf, old_memtable);
         }
 
         Ok(())

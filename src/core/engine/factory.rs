@@ -49,15 +49,19 @@ pub(crate) fn acquire_db_lock(
 
 /// Initialize manifest, ensuring default CF exists.
 /// Returns the manifest and the maximum CF ID for next_cf_id tracking.
-pub(crate) fn init_manifest(db_path: &Path, read_only: bool) -> MidgeResult<(Manifest, u32)> {
+pub(crate) fn init_manifest(db_path: &Path, read_only: bool, memtable_size: usize) -> MidgeResult<(Manifest, u32)> {
     let mut manifest = Manifest::load(db_path).unwrap_or_default();
 
     // Ensure default CF is in manifest (for new DBs)
     if !manifest.has_cf(DEFAULT_CF_ID) {
+        let default_cf_config = ColumnFamilyConfig {
+            memtable_max_bytes: memtable_size,
+            ..ColumnFamilyConfig::default()
+        };
         manifest.add_cf(
             DEFAULT_CF_ID,
             DEFAULT_CF_NAME.to_string(),
-            Some(ColumnFamilyConfig::default()),
+            Some(default_cf_config),
         );
         // Save manifest with default CF for new DBs
         if !read_only {
@@ -93,7 +97,10 @@ pub(super) fn init_column_families(
         let cf_id = ColumnFamilyId::new(cf_meta.id);
         let config = cf_meta.config.clone().unwrap_or_default();
         if cf_set.cfs.contains_key(&cf_id.as_u32()) {
-            continue;
+            // CF already exists (e.g., default CF created in new())
+            // Remove and recreate with correct config from manifest
+            cf_set.cfs.remove(&cf_id.as_u32());
+            cf_set.name_to_id.remove(&cf_meta.name);
         }
         cf_set.create_cf(cf_id, cf_meta.name.clone(), config)?;
     }
@@ -384,7 +391,7 @@ mod tests {
     #[test]
     fn should_initialize_manifest_with_default_cf() {
         let temp_dir = TempDir::new().unwrap();
-        let (manifest, max_cf_id) = init_manifest(temp_dir.path(), false).unwrap();
+        let (manifest, max_cf_id) = init_manifest(temp_dir.path(), false, 64 * 1024 * 1024).unwrap();
 
         assert!(manifest.has_cf(DEFAULT_CF_ID));
         assert_eq!(max_cf_id, 0);
@@ -409,7 +416,7 @@ mod tests {
         manifest.save_atomic(temp_dir.path()).unwrap();
 
         // Load it back
-        let (loaded_manifest, max_cf_id) = init_manifest(temp_dir.path(), false).unwrap();
+        let (loaded_manifest, max_cf_id) = init_manifest(temp_dir.path(), false, 64 * 1024 * 1024).unwrap();
 
         assert!(loaded_manifest.has_cf(DEFAULT_CF_ID));
         assert!(loaded_manifest.has_cf(ColumnFamilyId::new(1)));

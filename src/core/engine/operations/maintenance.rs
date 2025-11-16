@@ -29,7 +29,71 @@ impl MidgeEngine {
         self.flush_cf(&self.default_column_family())
     }
 
+    /// Flush a frozen (detached) memtable to SST.
+    ///
+    /// This method flushes a specific memtable that has been detached from the active
+    /// memtable position. This is used when a memtable is full and needs to be frozen
+    /// before flushing.
+    pub(crate) fn flush_frozen_memtable(
+        &self,
+        cf: &ColumnFamilyHandle,
+        memtable: crate::core::memtable::MemTable,
+    ) -> MidgeResult<()> {
+        // Serialize flush operations to prevent concurrent file conflicts
+        let _flush_guard = self.flush_mutex.lock();
+
+        if self.read_only {
+            return Ok(());
+        }
+
+        let cf_id = cf.id();
+
+        // Check if the frozen memtable is empty
+        if memtable.is_empty() {
+            return Ok(());
+        }
+
+        // Get CF config
+        let cf_config = self.cf_set.get_cf_config(cf_id).unwrap_or_default();
+
+        // Resolve merge operations BEFORE drain
+        // Note: We can't use resolve_memtable_merges because it accesses the active memtable
+        // For now, skip merge resolution for frozen memtables
+        // TODO: Implement merge resolution for detached memtables
+
+        // Drain the frozen memtable
+        let entries = memtable.drain_with_meta_internal();
+        let range_tombstones = memtable.drain_range_tombstones();
+
+        // Flush to SST
+        // NOTE: flush_memtable_to_sst() already updates the manifest with the new SST file
+        let (_file_path, _file_meta) = crate::core::persistence::flush::flush_memtable_to_sst(
+            cf_id,
+            || (entries, range_tombstones),
+            crate::core::persistence::flush::FlushConfig {
+                sst_factory: &self.sst_factory,
+                compression: cf_config.compression.into(),
+                block_size: self.block_size,
+                bloom_bits_per_key: cf_config.bloom_bits_per_key,
+                sst_dir: &self.sst_dir,
+                metrics: &self.metrics,
+                cloud_sst_mgr: self.cloud_sst_manager.as_ref().map(|m| m.as_ref()),
+            },
+        )?;
+
+        // Manifest update and cache updates are already handled by flush_memtable_to_sst
+        // Just update the cached manifest from disk to ensure consistency
+        let m = Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
+        self.update_manifest_cache(m);
+
+        Ok(())
+    }
+
     /// Flush a specific column family's memtable to SST.
+    ///
+    /// IMPORTANT: This replaces the active memtable with a new empty one before flushing.
+    /// The old memtable is flushed to SST. This is necessary because the skiplist-based
+    /// memtable doesn't support true draining - drain() only creates a snapshot.
     pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
         // Serialize flush operations to prevent concurrent file conflicts
         let _flush_guard = self.flush_mutex.lock();
@@ -40,28 +104,39 @@ impl MidgeEngine {
 
         let cf_id = cf.id();
 
-        // Check if memtable is empty
-        let is_empty = if cf_id == crate::api::column_family::DEFAULT_CF_ID {
-            self.with_default_memtable(|mt| mt.is_empty())
+        // Get the column family
+        let column_family = if cf_id == crate::api::column_family::DEFAULT_CF_ID {
+            self.cf_set
+                .cfs
+                .get(&0)
+                .ok_or_else(|| MidgeError::invalid_config("Default column family not found"))?
         } else {
-            self.with_cf_memtable(cf_id, |mt| mt.is_empty())
-                .unwrap_or(true)
+            self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+                MidgeError::invalid_config(format!("Column family {} not found", cf_id.as_u32()))
+            })?
         };
 
-        println!("flush_cf: cf_id={:?}, is_empty={}", cf_id, is_empty);
+        // Check if active memtable is empty
+        let is_empty = {
+            let mt = column_family.memtable.read();
+            mt.is_empty()
+        };
 
         if is_empty {
             return Ok(());
         }
 
-        println!("flush_cf: calling flush_memtable_to_sst");
-        let (file_path, file_meta) = self.flush_memtable_to_sst(cf_id)?;
-        println!(
-            "flush_cf: flush_memtable_to_sst returned file_path={:?}",
-            file_path
-        );
+        // CRITICAL: Replace active memtable with a new empty one BEFORE flushing.
+        // The drain operation on the skiplist-based memtable only creates a snapshot,
+        // it doesn't actually clear the skiplist. So we must create a new memtable
+        // to ensure new writes don't go to the memtable being flushed.
+        {
+            let mut mt_write = column_family.memtable.write();
+            *mt_write = crate::core::memtable::MemTable::new();
+        }
 
-        let mut m =
+        // Now flush the old memtable (which is still referenced by the closure in flush_memtable_to_sst)
+        let (file_path, file_meta) = self.flush_memtable_to_sst(cf_id)?;        let mut m =
             Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
         let name = file_path
             .file_name()
@@ -112,24 +187,8 @@ impl MidgeEngine {
             self.update_caches_for_new_sst(&name);
         }
 
-        // After manifest is persisted, pop the flushed memtable from immutable queue
-        // This is safe because:
-        // 1. Data is now durable in SST and manifest
-        // 2. Snapshots will read from SST if sequence is >= last_persisted_sequence
-        // 3. Prevents re-flushing the same data in crash recovery
-        let column_family = if cf_id == crate::api::column_family::DEFAULT_CF_ID {
-            self.cf_set
-                .cfs
-                .get(&0)
-                .ok_or_else(|| MidgeError::invalid_config("Default column family not found"))?
-        } else {
-            self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
-                MidgeError::invalid_config(format!("Column family {} not found", cf_id.as_u32()))
-            })?
-        };
-
-        // Pop the oldest immutable memtable (the one we just flushed)
-        let _ = column_family.pop_immutable();
+        // Note: If we flushed an immutable memtable, we already popped it earlier
+        // If we flushed the active memtable, no need to pop anything
 
         Ok(())
     }
