@@ -47,6 +47,13 @@ fn should_preserve_data_when_backup_runs_during_compaction_and_writes() {
     assert!(backup_info.backup_id > 0, "backup should have a valid ID");
     assert!(backup_info.size_bytes > 0, "backup should contain data");
 
+    // Ensure all data is flushed and background operations complete
+    let _ = eng.flush(); // Ignore error if memtable is already empty
+    eng.wait_for_flush(std::time::Duration::from_secs(10))
+        .expect("wait for flush should succeed");
+    eng.wait_for_compaction(std::time::Duration::from_secs(10))
+        .expect("wait for compaction should succeed");
+
     let result = eng
         .get(&cf, b"seed0005")
         .expect("get after backup/compaction");
@@ -190,9 +197,13 @@ fn should_preserve_data_during_high_concurrency_writes_with_admin_queries_when_s
     }
 
     // Assert - verify data persisted through admin stress.
-    // Wait for background activity to complete for deterministic asserts.
-    let _ = eng.wait_for_compaction(std::time::Duration::from_secs(5));
-    let _ = eng.wait_for_flush(std::time::Duration::from_secs(5));
+    // Ensure all data is flushed and background operations complete
+    let _ = eng.flush(); // Ignore error if memtable is already empty
+    eng.wait_for_flush(std::time::Duration::from_secs(10))
+        .expect("wait for flush should succeed");
+    eng.wait_for_compaction(std::time::Duration::from_secs(10))
+        .expect("wait for compaction should succeed");
+    
     for i in (0..NUM_WRITER_THREADS).step_by(3) {
         let key = format!("write_{}_0_{}", i, 0).into_bytes();
         let result = eng.get(&cf, &key).expect("get after admin stress");
