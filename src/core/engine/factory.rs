@@ -35,13 +35,13 @@ pub(crate) fn acquire_db_lock(
     mem_mode: bool,
 ) -> MidgeResult<Option<Box<dyn crate::core::locking::DbLock>>> {
     if !read_only && !mem_mode {
-        let ttl_ms = 5000; // 5 second TTL
-        let mut lock = Box::new(crate::core::locking::LocalFileLock::new(db_path, ttl_ms));
+        let ttl_ms = 5000u32; // 5 second TTL
+        let mut lock = crate::core::locking::create_local_lock(db_path, ttl_ms);
         lock.try_acquire(std::time::Duration::from_secs(10))
             .map_err(|e| MidgeError::InvalidConfig {
                 message: format!("Failed to acquire database lock: {}", e),
             })?;
-        Ok(Some(lock as Box<dyn crate::core::locking::DbLock>))
+        Ok(Some(lock))
     } else {
         Ok(None)
     }

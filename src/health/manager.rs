@@ -1,4 +1,9 @@
-//! Health manager - coordinates lifecycle and probes.
+//! System health monitoring and lifecycle management
+//!
+//! Provides operational visibility into database health, manages graceful
+//! startup and shutdown procedures, and coordinates system state transitions.
+//! Enables external monitoring systems to check readiness, track rehydration
+//! progress, and ensure safe maintenance operations.
 
 use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
@@ -40,7 +45,11 @@ impl Default for HealthConfig {
     }
 }
 
-/// Health manager coordinates lifecycle and probes
+/// Manages system health monitoring and lifecycle operations.
+///
+/// Tracks database readiness, coordinates graceful shutdown procedures,
+/// monitors rehydration progress, and provides operational status for
+/// external health checks and maintenance operations.
 pub struct HealthManager {
     /// Current lifecycle state
     state: Arc<RwLock<LifecycleState>>,

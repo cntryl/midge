@@ -9,7 +9,7 @@ use crate::error::{MidgeError, MidgeResult};
 use crate::wal::arena::Arena;
 use crate::wal::encode_pipeline::WalEncoder;
 use crate::wal::encoding::decode;
-use crate::wal::fs::group_commit::{GroupCommitConfig, GroupCommitCoordinator};
+use crate::wal::fs::batched_sync::{BatchedSyncConfig, BatchedSyncCoordinator};
 use crate::wal::types::WalSyncMode;
 use crate::wal::{WalOpKind, WalPos, WalRecord, WalWriter};
 
@@ -45,9 +45,9 @@ pub struct Wal {
     /// Synchronization mode
     #[allow(dead_code)]
     sync_mode: WalSyncMode,
-    /// Group commit coordinator (shared across instances)
+    /// Batched-sync coordinator (shared across instances)
     #[allow(dead_code)]
-    group_commit: Option<Arc<GroupCommitCoordinator>>,
+    group_commit: Option<Arc<BatchedSyncCoordinator>>,
     /// File number for this WAL (used for numbered naming: 000001.log)
     file_number: u64,
     /// Parallel encoder for batch operations
@@ -87,8 +87,8 @@ impl Wal {
 
         // Create group commit coordinator if needed
         let group_commit = if sync_mode == WalSyncMode::BatchedSync {
-            Some(Arc::new(GroupCommitCoordinator::new(
-                GroupCommitConfig::default(),
+            Some(Arc::new(BatchedSyncCoordinator::new(
+                BatchedSyncConfig::default(),
             )))
         } else {
             None

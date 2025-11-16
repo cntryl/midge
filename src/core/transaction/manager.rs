@@ -1,3 +1,10 @@
+//! Multi-version concurrency control (MVCC) transaction management
+//!
+//! Manages the lifecycle of database transactions, ensuring ACID properties
+//! through conflict detection, snapshot isolation, and coordinated commit/abort.
+//! Tracks active transactions, maintains read/write sets for conflict resolution,
+//! and coordinates with the storage engine to provide consistent transactional semantics.
+
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};

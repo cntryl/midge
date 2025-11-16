@@ -350,9 +350,9 @@ pub fn open_with_factories(
         wal_sync: opts.wal_sync,
         snapshot_registry: snapshot_registry_arc,
         block_cache: if opts.cache_size_mb > 0 {
-            Some(Arc::new(crate::sst::BlockCache::new(
+            Some(crate::sst::create_basic_cache(
                 opts.cache_size_mb * 1024 * 1024,
-            )))
+            ))
         } else {
             None
         },

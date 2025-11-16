@@ -25,7 +25,7 @@ impl MidgeEngine {
     ///     println!("Block cache enabled with capacity: {} bytes", cache.stats().max_size_bytes);
     /// }
     /// ```
-    pub fn block_cache(&self) -> Option<&Arc<crate::sst::BlockCache>> {
+    pub fn block_cache(&self) -> Option<&Arc<dyn crate::sst::BlockCacheTrait>> {
         self.block_cache.as_ref()
     }
 

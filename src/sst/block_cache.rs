@@ -14,6 +14,25 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Block cache trait for caching decoded SST blocks.
+///
+/// This trait abstracts different cache implementations (LRU, sharded, adaptive)
+/// behind a common interface, hiding implementation details like sharding strategy
+/// or adaptation logic.
+pub trait BlockCacheTrait: Send + Sync {
+    /// Get a block from the cache
+    fn get(&self, key: &BlockKey) -> Option<CachedBlock>;
+
+    /// Insert a block into the cache
+    fn insert(&self, key: BlockKey, value: CachedBlock);
+
+    /// Clear all entries from the cache
+    fn clear(&self);
+
+    /// Get cache statistics
+    fn stats(&self) -> CacheStats;
+}
+
 /// A block in the cache, containing decoded data
 #[derive(Clone)]
 pub struct CachedBlock {
@@ -36,6 +55,35 @@ pub enum BlockType {
     Data,
     Index,
     Filter,
+}
+
+// ============================================================================
+// Factory Functions (Implementation Details Hidden)
+// ============================================================================
+
+/// Create a basic LRU block cache.
+///
+/// This is appropriate for single-threaded or low-concurrency workloads
+/// where simple LRU eviction provides sufficient performance.
+pub fn create_basic_cache(max_size_bytes: usize) -> Arc<dyn BlockCacheTrait> {
+    Arc::new(BlockCache::new(max_size_bytes))
+}
+
+/// Create a sharded block cache for high-concurrency workloads.
+///
+/// This distributes cache entries across multiple shards to reduce lock
+/// contention, improving performance under concurrent access patterns.
+pub fn create_sharded_cache(max_size_bytes: usize, shard_count: usize) -> Arc<dyn BlockCacheTrait> {
+    Arc::new(ShardedBlockCache::new(max_size_bytes, shard_count))
+}
+
+/// Create an adaptive block cache that automatically optimizes itself.
+///
+/// This cache starts as a basic LRU cache and automatically switches to
+/// sharded mode if it detects high contention, providing optimal performance
+/// without manual tuning.
+pub fn create_adaptive_cache(max_size_bytes: usize) -> Arc<dyn BlockCacheTrait> {
+    Arc::new(AdaptiveBlockCache::new(max_size_bytes))
 }
 
 /// LRU block cache for decoded SST blocks
@@ -201,6 +249,24 @@ impl BlockCache {
             max_size_bytes: inner.max_size_bytes,
             entry_count: inner.map.len(),
         }
+    }
+}
+
+impl BlockCacheTrait for BlockCache {
+    fn get(&self, key: &BlockKey) -> Option<CachedBlock> {
+        self.get(key)
+    }
+
+    fn insert(&self, key: BlockKey, value: CachedBlock) {
+        self.insert(key, value)
+    }
+
+    fn clear(&self) {
+        self.clear()
+    }
+
+    fn stats(&self) -> CacheStats {
+        self.stats()
     }
 }
 
@@ -381,6 +447,24 @@ impl ShardedBlockCache {
             max_size_bytes: total_max_size,
             entry_count: total_entries,
         }
+    }
+}
+
+impl BlockCacheTrait for ShardedBlockCache {
+    fn get(&self, key: &BlockKey) -> Option<CachedBlock> {
+        self.get(key)
+    }
+
+    fn insert(&self, key: BlockKey, value: CachedBlock) {
+        self.insert(key, value)
+    }
+
+    fn clear(&self) {
+        self.clear()
+    }
+
+    fn stats(&self) -> CacheStats {
+        self.stats()
     }
 }
 
@@ -584,6 +668,24 @@ impl AdaptiveBlockCache {
             contentions,
             contention_rate,
         }
+    }
+}
+
+impl BlockCacheTrait for AdaptiveBlockCache {
+    fn get(&self, key: &BlockKey) -> Option<CachedBlock> {
+        self.get(key)
+    }
+
+    fn insert(&self, key: BlockKey, value: CachedBlock) {
+        self.insert(key, value)
+    }
+
+    fn clear(&self) {
+        self.clear()
+    }
+
+    fn stats(&self) -> CacheStats {
+        self.stats()
     }
 }
 

@@ -78,9 +78,9 @@ pub struct WalMetrics {
     fsync_calls: Arc<AtomicU64>,
     /// Cumulative fsync time in microseconds
     fsync_time_us: Arc<AtomicU64>,
-    /// Number of group commits performed
-    group_commits: Arc<AtomicU64>,
-    /// Operations batched in group commits
+    /// Number of batched syncs performed
+    batched_syncs: Arc<AtomicU64>,
+    /// Operations batched in batched syncs
     batched_operations: Arc<AtomicU64>,
 }
 
@@ -91,7 +91,7 @@ impl WalMetrics {
             bytes_written: Arc::new(AtomicU64::new(0)),
             fsync_calls: Arc::new(AtomicU64::new(0)),
             fsync_time_us: Arc::new(AtomicU64::new(0)),
-            group_commits: Arc::new(AtomicU64::new(0)),
+            batched_syncs: Arc::new(AtomicU64::new(0)),
             batched_operations: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -109,9 +109,9 @@ impl WalMetrics {
             .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
     }
 
-    /// Record a group commit
-    pub fn record_group_commit(&self, operations_batched: u64) {
-        self.group_commits.fetch_add(1, Ordering::Relaxed);
+    /// Record a batched sync
+    pub fn record_batched_sync(&self, operations_batched: u64) {
+        self.batched_syncs.fetch_add(1, Ordering::Relaxed);
         self.batched_operations
             .fetch_add(operations_batched, Ordering::Relaxed);
     }
@@ -137,13 +137,13 @@ impl WalMetrics {
         self.fsync_time_us.load(Ordering::Relaxed) as f64 / calls as f64
     }
 
-    /// Group commit effectiveness (ops per fsync)
+    /// Batched sync effectiveness (ops per fsync)
     pub fn avg_batch_size(&self) -> f64 {
-        let commits = self.group_commits.load(Ordering::Relaxed);
-        if commits == 0 {
+        let syncs = self.batched_syncs.load(Ordering::Relaxed);
+        if syncs == 0 {
             return 0.0;
         }
-        self.batched_operations.load(Ordering::Relaxed) as f64 / commits as f64
+        self.batched_operations.load(Ordering::Relaxed) as f64 / syncs as f64
     }
 
     pub fn reset(&self) {
@@ -151,7 +151,7 @@ impl WalMetrics {
         self.bytes_written.store(0, Ordering::Relaxed);
         self.fsync_calls.store(0, Ordering::Relaxed);
         self.fsync_time_us.store(0, Ordering::Relaxed);
-        self.group_commits.store(0, Ordering::Relaxed);
+        self.batched_syncs.store(0, Ordering::Relaxed);
         self.batched_operations.store(0, Ordering::Relaxed);
     }
 }
@@ -499,11 +499,11 @@ mod tests {
     }
 
     #[test]
-    fn should_track_group_commit_effectiveness() {
+    fn should_track_batched_sync_effectiveness() {
         let metrics = WalMetrics::new();
 
-        metrics.record_group_commit(10);
-        metrics.record_group_commit(20);
+        metrics.record_batched_sync(10);
+        metrics.record_batched_sync(20);
 
         assert_eq!(metrics.avg_batch_size(), 15.0);
     }

@@ -3,15 +3,9 @@
 //! This module provides exclusive access control for database directories,
 //! preventing multiple writers from corrupting the same database.
 //!
-//! Two implementations:
-//! - `LocalFileLock`: File-based lock for local/memory storage modes
-//! - `CloudLeaseLock`: Distributed lease for cloud-backed storage mode
-//!
-//! Both use the same semantics:
-//! - Acquisition with exponential backoff
-//! - Heartbeat renewal (every ttl/2)
-//! - Automatic read-only fallback on renewal failure
-//! - Graceful release on shutdown
+//! The locking behavior is abstracted behind the `DbLock` trait, with
+//! implementations for different storage backends (local file, cloud lease).
+//! Use the factory functions to create appropriate locks for your storage mode.
 
 mod cloud;
 mod local;
@@ -20,7 +14,30 @@ mod renewal;
 mod traits;
 
 // Re-export public API
-pub use cloud::CloudLeaseLock;
-pub use local::LocalFileLock;
-pub use meta::LockMeta;
 pub use traits::DbLock;
+pub use meta::LockMeta;
+
+// Factory functions for creating locks (implementation details hidden)
+use std::path::Path;
+use std::sync::Arc;
+use crate::cloud::StorageBackend;
+
+/// Create a local file-based database lock.
+///
+/// This is appropriate for local storage modes where file system
+/// locking provides sufficient exclusivity.
+pub fn create_local_lock(db_path: &Path, ttl_ms: u32) -> Box<dyn DbLock> {
+    Box::new(local::LocalFileLock::new(db_path, ttl_ms))
+}
+
+/// Create a cloud-based distributed database lock.
+///
+/// This is appropriate for cloud storage modes where distributed
+/// locking is required across multiple instances.
+pub fn create_cloud_lock(
+    backend: Arc<dyn StorageBackend>,
+    lock_key: String,
+    ttl_ms: u32,
+) -> Box<dyn DbLock> {
+    Box::new(cloud::CloudLeaseLock::new(backend, lock_key, ttl_ms))
+}

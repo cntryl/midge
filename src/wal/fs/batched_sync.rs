@@ -1,4 +1,4 @@
-//! Lock-free group commit mechanism for WAL synchronization
+//! Lock-free batched sync mechanism for WAL synchronization
 //!
 //! Allows multiple concurrent threads to share a single fsync operation,
 //! dramatically improving throughput under concurrent write workloads.
@@ -40,13 +40,13 @@ pub struct BatchedSyncConfig {
 impl Default for BatchedSyncConfig {
     fn default() -> Self {
         // Allow runtime override for experiments via environment variable
-        // `SHALE_GROUP_COMMIT_WAIT_US`. If unset or invalid, fall back to 100µs.
-        let wait_micros = std::env::var("SHALE_GROUP_COMMIT_WAIT_US")
+        // `SHALE_BATCHED_SYNC_WAIT_US`. If unset or invalid, fall back to 100µs.
+        let wait_micros = std::env::var("SHALE_BATCHED_SYNC_WAIT_US")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(100);
 
-        let spin_loops = std::env::var("SHALE_GROUP_COMMIT_SPIN_LOOPS")
+        let spin_loops = std::env::var("SHALE_BATCHED_SYNC_SPIN_LOOPS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(100);
@@ -171,7 +171,7 @@ impl BatchedSyncCoordinator {
                     if batch > 0 {
                         crate::metrics::global_performance_metrics()
                             .wal
-                            .record_group_commit(batch);
+                            .record_batched_sync(batch);
                     }
                 }
 

@@ -41,7 +41,7 @@ pub struct MidgeEngine {
     /// Transaction manager for optimistic concurrency control
     pub(crate) txn_manager: crate::core::transaction::TransactionManager,
     pub(crate) snapshot_registry: Arc<crate::api::snapshot::SnapshotRegistry>,
-    pub(crate) block_cache: Option<Arc<crate::sst::BlockCache>>,
+    pub(crate) block_cache: Option<Arc<dyn crate::sst::BlockCacheTrait>>,
     pub(crate) table_cache: Option<Arc<crate::sst::table_cache::TableCache>>,
     pub(crate) metrics: Arc<Metrics>,
     /// Performance metrics for real-time monitoring and optimization

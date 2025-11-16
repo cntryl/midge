@@ -6,11 +6,11 @@
 //! - Group commit coordination for batching fsyncs
 
 mod factory;
-mod group_commit;
+mod batched_sync;
 mod reader;
 mod writer;
 
 pub use factory::FsWalFactory;
-pub use group_commit::{GroupCommitConfig, GroupCommitCoordinator};
+pub use batched_sync::{BatchedSyncConfig, BatchedSyncCoordinator};
 pub use reader::replay_wal_file;
 pub use writer::{replay_wal_file_with_mode, Wal};

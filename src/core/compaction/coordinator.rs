@@ -1,7 +1,9 @@
-//! Compaction coordinator for background LSM-tree compaction
+//! Background compaction management for LSM-tree maintenance
 //!
-//! Manages the lifecycle of the background compaction worker thread, including
-//! spawning, job submission, and graceful shutdown.
+//! Manages the background compaction process that maintains LSM-tree performance
+//! by merging overlapping SST files, removing deleted data, and optimizing storage.
+//! Handles compaction job scheduling, worker thread lifecycle, and coordination
+//! with the main database operations to ensure minimal impact on read/write performance.
 
 use super::strategy::Compactor;
 use crate::common::test_hooks::CompactionGatePoint;

@@ -1,7 +1,9 @@
-//! WAL coordinator for managing write-ahead log operations
+//! WAL durability and rotation management
 //!
-//! Encapsulates the WAL writer and factory to provide a clean interface
-//! for write operations and log rotation.
+//! Provides a unified interface for write-ahead log operations that ensures
+//! data durability through coordinated writes and automatic log rotation.
+//! Handles the lifecycle of WAL writers, manages rotation during flush operations,
+//! and provides thread-safe access to WAL functionality for concurrent workloads.
 
 use crate::error::MidgeResult;
 use crate::wal::{WalFactory, WalWriter};
@@ -9,10 +11,11 @@ use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Coordinates write-ahead log operations including writes and rotation.
+/// Manages write-ahead log durability and rotation.
 ///
-/// Encapsulates the WAL writer (thread-safe via &self methods) and the factory
-/// for creating new writers during rotation.
+/// Provides thread-safe operations for appending records to the WAL,
+/// ensuring data persistence, and handling log rotation during flush operations.
+/// Acts as the primary interface for WAL operations in the storage engine.
 pub struct WalCoordinator {
     /// Current WAL writer (thread-safe via trait's &self methods)
     writer: RwLock<Box<dyn WalWriter>>,
