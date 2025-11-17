@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn should_register_transaction_given_valid_begin() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
 
         // Act
         let result = tm.begin(
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn should_remove_transaction_given_abort() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         tm.begin(
             1,
             100,
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn should_commit_transaction_given_no_conflicts() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws = HashSet::new();
         ws.insert(k("a"));
         tm.begin(
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn should_allow_disjoint_commits_between_two_transactions() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("a"));
         let mut ws2 = HashSet::new();
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn should_detect_write_write_conflict_between_active_transactions() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("x"));
         let mut ws2 = HashSet::new();
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn should_detect_write_write_conflict_with_committed_transaction() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws = HashSet::new();
         ws.insert(k("shared"));
         tm.begin(
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn should_detect_read_write_conflict_given_key_modified_after_read() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("data"));
         tm.begin(
@@ -592,7 +592,7 @@ mod tests {
     #[test]
     fn should_trim_committed_entries_given_exceeds_max_retained() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
 
         // Act
         for i in 0..1100 {
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn should_add_wait_for_edge_given_write_conflict() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("shared"));
         let mut ws2 = HashSet::new();
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn should_add_wait_for_edge_given_read_write_conflict() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("data"));
         let mut rs2 = HashSet::new();
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn should_clear_wait_for_edges_given_abort() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("shared"));
         let mut ws2 = HashSet::new();
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn should_detect_two_transaction_cycle() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
 
         let mut ws1 = HashSet::new();
         ws1.insert(k("A"));
@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn should_detect_three_transaction_cycle() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
 
         let (a, b, c) = (k("A"), k("B"), k("C"));
 
@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn should_not_detect_cycle_given_disjoint_keys() {
         // Arrange
-        let tm = TransactionManager::new();
+        let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("x"));
         let mut ws2 = HashSet::new();

@@ -6,10 +6,10 @@
 //! - Graceful drain coordination
 //! - State validation against cloud
 
-pub mod manager;
+pub mod monitor;
 pub mod rehydration;
 pub mod state;
 
-pub use manager::{HealthConfig, HealthMonitor};
+pub use monitor::{HealthConfig, HealthMonitor};
 pub use rehydration::{RehydrationProgress, RehydrationStatus};
 pub use state::{DrainResult, LifecycleState, ReadinessStatus, SyncpointStatus, ValidationResult};

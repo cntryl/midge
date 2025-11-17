@@ -78,24 +78,24 @@ impl KvTransaction for EngineTransaction {
         // Update transaction manager with current conflict sets
         // Safety: Engine pointer is valid for the transaction's lifetime
         let engine = unsafe { &*self.engine };
-        let write_set: HashSet<crate::core::transaction::manager::Key> = self
+        let write_set: HashSet<crate::core::transaction::controller::Key> = self
             .txn
             .conflict_write_set()
             .into_iter()
-            .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+            .map(|(cf, k)| crate::core::transaction::controller::Key::new(cf, k))
             .collect();
         let write_ranges = self.txn.conflict_write_ranges().clone();
-        let read_set: HashSet<crate::core::transaction::manager::Key> = self
+        let read_set: HashSet<crate::core::transaction::controller::Key> = self
             .txn
             .conflict_read_set()
             .into_iter()
-            .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+            .map(|(cf, k)| crate::core::transaction::controller::Key::new(cf, k))
             .collect();
-        let read_versions: HashMap<crate::core::transaction::manager::Key, u64> = self
+        let read_versions: HashMap<crate::core::transaction::controller::Key, u64> = self
             .txn
             .conflict_read_versions()
             .into_iter()
-            .map(|((cf, k), v)| (crate::core::transaction::manager::Key::new(cf, k), v))
+            .map(|((cf, k), v)| (crate::core::transaction::controller::Key::new(cf, k), v))
             .collect();
 
         let _ = engine.txn_manager.update(

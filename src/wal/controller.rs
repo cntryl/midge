@@ -137,7 +137,7 @@ mod tests {
         let writer = factory.create_writer(&wal_dir).unwrap();
 
         // Act
-        let coordinator = WalCoordinator::new(writer, factory);
+        let coordinator = WalController::new(writer, factory);
 
         // Assert - check we can get a read lock
         let _guard = coordinator.writer();
@@ -152,7 +152,7 @@ mod tests {
 
         let factory = Arc::new(FsWalFactory);
         let writer = factory.create_writer(&wal_dir).unwrap();
-        let coordinator = WalCoordinator::new(writer, factory);
+        let coordinator = WalController::new(writer, factory);
 
         // Act
         let result = coordinator.flush();
@@ -170,7 +170,7 @@ mod tests {
 
         let factory = Arc::new(FsWalFactory);
         let writer = factory.create_writer(&wal_dir).unwrap();
-        let coordinator = WalCoordinator::new(writer, factory);
+        let coordinator = WalController::new(writer, factory);
 
         // Act
         let result = coordinator.rotate(&wal_dir, 1);
@@ -195,7 +195,7 @@ mod tests {
 
         let factory = Arc::new(FsWalFactory);
         let writer = factory.create_writer(&wal_dir).unwrap();
-        let coordinator = WalCoordinator::new(writer, factory);
+        let coordinator = WalController::new(writer, factory);
 
         // Act - get read lock successfully
         let _writer_guard = coordinator.writer();
@@ -212,7 +212,7 @@ mod tests {
 
         let factory: Arc<dyn WalFactory> = Arc::new(FsWalFactory);
         let writer = factory.create_writer(&wal_dir).unwrap();
-        let coordinator = WalCoordinator::new(writer, factory.clone());
+        let coordinator = WalController::new(writer, factory.clone());
 
         // Act
         let factory_ref = coordinator.factory();
@@ -230,7 +230,7 @@ mod tests {
 
         let factory = Arc::new(FsWalFactory);
         let writer = factory.create_writer(&wal_dir).unwrap();
-        let coordinator = WalCoordinator::new(writer, factory);
+        let coordinator = WalController::new(writer, factory);
 
         let record = crate::wal::WalRecord {
             cf_id: 0,
@@ -260,7 +260,7 @@ mod tests {
 
         let factory = Arc::new(FsWalFactory);
         let writer = factory.create_writer(&wal_dir).unwrap();
-        let coordinator = WalCoordinator::new(writer, factory);
+        let coordinator = WalController::new(writer, factory);
 
         let records = vec![
             crate::wal::WalRecord {
@@ -303,7 +303,7 @@ mod tests {
 
         let factory = Arc::new(FsWalFactory);
         let writer = factory.create_writer(&wal_dir).unwrap();
-        let coordinator = WalCoordinator::new(writer, factory);
+        let coordinator = WalController::new(writer, factory);
 
         // Act
         let result = coordinator.sync();
@@ -321,7 +321,7 @@ mod tests {
 
         let factory = Arc::new(FsWalFactory);
         let writer = factory.create_writer(&wal_dir).unwrap();
-        let coordinator = WalCoordinator::new(writer, factory);
+        let coordinator = WalController::new(writer, factory);
 
         // Act
         let pos = coordinator.current_pos();

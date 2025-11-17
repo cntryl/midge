@@ -307,22 +307,22 @@ impl MidgeEngine {
         // Extract the internal transaction
         let txn = engine_txn.txn;
 
-        // Optimistic conflict detection: register with TransactionManager and try commit
-        let write_set: std::collections::HashSet<crate::core::transaction::manager::Key> = txn
+        // Optimistic conflict detection: register with TransactionController and try commit
+        let write_set: std::collections::HashSet<crate::core::transaction::controller::Key> = txn
             .conflict_write_set()
             .into_iter()
-            .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+            .map(|(cf, k)| crate::core::transaction::controller::Key::new(cf, k))
             .collect();
         let write_ranges = txn.conflict_write_ranges().clone();
-        let read_set: std::collections::HashSet<crate::core::transaction::manager::Key> = txn
+        let read_set: std::collections::HashSet<crate::core::transaction::controller::Key> = txn
             .conflict_read_set()
             .into_iter()
-            .map(|(cf, k)| crate::core::transaction::manager::Key::new(cf, k))
+            .map(|(cf, k)| crate::core::transaction::controller::Key::new(cf, k))
             .collect();
-        let read_versions: std::collections::HashMap<crate::core::transaction::manager::Key, u64> =
+        let read_versions: std::collections::HashMap<crate::core::transaction::controller::Key, u64> =
             txn.conflict_read_versions()
                 .into_iter()
-                .map(|((cf, k), v)| (crate::core::transaction::manager::Key::new(cf, k), v))
+                .map(|((cf, k), v)| (crate::core::transaction::controller::Key::new(cf, k), v))
                 .collect();
 
         let txn_id = txn.txn_id; // Use the existing transaction ID

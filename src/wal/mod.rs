@@ -5,7 +5,7 @@
 
 pub mod arena;
 pub mod cloud;
-pub mod coordinator;
+pub mod controller;
 pub mod encode_pipeline;
 pub mod encoding;
 pub mod fs;
@@ -21,7 +21,7 @@ pub use traits::{WalFactory, WalReader, WalReaderDyn, WalWriter};
 
 // Re-export concrete implementations
 pub use cloud::{CloudWalReader, CloudWalWriter, WalBatchManager};
-pub use coordinator::WalController;
+pub use controller::WalController;
 pub use encoding::{decode, encode};
 pub use fs::{FsWalFactory, Wal};
 pub use mem::{MemWalFactory, WalMem, WalMemReader};

@@ -20,7 +20,7 @@ use super::state::{
 
 /// Trait to persist a `Manifest` atomically. Implementations may write to disk
 /// (e.g. `Manifest::save_atomic`) or upload to cloud. Injected into
-/// `HealthManager` so drain logic can request durable persistence without
+/// `HealthMonitor` so drain logic can request durable persistence without
 /// depending on engine internals.
 pub trait ManifestPersister: Send + Sync {
     fn persist(&self, manifest: &Manifest) -> MidgeResult<()>;
@@ -465,4 +465,4 @@ impl HealthMonitor {
     }
 }
 
-// Tests for HealthManager are in tests/health.rs
+// Tests for HealthMonitor are in tests/health.rs

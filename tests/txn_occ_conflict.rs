@@ -28,7 +28,7 @@ fn should_reject_second_committer_on_write_write_conflict() {
 
     // Assert
     // With optimistic conflict detection, the second committer should be rejected due to write-write conflict.
-    // If OCC isn't yet implemented, this test will fail — it should be enabled once the TransactionManager
+    // If OCC isn't yet implemented, this test will fail — it should be enabled once the TransactionController
     // enforces write-set conflicts at commit time.
     assert!(
         first_result.is_ok() && second_result.is_err(),

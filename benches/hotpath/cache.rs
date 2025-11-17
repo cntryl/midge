@@ -9,7 +9,9 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::{BlockCache, BlockKey, CacheBlockType, CachedBlock};
+use cntryl_midge::sst::{
+    create_basic_cache, BlockKey, CacheBlockType, CachedBlock,
+};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
@@ -42,7 +44,7 @@ fn bench_cache_insert(c: &mut Criterion) {
             &num_blocks,
             |b, &n| {
                 b.iter_batched(
-                    || BlockCache::new(cache_size),
+                    || create_basic_cache(cache_size),
                     |cache| {
                         for i in 0..n {
                             let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
@@ -67,7 +69,7 @@ fn bench_cache_get_hit(c: &mut Criterion) {
     let num_blocks = 1000;
 
     // Pre-populate cache
-    let cache = BlockCache::new(cache_size);
+    let cache = create_basic_cache(cache_size);
     for i in 0..num_blocks {
         let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
         let block = make_cached_block(block_size);
@@ -95,7 +97,7 @@ fn bench_cache_get_miss(c: &mut Criterion) {
     let num_blocks = 1000;
 
     // Pre-populate cache with keys 0..1000
-    let cache = BlockCache::new(cache_size);
+    let cache = create_basic_cache(cache_size);
     for i in 0..num_blocks {
         let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
         let block = make_cached_block(block_size);
@@ -128,7 +130,7 @@ fn bench_cache_eviction(c: &mut Criterion) {
     // Insert more blocks than cache can hold
     group.bench_function("evict_under_pressure", |b| {
         b.iter(|| {
-            let cache = BlockCache::new(cache_size);
+            let cache = create_basic_cache(cache_size);
             // Try to insert 1000 blocks when only ~512 fit
             for i in 0..1000 {
                 let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
@@ -154,7 +156,7 @@ fn bench_cache_concurrent_access(c: &mut Criterion) {
     let num_blocks = 1000;
 
     // Pre-populate cache once
-    let cache = Arc::new(BlockCache::new(cache_size));
+    let cache = create_basic_cache(cache_size);
     for i in 0..num_blocks {
         let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
         let block = make_cached_block(block_size);

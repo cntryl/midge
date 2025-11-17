@@ -26,7 +26,7 @@ Layer 3 (Core Engine):
   core/       - LSM engine, compaction, transactions, manifest
     ├── engine/       - MidgeEngine and operations
     ├── compaction/   - Background compaction coordinator
-    ├── transaction/  - MVCC TransactionManager
+    ├── transaction/  - MVCC TransactionController
     ├── memtable/     - In-memory skiplist
     ├── persistence/  - Flush coordinator, WAL replay
     ├── manifest/     - Metadata tracking
