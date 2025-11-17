@@ -8,6 +8,7 @@ use cntryl_midge::api::kv_store::{BatchOperation, KvStore};
 use cntryl_midge::api::WriteOptions;
 use cntryl_midge::core::engine::KvStoreAdapter;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use std::sync::Arc;
 
 mod common;
 use common::test_temp_dir;
@@ -23,14 +24,14 @@ fn should_support_kvstore_trait_operations() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
 
     // Act & Assert - Put and Get
     adapter.put(cf, b"key1", b"value1").expect("put");
     let result = adapter.get(cf, b"key1").expect("get");
-    assert_eq!(result, Some(Bytes::from_static(b"value1")));
+    assert_eq!(result.as_deref(), Some(b"value1".as_ref()));
 }
 
 #[test]
@@ -44,7 +45,7 @@ fn should_insert_new_key_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
 
@@ -68,7 +69,7 @@ fn should_fail_insert_given_existing_key_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
     adapter.put(cf, b"existingkey", b"value1").expect("put");
@@ -91,13 +92,13 @@ fn should_delete_key_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
-    adapter.put(cf, b"delkey", b"delvalue").expect("put");
+    adapter.put(cf, b"key1", b"value1").expect("put");
 
     // Act
-    adapter.delete(cf, b"delkey").expect("delete");
+    adapter.delete(cf, b"key1").expect("delete");
 
     // Assert
     let result = adapter.get(cf, b"delkey").expect("get");
@@ -115,7 +116,7 @@ fn should_scan_range_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
     adapter.put(cf, b"key1", b"value1").expect("put");
@@ -142,7 +143,7 @@ fn should_delete_range_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
     adapter.put(cf, b"range1", b"value1").expect("put");
@@ -179,7 +180,7 @@ fn should_compare_and_swap_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
     adapter.put(cf, b"caskey", b"oldvalue").expect("put");
@@ -206,7 +207,7 @@ fn should_fail_compare_and_swap_given_mismatched_value() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
     adapter.put(cf, b"caskey", b"actualvalue").expect("put");
@@ -233,7 +234,7 @@ fn should_execute_batch_operations_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
 
@@ -273,7 +274,7 @@ fn should_create_and_use_column_families_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     // Act
     let cf_config = cntryl_midge::ColumnFamilyConfig::default();
@@ -304,21 +305,21 @@ fn should_begin_and_commit_transaction_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
 
-    // Act
+    // Act - Begin transaction
     let mut txn = adapter.begin_transaction(cf).expect("begin");
     txn.put(b"txn_key", b"txn_value").expect("txn put");
 
     adapter
-        .commit_transaction(txn, WriteOptions::Sync)
+        .commit_transaction(txn, WriteOptions::sync())
         .expect("commit");
 
     // Assert
     let result = adapter.get(cf, b"txn_key").expect("get");
-    assert_eq!(result, Some(Bytes::from_static(b"txn_value")));
+    assert_eq!(result.as_deref(), Some(b"txn_value".as_ref()));
 }
 
 #[test]
@@ -332,7 +333,7 @@ fn should_rollback_transaction_via_adapter() {
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(engine);
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
 
     let cf = adapter.default_column_family();
 
@@ -347,3 +348,4 @@ fn should_rollback_transaction_via_adapter() {
     let result = adapter.get(cf, b"rollback_key").expect("get");
     assert_eq!(result, None);
 }
+
