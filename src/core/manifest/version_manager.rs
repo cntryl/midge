@@ -30,10 +30,7 @@ impl VersionManager {
     /// # Arguments
     /// * `version_set` - Atomic version set to update
     /// * `db_path` - Database path for manifest storage
-    pub fn new(
-        version_set: AtomicVersionSet,
-        db_path: PathBuf,
-    ) -> Self {
+    pub fn new(version_set: AtomicVersionSet, db_path: PathBuf) -> Self {
         let (tx, rx) = bounded(100); // Backpressure after 100 pending edits
 
         let handle = thread::Builder::new()
@@ -58,11 +55,7 @@ impl VersionManager {
         tracing::info!("Version manager actor started");
 
         while let Ok(request) = rx.recv() {
-            let result = Self::process_edit(
-                &version_set,
-                &db_path,
-                request.edit,
-            );
+            let result = Self::process_edit(&version_set, &db_path, request.edit);
 
             // Send response if caller is waiting
             if let Some(response_tx) = request.response_tx {
@@ -166,10 +159,7 @@ mod tests {
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(
-            version_set.clone(),
-            db_path,
-        );
+        let manager = VersionManager::new(version_set.clone(), db_path);
 
         let file = FileMeta {
             name: "test.sst".to_string(),
@@ -180,7 +170,9 @@ mod tests {
 
         // Act
         manager
-            .apply_edit_sync(VersionEdit::AddFile { file: Box::new(file) })
+            .apply_edit_sync(VersionEdit::AddFile {
+                file: Box::new(file),
+            })
             .unwrap();
 
         // Assert
@@ -202,10 +194,7 @@ mod tests {
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(
-            version_set.clone(),
-            db_path,
-        );
+        let manager = VersionManager::new(version_set.clone(), db_path);
 
         // Act - add multiple files
         for i in 0..5 {
@@ -216,7 +205,9 @@ mod tests {
                 ..Default::default()
             };
             manager
-                .apply_edit_sync(VersionEdit::AddFile { file: Box::new(file) })
+                .apply_edit_sync(VersionEdit::AddFile {
+                    file: Box::new(file),
+                })
                 .unwrap();
         }
 
@@ -238,10 +229,7 @@ mod tests {
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(
-            version_set.clone(),
-            db_path,
-        );
+        let manager = VersionManager::new(version_set.clone(), db_path);
 
         let file = FileMeta {
             name: "test.sst".to_string(),
@@ -252,7 +240,9 @@ mod tests {
 
         // Act
         manager
-            .apply_edit_async(VersionEdit::AddFile { file: Box::new(file) })
+            .apply_edit_async(VersionEdit::AddFile {
+                file: Box::new(file),
+            })
             .unwrap();
 
         // Wait for processing

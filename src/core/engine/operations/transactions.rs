@@ -319,11 +319,14 @@ impl MidgeEngine {
             .into_iter()
             .map(|(cf, k)| crate::core::transaction::controller::Key::new(cf, k))
             .collect();
-        let read_versions: std::collections::HashMap<crate::core::transaction::controller::Key, u64> =
-            txn.conflict_read_versions()
-                .into_iter()
-                .map(|((cf, k), v)| (crate::core::transaction::controller::Key::new(cf, k), v))
-                .collect();
+        let read_versions: std::collections::HashMap<
+            crate::core::transaction::controller::Key,
+            u64,
+        > = txn
+            .conflict_read_versions()
+            .into_iter()
+            .map(|((cf, k), v)| (crate::core::transaction::controller::Key::new(cf, k), v))
+            .collect();
 
         let txn_id = txn.txn_id; // Use the existing transaction ID
         let commit_seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;

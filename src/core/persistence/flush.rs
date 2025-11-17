@@ -217,7 +217,10 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
 
     // Update engine's cached manifest so reads can immediately see the new SST
     if let Some(ref callback) = config.manifest_update_callback {
-        tracing::info!("invoking manifest update callback with {} files", m.files.len());
+        tracing::info!(
+            "invoking manifest update callback with {} files",
+            m.files.len()
+        );
         callback(m.clone());
         tracing::info!("manifest update callback completed");
     } else {
@@ -484,8 +487,7 @@ where
 
     // Add entries with expiration metadata
     for (idx, entry) in entries.iter().enumerate() {
-        if idx < 5 || idx >= entries.len() - 5 || idx == 500 {
-        }
+        if idx < 5 || idx >= entries.len() - 5 || idx == 500 {}
         let v_ref = entry.value.as_deref();
         dyn_writer.add_with_meta(
             &entry.key,

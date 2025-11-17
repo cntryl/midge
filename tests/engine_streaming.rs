@@ -283,8 +283,7 @@ fn should_streaming_scan_handle_large_dataset() {
     for i in 0..100u16 {
         let key = format!("key_{:04}", i);
         let value = format!("value_{:04}", i);
-        eng.put(&cf, key.as_bytes(), value.as_bytes())
-            .expect("put");
+        eng.put(&cf, key.as_bytes(), value.as_bytes()).expect("put");
     }
 
     // Wait for flushes

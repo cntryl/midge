@@ -68,11 +68,11 @@ pub(crate) fn init_manifest(
         );
         // Save manifest with default CF for new DBs
         if !read_only {
-            println!("[diag-lib] saving manifest to {}", db_path.display());
+            tracing::debug!("saving manifest to {}", db_path.display());
             match manifest.save_atomic(db_path) {
-                Ok(_) => println!("[diag-lib] manifest.save_atomic succeeded"),
+                Ok(_) => tracing::debug!("manifest.save_atomic succeeded"),
                 Err(e) => {
-                    println!("[diag-lib] manifest.save_atomic failed: {:?}", e);
+                    tracing::debug!("manifest.save_atomic failed: {:?}", e);
                     return Err(e);
                 }
             }

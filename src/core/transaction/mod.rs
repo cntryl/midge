@@ -10,15 +10,15 @@
 //! The transaction system uses optimistic locking with conflict detection at commit time.
 
 pub mod conflict_tracking;
+pub mod controller;
 pub(crate) mod core;
 pub mod engine_transaction;
-pub mod controller;
 pub mod spill;
 
 // Re-export public types
 pub use conflict_tracking::ConflictTracker;
-pub use engine_transaction::EngineTransaction;
 pub use controller::{Key, TransactionController};
+pub use engine_transaction::EngineTransaction;
 pub use spill::SpillManager;
 
 // Internal re-export for use within core module

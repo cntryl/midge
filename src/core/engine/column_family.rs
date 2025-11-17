@@ -91,10 +91,9 @@ impl ColumnFamily {
 
         // Atomic swap: replace active memtable with new empty one
         let old_arc = self.memtable.swap(Arc::new(MemTable::new()));
-        
+
         // Extract the memtable from Arc (cheap if refcount is 1, clone if shared)
-        let old_memtable = Arc::try_unwrap(old_arc)
-            .unwrap_or_else(|arc| (*arc).clone());
+        let old_memtable = Arc::try_unwrap(old_arc).unwrap_or_else(|arc| (*arc).clone());
 
         // Add frozen memtable to immutable queue (oldest first, newest last)
         immutables.push_back(old_memtable);

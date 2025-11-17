@@ -4,9 +4,7 @@
 //! control fsync behavior at transaction commit time.
 
 use bytes::Bytes;
-use cntryl_midge::{
-    KvTransaction, MidgeEngine, MidgeOptions, StorageMode, WriteOptions,
-};
+use cntryl_midge::{KvTransaction, MidgeEngine, MidgeOptions, StorageMode, WriteOptions};
 
 mod common;
 use common::test_temp_dir;
@@ -256,10 +254,6 @@ fn should_batch_multiple_writes_in_sync_transaction() {
         let result = engine
             .get(&cf, format!("batch_{}", i).as_bytes())
             .expect("get");
-        assert!(
-            result.is_some(),
-            "Batch write {} should be persisted",
-            i
-        );
+        assert!(result.is_some(), "Batch write {} should be persisted", i);
     }
 }

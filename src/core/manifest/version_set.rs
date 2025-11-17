@@ -139,7 +139,9 @@ mod tests {
 
         // Act
         let new_version = version
-            .apply_edit(VersionEdit::AddFile { file: Box::new(file) })
+            .apply_edit(VersionEdit::AddFile {
+                file: Box::new(file),
+            })
             .unwrap();
 
         // Assert
@@ -171,11 +173,9 @@ mod tests {
 
         // Act
         let new_version = version
-            .apply_edit(
-                VersionEdit::RemoveFiles {
-                    names: vec!["test1.sst".to_string()],
-                },
-            )
+            .apply_edit(VersionEdit::RemoveFiles {
+                names: vec!["test1.sst".to_string()],
+            })
             .unwrap();
 
         // Assert

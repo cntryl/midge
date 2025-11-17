@@ -152,8 +152,7 @@ fn should_upload_to_real_azure_when_credentials_configured() {
 
     // Arrange
     let account = env::var("AZURE_STORAGE_ACCOUNT").expect("AZURE_STORAGE_ACCOUNT must be set");
-    let container =
-        env::var("TEST_AZURE_CONTAINER").expect("TEST_AZURE_CONTAINER must be set");
+    let container = env::var("TEST_AZURE_CONTAINER").expect("TEST_AZURE_CONTAINER must be set");
 
     let backend = AzureBlobBackend::new(&account, &container).expect("failed to create backend");
     let test_key = format!("test-key-{}", uuid::Uuid::new_v4());
@@ -178,8 +177,7 @@ fn should_download_from_real_azure_when_blob_exists() {
 
     // Arrange
     let account = env::var("AZURE_STORAGE_ACCOUNT").expect("AZURE_STORAGE_ACCOUNT must be set");
-    let container =
-        env::var("TEST_AZURE_CONTAINER").expect("TEST_AZURE_CONTAINER must be set");
+    let container = env::var("TEST_AZURE_CONTAINER").expect("TEST_AZURE_CONTAINER must be set");
 
     let backend = AzureBlobBackend::new(&account, &container).expect("failed to create backend");
     let test_key = format!("test-key-{}", uuid::Uuid::new_v4());

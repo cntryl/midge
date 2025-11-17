@@ -5,12 +5,12 @@
 //! - Optional compression (LZ4) for large values
 //! - Group commit coordination for batching fsyncs
 
-mod factory;
 mod batched_sync;
+mod factory;
 mod reader;
 mod writer;
 
-pub use factory::FsWalFactory;
 pub use batched_sync::{BatchedSyncConfig, BatchedSyncCoordinator};
+pub use factory::FsWalFactory;
 pub use reader::replay_wal_file;
 pub use writer::{replay_wal_file_with_mode, Wal};

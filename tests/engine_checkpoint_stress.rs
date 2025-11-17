@@ -50,9 +50,7 @@ fn should_create_checkpoint_during_concurrent_writes() {
 
     // Verify checkpoint is readable
     let cp_opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: cp_dir,
-        },
+        storage_mode: StorageMode::LocalDisk { db_path: cp_dir },
         enable_compaction: false,
         ..Default::default()
     };
@@ -108,7 +106,10 @@ fn should_handle_multiple_concurrent_checkpoints() {
             ..Default::default()
         };
         let cp = MidgeEngine::open(cp_opts).expect(&format!("open checkpoint {}", i));
-        assert_eq!(cp.get(&cf, b"key_0").expect("get"), Some(Bytes::from_static(b"value")));
+        assert_eq!(
+            cp.get(&cf, b"key_0").expect("get"),
+            Some(Bytes::from_static(b"value"))
+        );
     }
 }
 
@@ -132,7 +133,11 @@ fn should_create_consistent_checkpoint_under_high_load() {
     let writer = thread::spawn(move || {
         for i in 0..100u32 {
             engine_writer
-                .put(&cf_clone, format!("load_{}", i).as_bytes(), format!("value_{}", i).as_bytes())
+                .put(
+                    &cf_clone,
+                    format!("load_{}", i).as_bytes(),
+                    format!("value_{}", i).as_bytes(),
+                )
                 .expect("put");
         }
     });
@@ -147,9 +152,7 @@ fn should_create_consistent_checkpoint_under_high_load() {
 
     // Assert - Checkpoint should be consistent (all keys readable)
     let cp_opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: cp_dir,
-        },
+        storage_mode: StorageMode::LocalDisk { db_path: cp_dir },
         enable_compaction: false,
         ..Default::default()
     };
@@ -158,7 +161,11 @@ fn should_create_consistent_checkpoint_under_high_load() {
     // Count keys in checkpoint (should have some subset of writes)
     let mut count = 0;
     for i in 0..100u32 {
-        if cp.get(&cf, format!("load_{}", i).as_bytes()).expect("get").is_some() {
+        if cp
+            .get(&cf, format!("load_{}", i).as_bytes())
+            .expect("get")
+            .is_some()
+        {
             count += 1;
         }
     }
@@ -193,9 +200,7 @@ fn should_checkpoint_preserve_all_column_families() {
 
     // Assert - All column families should exist in checkpoint
     let cp_opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: cp_dir,
-        },
+        storage_mode: StorageMode::LocalDisk { db_path: cp_dir },
         enable_compaction: false,
         ..Default::default()
     };
@@ -234,7 +239,9 @@ fn should_checkpoint_after_memtable_flush() {
             .put(&cf, format!("key_{}", i).as_bytes(), b"value")
             .expect("put");
     }
-    engine.wait_for_flush(Duration::from_millis(200)).expect("flush");
+    engine
+        .wait_for_flush(Duration::from_millis(200))
+        .expect("flush");
 
     // Act - Create checkpoint after flush
     let cp_dir = dir.path().join("checkpoint_post_flush");
@@ -242,9 +249,7 @@ fn should_checkpoint_after_memtable_flush() {
 
     // Assert - All flushed data should be in checkpoint
     let cp_opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: cp_dir,
-        },
+        storage_mode: StorageMode::LocalDisk { db_path: cp_dir },
         enable_compaction: false,
         ..Default::default()
     };
@@ -282,9 +287,7 @@ fn should_checkpoint_with_tombstones() {
 
     // Assert - Tombstones should be preserved
     let cp_opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: cp_dir,
-        },
+        storage_mode: StorageMode::LocalDisk { db_path: cp_dir },
         enable_compaction: false,
         ..Default::default()
     };
@@ -318,9 +321,7 @@ fn should_checkpoint_empty_database() {
 
     // Checkpoint should be openable
     let cp_opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: cp_dir,
-        },
+        storage_mode: StorageMode::LocalDisk { db_path: cp_dir },
         enable_compaction: false,
         ..Default::default()
     };

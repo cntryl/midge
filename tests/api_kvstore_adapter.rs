@@ -156,10 +156,16 @@ fn should_delete_range_via_adapter() {
         .expect("delete_range");
 
     // Assert
-    assert_eq!(adapter.get(cf, b"range1").expect("get"), Some(Bytes::from_static(b"value1")));
+    assert_eq!(
+        adapter.get(cf, b"range1").expect("get"),
+        Some(Bytes::from_static(b"value1"))
+    );
     assert_eq!(adapter.get(cf, b"range2").expect("get"), None);
     assert_eq!(adapter.get(cf, b"range3").expect("get"), None);
-    assert_eq!(adapter.get(cf, b"range4").expect("get"), Some(Bytes::from_static(b"value4")));
+    assert_eq!(
+        adapter.get(cf, b"range4").expect("get"),
+        Some(Bytes::from_static(b"value4"))
+    );
 }
 
 #[test]
@@ -250,7 +256,10 @@ fn should_execute_batch_operations_via_adapter() {
 
     // Assert
     assert_eq!(adapter.get(cf, b"batch1").expect("get"), None);
-    assert_eq!(adapter.get(cf, b"batch2").expect("get"), Some(Bytes::from_static(b"value2")));
+    assert_eq!(
+        adapter.get(cf, b"batch2").expect("get"),
+        Some(Bytes::from_static(b"value2"))
+    );
 }
 
 #[test]

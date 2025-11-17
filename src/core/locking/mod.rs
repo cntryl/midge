@@ -14,13 +14,13 @@ mod renewal;
 mod traits;
 
 // Re-export public API
-pub use traits::DbLock;
 pub use meta::LockMeta;
+pub use traits::DbLock;
 
 // Factory functions for creating locks (implementation details hidden)
+use crate::cloud::StorageBackend;
 use std::path::Path;
 use std::sync::Arc;
-use crate::cloud::StorageBackend;
 
 /// Create a local file-based database lock.
 ///

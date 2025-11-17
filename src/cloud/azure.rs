@@ -457,7 +457,10 @@ mod tests {
             url.contains("testcontainer"),
             "URL should contain container"
         );
-        assert!(url.contains("test-blob.dat"), "URL should contain blob name");
+        assert!(
+            url.contains("test-blob.dat"),
+            "URL should contain blob name"
+        );
     }
 
     #[test]
@@ -478,7 +481,10 @@ mod tests {
         );
 
         // Assert
-        assert!(signature_result.is_ok(), "Signature generation should succeed");
+        assert!(
+            signature_result.is_ok(),
+            "Signature generation should succeed"
+        );
         let sig = signature_result.unwrap();
         assert!(!sig.is_empty(), "Signature should not be empty");
         assert!(sig.starts_with("SharedKey "), "Should use SharedKey auth");

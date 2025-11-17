@@ -150,9 +150,7 @@ fn should_maintain_correctness_under_rapid_cache_churn() {
         .collect();
 
     for (key, data) in &test_data {
-        storage
-            .put_blob(key, data.clone())
-            .expect("put failed");
+        storage.put_blob(key, data.clone()).expect("put failed");
     }
 
     thread::sleep(std::time::Duration::from_millis(200));
@@ -256,11 +254,7 @@ fn should_recover_from_cache_directory_deletion() {
     for i in 0..10 {
         let key = format!("resilient-{}.dat", i);
         let result = storage.get_blob(&key);
-        assert!(
-            result.is_ok(),
-            "Should recover file {} from cloud",
-            i
-        );
+        assert!(result.is_ok(), "Should recover file {} from cloud", i);
     }
 }
 

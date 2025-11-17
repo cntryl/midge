@@ -256,9 +256,7 @@ impl SstFile {
         if let Some(block_handle) = sparse_index.find_block(key) {
             // Use snapshot-aware search to find first version with seq <= snapshot_seq
             let blk = match self.read_data_block(*block_handle) {
-                Ok(b) => {
-                    b
-                }
+                Ok(b) => b,
                 Err(e) => {
                     return Err(e);
                 }
@@ -547,9 +545,7 @@ impl SstFile {
         snapshot_seq: u64,
     ) -> MidgeResult<KeyState> {
         let entries_end = match calculate_entries_end(data) {
-            Some(end) => {
-                end
-            },
+            Some(end) => end,
             None => {
                 return Ok(KeyState::Absent);
             }
@@ -656,8 +652,7 @@ impl SstFile {
                 }
             }
 
-            if entry_count <= 5 || entry_count > 165 {
-            }
+            if entry_count <= 5 || entry_count > 165 {}
             if user_key.as_slice() == target_key {
                 return Ok(if tomb {
                     KeyState::Tombstone(seq)

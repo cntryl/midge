@@ -83,11 +83,12 @@ impl MidgeEngine {
 
         if memtable_full {
             // Freeze the current memtable: atomic swap with new empty one
-            let old_arc = column_family.memtable.swap(Arc::new(crate::core::memtable::MemTable::new()));
-            
+            let old_arc = column_family
+                .memtable
+                .swap(Arc::new(crate::core::memtable::MemTable::new()));
+
             // Extract memtable from Arc (cheap if refcount is 1, clone if shared)
-            let old_memtable = Arc::try_unwrap(old_arc)
-                .unwrap_or_else(|arc| (*arc).clone());
+            let old_memtable = Arc::try_unwrap(old_arc).unwrap_or_else(|arc| (*arc).clone());
 
             // Flush the frozen memtable to SST by calling flush_frozen_memtable
             let _ = self.flush_frozen_memtable(cf, old_memtable);

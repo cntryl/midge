@@ -89,15 +89,18 @@ impl MidgeEngine {
             .map(|md| md.len())
             .unwrap_or(0);
         // Update manifest with the new SST file
-        let mut m = Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
-        
+        let mut m =
+            Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
+
         // Update last_persisted_sequence to the largest sequence in the flushed data
         if let Some(largest_seq) = file_meta.largest_seq {
             m.last_persisted_sequence = largest_seq;
         }
-        
+
         // Assign sublevel based on overlap with existing L0 files
-        file_meta.sublevel = if let (Some(ref sk), Some(ref lk)) = (&file_meta.smallest_key, &file_meta.largest_key) {
+        file_meta.sublevel = if let (Some(ref sk), Some(ref lk)) =
+            (&file_meta.smallest_key, &file_meta.largest_key)
+        {
             m.assign_l0_sublevel(sk, lk)
         } else {
             0
@@ -148,12 +151,13 @@ impl MidgeEngine {
 
         // CRITICAL: Capture the old memtable BEFORE replacing it.
         // Atomic swap ensures no torn state - readers see old or new, never partial.
-        let old_arc = column_family.memtable.swap(Arc::new(crate::core::memtable::MemTable::new()));
-        
+        let old_arc = column_family
+            .memtable
+            .swap(Arc::new(crate::core::memtable::MemTable::new()));
+
         // Extract memtable from Arc (cheap if refcount is 1, clone if shared)
-        let old_memtable = Arc::try_unwrap(old_arc)
-            .unwrap_or_else(|arc| (*arc).clone());
-        
+        let old_memtable = Arc::try_unwrap(old_arc).unwrap_or_else(|arc| (*arc).clone());
+
         // Now flush the old memtable using the frozen memtable path
         // (flush_frozen_memtable already acquires the flush_mutex)
         self.flush_frozen_memtable(cf, old_memtable)
@@ -597,7 +601,10 @@ impl MidgeEngine {
             return Ok(0);
         }
 
-        let cloud_mgr = self.cloud_sst_manager.as_ref().expect("cloud_sst_manager should be Some since we checked is_none");
+        let cloud_mgr = self
+            .cloud_sst_manager
+            .as_ref()
+            .expect("cloud_sst_manager should be Some since we checked is_none");
         let local_manifest = self.manifest_cache.get();
 
         debug!(

@@ -128,31 +128,28 @@ impl Manifest {
         let tmp = db_path.join("manifest.json.tmp");
 
         // Write serialized data to temp file
-        println!("[diag-lib] about to write tmp manifest: {}", tmp.display());
+        tracing::debug!("about to write tmp manifest: {}", tmp.display());
         if let Err(e) = std::fs::write(&tmp, &data) {
-            println!("[diag-lib] write(tmp) failed: {:?}", e);
+            tracing::debug!("write(tmp) failed: {:?}", e);
             return Err(e.into());
         }
 
         // Atomic replace via rename
-        println!(
-            "[diag-lib] about to rename {} -> {}",
+        tracing::debug!(
+            "about to rename {} -> {}",
             tmp.display(),
             manifest_path.display()
         );
         if let Err(e) = std::fs::rename(&tmp, &manifest_path) {
-            println!("[diag-lib] rename failed: {:?}", e);
+            tracing::debug!("rename failed: {:?}", e);
             return Err(e.into());
         }
 
         // Update CURRENT pointer
         let current_path = db_path.join("CURRENT");
-        println!(
-            "[diag-lib] about to write CURRENT at {}",
-            current_path.display()
-        );
+        tracing::debug!("about to write CURRENT at {}", current_path.display());
         if let Err(e) = std::fs::write(&current_path, b"manifest.json") {
-            println!("[diag-lib] write(CURRENT) failed: {:?}", e);
+            tracing::debug!("write(CURRENT) failed: {:?}", e);
             return Err(e.into());
         }
 
@@ -163,8 +160,8 @@ impl Manifest {
         // configured behavior (e.g., RecordOnly/Skip) and allow fault injection.
         {
             // Sync the manifest file data to stable storage
-            println!(
-                "[diag-lib] about to open manifest for sync: {}",
+            tracing::debug!(
+                "about to open manifest for sync: {}",
                 manifest_path.display()
             );
             match std::fs::OpenOptions::new()
@@ -174,21 +171,21 @@ impl Manifest {
             {
                 Ok(f) => {
                     if let Err(e) = crate::fs::sync_data_only(&f, test_hooks) {
-                        println!("[diag-lib] sync_data_only failed: {:?}", e);
+                        tracing::debug!("sync_data_only failed: {:?}", e);
                         return Err(e.into());
                     }
                 }
                 Err(e) => {
-                    println!("[diag-lib] open(manifest) for sync failed: {:?}", e);
+                    tracing::debug!("open(manifest) for sync failed: {:?}", e);
                     return Err(e.into());
                 }
             }
         }
 
         // Sync the parent directory (CURRENT and manifest dir entry)
-        println!("[diag-lib] about to sync_parent for {}", db_path.display());
+        tracing::debug!("about to sync_parent for {}", db_path.display());
         if let Err(e) = crate::fs::sync_parent(db_path) {
-            println!("[diag-lib] sync_parent failed: {:?}", e);
+            tracing::debug!("sync_parent failed: {:?}", e);
             return Err(e.into());
         }
 
@@ -202,13 +199,13 @@ impl Manifest {
         if let Some(hooks) = test_hooks {
             if hooks.should_corrupt_manifest_after_save() {
                 // Intentionally corrupt the manifest file by truncating it to simulate corruption
-                println!("[diag-lib] corrupting manifest file for CorruptAfterSave test behavior");
+                tracing::debug!("corrupting manifest file for CorruptAfterSave test behavior");
                 if let Err(e) = std::fs::OpenOptions::new()
                     .write(true)
                     .truncate(true)
                     .open(&manifest_path)
                 {
-                    println!("[diag-lib] failed to corrupt manifest: {:?}", e);
+                    tracing::debug!("failed to corrupt manifest: {:?}", e);
                     return Err(e.into());
                 }
             }

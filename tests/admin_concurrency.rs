@@ -35,7 +35,9 @@ fn should_preserve_data_when_backup_runs_during_compaction_and_writes() {
     let writer_eng = Arc::clone(&eng);
     let writer_cf = cf.clone();
     let writer = thread::spawn(move || {
-        bulk_put_fn(&writer_eng, &writer_cf, "write", 5_000, |_| b"write_val".to_vec());
+        bulk_put_fn(&writer_eng, &writer_cf, "write", 5_000, |_| {
+            b"write_val".to_vec()
+        });
     });
 
     let compaction_eng = Arc::clone(&eng);
@@ -96,11 +98,13 @@ fn should_refuse_column_family_drop_when_unflushed_data_exists() {
     assert!(drop_result.is_err(), "drop should fail with unflushed data");
 
     let manifest = eng.get_manifest();
-    assert!(manifest
-        .column_families
-        .iter()
-        .any(|cf_meta| cf_meta.name == cf.name()),
-        "column family should still exist in manifest");
+    assert!(
+        manifest
+            .column_families
+            .iter()
+            .any(|cf_meta| cf_meta.name == cf.name()),
+        "column family should still exist in manifest"
+    );
 }
 
 #[test]
@@ -221,7 +225,7 @@ fn should_preserve_data_during_high_concurrency_writes_with_admin_queries_when_s
         .expect("wait for flush after concurrent writes");
     eng.wait_for_compaction(std::time::Duration::from_secs(15))
         .expect("wait for compaction after concurrent writes");
-    
+
     // Sample a few keys from different writer threads to verify data persistence
     // We check every 3rd thread to reduce test time while still validating concurrent writes
     let mut verified_count = 0;
@@ -232,7 +236,7 @@ fn should_preserve_data_during_high_concurrency_writes_with_admin_queries_when_s
             verified_count += 1;
         }
     }
-    
+
     // At least some keys should be readable - if none are, we have a serious data loss bug
     assert!(
         verified_count > 0,

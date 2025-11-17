@@ -531,7 +531,10 @@ mod tests {
             url.contains("storage.googleapis.com"),
             "URL should contain GCS domain"
         );
-        assert!(url.contains("test-bucket"), "URL should contain bucket name");
+        assert!(
+            url.contains("test-bucket"),
+            "URL should contain bucket name"
+        );
         assert!(
             url.contains("test-object.dat"),
             "URL should contain object name"

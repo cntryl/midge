@@ -9,9 +9,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::{
-    create_basic_cache, BlockKey, CacheBlockType, CachedBlock,
-};
+use cntryl_midge::sst::{create_basic_cache, BlockKey, CacheBlockType, CachedBlock};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
