@@ -177,19 +177,22 @@ mod tests {
     }
 
     #[test]
-    fn should_find_previous_block_for_key_between_entries() {
+    fn should_find_block_for_key_between_entries() {
         // Arrange
+        // Sparse index stores LAST key in each block
         let mut b = SparseIndexBuilder::new();
-        b.add(Bytes::from_static(b"a"), BlockHandle::new(100, 10));
-        b.add(Bytes::from_static(b"m"), BlockHandle::new(200, 20));
-        b.add(Bytes::from_static(b"z"), BlockHandle::new(300, 30));
+        b.add(Bytes::from_static(b"a"), BlockHandle::new(100, 10)); // Block 0 ends with "a"
+        b.add(Bytes::from_static(b"m"), BlockHandle::new(200, 20)); // Block 1 ends with "m"
+        b.add(Bytes::from_static(b"z"), BlockHandle::new(300, 30)); // Block 2 ends with "z"
         let idx = b.finish();
 
-        // Act
+        // Act: Search for "p" (between "m" and "z")
+        // "p" > "m" so it's not in block 1
+        // "p" <= "z" so it might be in block 2
         let got = idx.find_block(b"p").unwrap();
 
-        // Assert
-        assert_eq!(got.offset, 200);
+        // Assert: Should return block 2 (offset 300)
+        assert_eq!(got.offset, 300);
     }
 
     #[test]

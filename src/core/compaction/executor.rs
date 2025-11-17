@@ -300,21 +300,9 @@ pub(crate) fn write_compacted_sst(
         return Ok(None);
     }
 
-    // Enforce precondition: versions must be deduplicated (one entry per user_key)
-    // This prevents writing SSTs with duplicate keys which violates the SST invariant
-    let mut last_user_key: Option<&[u8]> = None;
-    for entry in versions {
-        if let Some(last_key) = last_user_key {
-            if last_key == entry.user_key.as_slice() {
-                return Err(crate::error::MidgeError::InvalidData(format!(
-                    "write_compacted_sst called with duplicate user_key: {}. \
-                     Versions must be deduplicated before writing.",
-                    hex::encode(entry.user_key.as_slice())
-                )));
-            }
-        }
-        last_user_key = Some(entry.user_key.as_slice());
-    }
+    // Note: versions may contain multiple entries for the same user_key when snapshots are active.
+    // This is correct behavior - we preserve different versions for snapshot visibility.
+    // The SST format with internal keys (user_key || seq || kind) handles this correctly.
 
     let mut writer = sst_factory.create(*compression, *block_size, true);
     let mut smallest_key: Option<Vec<u8>> = None;
@@ -832,25 +820,7 @@ mod tests {
         assert_eq!(meta.total_entries, 3);
     }
 
-    #[test]
-    fn should_fail_given_duplicate_keys_when_writing_sst() {
-        // Arrange
-        let temp_dir = TempDir::new().unwrap();
-        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::mem::MemSstFactory);
-        let ctx = create_test_context(&sst_factory, temp_dir.path());
-
-        // Intentionally create duplicate keys (same user_key) - violates SST invariant
-        let versions = vec![
-            make_version(b"key1", 200, false),
-            make_version(b"key1", 100, false), // DUPLICATE
-        ];
-
-        // Act
-        let result = write_compacted_sst(&ctx, &versions, 0);
-
-        // Assert
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, crate::error::MidgeError::InvalidData(_)));
-    }
+    // NOTE: Removed test should_fail_given_duplicate_keys_when_writing_sst
+    // Duplicate user keys are intentionally allowed for snapshot-aware compaction.
+    // The SST format with internal keys (user_key||seq||kind) ensures uniqueness.
 }

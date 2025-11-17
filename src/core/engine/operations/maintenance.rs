@@ -415,55 +415,6 @@ impl MidgeEngine {
         };
         let new_sst_name = new_file_meta.name.clone();
 
-        // Temporary sanity check: verify the new SST contains keys
-        let p = self.sst_dir.join(&new_sst_name);
-        eprintln!("compact_all: new SST path = {}, exists = {}", p.display(), p.exists());
-        match self.sst_reader_factory.open(&p) {
-            Ok(r) => {
-                // Check first key
-                if let Some(first) = versions.first() {
-                    match r.get_state(&first.user_key) {
-                        Ok(state) => {
-                            eprintln!(
-                                "compact_all: sample get key='{}' -> {:?}",
-                                String::from_utf8_lossy(&first.user_key),
-                                state
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("compact_all: sample get '{}' error: {}", String::from_utf8_lossy(&first.user_key), e);
-                        }
-                    }
-                }
-                // Check a problematic key
-                match r.get_state(b"large3") {
-                    Ok(state) => {
-                        eprintln!("compact_all: check get key='large3' -> {:?}", state);
-                    }
-                    Err(e) => {
-                        eprintln!("compact_all: check get 'large3' error: {}", e);
-                    }
-                }
-                // Scan the whole SST to see what's actually in it
-                match r.scan_range_state(None, None) {
-                    Ok(rows) => {
-                        eprintln!("compact_all: SST contains {} entries total", rows.len());
-                        let large_keys: Vec<_> = rows.iter().filter(|(k, _)| k.starts_with(b"large")).map(|(k, _)| String::from_utf8_lossy(k).to_string()).collect();
-                        eprintln!("compact_all: SST contains {} 'large*' keys", large_keys.len());
-                        if large_keys.len() < 200 {
-                            eprintln!("compact_all: first few large keys in SST: {:?}", large_keys.iter().take(20).collect::<Vec<_>>());
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("compact_all: failed to scan SST: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("compact_all: failed to open new SST {}: {}", new_sst_name, e);
-            }
-        }
-
         // Update manifest and version_set atomically via VersionManager
         // IMPORTANT: Add new SST first, THEN remove old ones
         // This ensures data is always accessible during the transition
@@ -472,20 +423,11 @@ impl MidgeEngine {
         };
         self.version_manager.apply_edit_sync(edit)?;
 
-        // Debug: verify the new SST is in version_set
-        let current_version = self.version_set.load();
-        eprintln!("compact_all: after AddFile, version_set has {} files", current_version.manifest.files.len());
-        eprintln!("compact_all: new SST in version_set? {}", current_version.manifest.files.iter().any(|f| f.name == new_sst_name));
-
         // Now remove all old SST files
         edit = crate::core::manifest::VersionEdit::RemoveFiles {
             names: manifest.ssts.iter().map(|name| name.clone()).collect(),
         };
         self.version_manager.apply_edit_sync(edit)?;
-
-        // Debug: verify old SSTs are removed
-        let current_version = self.version_set.load();
-        eprintln!("compact_all: after RemoveFiles, version_set has {} files", current_version.manifest.files.len());
 
         // Update sequence number in manifest
         edit = crate::core::manifest::VersionEdit::UpdateSequence {

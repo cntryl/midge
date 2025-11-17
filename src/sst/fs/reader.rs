@@ -646,9 +646,10 @@ impl SstFile {
             };
 
             // Check snapshot visibility
+            // Snapshot sees writes with seq < snapshot_seq (strictly less than)
             if let Some(snapshot) = snapshot_seq {
-                if seq > snapshot {
-                    continue; // Skip newer entries
+                if seq >= snapshot {
+                    continue; // Skip entries not visible to snapshot
                 }
             }
 
