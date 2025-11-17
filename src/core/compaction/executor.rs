@@ -336,11 +336,18 @@ pub(crate) fn write_compacted_sst(
             None => entry.seq,
         });
 
+        // When use_internal=true, the writer expects keys to be pre-encoded as internal keys
+        let internal_key = crate::common::internal_key::encode_internal_key(
+            &entry.user_key,
+            entry.seq,
+            entry.tombstone,
+        );
+
         if entry.tombstone {
-            writer.add_with_meta(entry.user_key.as_slice(), None, entry.seq, true, None)?;
+            writer.add_with_meta(&internal_key, None, entry.seq, true, entry.expiration)?;
         } else if let Some(value) = &entry.value {
             writer.add_with_meta(
-                entry.user_key.as_slice(),
+                &internal_key,
                 Some(value.as_ref()),
                 entry.seq,
                 false,

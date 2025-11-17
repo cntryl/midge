@@ -334,7 +334,9 @@ impl MidgeEngine {
         if self.read_only {
             return Err(crate::error::MidgeError::ReadOnly);
         }
-        let manifest = Manifest::load(&self.db_path).unwrap_or_default();
+        // Load current manifest from version_set to get latest state
+        let version = self.version_set.load();
+        let manifest = &version.manifest;
         if manifest.ssts.is_empty() {
             return Ok(());
         }
@@ -392,85 +394,98 @@ impl MidgeEngine {
             "compact_all: writing versions to output SST"
         );
 
-        // Build the output SST file name
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
-        let sst_name = format!("L0_{:016}.sst", seq);
-        let sst_path = self.sst_dir.join(&sst_name);
-
-        // Write the output SST
-        let mut writer = self
-            .sst_factory
-            .create(self.compression, self.block_size, true);
-
-        for v in &versions {
-            // When use_internal=true, the writer expects keys to be pre-encoded as internal keys
-            let internal_key =
-                crate::common::internal_key::encode_internal_key(&v.user_key, v.seq, v.tombstone);
-
-            if v.tombstone {
-                writer.add_with_meta(&internal_key, None, v.seq, true, v.expiration)?;
-            } else if let Some(value) = &v.value {
-                writer.add_with_meta(
-                    &internal_key,
-                    Some(value.as_ref()),
-                    v.seq,
-                    false,
-                    v.expiration,
-                )?;
-            }
-        }
-
-        let raw = writer.finish_bytes()?;
-        std::fs::write(&sst_path, &raw)?;
-        let bytes_written = raw.len();
-        debug!(
-            path = %sst_path.display(),
-            bytes_written,
-            "compact_all: output SST written"
-        );
-
-        // Compute metadata for the new SST
-        let size_bytes = std::fs::metadata(&sst_path).map(|md| md.len()).unwrap_or(0);
-        let smallest_key = versions.first().map(|v| v.user_key.clone());
-        let largest_key = versions.last().map(|v| v.user_key.clone());
-        let smallest_seq = versions.iter().map(|v| v.seq).min();
-        let largest_seq = versions.iter().map(|v| v.seq).max();
-        let point_tombstone_count = versions.iter().filter(|v| v.tombstone).count() as u64;
+        // Use the shared compaction SST writer to ensure consistent encoding/metadata
+        let ctx = crate::core::compaction::executor::SstWriterContext {
+            sst_factory: &self.sst_factory,
+            compression: self.compression,
+            block_size: self.block_size,
+            sst_dir: &self.sst_dir,
+            cloud_sst_manager: self.cloud_sst_manager.as_ref(),
+        };
 
         // compact_all operates on the default CF
         let cf_id = crate::api::column_family::DEFAULT_CF_ID.as_u32();
 
-        let new_file_meta = crate::manifest::FileMeta {
-            name: sst_name.clone(),
-            level: 0,
-            size_bytes,
-            cf_id,
-            smallest_key,
-            largest_key,
-            smallest_seq,
-            largest_seq,
-            sublevel: 0,
-            cloud_location: None,
-            cloud_checksum: None,
-            cloud_uploaded_at: None,
-            cloud_state: None,
-            point_tombstone_count,
-            range_tombstone_count: 0,
-            total_entries: versions.len() as u64,
+        let (_path, new_file_meta) = match crate::core::compaction::executor::write_compacted_sst(&ctx, &versions, cf_id)? {
+            Some(res) => res,
+            None => {
+                // Nothing to write; keep manifest unchanged
+                return Ok(());
+            }
         };
+        let new_sst_name = new_file_meta.name.clone();
+
+        // Temporary sanity check: verify the new SST contains keys
+        let p = self.sst_dir.join(&new_sst_name);
+        eprintln!("compact_all: new SST path = {}, exists = {}", p.display(), p.exists());
+        match self.sst_reader_factory.open(&p) {
+            Ok(r) => {
+                // Check first key
+                if let Some(first) = versions.first() {
+                    match r.get_state(&first.user_key) {
+                        Ok(state) => {
+                            eprintln!(
+                                "compact_all: sample get key='{}' -> {:?}",
+                                String::from_utf8_lossy(&first.user_key),
+                                state
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("compact_all: sample get '{}' error: {}", String::from_utf8_lossy(&first.user_key), e);
+                        }
+                    }
+                }
+                // Check a problematic key
+                match r.get_state(b"large3") {
+                    Ok(state) => {
+                        eprintln!("compact_all: check get key='large3' -> {:?}", state);
+                    }
+                    Err(e) => {
+                        eprintln!("compact_all: check get 'large3' error: {}", e);
+                    }
+                }
+                // Scan the whole SST to see what's actually in it
+                match r.scan_range_state(None, None) {
+                    Ok(rows) => {
+                        eprintln!("compact_all: SST contains {} entries total", rows.len());
+                        let large_keys: Vec<_> = rows.iter().filter(|(k, _)| k.starts_with(b"large")).map(|(k, _)| String::from_utf8_lossy(k).to_string()).collect();
+                        eprintln!("compact_all: SST contains {} 'large*' keys", large_keys.len());
+                        if large_keys.len() < 200 {
+                            eprintln!("compact_all: first few large keys in SST: {:?}", large_keys.iter().take(20).collect::<Vec<_>>());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("compact_all: failed to scan SST: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("compact_all: failed to open new SST {}: {}", new_sst_name, e);
+            }
+        }
 
         // Update manifest and version_set atomically via VersionManager
-        // First remove all old SST files
-        let mut edit = crate::core::manifest::VersionEdit::RemoveFiles {
+        // IMPORTANT: Add new SST first, THEN remove old ones
+        // This ensures data is always accessible during the transition
+        let mut edit = crate::core::manifest::VersionEdit::AddFile {
+            file: Box::new(new_file_meta),
+        };
+        self.version_manager.apply_edit_sync(edit)?;
+
+        // Debug: verify the new SST is in version_set
+        let current_version = self.version_set.load();
+        eprintln!("compact_all: after AddFile, version_set has {} files", current_version.manifest.files.len());
+        eprintln!("compact_all: new SST in version_set? {}", current_version.manifest.files.iter().any(|f| f.name == new_sst_name));
+
+        // Now remove all old SST files
+        edit = crate::core::manifest::VersionEdit::RemoveFiles {
             names: manifest.ssts.iter().map(|name| name.clone()).collect(),
         };
         self.version_manager.apply_edit_sync(edit)?;
 
-        // Then add the new SST file
-        edit = crate::core::manifest::VersionEdit::AddFile {
-            file: Box::new(new_file_meta),
-        };
-        self.version_manager.apply_edit_sync(edit)?;
+        // Debug: verify old SSTs are removed
+        let current_version = self.version_set.load();
+        eprintln!("compact_all: after RemoveFiles, version_set has {} files", current_version.manifest.files.len());
 
         // Update sequence number in manifest
         edit = crate::core::manifest::VersionEdit::UpdateSequence {
@@ -498,7 +513,7 @@ impl MidgeEngine {
         }
 
         // Update bloom and sparse index caches for the new SST
-        self.update_caches_for_new_sst(&sst_name);
+        self.update_caches_for_new_sst(&new_sst_name);
 
         Ok(())
     }

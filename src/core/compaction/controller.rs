@@ -54,6 +54,7 @@ pub struct CompactionWorkerConfig {
     pub compactor: Compactor,
     pub cf_set: Arc<crate::core::engine::column_family::ColumnFamilySet>,
     pub test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    pub version_manager: Arc<crate::core::manifest::VersionManager>,
 }
 
 /// Coordinates background compaction of LSM-tree levels.
@@ -91,6 +92,7 @@ impl CompactionController {
         let compactor = config.compactor;
         let cf_set = config.cf_set.clone();
         let test_hooks = config.test_hooks.clone();
+        let version_manager = config.version_manager.clone();
 
         let handle = thread::Builder::new()
             .name("midge-compaction-worker".to_string())
@@ -302,31 +304,25 @@ impl CompactionController {
                                 super::executor::write_compacted_sst(&ctx, &deduped, plan.cf_id)?;
 
                             if let Some((_path, meta)) = write_res {
-                                // Update manifest on disk: remove inputs, add new file meta
+                                // Update manifest and version_set atomically via VersionManager
                                 if let Some(ref hooks) = test_hooks {
                                     hooks.maybe_pause_compaction(
                                         CompactionGatePoint::BeforeManifestUpdate,
                                     );
                                 }
 
-                                let mut m = crate::manifest::Manifest::load_with_retry(
-                                    &db_path,
-                                    10,
-                                    Duration::from_millis(10),
-                                )?;
+                                // IMPORTANT: Add new SST first, THEN remove old ones
+                                // This ensures data is always accessible during the transition
+                                let add_edit = crate::core::manifest::VersionEdit::AddFile {
+                                    file: Box::new(meta),
+                                };
+                                version_manager.apply_edit_sync(add_edit)?;
 
-                                // Remove input files from manifest.ssts and files
-                                for fname in &plan.input_files {
-                                    m.ssts.retain(|n| n != fname);
-                                    m.files.retain(|f| &f.name != fname);
-                                }
-
-                                // Add new SST to manifest
-                                m.ssts.push(meta.name.clone());
-                                m.files.push(meta);
-
-                                // Persist manifest
-                                m.save_atomic(&db_path)?;
+                                // Now remove all input SST files
+                                let remove_edit = crate::core::manifest::VersionEdit::RemoveFiles {
+                                    names: plan.input_files.clone(),
+                                };
+                                version_manager.apply_edit_sync(remove_edit)?;
 
                                 if let Some(ref hooks) = test_hooks {
                                     hooks.maybe_pause_compaction(
@@ -499,6 +495,12 @@ mod tests {
             }),
             cf_set: Arc::new(crate::core::engine::column_family::ColumnFamilySet::new()),
             test_hooks: None,
+            version_manager: Arc::new(crate::core::manifest::VersionManager::new(
+                crate::core::manifest::AtomicVersionSet::new(
+                    crate::core::manifest::VersionSet::new(manifest),
+                ),
+                db_path.clone(),
+            )),
         }
     }
 

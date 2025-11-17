@@ -258,6 +258,14 @@ pub fn open_with_factories(
         manifest_cache_for_flush.update(manifest);
     });
 
+    // Initialize VersionSet and VersionManager for lock-free manifest access
+    // Must be created before compaction coordinator so it can be passed to workers
+    let current_manifest_for_version = manifest_cache.get();
+    let version_set = crate::core::manifest::VersionSet::new(current_manifest_for_version);
+    let version_set_atomic = crate::core::manifest::AtomicVersionSet::new(version_set);
+    let version_manager =
+        Arc::new(crate::core::manifest::VersionManager::new(version_set_atomic.clone(), db_path.clone()));
+
     // Delegate flush and compaction coordinator setup to factory module
     let flush_coordinator = crate::core::engine::factory::setup_flush_coordinator(
         &opts,
@@ -279,6 +287,7 @@ pub fn open_with_factories(
         snapshot_registry_arc.clone(),
         metrics_arc.clone(),
         cf_set_arc.clone(),
+        version_manager.clone(),
     )?;
     let manifest = manifest_cache.get();
 
@@ -323,13 +332,6 @@ pub fn open_with_factories(
     // Create WAL coordinator
     tracing::debug!("creating wal coordinator");
     let wal_coordinator = crate::wal::WalController::new(wal_writer_box, wal_factory_arc);
-
-    // Initialize VersionSet and VersionManager for lock-free manifest access
-    let current_manifest = manifest_cache.get();
-    let version_set = crate::core::manifest::VersionSet::new(current_manifest);
-    let version_set_atomic = crate::core::manifest::AtomicVersionSet::new(version_set);
-    let version_manager =
-        crate::core::manifest::VersionManager::new(version_set_atomic.clone(), db_path.clone());
 
     Ok(MidgeEngine {
         wal_coordinator,

@@ -4,6 +4,7 @@
 //! All manifest updates and version publishes go through this single actor.
 
 use crossbeam_channel::{bounded, Receiver, Sender};
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -14,8 +15,8 @@ use crate::error::{MidgeError, MidgeResult};
 /// Actor that serializes all version changes.
 /// Ensures atomic visibility: manifest write + version publish happens atomically.
 pub struct VersionManager {
-    tx: Option<Sender<VersionEditRequest>>,
-    handle: Option<JoinHandle<()>>,
+    tx: Mutex<Option<Sender<VersionEditRequest>>>,
+    handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// Internal request type for the version manager actor.
@@ -41,8 +42,8 @@ impl VersionManager {
             .expect("Failed to spawn version manager thread");
 
         Self {
-            tx: Some(tx),
-            handle: Some(handle),
+            tx: Mutex::new(Some(tx)),
+            handle: Mutex::new(Some(handle)),
         }
     }
 
@@ -92,7 +93,8 @@ impl VersionManager {
     /// Apply a version edit asynchronously.
     /// Returns immediately - edit is queued for processing.
     pub fn apply_edit_async(&self, edit: VersionEdit) -> MidgeResult<()> {
-        self.tx
+        let tx_guard = self.tx.lock();
+        tx_guard
             .as_ref()
             .ok_or_else(|| MidgeError::internal("version manager stopped"))?
             .send(VersionEditRequest {
@@ -107,7 +109,8 @@ impl VersionManager {
     pub fn apply_edit_sync(&self, edit: VersionEdit) -> MidgeResult<()> {
         let (response_tx, response_rx) = bounded(1);
 
-        self.tx
+        let tx_guard = self.tx.lock();
+        tx_guard
             .as_ref()
             .ok_or_else(|| MidgeError::internal("version manager stopped"))?
             .send(VersionEditRequest {
@@ -115,6 +118,7 @@ impl VersionManager {
                 response_tx: Some(response_tx),
             })
             .map_err(|_| MidgeError::internal("version manager stopped"))?;
+        drop(tx_guard); // Release lock before blocking on response
 
         response_rx
             .recv()
@@ -122,12 +126,12 @@ impl VersionManager {
     }
 
     /// Shutdown the version manager and wait for pending edits.
-    pub fn shutdown(&mut self) {
-        if let Some(tx) = self.tx.take() {
+    pub fn shutdown(&self) {
+        if let Some(tx) = self.tx.lock().take() {
             drop(tx); // Close channel to signal shutdown
         }
 
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.handle.lock().take() {
             let _ = handle.join();
         }
     }
@@ -135,7 +139,7 @@ impl VersionManager {
 
 impl Drop for VersionManager {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.handle.lock().take() {
             tracing::warn!("VersionManager dropped without explicit shutdown");
             let _ = handle.join();
         }
@@ -180,7 +184,6 @@ mod tests {
         assert_eq!(current.manifest.files.len(), 1);
         assert_eq!(current.manifest.files[0].name, "test.sst");
 
-        let mut manager = manager;
         manager.shutdown();
     }
 
@@ -215,7 +218,6 @@ mod tests {
         let current = version_set.load();
         assert_eq!(current.manifest.files.len(), 5);
 
-        let mut manager = manager;
         manager.shutdown();
     }
 
@@ -252,7 +254,6 @@ mod tests {
         let current = version_set.load();
         assert_eq!(current.manifest.files.len(), 1);
 
-        let mut manager = manager;
         manager.shutdown();
     }
 }

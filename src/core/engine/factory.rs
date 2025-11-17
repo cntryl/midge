@@ -306,6 +306,7 @@ pub(crate) fn setup_compaction_coordinator(
     snapshot_registry_arc: Arc<crate::api::snapshot::SnapshotRegistry>,
     metrics_arc: Arc<Metrics>,
     cf_set_arc: Arc<super::column_family::ColumnFamilySet>,
+    version_manager: Arc<crate::core::manifest::VersionManager>,
 ) -> MidgeResult<Option<crate::core::CompactionController>> {
     if opts.enable_compaction && !opts.read_only {
         // Create CloudSstManager if in cloud-backed mode
@@ -357,6 +358,7 @@ pub(crate) fn setup_compaction_coordinator(
             compactor,
             cf_set: cf_set_arc,
             test_hooks: opts.test_hooks.clone(),
+            version_manager,
         };
 
         Ok(Some(crate::core::CompactionController::spawn(config)?))

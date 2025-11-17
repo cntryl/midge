@@ -78,7 +78,7 @@ pub struct MidgeEngine {
     /// Atomic version set for lock-free reads of manifest state
     pub(crate) version_set: crate::core::manifest::AtomicVersionSet,
     /// Version manager actor for serialized manifest updates
-    pub(crate) version_manager: crate::core::manifest::VersionManager,
+    pub(crate) version_manager: Arc<crate::core::manifest::VersionManager>,
 }
 
 impl MidgeEngine {
