@@ -102,8 +102,8 @@ impl MidgeEngine {
     /// let kv_store = engine.as_kv_store();
     /// kv_store.put(&cf, b"key", b"value")?;
     /// ```
-    pub fn as_kv_store(self: &Arc<Self>) -> super::adapters::KvStoreAdapter {
-        super::adapters::KvStoreAdapter::new(Arc::clone(self))
+    pub fn as_kv_store(self: &Arc<Self>) -> super::KvStoreAdapter {
+        super::KvStoreAdapter::new(Arc::clone(self))
     }
 
     /// Wait for the compaction coordinator to become idle.

@@ -11,7 +11,7 @@ use bytes::Bytes;
 
 use crate::error::{MidgeError, MidgeResult};
 
-use super::super::MidgeEngine;
+use super::MidgeEngine;
 
 /// Adapter that exposes MidgeEngine functionality through the KvStore trait.
 ///

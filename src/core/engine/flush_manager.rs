@@ -6,7 +6,7 @@
 use crate::api::column_family::{ColumnFamilyId, DEFAULT_CF_ID};
 use crate::error::MidgeResult;
 
-use super::super::MidgeEngine;
+use super::MidgeEngine;
 
 impl MidgeEngine {
     /// Roll over memtable and queue flush job for the specified column family.

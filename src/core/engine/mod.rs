@@ -4,22 +4,23 @@
 //! - `types.rs` - Result enums (InsertResult, CasResult)
 //! - `column_family.rs` - Column family management (ColumnFamily, ColumnFamilySet)
 //! - `factory.rs` - Engine construction and initialization helpers
-//! - `engine.rs` - Main MidgeEngine struct and internal helpers
+//! - `core.rs` - Main MidgeEngine struct and internal helpers
 //! - `state.rs` - Engine state management and initialization
 //! - `operations/` - Focused operation modules (reads, writes, transactions, etc.)
-//! - `adapters/` - Trait adapters for external API compatibility (KvStore, etc.)
+//! - `kv_store_adapter.rs` - KvStore trait adapter for external API compatibility
+//! - `flush_manager.rs` - Memtable flushing coordination
 
-mod adapters;
 mod cf_manager;
 pub(crate) mod column_family;
-mod coordination;
 mod core;
 pub(crate) mod factory;
+mod flush_manager;
+mod kv_store_adapter;
 pub mod state;
 pub mod types;
 
 // Re-export adapters for public use
-pub use adapters::KvStoreAdapter;
+pub use kv_store_adapter::KvStoreAdapter;
 
 // Re-export public types
 pub use types::{CasResult, InsertResult};
