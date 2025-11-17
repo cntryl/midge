@@ -167,8 +167,8 @@ impl StorageBackend for MockCloudBackend {
                 Ok(manifest) => {
                     *self.cloud_manifest.lock() = Some(manifest);
                 }
-                Err(e) => {
-                    eprintln!("Failed to parse uploaded manifest: {}", e);
+                Err(_e) => {
+                    // Silently ignore manifest parse errors in mock
                 }
             }
         }

@@ -34,7 +34,7 @@ fn meta_tests_enabled() -> bool {
 #[test]
 fn should_enforce_test_naming_convention() {
     if !meta_tests_enabled() {
-        eprintln!("tests/test_guidelines_compliance.rs: skipping naming checks (CI_STRICT_TEST_GUIDELINES!=1)");
+        println!("tests/test_guidelines_compliance.rs: skipping naming checks (CI_STRICT_TEST_GUIDELINES!=1)");
         return;
     }
     // Arrange
@@ -71,7 +71,7 @@ fn should_enforce_test_naming_convention() {
 #[test]
 fn should_enforce_arrange_act_assert_structure() {
     if !meta_tests_enabled() {
-        eprintln!("tests/test_guidelines_compliance.rs: skipping AAA checks (CI_STRICT_TEST_GUIDELINES!=1)");
+        println!("tests/test_guidelines_compliance.rs: skipping AAA checks (CI_STRICT_TEST_GUIDELINES!=1)");
         return;
     }
     // Arrange
@@ -121,9 +121,9 @@ fn should_enforce_arrange_act_assert_structure() {
 }
 
 #[test]
-fn should_enforce_single_behavior_principle() {
+fn should_enforce_single_behavior_per_test() {
     if !meta_tests_enabled() {
-        eprintln!("tests/test_guidelines_compliance.rs: skipping single-behavior checks (CI_STRICT_TEST_GUIDELINES!=1)");
+        println!("tests/test_guidelines_compliance.rs: skipping single-behavior checks (CI_STRICT_TEST_GUIDELINES!=1)");
         return;
     }
     // Arrange
@@ -172,9 +172,9 @@ fn should_enforce_single_behavior_principle() {
 }
 
 #[test]
-fn should_enforce_proper_test_file_organization() {
+fn should_enforce_module_organization() {
     if !meta_tests_enabled() {
-        eprintln!("tests/test_guidelines_compliance.rs: skipping organization checks (CI_STRICT_TEST_GUIDELINES!=1)");
+        println!("tests/test_guidelines_compliance.rs: skipping organization checks (CI_STRICT_TEST_GUIDELINES!=1)");
         return;
     }
     // Arrange

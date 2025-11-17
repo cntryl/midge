@@ -152,7 +152,7 @@ fn should_background_compact_when_threshold_exceeded() {
         loop {
             if let Ok(m) = cntryl_midge::manifest::Manifest::load(&db_path) {
                 if m.ssts.len() < 4 {
-                    println!(
+                    tracing::info!(
                         "Compaction succeeded: SST count reduced to {}",
                         m.ssts.len()
                     );
@@ -160,7 +160,7 @@ fn should_background_compact_when_threshold_exceeded() {
                 }
             }
             if start.elapsed() > timeout {
-                eprintln!("Timeout: compaction did not reduce SST count within 10 seconds");
+                tracing::warn!("Timeout: compaction did not reduce SST count within 10 seconds");
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -172,8 +172,8 @@ fn should_background_compact_when_threshold_exceeded() {
     let cf = eng.default_column_family();
     let m = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
 
-    println!("SSTs found: {}", m.ssts.len());
-    println!(
+    tracing::debug!("SSTs found: {}", m.ssts.len());
+    tracing::debug!(
         "Files: {:?}",
         m.files.iter().map(|f| &f.name).collect::<Vec<_>>()
     );

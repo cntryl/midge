@@ -206,13 +206,6 @@ impl WalWriter for Wal {
 
         // Advance position to reflect newly-written bytes
         inner.pos += (frag.header.len() + frag.body.len()) as u64;
-        eprintln!(
-            "[wal] append path={} pos_before={} written={} new_pos={}",
-            self.path.display(),
-            pos_before,
-            (frag.header.len() + frag.body.len()),
-            inner.pos
-        );
 
         // Test hook: allow truncating WAL immediately after append to simulate
         // torn-write scenarios. If the hook requests truncation, truncate the
@@ -223,89 +216,45 @@ impl WalWriter for Wal {
                 // simulate a partial/torn write (i.e., the last append didn't make it).
                 inner.file.flush()?;
                 let f = inner.file.get_mut();
-                eprintln!(
-                    "[wal] attempting truncate {} -> {}",
-                    self.path.display(),
-                    pos_before
-                );
                 // If tests request a simulated failing truncate, force the deterministic
                 // CRC-overwrite fallback so tests can exercise the code path.
                 if hooks.should_fail_truncate() {
-                    eprintln!(
-                        "[wal] simulating failing truncate on {} -> forcing fallback",
-                        self.path.display()
-                    );
-                    if let Err(e2) = (|| -> std::io::Result<()> {
+                    if let Err(e) = (|| -> std::io::Result<()> {
                         f.seek(SeekFrom::Start(pos_before))?;
                         // Overwrite 4 CRC bytes with 0xFF to guarantee mismatch.
                         f.write_all(&[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8])?;
                         f.flush()?;
                         Ok(())
                     })() {
-                        eprintln!(
-                            "[wal][ERR] simulated fallback corrupt CRC write failed on {}: {}",
-                            self.path.display(),
-                            e2
-                        );
-                        return Err(e2.into());
+                        return Err(e.into());
                     } else {
                         // Make sure our tracked position reflects the truncated view
                         if let Err(e) = f.seek(SeekFrom::Start(pos_before)) {
-                            eprintln!(
-                                "[wal][ERR] seek failed after simulated fallback on {}: {}",
-                                self.path.display(),
-                                e
-                            );
                             return Err(e.into());
                         }
                         inner.pos = pos_before;
-                        eprintln!(
-                            "[wal] simulated fallback corrupt CRC write succeeded on {}",
-                            self.path.display()
-                        );
                     }
                 } else if let Err(e) = f.set_len(pos_before) {
-                    eprintln!(
-                        "[wal][ERR] set_len failed on {}: {}",
-                        self.path.display(),
-                        e
-                    );
                     // Fallback for platforms that disallow set_len while file is open.
                     // Overwrite the stored CRC (first 4 bytes of the record header)
                     // at `pos_before` so WAL replay will detect a CRC mismatch and
                     // stop at the last valid record. Writing 4 bytes emulates the
                     // manual corruption performed in unit tests (see
                     // `should_detect_corrupted_crc`).
-                    if let Err(e2) = (|| -> std::io::Result<()> {
+                    if let Err(_e) = (|| -> std::io::Result<()> {
                         f.seek(SeekFrom::Start(pos_before))?;
                         // Overwrite 4 CRC bytes with 0xFF to guarantee mismatch.
                         f.write_all(&[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8])?;
                         f.flush()?;
                         Ok(())
                     })() {
-                        eprintln!(
-                            "[wal][ERR] fallback corrupt CRC write failed on {}: {}",
-                            self.path.display(),
-                            e2
-                        );
                         return Err(e.into());
-                    } else {
-                        eprintln!(
-                            "[wal] fallback corrupt CRC write succeeded on {}",
-                            self.path.display()
-                        );
                     }
                 } else {
                     if let Err(e) = f.seek(SeekFrom::Start(pos_before)) {
-                        eprintln!("[wal][ERR] seek failed on {}: {}", self.path.display(), e);
                         return Err(e.into());
                     }
                     inner.pos = pos_before;
-                    eprintln!(
-                        "[wal] truncate succeeded {} -> {}",
-                        self.path.display(),
-                        pos_before
-                    );
                 }
             }
         }
@@ -382,57 +331,30 @@ impl WalWriter for Wal {
                 if hooks.after_wal_append() {
                     inner.file.flush()?;
                     let f = inner.file.get_mut();
-                    eprintln!(
-                        "[wal] attempting truncate (batch) {} -> {}",
-                        self.path.display(),
-                        pos_before
-                    );
                     // If tests request simulated failing truncate, perform the
                     // deterministic CRC-overwrite fallback instead of set_len.
                     if hooks.should_fail_truncate() {
-                        eprintln!(
-                            "[wal] simulating failing truncate (batch) on {} -> forcing fallback",
-                            self.path.display()
-                        );
                         if let Err(e) = (|| -> std::io::Result<()> {
                             f.seek(SeekFrom::Start(pos_before))?;
                             f.write_all(&[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8])?;
                             f.flush()?;
                             Ok(())
                         })() {
-                            eprintln!("[wal][ERR] simulated fallback corrupt CRC write failed (batch) on {}: {}", self.path.display(), e);
                             return Err(e.into());
                         } else {
                             if let Err(e) = f.seek(SeekFrom::Start(pos_before)) {
-                                eprintln!("[wal][ERR] seek failed after simulated fallback (batch) on {}: {}", self.path.display(), e);
                                 return Err(e.into());
                             }
                             inner.pos = pos_before;
-                            eprintln!("[wal] simulated fallback corrupt CRC write succeeded (batch) on {}", self.path.display());
                         }
                     } else {
                         if let Err(e) = f.set_len(pos_before) {
-                            eprintln!(
-                                "[wal][ERR] set_len failed (batch) on {}: {}",
-                                self.path.display(),
-                                e
-                            );
                             return Err(e.into());
                         }
                         if let Err(e) = f.seek(SeekFrom::Start(pos_before)) {
-                            eprintln!(
-                                "[wal][ERR] seek failed (batch) on {}: {}",
-                                self.path.display(),
-                                e
-                            );
                             return Err(e.into());
                         }
                         inner.pos = pos_before;
-                        eprintln!(
-                            "[wal] truncate succeeded (batch) {} -> {}",
-                            self.path.display(),
-                            pos_before
-                        );
                     }
                 }
             }

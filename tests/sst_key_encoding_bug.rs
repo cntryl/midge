@@ -41,7 +41,7 @@ fn should_return_user_keys_not_internal_keys_when_scanning_sst() {
 
     // Debug: Print what we actually got
     for (i, (key, val)) in rows.iter().enumerate() {
-        eprintln!("Row {}: key={:?}, value={:?}", i, key, val);
+        tracing::debug!("Row {}: key={:?}, value={:?}", i, key, val);
     }
 
     assert_eq!(rows.len(), 3, "Should have 3 keys");

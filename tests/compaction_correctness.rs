@@ -331,26 +331,26 @@ fn should_preserve_ordering_and_values_given_multiple_overwrites_during_compacti
             }
 
             // Check data before flush
-            println!("Before flush:");
+            tracing::debug!("Before flush:");
             for i in 0..3 {
                 // Check first 3 keys
                 let key = format!("overwrite_key_{:02}", i).into_bytes();
                 let result = eng.get(&cf, &key).expect("get before flush");
-                println!("  Key {}: {:?}", String::from_utf8_lossy(&key), result);
+                tracing::debug!("  Key {}: {:?}", String::from_utf8_lossy(&key), result);
             }
 
             // Trigger compaction to merge all overwrites
-            println!("Calling flush_cf...");
+            tracing::debug!("Calling flush_cf...");
             eng.flush_cf(&cf).expect("flush");
-            println!("flush_cf completed");
+            tracing::debug!("flush_cf completed");
 
             // Check data after flush
-            println!("After flush:");
+            tracing::debug!("After flush:");
             for i in 0..3 {
                 // Check first 3 keys
                 let key = format!("overwrite_key_{:02}", i).into_bytes();
                 let result = eng.get(&cf, &key).expect("get after flush");
-                println!("  Key {}: {:?}", String::from_utf8_lossy(&key), result);
+                tracing::debug!("  Key {}: {:?}", String::from_utf8_lossy(&key), result);
             }
 
             // eng.compact_all().expect("compact");

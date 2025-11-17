@@ -36,7 +36,7 @@ fn should_commit_new_ssts_and_manifest_together_given_compaction_successful() {
 
     // DEBUG: Check compaction trigger counts
     if !compaction_complete {
-        eprintln!(
+        tracing::debug!(
             "Compaction didn't start. Starts: {} (before: {})",
             hooks.compaction_start_count(),
             compaction_starts_before

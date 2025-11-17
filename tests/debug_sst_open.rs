@@ -23,5 +23,5 @@ fn debug_sst_open() {
         .into_iter()
         .map(|(k, _)| String::from_utf8_lossy(&k).to_string())
         .collect();
-    println!("keys from fs reader: {:?}", keys);
+    tracing::debug!("keys from fs reader: {:?}", keys);
 }

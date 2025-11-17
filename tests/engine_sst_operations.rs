@@ -224,7 +224,7 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
     eng.flush().unwrap();
     let snap = eng.snapshot();
     let manifest = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
-    println!("manifest ssts after flush: {:?}", manifest.ssts);
+    tracing::debug!("manifest ssts after flush: {:?}", manifest.ssts);
     let sst_path = opts
         .storage_mode
         .local_path()
@@ -232,8 +232,8 @@ fn should_return_sst_value_at_snapshot_when_memtable_has_newer() {
         .join(&manifest.ssts[0]);
     let sst = cntryl_midge::sst::fs::SstFile::open(&sst_path).unwrap();
     let rows = cntryl_midge::sst::SstStateReader::scan_range_state(&sst, None, None).unwrap();
-    println!("sst rows: {:?}", rows);
-    println!("snapshot seq={} ", snap.seq);
+    tracing::debug!("sst rows: {:?}", rows);
+    tracing::debug!("snapshot seq={} ", snap.seq);
     // Newer write stays in memtable with higher seq
     eng.put(&cf, b"k", b"v2").unwrap();
 
