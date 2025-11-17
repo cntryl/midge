@@ -104,11 +104,14 @@ impl MidgeEngine {
             0
         };
 
-        m.ssts.push(file_meta.name.clone());
-        m.files.push(file_meta);
-        m.save_atomic(&self.db_path)?;
-        // Update the cached manifest
-        self.update_manifest_cache(m);
+        // Create a version edit to add the new SST file
+        let edit = crate::core::manifest::VersionEdit::AddFile {
+            file: Box::new(file_meta),
+        };
+        
+        // Apply edit through VersionManager to atomically update manifest AND version_set
+        self.version_manager.apply_edit_sync(edit)?;
+        
         Ok(())
     }
 
@@ -426,12 +429,6 @@ impl MidgeEngine {
             "compact_all: output SST written"
         );
 
-        // Update manifest: replace old SSTs with new one
-        let mut m = Manifest::load(&self.db_path).unwrap_or_default();
-        m.ssts.retain(|n| !manifest.ssts.contains(n));
-        m.files.retain(|f| !manifest.ssts.contains(&f.name));
-        m.ssts.push(sst_name.clone());
-
         // Compute metadata for the new SST
         let size_bytes = std::fs::metadata(&sst_path).map(|md| md.len()).unwrap_or(0);
         let smallest_key = versions.first().map(|v| v.user_key.clone());
@@ -443,7 +440,7 @@ impl MidgeEngine {
         // compact_all operates on the default CF
         let cf_id = crate::api::column_family::DEFAULT_CF_ID.as_u32();
 
-        m.files.push(crate::manifest::FileMeta {
+        let new_file_meta = crate::manifest::FileMeta {
             name: sst_name.clone(),
             level: 0,
             size_bytes,
@@ -460,13 +457,26 @@ impl MidgeEngine {
             point_tombstone_count,
             range_tombstone_count: 0,
             total_entries: versions.len() as u64,
-        });
+        };
 
-        m.last_persisted_sequence = self.seq.load(Ordering::SeqCst);
-        m.save_atomic(&self.db_path)?;
+        // Update manifest and version_set atomically via VersionManager
+        // First remove all old SST files
+        let mut edit = crate::core::manifest::VersionEdit::RemoveFiles {
+            names: manifest.ssts.iter().map(|name| name.clone()).collect(),
+        };
+        self.version_manager.apply_edit_sync(edit)?;
 
-        // Update cached manifest after successful save
-        self.update_manifest_cache(m);
+        // Then add the new SST file
+        edit = crate::core::manifest::VersionEdit::AddFile {
+            file: Box::new(new_file_meta),
+        };
+        self.version_manager.apply_edit_sync(edit)?;
+
+        // Update sequence number in manifest
+        edit = crate::core::manifest::VersionEdit::UpdateSequence {
+            sequence: self.seq.load(Ordering::SeqCst),
+        };
+        self.version_manager.apply_edit_sync(edit)?;
 
         // Invalidate table cache entries for old SSTs before deleting files
         if let Some(ref cache) = self.table_cache {

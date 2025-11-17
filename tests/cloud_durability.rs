@@ -51,17 +51,7 @@ fn should_preserve_local_file_given_upload_in_progress_when_crash() {
     // TODO: Test cloud mode with mock backend to verify upload retry logic
 }
 
-// TODO: This test fails due to CloudSstReaderFactory bug (issue discovered during deadlock fix)
-// CloudSstReaderFactory::open() tries to download from cloud using the full local filesystem path
-// as the cloud key, instead of checking the local cache first or using the correct cloud key format.
-// The SST file exists locally at local_cache_path/sst/XXX.sst, but the read path always tries
-// cloud.get_blob("/full/path/to/local_cache/sst/XXX.sst") which fails.
-// Fix requires refactoring CloudSstReaderFactory to:
-// 1. Check local cache first (if file exists locally, read it)
-// 2. Only download from cloud if not in local cache
-// 3. Use correct cloud key format (relative path, not absolute)
 #[test]
-#[ignore = "CloudSstReaderFactory doesn't check local cache before cloud download"]
 fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_flaky() {
     // Arrange
     let dir = test_temp_dir();
@@ -90,29 +80,42 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
         eng.put(&cf, format!("key{:02}", i).as_bytes(), b"value")
             .expect("put");
     }
+    println!("Wrote 10 keys to memtable");
 
     // Force flush - this may fail if cloud uploads fail, but data should still be available locally
-    let _ = eng.flush_cf(&cf); // Ignore result - we want to test resilience to upload failures
+    let flush_result = eng.flush_cf(&cf);
+    println!("Flush result: {:?}", flush_result);
+
+    // Check manifest
+    let manifest_path = dir.path().join("manifest.json");
+    if manifest_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+            println!("Manifest after flush:\n{}", content);
+        }
+    }
 
     // Wait for background uploads with timeout (observability)
-    let _upload_succeeded = mock_backend.wait_for_uploads(1, Duration::from_millis(500));
+    let upload_succeeded = mock_backend.wait_for_uploads(1, Duration::from_millis(500));
+    println!("Uploads: {} succeeded, upload flag: {}", mock_backend.upload_count(), upload_succeeded);
 
     // Assert - data should be available despite upload failures
-    // NOTE: This assertion will fail until CloudSstReaderFactory is fixed to check local cache
     for i in 0..10 {
+        let key = format!("key{:02}", i);
         let result = eng
-            .get(&cf, format!("key{:02}", i).as_bytes())
+            .get(&cf, key.as_bytes())
             .expect("get");
+        if result.is_none() {
+            println!("MISSING: {} not found!", key);
+        }
         assert!(
             result.is_some(),
-            "Data should be available from local cache despite upload failures"
+            "Data should be available from local cache despite upload failures: key={}", key
         );
     }
+    println!("All keys verified successfully");
 }
 
-// TODO: Same CloudSstReaderFactory bug as above
 #[test]
-#[ignore = "CloudSstReaderFactory doesn't check local cache before cloud download"]
 fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_runs() {
     // Arrange
     let dir = test_temp_dir();

@@ -125,22 +125,58 @@ impl CloudSstReaderFactory {
 
 impl SstReaderFactory for CloudSstReaderFactory {
     fn open(&self, path: &std::path::Path) -> MidgeResult<Box<dyn SstStateReader>> {
-        // Convert path to cloud key (use path as-is, or extract filename)
-        let cloud_key = path.to_string_lossy().to_string();
-        let data = self.backend.get_blob(&cloud_key)?;
+        // HYBRID MODE: Check local cache first, fall back to cloud download
+        // This enables CloudBacked storage mode where SSTs are written locally
+        // AND uploaded to cloud for durability/disaster recovery
+        
+        let data = if path.exists() {
+            // Read from local cache (fast path)
+            std::fs::read(path).map_err(|e| {
+                crate::error::MidgeError::internal(format!(
+                    "Failed to read local SST {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?
+        } else {
+            // Download from cloud (slow path - cache miss or node failure recovery)
+            // Extract filename from path and construct cloud key
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| {
+                    crate::error::MidgeError::internal(format!(
+                        "Invalid SST path: {}",
+                        path.display()
+                    ))
+                })?;
+            
+            // Cloud key format: "sst/<filename>" (relative path, not absolute)
+            let cloud_key = format!("sst/{}", filename);
+            
+            tracing::debug!(
+                "SST not in local cache, downloading from cloud: {}",
+                cloud_key
+            );
+            
+            self.backend.get_blob(&cloud_key)?.to_vec()
+        };
+        
+        // Construct cloud key for reader metadata (used for logging/debugging)
+        let cloud_key = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|f| format!("sst/{}", f));
+        
         let r = if self.paranoid_checksums {
             SstCloudReader::from_bytes_with_key_paranoid(
                 self.backend.clone(),
-                data.to_vec(),
-                Some(cloud_key),
+                data,
+                cloud_key,
                 true,
             )?
         } else {
-            SstCloudReader::from_bytes_with_key(
-                self.backend.clone(),
-                data.to_vec(),
-                Some(cloud_key),
-            )?
+            SstCloudReader::from_bytes_with_key(self.backend.clone(), data, cloud_key)?
         };
         Ok(Box::new(r))
     }
