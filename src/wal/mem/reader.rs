@@ -93,6 +93,7 @@ impl WalReader for WalMemReader {
 }
 
 // Adapter to make WalMemReader implement WalReaderDyn
+#[allow(dead_code)]
 pub(super) struct WalMemReaderDynAdapter(pub(super) WalMemReader);
 
 impl crate::wal::WalReaderDyn for WalMemReaderDynAdapter {

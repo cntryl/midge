@@ -276,6 +276,12 @@ impl Autotuner {
     }
 }
 
+impl Default for Autotuner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

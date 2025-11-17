@@ -598,7 +598,7 @@ impl DataBlockBuilder {
     }
 
     pub fn finish(mut self) -> Bytes {
-        let header_size = 1 + 4 + 4 * self.restarts.len();
+        let _header_size = 1 + 4 + 4 * self.restarts.len();
         // Write entries first
         // self.buffer already has the entries
 
@@ -607,14 +607,13 @@ impl DataBlockBuilder {
         // Version byte placed before restart array for compatibility with disk layout
         self.buffer.put_u8(3); // Version 3 = TLV format
         for restart in &self.restarts {
-            self.buffer.put_u32_le(*restart as u32);
+            self.buffer.put_u32_le(*restart);
         }
         // Restart count must be last (readers expect it at the final 4 bytes)
         self.buffer.put_u32_le(self.restarts.len() as u32);
 
-        let buffer_len = self.buffer.len();
-        let result = self.buffer.freeze();
-        result
+        let _buffer_len = self.buffer.len();
+        self.buffer.freeze()
     }
 
     pub fn is_empty(&self) -> bool {

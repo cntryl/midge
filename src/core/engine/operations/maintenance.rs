@@ -13,7 +13,6 @@
 //! - Consistency guarantees
 
 use crate::api::column_family::ColumnFamilyHandle;
-use crate::common::test_hooks::FlushGatePoint;
 use crate::core::engine::core::MidgeEngine;
 use crate::core::manifest::Manifest;
 use crate::error::{MidgeError, MidgeResult};
@@ -598,7 +597,7 @@ impl MidgeEngine {
             return Ok(0);
         }
 
-        let cloud_mgr = self.cloud_sst_manager.as_ref().unwrap();
+        let cloud_mgr = self.cloud_sst_manager.as_ref().expect("cloud_sst_manager should be Some since we checked is_none");
         let local_manifest = self.manifest_cache.get();
 
         debug!(

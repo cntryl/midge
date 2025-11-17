@@ -70,8 +70,10 @@ pub struct MidgeEngine {
     /// OPTIMIZATION: Avoids SST metadata reads and index deserialization overhead
     pub(super) sparse_index_cache: crate::sst::sparse_index_cache::SparseIndexCache,
     /// Optional autotuner for adaptive parameter adjustment
+    #[allow(dead_code)]
     pub(crate) autotuner: Option<Arc<crate::config::Autotuner>>,
     /// Optional test hooks for deterministic coordination in tests
+    #[allow(dead_code)]
     pub(crate) test_hooks: Option<crate::common::test_hooks::TestHooks>,
     /// Atomic version set for lock-free reads of manifest state
     pub(crate) version_set: crate::core::manifest::AtomicVersionSet,

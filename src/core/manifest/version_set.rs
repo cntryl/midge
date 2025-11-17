@@ -38,7 +38,7 @@ impl VersionSet {
         match edit {
             VersionEdit::AddFile { file } => {
                 // Add file metadata to manifest
-                new_manifest.files.push(file.clone());
+                new_manifest.files.push(*file.clone());
                 new_manifest.ssts.push(file.name.clone());
             }
             VersionEdit::RemoveFiles { names } => {
@@ -62,7 +62,7 @@ impl VersionSet {
 #[derive(Debug, Clone)]
 pub enum VersionEdit {
     /// Add a new SST file to the version
-    AddFile { file: FileMeta },
+    AddFile { file: Box<FileMeta> },
     /// Remove SST files from the version (compaction)
     RemoveFiles { names: Vec<String> },
     /// Update last persisted sequence number
@@ -139,7 +139,7 @@ mod tests {
 
         // Act
         let new_version = version
-            .apply_edit(VersionEdit::AddFile { file })
+            .apply_edit(VersionEdit::AddFile { file: Box::new(file) })
             .unwrap();
 
         // Assert

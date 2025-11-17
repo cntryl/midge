@@ -290,6 +290,7 @@ impl MidgeEngine {
     ///
     /// # Note
     /// This is an internal method used during memtable flush and compaction.
+    #[allow(dead_code)]
     pub(crate) fn resolve_merges(
         &self,
         cf_id: ColumnFamilyId,

@@ -164,12 +164,6 @@ impl MidgeEngine {
             match self.sst_reader_factory.open(&p) {
                 Ok(sst) => {
                     match sst.get_state(key) {
-                        Ok(state) => {
-                        }
-                        Err(e) => {
-                        }
-                    }
-                    match sst.get_state(key) {
                         Ok(crate::sst::KeyState::Value(v, _, expiration)) => {
                             // Check if key is expired
                             if let Some(exp_ts) = expiration {
@@ -186,9 +180,7 @@ impl MidgeEngine {
                         Err(_) => continue,
                     }
                 }
-                Err(e) => {
-                    continue;
-                }
+                Err(_) => continue,
             }
         }
         Ok(None)

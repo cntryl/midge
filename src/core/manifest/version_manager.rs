@@ -4,7 +4,7 @@
 //! All manifest updates and version publishes go through this single actor.
 
 use crossbeam_channel::{bounded, Receiver, Sender};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -78,7 +78,7 @@ impl VersionManager {
     /// Process a single edit: load → apply → save → publish.
     fn process_edit(
         version_set: &AtomicVersionSet,
-        db_path: &PathBuf,
+        db_path: &Path,
         edit: VersionEdit,
     ) -> MidgeResult<()> {
         // Load current version
@@ -180,7 +180,7 @@ mod tests {
 
         // Act
         manager
-            .apply_edit_sync(VersionEdit::AddFile { file })
+            .apply_edit_sync(VersionEdit::AddFile { file: Box::new(file) })
             .unwrap();
 
         // Assert
@@ -216,7 +216,7 @@ mod tests {
                 ..Default::default()
             };
             manager
-                .apply_edit_sync(VersionEdit::AddFile { file })
+                .apply_edit_sync(VersionEdit::AddFile { file: Box::new(file) })
                 .unwrap();
         }
 
@@ -252,7 +252,7 @@ mod tests {
 
         // Act
         manager
-            .apply_edit_async(VersionEdit::AddFile { file })
+            .apply_edit_async(VersionEdit::AddFile { file: Box::new(file) })
             .unwrap();
 
         // Wait for processing

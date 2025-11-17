@@ -88,5 +88,6 @@ pub(super) struct MemInner {
 
 // Global registry mapping directory paths to shared in-memory buffers so
 // MemWalFactory can return writer/reader pairs that operate on the same buffer
+#[allow(dead_code)]
 pub(super) static MEM_REGISTRY: LazyLock<Mutex<HashMap<String, Arc<Mutex<MemInner>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));

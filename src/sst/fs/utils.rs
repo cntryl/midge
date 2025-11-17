@@ -6,6 +6,7 @@
 use crate::error::MidgeResult;
 
 /// Get current time in milliseconds since UNIX epoch for TTL checks
+#[allow(dead_code)]
 #[inline]
 pub(super) fn now_millis() -> u64 {
     crate::common::timestamp::now_millis()

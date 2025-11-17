@@ -237,7 +237,7 @@ impl SstFile {
             .sparse_index
             .as_ref()
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
-        for (i, entry) in sparse_index.entries().iter().enumerate().take(5) {
+        for (_i, _entry) in sparse_index.entries().iter().enumerate().take(5) {
         }
         
         // TEMP DEBUG: print sparse index keys to help diagnose failing tests
@@ -260,7 +260,6 @@ impl SstFile {
             }
             let data_block = self.read_data_block(*block_handle)?;
             return self.search_data_block_state(&data_block.data, key);
-        } else {
         }
 
         Ok(KeyState::Absent)
@@ -683,7 +682,7 @@ impl SstFile {
             raw_key.extend_from_slice(entry.key_delta);
             last_key = raw_key.clone();
 
-            let raw_key_len = raw_key.len(); // Save length before moving
+            let _raw_key_len = raw_key.len(); // Save length before moving
             let (user_key, seq, tomb) = if self.use_internal_keys {
                 if let Some((uk, s, t)) = crate::common::internal_key::decode_internal_key(&raw_key)
                 {
