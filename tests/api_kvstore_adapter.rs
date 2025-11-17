@@ -51,6 +51,8 @@ use std::sync::Arc;
 
 mod common;
 use common::test_temp_dir;
+use std::thread;
+use std::sync::Arc as StdArc;
 
 #[test]
 fn should_support_kvstore_trait_operations() {
@@ -276,6 +278,60 @@ fn should_execute_batch_operations_via_adapter() {
     assert_eq!(
         adapter.get(cf, b"batch2").expect("get"),
         Some(Bytes::from_static(b"value2"))
+    );
+}
+
+#[test]
+fn should_allow_only_one_of_two_concurrent_inserts() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("open");
+    let adapter = StdArc::new(KvStoreAdapter::new(Arc::new(engine)));
+    let cf = adapter.default_column_family();
+
+    // Act
+    let a1 = adapter.clone();
+    let t1 = thread::spawn(move || a1.insert(cf, b"race_key", b"v1"));
+    let a2 = adapter.clone();
+    let t2 = thread::spawn(move || a2.insert(cf, b"race_key", b"v2"));
+    let r1 = t1.join().unwrap();
+    let r2 = t2.join().unwrap();
+
+    // Assert
+    let success_count = [r1.is_ok(), r2.is_ok()].into_iter().filter(|b| *b).count();
+    assert_eq!(success_count, 1, "Exactly one insert should succeed");
+}
+
+#[test]
+fn should_allow_only_one_of_two_concurrent_cas_with_none_expected() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("open");
+    let adapter = StdArc::new(KvStoreAdapter::new(Arc::new(engine)));
+    let cf = adapter.default_column_family();
+
+    // Act
+    let a1 = adapter.clone();
+    let t1 = thread::spawn(move || a1.compare_and_swap(cf, b"race_cas", None, b"v1"));
+    let a2 = adapter.clone();
+    let t2 = thread::spawn(move || a2.compare_and_swap(cf, b"race_cas", None, b"v2"));
+    let r1 = t1.join().unwrap().expect("cas ok");
+    let r2 = t2.join().unwrap().expect("cas ok");
+
+    // Assert
+    assert_ne!(r1, r2, "Exactly one CAS should succeed");
+    let val = adapter.get(cf, b"race_cas").expect("get");
+    assert!(
+        val.as_deref() == Some(&b"v1"[..]) || val.as_deref() == Some(&b"v2"[..]),
+        "Final value must be winner's value"
     );
 }
 

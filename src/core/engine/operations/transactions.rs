@@ -355,40 +355,53 @@ impl MidgeEngine {
             return Err(MidgeError::transaction_conflict("transaction timed out"));
         }
 
-        // Validate Compare-And-Swap operations
+        // Validate Insert and Compare-And-Swap operations at commit time
         let muts = txn.commit()?;
         for mutation in &muts {
-            if let crate::api::mutation::MutationOp::CompareAndSwap = mutation.op {
-                // For CAS validation, we need to check the current value
-                // For now, assume default CF and create a handle
-                let cf_handle = crate::api::column_family::ColumnFamilyHandle::new(
-                    mutation.cf_id,
-                    "default".to_string(), // TODO: Get actual CF name
-                );
-                let expected = mutation.range_end.as_ref();
-                let current = self.get(&cf_handle, &mutation.key)?;
-                match (expected, current) {
-                    (Some(exp), Some(cur)) => {
-                        if exp != &cur {
+            match mutation.op {
+                crate::api::mutation::MutationOp::CompareAndSwap => {
+                    // CAS: expected value is stored in range_end
+                    let cf_handle = crate::api::column_family::ColumnFamilyHandle::new(
+                        mutation.cf_id,
+                        "default".to_string(), // TODO: capture actual CF name if needed
+                    );
+                    let expected = mutation.range_end.as_ref();
+                    let current = self.get(&cf_handle, &mutation.key)?;
+                    match (expected, current) {
+                        (Some(exp), Some(cur)) => {
+                            if exp != &cur {
+                                return Err(MidgeError::transaction_conflict(
+                                    "CAS validation failed: value changed",
+                                ));
+                            }
+                        }
+                        (None, Some(_)) => {
                             return Err(MidgeError::transaction_conflict(
-                                "CAS validation failed: value changed",
+                                "CAS validation failed: expected no value but found one",
                             ));
                         }
-                    }
-                    (None, Some(_)) => {
-                        return Err(MidgeError::transaction_conflict(
-                            "CAS validation failed: expected no value but found one",
-                        ));
-                    }
-                    (Some(_), None) => {
-                        return Err(MidgeError::transaction_conflict(
-                            "CAS validation failed: expected value but found none",
-                        ));
-                    }
-                    (None, None) => {
-                        // Both expect no value - OK
+                        (Some(_), None) => {
+                            return Err(MidgeError::transaction_conflict(
+                                "CAS validation failed: expected value but found none",
+                            ));
+                        }
+                        (None, None) => {}
                     }
                 }
+                crate::api::mutation::MutationOp::Insert => {
+                    // Insert: must fail if key exists at commit time
+                    let cf_handle = crate::api::column_family::ColumnFamilyHandle::new(
+                        mutation.cf_id,
+                        "default".to_string(),
+                    );
+                    let current = self.get(&cf_handle, &mutation.key)?;
+                    if current.is_some() {
+                        return Err(MidgeError::transaction_conflict(
+                            "insert validation failed: key already exists",
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
 

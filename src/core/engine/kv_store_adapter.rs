@@ -169,7 +169,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         key: &[u8],
         value: &[u8],
     ) -> MidgeResult<()> {
-        // True insert semantics: fail if the key already exists.
+        // Enforce insert uniqueness at commit time using a short transaction
         let handle = self
             .engine
             .list_column_families()
@@ -178,10 +178,17 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .ok_or_else(|| {
                 MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
             })?;
-        if self.engine.get(&handle, key)?.is_some() {
-            return Err(MidgeError::internal("insert failed: key already exists"));
-        }
-        self.engine.put(&handle, key, value)
+
+        let mut etxn = self.engine.begin_transaction(&handle)?;
+        // Use CF-specific insert via internal transaction API
+        etxn.txn.insert_cf(
+            cf,
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value),
+            None,
+        )?;
+        self.engine
+            .commit_transaction(etxn, crate::api::WriteOptions::default())
     }
 
     fn compare_and_swap(
@@ -191,7 +198,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         expected: Option<&[u8]>,
         new_value: &[u8],
     ) -> MidgeResult<bool> {
-        // Read current value
+        // Perform CAS via a short transaction and interpret commit outcome
         let handle = self
             .engine
             .list_column_families()
@@ -200,21 +207,27 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .ok_or_else(|| {
                 MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
             })?;
-        let current = self.engine.get(&handle, key)?;
 
-        // Check if current value matches expected
-        let matches = match (current.as_ref(), expected) {
-            (None, None) => true,
-            (Some(c), Some(e)) => c.as_ref() == e,
-            _ => false,
-        };
-
-        // If matches, perform the swap
-        if matches {
-            self.engine.put(&handle, key, new_value)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        let mut etxn = self.engine.begin_transaction(&handle)?;
+        etxn.txn.compare_and_swap_cf(
+            cf,
+            Bytes::copy_from_slice(key),
+            expected.map(Bytes::copy_from_slice),
+            Bytes::copy_from_slice(new_value),
+        )?;
+        match self
+            .engine
+            .commit_transaction(etxn, crate::api::WriteOptions::default())
+        {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                if matches!(e, MidgeError::TransactionConflict { .. }) {
+                    // CAS precondition failed at commit
+                    Ok(false)
+                } else {
+                    Err(e)
+                }
+            }
         }
     }
 
@@ -256,10 +269,13 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         for op in operations {
             match op {
                 crate::api::kv_store::BatchOperation::Insert { key, value } => {
-                    if self.engine.get(&handle, &key)?.is_some() {
-                        return Err(MidgeError::internal("batch insert failed: key already exists"));
-                    }
-                    self.engine.put(&handle, &key, &value)?;
+                    // Enforce at commit time via per-op short transaction
+                    let mut etxn = self.engine.begin_transaction(&handle)?;
+                    etxn
+                        .txn
+                        .insert_cf(cf, Bytes::from(key.clone()), Bytes::from(value.clone()), None)?;
+                    self.engine
+                        .commit_transaction(etxn, crate::api::WriteOptions::default())?;
                 }
                 crate::api::kv_store::BatchOperation::Put { key, value } => {
                     self.engine.put(&handle, &key, &value)?;
@@ -275,16 +291,23 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
                     expected,
                     new_value,
                 } => {
-                    // For batch operations, CAS is not atomic across the batch
-                    // Each CAS is applied individually
-                    let current = self.engine.get(&handle, &key)?;
-                    let matches = match (current.as_ref(), expected.as_ref()) {
-                        (None, None) => true,
-                        (Some(c), Some(e)) => c.as_ref() == e.as_slice(),
-                        _ => false,
-                    };
-                    if matches {
-                        self.engine.put(&handle, &key, &new_value)?;
+                    // Enforce at commit time via per-op short transaction
+                    let mut etxn = self.engine.begin_transaction(&handle)?;
+                    etxn.txn.compare_and_swap_cf(
+                        cf,
+                        Bytes::from(key.clone()),
+                        expected.clone().map(Bytes::from),
+                        Bytes::from(new_value.clone()),
+                    )?;
+                    // Interpret CAS failure as Ok(false) by swallowing conflict
+                    if let Err(e) = self.engine.commit_transaction(
+                        etxn,
+                        crate::api::WriteOptions::default(),
+                    ) {
+                        if !matches!(e, MidgeError::TransactionConflict { .. }) {
+                            return Err(e);
+                        }
+                        // else: CAS failed; continue
                     }
                 }
                 crate::api::kv_store::BatchOperation::Merge { key, value } => {
