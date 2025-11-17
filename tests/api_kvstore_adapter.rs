@@ -1,7 +1,46 @@
-//! KvStore Adapter Integration Tests
-//!
-//! Tests for the KvStoreAdapter trait implementation that allows external
-//! integrations to use Midge through the generic KvStore interface.
+#[test]
+fn should_insert_new_key_given_absent_key() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("open");
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
+    let cf = adapter.default_column_family();
+
+    // Act
+    adapter.insert(cf, b"ins_key", b"ins_val").expect("insert");
+
+    // Assert
+    let got = adapter.get(cf, b"ins_key").expect("get");
+    assert_eq!(got.as_deref(), Some(b"ins_val".as_ref()));
+}
+
+#[test]
+fn should_fail_insert_given_existing_key_via_adapter() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("open");
+    let adapter = KvStoreAdapter::new(Arc::new(engine));
+    let cf = adapter.default_column_family();
+    adapter.put(cf, b"existingkey", b"value1").expect("put");
+
+    // Act
+    let result = adapter.insert(cf, b"existingkey", b"value2");
+
+    // Assert
+    assert!(result.is_err(), "Insert should fail for existing key");
+}
+// KvStore Adapter Integration Tests
+//
+// Tests for the KvStoreAdapter trait implementation that allows external
+// integrations to use Midge through the generic KvStore interface.
 
 use bytes::Bytes;
 use cntryl_midge::api::kv_store::{BatchOperation, KvStore};
@@ -56,29 +95,6 @@ fn should_insert_new_key_via_adapter() {
     assert!(result.is_ok(), "Insert should succeed for new key");
     let value = adapter.get(cf, b"newkey").expect("get");
     assert_eq!(value, Some(Bytes::from_static(b"newvalue")));
-}
-
-#[test]
-fn should_fail_insert_given_existing_key_via_adapter() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let adapter = KvStoreAdapter::new(Arc::new(engine));
-
-    let cf = adapter.default_column_family();
-    adapter.put(cf, b"existingkey", b"value1").expect("put");
-
-    // Act
-    let result = adapter.insert(cf, b"existingkey", b"value2");
-
-    // Assert
-    assert!(result.is_err(), "Insert should fail for existing key");
 }
 
 #[test]

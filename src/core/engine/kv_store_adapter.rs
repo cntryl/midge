@@ -169,8 +169,7 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         key: &[u8],
         value: &[u8],
     ) -> MidgeResult<()> {
-        // KvStore::insert is currently an alias for put
-        // Use insert_with_value() for insert-if-absent semantics
+        // True insert semantics: fail if the key already exists.
         let handle = self
             .engine
             .list_column_families()
@@ -179,6 +178,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
             .ok_or_else(|| {
                 MidgeError::invalid_config(format!("cf id {} not found", cf.as_u32()))
             })?;
+        if self.engine.get(&handle, key)?.is_some() {
+            return Err(MidgeError::internal("insert failed: key already exists"));
+        }
         self.engine.put(&handle, key, value)
     }
 
@@ -254,6 +256,9 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
         for op in operations {
             match op {
                 crate::api::kv_store::BatchOperation::Insert { key, value } => {
+                    if self.engine.get(&handle, &key)?.is_some() {
+                        return Err(MidgeError::internal("batch insert failed: key already exists"));
+                    }
                     self.engine.put(&handle, &key, &value)?;
                 }
                 crate::api::kv_store::BatchOperation::Put { key, value } => {
