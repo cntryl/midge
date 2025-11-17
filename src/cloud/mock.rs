@@ -106,6 +106,19 @@ impl MockCloudBackend {
         self.fail_upload_after.store(usize::MAX, Ordering::SeqCst);
     }
 
+    /// Wait for upload count to reach at least the expected value (with timeout)
+    /// Returns true if condition met, false if timed out
+    pub fn wait_for_uploads(&self, expected: usize, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if self.upload_count() >= expected {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     fn simulate_latency(&self) {
         if let Some(delay) = self.latency {
             std::thread::sleep(delay);

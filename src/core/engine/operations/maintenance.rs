@@ -48,8 +48,6 @@ impl MidgeEngine {
         let cf_id = cf.id();
 
         // Check if the frozen memtable is empty
-        let _guard = self.flush_mutex.lock();
-
         if memtable.is_empty() {
             return Ok(());
         }
