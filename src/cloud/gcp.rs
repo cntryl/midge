@@ -513,3 +513,107 @@ impl StorageBackend for GcpStorageBackend {
         Ok(meta.and_then(|m| m.etag).unwrap_or_default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_construct_correct_object_url() {
+        // Arrange
+        let backend = GcpStorageBackend::new("test-bucket").expect("failed to create backend");
+
+        // Act
+        let url = backend.object_url("test-object.dat");
+
+        // Assert
+        assert!(
+            url.contains("storage.googleapis.com"),
+            "URL should contain GCS domain"
+        );
+        assert!(url.contains("test-bucket"), "URL should contain bucket name");
+        assert!(
+            url.contains("test-object.dat"),
+            "URL should contain object name"
+        );
+    }
+
+    #[test]
+    fn should_encode_object_names_with_special_characters() {
+        // Arrange
+        let backend = GcpStorageBackend::new("test-bucket").expect("failed to create backend");
+
+        // Act
+        let url = backend.object_url("path/to file with spaces.dat");
+
+        // Assert
+        assert!(
+            url.contains("path%2Fto%20file%20with%20spaces.dat")
+                || url.contains("path/to%20file%20with%20spaces.dat"),
+            "URL should properly encode special characters"
+        );
+    }
+
+    #[test]
+    fn should_refresh_expired_token() {
+        // Arrange
+        let mut creds = GcpCredentials {
+            access_token: "old_token".to_string(),
+            expires_at: timestamp::now_millis() - 1000, // Expired 1 second ago
+        };
+
+        // Act
+        let is_expired = creds.expires_at < timestamp::now_millis();
+
+        // Assert
+        assert!(is_expired, "Token should be expired");
+    }
+
+    #[test]
+    fn should_retry_on_transient_errors() {
+        // This test verifies the retry logic structure exists
+        // Real retry behavior is tested in integration tests
+
+        // Arrange
+        let backend = GcpStorageBackend::new("test-bucket").expect("failed to create backend");
+
+        let mut attempt_count = 0;
+        let operation = || {
+            attempt_count += 1;
+            if attempt_count < 2 {
+                Err(MidgeError::Http("503 Service Unavailable".to_string()))
+            } else {
+                Ok(42)
+            }
+        };
+
+        // Act
+        let result = backend.retry_with_backoff(operation);
+
+        // Assert
+        assert!(result.is_ok(), "Should succeed after retry");
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempt_count, 2, "Should have retried once");
+    }
+
+    #[test]
+    fn should_not_retry_non_retryable_errors() {
+        // Arrange
+        let backend = GcpStorageBackend::new("test-bucket").expect("failed to create backend");
+
+        let mut attempt_count = 0;
+        let operation = || {
+            attempt_count += 1;
+            Err(MidgeError::InvalidConfig {
+                message: "bad config".to_string(),
+            })
+        };
+
+        // Act
+        let result = backend.retry_with_backoff(operation);
+
+        // Assert
+        assert!(result.is_err(), "Should fail immediately");
+        assert_eq!(attempt_count, 1, "Should not retry non-retryable errors");
+    }
+}

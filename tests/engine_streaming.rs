@@ -122,3 +122,178 @@ fn should_streaming_scan_apply_tombstones() {
     assert_eq!(results[0].0, Bytes::from_static(b"k2"));
     assert_eq!(results[0].1, Bytes::from_static(b"v2"));
 }
+
+#[test]
+fn should_handle_streaming_scan_on_empty_database() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("open");
+
+    // Act
+    let results = eng.scan_streaming(Query::new()).expect("scan_streaming");
+
+    // Assert - Should return empty vec, not error
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn should_handle_streaming_scan_with_invalid_range() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
+
+    eng.put(&cf, b"key1", b"value1").expect("put");
+    eng.put(&cf, b"key2", b"value2").expect("put");
+
+    // Act - Query with start > end (empty range)
+    let results = eng
+        .scan_streaming(
+            Query::new()
+                .start_key(Bytes::from_static(b"z"))
+                .end_key(Bytes::from_static(b"a")),
+        )
+        .expect("scan_streaming");
+
+    // Assert - Should return empty results
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn should_handle_streaming_scan_after_engine_flush() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 50,
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
+
+    // Add data and flush
+    for i in 0..5u8 {
+        eng.put(&cf, &[b'k', b'0' + i], &[b'v', b'0' + i])
+            .expect("put");
+    }
+    eng.wait_for_flush(std::time::Duration::from_millis(100))
+        .expect("flush");
+
+    // Act - Stream after flush
+    let results = eng.scan_streaming(Query::new()).expect("scan_streaming");
+
+    // Assert - All data should be accessible
+    assert_eq!(results.len(), 5);
+}
+
+#[test]
+fn should_handle_streaming_scan_with_zero_limit() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
+
+    eng.put(&cf, b"key1", b"value1").expect("put");
+    eng.put(&cf, b"key2", b"value2").expect("put");
+
+    // Act - Stream with limit 0
+    let results = eng
+        .scan_streaming(Query::new().limit(0))
+        .expect("scan_streaming");
+
+    // Assert - Should return no results
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn should_handle_concurrent_streaming_scans() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
+
+    for i in 0..20u8 {
+        eng.put(&cf, &[b'k', b'0' + i], &[b'v', b'0' + i])
+            .expect("put");
+    }
+
+    let eng = std::sync::Arc::new(eng);
+    let mut handles = vec![];
+
+    // Act - Launch concurrent streaming scans
+    for _ in 0..4 {
+        let eng_clone = eng.clone();
+        handles.push(std::thread::spawn(move || {
+            eng_clone
+                .scan_streaming(Query::new())
+                .expect("scan_streaming")
+        }));
+    }
+
+    // Assert - All scans should succeed and return same results
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    assert_eq!(results[0].len(), 20);
+    for r in &results[1..] {
+        assert_eq!(r.len(), results[0].len());
+    }
+}
+
+#[test]
+fn should_streaming_scan_handle_large_dataset() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 500, // Small to force multiple flushes
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
+
+    // Insert many keys to span multiple SSTables
+    for i in 0..1000u16 {
+        let key = format!("key_{:06}", i);
+        let value = format!("value_{:06}", i);
+        eng.put(&cf, key.as_bytes(), value.as_bytes())
+            .expect("put");
+    }
+
+    // Wait for flushes
+    eng.wait_for_flush(std::time::Duration::from_millis(500))
+        .expect("flush");
+
+    // Act - Stream large result set
+    let results = eng.scan_streaming(Query::new()).expect("scan_streaming");
+
+    // Assert - Should handle large scan without error
+    assert_eq!(results.len(), 1000);
+}

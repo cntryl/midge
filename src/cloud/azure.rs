@@ -434,3 +434,103 @@ impl StorageBackend for AzureBlobBackend {
         Ok(meta.and_then(|m| m.etag).unwrap_or_default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_construct_correct_blob_url() {
+        // Arrange
+        let backend = AzureBlobBackend::new("testaccount", "testcontainer", "dGVzdGtleQ==")
+            .expect("failed to create backend");
+
+        // Act
+        let url = backend.blob_url("test-blob.dat");
+
+        // Assert
+        assert!(
+            url.contains("testaccount.blob.core.windows.net"),
+            "URL should contain storage account"
+        );
+        assert!(
+            url.contains("testcontainer"),
+            "URL should contain container"
+        );
+        assert!(url.contains("test-blob.dat"), "URL should contain blob name");
+    }
+
+    #[test]
+    fn should_sign_request_with_shared_key() {
+        // Arrange
+        let backend = AzureBlobBackend::new("testaccount", "testcontainer", "dGVzdGtleQ==")
+            .expect("failed to create backend");
+
+        // Act
+        let signature_result = backend.sign_request(
+            "GET",
+            &backend.blob_url("test.dat"),
+            "testaccount",
+            "testcontainer",
+            "test.dat",
+            "",
+            0,
+        );
+
+        // Assert
+        assert!(signature_result.is_ok(), "Signature generation should succeed");
+        let sig = signature_result.unwrap();
+        assert!(!sig.is_empty(), "Signature should not be empty");
+        assert!(sig.starts_with("SharedKey "), "Should use SharedKey auth");
+    }
+
+    #[test]
+    fn should_retry_on_transient_errors() {
+        // This test verifies the retry logic structure exists
+        // Real retry behavior is tested in integration tests
+
+        // Arrange
+        let backend = AzureBlobBackend::new("testaccount", "testcontainer", "dGVzdGtleQ==")
+            .expect("failed to create backend");
+
+        let mut attempt_count = 0;
+        let operation = || {
+            attempt_count += 1;
+            if attempt_count < 2 {
+                Err(MidgeError::Http("503 Service Unavailable".to_string()))
+            } else {
+                Ok(42)
+            }
+        };
+
+        // Act
+        let result = backend.retry_with_backoff(operation);
+
+        // Assert
+        assert!(result.is_ok(), "Should succeed after retry");
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempt_count, 2, "Should have retried once");
+    }
+
+    #[test]
+    fn should_not_retry_non_retryable_errors() {
+        // Arrange
+        let backend = AzureBlobBackend::new("testaccount", "testcontainer", "dGVzdGtleQ==")
+            .expect("failed to create backend");
+
+        let mut attempt_count = 0;
+        let operation = || {
+            attempt_count += 1;
+            Err(MidgeError::InvalidConfig {
+                message: "bad config".to_string(),
+            })
+        };
+
+        // Act
+        let result = backend.retry_with_backoff(operation);
+
+        // Assert
+        assert!(result.is_err(), "Should fail immediately");
+        assert_eq!(attempt_count, 1, "Should not retry non-retryable errors");
+    }
+}
