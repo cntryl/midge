@@ -25,7 +25,7 @@ impl SparseIndex {
     pub fn encode(&self) -> Bytes {
         let mut builder = crate::sst::format::IndexBlockBuilder::new();
         for entry in &self.entries {
-            builder.add_index_entry(&entry.key, entry.block_handle);
+            let _ = builder.add_index_entry(&entry.key, entry.block_handle);
         }
         builder.finish()
     }

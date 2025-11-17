@@ -103,24 +103,6 @@ impl ColumnFamily {
         true
     }
 
-    /// Pop the oldest immutable memtable for flushing.
-    ///
-    /// Returns `None` if the immutable queue is empty.
-    ///
-    /// Called after successfully flushing a memtable to SST and persisting
-    /// the manifest. This removes the flushed memtable from the queue to
-    /// free memory and prevent re-flushing the same data.
-    #[allow(dead_code)]
-    pub(crate) fn pop_immutable(&self) -> Option<MemTable> {
-        let mut immutables = self.immutable_memtables.lock();
-        if let Some(mt) = immutables.pop_front() {
-            self.immutable_count.fetch_sub(1, Ordering::Release);
-            Some(mt)
-        } else {
-            None
-        }
-    }
-
     /// Get the current number of immutable memtables waiting to be flushed.
     pub(crate) fn immutable_count(&self) -> usize {
         self.immutable_count.load(Ordering::Acquire)
