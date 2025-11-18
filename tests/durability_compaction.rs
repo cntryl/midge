@@ -122,9 +122,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,
@@ -133,6 +131,9 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     };
 
     // Act - Write data to create multiple SSTs and trigger compaction
+    // DEBUG: print DB path for diagnostic capture
+    // DEBUG: print DB path for diagnostic capture
+    println!("DB path: {:?}", dir.path());
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
     let compaction_starts_before = hooks.compaction_start_count();
@@ -176,9 +177,7 @@ fn should_fsync_new_ssts_before_updating_manifest() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,

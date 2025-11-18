@@ -344,10 +344,12 @@ pub(crate) fn write_compacted_sst(
         }
     }
 
-    let raw = writer.finish_bytes()?;
+    // Persist SST using writer.finish_to_path so that filesystem-backed
+    // writers (FsDynWriter) can perform atomic rename + fsync operations.
+    // This ensures the SST is fully durable before manifest updates.
     let id = uuid::Uuid::new_v4().to_string();
     let file_path = sst_dir.join(format!("{}.sst", id));
-    std::fs::write(&file_path, &raw)?;
+    writer.finish_to_path(&file_path)?;
 
     // Calculate tombstone counts
     let point_tombstone_count = versions.iter().filter(|v| v.tombstone).count() as u64;

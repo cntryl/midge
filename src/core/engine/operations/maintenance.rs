@@ -16,7 +16,6 @@ use crate::api::column_family::ColumnFamilyHandle;
 use crate::core::engine::core::MidgeEngine;
 use crate::core::manifest::Manifest;
 use crate::error::{MidgeError, MidgeResult};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -553,6 +552,8 @@ impl MidgeEngine {
                 }
             };
         let new_sst_name = new_file_meta.name.clone();
+        // Capture the persisted largest sequence from the SST metadata before we move it
+        let new_sst_largest_seq_opt = new_file_meta.largest_seq;
 
         // Update manifest and version_set atomically via VersionManager
         // IMPORTANT: Add new SST first, THEN remove old ones
@@ -568,9 +569,19 @@ impl MidgeEngine {
         };
         self.version_manager.apply_edit_sync(edit)?;
 
-        // Update sequence number in manifest
+        // Update sequence number in manifest using the compacted SST's largest seq.
+        // We must NOT advance last_persisted_sequence to the in-memory engine sequence
+        // (self.seq) because that may include unflushed writes. Instead, use the
+        // largest sequence actually persisted in the new SST file.
+        let seq_to_set = if let Some(lg) = new_sst_largest_seq_opt {
+            // Ensure monotonicity: never regress the persisted sequence.
+            std::cmp::max(self.version_set.load().manifest.last_persisted_sequence, lg)
+        } else {
+            // Fallback conservatively to the existing persisted sequence
+            self.version_set.load().manifest.last_persisted_sequence
+        };
         edit = crate::core::manifest::VersionEdit::UpdateSequence {
-            sequence: self.seq.load(Ordering::SeqCst),
+            sequence: seq_to_set,
         };
         self.version_manager.apply_edit_sync(edit)?;
 
@@ -591,6 +602,17 @@ impl MidgeEngine {
                     debug!(path = %old_path.display(), "removed old SST");
                 }
             }
+        }
+
+        // Debug: list files in sst dir to inspect side-effects of removal
+        if let Ok(entries) = std::fs::read_dir(&self.sst_dir) {
+            let mut names: Vec<String> = Vec::new();
+            for e in entries.flatten() {
+                if let Some(n) = e.file_name().to_str() {
+                    names.push(n.to_string());
+                }
+            }
+            eprintln!("INSTRUMENT maintenance_sst_dir_contents = {:?}", names);
         }
 
         // Update bloom and sparse index caches for the new SST

@@ -337,8 +337,16 @@ impl CompactionController {
                                 plan.input_files
                             );
 
-                            let combined = crate::core::manifest::VersionEdit::CombinedAddRemove { add: Box::new(meta), remove: plan.input_files.clone() };
+                            let combined = crate::core::manifest::VersionEdit::CombinedAddRemove { add: Box::new(meta.clone()), remove: plan.input_files.clone() };
                             version_manager.apply_edit_sync(combined)?;
+                            // Also update the manifest's persisted sequence to reflect the
+                            // largest sequence present in the newly written compacted SST.
+                            if let Some(lg) = meta.largest_seq {
+                                let current_seq = Manifest::load_with_retry(&db_path, 5, std::time::Duration::from_millis(10)).unwrap_or_default().last_persisted_sequence;
+                                let seq_to_set = std::cmp::max(current_seq, lg);
+                                let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence { sequence: seq_to_set };
+                                version_manager.apply_edit_sync(seq_edit)?;
+                            }
                             let after_combined = Manifest::load_with_retry(&db_path, 5, std::time::Duration::from_millis(10)).unwrap_or_default();
                             eprintln!(
                                 "INSTRUMENT compaction_post_combined manifest_seq={} file_count={} remaining_files={:?}",
@@ -346,6 +354,17 @@ impl CompactionController {
                                 after_combined.files.len(),
                                 after_combined.files.iter().map(|f| f.name.clone()).collect::<Vec<_>>()
                             );
+
+                            // Debug: list files in sst_dir to catch races where files disappear
+                            if let Ok(entries) = std::fs::read_dir(&sst_dir) {
+                                let mut names: Vec<String> = Vec::new();
+                                for e in entries.flatten() {
+                                    if let Some(n) = e.file_name().to_str() {
+                                        names.push(n.to_string());
+                                    }
+                                }
+                                eprintln!("INSTRUMENT sst_dir_contents = {:?}", names);
+                            }
 
                             if let Some(ref hooks) = test_hooks {
                                 hooks.maybe_pause_compaction(
