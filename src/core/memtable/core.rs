@@ -290,7 +290,7 @@ impl MemTable {
         self.bytes.store(0, Ordering::Relaxed);
         // Convert to user-visible entries only (skip tombstones)
         out.into_iter()
-            .filter_map(|(k, v_opt, _seq, _tomb, _exp)| v_opt.map(|v| (k.to_vec(), v.to_vec())))
+            .filter_map(|(k, v_opt, _seq, _tomb, _exp, _op)| v_opt.map(|v| (k.to_vec(), v.to_vec())))
             .collect()
     }
 
@@ -302,8 +302,8 @@ impl MemTable {
         self.bytes.store(0, Ordering::Relaxed);
         // Convert Bytes to Vec<u8> at API boundary and wrap in EntryMeta
         out.into_iter()
-            .map(|(k, v, seq, tomb, exp)| {
-                crate::core::EntryMeta::new(k.to_vec(), v.map(|b| b.to_vec()), seq, tomb, exp)
+            .map(|(k, v, seq, tomb, exp, op)| {
+                crate::core::EntryMeta::new(k.to_vec(), v.map(|b| b.to_vec()), seq, tomb, exp, op)
             })
             .collect()
     }
@@ -316,7 +316,7 @@ impl MemTable {
         self.bytes.store(0, Ordering::Relaxed);
         // Transform keys into internal-key encoding
         let mut out: Vec<crate::core::EntryMeta> = Vec::with_capacity(raws.len());
-        for (k, v_opt, seq, tomb, exp) in raws {
+        for (k, v_opt, seq, tomb, exp, op) in raws {
             let ik = crate::common::internal_key::encode_internal_key(&k, seq, tomb);
             out.push(crate::core::EntryMeta::new(
                 ik,
@@ -324,6 +324,7 @@ impl MemTable {
                 seq,
                 tomb,
                 exp,
+                op,
             ));
         }
         out

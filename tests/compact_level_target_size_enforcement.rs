@@ -58,7 +58,7 @@ fn should_compact_largest_file_given_level_too_large() {
     // Create files of varying sizes
     for i in 0..20 {
         engine
-            .put(&cf, format!("small{}", i).as_bytes(), b"val")
+            .put(&cf, format!("small{:02}", i).as_bytes(), b"val")
             .unwrap();
     }
     engine.flush().unwrap();
@@ -68,7 +68,7 @@ fn should_compact_largest_file_given_level_too_large() {
         engine
             .put(
                 &cf,
-                format!("large{}", i).as_bytes(),
+                format!("large{:03}", i).as_bytes(),
                 b"large_value_content",
             )
             .unwrap();
@@ -81,7 +81,7 @@ fn should_compact_largest_file_given_level_too_large() {
     // Assert - Should succeed and all data accessible
     assert!(result.is_ok());
     for i in 0..200 {
-        let key = format!("large{}", i);
+        let key = format!("large{:03}", i);
         assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
     }
 }
@@ -102,7 +102,7 @@ fn should_respect_level_multiplier_given_cascading_compaction() {
     // Write enough data to potentially trigger cascading
     for batch in 0..10 {
         for i in 0..50 {
-            let key = format!("cascade{}key{}", batch, i);
+            let key = format!("cascade{:02}key{:02}", batch, i);
             engine.put(&cf, key.as_bytes(), b"value").unwrap();
         }
         engine.flush().unwrap();
@@ -122,7 +122,7 @@ fn should_respect_level_multiplier_given_cascading_compaction() {
     assert!(result.is_ok());
     for batch in 0..10 {
         for i in 0..50 {
-            let key = format!("cascade{}key{}", batch, i);
+            let key = format!("cascade{:02}key{:02}", batch, i);
             assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
         }
     }

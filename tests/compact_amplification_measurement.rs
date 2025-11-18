@@ -159,7 +159,7 @@ fn should_track_amplification_over_time_given_workload() {
         let phase_start_compaction_reads = eng.performance_metrics().compaction.total_bytes_read();
 
         for i in 0..20 {
-            let key = format!("key_p{}_i{}", phase, i);
+            let key = format!("key_p{:02}_i{:02}", phase, i);
             eng.put(&cf, key.as_bytes(), b"data").unwrap();
         }
         eng.flush_cf(&cf).expect("flush");
@@ -192,14 +192,14 @@ fn should_track_amplification_over_time_given_workload() {
         total_compactions,
         "Metrics API verified: {} compactions tracked",
     );
-    let result = eng.get(&cf, b"key_p0_i0").expect("get failed");
+    let result = eng.get(&cf, b"key_p00_i00").expect("get failed");
     assert_eq!(
         result.unwrap().as_ref(),
         b"data",
         "First phase data should be present"
     );
 
-    let result = eng.get(&cf, b"key_p4_i19").expect("get failed");
+    let result = eng.get(&cf, b"key_p04_i19").expect("get failed");
     assert_eq!(
         result.unwrap().as_ref(),
         b"data",

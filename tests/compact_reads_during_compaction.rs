@@ -112,8 +112,8 @@ fn should_return_correct_value_given_key_being_compacted() {
         engine
             .put(
                 &cf,
-                format!("key{}", i).as_bytes(),
-                format!("val{}", i).as_bytes(),
+                format!("key{:03}", i).as_bytes(),
+                format!("val{:03}", i).as_bytes(),
             )
             .unwrap();
     }

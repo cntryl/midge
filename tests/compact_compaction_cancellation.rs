@@ -42,7 +42,7 @@ fn should_cleanup_resources_given_cancelled_compaction() {
     let cf = engine.default_column_family();
 
     for i in 0..50 {
-        let key = format!("cancel_k{}", i);
+        let key = format!("cancel_k{:02}", i);
         engine.put(&cf, key.as_bytes(), b"v").unwrap();
     }
     engine.flush().unwrap();
@@ -63,7 +63,7 @@ fn should_not_update_manifest_given_incomplete_compaction_when_shutdown() {
     let cf = engine.default_column_family();
 
     for i in 0..30 {
-        let key = format!("incomplete{}", i);
+        let key = format!("incomplete{:02}", i);
         engine.put(&cf, key.as_bytes(), b"val").unwrap();
     }
     engine.flush().unwrap();

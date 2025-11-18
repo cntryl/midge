@@ -40,7 +40,7 @@ fn should_abort_compaction_given_corruption_detected_when_reading_input() {
     let cf = engine.default_column_family();
 
     for i in 0..50 {
-        let key = format!("key{}", i);
+        let key = format!("key{:02}", i);
         engine.put(&cf, key.as_bytes(), b"value").unwrap();
     }
     engine.flush().unwrap();
@@ -53,14 +53,14 @@ fn should_abort_compaction_given_corruption_detected_when_reading_input() {
         Ok(_) => {
             // Successful compaction
             for i in 0..50 {
-                let key = format!("key{}", i);
+                let key = format!("key{:02}", i);
                 assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
             }
         }
         Err(_) => {
             // Failed gracefully - data should still be accessible
             for i in 0..50 {
-                let key = format!("key{}", i);
+                let key = format!("key{:02}", i);
                 assert!(engine.get(&cf, key.as_bytes()).is_ok());
             }
         }
@@ -91,7 +91,7 @@ fn should_restore_manifest_given_compaction_crash_before_commit() {
     let cf = engine.default_column_family();
 
     for i in 0..30 {
-        let key = format!("k{}", i);
+        let key = format!("k{:02}", i);
         engine.put(&cf, key.as_bytes(), b"v").unwrap();
     }
     engine.flush().unwrap();
@@ -101,7 +101,7 @@ fn should_restore_manifest_given_compaction_crash_before_commit() {
 
     // Assert - Data accessible (manifest is consistent)
     for i in 0..30 {
-        let key = format!("k{}", i);
+        let key = format!("k{:02}", i);
         assert!(engine.get(&cf, key.as_bytes()).unwrap().is_some());
     }
 }
@@ -114,14 +114,14 @@ fn should_preserve_input_files_given_compaction_error_when_aborting() {
     let cf = engine.default_column_family();
 
     for i in 0..40 {
-        let key = format!("preserve{}", i);
+        let key = format!("preserve{:02}", i);
         engine.put(&cf, key.as_bytes(), b"data").unwrap();
     }
     engine.flush().unwrap();
 
     let _initial_keys: Vec<_> = (0..40)
         .filter_map(|i| {
-            let key = format!("preserve{}", i);
+            let key = format!("preserve{:02}", i);
             engine.get(&cf, key.as_bytes()).unwrap()
         })
         .collect();
@@ -131,7 +131,7 @@ fn should_preserve_input_files_given_compaction_error_when_aborting() {
 
     // Assert - Original data preserved regardless
     for i in 0..40 {
-        let key = format!("preserve{}", i);
+        let key = format!("preserve{:02}", i);
         assert!(
             engine.get(&cf, key.as_bytes()).unwrap().is_some(),
             "Key should be preserved"

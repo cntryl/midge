@@ -17,7 +17,7 @@ const MAX_LEVEL: usize = 16;
 /// Entry metadata tuple: (key, value_opt, sequence, is_tombstone)
 pub type SkipListEntry = (Bytes, Option<Bytes>, u64, bool);
 /// Extended entry metadata including optional expiration (Unix millis)
-pub type SkipListEntryWithExp = (Bytes, Option<Bytes>, u64, bool, Option<u64>);
+pub type SkipListEntryWithExp = (Bytes, Option<Bytes>, u64, bool, Option<u64>, OpType);
 
 /// Operation type for a skiplist version
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,10 +660,14 @@ impl SkipList {
         let mut curr = self.head.forward[0].load(AO::Acquire, guard);
 
         while let Some(node) = unsafe { curr.as_ref() } {
-            // Get newest version
-            if let Some(vn) = unsafe { node.versions_head.load(AO::Acquire, guard).as_ref() } {
+            // Get all versions of this key (newest to oldest)
+            // This is needed for merge resolution - we need all merge operands,
+            // not just the most recent one
+            let mut vn_ptr = node.versions_head.load(AO::Acquire, guard);
+            while let Some(vn) = unsafe { vn_ptr.as_ref() } {
                 let is_tomb = vn.val.is_none();
-                out.push((node.key.clone(), vn.val.clone(), vn.seq, is_tomb, vn.exp));
+                out.push((node.key.clone(), vn.val.clone(), vn.seq, is_tomb, vn.exp, vn.op));
+                vn_ptr = vn.next.load(AO::Acquire, guard);
             }
 
             curr = node.forward[0].load(AO::Acquire, guard);

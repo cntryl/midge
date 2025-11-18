@@ -21,6 +21,85 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 impl MidgeEngine {
+    /// Resolve merge operations in a list of entries from a memtable.
+    ///
+    /// Groups entries by key, resolves merges using the registered operator for the CF,
+    /// and returns a deduplicated list with resolved values.
+    /// For non-merge keys, returns only the newest version.
+    fn resolve_merges_in_entries(
+        &self,
+        cf_id: crate::api::column_family::ColumnFamilyId,
+        entries: Vec<crate::core::EntryMeta>,
+    ) -> MidgeResult<Vec<crate::core::EntryMeta>> {
+        use std::collections::HashMap;
+        use bytes::Bytes;
+
+        // Group entries by user key (decode from internal keys)
+        let mut key_groups: HashMap<Vec<u8>, Vec<&crate::core::EntryMeta>> = HashMap::new();
+        for entry in &entries {
+            // Decode internal key to get user key: userkey || seq || kind
+            if let Some((user_key, _seq, _tomb)) = 
+                crate::common::internal_key::decode_internal_key(&entry.key) {
+                key_groups.entry(user_key).or_default().push(entry);
+            }
+        }
+
+        let mut resolved_entries = Vec::new();
+
+        // Process each key group
+        for (user_key, group) in key_groups {
+            // Check if this key has any merge operands
+            let has_merge = group.iter().any(|e| e.op_type == crate::core::skiplist::OpType::Merge);
+
+            if has_merge {
+                // Convert to the format needed by resolve_merges
+                let mut versions = Vec::new();
+                for entry in &group {
+                    let value = entry.value.as_ref().map(|v| Bytes::from(v.clone()));
+                    versions.push((value, entry.expiration_millis, entry.op_type));
+                }
+
+                // Try to resolve merges for this key
+                if let Some(resolved_value) = self.resolve_merges(cf_id, &user_key, versions)? {
+                    // Take the metadata from the newest entry (first in group)
+                    if let Some(newest) = group.first() {
+                        // Encode the resolved value back as an internal key
+                        let resolved_ikey = crate::common::internal_key::encode_internal_key(
+                            &user_key,
+                            newest.sequence,
+                            false, // Not a tombstone
+                        );
+                        let resolved_entry = crate::core::EntryMeta::new(
+                            resolved_ikey,
+                            Some(resolved_value.to_vec()),
+                            newest.sequence,
+                            false, // Resolved value is not a tombstone
+                            newest.expiration_millis,
+                            crate::core::skiplist::OpType::Put, // Resolved merge becomes a Put
+                        );
+                        resolved_entries.push(resolved_entry);
+                    }
+                } else {
+                    // Merge resolution failed, keep all entries as-is
+                    for entry in group {
+                        resolved_entries.push((*entry).clone());
+                    }
+                }
+            } else {
+                // No merge operands - keep only the newest version (first in group)
+                if let Some(newest) = group.first() {
+                    resolved_entries.push((*newest).clone());
+                }
+            }
+        }
+
+        // Sort entries by internal key before returning
+        // SST writer requires entries to be sorted
+        resolved_entries.sort_by(|a, b| a.key.cmp(&b.key));
+
+        Ok(resolved_entries)
+    }
+
     /// Flush MemTable to SST and update manifest. No-op if MemTable is empty or read-only.
     ///
     /// Currently flushes the default column family.
@@ -54,17 +133,17 @@ impl MidgeEngine {
         // Get CF config
         let cf_config = self.cf_set.get_cf_config(cf_id).unwrap_or_default();
 
-        // Resolve merge operations BEFORE drain
-        // Note: We can't use resolve_memtable_merges because it accesses the active memtable
-        // For now, skip merge resolution for frozen memtables
-        // TODO: Implement merge resolution for detached memtables
-
         // Drain the frozen memtable
         let entries = memtable.drain_with_meta_internal();
         let range_tombstones = memtable.drain_range_tombstones();
         if entries.is_empty() {
             return Ok(());
         }
+
+        // Resolve merge operations BEFORE writing to SST
+        // Group entries by key and resolve merges using the registered operator
+        let resolved_entries = self.resolve_merges_in_entries(cf_id, entries)?;
+        let entries = resolved_entries;
 
         // Flush to SST
         // NOTE: flush_memtable_to_sst() already updates the manifest with the new SST file

@@ -53,6 +53,8 @@ pub struct EntryMeta {
     pub is_tombstone: bool,
     /// Optional TTL expiration timestamp in milliseconds since epoch
     pub expiration_millis: Option<u64>,
+    /// Operation type (Put, Merge, Delete)
+    pub op_type: crate::core::skiplist::OpType,
 }
 
 impl EntryMeta {
@@ -63,6 +65,7 @@ impl EntryMeta {
         sequence: u64,
         is_tombstone: bool,
         expiration_millis: Option<u64>,
+        op_type: crate::core::skiplist::OpType,
     ) -> Self {
         Self {
             key,
@@ -70,17 +73,26 @@ impl EntryMeta {
             sequence,
             is_tombstone,
             expiration_millis,
+            op_type,
         }
     }
 
     /// Convert from legacy tuple format
     pub fn from_tuple(tuple: (Vec<u8>, Option<Vec<u8>>, u64, bool, Option<u64>)) -> Self {
+        // Infer OpType from is_tombstone and value
+        let op_type = if tuple.3 {
+            crate::core::skiplist::OpType::Delete
+        } else {
+            crate::core::skiplist::OpType::Put // Default to Put for legacy data
+        };
+        
         Self {
             key: tuple.0,
             value: tuple.1,
             sequence: tuple.2,
             is_tombstone: tuple.3,
             expiration_millis: tuple.4,
+            op_type,
         }
     }
 
