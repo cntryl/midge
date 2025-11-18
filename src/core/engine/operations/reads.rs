@@ -281,12 +281,20 @@ impl MidgeEngine {
 
         // Add SST sources for this CF
         let version = self.version_set.load();
-        let cf_files: Vec<_> = version
+        let mut cf_files: Vec<_> = version
             .manifest
             .files
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())
             .collect();
+        
+        // Sort SST files by largest_seq (newest first) so that newer versions
+        // are added to merge iterator first (get lower source_id)
+        cf_files.sort_by(|a, b| {
+            let a_seq = a.largest_seq.unwrap_or(0);
+            let b_seq = b.largest_seq.unwrap_or(0);
+            b_seq.cmp(&a_seq) // Descending order (newest first)
+        });
 
         for file in &cf_files {
             let p = self.sst_dir.join(&file.name);
@@ -300,17 +308,17 @@ impl MidgeEngine {
                         .map(|(k, st)| {
                             use crate::sst::KeyState;
                             match st {
-                                KeyState::Value(v, _, expiration) => {
+                                KeyState::Value(v, seq, expiration) => {
                                     // Check if key is expired
                                     if let Some(exp_ts) = expiration {
                                         if exp_ts <= now_millis {
                                             // Key is expired, treat as tombstone
-                                            return (k, None, 0);
+                                            return (k, None, seq);
                                         }
                                     }
-                                    (k, Some(v), 0)
+                                    (k, Some(v), seq)
                                 }
-                                KeyState::Tombstone(_) => (k, None, 0),
+                                KeyState::Tombstone(seq) => (k, None, seq),
                                 KeyState::Absent => (k, None, 0),
                             }
                         })

@@ -37,6 +37,9 @@ impl Ord for HeapEntry {
         };
 
         match ord {
+            // When keys are equal, prioritize lower source_id (newer data).
+            // Since BinaryHeap is a max-heap and pops the max element,
+            // we need other.source_id.cmp(&self.source_id) to make lower IDs pop first.
             Ordering::Equal => other.source_id.cmp(&self.source_id),
             o => o,
         }

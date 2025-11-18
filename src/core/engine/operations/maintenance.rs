@@ -47,7 +47,11 @@ impl MidgeEngine {
         let mut resolved_entries = Vec::new();
 
         // Process each key group
-        for (user_key, group) in key_groups {
+        for (user_key, mut group) in key_groups {
+            // Sort entries by sequence number (descending) so newest entries come first
+            // This is critical for merge resolution which expects versions ordered newest→oldest
+            group.sort_by(|a, b| b.sequence.cmp(&a.sequence));
+            
             // Check if this key has any merge operands
             let has_merge = group.iter().any(|e| e.op_type == crate::core::skiplist::OpType::Merge);
 
@@ -107,7 +111,16 @@ impl MidgeEngine {
     /// Currently flushes the default column family.
     /// Use `flush_cf()` to flush a specific column family.
     pub fn flush(&self) -> MidgeResult<()> {
-        self.flush_cf(&self.default_column_family())
+        // Flush all column families to ensure all pending writes are persisted
+        let cf_ids: Vec<u32> = self.cf_set.cfs.iter().map(|entry| *entry.key()).collect();
+        
+        for cf_id in cf_ids {
+            if let Some(cf_entry) = self.cf_set.cfs.get(&cf_id) {
+                let cf_handle = cf_entry.value().handle();
+                self.flush_cf(&cf_handle)?;
+            }
+        }
+        Ok(())
     }
 
     /// Flush a frozen (detached) memtable to SST.
@@ -167,14 +180,9 @@ impl MidgeEngine {
         file_meta.size_bytes = std::fs::metadata(&file_path)
             .map(|md| md.len())
             .unwrap_or(0);
-        // Update manifest with the new SST file
-        let mut m =
+        // Load manifest to check for sublevel assignment
+        let m =
             Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
-
-        // Update last_persisted_sequence to the largest sequence in the flushed data
-        if let Some(largest_seq) = file_meta.largest_seq {
-            m.last_persisted_sequence = largest_seq;
-        }
 
         // Assign sublevel based on overlap with existing L0 files
         file_meta.sublevel = if let (Some(ref sk), Some(ref lk)) =
@@ -186,12 +194,25 @@ impl MidgeEngine {
         };
 
         // Create a version edit to add the new SST file
-        let edit = crate::core::manifest::VersionEdit::AddFile {
-            file: Box::new(file_meta),
+        let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
+            file: Box::new(file_meta.clone()),
         };
         
-        // Apply edit through VersionManager to atomically update manifest AND version_set
-        self.version_manager.apply_edit_sync(edit)?;
+        // Apply AddFile edit first
+        self.version_manager.apply_edit_sync(add_file_edit)?;
+        
+        // Update last_persisted_sequence if we have flushed data with a sequence number
+        // This prevents WAL replay from re-applying these operations on restart
+        if let Some(largest_seq) = file_meta.largest_seq {
+            let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
+                sequence: largest_seq,
+            };
+            self.version_manager.apply_edit_sync(seq_edit)?;
+        }
+        
+        // Update manifest cache to reflect the new SST file
+        let updated_manifest = self.version_set.load().manifest.clone();
+        self.update_manifest_cache(updated_manifest);
         
         Ok(())
     }
@@ -351,8 +372,16 @@ impl MidgeEngine {
         std::fs::create_dir_all(dst_dir)?;
         let dst_sst = dst_dir.join("sst");
         std::fs::create_dir_all(&dst_sst)?;
+        
         // Link or copy each SST into checkpoint/sst
-        for name in &m.ssts {
+        // Use manifest.files which includes CF-specific files, falling back to legacy ssts list
+        let sst_names: Vec<String> = if !m.files.is_empty() {
+            m.files.iter().map(|f| f.name.clone()).collect()
+        } else {
+            m.ssts.clone()
+        };
+        
+        for name in &sst_names {
             let src = self.sst_dir.join(name);
             let dst = dst_sst.join(name);
             if !src.exists() {

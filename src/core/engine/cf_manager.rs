@@ -7,6 +7,7 @@
 //! - Merge resolution logic
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use bytes::Bytes;
 
@@ -59,7 +60,9 @@ impl MidgeEngine {
             .cf_set
             .create_cf(cf_id, name.to_string(), config.clone())?;
 
-        let mut manifest = Manifest::load(&self.db_path).unwrap_or_default();
+        // Load current version from version_set to preserve all existing state
+        let current_version = self.version_set.load();
+        let mut manifest = current_version.manifest.clone();
         manifest.add_cf(cf_id, name.to_string(), Some(config));
 
         // Persist manifest. If persistence fails, roll back the in-memory CF registration
@@ -71,6 +74,10 @@ impl MidgeEngine {
             return Err(e);
         }
 
+        // Update version_set with new manifest (critical for subsequent flush operations)
+        let new_version = crate::core::manifest::VersionSet { manifest: manifest.clone() };
+        self.version_set.store(Arc::new(new_version));
+        
         // Update cached manifest after successful save
         self.update_manifest_cache(manifest);
 
