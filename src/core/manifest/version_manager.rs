@@ -17,6 +17,8 @@ use crate::error::{MidgeError, MidgeResult};
 pub struct VersionManager {
     tx: Mutex<Option<Sender<VersionEditRequest>>>,
     handle: Mutex<Option<JoinHandle<()>>>,
+    #[allow(dead_code)] // Used by actor thread
+    test_hooks: Option<crate::common::test_hooks::TestHooks>,
 }
 
 /// Internal request type for the version manager actor.
@@ -31,19 +33,26 @@ impl VersionManager {
     /// # Arguments
     /// * `version_set` - Atomic version set to update
     /// * `db_path` - Database path for manifest storage
-    pub fn new(version_set: AtomicVersionSet, db_path: PathBuf) -> Self {
+    /// * `test_hooks` - Optional test hooks for fault injection
+    pub fn new(
+        version_set: AtomicVersionSet,
+        db_path: PathBuf,
+        test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    ) -> Self {
         let (tx, rx) = bounded(100); // Backpressure after 100 pending edits
 
+        let test_hooks_for_actor = test_hooks.clone();
         let handle = thread::Builder::new()
             .name("version-manager".to_string())
             .spawn(move || {
-                Self::run_actor(version_set, db_path, rx);
+                Self::run_actor(version_set, db_path, rx, test_hooks_for_actor);
             })
             .expect("Failed to spawn version manager thread");
 
         Self {
             tx: Mutex::new(Some(tx)),
             handle: Mutex::new(Some(handle)),
+            test_hooks,
         }
     }
 
@@ -52,11 +61,12 @@ impl VersionManager {
         version_set: AtomicVersionSet,
         db_path: PathBuf,
         rx: Receiver<VersionEditRequest>,
+        test_hooks: Option<crate::common::test_hooks::TestHooks>,
     ) {
         tracing::info!("Version manager actor started");
 
         while let Ok(request) = rx.recv() {
-            let result = Self::process_edit(&version_set, &db_path, request.edit);
+            let result = Self::process_edit(&version_set, &db_path, request.edit, test_hooks.as_ref());
 
             // Send response if caller is waiting
             if let Some(response_tx) = request.response_tx {
@@ -74,6 +84,7 @@ impl VersionManager {
         version_set: &AtomicVersionSet,
         db_path: &Path,
         edit: VersionEdit,
+        test_hooks: Option<&crate::common::test_hooks::TestHooks>,
     ) -> MidgeResult<()> {
         // Load current version
         let current = version_set.load();
@@ -81,8 +92,8 @@ impl VersionManager {
         // Apply edit to create new version
         let new_version = current.apply_edit(edit)?;
 
-        // Save manifest atomically
-        new_version.manifest.save_atomic(db_path)?;
+        // Save manifest atomically with test hooks
+        new_version.manifest.save_atomic_with_hooks(db_path, test_hooks)?;
 
         // Publish new version atomically
         version_set.store(Arc::new(new_version));
@@ -163,7 +174,7 @@ mod tests {
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(version_set.clone(), db_path);
+        let manager = VersionManager::new(version_set.clone(), db_path, None);
 
         let file = FileMeta {
             name: "test.sst".to_string(),
@@ -197,7 +208,7 @@ mod tests {
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(version_set.clone(), db_path);
+        let manager = VersionManager::new(version_set.clone(), db_path, None);
 
         // Act - add multiple files
         for i in 0..5 {
@@ -231,7 +242,7 @@ mod tests {
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(version_set.clone(), db_path);
+        let manager = VersionManager::new(version_set.clone(), db_path, None);
 
         let file = FileMeta {
             name: "test.sst".to_string(),

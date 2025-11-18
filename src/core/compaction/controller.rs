@@ -506,6 +506,7 @@ mod tests {
                 crate::core::manifest::VersionSet::new(manifest),
             ),
             db_path.clone(),
+            None, // No test hooks in this test
         ));
 
         let config = CompactionWorkerConfig {
