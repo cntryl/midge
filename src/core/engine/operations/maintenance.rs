@@ -94,8 +94,10 @@ impl MidgeEngine {
         }
 
         // Sort entries by internal key before returning
-        // SST writer requires entries to be sorted
-        resolved_entries.sort_by(|a, b| a.key.cmp(&b.key));
+        // SST writer requires entries to be sorted using proper internal key comparison
+        resolved_entries.sort_by(|a, b| {
+            crate::common::internal_key::compare_internal_keys(&a.key, &b.key)
+        });
 
         Ok(resolved_entries)
     }

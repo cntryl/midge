@@ -57,7 +57,7 @@ fn should_remove_expired_keys_given_ttl_exceeded_when_compacting() {
 
     // Write keys with very short TTL (1 second)
     for i in 0..20 {
-        let key = format!("ttl_key{}", i);
+        let key = format!("ttl_key{:02}", i);
         engine
             .put_with_ttl(&cf, key.as_bytes(), b"expire_me", 1)
             .unwrap();
@@ -72,7 +72,7 @@ fn should_remove_expired_keys_given_ttl_exceeded_when_compacting() {
 
     // Assert - Expired keys should not be readable
     for i in 0..20 {
-        let key = format!("ttl_key{}", i);
+        let key = format!("ttl_key{:02}", i);
         let result = engine.get(&cf, key.as_bytes()).unwrap();
         // Keys may or may not be removed depending on compaction filter implementation
         // At minimum, reads should not crash
@@ -89,7 +89,7 @@ fn should_preserve_non_expired_keys_given_ttl_not_reached() {
 
     // Write keys with long TTL (1 hour)
     for i in 0..20 {
-        let key = format!("long_ttl{}", i);
+        let key = format!("long_ttl{:02}", i);
         engine
             .put_with_ttl(&cf, key.as_bytes(), b"keep_me", 3600)
             .unwrap();
@@ -101,7 +101,7 @@ fn should_preserve_non_expired_keys_given_ttl_not_reached() {
 
     // Assert - Non-expired keys should be preserved
     for i in 0..20 {
-        let key = format!("long_ttl{}", i);
+        let key = format!("long_ttl{:02}", i);
         let result = engine.get(&cf, key.as_bytes()).unwrap();
         assert!(result.is_some(), "Non-expired key should be preserved");
         assert_eq!(result.unwrap().as_ref(), b"keep_me");
@@ -139,7 +139,7 @@ fn should_update_metrics_given_ttl_filtered_keys() {
     // Write keys with short TTL
     for i in 0..30 {
         engine
-            .put_with_ttl(&cf, format!("metric_k{}", i).as_bytes(), b"v", 1)
+            .put_with_ttl(&cf, format!("metric_k{:02}", i).as_bytes(), b"v", 1)
             .unwrap();
     }
     engine.flush().unwrap();

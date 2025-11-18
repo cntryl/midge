@@ -243,12 +243,12 @@ impl MidgeEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, IsolationLevel};
     /// # use std::time::Duration;
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let cf = engine.default_column_family();
     /// // Transaction with 10MB memory limit
-    /// let txn = engine.begin_transaction_with_options(&cf, None, 10 * 1024 * 1024).unwrap();
+    /// let txn = engine.begin_transaction_with_options(&cf, None, 10 * 1024 * 1024, IsolationLevel::Snapshot).unwrap();
     /// ```
     pub fn begin_transaction_with_options(
         &self,

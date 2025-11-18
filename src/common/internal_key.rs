@@ -166,6 +166,62 @@ pub fn compare_internal_keys_cf(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     a[a.len() - 1].cmp(&b[b.len() - 1])
 }
 
+/// Compare two legacy internal keys (without CF ID).
+/// Returns Ordering for use in sorting/comparison.
+///
+/// Order: user_key (lex) -> seq (desc) -> type (asc)
+#[inline(always)]
+pub fn compare_internal_keys(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    // Fast path: length check
+    if a.len() < 9 || b.len() < 9 {
+        return a.cmp(b); // Fallback to lexicographic
+    }
+
+    // Compare user key portion (everything except last 9 bytes)
+    let a_user_end = a.len() - 9;
+    let b_user_end = b.len() - 9;
+    let a_user = &a[..a_user_end];
+    let b_user = &b[..b_user_end];
+
+    match a_user.cmp(b_user) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // Same user key, compare sequence (DESCENDING - newer first)
+    // Sequences are already inverted in encoding, so regular comparison gives descending order
+    let a_seq = u64::from_be_bytes([
+        a[a_user_end],
+        a[a_user_end + 1],
+        a[a_user_end + 2],
+        a[a_user_end + 3],
+        a[a_user_end + 4],
+        a[a_user_end + 5],
+        a[a_user_end + 6],
+        a[a_user_end + 7],
+    ]);
+    let b_seq = u64::from_be_bytes([
+        b[b_user_end],
+        b[b_user_end + 1],
+        b[b_user_end + 2],
+        b[b_user_end + 3],
+        b[b_user_end + 4],
+        b[b_user_end + 5],
+        b[b_user_end + 6],
+        b[b_user_end + 7],
+    ]);
+
+    match a_seq.cmp(&b_seq) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // Same sequence, compare entry type (ASCENDING)
+    a[a.len() - 1].cmp(&b[b.len() - 1])
+}
+
 /// Legacy internal key layout (no CF ID): userkey || seq (u64 big-endian) || kind (u8)
 /// kind: 0 = value, 1 = point tombstone, 2 = range tombstone start
 ///

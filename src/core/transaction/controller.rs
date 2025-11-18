@@ -89,10 +89,9 @@ impl TransactionController {
             read_versions: read_versions.clone(),
         };
 
-        // Detect conflicts with other active transactions (write-write and range overlaps)
-        if Self::has_active_conflict(&txn_info, &inner.active, txn_id) {
-            return Err("Write-write conflict with active transaction".into());
-        }
+        // OCC: Detect conflicts only with committed transactions
+        // Do NOT check active transactions - that would be pessimistic locking
+        // In OCC, transactions can overlap during execution and conflicts are detected only at commit time
 
         if Self::has_commit_conflict(&txn_info, &inner.committed, txn_id) {
             return Err("Write-write conflict with committed transaction".into());
@@ -229,6 +228,7 @@ impl TransactionController {
             .any(|(&_seq, (cid, ws, _))| *cid != id && !txn.write_set.is_disjoint(ws))
     }
 
+    #[allow(dead_code)] // May be useful for pessimistic locking in the future
     fn has_active_conflict(txn: &TxnInfo, active: &HashMap<u64, TxnInfo>, id: u64) -> bool {
         // Check for direct key write conflicts
         for (&other_id, other) in active {
@@ -450,14 +450,15 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn should_detect_write_write_conflict_between_active_transactions() {
-        // Arrange
+    fn should_allow_concurrent_writes_to_same_key_in_active_transactions() {
+        // Arrange: In OCC, active transactions can write to the same key
+        // Conflicts are detected only at commit time against committed transactions
         let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("x"));
         let mut ws2 = HashSet::new();
         ws2.insert(k("x"));
-        tm.begin(1, 1, ws1, HashSet::new(), HashSet::new(), HashMap::new())
+        tm.begin(1, 1, ws1.clone(), HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
         tm.begin(
             2,
@@ -469,19 +470,30 @@ mod tests {
         )
         .unwrap();
 
-        // Act
-        let result = tm.try_commit(
-            2,
+        // Act: First transaction commits successfully
+        let result1 = tm.try_commit(
+            1,
             5,
+            &ws1,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert!(result1.is_ok(), "First commit should succeed");
+
+        // Second transaction should fail because txn1 is now committed
+        let result2 = tm.try_commit(
+            2,
+            6,
             &ws2,
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
         );
 
-        // Assert
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Write-write conflict"));
+        // Assert: Second transaction detects conflict with committed txn1
+        assert!(result2.is_err());
+        assert!(result2.unwrap_err().contains("Write-write conflict"));
     }
 
     #[test]
