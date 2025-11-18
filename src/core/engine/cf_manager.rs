@@ -75,9 +75,11 @@ impl MidgeEngine {
         }
 
         // Update version_set with new manifest (critical for subsequent flush operations)
-        let new_version = crate::core::manifest::VersionSet { manifest: manifest.clone() };
+        let new_version = crate::core::manifest::VersionSet {
+            manifest: manifest.clone(),
+        };
         self.version_set.store(Arc::new(new_version));
-        
+
         // Update cached manifest after successful save
         self.update_manifest_cache(manifest);
 

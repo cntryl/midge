@@ -3,7 +3,9 @@ fn should_insert_new_key_given_absent_key() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
@@ -23,7 +25,9 @@ fn should_fail_insert_given_existing_key_via_adapter() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
@@ -51,8 +55,8 @@ use std::sync::Arc;
 
 mod common;
 use common::test_temp_dir;
-use std::thread;
 use std::sync::Arc as StdArc;
+use std::thread;
 
 #[test]
 fn should_support_kvstore_trait_operations() {
@@ -286,7 +290,9 @@ fn should_allow_only_one_of_two_concurrent_inserts() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
@@ -311,7 +317,9 @@ fn should_allow_only_one_of_two_concurrent_cas_with_none_expected() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open");
@@ -420,4 +428,3 @@ fn should_rollback_transaction_via_adapter() {
     let result = adapter.get(cf, b"rollback_key").expect("get");
     assert_eq!(result, None);
 }
-

@@ -325,12 +325,27 @@ impl CompactionController {
                                 );
                             }
 
-                            // Apply AddFile and RemoveFiles in a single atomic edit
-                            let combined_edit = crate::core::manifest::VersionEdit::Combined {
-                                add_file: Box::new(meta),
-                                remove_files: plan.input_files.clone(),
-                            };
-                            version_manager.apply_edit_sync(combined_edit)?;
+                            // Instrument atomic compaction edit (CombinedAddRemove)
+                            let manifest_before = Manifest::load_with_retry(&db_path, 5, std::time::Duration::from_millis(10)).unwrap_or_default();
+                            eprintln!(
+                                "INSTRUMENT compaction_pre_combined file={} level_target={} input_count={} manifest_seq={} before_file_count={} remove_candidates={:?}",
+                                meta.name,
+                                plan.target_level,
+                                plan.input_files.len(),
+                                manifest_before.last_persisted_sequence,
+                                manifest_before.files.len(),
+                                plan.input_files
+                            );
+
+                            let combined = crate::core::manifest::VersionEdit::CombinedAddRemove { add: Box::new(meta), remove: plan.input_files.clone() };
+                            version_manager.apply_edit_sync(combined)?;
+                            let after_combined = Manifest::load_with_retry(&db_path, 5, std::time::Duration::from_millis(10)).unwrap_or_default();
+                            eprintln!(
+                                "INSTRUMENT compaction_post_combined manifest_seq={} file_count={} remaining_files={:?}",
+                                after_combined.last_persisted_sequence,
+                                after_combined.files.len(),
+                                after_combined.files.iter().map(|f| f.name.clone()).collect::<Vec<_>>()
+                            );
 
                             if let Some(ref hooks) = test_hooks {
                                 hooks.maybe_pause_compaction(
@@ -498,9 +513,9 @@ mod tests {
         let _ = manifest.save_atomic(&db_path);
 
         let version_manager = Arc::new(crate::core::manifest::VersionManager::new(
-            crate::core::manifest::AtomicVersionSet::new(
-                crate::core::manifest::VersionSet::new(manifest),
-            ),
+            crate::core::manifest::AtomicVersionSet::new(crate::core::manifest::VersionSet::new(
+                manifest,
+            )),
             db_path.clone(),
             None, // No test hooks in this test
         ));

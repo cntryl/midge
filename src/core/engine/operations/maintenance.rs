@@ -31,15 +31,16 @@ impl MidgeEngine {
         cf_id: crate::api::column_family::ColumnFamilyId,
         entries: Vec<crate::core::EntryMeta>,
     ) -> MidgeResult<Vec<crate::core::EntryMeta>> {
-        use std::collections::HashMap;
         use bytes::Bytes;
+        use std::collections::HashMap;
 
         // Group entries by user key (decode from internal keys)
         let mut key_groups: HashMap<Vec<u8>, Vec<&crate::core::EntryMeta>> = HashMap::new();
         for entry in &entries {
             // Decode internal key to get user key: userkey || seq || kind
-            if let Some((user_key, _seq, _tomb)) = 
-                crate::common::internal_key::decode_internal_key(&entry.key) {
+            if let Some((user_key, _seq, _tomb)) =
+                crate::common::internal_key::decode_internal_key(&entry.key)
+            {
                 key_groups.entry(user_key).or_default().push(entry);
             }
         }
@@ -51,9 +52,11 @@ impl MidgeEngine {
             // Sort entries by sequence number (descending) so newest entries come first
             // This is critical for merge resolution which expects versions ordered newest→oldest
             group.sort_by(|a, b| b.sequence.cmp(&a.sequence));
-            
+
             // Check if this key has any merge operands
-            let has_merge = group.iter().any(|e| e.op_type == crate::core::skiplist::OpType::Merge);
+            let has_merge = group
+                .iter()
+                .any(|e| e.op_type == crate::core::skiplist::OpType::Merge);
 
             if has_merge {
                 // Convert to the format needed by resolve_merges
@@ -99,9 +102,8 @@ impl MidgeEngine {
 
         // Sort entries by internal key before returning
         // SST writer requires entries to be sorted using proper internal key comparison
-        resolved_entries.sort_by(|a, b| {
-            crate::common::internal_key::compare_internal_keys(&a.key, &b.key)
-        });
+        resolved_entries
+            .sort_by(|a, b| crate::common::internal_key::compare_internal_keys(&a.key, &b.key));
 
         Ok(resolved_entries)
     }
@@ -113,7 +115,7 @@ impl MidgeEngine {
     pub fn flush(&self) -> MidgeResult<()> {
         // Flush all column families to ensure all pending writes are persisted
         let cf_ids: Vec<u32> = self.cf_set.cfs.iter().map(|entry| *entry.key()).collect();
-        
+
         for cf_id in cf_ids {
             if let Some(cf_entry) = self.cf_set.cfs.get(&cf_id) {
                 let cf_handle = cf_entry.value().handle();
@@ -181,8 +183,7 @@ impl MidgeEngine {
             .map(|md| md.len())
             .unwrap_or(0);
         // Load manifest to check for sublevel assignment
-        let m =
-            Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
+        let m = Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
 
         // Assign sublevel based on overlap with existing L0 files
         file_meta.sublevel = if let (Some(ref sk), Some(ref lk)) =
@@ -193,26 +194,54 @@ impl MidgeEngine {
             0
         };
 
-        // Update sequence first, then add file
-        // Both edits will be applied to the same base manifest state,
-        // ensuring they're logically grouped even though they're separate operations
+        // SAFETY ORDERING CHANGE:
+        // Persist the new SST (AddFile) BEFORE advancing last_persisted_sequence.
+        // Rationale: If we advance the sequence first and crash before AddFile is durable,
+        // WAL replay will skip the latest writes whose data is not yet referenced by any SST.
+        // By adding the file first, a crash between AddFile and UpdateSequence leaves
+        // sequence conservative (older) and replay simply re-applies recent WAL entries (safe).
+        // This mirrors the background flush behavior where sequence advancement occurs in the same
+        // atomic manifest write that adds the file.
+
+        // 1. AddFile edit (makes SST discoverable)
+        let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
+            file: Box::new(file_meta.clone()),
+        };
+        tracing::debug!(target: "midge.instrument", action="flush_pre_add_file", current_manifest_seq = self.version_set.load().manifest.last_persisted_sequence, file = %file_meta.name);
+        eprintln!(
+            "INSTRUMENT flush_pre_add_file manifest_seq={} file={}",
+            self.version_set.load().manifest.last_persisted_sequence,
+            file_meta.name
+        );
+        self.version_manager.apply_edit_sync(add_file_edit)?;
+        tracing::debug!(target: "midge.instrument", action="flush_post_add_file", file_count = self.version_set.load().manifest.files.len(), manifest_seq = self.version_set.load().manifest.last_persisted_sequence, file = %file_meta.name);
+        eprintln!(
+            "INSTRUMENT flush_post_add_file manifest_seq={} file_count={} file={}",
+            self.version_set.load().manifest.last_persisted_sequence,
+            self.version_set.load().manifest.files.len(),
+            file_meta.name
+        );
+
+        // 2. UpdateSequence edit (now safe to advance durable sequence)
         if let Some(largest_seq) = file_meta.largest_seq {
+            tracing::debug!(target: "midge.instrument", action="flush_pre_update_sequence", largest_seq, current_manifest_seq = self.version_set.load().manifest.last_persisted_sequence, new_file = %file_meta.name);
+            eprintln!("INSTRUMENT flush_pre_update_sequence largest_seq={} current_manifest_seq={} file={}", largest_seq, self.version_set.load().manifest.last_persisted_sequence, file_meta.name);
             let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
                 sequence: largest_seq,
             };
             self.version_manager.apply_edit_sync(seq_edit)?;
+            tracing::debug!(target: "midge.instrument", action="flush_post_update_sequence", manifest_seq = self.version_set.load().manifest.last_persisted_sequence, file = %file_meta.name);
+            eprintln!(
+                "INSTRUMENT flush_post_update_sequence manifest_seq={} file={}",
+                self.version_set.load().manifest.last_persisted_sequence,
+                file_meta.name
+            );
         }
-        
-        // Create a version edit to add the new SST file
-        let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
-            file: Box::new(file_meta.clone()),
-        };
-        self.version_manager.apply_edit_sync(add_file_edit)?;
-        
+
         // Update manifest cache to reflect the new SST file
         let updated_manifest = self.version_set.load().manifest.clone();
         self.update_manifest_cache(updated_manifest);
-        
+
         Ok(())
     }
 
@@ -371,7 +400,7 @@ impl MidgeEngine {
         std::fs::create_dir_all(dst_dir)?;
         let dst_sst = dst_dir.join("sst");
         std::fs::create_dir_all(&dst_sst)?;
-        
+
         // Link or copy each SST into checkpoint/sst
         // Use manifest.files which includes CF-specific files, falling back to legacy ssts list
         let sst_names: Vec<String> = if !m.files.is_empty() {
@@ -379,7 +408,7 @@ impl MidgeEngine {
         } else {
             m.ssts.clone()
         };
-        
+
         for name in &sst_names {
             let src = self.sst_dir.join(name);
             let dst = dst_sst.join(name);
@@ -515,13 +544,14 @@ impl MidgeEngine {
         // compact_all operates on the default CF
         let cf_id = crate::api::column_family::DEFAULT_CF_ID.as_u32();
 
-        let (_path, new_file_meta) = match crate::core::compaction::executor::write_compacted_sst(&ctx, &versions, cf_id)? {
-            Some(res) => res,
-            None => {
-                // Nothing to write; keep manifest unchanged
-                return Ok(());
-            }
-        };
+        let (_path, new_file_meta) =
+            match crate::core::compaction::executor::write_compacted_sst(&ctx, &versions, cf_id)? {
+                Some(res) => res,
+                None => {
+                    // Nothing to write; keep manifest unchanged
+                    return Ok(());
+                }
+            };
         let new_sst_name = new_file_meta.name.clone();
 
         // Update manifest and version_set atomically via VersionManager

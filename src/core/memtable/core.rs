@@ -290,7 +290,9 @@ impl MemTable {
         self.bytes.store(0, Ordering::Relaxed);
         // Convert to user-visible entries only (skip tombstones)
         out.into_iter()
-            .filter_map(|(k, v_opt, _seq, _tomb, _exp, _op)| v_opt.map(|v| (k.to_vec(), v.to_vec())))
+            .filter_map(|(k, v_opt, _seq, _tomb, _exp, _op)| {
+                v_opt.map(|v| (k.to_vec(), v.to_vec()))
+            })
             .collect()
     }
 

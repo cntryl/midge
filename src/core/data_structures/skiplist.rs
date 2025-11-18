@@ -666,7 +666,14 @@ impl SkipList {
             let mut vn_ptr = node.versions_head.load(AO::Acquire, guard);
             while let Some(vn) = unsafe { vn_ptr.as_ref() } {
                 let is_tomb = vn.val.is_none();
-                out.push((node.key.clone(), vn.val.clone(), vn.seq, is_tomb, vn.exp, vn.op));
+                out.push((
+                    node.key.clone(),
+                    vn.val.clone(),
+                    vn.seq,
+                    is_tomb,
+                    vn.exp,
+                    vn.op,
+                ));
                 vn_ptr = vn.next.load(AO::Acquire, guard);
             }
 

@@ -96,20 +96,23 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
 
     // Wait for background uploads with timeout (observability)
     let upload_succeeded = mock_backend.wait_for_uploads(1, Duration::from_millis(500));
-    println!("Uploads: {} succeeded, upload flag: {}", mock_backend.upload_count(), upload_succeeded);
+    println!(
+        "Uploads: {} succeeded, upload flag: {}",
+        mock_backend.upload_count(),
+        upload_succeeded
+    );
 
     // Assert - data should be available despite upload failures
     for i in 0..10 {
         let key = format!("key{:02}", i);
-        let result = eng
-            .get(&cf, key.as_bytes())
-            .expect("get");
+        let result = eng.get(&cf, key.as_bytes()).expect("get");
         if result.is_none() {
             println!("MISSING: {} not found!", key);
         }
         assert!(
             result.is_some(),
-            "Data should be available from local cache despite upload failures: key={}", key
+            "Data should be available from local cache despite upload failures: key={}",
+            key
         );
     }
     println!("All keys verified successfully");

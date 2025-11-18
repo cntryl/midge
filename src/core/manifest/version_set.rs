@@ -47,13 +47,11 @@ impl VersionSet {
             VersionEdit::UpdateSequence { sequence } => {
                 new_manifest.last_persisted_sequence = sequence;
             }
-            VersionEdit::Combined { add_file, remove_files } => {
-                // Add new file
-                new_manifest.files.push(*add_file.clone());
-                new_manifest.ssts.push(add_file.name.clone());
-                // Remove old files
-                new_manifest.files.retain(|f| !remove_files.contains(&f.name));
-                new_manifest.ssts.retain(|s| !remove_files.contains(s));
+            VersionEdit::CombinedAddRemove { add, remove } => {
+                new_manifest.files.push(*add.clone());
+                new_manifest.ssts.push(add.name.clone());
+                new_manifest.files.retain(|f| !remove.contains(&f.name));
+                new_manifest.ssts.retain(|s| !remove.contains(s));
             }
         }
 
@@ -73,8 +71,9 @@ pub enum VersionEdit {
     RemoveFiles { names: Vec<String> },
     /// Update last persisted sequence number
     UpdateSequence { sequence: u64 },
-        /// Atomically add a new SST and remove old ones
-        Combined { add_file: Box<FileMeta>, remove_files: Vec<String> },
+    /// Atomic combination of adding one file and removing a set of files.
+    /// Prevents interleaving flush AddFile between compaction AddFile/RemoveFiles.
+    CombinedAddRemove { add: Box<FileMeta>, remove: Vec<String> },
 }
 
 /// Wrapper for atomic version set operations.

@@ -85,7 +85,7 @@ impl EntryMeta {
         } else {
             crate::core::skiplist::OpType::Put // Default to Put for legacy data
         };
-        
+
         Self {
             key: tuple.0,
             value: tuple.1,

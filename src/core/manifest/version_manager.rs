@@ -66,7 +66,8 @@ impl VersionManager {
         tracing::info!("Version manager actor started");
 
         while let Ok(request) = rx.recv() {
-            let result = Self::process_edit(&version_set, &db_path, request.edit, test_hooks.as_ref());
+            let result =
+                Self::process_edit(&version_set, &db_path, request.edit, test_hooks.as_ref());
 
             // Send response if caller is waiting
             if let Some(response_tx) = request.response_tx {
@@ -93,7 +94,9 @@ impl VersionManager {
         let new_version = current.apply_edit(edit)?;
 
         // Save manifest atomically with test hooks
-        new_version.manifest.save_atomic_with_hooks(db_path, test_hooks)?;
+        new_version
+            .manifest
+            .save_atomic_with_hooks(db_path, test_hooks)?;
 
         // Publish new version atomically
         version_set.store(Arc::new(new_version));

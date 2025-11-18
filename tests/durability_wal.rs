@@ -31,7 +31,8 @@ fn should_recover_without_loss_given_crash_after_wal_append_before_fsync() {
 fn should_lose_unfsynced_data_given_crash_before_fsync() {
     // Arrange
     let dir = test_temp_dir();
-    let hooks = TestHooks::new().with_wal_behavior(cntryl_midge::test_hooks::WalBehavior::TruncateAfterWrite);
+    let hooks = TestHooks::new()
+        .with_wal_behavior(cntryl_midge::test_hooks::WalBehavior::TruncateAfterWrite);
 
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
@@ -50,7 +51,10 @@ fn should_lose_unfsynced_data_given_crash_before_fsync() {
         eng.put(&cf, b"unfsynced_key", b"unfsynced_value")
             .expect("put");
         // Verify WAL append was recorded
-        assert!(hooks.wal_append_count() > 0, "WAL append should have been called");
+        assert!(
+            hooks.wal_append_count() > 0,
+            "WAL append should have been called"
+        );
     } // Engine drops here (with torn write simulation)
 
     // Assert - Reopen with hooks disabled to allow normal recovery
@@ -70,7 +74,11 @@ fn should_lose_unfsynced_data_given_crash_before_fsync() {
     // With TolerateCorruptedTail and torn write, the truncated record should be discarded
     // Recovery should succeed gracefully regardless of whether data was lost
     if let Some(value) = result {
-        assert_eq!(value.as_ref(), b"unfsynced_value", "If present, data should be correct");
+        assert_eq!(
+            value.as_ref(),
+            b"unfsynced_value",
+            "If present, data should be correct"
+        );
     }
     // Test passes whether data is present or not - verifies graceful recovery
 }

@@ -245,11 +245,13 @@ impl SstImageBuilder {
                 offset: current_offset,
                 size: encoded_block.len() as u64,
             };
-            
+
             // Extract user key from internal key if using internal key format
             // Sparse index should store user keys only for correct comparison
             if self.state.config.use_internal_keys {
-                if let Some((user_key, _, _)) = crate::common::internal_key::decode_internal_key(last_key) {
+                if let Some((user_key, _, _)) =
+                    crate::common::internal_key::decode_internal_key(last_key)
+                {
                     self.state.index.add_index_entry(&user_key, handle)?;
                 } else {
                     self.state.index.add_index_entry(last_key, handle)?;

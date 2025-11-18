@@ -158,7 +158,7 @@ impl MidgeEngine {
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())
             .collect();
-        
+
         for file in cf_files.iter().rev() {
             let p = self.sst_dir.join(&file.name);
             // CloudSstReaderFactory will download from cloud if not in local cache
@@ -287,7 +287,7 @@ impl MidgeEngine {
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())
             .collect();
-        
+
         // Sort SST files by largest_seq (newest first) so that newer versions
         // are added to merge iterator first (get lower source_id)
         cf_files.sort_by(|a, b| {

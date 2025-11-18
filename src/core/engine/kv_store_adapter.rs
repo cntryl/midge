@@ -271,9 +271,12 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
                 crate::api::kv_store::BatchOperation::Insert { key, value } => {
                     // Enforce at commit time via per-op short transaction
                     let mut etxn = self.engine.begin_transaction(&handle)?;
-                    etxn
-                        .txn
-                        .insert_cf(cf, Bytes::from(key.clone()), Bytes::from(value.clone()), None)?;
+                    etxn.txn.insert_cf(
+                        cf,
+                        Bytes::from(key.clone()),
+                        Bytes::from(value.clone()),
+                        None,
+                    )?;
                     self.engine
                         .commit_transaction(etxn, crate::api::WriteOptions::default())?;
                 }
@@ -300,10 +303,10 @@ impl crate::api::kv_store::KvStore for KvStoreAdapter {
                         Bytes::from(new_value.clone()),
                     )?;
                     // Interpret CAS failure as Ok(false) by swallowing conflict
-                    if let Err(e) = self.engine.commit_transaction(
-                        etxn,
-                        crate::api::WriteOptions::default(),
-                    ) {
+                    if let Err(e) = self
+                        .engine
+                        .commit_transaction(etxn, crate::api::WriteOptions::default())
+                    {
                         if !matches!(e, MidgeError::TransactionConflict { .. }) {
                             return Err(e);
                         }

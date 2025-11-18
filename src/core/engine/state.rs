@@ -263,8 +263,11 @@ pub fn open_with_factories(
     let current_manifest_for_version = manifest_cache.get();
     let version_set = crate::core::manifest::VersionSet::new(current_manifest_for_version);
     let version_set_atomic = crate::core::manifest::AtomicVersionSet::new(version_set);
-    let version_manager =
-        Arc::new(crate::core::manifest::VersionManager::new(version_set_atomic.clone(), db_path.clone(), opts.test_hooks.clone()));
+    let version_manager = Arc::new(crate::core::manifest::VersionManager::new(
+        version_set_atomic.clone(),
+        db_path.clone(),
+        opts.test_hooks.clone(),
+    ));
 
     // Delegate flush and compaction coordinator setup to factory module
     let flush_coordinator = crate::core::engine::factory::setup_flush_coordinator(

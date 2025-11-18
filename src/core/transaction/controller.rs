@@ -458,8 +458,15 @@ mod tests {
         ws1.insert(k("x"));
         let mut ws2 = HashSet::new();
         ws2.insert(k("x"));
-        tm.begin(1, 1, ws1.clone(), HashSet::new(), HashSet::new(), HashMap::new())
-            .unwrap();
+        tm.begin(
+            1,
+            1,
+            ws1.clone(),
+            HashSet::new(),
+            HashSet::new(),
+            HashMap::new(),
+        )
+        .unwrap();
         tm.begin(
             2,
             1,

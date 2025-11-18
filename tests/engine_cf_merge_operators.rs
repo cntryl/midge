@@ -318,9 +318,10 @@ fn should_persist_and_recover_merge_resolutions_across_restart() {
     };
     let engine = MidgeEngine::open(opts).expect("reopen");
     // Column families should persist across restarts - if not found, create it
-    let cf = engine.get_column_family("persist_cf").or_else(|_| {
-        engine.create_column_family("persist_cf", ColumnFamilyConfig::default())
-    }).expect("get or create cf");
+    let cf = engine
+        .get_column_family("persist_cf")
+        .or_else(|_| engine.create_column_family("persist_cf", ColumnFamilyConfig::default()))
+        .expect("get or create cf");
 
     // Re-register merge operator (operators are not persisted, must be registered on startup)
     engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator));

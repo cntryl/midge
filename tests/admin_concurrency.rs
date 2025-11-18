@@ -22,7 +22,9 @@ fn should_preserve_data_when_backup_runs_during_compaction_and_writes() {
     let writer = thread::spawn(move || {
         for i in 0..30 {
             let k = format!("write{:03}", i);
-            writer_eng.put(&writer_cf, k.as_bytes(), b"writeval").unwrap();
+            writer_eng
+                .put(&writer_cf, k.as_bytes(), b"writeval")
+                .unwrap();
         }
     });
 
@@ -30,7 +32,10 @@ fn should_preserve_data_when_backup_runs_during_compaction_and_writes() {
 
     // Assert - Verify seed data is still readable
     let result = eng.get(&cf, b"seed015").expect("get");
-    assert!(result.is_some(), "seed data should persist during concurrent writes");
+    assert!(
+        result.is_some(),
+        "seed data should persist during concurrent writes"
+    );
 }
 
 #[test]
