@@ -325,16 +325,12 @@ impl CompactionController {
                                 );
                             }
 
-                            // IMPORTANT: Add new SST first, THEN remove old ones.
-                            let add_edit = crate::core::manifest::VersionEdit::AddFile {
-                                file: Box::new(meta),
+                            // Apply AddFile and RemoveFiles in a single atomic edit
+                            let combined_edit = crate::core::manifest::VersionEdit::Combined {
+                                add_file: Box::new(meta),
+                                remove_files: plan.input_files.clone(),
                             };
-                            version_manager.apply_edit_sync(add_edit)?;
-
-                            let remove_edit = crate::core::manifest::VersionEdit::RemoveFiles {
-                                names: plan.input_files.clone(),
-                            };
-                            version_manager.apply_edit_sync(remove_edit)?;
+                            version_manager.apply_edit_sync(combined_edit)?;
 
                             if let Some(ref hooks) = test_hooks {
                                 hooks.maybe_pause_compaction(

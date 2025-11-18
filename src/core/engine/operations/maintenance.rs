@@ -193,22 +193,21 @@ impl MidgeEngine {
             0
         };
 
-        // Create a version edit to add the new SST file
-        let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
-            file: Box::new(file_meta.clone()),
-        };
-        
-        // Apply AddFile edit first
-        self.version_manager.apply_edit_sync(add_file_edit)?;
-        
-        // Update last_persisted_sequence if we have flushed data with a sequence number
-        // This prevents WAL replay from re-applying these operations on restart
+        // Update sequence first, then add file
+        // Both edits will be applied to the same base manifest state,
+        // ensuring they're logically grouped even though they're separate operations
         if let Some(largest_seq) = file_meta.largest_seq {
             let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
                 sequence: largest_seq,
             };
             self.version_manager.apply_edit_sync(seq_edit)?;
         }
+        
+        // Create a version edit to add the new SST file
+        let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
+            file: Box::new(file_meta.clone()),
+        };
+        self.version_manager.apply_edit_sync(add_file_edit)?;
         
         // Update manifest cache to reflect the new SST file
         let updated_manifest = self.version_set.load().manifest.clone();

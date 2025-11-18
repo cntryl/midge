@@ -37,17 +37,23 @@ impl VersionSet {
 
         match edit {
             VersionEdit::AddFile { file } => {
-                // Add file metadata to manifest
                 new_manifest.files.push(*file.clone());
                 new_manifest.ssts.push(file.name.clone());
             }
             VersionEdit::RemoveFiles { names } => {
-                // Remove files from manifest
                 new_manifest.files.retain(|f| !names.contains(&f.name));
                 new_manifest.ssts.retain(|s| !names.contains(s));
             }
             VersionEdit::UpdateSequence { sequence } => {
                 new_manifest.last_persisted_sequence = sequence;
+            }
+            VersionEdit::Combined { add_file, remove_files } => {
+                // Add new file
+                new_manifest.files.push(*add_file.clone());
+                new_manifest.ssts.push(add_file.name.clone());
+                // Remove old files
+                new_manifest.files.retain(|f| !remove_files.contains(&f.name));
+                new_manifest.ssts.retain(|s| !remove_files.contains(s));
             }
         }
 
@@ -67,6 +73,8 @@ pub enum VersionEdit {
     RemoveFiles { names: Vec<String> },
     /// Update last persisted sequence number
     UpdateSequence { sequence: u64 },
+        /// Atomically add a new SST and remove old ones
+        Combined { add_file: Box<FileMeta>, remove_files: Vec<String> },
 }
 
 /// Wrapper for atomic version set operations.
