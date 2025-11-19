@@ -291,9 +291,24 @@ mod tests {
         let mut cf_map = HashMap::new();
         cf_map.insert(0, &memtable);
         let records = vec![
-            create_test_record(1, WalOpKind::Put, b"key1".to_vec(), Some(b"value1".to_vec())),
-            create_test_record(5, WalOpKind::Put, b"key2".to_vec(), Some(b"value2".to_vec())),
-            create_test_record(10, WalOpKind::Put, b"key3".to_vec(), Some(b"value3".to_vec())),
+            create_test_record(
+                1,
+                WalOpKind::Put,
+                b"key1".to_vec(),
+                Some(b"value1".to_vec()),
+            ),
+            create_test_record(
+                5,
+                WalOpKind::Put,
+                b"key2".to_vec(),
+                Some(b"value2".to_vec()),
+            ),
+            create_test_record(
+                10,
+                WalOpKind::Put,
+                b"key3".to_vec(),
+                Some(b"value3".to_vec()),
+            ),
         ];
 
         // Act

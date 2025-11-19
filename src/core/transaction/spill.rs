@@ -321,3 +321,267 @@ impl Drop for SpillManager {
         self.cleanup_spill_files();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_create_spill_manager_successfully() {
+        // Arrange & Act
+        let manager = SpillManager::new(100);
+
+        // Assert
+        assert_eq!(manager.txn_id, 100);
+        assert!(!manager.has_spill_files());
+        assert_eq!(manager.spill_file_count(), 0);
+    }
+
+    #[test]
+    fn should_spill_put_mutations_to_disk() {
+        // Arrange
+        let mut manager = SpillManager::new(1);
+        let mutations = vec![Mutation::put(
+            Bytes::from("key1"),
+            Bytes::from("value1"),
+            None,
+        )];
+
+        // Act
+        let result = manager.spill_to_disk(&mutations);
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(manager.has_spill_files());
+        assert_eq!(manager.spill_file_count(), 1);
+    }
+
+    #[test]
+    fn should_read_spilled_put_mutations() {
+        // Arrange
+        let mut manager = SpillManager::new(2);
+        let mutations = vec![
+            Mutation::put(Bytes::from("key1"), Bytes::from("value1"), None),
+            Mutation::put(Bytes::from("key2"), Bytes::from("value2"), None),
+        ];
+        manager.spill_to_disk(&mutations).unwrap();
+
+        // Act
+        let result = manager.read_spill_files();
+
+        // Assert
+        assert!(result.is_ok());
+        let read_mutations = result.unwrap();
+        assert_eq!(read_mutations.len(), 2);
+        assert_eq!(read_mutations[0].key, Bytes::from("key1"));
+        assert_eq!(read_mutations[0].value, Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_handle_delete_mutations_in_spill() {
+        // Arrange
+        let mut manager = SpillManager::new(3);
+        let mutations = vec![Mutation::delete(Bytes::from("key1"))];
+        manager.spill_to_disk(&mutations).unwrap();
+
+        // Act
+        let result = manager.read_spill_files();
+
+        // Assert
+        assert!(result.is_ok());
+        let read_mutations = result.unwrap();
+        assert_eq!(read_mutations.len(), 1);
+        assert_eq!(read_mutations[0].key, Bytes::from("key1"));
+        assert!(matches!(read_mutations[0].op, MutationOp::Delete));
+    }
+
+    #[test]
+    fn should_handle_delete_range_mutations_in_spill() {
+        // Arrange
+        let mut manager = SpillManager::new(4);
+        let mutations = vec![Mutation::delete_range(
+            Bytes::from("key1"),
+            Bytes::from("key9"),
+        )];
+        manager.spill_to_disk(&mutations).unwrap();
+
+        // Act
+        let result = manager.read_spill_files();
+
+        // Assert
+        assert!(result.is_ok());
+        let read_mutations = result.unwrap();
+        assert_eq!(read_mutations.len(), 1);
+        assert!(matches!(read_mutations[0].op, MutationOp::DeleteRange));
+        assert_eq!(read_mutations[0].range_end, Some(Bytes::from("key9")));
+    }
+
+    #[test]
+    fn should_handle_merge_mutations_in_spill() {
+        // Arrange
+        let mut manager = SpillManager::new(5);
+        let mutations = vec![Mutation::merge(Bytes::from("counter"), Bytes::from("1"))];
+        manager.spill_to_disk(&mutations).unwrap();
+
+        // Act
+        let result = manager.read_spill_files();
+
+        // Assert
+        assert!(result.is_ok());
+        let read_mutations = result.unwrap();
+        assert_eq!(read_mutations.len(), 1);
+        assert!(matches!(read_mutations[0].op, MutationOp::Merge));
+    }
+
+    #[test]
+    fn should_preserve_mutation_order_across_spills() {
+        // Arrange
+        let mut manager = SpillManager::new(6);
+        let batch1 = vec![
+            Mutation::put(Bytes::from("a"), Bytes::from("1"), None),
+            Mutation::put(Bytes::from("b"), Bytes::from("2"), None),
+        ];
+        let batch2 = vec![
+            Mutation::put(Bytes::from("c"), Bytes::from("3"), None),
+            Mutation::put(Bytes::from("d"), Bytes::from("4"), None),
+        ];
+        manager.spill_to_disk(&batch1).unwrap();
+        manager.spill_to_disk(&batch2).unwrap();
+
+        // Act
+        let result = manager.read_spill_files();
+
+        // Assert
+        assert!(result.is_ok());
+        let mutations = result.unwrap();
+        assert_eq!(mutations.len(), 4);
+        assert_eq!(mutations[0].key, Bytes::from("a"));
+        assert_eq!(mutations[1].key, Bytes::from("b"));
+        assert_eq!(mutations[2].key, Bytes::from("c"));
+        assert_eq!(mutations[3].key, Bytes::from("d"));
+    }
+
+    #[test]
+    fn should_cleanup_spill_files_successfully() {
+        // Arrange
+        let mut manager = SpillManager::new(7);
+        let mutations = vec![Mutation::put(
+            Bytes::from("key1"),
+            Bytes::from("value1"),
+            None,
+        )];
+        manager.spill_to_disk(&mutations).unwrap();
+        let spill_paths = manager.spill_file_paths().to_vec();
+        assert!(spill_paths[0].exists());
+
+        // Act
+        manager.cleanup_spill_files();
+
+        // Assert
+        assert!(!manager.has_spill_files());
+        assert!(!spill_paths[0].exists());
+    }
+
+    #[test]
+    fn should_return_ok_when_spilling_empty_mutations() {
+        // Arrange
+        let mut manager = SpillManager::new(8);
+        let mutations: Vec<Mutation> = vec![];
+
+        // Act
+        let result = manager.spill_to_disk(&mutations);
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(!manager.has_spill_files());
+    }
+
+    #[test]
+    fn should_handle_large_values_in_spill() {
+        // Arrange
+        let mut manager = SpillManager::new(9);
+        let large_value = vec![0u8; 100_000];
+        let mutations = vec![Mutation::put(
+            Bytes::from("large_key"),
+            Bytes::from(large_value.clone()),
+            None,
+        )];
+        manager.spill_to_disk(&mutations).unwrap();
+
+        // Act
+        let result = manager.read_spill_files();
+
+        // Assert
+        assert!(result.is_ok());
+        let read_mutations = result.unwrap();
+        assert_eq!(read_mutations[0].value.as_ref().unwrap().len(), 100_000);
+    }
+
+    #[test]
+    fn should_cleanup_spill_files_on_drop() {
+        // Arrange
+        let mut manager = SpillManager::new(10);
+        let mutations = vec![Mutation::put(
+            Bytes::from("key1"),
+            Bytes::from("value1"),
+            None,
+        )];
+        manager.spill_to_disk(&mutations).unwrap();
+        let spill_paths = manager.spill_file_paths().to_vec();
+        assert!(spill_paths[0].exists());
+
+        // Act
+        drop(manager);
+
+        // Assert
+        assert!(!spill_paths[0].exists());
+    }
+
+    #[test]
+    fn should_handle_mixed_mutation_types_in_spill() {
+        // Arrange
+        let mut manager = SpillManager::new(11);
+        let mutations = vec![
+            Mutation::put(Bytes::from("k1"), Bytes::from("v1"), None),
+            Mutation::delete(Bytes::from("k2")),
+            Mutation::merge(Bytes::from("k3"), Bytes::from("v3")),
+            Mutation::delete_range(Bytes::from("k4"), Bytes::from("k9")),
+        ];
+        manager.spill_to_disk(&mutations).unwrap();
+
+        // Act
+        let result = manager.read_spill_files();
+
+        // Assert
+        assert!(result.is_ok());
+        let read_mutations = result.unwrap();
+        assert_eq!(read_mutations.len(), 4);
+        assert!(matches!(read_mutations[0].op, MutationOp::Put));
+        assert!(matches!(read_mutations[1].op, MutationOp::Delete));
+        assert!(matches!(read_mutations[2].op, MutationOp::Merge));
+        assert!(matches!(read_mutations[3].op, MutationOp::DeleteRange));
+    }
+
+    #[test]
+    fn should_handle_mutations_with_different_column_families() {
+        // Arrange
+        let mut manager = SpillManager::new(12);
+        let cf1 = ColumnFamilyId::new(0);
+        let cf2 = ColumnFamilyId::new(1);
+        let mutations = vec![
+            Mutation::put_cf(cf1, Bytes::from("key1"), Bytes::from("value1"), None),
+            Mutation::put_cf(cf2, Bytes::from("key2"), Bytes::from("value2"), None),
+        ];
+        manager.spill_to_disk(&mutations).unwrap();
+
+        // Act
+        let result = manager.read_spill_files();
+
+        // Assert
+        assert!(result.is_ok());
+        let read_mutations = result.unwrap();
+        assert_eq!(read_mutations.len(), 2);
+        assert_eq!(read_mutations[0].cf_id, cf1);
+        assert_eq!(read_mutations[1].cf_id, cf2);
+    }
+}

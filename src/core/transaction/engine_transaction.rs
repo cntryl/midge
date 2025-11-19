@@ -210,3 +210,235 @@ impl KvTransaction for EngineTransaction {
             .merge(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::engine::MidgeEngine;
+    use crate::core::transaction::core::Transaction;
+    use std::sync::Arc;
+
+    fn create_test_engine() -> Arc<MidgeEngine> {
+        let opts = crate::MidgeOptions {
+            storage_mode: crate::StorageMode::Memory,
+            enable_compaction: false,
+            ..Default::default()
+        };
+        Arc::new(MidgeEngine::open(opts).expect("Failed to create test engine"))
+    }
+
+    #[test]
+    fn should_create_engine_transaction_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let txn = Transaction::new(1, 0);
+
+        // Act
+        let engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Assert
+        assert_eq!(engine_txn.txn_id(), 1);
+    }
+
+    #[test]
+    fn should_insert_key_value_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let txn = Transaction::new(1, 0);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.insert(b"key1", b"value1");
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_put_key_value_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let txn = Transaction::new(2, 0);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.put(b"key1", b"value1");
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_get_value_from_engine() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"existing_key", b"existing_value").unwrap();
+        let txn = Transaction::new(3, u64::MAX);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.get(b"existing_key");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(Bytes::from("existing_value")));
+    }
+
+    #[test]
+    fn should_return_none_for_nonexistent_key() {
+        // Arrange
+        let engine = create_test_engine();
+        let txn = Transaction::new(4, 0);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.get(b"nonexistent");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn should_delete_key_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let txn = Transaction::new(5, 0);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.delete(b"key1");
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_scan_range_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        engine.put(&cf, b"key2", b"value2").unwrap();
+        engine.put(&cf, b"key3", b"value3").unwrap();
+        let txn = Transaction::new(6, u64::MAX);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.scan(b"key1", b"key3");
+
+        // Assert
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(results.len() >= 2);
+    }
+
+    #[test]
+    fn should_include_uncommitted_writes_in_scan() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        let txn = Transaction::new(7, u64::MAX);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+        engine_txn.put(b"key2", b"value2").unwrap();
+
+        // Act
+        let result = engine_txn.scan(b"key1", b"key9");
+
+        // Assert
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        let has_key2 = results.iter().any(|(k, _)| k == &Bytes::from("key2"));
+        assert!(has_key2);
+    }
+
+    #[test]
+    fn should_exclude_deleted_keys_from_scan() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        engine.put(&cf, b"key2", b"value2").unwrap();
+        let txn = Transaction::new(8, u64::MAX);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+        engine_txn.delete(b"key1").unwrap();
+
+        // Act
+        let result = engine_txn.scan(b"key1", b"key9");
+
+        // Assert
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        let has_key1 = results.iter().any(|(k, _)| k == &Bytes::from("key1"));
+        assert!(!has_key1);
+    }
+
+    #[test]
+    fn should_delete_range_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let txn = Transaction::new(9, 0);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.delete_range(b"key1", b"key9");
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_merge_key_value_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let txn = Transaction::new(10, 0);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.merge(b"counter", b"1");
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_compare_and_swap_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let txn = Transaction::new(11, 0);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+
+        // Act
+        let result = engine_txn.compare_and_swap(b"key1", Some(b"old"), b"new");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[test]
+    fn should_sort_scan_results_with_uncommitted_writes() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        engine.put(&cf, b"key3", b"value3").unwrap();
+        let txn = Transaction::new(12, u64::MAX);
+        let mut engine_txn = EngineTransaction::new(txn, &engine);
+        engine_txn.put(b"key2", b"value2").unwrap();
+
+        // Act
+        let result = engine_txn.scan(b"key1", b"key9");
+
+        // Assert
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        if results.len() >= 2 {
+            for i in 0..results.len() - 1 {
+                assert!(results[i].0 < results[i + 1].0, "Results should be sorted");
+            }
+        }
+    }
+}

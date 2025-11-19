@@ -647,8 +647,7 @@ mod tests {
         ];
 
         // Act
-        let (smallest_key, largest_key, smallest_seq, largest_seq) =
-            compute_bounds(&entries, &[]);
+        let (smallest_key, largest_key, smallest_seq, largest_seq) = compute_bounds(&entries, &[]);
 
         // Assert
         assert_eq!(smallest_key, Some(b"key1".to_vec()));

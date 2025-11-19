@@ -256,4 +256,182 @@ mod tests {
         assert_eq!(tracker.read_count(), 2);
         assert_eq!(tracker.write_count(), 1);
     }
+
+    #[test]
+    fn should_track_write_range_successfully() {
+        // Arrange
+        let mut tracker = ConflictTracker::new();
+
+        // Act
+        tracker.track_write_range(0, Bytes::from("a"), Bytes::from("z"));
+
+        // Assert
+        assert!(tracker
+            .write_ranges()
+            .contains(&(0, Bytes::from("a"), Bytes::from("z"))));
+        assert_eq!(tracker.write_count(), 1);
+    }
+
+    #[test]
+    fn should_detect_write_range_conflict() {
+        // Arrange
+        let mut tracker1 = ConflictTracker::new();
+        let mut tracker2 = ConflictTracker::new();
+        tracker1.track_write(0, Bytes::from("m"));
+        tracker2.track_write_range(0, Bytes::from("a"), Bytes::from("z"));
+
+        // Act
+        let has_conflict = tracker1.has_write_range_conflict(tracker2.write_ranges());
+
+        // Assert
+        assert!(has_conflict);
+    }
+
+    #[test]
+    fn should_not_detect_write_range_conflict_outside_range() {
+        // Arrange
+        let mut tracker1 = ConflictTracker::new();
+        let mut tracker2 = ConflictTracker::new();
+        tracker1.track_write(0, Bytes::from("z"));
+        tracker2.track_write_range(0, Bytes::from("a"), Bytes::from("m"));
+
+        // Act
+        let has_conflict = tracker1.has_write_range_conflict(tracker2.write_ranges());
+
+        // Assert
+        assert!(!has_conflict);
+    }
+
+    #[test]
+    fn should_detect_range_range_overlap() {
+        // Arrange
+        let mut tracker1 = ConflictTracker::new();
+        let mut tracker2 = ConflictTracker::new();
+        tracker1.track_write_range(0, Bytes::from("a"), Bytes::from("m"));
+        tracker2.track_write_range(0, Bytes::from("f"), Bytes::from("z"));
+
+        // Act
+        let has_conflict = tracker1.has_range_range_conflict(tracker2.write_ranges());
+
+        // Assert
+        assert!(has_conflict);
+    }
+
+    #[test]
+    fn should_not_detect_range_range_overlap_when_disjoint() {
+        // Arrange
+        let mut tracker1 = ConflictTracker::new();
+        let mut tracker2 = ConflictTracker::new();
+        tracker1.track_write_range(0, Bytes::from("a"), Bytes::from("m"));
+        tracker2.track_write_range(0, Bytes::from("n"), Bytes::from("z"));
+
+        // Act
+        let has_conflict = tracker1.has_range_range_conflict(tracker2.write_ranges());
+
+        // Assert
+        assert!(!has_conflict);
+    }
+
+    #[test]
+    fn should_track_multiple_reads_for_same_key() {
+        // Arrange
+        let mut tracker = ConflictTracker::new();
+
+        // Act
+        tracker.track_read(0, Bytes::from("key1"), 100);
+        tracker.track_read(0, Bytes::from("key1"), 150);
+
+        // Assert
+        assert_eq!(tracker.read_count(), 1);
+        assert_eq!(tracker.read_version(0, b"key1"), Some(150));
+    }
+
+    #[test]
+    fn should_track_operations_in_different_column_families() {
+        // Arrange
+        let mut tracker = ConflictTracker::new();
+
+        // Act
+        tracker.track_read(0, Bytes::from("key1"), 100);
+        tracker.track_read(1, Bytes::from("key1"), 101);
+        tracker.track_write(0, Bytes::from("key2"));
+        tracker.track_write(1, Bytes::from("key2"));
+
+        // Assert
+        assert_eq!(tracker.read_count(), 2);
+        assert_eq!(tracker.write_count(), 2);
+    }
+
+    #[test]
+    fn should_not_detect_conflict_in_different_column_families() {
+        // Arrange
+        let mut tracker1 = ConflictTracker::new();
+        let mut tracker2 = ConflictTracker::new();
+        tracker1.track_write(0, Bytes::from("key1"));
+        tracker2.track_write(1, Bytes::from("key1"));
+
+        // Act
+        let has_conflict = tracker1.has_write_conflict(tracker2.write_set());
+
+        // Assert
+        assert!(!has_conflict);
+    }
+
+    #[test]
+    fn should_detect_range_overlap_at_boundaries() {
+        // Arrange
+        let mut tracker1 = ConflictTracker::new();
+        let mut tracker2 = ConflictTracker::new();
+        tracker1.track_write_range(0, Bytes::from("a"), Bytes::from("m"));
+        tracker2.track_write_range(0, Bytes::from("m"), Bytes::from("z"));
+
+        // Act
+        let has_conflict = tracker1.has_range_range_conflict(tracker2.write_ranges());
+
+        // Assert
+        assert!(!has_conflict);
+    }
+
+    #[test]
+    fn should_return_none_for_unknown_read_version() {
+        // Arrange
+        let tracker = ConflictTracker::new();
+
+        // Act
+        let version = tracker.read_version(0, b"unknown");
+
+        // Assert
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn should_handle_empty_tracker_operations() {
+        // Arrange
+        let tracker1 = ConflictTracker::new();
+        let tracker2 = ConflictTracker::new();
+
+        // Act
+        let has_write_conflict = tracker1.has_write_conflict(tracker2.write_set());
+        let has_range_conflict = tracker1.has_write_range_conflict(tracker2.write_ranges());
+        let has_range_range_conflict = tracker1.has_range_range_conflict(tracker2.write_ranges());
+
+        // Assert
+        assert!(!has_write_conflict);
+        assert!(!has_range_conflict);
+        assert!(!has_range_range_conflict);
+    }
+
+    #[test]
+    fn should_count_both_writes_and_ranges_in_write_count() {
+        // Arrange
+        let mut tracker = ConflictTracker::new();
+
+        // Act
+        tracker.track_write(0, Bytes::from("key1"));
+        tracker.track_write(0, Bytes::from("key2"));
+        tracker.track_write_range(0, Bytes::from("a"), Bytes::from("z"));
+
+        // Assert
+        assert_eq!(tracker.write_count(), 3);
+    }
 }
