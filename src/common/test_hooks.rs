@@ -477,7 +477,8 @@ mod tests {
 
     #[test]
     fn should_create_hooks_with_normal_behavior() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let hooks = TestHooks::new();
 
         // Assert
@@ -545,6 +546,7 @@ mod tests {
 
     #[test]
     fn should_trigger_compaction_gate() {
+        // Arrange
         use std::thread;
         let hooks = TestHooks::new();
         let gate = hooks.install_compaction_gate(CompactionGatePoint::BeforeManifestUpdate);
@@ -554,13 +556,17 @@ mod tests {
             hooks_clone.maybe_pause_compaction(CompactionGatePoint::BeforeManifestUpdate);
         });
 
+        // Act
         assert!(gate.wait_until_blocked(Duration::from_millis(100)));
         gate.release();
+
+        // Assert
         handle.join().unwrap();
     }
 
     #[test]
     fn should_trigger_flush_gate() {
+        // Arrange
         use std::thread;
         let hooks = TestHooks::new();
         let gate = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
@@ -570,8 +576,11 @@ mod tests {
             hooks_clone.maybe_pause_flush(FlushGatePoint::BeforeManifestUpdate);
         });
 
+        // Act
         assert!(gate.wait_until_blocked(Duration::from_millis(100)));
         gate.release();
+
+        // Assert
         handle.join().unwrap();
     }
 }

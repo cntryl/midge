@@ -114,13 +114,13 @@ fn bench_mixed_read_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_read_write_contention");
 
     // Precompute data to avoid allocations in hot path
-    let prefill_keys: Vec<_> = (0..10_000).map(|i| make_key(i)).collect();
+    let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
     let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value(64)).collect();
     let writer_keys: Vec<_> = (0..4_000).map(|i| make_key(i + 20_000)).collect();
     let writer_vals: Vec<_> = (0..4_000).map(|_| make_value(128)).collect();
     let writer_keys = Arc::new(writer_keys);
     let writer_vals = Arc::new(writer_vals);
-    let reader_keys: Vec<_> = (0..10_000).step_by(3).map(|i| make_key(i)).collect();
+    let reader_keys: Vec<_> = (0..10_000).step_by(3).map(make_key).collect();
     let reader_keys = Arc::new(reader_keys);
 
     group.bench_function("4w4r_threads", |b| {
@@ -180,9 +180,9 @@ fn bench_compaction_pressure(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_compaction_pressure");
 
     // Precompute data
-    let compaction_keys: Vec<_> = (0..25_000).map(|i| make_key(i)).collect();
+    let compaction_keys: Vec<_> = (0..25_000).map(make_key).collect();
     let compaction_vals: Vec<_> = (0..25_000).map(|_| make_value(256)).collect();
-    let verify_keys: Vec<_> = (0..1_000).step_by(50).map(|i| make_key(i)).collect();
+    let verify_keys: Vec<_> = (0..1_000).step_by(50).map(make_key).collect();
 
     group.bench_function("steady_write_with_compaction", |b| {
         b.iter_batched(
@@ -200,8 +200,8 @@ fn bench_compaction_pressure(c: &mut Criterion) {
                     thread::sleep(Duration::from_millis(50));
                 }
                 // Verify a few reads during/after compaction
-                for j in 0..verify_keys.len() {
-                    let _ = engine.get(&cf, &verify_keys[j]).unwrap();
+                for key in &verify_keys {
+                    let _ = engine.get(&cf, key).unwrap();
                 }
                 black_box(());
             },
@@ -220,9 +220,9 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_concurrent_deletes");
 
     // Precompute data
-    let prefill_keys: Vec<_> = (0..10_000).map(|i| make_key(i)).collect();
+    let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
     let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value(100)).collect();
-    let delete_keys: Vec<_> = (0..10_000).map(|i| make_key(i)).collect();
+    let delete_keys: Vec<_> = (0..10_000).map(make_key).collect();
     let delete_keys = Arc::new(delete_keys);
 
     for &threads in &[2, 4, 8] {
@@ -279,7 +279,7 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_concurrent_multi_cf");
 
     // Precompute for max pairs=8, 8*2*2500=40000
-    let multi_cf_keys: Vec<_> = (0..40_000).map(|i| make_key(i)).collect();
+    let multi_cf_keys: Vec<_> = (0..40_000).map(make_key).collect();
     let multi_cf_vals: Vec<_> = (0..40_000).map(|_| make_value(150)).collect();
     let multi_cf_keys = Arc::new(multi_cf_keys);
     let multi_cf_vals = Arc::new(multi_cf_vals);

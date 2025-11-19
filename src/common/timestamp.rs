@@ -366,7 +366,8 @@ mod tests {
 
     #[test]
     fn should_maintain_relationship_between_time_units() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let nanos = now_nanos();
         let millis = now_millis();
         let secs = now_secs();
@@ -381,7 +382,8 @@ mod tests {
 
     #[test]
     fn should_support_fast_variants_for_all_units() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let millis_fast = now_millis_fast();
         let secs_fast = now_secs_fast();
         let nanos_fast = now_nanos_fast();

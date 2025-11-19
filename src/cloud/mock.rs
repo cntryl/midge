@@ -353,7 +353,8 @@ mod tests {
 
     #[test]
     fn should_create_backend_with_default_temp_directory() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let backend = MockCloudBackend::new();
 
         // Assert
@@ -854,7 +855,7 @@ mod tests {
         // Act
         let result = backend.put_blob_if_not_exists(key, Bytes::from("new"));
 
-        // Assert - Returns DatabaseLocked for lock acquisition semantics
+        // Assert
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -1032,6 +1033,7 @@ mod tests {
         let data = Bytes::from("shared data");
         backend.put_blob(key, data.clone()).unwrap();
 
+        // Act
         let handles: Vec<_> = (0..10)
             .map(|_| {
                 let backend = backend.clone();
@@ -1043,7 +1045,7 @@ mod tests {
             })
             .collect();
 
-        // Act & Assert
+        // Assert
         for handle in handles {
             handle.join().unwrap();
         }

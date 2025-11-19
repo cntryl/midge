@@ -91,8 +91,8 @@ fn bench_cache_get_hit(c: &mut Criterion) {
     c.bench_function("hotpath_cache_get_hit", |b| {
         b.iter(|| {
             let mut count = 0;
-            for i in 0..num_blocks {
-                if cache.get(&keys[i]).is_some() {
+            for key in keys.iter().take(num_blocks) {
+                if cache.get(key).is_some() {
                     count += 1;
                 }
             }

@@ -901,6 +901,7 @@ mod tests {
         // Act - Write directly to cloud (bypassing hybrid)
         backend.put_blob("cloud_only.dat", data.clone()).unwrap();
 
+        // Act
         // Read through hybrid (should fetch from cloud)
         let retrieved = hybrid.read("cloud_only.dat").unwrap();
 
@@ -920,7 +921,7 @@ mod tests {
         let max_cache = 100; // 100 bytes max
         let hybrid = HybridStorage::new(cache_dir, backend, max_cache).unwrap();
 
-        // Act - Write 3 files of 50 bytes each (will exceed cache)
+        // Act
         hybrid
             .write("file1.dat", Bytes::from(vec![0u8; 50]), true)
             .unwrap();
@@ -931,7 +932,7 @@ mod tests {
             .write("file3.dat", Bytes::from(vec![2u8; 50]), true)
             .unwrap(); // Triggers eviction
 
-        // Assert - Cache should be under limit
+        // Assert
         let stats = hybrid.cache_stats();
         assert!(stats.total_bytes <= max_cache);
 
@@ -1015,7 +1016,7 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("hybrid_test_async");
         let hybrid = HybridStorage::new(cache_dir, backend.clone(), 1024).unwrap();
 
-        // Act - Async write (sync=false)
+        // Act
         hybrid
             .write("async.dat", Bytes::from("data"), false)
             .unwrap();
@@ -1038,7 +1039,7 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("hybrid_test_bg_upload");
         let hybrid = HybridStorage::new(cache_dir, backend.clone(), 1024 * 1024).unwrap();
 
-        // Act - Start background workers
+        // Act
         hybrid.spawn_background_workers();
 
         // Write async (queues upload)
@@ -1052,7 +1053,7 @@ mod tests {
         // Give upload worker time to process
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        // Assert - Background worker should have uploaded
+        // Assert
         assert_eq!(backend.upload_count(), 2);
 
         // Cleanup
@@ -1068,7 +1069,7 @@ mod tests {
         let max_bytes = 1000;
         let hybrid = HybridStorage::new(cache_dir.clone(), backend, max_bytes).unwrap();
 
-        // Act - Start background workers
+        // Act
         hybrid.spawn_background_workers();
 
         // Write files up to limit (but not exceeding)
@@ -1113,7 +1114,7 @@ mod tests {
         // Give eviction worker time to run (checks every 5s, so wait 6s to be safe)
         std::thread::sleep(std::time::Duration::from_secs(6));
 
-        // Assert - Background worker should have evicted LRU files
+        // Assert
         let stats_after = hybrid.cache_stats();
         assert!(
             stats_after.total_bytes <= max_bytes,
@@ -1146,10 +1147,10 @@ mod tests {
         let hybrid = Arc::new(HybridStorage::new(cache_dir, cloud.clone(), 1024).unwrap());
         let backend = HybridStorageBackend::new(hybrid, true);
 
-        // Act - Write through adapter (sync mode)
+        // Act
         backend.put_blob("test.dat", Bytes::from("data")).unwrap();
 
-        // Assert - Should be in cloud immediately
+        // Assert
         assert_eq!(cloud.upload_count(), 1);
 
         // And readable through adapter
@@ -1165,10 +1166,10 @@ mod tests {
         let hybrid = Arc::new(HybridStorage::new(cache_dir, cloud.clone(), 1024).unwrap());
         let backend = HybridStorageBackend::new(hybrid.clone(), false);
 
-        // Act - Write through adapter (async mode)
+        // Act
         backend.put_blob("test.dat", Bytes::from("data")).unwrap();
 
-        // Assert - Not yet in cloud
+        // Assert
         assert_eq!(cloud.upload_count(), 0);
 
         // Process uploads
@@ -1186,7 +1187,7 @@ mod tests {
         let hybrid = Arc::new(HybridStorage::new(cache_dir, cloud.clone(), 1024).unwrap());
         let backend = HybridStorageBackend::new(hybrid, true);
 
-        // Act - Write and read
+        // Act
         backend
             .put_blob("cached.dat", Bytes::from("cached_data"))
             .unwrap();
@@ -1207,7 +1208,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cache_dir);
         let hybrid = HybridStorage::new(cache_dir.clone(), backend.clone(), 1024).unwrap();
 
-        // Act - Write a file and read it (cache hit)
+        // Act
         hybrid
             .write("file1.dat", Bytes::from("data1"), true)
             .unwrap();
@@ -1238,7 +1239,7 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("hybrid_test_upload_metrics");
         let hybrid = HybridStorage::new(cache_dir, backend, 1024).unwrap();
 
-        // Act - Perform some uploads (sync mode)
+        // Act
         hybrid.write("f1.dat", Bytes::from("data1"), true).unwrap();
         hybrid.write("f2.dat", Bytes::from("data2"), true).unwrap();
         hybrid.write("f3.dat", Bytes::from("data3"), true).unwrap();
@@ -1263,7 +1264,7 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("hybrid_test_latency_percentiles");
         let hybrid = HybridStorage::new(cache_dir, backend, 10 * 1024).unwrap();
 
-        // Act - Upload multiple files to get latency distribution
+        // Act
         for i in 0..20 {
             let data = Bytes::from(format!("data_{}", i));
             hybrid.write(&format!("file{}.dat", i), data, true).unwrap();
@@ -1288,7 +1289,7 @@ mod tests {
         let max_cache = 200;
         let hybrid = HybridStorage::new(cache_dir, backend, max_cache).unwrap();
 
-        // Act - Write files to trigger eviction
+        // Act
         hybrid
             .write("f1.dat", Bytes::from(vec![0u8; 100]), true)
             .unwrap();
@@ -1315,7 +1316,7 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("hybrid_test_async_metrics");
         let hybrid = HybridStorage::new(cache_dir, backend.clone(), 1024).unwrap();
 
-        // Act - Async writes (sync=false)
+        // Act
         hybrid
             .write("async1.dat", Bytes::from("data1"), false)
             .unwrap();
@@ -1345,7 +1346,7 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("hybrid_test_no_reads");
         let hybrid = HybridStorage::new(cache_dir, backend, 1024).unwrap();
 
-        // Act - No reads
+        // Act
         let metrics = hybrid.cloud_metrics();
 
         // Assert
@@ -1361,7 +1362,7 @@ mod tests {
         let cache_dir = std::env::temp_dir().join("hybrid_test_bg_metrics");
         let hybrid = HybridStorage::new(cache_dir, backend.clone(), 1024).unwrap();
 
-        // Act - Start background workers
+        // Act
         hybrid.spawn_background_workers();
 
         // Async writes
