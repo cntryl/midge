@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn should_contain_key_between_start_and_end_in_single_byte_range() {
+    fn should_contain_key_in_range() {
         // Arrange
         let rt = RangeTombstone::new(Bytes::from("a"), Bytes::from("b"), 1);
 

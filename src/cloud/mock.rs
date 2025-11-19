@@ -533,7 +533,7 @@ mod tests {
     // ===== get_blob_range Tests =====
 
     #[test]
-    fn should_get_blob_range_with_start_and_end() {
+    fn should_get_blob_range() {
         // Arrange
         let backend = MockCloudBackend::new();
         let key = "range.dat";

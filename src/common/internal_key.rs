@@ -501,7 +501,7 @@ mod tests {
     // Tests from internal_key_test_stubs.rs - comprehensive encoding tests
 
     #[test]
-    fn should_encode_user_key_with_sequence_and_type() {
+    fn should_encode_internal_key() {
         // Arrange
         let user_key = b"test_key";
         let seq = 100u64;

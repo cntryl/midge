@@ -186,7 +186,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_column_family_id_and_convert_to_u32() {
+    fn should_convert_column_family_id_to_u32() {
         // Arrange
         let id = ColumnFamilyId::new(5);
 
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn should_clone_column_family_handle_preserving_id_and_name() {
+    fn should_clone_column_family_handle_preserving_id() {
         // Arrange
         let handle = ColumnFamilyHandle::new(ColumnFamilyId::new(2), "clone_test".to_string());
 
@@ -262,6 +262,17 @@ mod tests {
 
         // Assert
         assert_eq!(handle.id(), cloned.id());
+    }
+
+    #[test]
+    fn should_clone_column_family_handle_preserving_name() {
+        // Arrange
+        let handle = ColumnFamilyHandle::new(ColumnFamilyId::new(2), "clone_test".to_string());
+
+        // Act
+        let cloned = handle.clone();
+
+        // Assert
         assert_eq!(handle.name(), cloned.name());
     }
 }

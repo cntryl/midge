@@ -874,20 +874,35 @@ mod tests {
     }
 
     #[test]
-    fn should_write_and_read_with_cache_hit() {
+    fn should_write_to_hybrid_storage() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let cache_dir = std::env::temp_dir().join("hybrid_test_write");
+        let hybrid = HybridStorage::new(cache_dir, backend.clone(), 1024 * 1024).unwrap();
+        let data = Bytes::from("test data");
+
+        // Act
+        hybrid.write("test.dat", data, true).unwrap();
+
+        // Assert
+        assert_eq!(backend.upload_count(), 1);
+    }
+
+    #[test]
+    fn should_read_from_hybrid_storage_with_cache_hit() {
         // Arrange
         let backend = Arc::new(MockCloudBackend::new());
         let cache_dir = std::env::temp_dir().join("hybrid_test_cache_hit");
         let hybrid = HybridStorage::new(cache_dir, backend.clone(), 1024 * 1024).unwrap();
         let data = Bytes::from("test data");
+        hybrid.write("test.dat", data.clone(), true).unwrap(); // Pre-fill
 
         // Act
-        hybrid.write("test.dat", data.clone(), true).unwrap();
         let retrieved = hybrid.read("test.dat").unwrap();
 
         // Assert
         assert_eq!(retrieved, data);
-        assert_eq!(backend.upload_count(), 1);
+        assert_eq!(backend.upload_count(), 1); // No additional upload
     }
 
     #[test]
@@ -964,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn should_delete_from_both_local_and_cloud() {
+    fn should_delete_file_from_hybrid_storage() {
         // Arrange
         let backend = Arc::new(MockCloudBackend::new());
         let cache_dir = std::env::temp_dir().join("hybrid_test_delete");
@@ -1201,7 +1216,7 @@ mod tests {
     // ===== Metrics Tests =====
 
     #[test]
-    fn should_track_cache_hits_and_misses() {
+    fn should_track_cache_statistics() {
         // Arrange
         let backend = Arc::new(MockCloudBackend::new());
         let cache_dir = std::env::temp_dir().join("hybrid_test_cache_metrics");

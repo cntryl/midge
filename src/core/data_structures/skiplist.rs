@@ -769,12 +769,24 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn should_insert_and_get_value() {
+    fn should_insert_value() {
         // Arrange
         let sl = SkipList::new();
 
         // Act
         sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 1);
+
+        // Assert
+        // Insert succeeds without panic
+    }
+
+    #[test]
+    fn should_get_value() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 1);
+
+        // Act
         let got = sl.get(b"k", u64::MAX);
 
         // Assert
@@ -873,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_concurrent_reads_and_writes() {
+    fn should_support_concurrent_operations() {
         // Arrange
         let sl = Arc::new(SkipList::new());
         for i in 0..100 {

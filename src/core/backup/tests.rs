@@ -37,7 +37,7 @@ fn should_compare_full_backup_types_for_equality() {
 }
 
 #[test]
-fn should_detect_full_and_incremental_are_not_equal() {
+fn should_detect_different_backup_types() {
     // Arrange
     let full = BackupType::Full;
     let incremental = BackupType::Incremental {

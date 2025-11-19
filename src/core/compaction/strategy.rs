@@ -707,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn should_track_source_and_target_levels() {
+    fn should_select_compaction_with_correct_levels() {
         // Arrange
         let config = LeveledCompactionConfig {
             l0_compaction_threshold: 100,
