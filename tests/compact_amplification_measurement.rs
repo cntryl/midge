@@ -34,11 +34,17 @@ fn should_measure_read_amplification_given_multilevel_scan() {
         let sst_reads = metrics_after - metrics_before;
 
         // Assert
-        assert!(results.len() > 0, "Scan should return data");
-        assert!(metrics_after >= metrics_before, "SST read counter should not decrease");
+        assert!(!results.is_empty(), "Scan should return data");
+        assert!(
+            metrics_after >= metrics_before,
+            "SST read counter should not decrease"
+        );
         if sst_reads > 0 {
             let read_amp = sst_reads as f64 / results.len() as f64;
-            assert!(read_amp >= 0.0, "Read amplification ratio should be non-negative");
+            assert!(
+                read_amp >= 0.0,
+                "Read amplification ratio should be non-negative"
+            );
         }
     }
 }
@@ -50,7 +56,7 @@ fn should_measure_write_amplification_given_compaction_cascade() {
         // Arrange
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
         let mut opts = compaction_test_opts(storage_mode); // compaction enabled
-        // Enable WAL sync to guarantee WAL bytes metric increments
+                                                           // Enable WAL sync to guarantee WAL bytes metric increments
         opts.wal_sync = true;
         let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
         let cf = eng.default_column_family();
@@ -60,12 +66,14 @@ fn should_measure_write_amplification_given_compaction_cascade() {
 
         // Act
         let mut user_bytes: usize = 0;
-        for i in 0..200 { // larger workload to trigger multi-level compaction
+        for i in 0..200 {
+            // larger workload to trigger multi-level compaction
             let key = format!("key_{:05}", i);
             let value = vec![b'x'; 300]; // 300-byte values
             user_bytes += value.len();
             eng.put(&cf, key.as_bytes(), &value).unwrap();
-            if i % 50 == 49 { // periodic flush to create levels
+            if i % 50 == 49 {
+                // periodic flush to create levels
                 eng.flush_cf(&cf).expect("flush");
             }
         }
@@ -77,11 +85,17 @@ fn should_measure_write_amplification_given_compaction_cascade() {
 
         // Assert
         // WAL metric may remain zero; ensure monotonicity
-        assert!(final_wal_bytes >= initial_wal_bytes, "WAL bytes metric should be monotonic");
+        assert!(
+            final_wal_bytes >= initial_wal_bytes,
+            "WAL bytes metric should be monotonic"
+        );
         let compaction_bytes_written = final_compaction_bytes - initial_compaction_bytes;
         if compaction_bytes_written > 0 {
             let write_amp = compaction_bytes_written as f64 / user_bytes as f64;
-            assert!(write_amp >= 0.0, "Write amplification ratio should be non-negative");
+            assert!(
+                write_amp >= 0.0,
+                "Write amplification ratio should be non-negative"
+            );
         }
     }
 }
@@ -181,7 +195,10 @@ fn should_track_amplification_over_time_given_workload() {
         // Assert
         if !samples.is_empty() {
             for (idx, amp) in samples.iter().enumerate() {
-                assert!(*amp >= 1.0, "Phase {idx} write amplification should be >=1, got {amp:.2}");
+                assert!(
+                    *amp >= 1.0,
+                    "Phase {idx} write amplification should be >=1, got {amp:.2}"
+                );
             }
         }
         // Sanity check data presence

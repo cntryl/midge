@@ -69,7 +69,7 @@ fn should_serve_reads_given_compaction_in_progress() {
 #[test]
 fn should_return_correct_value_given_key_being_compacted() {
     for mode in common::disk_storage_modes() {
-        let (mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
+        let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
         // Arrange
         let opts = compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());

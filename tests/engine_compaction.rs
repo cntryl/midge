@@ -139,8 +139,9 @@ fn should_background_compact_when_threshold_exceeded() {
 
     // Verify all 4 SST files were created before starting background compaction
     {
-        let manifest_before = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path())
-            .expect("load manifest");
+        let manifest_before =
+            cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path())
+                .expect("load manifest");
         assert_eq!(
             manifest_before.ssts.len(),
             4,

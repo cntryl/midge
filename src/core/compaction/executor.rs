@@ -76,7 +76,7 @@ pub(crate) fn collect_compaction_versions(
             tracing::warn!(file = %name, "Failed to scan SST during collection");
             continue;
         };
-        
+
         let mut file_versions = Vec::new();
         for (raw_key, state) in rows {
             // The key returned by scan_range_state is now a user key (after SST encoding fix)
@@ -995,4 +995,3 @@ mod tests {
         assert_eq!(result[1].seq, 8);
     }
 }
-
