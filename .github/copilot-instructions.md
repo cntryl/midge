@@ -75,15 +75,15 @@ Code must be **idiomatic Rust** and **always clean of Clippy errors and warnings
 
 #### Running Tests
 
-`ash
+```bash
 cargo test                              # All tests
 cargo test test_guidelines_compliance   # Meta-test (validates naming/AAA)
 cargo test --test engine_basic_ops      # Specific integration test
-`
+```
 
 #### Test Validation
 
-`ash
+````bash
 
 # Check test compliance (naming, AAA structure)
 
@@ -97,7 +97,7 @@ cargo run --bin validate_tests -- --file src/wal/wal_helpers.rs
 
 - **Python**: Cross-platform, better library support, VS Code integration
 - **PowerShell**: Only for quick Windows-specific admin tasks
-- Store automation in scripts/ directory (e.g., enchmark_summary.py)
+- Store automation in scripts/ directory (e.g., benchmark_summary.py)
 
 ## Test Guidelines
 
@@ -382,9 +382,9 @@ The meta-test will **fail** if:
 
 Run manually with:
 
-`ash
+```bash
 cargo test test_guidelines_compliance
-`
+````
 
 ## Quick Checklist for Copilot
 
@@ -438,9 +438,9 @@ Every benchmark file MUST:
 
 1. Import: use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, SamplingMode, Throughput};
 2. Use criterion_config() for configuration.
-3. Group related benchmarks into enchmark_group!.
-4. Precompute ALL data outside .iter(|| ...).
-5. Use lack_box() to prevent compiler optimizations.
+3. Group related benchmarks into benchmark_group!.
+4. Precompute ALL data outside b.iter(|| ...).
+5. Use black_box() to prevent compiler optimizations.
 6. End with criterion_group! { name, config, group }; criterion_main!(name);
 
 Template:
@@ -592,7 +592,7 @@ Follow patterns in hotpath_storage.rs and subsystem_storage.rs.
 - Clear grouping and naming.
 - Minimal noise (precompute everything).
 - Rust-idiomatic.
-- Correct lack_box() usage.
+- Correct black_box() usage.
 - Real Midge types (MemTable, SkipList, WalWriter, SstFileBuilder, etc.).
 
 #### NO (Forbidden)
@@ -640,9 +640,9 @@ b.iter(|| {
 
 ### File Naming (Strict)
 
-- enches/hotpath_storage.rs Tier 1 (pure in-memory hot path).
-- enches/subsystem_storage.rs Tier 2 (WAL, SST, WriteBatch).
-- enches/system_storage.rs Tier 3 (full-engine + compaction).
+- benches/hotpath_storage.rs Tier 1 (pure in-memory hot path).
+- benches/subsystem_storage.rs Tier 2 (WAL, SST, WriteBatch).
+- benches/system_storage.rs Tier 3 (full-engine + compaction).
 
 ### CI Integration
 
@@ -652,11 +652,11 @@ Integrate benchmarks into CI with cargo bench --bench <name>. Use --save-baselin
 
 Before generating a benchmark, verify:
 
-- [ ] Measures only hot path (no setup in .iter).
+- [ ] Measures only hot path (no setup in b.iter).
 - [ ] All data precomputed outside loop.
 - [ ] Uses SamplingMode::Flat and appropriate Throughput.
 - [ ] Deterministic input (no randomness in hot path).
-- [ ] Correct lack_box() usage.
+- [ ] Correct black_box() usage.
 - [ ] Follows file naming and structure.
 - [ ] Uses real Midge types and patterns.
 - [ ] Fast execution (< 3 seconds total).
