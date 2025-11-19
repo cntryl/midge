@@ -101,3 +101,161 @@ impl Drop for FlushCoordinator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::column_family::ColumnFamilyId;
+    use crate::core::EntryMeta;
+    use crate::metrics::Metrics;
+    use crate::sst::mem::MemSstFactory;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn create_test_config() -> FlushWorkerConfig {
+        let temp_dir = TempDir::new().unwrap();
+        let sst_dir = temp_dir.path().join("sst");
+        let wal_dir = temp_dir.path().join("wal");
+        let db_path = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(&sst_dir).unwrap();
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        FlushWorkerConfig {
+            sst_factory: Arc::new(MemSstFactory {}),
+            sst_dir,
+            wal_dir,
+            db_path,
+            compression: crate::common::codec::CompressionType::None,
+            block_size: 4096,
+            mem_mode: true,
+            cloud_sst_manager: None,
+            metrics: Arc::new(Metrics::new()),
+            test_hooks: None,
+            manifest_update_callback: None,
+        }
+    }
+
+    #[test]
+    fn should_spawn_coordinator_successfully() {
+        // Arrange
+        let config = create_test_config();
+
+        // Act
+        let result = FlushCoordinator::spawn(config);
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_running());
+    }
+
+    #[test]
+    fn should_request_flush_without_blocking() {
+        // Arrange
+        let config = create_test_config();
+        let coordinator = FlushCoordinator::spawn(config).unwrap();
+        let job = FlushJob {
+            cf_id: ColumnFamilyId::new(0),
+            seq: 1,
+            entries: vec![],
+            range_tombstones: vec![],
+        };
+
+        // Act
+        let result = coordinator.request_flush(job);
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_wait_until_idle_successfully() {
+        // Arrange
+        let config = create_test_config();
+        let coordinator = FlushCoordinator::spawn(config).unwrap();
+
+        // Act
+        let result = coordinator.wait_until_idle(std::time::Duration::from_secs(1));
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_timeout_when_waiting_too_short() {
+        // Arrange
+        let config = create_test_config();
+        let coordinator = FlushCoordinator::spawn(config).unwrap();
+        // Queue a job that won't complete immediately
+        let mut entries = vec![];
+        for i in 0..1000 {
+            entries.push(EntryMeta {
+                key: format!("key_{}", i).into_bytes(),
+                value: Some(vec![0u8; 1024]),
+                sequence: i,
+                is_tombstone: false,
+                expiration_millis: None,
+                op_type: crate::core::skiplist::OpType::Put,
+            });
+        }
+        let job = FlushJob {
+            cf_id: ColumnFamilyId::new(0),
+            seq: 1,
+            entries,
+            range_tombstones: vec![],
+        };
+        coordinator.request_flush(job).unwrap();
+
+        // Act
+        let result = coordinator.wait_until_idle(std::time::Duration::from_nanos(1));
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_shutdown_gracefully() {
+        // Arrange
+        let config = create_test_config();
+        let coordinator = FlushCoordinator::spawn(config).unwrap();
+
+        // Act
+        let result = coordinator.shutdown();
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_process_multiple_flush_jobs() {
+        // Arrange
+        let config = create_test_config();
+        let coordinator = FlushCoordinator::spawn(config).unwrap();
+
+        // Act
+        for i in 0..5 {
+            let job = FlushJob {
+                cf_id: ColumnFamilyId::new(0),
+                seq: i,
+                entries: vec![],
+                range_tombstones: vec![],
+            };
+            coordinator.request_flush(job).unwrap();
+        }
+        let result = coordinator.wait_until_idle(std::time::Duration::from_secs(2));
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_not_panic_when_dropped_without_shutdown() {
+        // Arrange
+        let config = create_test_config();
+        let coordinator = FlushCoordinator::spawn(config).unwrap();
+
+        // Act
+        drop(coordinator);
+
+        // Assert - no panic means success
+    }
+}

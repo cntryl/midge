@@ -610,3 +610,198 @@ where
 
     Ok(seq)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::EntryMeta;
+
+    #[test]
+    fn should_compute_bounds_from_entries() {
+        // Arrange
+        let entries = vec![
+            EntryMeta {
+                key: b"key1".to_vec(),
+                value: Some(b"val1".to_vec()),
+                sequence: 1,
+                is_tombstone: false,
+                expiration_millis: None,
+                op_type: crate::core::skiplist::OpType::Put,
+            },
+            EntryMeta {
+                key: b"key3".to_vec(),
+                value: Some(b"val3".to_vec()),
+                sequence: 3,
+                is_tombstone: false,
+                expiration_millis: None,
+                op_type: crate::core::skiplist::OpType::Put,
+            },
+            EntryMeta {
+                key: b"key2".to_vec(),
+                value: Some(b"val2".to_vec()),
+                sequence: 2,
+                is_tombstone: false,
+                expiration_millis: None,
+                op_type: crate::core::skiplist::OpType::Put,
+            },
+        ];
+
+        // Act
+        let (smallest_key, largest_key, smallest_seq, largest_seq) =
+            compute_bounds(&entries, &[]);
+
+        // Assert
+        assert_eq!(smallest_key, Some(b"key1".to_vec()));
+        assert_eq!(largest_key, Some(b"key3".to_vec()));
+        assert_eq!(smallest_seq, Some(1));
+        assert_eq!(largest_seq, Some(3));
+    }
+
+    #[test]
+    fn should_compute_bounds_from_range_tombstones() {
+        // Arrange
+        let range_tombstones = vec![
+            (b"a".to_vec(), b"m".to_vec(), 10),
+            (b"n".to_vec(), b"z".to_vec(), 20),
+        ];
+
+        // Act
+        let (smallest_key, largest_key, smallest_seq, largest_seq) =
+            compute_bounds(&[], &range_tombstones);
+
+        // Assert
+        assert_eq!(smallest_key, Some(b"a".to_vec()));
+        assert_eq!(largest_key, Some(b"z".to_vec()));
+        assert_eq!(smallest_seq, Some(10));
+        assert_eq!(largest_seq, Some(20));
+    }
+
+    #[test]
+    fn should_compute_bounds_from_mixed_entries_and_tombstones() {
+        // Arrange
+        let entries = vec![EntryMeta {
+            key: b"key5".to_vec(),
+            value: Some(b"val5".to_vec()),
+            sequence: 5,
+            is_tombstone: false,
+            expiration_millis: None,
+            op_type: crate::core::skiplist::OpType::Put,
+        }];
+        let range_tombstones = vec![(b"key1".to_vec(), b"key9".to_vec(), 3)];
+
+        // Act
+        let (smallest_key, largest_key, smallest_seq, largest_seq) =
+            compute_bounds(&entries, &range_tombstones);
+
+        // Assert
+        assert_eq!(smallest_key, Some(b"key1".to_vec()));
+        assert_eq!(largest_key, Some(b"key9".to_vec()));
+        assert_eq!(smallest_seq, Some(3));
+        assert_eq!(largest_seq, Some(5));
+    }
+
+    #[test]
+    fn should_return_none_when_no_entries_or_tombstones() {
+        // Arrange
+        let entries: Vec<crate::core::EntryMeta> = vec![];
+        let range_tombstones: Vec<(Vec<u8>, Vec<u8>, u64)> = vec![];
+
+        // Act
+        let (smallest_key, largest_key, smallest_seq, largest_seq) =
+            compute_bounds(&entries, &range_tombstones);
+
+        // Assert
+        assert_eq!(smallest_key, None);
+        assert_eq!(largest_key, None);
+        assert_eq!(smallest_seq, None);
+        assert_eq!(largest_seq, None);
+    }
+
+    #[test]
+    fn should_determine_safe_prune_sequence_without_cloud_checkpoint() {
+        // Arrange
+        let manifest = Manifest {
+            last_persisted_sequence: 100,
+            cloud_checkpoint: None,
+            ..Default::default()
+        };
+
+        // Act
+        let safe_seq = determine_safe_prune_sequence(&manifest);
+
+        // Assert
+        assert_eq!(safe_seq, 100);
+    }
+
+    #[test]
+    fn should_determine_safe_prune_sequence_with_cloud_checkpoint() {
+        // Arrange
+        let manifest = Manifest {
+            last_persisted_sequence: 100,
+            cloud_checkpoint: Some(crate::core::manifest::CloudCheckpoint {
+                checkpoint_sequence: 50,
+                covering_ssts: vec![],
+                checkpoint_time: std::time::SystemTime::UNIX_EPOCH,
+            }),
+            ..Default::default()
+        };
+
+        // Act
+        let safe_seq = determine_safe_prune_sequence(&manifest);
+
+        // Assert
+        assert_eq!(safe_seq, 50);
+    }
+
+    #[test]
+    fn should_prune_old_wal_files_successfully() {
+        // Arrange
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = temp_dir.path();
+        std::fs::write(wal_dir.join("00000000000000000010.wal"), b"data").unwrap();
+        std::fs::write(wal_dir.join("00000000000000000050.wal"), b"data").unwrap();
+        std::fs::write(wal_dir.join("00000000000000000100.wal"), b"data").unwrap();
+
+        // Act
+        let result = prune_old_wal_files(wal_dir, 50);
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 2);
+        assert!(!wal_dir.join("00000000000000000010.wal").exists());
+        assert!(!wal_dir.join("00000000000000000050.wal").exists());
+        assert!(wal_dir.join("00000000000000000100.wal").exists());
+    }
+
+    #[test]
+    fn should_return_zero_when_wal_dir_does_not_exist() {
+        // Arrange
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("nonexistent");
+
+        // Act
+        let result = prune_old_wal_files(&wal_dir, 100);
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn should_not_prune_wal_files_above_safe_sequence() {
+        // Arrange
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = temp_dir.path();
+        std::fs::write(wal_dir.join("00000000000000000100.wal"), b"data").unwrap();
+        std::fs::write(wal_dir.join("00000000000000000200.wal"), b"data").unwrap();
+
+        // Act
+        let result = prune_old_wal_files(wal_dir, 50);
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        assert!(wal_dir.join("00000000000000000100.wal").exists());
+        assert!(wal_dir.join("00000000000000000200.wal").exists());
+    }
+}

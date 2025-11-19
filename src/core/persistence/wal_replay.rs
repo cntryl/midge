@@ -214,3 +214,287 @@ fn varint_len_u32(mut v: u32) -> usize {
     }
     n
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::memtable::MemTable;
+    use bytes::Bytes;
+    use std::collections::HashMap;
+
+    fn create_test_record(
+        seq: u64,
+        op: WalOpKind,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    ) -> WalRecord {
+        WalRecord {
+            seq,
+            op,
+            key: Bytes::from(key),
+            value: value.map(Bytes::from),
+            txn_id: None,
+            range_end: None,
+            expiration: None,
+            cf_id: 0,
+            compression: None,
+        }
+    }
+
+    #[test]
+    fn should_replay_put_operation() {
+        // Arrange
+        let memtable = MemTable::new();
+        let mut cf_map = HashMap::new();
+        cf_map.insert(0, &memtable);
+        let records = vec![create_test_record(
+            1,
+            WalOpKind::Put,
+            b"key1".to_vec(),
+            Some(b"value1".to_vec()),
+        )];
+
+        // Act
+        let max_seq = replay_wal_to_memtables(&mut cf_map, &records);
+
+        // Assert
+        assert_eq!(max_seq, 1);
+        assert_eq!(memtable.get(b"key1"), Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_replay_delete_operation() {
+        // Arrange
+        let memtable = MemTable::new();
+        memtable.put(b"key1", b"value1");
+        let mut cf_map = HashMap::new();
+        cf_map.insert(0, &memtable);
+        let records = vec![create_test_record(
+            2,
+            WalOpKind::Delete,
+            b"key1".to_vec(),
+            None,
+        )];
+
+        // Act
+        let max_seq = replay_wal_to_memtables(&mut cf_map, &records);
+
+        // Assert
+        assert_eq!(max_seq, 2);
+        assert_eq!(memtable.get(b"key1"), None);
+    }
+
+    #[test]
+    fn should_skip_records_before_sequence() {
+        // Arrange
+        let memtable = MemTable::new();
+        let mut cf_map = HashMap::new();
+        cf_map.insert(0, &memtable);
+        let records = vec![
+            create_test_record(1, WalOpKind::Put, b"key1".to_vec(), Some(b"value1".to_vec())),
+            create_test_record(5, WalOpKind::Put, b"key2".to_vec(), Some(b"value2".to_vec())),
+            create_test_record(10, WalOpKind::Put, b"key3".to_vec(), Some(b"value3".to_vec())),
+        ];
+
+        // Act
+        let max_seq = replay_wal_to_memtables_after_seq(&mut cf_map, &records, 5);
+
+        // Assert
+        assert_eq!(max_seq, 10);
+        assert_eq!(memtable.get(b"key1"), None);
+        assert_eq!(memtable.get(b"key2"), None);
+        assert_eq!(memtable.get(b"key3"), Some(Bytes::from("value3")));
+    }
+
+    #[test]
+    fn should_replay_committed_transaction() {
+        // Arrange
+        let memtable = MemTable::new();
+        let mut cf_map = HashMap::new();
+        cf_map.insert(0, &memtable);
+        let records = vec![
+            WalRecord {
+                seq: 1,
+                op: WalOpKind::TxnBegin,
+                key: Bytes::new(),
+                value: None,
+                txn_id: Some(100),
+                range_end: None,
+                expiration: None,
+                cf_id: 0,
+                compression: None,
+            },
+            WalRecord {
+                seq: 2,
+                op: WalOpKind::Put,
+                key: Bytes::from("key1"),
+                value: Some(Bytes::from("value1")),
+                txn_id: Some(100),
+                range_end: None,
+                expiration: None,
+                cf_id: 0,
+                compression: None,
+            },
+            WalRecord {
+                seq: 3,
+                op: WalOpKind::TxnCommit,
+                key: Bytes::new(),
+                value: None,
+                txn_id: Some(100),
+                range_end: None,
+                expiration: None,
+                cf_id: 0,
+                compression: None,
+            },
+        ];
+
+        // Act
+        let max_seq = replay_wal_to_memtables(&mut cf_map, &records);
+
+        // Assert
+        assert_eq!(max_seq, 3);
+        assert_eq!(memtable.get(b"key1"), Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_discard_uncommitted_transaction() {
+        // Arrange
+        let memtable = MemTable::new();
+        let mut cf_map = HashMap::new();
+        cf_map.insert(0, &memtable);
+        let records = vec![
+            WalRecord {
+                seq: 1,
+                op: WalOpKind::TxnBegin,
+                key: Bytes::new(),
+                value: None,
+                txn_id: Some(100),
+                range_end: None,
+                expiration: None,
+                cf_id: 0,
+                compression: None,
+            },
+            WalRecord {
+                seq: 2,
+                op: WalOpKind::Put,
+                key: Bytes::from("key1"),
+                value: Some(Bytes::from("value1")),
+                txn_id: Some(100),
+                range_end: None,
+                expiration: None,
+                cf_id: 0,
+                compression: None,
+            },
+        ];
+
+        // Act
+        let max_seq = replay_wal_to_memtables(&mut cf_map, &records);
+
+        // Assert
+        assert_eq!(max_seq, 2);
+        assert_eq!(memtable.get(b"key1"), None);
+    }
+
+    #[test]
+    fn should_ignore_records_for_nonexistent_cf() {
+        // Arrange
+        let memtable = MemTable::new();
+        let mut cf_map = HashMap::new();
+        cf_map.insert(0, &memtable);
+        let records = vec![WalRecord {
+            seq: 1,
+            op: WalOpKind::Put,
+            key: Bytes::from("key1"),
+            value: Some(Bytes::from("value1")),
+            txn_id: None,
+            range_end: None,
+            expiration: None,
+            cf_id: 99,
+            compression: None,
+        }];
+
+        // Act
+        let max_seq = replay_wal_to_memtables(&mut cf_map, &records);
+
+        // Assert
+        assert_eq!(max_seq, 1);
+        assert_eq!(memtable.get(b"key1"), None);
+    }
+
+    #[test]
+    fn should_calculate_varint_len_for_small_values() {
+        // Arrange & Act & Assert
+        assert_eq!(varint_len_u32(0), 1);
+        assert_eq!(varint_len_u32(127), 1);
+    }
+
+    #[test]
+    fn should_calculate_varint_len_for_medium_values() {
+        // Arrange & Act & Assert
+        assert_eq!(varint_len_u32(128), 2);
+        assert_eq!(varint_len_u32(16383), 2);
+    }
+
+    #[test]
+    fn should_calculate_varint_len_for_large_values() {
+        // Arrange & Act & Assert
+        assert_eq!(varint_len_u32(16384), 3);
+        assert_eq!(varint_len_u32(u32::MAX), 5);
+    }
+
+    #[test]
+    fn should_calculate_wal_record_encoded_len_for_put() {
+        // Arrange
+        let key_len = 10;
+        let val_len = Some(20);
+
+        // Act
+        let len = wal_record_encoded_len(WalOpKind::Put, key_len, val_len, None);
+
+        // Assert
+        assert!(len > 0);
+        assert!(len >= (4 + 1 + 4 + 8 + key_len + 20) as u64);
+    }
+
+    #[test]
+    fn should_calculate_wal_record_encoded_len_for_delete() {
+        // Arrange
+        let key_len = 10;
+
+        // Act
+        let len = wal_record_encoded_len(WalOpKind::Delete, key_len, None, None);
+
+        // Assert
+        assert!(len > 0);
+        assert!(len >= (4 + 1 + 4 + 8 + key_len) as u64);
+    }
+
+    #[test]
+    fn should_calculate_wal_record_encoded_len_for_delete_range() {
+        // Arrange
+        let key_len = 10;
+        let range_end_len = Some(15);
+
+        // Act
+        let len = wal_record_encoded_len(WalOpKind::DeleteRange, key_len, None, range_end_len);
+
+        // Assert
+        assert!(len > 0);
+        assert!(len >= (4 + 1 + 4 + 8 + key_len + 15) as u64);
+    }
+
+    #[test]
+    fn should_return_max_sequence_from_empty_records() {
+        // Arrange
+        let memtable = MemTable::new();
+        let mut cf_map = HashMap::new();
+        cf_map.insert(0, &memtable);
+        let records: Vec<WalRecord> = vec![];
+
+        // Act
+        let max_seq = replay_wal_to_memtables(&mut cf_map, &records);
+
+        // Assert
+        assert_eq!(max_seq, 0);
+    }
+}
