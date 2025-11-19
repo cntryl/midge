@@ -434,4 +434,29 @@ mod tests {
         assert_eq!(left_result, right_result);
         assert_eq!(left_result, b"60");
     }
+
+    #[test]
+    fn should_return_error_given_invalid_delta_given_integer_add_operator() {
+        // Arrange
+        let op = IntegerAddOperator;
+
+        // Act
+        let result = op.merge(b"key", Some(b"10"), b"not-an-int");
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_given_merge_many_without_deltas() {
+        // Arrange
+        let op = IntegerAddOperator;
+        let empty: Vec<&[u8]> = Vec::new();
+
+        // Act
+        let result = op.merge_many(b"key", None, &empty);
+
+        // Assert
+        assert!(result.is_err());
+    }
 }

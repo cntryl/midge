@@ -40,6 +40,7 @@ Layer 3 (Core Engine):
 Midge offers **two initialization paths**:
 
 1. **High-Level Config API** (Recommended):
+
    - Answer 3 questions: Goal (Latency/Throughput/Cost), Durability (Strict/Steady/CloudReplicated), Memory Budget
    - All parameters auto-derived (block size, cache, compaction threads, etc.)
    - Use `ConfigBuilder::new(path).goal(...).durability(...).build()`
@@ -53,20 +54,15 @@ Midge offers **two initialization paths**:
 ## Development Workflows
 
 ### Running Tests
+
 ```bash
 cargo test                              # All tests
 cargo test test_guidelines_compliance   # Meta-test (validates naming/AAA)
 cargo test --test engine_basic_ops      # Specific integration test
 ```
 
-### Benchmarks
-```bash
-cargo bench                             # All benchmarks
-cargo bench --bench point_lookup        # Specific benchmark
-```
-See `benches/README.md` for organization (api/, storage/, wal/, compaction/, etc.)
-
 ### Test Validation
+
 ```bash
 # Check test compliance (naming, AAA structure)
 cargo run --bin validate_tests -- --summary
@@ -76,6 +72,7 @@ cargo run --bin validate_tests -- --file src/wal/wal_helpers.rs
 ## Automation Scripts
 
 **Prefer Python over PowerShell** for all project automation:
+
 - **Python**: Cross-platform, better library support, VS Code integration
 - **PowerShell**: Only for quick Windows-specific admin tasks
 - Store automation in `scripts/` directory (e.g., `benchmark_summary.py`)
@@ -388,7 +385,181 @@ Excellent examples can be found in:
 **REMEMBER:** When in doubt, create **more smaller tests**, not fewer large ones.
 Clarity beats cleverness.
 
+## Benchmarks
 
-## WIP
+**Always generate benchmarks that follow these rules unless a file explicitly asks for something different.**
 
-if you need to add markdown docs to track work those should live in docs/wip/*
+## **🎯 Benchmark Philosophy (Very Important)**
+
+Benchmarks MUST:
+
+- Measure **only the hot path**, not allocations or setup work.
+- Avoid **all allocations inside the measured loop**.
+- Avoid spawning threads inside the loop.
+- Use **precomputed key/value buffers** outside the loop.
+- Use **deterministic input** (fixed seeds).
+- Use **flat sampling mode** for stable microbench numbers.
+- Run **fast** (Tier-1 < 1 second total, Tier-2 < 3 seconds).
+
+These benchmarks must reflect the real performance of:
+
+- MemTable
+- SkipList
+- WAL write path
+- SST block builder
+- SST decode + search
+- WriteBatch application
+- MergeIterator over multiple SSTs
+
+## **🧱 General Structure to Follow**
+
+Every benchmark file should:
+
+1. Import `criterion::{Criterion, BenchmarkId, SamplingMode, Throughput}`
+2. Use `criterion_config()` for configuration
+3. Group related benchmarks into `benchmark_group`s
+4. Precompute all data _outside_ `b.iter(|| ...)`
+5. Use `black_box()` correctly
+6. End with:
+
+```rust
+criterion_group! { ... }
+criterion_main!(...);
+```
+
+## **🔧 Precomputation Rules**
+
+Copilot must ALWAYS follow these patterns:
+
+### **For fixed-size K/V pairs:**
+
+```rust
+fn make_fixed_kv(n: usize) -> (Vec<Bytes>, Vec<Bytes>) {
+    let mut keys = Vec::with_capacity(n);
+    let mut vals = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let mut k = [0u8; 16];
+        k[8..16].copy_from_slice(&(i as u64).to_be_bytes());
+        keys.push(Bytes::copy_from_slice(&k));
+
+        vals.push(Bytes::copy_from_slice(&[0xAB; 32]));
+    }
+
+    (keys, vals)
+}
+```
+
+### **For deterministic random order:**
+
+```rust
+fn shuffle_indices(len: usize) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..len).collect();
+    let mut seed = 0xDEADBEEFCAFEBABE;
+    for i in (1..len).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let j = (seed as usize) % (i + 1);
+        idx.swap(i, j);
+    }
+    idx
+}
+```
+
+### **For concurrency:**
+
+- Use a `Barrier`
+- Use an `AtomicBool` stop flag
+- Spawn worker threads **once**
+- Synchronize work inside the benchmark
+
+Copilot must not spawn threads in the hot loop.
+
+## **🔥 Benchmark Requirements**
+
+Copilot MUST generate benchmarks that use:
+
+```rust
+group.sampling_mode(SamplingMode::Flat);
+```
+
+and:
+
+```rust
+group.throughput(Throughput::Elements(N as u64));
+```
+
+for any “N operations” microbench.
+
+## **📌 Hot-Path Benchmarks Copilot Should Produce**
+
+Each time I ask Copilot for benches involving:
+
+- SkipList
+- MemTable
+- WriteBatch
+- WAL
+- SST
+- MergeIterator
+
+Copilot must generate:
+
+- **Sequential insert**
+- **Random insert**
+- **Concurrent insert (thread-reuse pattern)**
+- **Read path**
+- **Encode/compress**
+- **Decode/decompress**
+- **File builder (SST)**
+- **MergeIterator scan**
+
+Following the patterns in `hotpath_storage.rs` and `subsystem_storage.rs`.
+
+## **🚀 Benchmark Quality Standards**
+
+Copilot must ensure its generated benchmarks:
+
+### **YES**
+
+- Allocation-free inside loops
+- Deterministic
+- CI-friendly
+- Use flat sampling
+- Clear grouping and naming
+- Minimal noise
+- Rust-idiomatic
+- Use `black_box()` correctly
+- Use real Midge types (MemTable, SkipList, WalWriter, SstFileBuilder, etc.)
+
+### **NO**
+
+- No string formatting inside loops
+- No `Vec::push` inside measured loop
+- No cloning large buffers inside loops
+- No thread spawn per iteration
+- No random RNG calls inside measured loop
+- No I/O unless the benchmark is explicitly for WAL/fsync
+
+## **📁 File Naming**
+
+Copilot must use the following benchmark file structure:
+
+- `benches/hotpath_storage.rs` → Tier 1 (pure in-memory hot path)
+- `benches/subsystem_storage.rs` → Tier 2 (WAL, SST, writebatch)
+- `benches/system_storage.rs` → Tier 3 (full-engine + compaction)
+
+## **📄 Example Instruction to Copilot**
+
+If I ask:
+
+> “Generate benchmarks for the SST read path”
+
+Copilot must produce:
+
+- A block decode benchmark
+- A block binary search benchmark
+- An SSTFile decode benchmark
+- A MergeIterator benchmark
+- All using the construction patterns above
+- Zero allocations or randomness inside the hot loop

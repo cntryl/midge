@@ -263,3 +263,8 @@ name = "system_durability_modes"
 path = "benches/system/durability_modes.rs"
 harness = false
 
+[[bench]]
+name = "subsystem_storage"
+path = "benches/subsystem/storage.rs"
+harness = false
+
