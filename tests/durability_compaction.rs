@@ -1,8 +1,26 @@
 mod common;
-use cntryl_midge::test_hooks::{CompactionBehavior, TestHooks};
+use cntryl_midge::test_hooks::{CompactionBehavior, CompactionGatePoint, TestHooks};
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
-use std::time::Duration;
+
+fn collect_sst_files(dir: &std::path::Path) -> Vec<String> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".sst") {
+                    files.push(name.to_string());
+                }
+            }
+        }
+    }
+    files.sort();
+    files
+}
 
 #[test]
 fn should_commit_new_ssts_and_manifest_together_given_compaction_successful() {
@@ -31,7 +49,8 @@ fn should_commit_new_ssts_and_manifest_together_given_compaction_successful() {
             .expect("put");
     }
     // Wait for compaction to trigger
-    std::thread::sleep(Duration::from_millis(500));
+    eng.wait_for_compaction(std::time::Duration::from_secs(2))
+        .expect("compaction should complete");
     let compaction_complete = hooks.compaction_start_count() > compaction_starts_before;
 
     // DEBUG: Check compaction trigger counts
@@ -92,7 +111,8 @@ fn should_cleanup_partial_output_given_compaction_failure() {
             .expect("put");
     }
     // Wait for compaction attempt to execute
-    std::thread::sleep(Duration::from_millis(500));
+    eng.wait_for_compaction(std::time::Duration::from_secs(2))
+        .expect("compaction should complete");
     let compaction_started = hooks.compaction_start_count() > 0;
     drop(eng);
 
@@ -138,7 +158,6 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     println!("DB path: {:?}", dir.path());
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
-    let compaction_starts_before = hooks.compaction_start_count();
     for round in 0..3 {
         let round_value = vec![b'0' + round as u8; 100]; // 100 bytes per value
         for i in 0..100 {
@@ -146,9 +165,9 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
                 .expect("put");
         }
     }
-    // Wait for compaction
-    std::thread::sleep(Duration::from_millis(500));
-    let compaction_completed = hooks.compaction_complete_count() > compaction_starts_before;
+    // Wait for compaction to complete - use stability-aware wait
+    eng.wait_for_compaction(std::time::Duration::from_secs(5))
+        .expect("compaction should complete");
     drop(eng);
 
     // Assert - latest values should be present, old SSTs should be cleaned
@@ -170,7 +189,67 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
             i
         );
     }
-    assert!(compaction_completed, "Compaction should have completed");
+}
+
+#[test]
+fn should_keep_source_ssts_present_until_manifest_persisted() {
+    // Arrange
+    let dir = test_temp_dir();
+    let hooks = TestHooks::new();
+    let before_gate = hooks.install_compaction_gate(CompactionGatePoint::BeforeExecution);
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 1024,
+        enable_compaction: true,
+        wal_sync: true,
+        test_hooks: Some(hooks.clone()),
+        ..Default::default()
+    };
+    let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
+    let sst_dir = dir.path().join("sst");
+
+    // Act
+    for round in 0..3 {
+        let value = vec![b'a' + round as u8; 128];
+        for i in 0..64 {
+            eng.put(&cf, format!("key{:04}", i).as_bytes(), &value)
+                .expect("put");
+        }
+    }
+
+    assert!(
+        before_gate.wait_until_blocked(std::time::Duration::from_secs(5)),
+        "Compaction should reach the BeforeExecution gate"
+    );
+    let source_files = collect_sst_files(&sst_dir);
+    assert!(
+        !source_files.is_empty(),
+        "Expected flushed SSTs before compaction proceeds"
+    );
+
+    let after_gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+    before_gate.release();
+
+    assert!(
+        after_gate.wait_until_blocked(std::time::Duration::from_secs(5)),
+        "Compaction should reach the AfterManifestUpdate gate"
+    );
+
+    // Assert
+    for file in &source_files {
+        assert!(
+            sst_dir.join(file).exists(),
+            "Source SST {} should remain until manifest persistence completes",
+            file
+        );
+    }
+
+    after_gate.release();
+    eng.wait_for_compaction(std::time::Duration::from_secs(2))
+        .expect("compaction should complete");
 }
 
 #[test]
@@ -200,7 +279,8 @@ fn should_fsync_new_ssts_before_updating_manifest() {
             .expect("put");
     }
     // Wait for compaction
-    std::thread::sleep(Duration::from_millis(500));
+    eng.wait_for_compaction(std::time::Duration::from_secs(2))
+        .expect("compaction should complete");
     let fsync_count_after = hooks.fsync_count();
     let compaction_completed = hooks.compaction_complete_count() > compaction_starts_before;
     drop(eng);
@@ -250,7 +330,8 @@ fn should_recover_consistent_state_given_crash_mid_compaction_when_restart() {
             .expect("put");
     }
     // Wait for compaction to reach crash point
-    std::thread::sleep(Duration::from_millis(500));
+    eng.wait_for_compaction(std::time::Duration::from_secs(2))
+        .expect("compaction should complete");
     let compaction_attempted = hooks.compaction_start_count() > 0;
     drop(eng);
 
@@ -298,7 +379,8 @@ fn should_preserve_source_ssts_when_compaction_output_not_fsynced() {
             .expect("put");
     }
     // Wait for compaction to reach crash point
-    std::thread::sleep(Duration::from_millis(500));
+    eng.wait_for_compaction(std::time::Duration::from_secs(2))
+        .expect("compaction should complete");
     let compaction_attempted = hooks.compaction_start_count() > 0;
     drop(eng);
 

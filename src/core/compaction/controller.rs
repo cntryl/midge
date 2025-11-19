@@ -371,6 +371,24 @@ impl CompactionController {
                                     CompactionGatePoint::AfterManifestUpdate,
                                 );
                             }
+
+                            // Delete old SST files only after manifest persistence is confirmed
+                            for old_sst in &plan.input_files {
+                                let old_path = sst_dir.join(old_sst);
+                                eprintln!("INSTRUMENT attempting to delete old SST: {}", old_path.display());
+                                if old_path.exists() {
+                                    eprintln!("INSTRUMENT old SST exists, deleting: {}", old_path.display());
+                                    if let Err(e) = std::fs::remove_file(&old_path) {
+                                        eprintln!("INSTRUMENT failed to remove old SST {}: {}", old_path.display(), e);
+                                        tracing::warn!(path = %old_path.display(), error = %e, "failed to remove old SST during compaction");
+                                    } else {
+                                        eprintln!("INSTRUMENT successfully removed old SST: {}", old_path.display());
+                                        tracing::debug!(path = %old_path.display(), "removed old SST during compaction");
+                                    }
+                                } else {
+                                    eprintln!("INSTRUMENT old SST does not exist: {}", old_path.display());
+                                }
+                            }
                         }
 
                         Ok(())
@@ -446,19 +464,50 @@ impl CompactionController {
     /// any in-flight compaction). This sends a Barrier message and waits for the
     /// worker to acknowledge. A timeout is required to avoid hanging tests if the
     /// worker is deadlocked.
+    ///
+    /// This waits for stability - the worker must be idle for a short period to
+    /// ensure cascading compactions have also completed.
     pub fn wait_until_idle(&self, timeout: std::time::Duration) -> MidgeResult<()> {
-        let (s, r) = channel::bounded::<()>(1);
-        self.tx
-            .send(CompactionMsg::Barrier { reply: s })
-            .map_err(|_| MidgeError::internal("Compaction worker channel closed"))?;
+        let start_time = std::time::Instant::now();
+        let stability_duration = std::time::Duration::from_millis(100);
 
-        match r.recv_timeout(timeout) {
-            Ok(()) => Ok(()),
-            Err(channel::RecvTimeoutError::Timeout) => Err(MidgeError::internal(
-                "Timed out waiting for compaction worker to become idle",
-            )),
-            Err(channel::RecvTimeoutError::Disconnected) => {
-                Err(MidgeError::internal("Compaction worker disconnected"))
+        loop {
+            let (s, r) = channel::bounded::<()>(1);
+            self.tx
+                .send(CompactionMsg::Barrier { reply: s })
+                .map_err(|_| MidgeError::internal("Compaction worker channel closed"))?;
+
+            match r.recv_timeout(timeout.saturating_sub(start_time.elapsed())) {
+                Ok(()) => {
+                    // Worker is currently idle. Wait a bit and check again to ensure stability.
+                    std::thread::sleep(stability_duration);
+                    let (s2, r2) = channel::bounded::<()>(1);
+                    self.tx
+                        .send(CompactionMsg::Barrier { reply: s2 })
+                        .map_err(|_| MidgeError::internal("Compaction worker channel closed"))?;
+
+                    match r2.recv_timeout(std::time::Duration::from_millis(50)) {
+                        Ok(()) => {
+                            // Still idle after stability period - we're done
+                            return Ok(());
+                        }
+                        Err(channel::RecvTimeoutError::Timeout) => {
+                            // Worker became busy again, continue waiting
+                            continue;
+                        }
+                        Err(channel::RecvTimeoutError::Disconnected) => {
+                            return Err(MidgeError::internal("Compaction worker disconnected"));
+                        }
+                    }
+                }
+                Err(channel::RecvTimeoutError::Timeout) => {
+                    return Err(MidgeError::internal(
+                        "Timed out waiting for compaction worker to become idle",
+                    ));
+                }
+                Err(channel::RecvTimeoutError::Disconnected) => {
+                    return Err(MidgeError::internal("Compaction worker disconnected"));
+                }
             }
         }
     }

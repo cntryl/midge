@@ -316,7 +316,12 @@ mod tests {
     #[test]
     fn should_return_ok_immediately_when_compaction_disabled() {
         // Arrange
-        let engine = create_test_engine();
+        let opts = crate::MidgeOptions {
+            storage_mode: crate::StorageMode::Memory,
+            enable_compaction: false,
+            ..Default::default()
+        };
+        let engine = Arc::new(MidgeEngine::open(opts).expect("Failed to create test engine"));
 
         // Act
         let result = engine.wait_for_compaction_idle(std::time::Duration::from_secs(1));

@@ -266,9 +266,8 @@ fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested()
     // Reader thread attempts to read while transaction is open
     let eng_reader = Arc::clone(&engine);
     let cf_reader = cf.clone();
-    let reader_result = std::thread::spawn(move || {
-        eng_reader.get(&cf_reader, b"dirty_read_key").expect("get")
-    });
+    let reader_result =
+        std::thread::spawn(move || eng_reader.get(&cf_reader, b"dirty_read_key").expect("get"));
 
     let read_value = reader_result.join().expect("reader panicked");
     let _txn = txn_handle.join().expect("txn panicked");
