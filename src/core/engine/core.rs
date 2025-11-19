@@ -335,10 +335,10 @@ mod tests {
         // Arrange
         let engine = create_test_engine();
 
-        // Act - should not panic even if file doesn't exist
+        // Act
         engine.update_caches_for_new_sst("nonexistent.sst");
 
-        // Assert - no assertion needed, just verify no panic
+        // Assert
     }
 
     #[test]
@@ -349,6 +349,6 @@ mod tests {
         // Act
         drop(engine);
 
-        // Assert - if we get here without panic, WAL was flushed successfully
+        // Assert
     }
 }

@@ -375,40 +375,60 @@ mod tests {
 
     #[test]
     fn should_acquire_lock_in_writable_mode() {
+        // Arrange
+
+        // Act
         let temp_dir = TempDir::new().unwrap();
         let lock = acquire_db_lock(temp_dir.path(), false, false);
+
+        // Assert
         assert!(lock.is_ok());
         assert!(lock.unwrap().is_some());
     }
 
     #[test]
     fn should_not_acquire_lock_in_read_only_mode() {
+        // Arrange
+
+        // Act
         let temp_dir = TempDir::new().unwrap();
         let lock = acquire_db_lock(temp_dir.path(), true, false);
+
+        // Assert
         assert!(lock.is_ok());
         assert!(lock.unwrap().is_none());
     }
 
     #[test]
     fn should_not_acquire_lock_in_memory_mode() {
+        // Arrange
+
+        // Act
         let temp_dir = TempDir::new().unwrap();
         let lock = acquire_db_lock(temp_dir.path(), false, true);
+
+        // Assert
         assert!(lock.is_ok());
         assert!(lock.unwrap().is_none());
     }
 
     #[test]
     fn should_initialize_manifest_with_default_cf() {
+        // Arrange
+
+        // Act
         let temp_dir = TempDir::new().unwrap();
         let (manifest, max_cf_id) =
             init_manifest(temp_dir.path(), false, 64 * 1024 * 1024, false).unwrap();
 
+        // Assert
         assert!(manifest.has_cf(DEFAULT_CF_ID));
         assert_eq!(max_cf_id, 0);
     }
 
     #[test]
     fn should_load_existing_manifest() {
+        // Arrange
         let temp_dir = TempDir::new().unwrap();
 
         // Create and save a manifest
@@ -425,10 +445,12 @@ mod tests {
         );
         manifest.save_atomic(temp_dir.path()).unwrap();
 
+        // Act
         // Load it back
         let (loaded_manifest, max_cf_id) =
             init_manifest(temp_dir.path(), false, 64 * 1024 * 1024, false).unwrap();
 
+        // Assert
         assert!(loaded_manifest.has_cf(DEFAULT_CF_ID));
         assert!(loaded_manifest.has_cf(ColumnFamilyId::new(1)));
         assert_eq!(max_cf_id, 1);
@@ -436,6 +458,7 @@ mod tests {
 
     #[test]
     fn should_initialize_column_families_from_manifest() {
+        // Arrange
         let _temp_dir = TempDir::new().unwrap();
         let mut manifest = Manifest::default();
         manifest.add_cf(
@@ -450,8 +473,11 @@ mod tests {
         );
 
         let cf_set = ColumnFamilySet::new();
+
+        // Act
         let result = init_column_families(&manifest, &cf_set, 1);
 
+        // Assert
         assert!(result.is_ok());
         assert!(cf_set.cfs.contains_key(&DEFAULT_CF_ID.as_u32()));
         assert!(cf_set.cfs.contains_key(&1));
@@ -460,11 +486,14 @@ mod tests {
 
     #[test]
     fn should_return_last_persisted_seq_when_no_wal_files() {
+        // Arrange
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
         std::fs::create_dir_all(&wal_dir).unwrap();
 
         let cf_set = ColumnFamilySet::new();
+
+        // Act
         let max_seq = replay_local_wal_segments(
             &wal_dir,
             &cf_set,
@@ -474,15 +503,19 @@ mod tests {
         )
         .unwrap();
 
+        // Assert
         assert_eq!(max_seq, 100);
     }
 
     #[test]
     fn should_skip_replay_in_memory_mode() {
+        // Arrange
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
 
         let cf_set = ColumnFamilySet::new();
+
+        // Act
         let max_seq = replay_local_wal_segments(
             &wal_dir,
             &cf_set,
@@ -492,6 +525,7 @@ mod tests {
         )
         .unwrap();
 
+        // Assert
         assert_eq!(max_seq, 100);
     }
 

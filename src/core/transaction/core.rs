@@ -552,7 +552,7 @@ mod tests {
         txn.delete_range(Bytes::from("a"), Bytes::from("z"))
             .unwrap();
 
-        // Act - key is in range
+        // Act
         let result1 = txn.get_local(crate::api::DEFAULT_CF_ID.as_u32(), b"m");
 
         // Assert
@@ -760,7 +760,7 @@ mod tests {
         // Act
         txn.put(b"key1", &large_value).unwrap();
 
-        // Assert - memory should be reset after spill
+        // Assert
         assert_eq!(txn.mem_used, 0, "Memory should be reset after spill");
         assert_eq!(
             txn.staged.len(),
@@ -894,7 +894,7 @@ mod tests {
             crate::api::IsolationLevel::default(),
         );
 
-        // Act - Add 2KB of data (force spilling)
+        // Act
         for i in 0..2 {
             txn.put(format!("key{:03}", i).as_bytes(), &vec![0xAB; 1024])
                 .unwrap();
@@ -902,7 +902,7 @@ mod tests {
 
         let mutations = txn.commit().unwrap();
 
-        // Assert - All mutations should be present
+        // Assert
         assert_eq!(mutations.len(), 2, "Should have all mutations after spill");
         assert_eq!(mutations[0].key, Bytes::from("key000"));
         assert_eq!(mutations[1].key, Bytes::from("key001"));
@@ -920,13 +920,13 @@ mod tests {
             crate::api::IsolationLevel::default(),
         );
 
-        // Act - Write large value
+        // Act
         let large_value = vec![0xCC; 10000];
         txn.put(b"large_key", &large_value).unwrap();
 
         let mutations = txn.commit().unwrap();
 
-        // Assert - Large value preserved
+        // Assert
         assert_eq!(mutations.len(), 1);
         assert_eq!(mutations[0].value, Some(Bytes::from(large_value)));
     }
@@ -936,7 +936,7 @@ mod tests {
         // Arrange
         let memory_threshold = 256;
 
-        // Act - Spill data then drop without committing
+        // Act
         {
             let mut txn = Transaction::with_options(
                 1,
@@ -949,7 +949,8 @@ mod tests {
             // Transaction dropped here without commit or rollback
         }
 
-        // Assert - Should not panic or leave files (tested by not crashing)
+        // Assert
+        // Should not panic or leave files (tested by not crashing)
         // Cleanup is automatic via Drop trait
     }
 
@@ -1021,7 +1022,8 @@ mod tests {
         // Act
         txn.rollback(); // Second rollback should be idempotent
 
-        // Assert - No panic, rollback is idempotent
+        // Assert
+        // No panic, rollback is idempotent
     }
 
     #[test]
@@ -1031,7 +1033,7 @@ mod tests {
         txn.put(b"key1", b"value1").unwrap();
         txn.rollback();
 
-        // Act - Try to add more mutations
+        // Act
         let result = txn.put(b"key2", b"value2");
 
         // Assert

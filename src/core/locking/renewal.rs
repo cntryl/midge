@@ -147,7 +147,9 @@ mod tests {
 
     #[test]
     fn should_compute_renewal_interval_as_half_ttl() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let interval = renewal_interval_from_ttl(10000);
 
         // Assert

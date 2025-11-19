@@ -256,6 +256,7 @@ mod tests {
         // Act
         drop(coordinator);
 
-        // Assert - no panic means success
+        // Assert
+        // no panic means success
     }
 }

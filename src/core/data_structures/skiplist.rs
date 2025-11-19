@@ -859,7 +859,7 @@ mod tests {
         let sl = Arc::new(SkipList::new());
         let mut handles = vec![];
 
-        // Act - Spawn multiple threads to write concurrently
+        // Act
         for i in 0..4 {
             let sl_clone = Arc::clone(&sl);
             let handle = thread::spawn(move || {
@@ -879,7 +879,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        // Assert - Verify all 400 keys are present
+        // Assert
         let keys = sl.get_all_keys();
         assert_eq!(keys.len(), 400);
     }
@@ -896,7 +896,7 @@ mod tests {
             );
         }
 
-        // Act - Spawn writers and readers concurrently
+        // Act
         let mut handles = vec![];
         for i in 0..2 {
             let sl_clone = Arc::clone(&sl);
@@ -927,7 +927,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        // Assert - No panics during concurrent access
+        // Assert
     }
 
     #[test]

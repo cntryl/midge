@@ -517,8 +517,7 @@ mod tests {
 
     #[test]
     fn should_preserve_old_value_visible_to_snapshot_when_deduplicating() {
-        // Arrange: key with value at seq=100, tombstone at seq=200
-        // Snapshot exists at seq=150, so it should see value at seq=100 (100 < 150)
+        // Arrange
         let mut versions = vec![
             make_tombstone(b"key1", 200), // Newest: tombstone (not visible to snapshot)
             make_version(b"key1", 100, false), // Older: value (visible to snapshot at seq=150)
@@ -528,7 +527,7 @@ mod tests {
         // Act
         let result = deduplicate_versions(&versions, Some(150));
 
-        // Assert: Both versions should be kept
+        // Assert
         assert_eq!(
             result.len(),
             2,
@@ -542,8 +541,7 @@ mod tests {
 
     #[test]
     fn should_discard_old_value_not_visible_to_snapshot_when_deduplicating() {
-        // Arrange: key with value at seq=50, tombstone at seq=200
-        // Snapshot exists at seq=25, so it doesn't see seq=50 (50 >= 25)
+        // Arrange
         let mut versions = vec![
             make_tombstone(b"key1", 200),     // Newest: tombstone
             make_version(b"key1", 50, false), // Older: value (NOT visible to snapshot at seq=25)
@@ -553,7 +551,7 @@ mod tests {
         // Act
         let result = deduplicate_versions(&versions, Some(25));
 
-        // Assert: Only tombstone kept since old value not visible to any snapshot
+        // Assert
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].seq, 200);
         assert!(result[0].tombstone);
@@ -840,7 +838,7 @@ mod tests {
 
     #[test]
     fn should_sort_versions_with_newest_first() {
-        // Arrange: Create versions of same key with different sequences (unsorted)
+        // Arrange
         let mut versions = vec![
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -868,7 +866,7 @@ mod tests {
         // Act
         sort_versions_for_output(&mut versions);
 
-        // Assert: Same key should be together, with highest seq first
+        // Assert
         assert_eq!(versions[0].seq, 10);
         assert_eq!(versions[1].seq, 5);
         assert_eq!(versions[2].seq, 1);
@@ -876,7 +874,7 @@ mod tests {
 
     #[test]
     fn should_deduplicate_keeping_only_newest_version_when_no_snapshots() {
-        // Arrange: Multiple versions of same key, sorted newest first
+        // Arrange
         let versions = vec![
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -901,10 +899,10 @@ mod tests {
             },
         ];
 
-        // Act: No active snapshots
+        // Act
         let result = deduplicate_versions(&versions, None);
 
-        // Assert: Only newest version should remain
+        // Assert
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].seq, 10);
         assert_eq!(result[0].value, Some(Bytes::from_static(b"v10")));
@@ -912,7 +910,7 @@ mod tests {
 
     #[test]
     fn should_preserve_versions_visible_to_snapshots() {
-        // Arrange: Multiple versions with a snapshot at seq=7
+        // Arrange
         let versions = vec![
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -937,10 +935,10 @@ mod tests {
             },
         ];
 
-        // Act: Snapshot at seq=7 can see versions < 7 (seq 5 and 1)
+        // Act
         let result = deduplicate_versions(&versions, Some(7));
 
-        // Assert: Keep newest (10) and versions visible to snapshot (5, 1)
+        // Assert
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].seq, 10);
         assert_eq!(result[1].seq, 5);
@@ -949,7 +947,7 @@ mod tests {
 
     #[test]
     fn should_handle_multiple_keys_with_different_sequences() {
-        // Arrange: Two keys with multiple versions each
+        // Arrange
         let mut versions = vec![
             CompactionVersion {
                 user_key: b"key_a".to_vec(),
@@ -985,7 +983,7 @@ mod tests {
         sort_versions_for_output(&mut versions);
         let result = deduplicate_versions(&versions, None);
 
-        // Assert: Two keys, each with newest version only
+        // Assert
         assert_eq!(result.len(), 2);
         // key_a comes first (alphabetically)
         assert_eq!(result[0].user_key, b"key_a");

@@ -328,7 +328,9 @@ mod tests {
 
     #[test]
     fn should_create_spill_manager_successfully() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let manager = SpillManager::new(100);
 
         // Assert

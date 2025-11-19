@@ -438,23 +438,41 @@ mod tests {
 
     #[test]
     fn should_calculate_varint_len_for_small_values() {
-        // Arrange & Act & Assert
-        assert_eq!(varint_len_u32(0), 1);
-        assert_eq!(varint_len_u32(127), 1);
+        // Arrange
+
+        // Act
+        let len0 = varint_len_u32(0);
+        let len127 = varint_len_u32(127);
+
+        // Assert
+        assert_eq!(len0, 1);
+        assert_eq!(len127, 1);
     }
 
     #[test]
     fn should_calculate_varint_len_for_medium_values() {
-        // Arrange & Act & Assert
-        assert_eq!(varint_len_u32(128), 2);
-        assert_eq!(varint_len_u32(16383), 2);
+        // Arrange
+
+        // Act
+        let len128 = varint_len_u32(128);
+        let len16383 = varint_len_u32(16383);
+
+        // Assert
+        assert_eq!(len128, 2);
+        assert_eq!(len16383, 2);
     }
 
     #[test]
     fn should_calculate_varint_len_for_large_values() {
-        // Arrange & Act & Assert
-        assert_eq!(varint_len_u32(16384), 3);
-        assert_eq!(varint_len_u32(u32::MAX), 5);
+        // Arrange
+
+        // Act
+        let len16384 = varint_len_u32(16384);
+        let len_max = varint_len_u32(u32::MAX);
+
+        // Assert
+        assert_eq!(len16384, 3);
+        assert_eq!(len_max, 5);
     }
 
     #[test]

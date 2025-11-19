@@ -119,8 +119,11 @@ mod tests {
             WorkloadProfile::Mixed,
         );
 
-        // Act & Assert
-        assert!(validate(&params, CloudMode::Off).is_ok());
+        // Act
+        let result = validate(&params, CloudMode::Off);
+
+        // Assert
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -145,7 +148,7 @@ mod tests {
 
     #[test]
     fn should_validate_wal_interval_bounds() {
-        // Arrange - Create params with unsafe interval
+        // Arrange
         let mut params = DerivedParams::derive(
             Goal::Latency,
             Durability::Steady,

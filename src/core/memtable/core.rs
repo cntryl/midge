@@ -440,10 +440,10 @@ mod tests {
         mt.put_with_seq(b"b", b"2", 2);
         mt.put_with_seq(b"c", b"3", 3);
 
-        // Act: snapshot at seq 3 sees writes with seq < 3 (i.e., seq 1 and 2)
+        // Act
         let rows_at_3 = mt.scan_range_at(Some(b"a"), Some(b"z"), 3);
 
-        // Assert: keys with seq < 3 only (a and b)
+        // Assert
         assert_eq!(
             rows_at_3,
             vec![
@@ -464,7 +464,7 @@ mod tests {
         mt.put_with_seq(&key, &val, 42);
         let metas = mt.drain_with_meta();
 
-        // Assert: one entry with expected fields
+        // Assert
         assert_eq!(metas.len(), 1);
         let m = &metas[0];
         assert_eq!(m.key, key);
@@ -479,7 +479,7 @@ mod tests {
         let mt = MemTable::new();
         let key = b"k2".to_vec();
 
-        // Act: delete creates a tombstone
+        // Act
         mt.delete_with_seq(&key, 7);
         let metas = mt.drain_with_meta();
 
@@ -497,7 +497,9 @@ mod tests {
         // Arrange
         let mt = MemTable::new();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert!(mt.is_empty());
     }
 
@@ -535,10 +537,10 @@ mod tests {
         mt.put_with_seq(b"c", b"3", 3);
         mt.put_with_seq(b"d", b"4", 4);
 
-        // Act: delete range [b, d)
+        // Act
         mt.delete_range_with_seq(b"b", b"d", 5);
 
-        // Assert: b and c should be deleted, a and d should remain
+        // Assert
         assert_eq!(mt.get(b"a"), Some(Bytes::from_static(b"1")));
         assert_eq!(mt.get(b"b"), None);
         assert_eq!(mt.get(b"c"), None);
@@ -555,7 +557,7 @@ mod tests {
         // Act
         let metas = mt.drain_with_meta_internal();
 
-        // Assert: keys should be encoded as internal keys
+        // Assert
         assert_eq!(metas.len(), 2);
 
         // First entry: put with seq 10

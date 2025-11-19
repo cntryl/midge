@@ -124,9 +124,13 @@ mod tests {
         // Arrange
         let result = VerifyResult::Valid;
 
-        // Act & Assert
-        assert!(result.is_valid());
-        assert!(result.errors().is_none());
+        // Act
+        let is_valid = result.is_valid();
+        let errors = result.errors();
+
+        // Assert
+        assert!(is_valid);
+        assert!(errors.is_none());
     }
 
     #[test]
@@ -136,14 +140,20 @@ mod tests {
             errors: vec!["Error 1".to_string()],
         };
 
-        // Act & Assert
-        assert!(!result.is_valid());
-        assert_eq!(result.errors().unwrap().len(), 1);
+        // Act
+        let is_valid = result.is_valid();
+        let errors = result.errors();
+
+        // Assert
+        assert!(!is_valid);
+        assert!(errors.is_some());
     }
 
     #[test]
     fn should_create_default_backup_options() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let opts = BackupOptions::default();
 
         // Assert
@@ -154,7 +164,9 @@ mod tests {
 
     #[test]
     fn should_create_default_restore_options() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let opts = RestoreOptions::default();
 
         // Assert

@@ -226,7 +226,7 @@ mod tests {
 
         let manager = VersionManager::new(version_set.clone(), db_path, None, false);
 
-        // Act - add multiple files
+        // Act
         for i in 0..5 {
             let file = FileMeta {
                 name: format!("test_{}.sst", i),

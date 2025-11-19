@@ -486,12 +486,15 @@ mod tests {
 
     #[test]
     fn should_track_wal_metrics() {
+        // Arrange
         let metrics = WalMetrics::new();
 
+        // Act
         metrics.record_write(1024);
         metrics.record_write(2048);
         metrics.record_fsync(Duration::from_micros(500));
 
+        // Assert
         assert_eq!(metrics.total_operations(), 2);
         assert_eq!(metrics.total_bytes_written(), 3072);
         assert_eq!(metrics.total_fsync_calls(), 1);
@@ -500,56 +503,71 @@ mod tests {
 
     #[test]
     fn should_track_batched_sync_effectiveness() {
+        // Arrange
         let metrics = WalMetrics::new();
 
+        // Act
         metrics.record_batched_sync(10);
         metrics.record_batched_sync(20);
 
+        // Assert
         assert_eq!(metrics.avg_batch_size(), 15.0);
     }
 
     #[test]
     fn should_calculate_cache_hit_rate() {
+        // Arrange
         let metrics = CacheMetrics::new();
 
+        // Act
         metrics.record_hit();
         metrics.record_hit();
         metrics.record_miss();
 
+        // Assert
         assert_eq!(metrics.hit_rate(), 2.0 / 3.0);
     }
 
     #[test]
     fn should_calculate_bloom_false_positive_rate() {
+        // Arrange
         let metrics = SstMetrics::new();
 
+        // Act
         metrics.record_bloom_check(true);
         metrics.record_bloom_check(true);
         metrics.record_bloom_check(false);
 
+        // Assert
         // 2 hits out of 3 checks = 33% false positive rate
         assert!((metrics.bloom_false_positive_rate() - 0.333).abs() < 0.01);
     }
 
     #[test]
     fn should_calculate_write_amplification() {
+        // Arrange
         let metrics = CompactionMetrics::new();
 
+        // Act
         metrics.record_compaction(1_000_000, 5_000_000, Duration::from_secs(1));
 
+        // Assert
         assert_eq!(metrics.write_amplification(), 5.0);
     }
 
     #[test]
     fn should_reset_metrics() {
+        // Arrange
         let metrics = PerformanceMetrics::new();
 
+        // Act
         metrics.wal.record_write(1024);
         metrics.memtable.record_insert(512);
         metrics.cache.record_hit();
 
         metrics.reset();
 
+        // Assert
         assert_eq!(metrics.wal.total_operations(), 0);
         assert_eq!(metrics.memtable.total_inserts(), 0);
         assert_eq!(metrics.cache.total_hits(), 0);

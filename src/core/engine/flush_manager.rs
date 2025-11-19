@@ -130,7 +130,7 @@ mod tests {
         // Arrange
         let engine = create_test_engine();
 
-        // Act - Rollover without any writes
+        // Act
         let result = engine.rollover_and_queue_flush(DEFAULT_CF_ID);
 
         // Assert
@@ -150,7 +150,7 @@ mod tests {
         // Act
         engine.rollover_and_queue_flush(DEFAULT_CF_ID).unwrap();
 
-        // Assert - Data should still be retrievable (either from frozen memtable or after flush)
+        // Assert
         let value1 = engine.get(&cf, b"key1").unwrap();
         let value2 = engine.get(&cf, b"key2").unwrap();
         assert!(value1.is_some());
@@ -181,7 +181,7 @@ mod tests {
         let engine = create_test_engine();
         let cf = engine.default_column_family();
 
-        // Act - Multiple rollovers
+        // Act
         engine.put(&cf, b"key1", b"value1").unwrap();
         let seq1 = engine.rollover_and_queue_flush(DEFAULT_CF_ID).unwrap();
 
@@ -209,10 +209,10 @@ mod tests {
         engine.put(&default_cf, b"key1", b"value1").unwrap();
         engine.put(&custom_cf, b"key2", b"value2").unwrap();
 
-        // Act - Rollover only default CF
+        // Act
         let seq_default = engine.rollover_and_queue_flush(DEFAULT_CF_ID).unwrap();
 
-        // Assert - Custom CF should still have data in active memtable
+        // Assert
         let value_custom = engine.get(&custom_cf, b"key2").unwrap();
         assert!(value_custom.is_some());
         assert!(seq_default > 0);
@@ -237,7 +237,7 @@ mod tests {
         // Act
         let result = engine.rollover_and_queue_flush(DEFAULT_CF_ID);
 
-        // Assert - WAL rotation should succeed as part of rollover
+        // Assert
         assert!(result.is_ok());
     }
 
@@ -256,7 +256,7 @@ mod tests {
         // Write data after rollover
         engine.put(&cf, b"after_key", b"after_value").unwrap();
 
-        // Assert - Both values should be retrievable
+        // Assert
         let before_value = engine.get(&cf, b"before_key").unwrap();
         let after_value = engine.get(&cf, b"after_key").unwrap();
         assert_eq!(

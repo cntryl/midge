@@ -440,8 +440,7 @@ mod tests {
 
     #[test]
     fn should_allow_concurrent_writes_to_same_key_in_active_transactions() {
-        // Arrange: In OCC, active transactions can write to the same key
-        // Conflicts are detected only at commit time against committed transactions
+        // Arrange
         let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("x"));
@@ -466,7 +465,7 @@ mod tests {
         )
         .unwrap();
 
-        // Act: First transaction commits successfully
+        // Act
         let result1 = tm.try_commit(
             1,
             5,
@@ -487,7 +486,7 @@ mod tests {
             &HashMap::new(),
         );
 
-        // Assert: Second transaction detects conflict with committed txn1
+        // Assert
         assert!(result2.is_err());
         assert!(result2.unwrap_err().contains("Write-write conflict"));
     }
