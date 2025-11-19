@@ -105,7 +105,7 @@ fn should_handle_multiple_concurrent_checkpoints() {
             enable_compaction: false,
             ..Default::default()
         };
-        let cp = MidgeEngine::open(cp_opts).expect(&format!("open checkpoint {}", i));
+        let cp = MidgeEngine::open(cp_opts).unwrap_or_else(|_| panic!("open checkpoint {}", i));
         assert_eq!(
             cp.get(&cf, b"key_0").expect("get"),
             Some(Bytes::from_static(b"value"))

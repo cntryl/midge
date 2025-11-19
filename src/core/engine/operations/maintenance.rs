@@ -565,7 +565,7 @@ impl MidgeEngine {
 
         // Now remove all old SST files
         edit = crate::core::manifest::VersionEdit::RemoveFiles {
-            names: manifest.ssts.iter().map(|name| name.clone()).collect(),
+            names: manifest.ssts.to_vec(),
         };
         self.version_manager.apply_edit_sync(edit)?;
 
@@ -808,7 +808,8 @@ mod tests {
     use crate::{MidgeEngine, MidgeOptions, StorageMode};
 
     fn create_test_engine() -> MidgeEngine {
-        let temp_dir = std::env::temp_dir().join(format!("midge_test_maintenance_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_test_maintenance_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let db_path = temp_dir;
         let opts = MidgeOptions {
@@ -894,7 +895,10 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MidgeError::InvalidConfig { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            MidgeError::InvalidConfig { .. }
+        ));
     }
 
     #[test]
@@ -920,7 +924,10 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MidgeError::InvalidConfig { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            MidgeError::InvalidConfig { .. }
+        ));
     }
 
     #[test]
@@ -934,6 +941,9 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MidgeError::InvalidConfig { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            MidgeError::InvalidConfig { .. }
+        ));
     }
 }

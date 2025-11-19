@@ -19,6 +19,9 @@ impl Key {
     }
 }
 
+// Type alias for committed transaction info: commit_seq -> (txn_id, writes, ranges)
+type CommittedTxnInfo = HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>;
+
 #[derive(Clone)]
 struct TxnInfo {
     begin_seq: u64,
@@ -31,7 +34,7 @@ struct TxnInfo {
 #[derive(Default)]
 struct Inner {
     active: HashMap<u64, TxnInfo>,
-    committed: HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>, // commit_seq -> (txn_id, writes, ranges)
+    committed: CommittedTxnInfo, // commit_seq -> (txn_id, writes, ranges)
     wait_for: HashMap<u64, HashSet<u64>>,
     max_retained: usize,
 }
@@ -218,11 +221,7 @@ impl TransactionController {
 
     // --- Private helpers ---
 
-    fn has_commit_conflict(
-        txn: &TxnInfo,
-        committed: &HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>,
-        id: u64,
-    ) -> bool {
+    fn has_commit_conflict(txn: &TxnInfo, committed: &CommittedTxnInfo, id: u64) -> bool {
         committed
             .iter()
             .any(|(&_seq, (cid, ws, _))| *cid != id && !txn.write_set.is_disjoint(ws))
@@ -244,7 +243,7 @@ impl TransactionController {
                 if other
                     .write_ranges
                     .iter()
-                    .any(|(cf, start, end)| key.0 == *cf && &key.1 >= start && &key.1 < end)
+                    .any(|(cf, start, end)| key.0 == *cf && key.1 >= start && key.1 < end)
                 {
                     return true;
                 }
@@ -255,7 +254,7 @@ impl TransactionController {
                 if other
                     .write_set
                     .iter()
-                    .any(|k| k.0 == *cf && &k.1 >= start && &k.1 < end)
+                    .any(|k| k.0 == *cf && k.1 >= start && k.1 < end)
                 {
                     return true;
                 }
@@ -273,10 +272,7 @@ impl TransactionController {
         false
     }
 
-    fn has_read_conflict(
-        txn: &TxnInfo,
-        committed: &HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>,
-    ) -> bool {
+    fn has_read_conflict(txn: &TxnInfo, committed: &CommittedTxnInfo) -> bool {
         txn.read_versions.iter().any(|(key, ver)| {
             committed
                 .iter()
@@ -284,22 +280,15 @@ impl TransactionController {
         })
     }
 
-    fn has_commit_range_conflict(
-        txn: &TxnInfo,
-        committed: &HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, Bytes)>)>,
-        id: u64,
-    ) -> bool {
+    fn has_commit_range_conflict(txn: &TxnInfo, committed: &CommittedTxnInfo, id: u64) -> bool {
         committed.iter().any(|(&seq, (cid, _, ranges))| {
             seq >= txn.begin_seq
                 && *cid != id
-                && (
-                    // Check if our writes conflict with committed ranges
-                    ranges.iter().any(|(cf, start, end)| {
-                    txn.write_set.iter().any(|key| key.0 == *cf && &key.1 >= start && &key.1 < end)
-                }) ||
-                // Check if our ranges conflict with committed writes (simplified - no committed writes to check)
-                false
-                )
+                && ranges.iter().any(|(cf, start, end)| {
+                    txn.write_set
+                        .iter()
+                        .any(|key| key.0 == *cf && key.1 >= start && key.1 < end)
+                })
         })
     }
 }

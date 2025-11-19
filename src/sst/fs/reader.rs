@@ -653,7 +653,6 @@ impl SstFile {
                 }
             }
 
-            if entry_count <= 5 || entry_count > 165 {}
             if user_key.as_slice() == target_key {
                 return Ok(if tomb {
                     KeyState::Tombstone(seq)

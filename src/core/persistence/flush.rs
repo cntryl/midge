@@ -500,8 +500,7 @@ where
     let total_entries = entries.len() as u64;
 
     // Add entries with expiration metadata
-    for (idx, entry) in entries.iter().enumerate() {
-        if idx < 5 || idx >= entries.len() - 5 || idx == 500 {}
+    for entry in entries.iter() {
         let v_ref = entry.value.as_deref();
         dyn_writer.add_with_meta(
             &entry.key,

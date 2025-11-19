@@ -227,7 +227,7 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stress_t
             if let Ok(Some(result)) = engine.get(&cf, &key) {
                 // If we got a result, verify it matches expected pattern
                 assert!(
-                    result.len() > 0,
+                    !result.is_empty(),
                     "Committed transaction data should be readable"
                 );
             }
@@ -267,8 +267,7 @@ fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested()
     let eng_reader = Arc::clone(&engine);
     let cf_reader = cf.clone();
     let reader_result = std::thread::spawn(move || {
-        let result = eng_reader.get(&cf_reader, b"dirty_read_key").expect("get");
-        result
+        eng_reader.get(&cf_reader, b"dirty_read_key").expect("get")
     });
 
     let read_value = reader_result.join().expect("reader panicked");

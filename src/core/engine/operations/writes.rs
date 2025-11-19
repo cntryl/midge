@@ -630,7 +630,8 @@ mod tests {
     use uuid;
 
     fn create_test_engine() -> MidgeEngine {
-        let temp_dir = std::env::temp_dir().join(format!("midge_test_writes_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_test_writes_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let db_path = temp_dir;
         let opts = MidgeOptions {
@@ -689,8 +690,14 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
-        assert_eq!(engine.get(&cf, b"key2").unwrap(), Some(Bytes::from("value2")));
+        assert_eq!(
+            engine.get(&cf, b"key1").unwrap(),
+            Some(Bytes::from("value1"))
+        );
+        assert_eq!(
+            engine.get(&cf, b"key2").unwrap(),
+            Some(Bytes::from("value2"))
+        );
         assert_eq!(engine.get(&cf, b"key3").unwrap(), None);
     }
 
@@ -705,8 +712,11 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
-        assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
+        assert!(result.unwrap());
+        assert_eq!(
+            engine.get(&cf, b"key1").unwrap(),
+            Some(Bytes::from("value1"))
+        );
     }
 
     #[test]
@@ -721,7 +731,10 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
-        assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("existing")));
+        assert!(!result.unwrap());
+        assert_eq!(
+            engine.get(&cf, b"key1").unwrap(),
+            Some(Bytes::from("existing"))
+        );
     }
 }

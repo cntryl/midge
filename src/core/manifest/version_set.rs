@@ -73,7 +73,10 @@ pub enum VersionEdit {
     UpdateSequence { sequence: u64 },
     /// Atomic combination of adding one file and removing a set of files.
     /// Prevents interleaving flush AddFile between compaction AddFile/RemoveFiles.
-    CombinedAddRemove { add: Box<FileMeta>, remove: Vec<String> },
+    CombinedAddRemove {
+        add: Box<FileMeta>,
+        remove: Vec<String>,
+    },
 }
 
 /// Wrapper for atomic version set operations.

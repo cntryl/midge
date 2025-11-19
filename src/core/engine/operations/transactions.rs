@@ -571,7 +571,8 @@ mod tests {
     use uuid;
 
     fn create_test_engine() -> MidgeEngine {
-        let temp_dir = std::env::temp_dir().join(format!("midge_test_transactions_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_test_transactions_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let db_path = temp_dir;
         let opts = MidgeOptions {
@@ -652,7 +653,7 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]
@@ -667,6 +668,6 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 }

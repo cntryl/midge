@@ -263,7 +263,7 @@ fn should_track_sequence_numbers_correctly_across_concurrent_writes_with_overlap
             .expect("get")
             .expect("key should exist");
         assert!(
-            result.len() > 0,
+            !result.is_empty(),
             "Key should have a value from sequence numbering"
         );
     }

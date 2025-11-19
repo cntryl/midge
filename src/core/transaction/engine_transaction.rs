@@ -169,7 +169,7 @@ impl KvTransaction for EngineTransaction {
         }
 
         // Apply uncommitted writes: remove deletes, update/add puts
-        results.retain(|(k, _)| !uncommitted.get(k).map_or(false, |v| v.is_none()));
+        results.retain(|(k, _)| !uncommitted.get(k).is_some_and(|v| v.is_none()));
 
         for (key, value_opt) in uncommitted {
             if let Some(value) = value_opt {

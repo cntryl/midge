@@ -654,12 +654,13 @@ impl MidgeEngine {
 
 #[cfg(test)]
 mod tests {
-    use crate::{MidgeEngine, MidgeOptions, StorageMode, Query};
+    use crate::{MidgeEngine, MidgeOptions, Query, StorageMode};
     use bytes::Bytes;
     use uuid;
 
     fn create_test_engine() -> MidgeEngine {
-        let temp_dir = std::env::temp_dir().join(format!("midge_test_reads_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_test_reads_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let db_path = temp_dir;
         let opts = MidgeOptions {

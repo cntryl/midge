@@ -141,7 +141,8 @@ mod tests {
     use uuid;
 
     fn create_test_engine() -> MidgeEngine {
-        let temp_dir = std::env::temp_dir().join(format!("midge_test_mutations_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_test_mutations_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let db_path = temp_dir;
         let opts = MidgeOptions {
@@ -199,12 +200,8 @@ mod tests {
         engine.put(&cf, b"key1", b"old_value").unwrap();
 
         // Act
-        let result = engine.compare_and_swap(
-            &cf,
-            b"key1",
-            Some(Bytes::from("old_value")),
-            b"new_value",
-        );
+        let result =
+            engine.compare_and_swap(&cf, b"key1", Some(Bytes::from("old_value")), b"new_value");
 
         // Assert
         assert!(result.is_ok());

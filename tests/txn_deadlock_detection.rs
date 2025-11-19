@@ -159,7 +159,7 @@ fn should_detect_deadlock_given_three_way_circular_dependency() {
     .filter(|r| r.is_ok())
     .count();
     assert!(
-        success_count >= 1 && success_count < 3,
+        (1..3).contains(&success_count),
         "At least one transaction should succeed, but not all three (circular conflicts should cause some failures)"
     );
 }

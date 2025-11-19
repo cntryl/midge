@@ -236,7 +236,7 @@ fn should_maintain_efficiency_with_range_scans_across_multiple_concurrent_operat
         .end_key(Bytes::from("scan_key_00500"));
     let results = engine.scan(&cf, query).expect("final scan");
     assert!(
-        results.len() > 0,
+        !results.is_empty(),
         "Final scan should return results after concurrent load"
     );
 }

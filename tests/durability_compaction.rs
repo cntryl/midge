@@ -122,7 +122,9 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,
@@ -177,7 +179,9 @@ fn should_fsync_new_ssts_before_updating_manifest() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 1024,
         enable_compaction: true,
         wal_sync: true,

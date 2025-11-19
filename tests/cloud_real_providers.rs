@@ -10,7 +10,6 @@
 //! - Azure: Set AZURE_STORAGE_ACCOUNT, AZURE_STORAGE_KEY, TEST_AZURE_CONTAINER
 //! - GCP: Set GOOGLE_APPLICATION_CREDENTIALS, TEST_GCS_BUCKET
 
-
 // ============================================================================
 // AWS S3 Real Provider Tests
 // ============================================================================

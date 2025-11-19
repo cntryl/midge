@@ -392,9 +392,7 @@ impl CompactionController {
                     }
 
                     // 5) We just finished one compaction.
-                    if inflight > 0 {
-                        inflight -= 1;
-                    }
+                    inflight = inflight.saturating_sub(1);
 
                     // If this brought us to idle (no queued work, no in-flight),
                     // satisfy any barriers immediately.
