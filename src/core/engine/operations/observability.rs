@@ -349,10 +349,10 @@ mod tests {
         let engine = create_test_engine();
 
         // Act
-        let seq = engine.current_sequence();
+        let _seq = engine.current_sequence();
 
         // Assert
-        assert!(seq >= 0);
+        // Sequence should be non-negative (u64)
     }
 
     #[test]
@@ -361,10 +361,10 @@ mod tests {
         let engine = create_test_engine();
 
         // Act
-        let usage = engine.total_memory_usage();
+        let _usage = engine.total_memory_usage();
 
         // Assert
-        assert!(usage >= 0);
+        // Memory usage should be non-negative (u64)
     }
 
     #[test]
@@ -386,11 +386,11 @@ mod tests {
         let engine = create_test_engine();
 
         // Act
-        let snapshot = engine.metrics_snapshot();
+        let _snapshot = engine.metrics_snapshot();
 
         // Assert
         // Just check that we get a snapshot without panicking
-        assert!(snapshot.get_count >= 0);
+        // get_count should be non-negative (u64)
     }
 
     #[test]

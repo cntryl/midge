@@ -81,10 +81,10 @@ mod tests {
         let engine = create_test_engine();
 
         // Act
-        let snapshot = engine.snapshot();
+        let _snapshot = engine.snapshot();
 
         // Assert
-        assert!(snapshot.seq >= 0);
+        // Sequence should be non-negative (u64)
     }
 
     #[test]
