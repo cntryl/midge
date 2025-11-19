@@ -32,7 +32,10 @@
 pub mod cloud;
 
 use bytes::Bytes;
-use cntryl_midge::{test_hooks::TestHooks, MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{
+    cloud::MockCloudBackend, config::cloud::StorageContext, test_hooks::TestHooks, MidgeEngine,
+    MidgeOptions, StorageMode,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -377,9 +380,9 @@ pub fn assert_wal_exists(db_path: &std::path::Path) {
 /// let engine = MidgeEngine::open(opts).unwrap();
 /// ```
 #[allow(dead_code)]
-pub fn compaction_test_opts() -> MidgeOptions {
+pub fn compaction_test_opts(storage_mode: StorageMode) -> MidgeOptions {
     MidgeOptions {
-        storage_mode: StorageMode::Memory,
+        storage_mode,
         memtable_size: 1024,         // Small memtable to trigger flushes easily
         compaction_sst_threshold: 2, // Trigger compaction with just 2 SST files
         ..Default::default()
@@ -647,4 +650,109 @@ pub fn assert_key_present(
 ) {
     let result = eng.get(cf, key).expect("get failed");
     assert!(result.is_some(), "{}", msg);
+}
+
+// ============================================================================
+// Storage Mode Testing Helpers
+// ============================================================================
+
+/// Creates a storage mode configuration for testing.
+///
+/// Returns a tuple of (mode_name, storage_mode, optional_temp_dir).
+/// The TempDir must be kept alive for the duration of the test to ensure
+/// directories exist for LocalDisk and CloudBacked modes.
+///
+/// # Supported Modes
+///
+/// - `"Memory"` - Pure in-memory storage (no disk writes)
+/// - `"LocalDisk"` - Local filesystem storage with temp directory
+/// - `"CloudBacked"` - Mock cloud storage with local cache
+///
+/// # Note on Memory Mode
+///
+/// Memory mode does not write SST files to disk, so tests that require
+/// flush/compaction operations should exclude Memory mode and only test
+/// LocalDisk and CloudBacked modes.
+///
+/// # Examples
+///
+/// ```rust
+/// // Test with all three modes
+/// for mode in &["Memory", "LocalDisk", "CloudBacked"] {
+///     let (name, storage_mode, _temp_dir) = create_storage_mode(mode);
+///     let opts = MidgeOptions { storage_mode, ..Default::default() };
+///     let engine = MidgeEngine::open(opts).unwrap();
+///     // ... test code ...
+/// }
+/// ```
+///
+/// ```rust
+/// // Test only modes that support SST files
+/// for mode in &["LocalDisk", "CloudBacked"] {
+///     let (name, storage_mode, _temp_dir) = create_storage_mode(mode);
+///     // ... test compaction behavior ...
+/// }
+/// ```
+#[allow(dead_code)]
+pub fn create_storage_mode(mode: &str) -> (String, StorageMode, Option<TempDir>) {
+    match mode {
+        "Memory" => ("Memory".to_string(), StorageMode::Memory, None),
+        "LocalDisk" => {
+            let temp_dir = test_temp_dir();
+            let storage_mode = StorageMode::LocalDisk {
+                db_path: temp_dir.path().to_path_buf(),
+            };
+            ("LocalDisk".to_string(), storage_mode, Some(temp_dir))
+        }
+        "CloudBacked" => {
+            let temp_dir = test_temp_dir();
+            let storage_mode = StorageMode::CloudBacked {
+                local_cache_path: temp_dir.path().to_path_buf(),
+                cloud_backend: Arc::new(MockCloudBackend::new()),
+                storage_context: StorageContext::default(),
+                local_wal_sync: false,
+                wal_batch_size: 4 * 1024 * 1024,
+                sst_cache_capacity: 16,
+            };
+            ("CloudBacked".to_string(), storage_mode, Some(temp_dir))
+        }
+        _ => panic!("Unknown storage mode: {}", mode),
+    }
+}
+
+/// Returns all three storage modes for comprehensive testing.
+///
+/// Use this for tests that should work with any storage backend,
+/// including pure in-memory mode.
+///
+/// # Examples
+///
+/// ```rust
+/// for mode in all_storage_modes() {
+///     let (name, storage_mode, _temp_dir) = create_storage_mode(mode);
+///     // ... test code ...
+/// }
+/// ```
+#[allow(dead_code)]
+pub fn all_storage_modes() -> &'static [&'static str] {
+    &["Memory", "LocalDisk", "CloudBacked"]
+}
+
+/// Returns only storage modes that write SST files to disk.
+///
+/// Use this for tests that require flush() or compaction operations,
+/// as Memory mode does not persist SST files.
+///
+/// # Examples
+///
+/// ```rust
+/// for mode in disk_storage_modes() {
+///     let (name, storage_mode, _temp_dir) = create_storage_mode(mode);
+///     engine.flush().unwrap();  // This works for LocalDisk and CloudBacked
+///     // ... test compaction ...
+/// }
+/// ```
+#[allow(dead_code)]
+pub fn disk_storage_modes() -> &'static [&'static str] {
+    &["LocalDisk", "CloudBacked"]
 }
