@@ -14,7 +14,10 @@ fn should_measure_read_amplification_given_multilevel_scan() {
     // Arrange
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        // Disable background compaction to ensure overwritten keys remain visible
+        // This test measures space amplification pre-compaction.
+        let mut opts = compaction_test_opts(storage_mode);
+        opts.enable_compaction = false;
         let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
         let cf = eng.default_column_family();
 
@@ -63,7 +66,9 @@ fn should_measure_write_amplification_given_compaction_cascade() {
     // Arrange
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        // Disable background compaction to ensure overwritten key reflects latest value deterministically
+        let mut opts = compaction_test_opts(storage_mode);
+        opts.enable_compaction = false;
         let eng = cntryl_midge::MidgeEngine::open(opts).unwrap();
         let cf = eng.default_column_family();
 
