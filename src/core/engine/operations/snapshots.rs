@@ -56,3 +56,52 @@ impl MidgeEngine {
         self.snapshot_registry.register(seq)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{MidgeEngine, MidgeOptions, StorageMode};
+    use bytes::Bytes;
+    use uuid;
+
+    fn create_test_engine() -> MidgeEngine {
+        let temp_dir = std::env::temp_dir().join(format!("midge_test_snapshots_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir;
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk { db_path },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        MidgeEngine::open(opts).unwrap()
+    }
+
+    #[test]
+    fn should_create_snapshot_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let snapshot = engine.snapshot();
+
+        // Assert
+        assert!(snapshot.seq >= 0);
+    }
+
+    #[test]
+    fn should_snapshot_capture_state_before_writes() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+
+        // Act
+        let snapshot = engine.snapshot();
+        engine.put(&cf, b"key1", b"value2").unwrap();
+
+        // Assert
+        let current_value = engine.get(&cf, b"key1").unwrap();
+        let snapshot_value = engine.get_at(&cf, b"key1", &snapshot).unwrap();
+        assert_eq!(current_value, Some(Bytes::from("value2")));
+        assert_eq!(snapshot_value, Some(Bytes::from("value1")));
+    }
+}

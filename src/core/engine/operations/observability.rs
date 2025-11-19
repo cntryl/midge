@@ -325,3 +325,121 @@ impl MidgeEngine {
         manifest.files.iter().map(|f| f.size_bytes).sum()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{MidgeEngine, MidgeOptions, StorageMode};
+    use uuid;
+
+    fn create_test_engine() -> MidgeEngine {
+        let temp_dir = std::env::temp_dir().join(format!("midge_test_observability_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir;
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk { db_path },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        MidgeEngine::open(opts).unwrap()
+    }
+
+    #[test]
+    fn should_return_current_sequence() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let seq = engine.current_sequence();
+
+        // Assert
+        assert!(seq >= 0);
+    }
+
+    #[test]
+    fn should_return_total_memory_usage() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let usage = engine.total_memory_usage();
+
+        // Assert
+        assert!(usage >= 0);
+    }
+
+    #[test]
+    fn should_return_memory_usage_by_cf() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let usage = engine.memory_usage_by_cf();
+
+        // Assert
+        // Should have at least the default CF
+        assert!(!usage.is_empty());
+    }
+
+    #[test]
+    fn should_return_metrics_snapshot() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let snapshot = engine.metrics_snapshot();
+
+        // Assert
+        // Just check that we get a snapshot without panicking
+        assert!(snapshot.get_count >= 0);
+    }
+
+    #[test]
+    fn should_return_read_amplification() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let ra = engine.read_amplification();
+
+        // Assert
+        // Read amplification should be finite
+        assert!(ra.is_finite());
+    }
+
+    #[test]
+    fn should_return_write_amplification() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let wa = engine.write_amplification();
+
+        // Assert
+        // Write amplification should be finite (0.0 for empty engine)
+        assert!(wa.is_finite());
+    }
+
+    #[test]
+    fn should_return_sst_file_count() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let count = engine.sst_file_count();
+
+        // Assert
+        assert_eq!(count, 0); // Empty engine has no SST files
+    }
+
+    #[test]
+    fn should_return_total_sst_size() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let size = engine.total_sst_size();
+
+        // Assert
+        assert_eq!(size, 0); // Empty engine has no SST files
+    }
+}

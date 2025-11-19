@@ -622,3 +622,106 @@ impl MidgeEngine {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
+    use bytes::Bytes;
+    use uuid;
+
+    fn create_test_engine() -> MidgeEngine {
+        let temp_dir = std::env::temp_dir().join(format!("midge_test_writes_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir;
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk { db_path },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        MidgeEngine::open(opts).unwrap()
+    }
+
+    #[test]
+    fn should_put_and_get_value() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let put_result = engine.put(&cf, b"key1", b"value1");
+        let get_result = engine.get(&cf, b"key1");
+
+        // Assert
+        assert!(put_result.is_ok());
+        assert!(get_result.is_ok());
+        assert_eq!(get_result.unwrap(), Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_delete_existing_key() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+
+        // Act
+        let delete_result = engine.delete(&cf, b"key1");
+        let get_result = engine.get(&cf, b"key1");
+
+        // Assert
+        assert!(delete_result.is_ok());
+        assert!(get_result.is_ok());
+        assert_eq!(get_result.unwrap(), None);
+    }
+
+    #[test]
+    fn should_write_batch_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        let mut batch = WriteBatch::new();
+        batch.put(cf.id(), Bytes::from("key1"), Bytes::from("value1"));
+        batch.put(cf.id(), Bytes::from("key2"), Bytes::from("value2"));
+        batch.delete(cf.id(), Bytes::from("key3"));
+
+        // Act
+        let result = engine.write_batch(&batch);
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
+        assert_eq!(engine.get(&cf, b"key2").unwrap(), Some(Bytes::from("value2")));
+        assert_eq!(engine.get(&cf, b"key3").unwrap(), None);
+    }
+
+    #[test]
+    fn should_insert_when_key_does_not_exist() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let result = engine.insert(&cf, b"key1", b"value1");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true);
+        assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_not_insert_when_key_exists() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"existing").unwrap();
+
+        // Act
+        let result = engine.insert(&cf, b"key1", b"new_value");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), false);
+        assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from("existing")));
+    }
+}

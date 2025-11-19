@@ -132,3 +132,148 @@ impl MidgeEngine {
         Ok(CasResult::Swapped)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MidgeEngine, MidgeOptions, StorageMode};
+    use bytes::Bytes;
+    use uuid;
+
+    fn create_test_engine() -> MidgeEngine {
+        let temp_dir = std::env::temp_dir().join(format!("midge_test_mutations_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir;
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk { db_path },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        MidgeEngine::open(opts).unwrap()
+    }
+
+    #[test]
+    fn should_insert_value_when_key_does_not_exist() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let result = engine.insert_with_value(&cf, b"key1", b"value1");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), InsertResult::Inserted);
+        let get_result = engine.get(&cf, b"key1").unwrap();
+        assert_eq!(get_result, Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_return_existing_value_when_key_already_exists() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"existing").unwrap();
+
+        // Act
+        let result = engine.insert_with_value(&cf, b"key1", b"new_value");
+
+        // Assert
+        assert!(result.is_ok());
+        match result.unwrap() {
+            InsertResult::AlreadyExists(existing) => {
+                assert_eq!(existing, Bytes::from("existing"));
+            }
+            _ => panic!("Expected AlreadyExists"),
+        }
+        // Verify the value wasn't changed
+        let get_result = engine.get(&cf, b"key1").unwrap();
+        assert_eq!(get_result, Some(Bytes::from("existing")));
+    }
+
+    #[test]
+    fn should_swap_value_when_expected_matches_current() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"old_value").unwrap();
+
+        // Act
+        let result = engine.compare_and_swap(
+            &cf,
+            b"key1",
+            Some(Bytes::from("old_value")),
+            b"new_value",
+        );
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), CasResult::Swapped);
+        let get_result = engine.get(&cf, b"key1").unwrap();
+        assert_eq!(get_result, Some(Bytes::from("new_value")));
+    }
+
+    #[test]
+    fn should_return_mismatch_when_expected_does_not_match_current() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"actual_value").unwrap();
+
+        // Act
+        let result = engine.compare_and_swap(
+            &cf,
+            b"key1",
+            Some(Bytes::from("expected_value")),
+            b"new_value",
+        );
+
+        // Assert
+        assert!(result.is_ok());
+        match result.unwrap() {
+            CasResult::Mismatch(actual) => {
+                assert_eq!(actual, Some(Bytes::from("actual_value")));
+            }
+            _ => panic!("Expected Mismatch"),
+        }
+        // Verify the value wasn't changed
+        let get_result = engine.get(&cf, b"key1").unwrap();
+        assert_eq!(get_result, Some(Bytes::from("actual_value")));
+    }
+
+    #[test]
+    fn should_swap_value_when_expected_is_none_and_key_does_not_exist() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let result = engine.compare_and_swap(&cf, b"key1", None, b"new_value");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), CasResult::Swapped);
+        let get_result = engine.get(&cf, b"key1").unwrap();
+        assert_eq!(get_result, Some(Bytes::from("new_value")));
+    }
+
+    #[test]
+    fn should_return_mismatch_when_expected_is_none_but_key_exists() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"existing").unwrap();
+
+        // Act
+        let result = engine.compare_and_swap(&cf, b"key1", None, b"new_value");
+
+        // Assert
+        assert!(result.is_ok());
+        match result.unwrap() {
+            CasResult::Mismatch(actual) => {
+                assert_eq!(actual, Some(Bytes::from("existing")));
+            }
+            _ => panic!("Expected Mismatch"),
+        }
+    }
+}

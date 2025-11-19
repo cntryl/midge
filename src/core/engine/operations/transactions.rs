@@ -563,3 +563,110 @@ impl MidgeEngine {
         self.transaction_get(txn, cf, key).map(|opt| opt.is_some())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{MidgeEngine, MidgeOptions, StorageMode};
+    use bytes::Bytes;
+    use uuid;
+
+    fn create_test_engine() -> MidgeEngine {
+        let temp_dir = std::env::temp_dir().join(format!("midge_test_transactions_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir;
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk { db_path },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        MidgeEngine::open(opts).unwrap()
+    }
+
+    #[test]
+    fn should_begin_transaction_successfully() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let result = engine.begin_transaction(&cf);
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_commit_empty_transaction() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        let txn = engine.begin_transaction(&cf).unwrap();
+
+        // Act
+        let result = engine.commit_transaction(txn, crate::WriteOptions::default());
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_abort_transaction() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        let txn = engine.begin_transaction(&cf).unwrap();
+
+        // Act
+        engine.abort_transaction(txn);
+
+        // Assert
+        // No panic, transaction aborted
+    }
+
+    #[test]
+    fn should_transaction_get_see_committed_writes() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+
+        // Act
+        let result = engine.transaction_get(&mut txn.txn, &cf, b"key1");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_transaction_exists_return_true_for_existing_key() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+
+        // Act
+        let result = engine.transaction_exists(&mut txn.txn, &cf, b"key1");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[test]
+    fn should_transaction_exists_return_false_for_nonexistent_key() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+
+        // Act
+        let result = engine.transaction_exists(&mut txn.txn, &cf, b"nonexistent");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), false);
+    }
+}

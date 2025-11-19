@@ -801,3 +801,139 @@ impl MidgeEngine {
         Ok(inconsistencies)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MidgeEngine, MidgeOptions, StorageMode};
+
+    fn create_test_engine() -> MidgeEngine {
+        let temp_dir = std::env::temp_dir().join(format!("midge_test_maintenance_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir;
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk { db_path },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        MidgeEngine::open(opts).unwrap()
+    }
+
+    #[test]
+    fn should_flush_empty_engine_without_error() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let result = engine.flush();
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_flush_cf_empty_memtable_without_error() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let result = engine.flush_cf(&cf);
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_create_checkpoint_for_empty_engine() {
+        // Arrange
+        let engine = create_test_engine();
+        let checkpoint_dir = std::env::temp_dir().join("midge_checkpoint_test");
+        std::fs::create_dir_all(&checkpoint_dir).unwrap();
+
+        // Act
+        let result = engine.create_checkpoint(&checkpoint_dir);
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(checkpoint_dir.join("CURRENT").exists());
+        assert!(checkpoint_dir.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn should_compact_all_on_empty_engine_without_error() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let result = engine.compact_all();
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_wait_for_flush_on_empty_engine() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let result = engine.wait_for_flush(std::time::Duration::from_millis(100));
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_return_error_when_waiting_for_compaction_with_compaction_disabled() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let result = engine.wait_for_compaction(std::time::Duration::from_millis(100));
+
+        // Assert
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MidgeError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn should_close_engine_without_error() {
+        // Arrange
+        let engine = create_test_engine();
+
+        // Act
+        let result = engine.close();
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_return_error_when_compacting_level_with_compaction_disabled() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let result = engine.compact_level(&cf, 0);
+
+        // Assert
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MidgeError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn should_return_error_when_compacting_range_with_compaction_disabled() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let result = engine.compact_range(&cf, None, None);
+
+        // Assert
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MidgeError::InvalidConfig { .. }));
+    }
+}

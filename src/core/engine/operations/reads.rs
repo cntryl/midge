@@ -651,3 +651,122 @@ impl MidgeEngine {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{MidgeEngine, MidgeOptions, StorageMode, Query};
+    use bytes::Bytes;
+    use uuid;
+
+    fn create_test_engine() -> MidgeEngine {
+        let temp_dir = std::env::temp_dir().join(format!("midge_test_reads_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir;
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk { db_path },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        MidgeEngine::open(opts).unwrap()
+    }
+
+    #[test]
+    fn should_return_none_when_getting_nonexistent_key() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act
+        let result = engine.get(&cf, b"nonexistent");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn should_return_value_when_getting_existing_key() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+
+        // Act
+        let result = engine.get(&cf, b"key1");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_return_empty_vec_when_scanning_empty_engine() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        let query = Query::new();
+
+        // Act
+        let result = engine.scan(&cf, query);
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Vec::<(Bytes, Bytes)>::new());
+    }
+
+    #[test]
+    fn should_return_entries_when_scanning_with_data() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        engine.put(&cf, b"key2", b"value2").unwrap();
+        let query = Query::new();
+
+        // Act
+        let result = engine.scan(&cf, query);
+
+        // Assert
+        assert!(result.is_ok());
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&(Bytes::from("key1"), Bytes::from("value1"))));
+        assert!(entries.contains(&(Bytes::from("key2"), Bytes::from("value2"))));
+    }
+
+    #[test]
+    fn should_return_value_at_snapshot_when_get_at() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        let snapshot = engine.snapshot();
+        engine.put(&cf, b"key1", b"value2").unwrap(); // Update after snapshot
+
+        // Act
+        let result = engine.get_at(&cf, b"key1", &snapshot);
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_return_entries_at_snapshot_when_scan_at() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+        let snapshot = engine.snapshot();
+        engine.put(&cf, b"key2", b"value2").unwrap(); // Add after snapshot
+
+        // Act
+        let result = engine.scan_at(&cf, Query::new(), &snapshot);
+
+        // Assert
+        assert!(result.is_ok());
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], (Bytes::from("key1"), Bytes::from("value1")));
+    }
+}
