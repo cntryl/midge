@@ -31,6 +31,16 @@ fn make_value(size: usize) -> Bytes {
     Bytes::from(vec![b'x'; size])
 }
 
+fn precompute_kv(n: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
+    let mut keys = Vec::with_capacity(n);
+    let mut vals = Vec::with_capacity(n);
+    for i in 0..n {
+        keys.push(make_key(i));
+        vals.push(make_value(value_size));
+    }
+    (keys, vals)
+}
+
 fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
     let path = std::env::temp_dir().join(format!("midge_bench_t3_mvcc_{}", name));
     let _ = std::fs::remove_dir_all(&path);
@@ -51,29 +61,31 @@ fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
 fn bench_single_thread_baseline(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_baseline_single_thread");
 
+    let (keys_put, vals_put) = precompute_kv(1000, 128);
     group.bench_function("baseline_seq_puts_128b", |b| {
         b.iter_batched(
             || Arc::new(setup_db("baseline_seq", false)),
             |engine| {
                 let cf = engine.default_column_family();
                 for i in 0..1_000 {
-                    engine.put(&cf, &make_key(i), &make_value(128)).unwrap();
+                    engine.put(&cf, &keys_put[i], &vals_put[i]).unwrap();
                 }
             },
             BatchSize::SmallInput,
         )
     });
 
+    let (keys_get, vals_get) = precompute_kv(1000, 128);
     group.bench_function("baseline_random_gets_hit", |b| {
         let engine = Arc::new(setup_db("baseline_get", false));
         let cf = engine.default_column_family();
         for i in 0..1_000 {
-            engine.put(&cf, &make_key(i), &make_value(128)).unwrap();
+            engine.put(&cf, &keys_get[i], &vals_get[i]).unwrap();
         }
 
         b.iter(|| {
             for i in (0..1_000).step_by(5) {
-                let _ = engine.get(&cf, &make_key(i)).unwrap();
+                let _ = engine.get(&cf, &keys_get[i]).unwrap();
             }
         })
     });

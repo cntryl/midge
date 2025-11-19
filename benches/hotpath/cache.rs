@@ -29,6 +29,18 @@ fn make_cached_block(size: usize) -> CachedBlock {
     }
 }
 
+fn precompute_keys_and_blocks(num_blocks: usize, block_size: usize) -> (Vec<BlockKey>, Vec<CachedBlock>) {
+    let mut keys = Vec::with_capacity(num_blocks);
+    let mut blocks = Vec::with_capacity(num_blocks);
+    for i in 0..num_blocks {
+        let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
+        let block = make_cached_block(block_size);
+        keys.push(key);
+        blocks.push(block);
+    }
+    (keys, blocks)
+}
+
 /// Benchmark cache insert operations
 fn bench_cache_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_cache_insert");
@@ -37,6 +49,9 @@ fn bench_cache_insert(c: &mut Criterion) {
     let block_size = 4 * 1024; // 4 KB
 
     for &num_blocks in &[100, 1_000] {
+        // Precompute keys and blocks outside the loop
+        let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
+
         group.bench_with_input(
             BenchmarkId::from_parameter(num_blocks),
             &num_blocks,
@@ -45,11 +60,9 @@ fn bench_cache_insert(c: &mut Criterion) {
                     || create_basic_cache(cache_size),
                     |cache| {
                         for i in 0..n {
-                            let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-                            let block = make_cached_block(block_size);
-                            cache.insert(key, block);
-                            black_box(());
+                            cache.insert(keys[i].clone(), blocks[i].clone());
                         }
+                        black_box(());
                     },
                     BatchSize::SmallInput,
                 )
@@ -66,20 +79,20 @@ fn bench_cache_get_hit(c: &mut Criterion) {
     let block_size = 4 * 1024;
     let num_blocks = 1000;
 
+    // Precompute keys and blocks
+    let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
+
     // Pre-populate cache
     let cache = create_basic_cache(cache_size);
     for i in 0..num_blocks {
-        let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-        let block = make_cached_block(block_size);
-        cache.insert(key, block);
+        cache.insert(keys[i].clone(), blocks[i].clone());
     }
 
     c.bench_function("hotpath_cache_get_hit", |b| {
         b.iter(|| {
             let mut count = 0;
             for i in 0..num_blocks {
-                let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-                if cache.get(&key).is_some() {
+                if cache.get(&keys[i]).is_some() {
                     count += 1;
                 }
             }
@@ -94,21 +107,23 @@ fn bench_cache_get_miss(c: &mut Criterion) {
     let block_size = 4 * 1024;
     let num_blocks = 1000;
 
+    // Precompute keys and blocks for population
+    let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
+
     // Pre-populate cache with keys 0..1000
     let cache = create_basic_cache(cache_size);
     for i in 0..num_blocks {
-        let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-        let block = make_cached_block(block_size);
-        cache.insert(key, block);
+        cache.insert(keys[i].clone(), blocks[i].clone());
     }
+
+    // Precompute miss keys (1000..2000)
+    let (miss_keys, _) = precompute_keys_and_blocks(num_blocks, block_size);
 
     c.bench_function("hotpath_cache_get_miss", |b| {
         b.iter(|| {
-            // Query keys that don't exist (1000..2000)
             let mut count = 0;
-            for i in num_blocks..num_blocks * 2 {
-                let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-                if cache.get(&key).is_some() {
+            for key in &miss_keys {
+                if cache.get(key).is_some() {
                     count += 1;
                 }
             }
@@ -124,16 +139,18 @@ fn bench_cache_eviction(c: &mut Criterion) {
     // Small cache to trigger eviction (2 MB, holds ~512 4KB blocks)
     let cache_size = 2 * 1024 * 1024;
     let block_size = 4 * 1024;
+    let num_blocks = 1000;
+
+    // Precompute keys and blocks
+    let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
 
     // Insert more blocks than cache can hold
     group.bench_function("evict_under_pressure", |b| {
         b.iter(|| {
             let cache = create_basic_cache(cache_size);
             // Try to insert 1000 blocks when only ~512 fit
-            for i in 0..1000 {
-                let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-                let block = make_cached_block(block_size);
-                cache.insert(key, block);
+            for i in 0..num_blocks {
+                cache.insert(keys[i].clone(), blocks[i].clone());
             }
             black_box(cache);
         })
@@ -153,12 +170,13 @@ fn bench_cache_concurrent_access(c: &mut Criterion) {
     let block_size = 4 * 1024;
     let num_blocks = 1000;
 
+    // Precompute keys and blocks
+    let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
+
     // Pre-populate cache once
-    let cache = create_basic_cache(cache_size);
+    let cache = Arc::new(create_basic_cache(cache_size));
     for i in 0..num_blocks {
-        let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-        let block = make_cached_block(block_size);
-        cache.insert(key, block);
+        cache.insert(keys[i].clone(), blocks[i].clone());
     }
 
     for &num_threads in &[2, 4, 8, 16, 32] {
@@ -167,11 +185,11 @@ fn bench_cache_concurrent_access(c: &mut Criterion) {
                 let mut handles = vec![];
                 for _ in 0..num_threads {
                     let cache_clone = Arc::clone(&cache);
+                    let keys_clone = keys.clone();
                     let handle = thread::spawn(move || {
                         let mut count = 0;
-                        for i in 0..num_blocks {
-                            let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-                            if cache_clone.get(&key).is_some() {
+                        for key in &keys_clone {
+                            if cache_clone.get(key).is_some() {
                                 count += 1;
                             }
                         }

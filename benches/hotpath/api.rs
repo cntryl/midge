@@ -16,6 +16,20 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
+fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
+    let mut keys = Vec::with_capacity(size);
+    let mut vals = Vec::with_capacity(size);
+    for i in 0..size {
+        let mut key = [0u8; 16];
+        key[8..16].copy_from_slice(&(i as u64).to_be_bytes());
+        keys.push(Bytes::copy_from_slice(&key));
+        let mut val = [0u8; 32];
+        val[24..32].copy_from_slice(&(i as u64).to_be_bytes());
+        vals.push(Bytes::copy_from_slice(&val));
+    }
+    (keys, vals)
+}
+
 fn setup_db(name: &str) -> MidgeEngine {
     let path = std::env::temp_dir().join(format!("midge_bench_hotpath_api_{}", name));
     let _ = std::fs::remove_dir_all(&path);
@@ -40,18 +54,19 @@ fn bench_batch_put(c: &mut Criterion) {
     let cf_id = cf.id();
 
     for &batch_size in &[100, 1_000] {
+        // Precompute keys and values outside the loop
+        let (keys, vals) = make_fixed_kv(batch_size);
+
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
             |b, &size| {
                 b.iter_batched(
                     || {
-                        // Only prepare a WriteBatch in setup (not database creation)
+                        // Only prepare a WriteBatch in setup (no allocations)
                         let mut batch = WriteBatch::new();
                         for i in 0..size {
-                            let key = format!("key_{:010}", i);
-                            let value = format!("value_{:010}_data", i);
-                            batch.put(cf_id, Bytes::from(key), Bytes::from(value));
+                            batch.put(cf_id, keys[i].clone(), vals[i].clone());
                         }
                         batch
                     },
@@ -76,32 +91,38 @@ fn bench_single_get(c: &mut Criterion) {
     let engine = setup_db("single_get");
     let cf = engine.default_column_family();
 
+    // Precompute keys and values
+    let num_keys = 10_000;
+    let (keys, vals) = make_fixed_kv(num_keys);
+
     // Pre-populate with data
-    for i in 0..10_000 {
-        let key = format!("key_{:010}", i);
-        let value = format!("value_{:010}_padding_to_increase_size", i);
-        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+    for i in 0..num_keys {
+        engine.put(&cf, &keys[i], &vals[i]).unwrap();
     }
     engine.flush().unwrap();
 
-    // Hit rate benchmark
+    // Hit rate benchmark - cycle through keys
     let mut counter = 0;
     group.bench_function("single_get_hit", |b| {
         b.iter(|| {
-            let key = format!("key_{:010}", counter % 10_000);
+            let idx = counter % num_keys;
             counter += 1;
-            let result = engine.get(&cf, key.as_bytes()).unwrap();
+            let result = engine.get(&cf, &keys[idx]).unwrap();
             black_box(result);
         })
     });
 
-    // Miss rate benchmark
-    let mut miss_counter = 10_000;
+    // Miss rate benchmark - use keys not in the populated set
+    let mut miss_counter = 0;
     group.bench_function("single_get_miss", |b| {
         b.iter(|| {
-            let key = format!("key_{:010}", miss_counter);
+            let idx = miss_counter % num_keys;
             miss_counter += 1;
-            let result = engine.get(&cf, key.as_bytes()).unwrap();
+            // Use miss_keys which are the same as keys, but since we didn't insert them with different values? Wait, no.
+            // To make miss, I need different keys. Let's offset by num_keys.
+            let mut miss_key = [0u8; 16];
+            miss_key[8..16].copy_from_slice(&((idx + num_keys) as u64).to_be_bytes());
+            let result = engine.get(&cf, &miss_key[..]).unwrap();
             black_box(result);
         })
     });
@@ -115,14 +136,17 @@ fn bench_single_put(c: &mut Criterion) {
 
     let engine = setup_db("single_put");
     let cf = engine.default_column_family();
-    let mut counter = 0u64;
+
+    // Precompute keys and values
+    let num_ops = 10_000;
+    let (keys, vals) = make_fixed_kv(num_ops);
+    let mut counter = 0;
 
     group.bench_function("single_put", |b| {
         b.iter(|| {
-            let key = format!("key_{:010}", counter);
-            let value = format!("value_{:010}_data", counter);
+            let idx = counter % num_ops;
             counter += 1;
-            engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+            engine.put(&cf, &keys[idx], &vals[idx]).unwrap();
             black_box(());
         })
     });
@@ -138,11 +162,13 @@ fn bench_batch_delete(c: &mut Criterion) {
     let cf = engine.default_column_family();
     let cf_id = cf.id();
 
+    // Precompute keys and values for population
+    let num_keys = 100_000;
+    let (keys, vals) = make_fixed_kv(num_keys);
+
     // Pre-populate with data to delete
-    for i in 0..100_000 {
-        let key = format!("key_{:010}", i);
-        let value = format!("value_{:010}_data", i);
-        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+    for i in 0..num_keys {
+        engine.put(&cf, &keys[i], &vals[i]).unwrap();
     }
     engine.flush().unwrap();
 
@@ -155,11 +181,11 @@ fn bench_batch_delete(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let mut batch = WriteBatch::new();
-                        for i in offset..offset + size {
-                            let key = format!("key_{:010}", i);
-                            batch.delete(cf_id, Bytes::from(key));
+                        for i in 0..size {
+                            let idx = (offset + i) % num_keys;
+                            batch.delete(cf_id, keys[idx].clone());
                         }
-                        offset += size;
+                        offset = (offset + size) % num_keys;
                         batch
                     },
                     |batch| {
@@ -183,16 +209,21 @@ fn bench_batch_mixed(c: &mut Criterion) {
     let cf = engine.default_column_family();
     let cf_id = cf.id();
 
+    // Precompute keys and values for population
+    let num_keys = 50_000;
+    let (keys, vals) = make_fixed_kv(num_keys);
+
     // Pre-populate with some data
-    for i in 0..50_000 {
-        let key = format!("key_{:010}", i);
-        let value = format!("value_{:010}_data", i);
-        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+    for i in 0..num_keys {
+        engine.put(&cf, &keys[i], &vals[i]).unwrap();
     }
     engine.flush().unwrap();
 
     let mut offset = 0;
     for &batch_size in &[100, 1_000] {
+        // Precompute keys for this batch size
+        let (batch_keys, batch_vals) = make_fixed_kv(batch_size);
+
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -203,16 +234,15 @@ fn bench_batch_mixed(c: &mut Criterion) {
                         for i in 0..size {
                             if i % 2 == 0 {
                                 // Put new data
-                                let key = format!("key_{:010}", offset + i);
-                                let value = format!("value_{:010}_data", offset + i);
-                                batch.put(cf_id, Bytes::from(key), Bytes::from(value));
+                                let idx = (offset + i) % batch_keys.len();
+                                batch.put(cf_id, batch_keys[idx].clone(), batch_vals[idx].clone());
                             } else {
                                 // Delete existing data
-                                let key = format!("key_{:010}", i / 2);
-                                batch.delete(cf_id, Bytes::from(key));
+                                let idx = (i / 2) % keys.len();
+                                batch.delete(cf_id, keys[idx].clone());
                             }
                         }
-                        offset += size;
+                        offset = (offset + size) % batch_keys.len();
                         batch
                     },
                     |batch| {
@@ -237,20 +267,29 @@ fn bench_range_scan(c: &mut Criterion) {
     let engine = setup_db("range_scan");
     let cf = engine.default_column_family();
 
+    // Precompute keys and values for population
+    let num_keys = 10_000;
+    let (keys, vals) = make_fixed_kv(num_keys);
+
     // Pre-populate with ordered keys
-    for i in 0..10_000 {
-        let key = format!("key_{:010}", i);
-        let value = format!("value_{:010}_data", i);
-        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+    for i in 0..num_keys {
+        engine.put(&cf, &keys[i], &vals[i]).unwrap();
     }
     engine.flush().unwrap();
+
+    // Precompute start and end keys for scans
+    let start_key_100 = keys[0].clone();
+    let end_key_100 = keys[99].clone(); // key for 99
+
+    let start_key_1000 = keys[0].clone();
+    let end_key_1000 = keys[999].clone(); // key for 999
 
     // Scan 100 keys
     group.bench_function("scan_100_keys", |b| {
         b.iter(|| {
             let query = Query::new()
-                .start_key(Bytes::from("key_0000000000"))
-                .end_key(Bytes::from("key_0000000100"));
+                .start_key(start_key_100.clone())
+                .end_key(end_key_100.clone());
             let results = engine.scan(&cf, query).unwrap();
             black_box(results.len());
         })
@@ -260,8 +299,8 @@ fn bench_range_scan(c: &mut Criterion) {
     group.bench_function("scan_1000_keys", |b| {
         b.iter(|| {
             let query = Query::new()
-                .start_key(Bytes::from("key_0000000000"))
-                .end_key(Bytes::from("key_0000001000"));
+                .start_key(start_key_1000.clone())
+                .end_key(end_key_1000.clone());
             let results = engine.scan(&cf, query).unwrap();
             black_box(results.len());
         })

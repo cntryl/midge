@@ -47,6 +47,16 @@ fn make_value(i: usize, base: usize) -> Bytes {
     Bytes::from(vec![b'x'; size])
 }
 
+fn precompute_kv(n: usize, value_base: usize) -> (Vec<Bytes>, Vec<Bytes>) {
+    let mut keys = Vec::with_capacity(n);
+    let mut vals = Vec::with_capacity(n);
+    for i in 0..n {
+        keys.push(make_key(i));
+        vals.push(make_value(i, value_base));
+    }
+    (keys, vals)
+}
+
 // ============================================================================
 // CRUD Operations
 // ============================================================================
@@ -60,6 +70,7 @@ fn bench_put_variants(c: &mut Criterion) {
     group.sample_size(30);
 
     for &op_count in &[100, 1000] {
+        let (keys, vals) = precompute_kv(op_count, 80);
         group.throughput(Throughput::Elements(op_count as u64));
         group.bench_with_input(
             BenchmarkId::new("sequential", op_count),
@@ -70,7 +81,7 @@ fn bench_put_variants(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         for i in 0..n {
-                            engine.put(&cf, &make_key(i), &make_value(i, 80)).unwrap();
+                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
                         }
                     },
                     BatchSize::SmallInput,
@@ -78,19 +89,19 @@ fn bench_put_variants(c: &mut Criterion) {
             },
         );
 
+        let (keys_random, vals_random) = precompute_kv(op_count, 80);
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut indices: Vec<usize> = (0..op_count).collect();
+        indices.shuffle(&mut rng);
+
         group.throughput(Throughput::Elements(op_count as u64));
-        group.bench_with_input(BenchmarkId::new("random", op_count), &op_count, |b, &n| {
+        group.bench_with_input(BenchmarkId::new("random", op_count), &op_count, |b, _| {
             b.iter_batched(
-                || {
-                    let mut rng = StdRng::seed_from_u64(42);
-                    let mut indices: Vec<usize> = (0..n).collect();
-                    indices.shuffle(&mut rng);
-                    (setup_db("random", false), indices)
-                },
-                |(engine, indices)| {
+                || setup_db("random", false),
+                |engine| {
                     let cf = engine.default_column_family();
-                    for i in indices {
-                        engine.put(&cf, &make_key(i), &make_value(i, 80)).unwrap();
+                    for &i in &indices {
+                        engine.put(&cf, &keys_random[i], &vals_random[i]).unwrap();
                     }
                 },
                 BatchSize::SmallInput,
@@ -136,9 +147,16 @@ fn bench_concurrent_cf_scaling(c: &mut Criterion) {
                         cfs.push(cf);
                     }
 
-                    // prepare keys for each thread to avoid shared allocations during timing
-                    let keys: Vec<Vec<Bytes>> = (0..threads)
-                        .map(|t| (0..ops_per_thread).map(|i| make_key(i + t * ops_per_thread)).collect())
+                    // prepare keys and values for each thread to avoid shared allocations during timing
+                    let kv_pairs: Vec<Vec<(Bytes, Bytes)>> = (0..threads)
+                        .map(|t| {
+                            (0..ops_per_thread)
+                                .map(|i| {
+                                    let idx = i + t * ops_per_thread;
+                                    (make_key(idx), make_value(0, 128))
+                                })
+                                .collect()
+                        })
                         .collect();
 
                     // capture baseline write amplification
@@ -151,13 +169,13 @@ fn bench_concurrent_cf_scaling(c: &mut Criterion) {
                     for t in 0..threads {
                         let engine = Arc::clone(&engine);
                         let cf = cfs[t].clone();
-                        let thread_keys = keys[t].clone();
+                        let thread_kvs = kv_pairs[t].clone();
 
                         thread_handles.push(thread::spawn(move || {
                             let mut hist = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
-                            for k in thread_keys.iter() {
+                            for (k, v) in thread_kvs.iter() {
                                 let before = Instant::now();
-                                engine.put(&cf, k, &make_value(0, 128)).unwrap();
+                                engine.put(&cf, k, v).unwrap();
                                 let us = before.elapsed().as_micros() as u64;
                                 let _ = hist.record(us);
                             }

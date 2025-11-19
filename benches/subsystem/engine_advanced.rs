@@ -42,6 +42,16 @@ fn make_value(i: usize, base: usize) -> Bytes {
     Bytes::from(vec![b'x'; size])
 }
 
+fn precompute_kv(n: usize, value_base: usize) -> (Vec<Bytes>, Vec<Bytes>) {
+    let mut keys = Vec::with_capacity(n);
+    let mut vals = Vec::with_capacity(n);
+    for i in 0..n {
+        keys.push(make_key(i));
+        vals.push(make_value(i, value_base));
+    }
+    (keys, vals)
+}
+
 // ============================================================================
 // TTL Operations
 // ============================================================================
@@ -49,6 +59,7 @@ fn make_value(i: usize, base: usize) -> Bytes {
 fn bench_ttl(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_ttl");
 
+    let (keys, vals) = precompute_kv(500, 80);
     group.bench_function("put_with_ttl", |b| {
         b.iter_batched(
             || setup_db("ttl", false),
@@ -57,7 +68,7 @@ fn bench_ttl(c: &mut Criterion) {
                 let ttl = Duration::from_secs(1200);
                 for i in 0..500 {
                     engine
-                        .put_with_ttl(&cf, &make_key(i), &make_value(i, 80), ttl.as_secs())
+                        .put_with_ttl(&cf, &keys[i], &vals[i], ttl.as_secs())
                         .unwrap();
                 }
             },
@@ -65,6 +76,7 @@ fn bench_ttl(c: &mut Criterion) {
         )
     });
 
+    let (keys_read, vals_read) = precompute_kv(500, 100);
     group.bench_function("ttl_read_after_insert", |b| {
         b.iter_batched(
             || {
@@ -73,7 +85,7 @@ fn bench_ttl(c: &mut Criterion) {
                 let ttl = Duration::from_secs(1200);
                 for i in 0..500 {
                     engine
-                        .put_with_ttl(&cf, &make_key(i), &make_value(i, 100), ttl.as_secs())
+                        .put_with_ttl(&cf, &keys_read[i], &vals_read[i], ttl.as_secs())
                         .unwrap();
                 }
                 engine
@@ -81,7 +93,7 @@ fn bench_ttl(c: &mut Criterion) {
             |engine| {
                 let cf = engine.default_column_family();
                 for i in (0..500).step_by(4) {
-                    let _ = engine.get(&cf, &make_key(i)).unwrap();
+                    let _ = engine.get(&cf, &keys_read[i]).unwrap();
                 }
             },
             BatchSize::SmallInput,

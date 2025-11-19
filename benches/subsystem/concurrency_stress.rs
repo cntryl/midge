@@ -29,6 +29,16 @@ fn make_value(size: usize) -> Bytes {
     Bytes::from(vec![b'x'; size])
 }
 
+fn precompute_kv(n: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
+    let mut keys = Vec::with_capacity(n);
+    let mut vals = Vec::with_capacity(n);
+    for i in 0..n {
+        keys.push(make_key(i));
+        vals.push(make_value(value_size));
+    }
+    (keys, vals)
+}
+
 fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
     let path = std::env::temp_dir().join(format!("midge_bench_t3_stress_{}", name));
     let _ = std::fs::remove_dir_all(&path);
@@ -49,6 +59,13 @@ fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
 fn bench_concurrent_puts(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_concurrent_puts");
 
+    let max_threads = 16;
+    let n_ops = 5_000;
+    let total_ops = max_threads * n_ops;
+    let (keys, vals) = precompute_kv(total_ops, 128);
+    let keys = Arc::new(keys);
+    let vals = Arc::new(vals);
+
     for &threads in &[1, 2, 4, 8, 16] {
         group.bench_with_input(
             BenchmarkId::from_parameter(threads),
@@ -58,17 +75,21 @@ fn bench_concurrent_puts(c: &mut Criterion) {
                     || Arc::new(setup_db(&format!("concurrent_{}", tcount), false)),
                     |engine| {
                         let cf = engine.default_column_family();
-                        let n_ops = 5_000;
+                        let keys = Arc::clone(&keys);
+                        let vals = Arc::clone(&vals);
                         let start = Instant::now();
                         thread::scope(|scope| {
                             for tid in 0..tcount {
                                 let engine = Arc::clone(&engine);
                                 let cf = cf.clone();
+                                let keys = Arc::clone(&keys);
+                                let vals = Arc::clone(&vals);
                                 scope.spawn(move || {
                                     let offset = tid * n_ops;
                                     for i in 0..n_ops {
+                                        let idx = offset + i;
                                         engine
-                                            .put(&cf, &make_key(offset + i), &make_value(128))
+                                            .put(&cf, &keys[idx], &vals[idx])
                                             .expect("put failed");
                                     }
                                 });
@@ -92,14 +113,27 @@ fn bench_concurrent_puts(c: &mut Criterion) {
 fn bench_mixed_read_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_read_write_contention");
 
+    // Precompute data to avoid allocations in hot path
+    let prefill_keys: Vec<_> = (0..10_000).map(|i| make_key(i)).collect();
+    let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value(64)).collect();
+    let writer_keys: Vec<_> = (0..4_000).map(|i| make_key(i + 20_000)).collect();
+    let writer_vals: Vec<_> = (0..4_000).map(|_| make_value(128)).collect();
+    let writer_keys = Arc::new(writer_keys);
+    let writer_vals = Arc::new(writer_vals);
+    let reader_keys: Vec<_> = (0..10_000).step_by(3).map(|i| make_key(i)).collect();
+    let reader_keys = Arc::new(reader_keys);
+
     group.bench_function("4w4r_threads", |b| {
         b.iter_batched(
             || Arc::new(setup_db("mixed", false)),
             |engine| {
                 let cf = engine.default_column_family();
+                let writer_keys = Arc::clone(&writer_keys);
+                let writer_vals = Arc::clone(&writer_vals);
+                let reader_keys = Arc::clone(&reader_keys);
                 // prefill
                 for i in 0..10_000 {
-                    engine.put(&cf, &make_key(i), &make_value(64)).unwrap();
+                    engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
                 }
 
                 let engine_r = Arc::clone(&engine);
@@ -108,9 +142,12 @@ fn bench_mixed_read_write(c: &mut Criterion) {
                     for t in 0..4 {
                         let e = Arc::clone(&engine);
                         let cf = cf.clone();
+                        let writer_keys = Arc::clone(&writer_keys);
+                        let writer_vals = Arc::clone(&writer_vals);
                         scope.spawn(move || {
-                            for i in (t * 1_000)..(t * 1_000 + 1_000) {
-                                e.put(&cf, &make_key(i + 20_000), &make_value(128)).unwrap();
+                            for i in 0..1_000 {
+                                let idx = t * 1_000 + i;
+                                e.put(&cf, &writer_keys[idx], &writer_vals[idx]).unwrap();
                             }
                         });
                     }
@@ -118,9 +155,10 @@ fn bench_mixed_read_write(c: &mut Criterion) {
                     for _ in 0..4 {
                         let e = Arc::clone(&engine_r);
                         let cf = cf.clone();
+                        let reader_keys = Arc::clone(&reader_keys);
                         scope.spawn(move || {
-                            for i in (0..10_000).step_by(3) {
-                                let _ = e.get(&cf, &make_key(i)).unwrap();
+                            for j in 0..reader_keys.len() {
+                                let _ = e.get(&cf, &reader_keys[j]).unwrap();
                             }
                         });
                     }
@@ -141,6 +179,11 @@ fn bench_mixed_read_write(c: &mut Criterion) {
 fn bench_compaction_pressure(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_compaction_pressure");
 
+    // Precompute data
+    let compaction_keys: Vec<_> = (0..25_000).map(|i| make_key(i)).collect();
+    let compaction_vals: Vec<_> = (0..25_000).map(|_| make_value(256)).collect();
+    let verify_keys: Vec<_> = (0..1_000).step_by(50).map(|i| make_key(i)).collect();
+
     group.bench_function("steady_write_with_compaction", |b| {
         b.iter_batched(
             || setup_db("compacting", true),
@@ -148,16 +191,17 @@ fn bench_compaction_pressure(c: &mut Criterion) {
                 let cf = engine.default_column_family();
                 for round in 0..5 {
                     for i in 0..5_000 {
+                        let idx = round * 5_000 + i;
                         engine
-                            .put(&cf, &make_key(round * 5_000 + i), &make_value(256))
+                            .put(&cf, &compaction_keys[idx], &compaction_vals[idx])
                             .unwrap();
                     }
                     // brief pause to let background compaction catch up
                     thread::sleep(Duration::from_millis(50));
                 }
                 // Verify a few reads during/after compaction
-                for i in (0..1_000).step_by(50) {
-                    let _ = engine.get(&cf, &make_key(i)).unwrap();
+                for j in 0..verify_keys.len() {
+                    let _ = engine.get(&cf, &verify_keys[j]).unwrap();
                 }
                 black_box(());
             },
@@ -175,6 +219,12 @@ fn bench_compaction_pressure(c: &mut Criterion) {
 fn bench_concurrent_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_concurrent_deletes");
 
+    // Precompute data
+    let prefill_keys: Vec<_> = (0..10_000).map(|i| make_key(i)).collect();
+    let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value(100)).collect();
+    let delete_keys: Vec<_> = (0..10_000).map(|i| make_key(i)).collect();
+    let delete_keys = Arc::new(delete_keys);
+
     for &threads in &[2, 4, 8] {
         group.bench_with_input(
             BenchmarkId::from_parameter(threads),
@@ -187,22 +237,24 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         // Prefill with 10k keys
                         for i in 0..10_000 {
-                            engine.put(&cf, &make_key(i), &make_value(100)).unwrap();
+                            engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
                         }
                         engine
                     },
                     |engine| {
                         let cf = engine.default_column_family();
+                        let delete_keys = Arc::clone(&delete_keys);
                         let start = Instant::now();
                         thread::scope(|scope| {
                             for tid in 0..tcount {
                                 let engine = Arc::clone(&engine);
                                 let cf = cf.clone();
+                                let delete_keys = Arc::clone(&delete_keys);
                                 scope.spawn(move || {
                                     let offset = tid * (10_000 / tcount);
                                     let count = 10_000 / tcount;
                                     for i in 0..count {
-                                        engine.delete(&cf, &make_key(offset + i)).ok();
+                                        engine.delete(&cf, &delete_keys[offset + i]).ok();
                                     }
                                 });
                             }
@@ -226,6 +278,12 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
 fn bench_concurrent_multi_cf(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_concurrent_multi_cf");
 
+    // Precompute for max pairs=8, 8*2*2500=40000
+    let multi_cf_keys: Vec<_> = (0..40_000).map(|i| make_key(i)).collect();
+    let multi_cf_vals: Vec<_> = (0..40_000).map(|_| make_value(150)).collect();
+    let multi_cf_keys = Arc::new(multi_cf_keys);
+    let multi_cf_vals = Arc::new(multi_cf_vals);
+
     for &thread_pairs in &[2, 4, 8] {
         group.bench_with_input(
             BenchmarkId::from_parameter(thread_pairs),
@@ -244,6 +302,8 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
                     },
                     |engine| {
                         let cf_list = engine.list_column_families();
+                        let multi_cf_keys = Arc::clone(&multi_cf_keys);
+                        let multi_cf_vals = Arc::clone(&multi_cf_vals);
                         let start = Instant::now();
                         thread::scope(|scope| {
                             // 2 threads per CF
@@ -251,11 +311,13 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
                                 for tid in 0..2 {
                                     let engine = Arc::clone(&engine);
                                     let cf = cf.clone();
+                                    let multi_cf_keys = Arc::clone(&multi_cf_keys);
+                                    let multi_cf_vals = Arc::clone(&multi_cf_vals);
                                     scope.spawn(move || {
                                         let base = cf_idx * 2 * 2_500 + tid * 2_500;
                                         for i in 0..2_500 {
                                             engine
-                                                .put(&cf, &make_key(base + i), &make_value(150))
+                                                .put(&cf, &multi_cf_keys[base + i], &multi_cf_vals[base + i])
                                                 .unwrap();
                                         }
                                     });
