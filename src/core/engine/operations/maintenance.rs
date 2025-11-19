@@ -601,7 +601,6 @@ impl MidgeEngine {
                     names.push(n.to_string());
                 }
             }
-            eprintln!("INSTRUMENT maintenance_sst_dir_contents = {:?}", names);
         }
 
         // Update bloom and sparse index caches for the new SST
