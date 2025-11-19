@@ -153,9 +153,6 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     };
 
     // Act - Write data to create multiple SSTs and trigger compaction
-    // DEBUG: print DB path for diagnostic capture
-    // DEBUG: print DB path for diagnostic capture
-    println!("DB path: {:?}", dir.path());
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
     for round in 0..3 {

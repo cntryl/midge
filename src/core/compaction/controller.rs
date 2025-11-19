@@ -325,18 +325,6 @@ impl CompactionController {
                                 );
                             }
 
-                            // Instrument atomic compaction edit (CombinedAddRemove)
-                            let manifest_before = Manifest::load_with_retry(&db_path, 5, std::time::Duration::from_millis(10)).unwrap_or_default();
-                            eprintln!(
-                                "INSTRUMENT compaction_pre_combined file={} level_target={} input_count={} manifest_seq={} before_file_count={} remove_candidates={:?}",
-                                meta.name,
-                                plan.target_level,
-                                plan.input_files.len(),
-                                manifest_before.last_persisted_sequence,
-                                manifest_before.files.len(),
-                                plan.input_files
-                            );
-
                             let combined = crate::core::manifest::VersionEdit::CombinedAddRemove { add: Box::new(meta.clone()), remove: plan.input_files.clone() };
                             version_manager.apply_edit_sync(combined)?;
                             // Also update the manifest's persisted sequence to reflect the
@@ -347,24 +335,6 @@ impl CompactionController {
                                 let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence { sequence: seq_to_set };
                                 version_manager.apply_edit_sync(seq_edit)?;
                             }
-                            let after_combined = Manifest::load_with_retry(&db_path, 5, std::time::Duration::from_millis(10)).unwrap_or_default();
-                            eprintln!(
-                                "INSTRUMENT compaction_post_combined manifest_seq={} file_count={} remaining_files={:?}",
-                                after_combined.last_persisted_sequence,
-                                after_combined.files.len(),
-                                after_combined.files.iter().map(|f| f.name.clone()).collect::<Vec<_>>()
-                            );
-
-                            // Debug: list files in sst_dir to catch races where files disappear
-                            if let Ok(entries) = std::fs::read_dir(&sst_dir) {
-                                let mut names: Vec<String> = Vec::new();
-                                for e in entries.flatten() {
-                                    if let Some(n) = e.file_name().to_str() {
-                                        names.push(n.to_string());
-                                    }
-                                }
-                                eprintln!("INSTRUMENT sst_dir_contents = {:?}", names);
-                            }
 
                             if let Some(ref hooks) = test_hooks {
                                 hooks.maybe_pause_compaction(
@@ -373,20 +343,17 @@ impl CompactionController {
                             }
 
                             // Delete old SST files only after manifest persistence is confirmed
+                            // Use FileManager's grace period mechanism if available to prevent race conditions
                             for old_sst in &plan.input_files {
                                 let old_path = sst_dir.join(old_sst);
-                                eprintln!("INSTRUMENT attempting to delete old SST: {}", old_path.display());
                                 if old_path.exists() {
-                                    eprintln!("INSTRUMENT old SST exists, deleting: {}", old_path.display());
+                                    
+                                    // Delete immediately after manifest update to prevent stale reads
                                     if let Err(e) = std::fs::remove_file(&old_path) {
-                                        eprintln!("INSTRUMENT failed to remove old SST {}: {}", old_path.display(), e);
                                         tracing::warn!(path = %old_path.display(), error = %e, "failed to remove old SST during compaction");
                                     } else {
-                                        eprintln!("INSTRUMENT successfully removed old SST: {}", old_path.display());
                                         tracing::debug!(path = %old_path.display(), "removed old SST during compaction");
                                     }
-                                } else {
-                                    eprintln!("INSTRUMENT old SST does not exist: {}", old_path.display());
                                 }
                             }
                         }

@@ -216,35 +216,14 @@ impl MidgeEngine {
         let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
             file: Box::new(file_meta.clone()),
         };
-        tracing::debug!(target: "midge.instrument", action="flush_pre_add_file", current_manifest_seq = self.version_set.load().manifest.last_persisted_sequence, file = %file_meta.name);
-        eprintln!(
-            "INSTRUMENT flush_pre_add_file manifest_seq={} file={}",
-            self.version_set.load().manifest.last_persisted_sequence,
-            file_meta.name
-        );
         self.version_manager.apply_edit_sync(add_file_edit)?;
-        tracing::debug!(target: "midge.instrument", action="flush_post_add_file", file_count = self.version_set.load().manifest.files.len(), manifest_seq = self.version_set.load().manifest.last_persisted_sequence, file = %file_meta.name);
-        eprintln!(
-            "INSTRUMENT flush_post_add_file manifest_seq={} file_count={} file={}",
-            self.version_set.load().manifest.last_persisted_sequence,
-            self.version_set.load().manifest.files.len(),
-            file_meta.name
-        );
 
         // 2. UpdateSequence edit (now safe to advance durable sequence)
         if let Some(largest_seq) = file_meta.largest_seq {
-            tracing::debug!(target: "midge.instrument", action="flush_pre_update_sequence", largest_seq, current_manifest_seq = self.version_set.load().manifest.last_persisted_sequence, new_file = %file_meta.name);
-            eprintln!("INSTRUMENT flush_pre_update_sequence largest_seq={} current_manifest_seq={} file={}", largest_seq, self.version_set.load().manifest.last_persisted_sequence, file_meta.name);
             let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
                 sequence: largest_seq,
             };
             self.version_manager.apply_edit_sync(seq_edit)?;
-            tracing::debug!(target: "midge.instrument", action="flush_post_update_sequence", manifest_seq = self.version_set.load().manifest.last_persisted_sequence, file = %file_meta.name);
-            eprintln!(
-                "INSTRUMENT flush_post_update_sequence manifest_seq={} file={}",
-                self.version_set.load().manifest.last_persisted_sequence,
-                file_meta.name
-            );
         }
 
         // Update manifest cache to reflect the new SST file
