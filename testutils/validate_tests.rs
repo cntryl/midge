@@ -300,6 +300,23 @@ fn print_summary() {
                 println!("    \x1b[33m- {}\x1b[0m", issue);
             }
         }
+
+        // Print all multi-behavior violations
+        let multi_violations: Vec<_> = non_compliant.iter().filter(|r| r.issues.iter().any(|i| i.starts_with("MULTI-BEHAVIOR:"))).collect();
+        if !multi_violations.is_empty() {
+            println!("\x1b[33mAll Multi-behavior violations:\x1b[0m");
+            for result in multi_violations {
+                println!(
+                    "  \x1b[31m{}::{}  (line {})\x1b[0m",
+                    result.file, result.test_name, result.line
+                );
+                for issue in &result.issues {
+                    if issue.starts_with("MULTI-BEHAVIOR:") {
+                        println!("    \x1b[33m- {}\x1b[0m", issue);
+                    }
+                }
+            }
+        }
     }
 }
 

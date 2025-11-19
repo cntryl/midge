@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_concurrent_reads_and_writes() {
+    fn should_handle_concurrent_reads_writes() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
         let manifest = create_test_manifest(0, 0);
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn should_preserve_manifest_data_across_get_and_update() {
+    fn should_preserve_manifest_data_across_get_update() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
         let original = create_test_manifest(42, 3);

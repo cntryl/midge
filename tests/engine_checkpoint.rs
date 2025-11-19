@@ -10,7 +10,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 mod common;
 use common::test_temp_dir;
 #[test]
-fn should_create_checkpoint_and_read_from_it() {
+fn should_create_checkpoint_read_from_it() {
     // Arrange
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();

@@ -1055,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn should_support_compare_and_swap_operations() {
+    fn should_support_cas_operation() {
         // Arrange
         let mut txn = Transaction::new(1, 100);
 

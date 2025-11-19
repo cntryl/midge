@@ -84,7 +84,7 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
 }
 
 #[test]
-fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
+fn should_merge_memtable_ssts_with_last_write_wins_on_scan() {
     // Arrange: seed SST with a,b,c; then in memtable update b, delete c, add d.
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
@@ -137,7 +137,7 @@ fn should_merge_memtable_and_ssts_with_last_write_wins_when_scan() {
 }
 
 #[test]
-fn should_scan_by_prefix_and_limit_across_sst_and_memtable() {
+fn should_scan_by_prefix_limit_across_sst_memtable() {
     // Arrange: seed SST with a, ab, ac; then add ad in memtable
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
@@ -173,7 +173,7 @@ fn should_scan_by_prefix_and_limit_across_sst_and_memtable() {
 }
 
 #[test]
-fn should_scan_by_prefix_and_limit_across_sst_and_memtable_limited() {
+fn should_scan_by_prefix_limit_across_sst_memtable_limited() {
     // Arrange: seed SST with a, ab, ac; then add ad in memtable (same setup as previous test)
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();

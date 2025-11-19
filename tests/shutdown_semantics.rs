@@ -6,7 +6,7 @@ use common::{durability_opts, flush_test_opts, test_temp_dir, with_engine_restar
 use std::{sync::Arc, time::Duration};
 
 #[test]
-fn should_flush_and_fsync_all_memtables_given_shutdown_signal() {
+fn should_flush_fsync_all_memtables_on_shutdown_signal() {
     // Arrange
     let dir = test_temp_dir();
     let opts = flush_test_opts(dir.path().to_path_buf(), 1024 * 1024); // Large memtable
@@ -184,7 +184,7 @@ fn should_reopen_without_recovery_needed_given_clean_shutdown() {
 }
 
 #[test]
-fn should_handle_rapid_shutdown_and_restart_cycles_without_data_loss_when_stressed() {
+fn should_handle_rapid_shutdown_restart_cycles_without_data_loss_stressed() {
     // Arrange
     let dir = test_temp_dir();
     let base_opts = durability_opts(dir.path().to_path_buf());

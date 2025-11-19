@@ -80,7 +80,7 @@ fn should_commit_transaction_with_nosync_option() {
 }
 
 #[test]
-fn should_mix_sync_and_nosync_commits() {
+fn should_mix_sync_nosync_commits() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {

@@ -52,7 +52,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_store_and_retrieve_range_tombstones() {
+    fn should_drain_stored_range_tombstones() {
         // Arrange
         let rt = RangeTombstones::new();
 

@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn should_filter_scan_range_by_snapshot_and_tombstone() {
+    fn should_filter_scan_range_by_snapshot_tombstone() {
         // Arrange
         let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add_with_meta(b"a", Some(b"A"), 5, false, None)
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_scan_with_start_and_end_bounds() {
+    fn should_handle_scan_with_start_end_bounds() {
         // Arrange
         let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"1").unwrap();
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn should_persist_and_read_expiration_metadata() {
+    fn should_roundtrip_expiration_metadata() {
         // Arrange
         let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 4096);
         let exp1 = Some(1000000000000);
@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn should_write_footer_magic_and_version_given_writer_finish() {
+    fn should_write_footer_magic_version_on_finish() {
         // Arrange
         let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         w.add(b"a", b"A").unwrap();
@@ -637,7 +637,7 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn should_skip_corrupted_block_and_continue_scan_given_recover_mode_enabled() {
+    fn should_skip_corrupted_block_continue_scan_in_recover_mode() {
         // Arrange
         let mut w = SstMemWriter::new(CompressionType::None, 64);
         w.add(b"a", b"A").unwrap();
@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_restarts_and_delta_encoded_keys_when_scanning() {
+    fn should_handle_restarts_delta_encoded_keys_when_scanning() {
         // Arrange
         let mut w = SstMemWriter::new(CompressionType::None, 64);
         w.add(b"prefix_key_001", b"v1").unwrap();

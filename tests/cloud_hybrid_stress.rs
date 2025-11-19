@@ -55,7 +55,7 @@ fn should_evict_oldest_files_given_cache_full_when_adding_new_files() {
 }
 
 #[test]
-fn should_handle_concurrent_reads_and_writes_to_cache() {
+fn should_handle_concurrent_reads_writes_to_cache() {
     // Arrange
     let dir = test_temp_dir();
     let mock_backend = Arc::new(MockCloudBackend::new());

@@ -76,7 +76,7 @@ fn should_scan_by_prefix_memtable() {
 }
 
 #[test]
-fn should_scan_by_prefix_and_limit_memtable() {
+fn should_scan_by_prefix_limit_memtable() {
     // Arrange
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
@@ -216,7 +216,7 @@ fn should_scan_reverse_with_limit() {
 }
 
 #[test]
-fn should_scan_with_lower_and_upper_bounds() {
+fn should_scan_with_lower_upper_bounds() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {

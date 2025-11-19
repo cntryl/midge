@@ -162,7 +162,7 @@ fn should_reject_operations_given_committed_transaction_when_reused() {
 }
 
 #[test]
-fn should_handle_rapid_transaction_creation_and_commit() {
+fn should_handle_rapid_transaction_creation_commit() {
     // Arrange
     let (_dir, engine) = new_engine();
     let engine = Arc::new(engine);

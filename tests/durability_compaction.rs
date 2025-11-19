@@ -23,7 +23,7 @@ fn collect_sst_files(dir: &std::path::Path) -> Vec<String> {
 }
 
 #[test]
-fn should_commit_new_ssts_and_manifest_together_given_compaction_successful() {
+fn should_commit_new_ssts_manifest_together_on_compaction_success() {
     // Arrange
     let dir = test_temp_dir();
     let hooks = TestHooks::new();

@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn should_distinguish_bloom_and_tombstone_keys() {
+    fn should_distinguish_bloom_tombstone_keys() {
         // Arrange
         let bloom_handle = BlockHandle {
             offset: 100,
@@ -525,7 +525,7 @@ mod tests {
     // --- Integration tests ---
 
     #[test]
-    fn should_handle_meta_index_with_both_bloom_and_tombstones() {
+    fn should_handle_meta_index_with_bloom_tombstones() {
         // Arrange
         let mut builder = MetaIndexBuilder::new();
         let _ = builder.add_index_entry(
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_zero_offset_and_size() {
+    fn should_handle_zero_offset_size() {
         // Arrange
         let zero_handle = BlockHandle { offset: 0, size: 0 };
         let mut builder = MetaIndexBuilder::new();
@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_max_offset_and_size() {
+    fn should_handle_max_offset_size() {
         // Arrange
         let max_handle = BlockHandle {
             offset: u64::MAX,

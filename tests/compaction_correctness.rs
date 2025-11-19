@@ -303,7 +303,7 @@ fn should_maintain_data_consistency_during_high_concurrency_compaction_workload(
 }
 
 #[test]
-fn should_preserve_ordering_and_values_given_multiple_overwrites_during_compaction() {
+fn should_preserve_ordering_values_during_compaction_with_overwrites() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {

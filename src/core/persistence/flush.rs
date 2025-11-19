@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn should_compute_bounds_from_mixed_entries_and_tombstones() {
+    fn should_compute_bounds_from_mixed_entries_tombstones() {
         // Arrange
         let entries = vec![EntryMeta {
             key: b"key5".to_vec(),

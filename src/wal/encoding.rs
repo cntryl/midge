@@ -340,12 +340,24 @@ mod tests {
     }
 
     #[test]
-    fn should_encode_and_decode_basic_record() {
+    fn should_encode_basic_record() {
         // Arrange
         let original = create_test_record();
 
         // Act
         let encoded = encode(&original).expect("encode");
+
+        // Assert
+        assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn should_decode_basic_record() {
+        // Arrange
+        let original = create_test_record();
+        let encoded = encode(&original).expect("encode");
+
+        // Act
         let decoded = decode(&encoded).expect("decode");
 
         // Assert

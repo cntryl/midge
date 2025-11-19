@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn should_compare_and_swap_successfully() {
+    fn should_execute_cas_successfully() {
         // Arrange
         let engine = create_test_engine();
         let txn = Transaction::new(11, 0);

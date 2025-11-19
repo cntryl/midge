@@ -243,17 +243,27 @@ mod tests {
     }
 
     #[test]
-    fn should_return_read_and_write_counts() {
+    fn should_return_read_count() {
         // Arrange
         let mut tracker = ConflictTracker::new();
 
         // Act
         tracker.track_read(0, Bytes::from("key1"), 100);
         tracker.track_read(0, Bytes::from("key2"), 101);
-        tracker.track_write(0, Bytes::from("key3"));
 
         // Assert
         assert_eq!(tracker.read_count(), 2);
+    }
+
+    #[test]
+    fn should_return_write_count() {
+        // Arrange
+        let mut tracker = ConflictTracker::new();
+
+        // Act
+        tracker.track_write(0, Bytes::from("key3"));
+
+        // Assert
         assert_eq!(tracker.write_count(), 1);
     }
 
@@ -422,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn should_count_both_writes_and_ranges_in_write_count() {
+    fn should_count_write_operations_including_ranges() {
         // Arrange
         let mut tracker = ConflictTracker::new();
 

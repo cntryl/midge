@@ -768,7 +768,7 @@ mod tests {
     use bytes::Bytes;
 
     #[test]
-    fn should_store_offset_and_size_when_created() {
+    fn should_store_offset_size_when_created() {
         // Arrange
         // Act
         let handle = BlockHandle::new(100, 200);
@@ -794,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn should_encode_zero_offset_and_size_correctly() {
+    fn should_roundtrip_zero_offset_size() {
         // Arrange
         let handle = BlockHandle::new(0, 0);
 
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn should_store_data_type_and_compression_when_created() {
+    fn should_store_data_type_compression_when_created() {
         // Arrange
         let data = Bytes::from("test data");
 
@@ -1058,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn should_store_handles_and_compression_when_created() {
+    fn should_store_handles_when_created() {
         // Arrange
         let index_handle = BlockHandle::new(100, 50);
         let meta_handle = BlockHandle::new(200, 30);
@@ -1143,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn should_convert_block_type_to_u8_and_back() {
+    fn should_roundtrip_block_type_u8_conversion() {
         // Arrange
         // Act
         // Assert

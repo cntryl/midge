@@ -192,7 +192,7 @@ fn should_delete_range_via_adapter() {
 }
 
 #[test]
-fn should_compare_and_swap_via_adapter() {
+fn should_perform_cas_via_adapter() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -219,7 +219,7 @@ fn should_compare_and_swap_via_adapter() {
 }
 
 #[test]
-fn should_fail_compare_and_swap_given_mismatched_value() {
+fn should_fail_cas_with_mismatched_value() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -344,7 +344,7 @@ fn should_allow_only_one_of_two_concurrent_cas_with_none_expected() {
 }
 
 #[test]
-fn should_create_and_use_column_families_via_adapter() {
+fn should_create_use_column_families_via_adapter() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -375,7 +375,7 @@ fn should_create_and_use_column_families_via_adapter() {
 }
 
 #[test]
-fn should_begin_and_commit_transaction_via_adapter() {
+fn should_begin_commit_transaction_via_adapter() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {

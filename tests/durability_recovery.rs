@@ -8,7 +8,7 @@ use common::{
 };
 
 #[test]
-fn should_detect_and_ignore_already_compacted_wal_entries_given_manifest_sequence() {
+fn should_detect_ignore_compacted_wal_entries_with_manifest_sequence() {
     // Arrange
     let dir = test_temp_dir();
     let hooks = TestHooks::new();

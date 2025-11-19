@@ -112,13 +112,26 @@ mod tests {
     }
 
     #[test]
-    fn should_insert_and_retrieve_metadata() {
+    fn should_insert_metadata() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
         let cache = SstMetadataCache::new(temp_dir.path().to_path_buf());
 
         // Act
         cache.insert("sst_001.blob".to_string(), "test_metadata".to_string());
+
+        // Assert
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn should_retrieve_metadata() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let cache = SstMetadataCache::new(temp_dir.path().to_path_buf());
+        cache.insert("sst_001.blob".to_string(), "test_metadata".to_string());
+
+        // Act
         let result = cache.get("sst_001.blob");
 
         // Assert

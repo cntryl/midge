@@ -576,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn should_scan_range_with_none_start_and_end() {
+    fn should_scan_range_with_no_bounds() {
         // Arrange
         let mt = MemTable::new();
         mt.put(b"a", b"1");

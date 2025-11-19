@@ -215,7 +215,7 @@ fn should_handle_concurrent_writes_with_local_persistence() {
 }
 
 #[test]
-fn should_preserve_data_after_large_batch_write_and_restart() {
+fn should_preserve_data_after_large_batch_write_restart() {
     // Arrange
     let dir = test_temp_dir();
     let db_path = dir.path().to_path_buf();

@@ -135,7 +135,7 @@ fn should_multi_get_from_ssts_after_flush() {
 }
 
 #[test]
-fn should_multi_get_mixed_memtable_and_sst() {
+fn should_multi_get_mixed_memtable_sst() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {

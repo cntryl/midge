@@ -354,13 +354,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_encode_and_decode_basic_entry() {
+    fn should_encode_basic_entry() {
         // Arrange
         let key_delta = b"test_key";
         let value = b"test_value";
 
         // Act
         let encoded = encode(key_delta, 0, Some(value), 100, false, false, None);
+
+        // Assert
+        assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn should_decode_basic_entry() {
+        // Arrange
+        let key_delta = b"test_key";
+        let value = b"test_value";
+        let encoded = encode(key_delta, 0, Some(value), 100, false, false, None);
+
+        // Act
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -740,13 +753,26 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_binary_data_in_keys_and_values() {
+    fn should_encode_binary_data() {
         // Arrange
         let binary_key = vec![0x00, 0xFF, 0x80, 0x7F, 0xDE, 0xAD];
         let binary_value = vec![0xCA, 0xFE, 0xBA, 0xBE];
 
         // Act
         let encoded = encode(&binary_key, 0, Some(&binary_value), 100, false, false, None);
+
+        // Assert
+        assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn should_decode_binary_data() {
+        // Arrange
+        let binary_key = vec![0x00, 0xFF, 0x80, 0x7F, 0xDE, 0xAD];
+        let binary_value = vec![0xCA, 0xFE, 0xBA, 0xBE];
+        let encoded = encode(&binary_key, 0, Some(&binary_value), 100, false, false, None);
+
+        // Act
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert

@@ -10,7 +10,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 mod common;
 use common::test_temp_dir;
 #[test]
-fn should_compact_all_merge_newest_and_drop_tombstones() {
+fn should_compact_all_merge_newest_drop_tombstones() {
     // Arrange: create multiple SSTs with overlapping keys and tombstones
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();

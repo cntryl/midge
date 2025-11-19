@@ -282,7 +282,7 @@ fn should_handle_default_cf_merge_independently_from_other_cfs() {
 }
 
 #[test]
-fn should_persist_and_recover_merge_resolutions_across_restart() {
+fn should_persist_recover_merge_resolutions_across_restart() {
     // Arrange
     let dir = test_temp_dir();
     let db_path = dir.path().to_path_buf();

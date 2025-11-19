@@ -643,17 +643,29 @@ mod tests {
     }
 
     #[test]
-    fn should_put_and_get_value() {
+    fn should_put_value_when_key_not_exists() {
         // Arrange
         let engine = create_test_engine();
         let cf = engine.default_column_family();
 
         // Act
         let put_result = engine.put(&cf, b"key1", b"value1");
-        let get_result = engine.get(&cf, b"key1");
 
         // Assert
         assert!(put_result.is_ok());
+    }
+
+    #[test]
+    fn should_get_value_when_key_exists() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        engine.put(&cf, b"key1", b"value1").unwrap();
+
+        // Act
+        let get_result = engine.get(&cf, b"key1");
+
+        // Assert
         assert!(get_result.is_ok());
         assert_eq!(get_result.unwrap(), Some(Bytes::from("value1")));
     }
