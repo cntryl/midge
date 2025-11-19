@@ -175,3 +175,59 @@ fn should_handle_inverted_range_given_start_greater_than_end() {
         Some(Bytes::from_static(b"2"))
     );
 }
+
+#[test]
+fn should_not_create_filesystem_artifacts_when_using_memory_mode() {
+    // Arrange
+    let dir = test_temp_dir();
+    let db_path = dir.path();
+
+    // Verify directory is empty before test
+    assert!(
+        !db_path.exists() || std::fs::read_dir(db_path).unwrap().count() == 0,
+        "Directory should be empty before test"
+    );
+
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::Memory,
+        enable_compaction: false,
+        ..Default::default()
+    };
+
+    // Act
+    let engine = MidgeEngine::open(opts).expect("open");
+    let cf = engine.default_column_family();
+
+    // Write some data
+    engine.put(&cf, b"key1", b"value1").expect("put");
+    engine.put(&cf, b"key2", b"value2").expect("put");
+    engine.delete(&cf, b"key1").expect("delete");
+
+    // Verify data exists in memory
+    assert_eq!(engine.get(&cf, b"key1").expect("get"), None);
+    assert_eq!(
+        engine.get(&cf, b"key2").expect("get"),
+        Some(Bytes::from_static(b"value2"))
+    );
+
+    // Assert: No filesystem artifacts created
+    assert!(
+        !db_path.exists() || std::fs::read_dir(db_path).unwrap().count() == 0,
+        "No directories or files should be created in memory mode"
+    );
+
+    // Explicitly check common paths
+    assert!(
+        !db_path.join("sst").exists(),
+        "sst directory should not exist"
+    );
+    assert!(
+        !db_path.join("wal").exists(),
+        "wal directory should not exist"
+    );
+    assert!(
+        !db_path.join("manifest.json").exists(),
+        "manifest.json should not exist"
+    );
+    assert!(!db_path.join("LOCK").exists(), "LOCK file should not exist");
+}

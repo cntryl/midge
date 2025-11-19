@@ -583,7 +583,8 @@ mod tests {
                 manifest,
             )),
             db_path.clone(),
-            None, // No test hooks in this test
+            None,  // No test hooks in this test
+            false, // Not memory mode
         ));
 
         let config = CompactionWorkerConfig {

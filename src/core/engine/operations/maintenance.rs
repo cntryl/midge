@@ -178,11 +178,21 @@ impl MidgeEngine {
         );
         let (file_path, mut file_meta) = result?;
         // Fill in the file size (flush_memtable_to_sst sets it to 0)
-        file_meta.size_bytes = std::fs::metadata(&file_path)
-            .map(|md| md.len())
-            .unwrap_or(0);
+        // Skip filesystem access in memory mode
+        file_meta.size_bytes = if self.mem_mode {
+            0 // Size not relevant for in-memory SSTs
+        } else {
+            std::fs::metadata(&file_path)
+                .map(|md| md.len())
+                .unwrap_or(0)
+        };
         // Load manifest to check for sublevel assignment
-        let m = Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?;
+        // Use current version in memory mode since no disk persistence
+        let m = if self.mem_mode {
+            self.version_set.load().manifest.clone()
+        } else {
+            Manifest::load_with_retry(&self.db_path, 10, std::time::Duration::from_millis(10))?
+        };
 
         // Assign sublevel based on overlap with existing L0 files
         file_meta.sublevel = if let (Some(ref sk), Some(ref lk)) =

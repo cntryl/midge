@@ -52,6 +52,7 @@ pub(crate) fn init_manifest(
     db_path: &Path,
     read_only: bool,
     memtable_size: usize,
+    mem_mode: bool,
 ) -> MidgeResult<(Manifest, u32)> {
     let mut manifest = Manifest::load(db_path).unwrap_or_default();
 
@@ -66,8 +67,8 @@ pub(crate) fn init_manifest(
             DEFAULT_CF_NAME.to_string(),
             Some(default_cf_config),
         );
-        // Save manifest with default CF for new DBs
-        if !read_only {
+        // Save manifest with default CF for new DBs (skip in memory mode)
+        if !read_only && !mem_mode {
             tracing::debug!("saving manifest to {}", db_path.display());
             match manifest.save_atomic(db_path) {
                 Ok(_) => tracing::debug!("manifest.save_atomic succeeded"),
@@ -400,7 +401,7 @@ mod tests {
     fn should_initialize_manifest_with_default_cf() {
         let temp_dir = TempDir::new().unwrap();
         let (manifest, max_cf_id) =
-            init_manifest(temp_dir.path(), false, 64 * 1024 * 1024).unwrap();
+            init_manifest(temp_dir.path(), false, 64 * 1024 * 1024, false).unwrap();
 
         assert!(manifest.has_cf(DEFAULT_CF_ID));
         assert_eq!(max_cf_id, 0);
@@ -426,7 +427,7 @@ mod tests {
 
         // Load it back
         let (loaded_manifest, max_cf_id) =
-            init_manifest(temp_dir.path(), false, 64 * 1024 * 1024).unwrap();
+            init_manifest(temp_dir.path(), false, 64 * 1024 * 1024, false).unwrap();
 
         assert!(loaded_manifest.has_cf(DEFAULT_CF_ID));
         assert!(loaded_manifest.has_cf(ColumnFamilyId::new(1)));
@@ -492,5 +493,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(max_seq, 100);
+    }
+
+    #[test]
+    fn should_not_write_manifest_in_memory_mode() {
+        // Arrange
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path();
+
+        // Act
+        let (manifest, max_cf_id) = init_manifest(db_path, false, 64 * 1024 * 1024, true).unwrap();
+
+        // Assert
+        assert!(manifest.has_cf(DEFAULT_CF_ID)); // Manifest initialized in memory
+        assert_eq!(max_cf_id, 0);
+        assert!(!db_path.join("manifest.json").exists()); // No file written
     }
 }

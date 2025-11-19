@@ -66,12 +66,15 @@ impl MidgeEngine {
         manifest.add_cf(cf_id, name.to_string(), Some(config));
 
         // Persist manifest. If persistence fails, roll back the in-memory CF registration
-        if let Err(e) = manifest.save_atomic(&self.db_path) {
-            // Best-effort rollback of in-memory state inserted by create_cf
-            let id_u32 = cf_id.as_u32();
-            let _ = self.cf_set.cfs.remove(&id_u32);
-            let _ = self.cf_set.name_to_id.remove(handle.name());
-            return Err(e);
+        // Skip persistence in memory mode
+        if !self.mem_mode {
+            if let Err(e) = manifest.save_atomic(&self.db_path) {
+                // Best-effort rollback of in-memory state inserted by create_cf
+                let id_u32 = cf_id.as_u32();
+                let _ = self.cf_set.cfs.remove(&id_u32);
+                let _ = self.cf_set.name_to_id.remove(handle.name());
+                return Err(e);
+            }
         }
 
         // Update version_set with new manifest (critical for subsequent flush operations)
@@ -170,7 +173,11 @@ impl MidgeEngine {
             .collect();
 
         manifest.remove_cf(cf_id);
-        manifest.save_atomic(&self.db_path)?;
+
+        // Save manifest (skip in memory mode)
+        if !self.mem_mode {
+            manifest.save_atomic(&self.db_path)?;
+        }
 
         // Update cached manifest after successful save
         self.update_manifest_cache(manifest.clone());

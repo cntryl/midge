@@ -169,8 +169,12 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
         hooks.maybe_pause_flush(FlushGatePoint::BeforeManifestUpdate);
     }
 
-    let mut m =
-        Manifest::load_with_retry(&config.db_path, 10, std::time::Duration::from_millis(10))?;
+    // Load manifest (or use default in memory mode since no disk persistence)
+    let mut m = if config.mem_mode {
+        Manifest::default()
+    } else {
+        Manifest::load_with_retry(&config.db_path, 10, std::time::Duration::from_millis(10))?
+    };
     tracing::debug!(target:"midge.instrument", action="bg_flush_before_manifest_update", fname = %fname, seq_for_prune, largest_seq = largest_seq, smallest_seq = smallest_seq, current_manifest_seq = m.last_persisted_sequence);
     eprintln!("INSTRUMENT bg_flush_before_manifest_update file={} seq_for_prune={} largest_seq={:?} smallest_seq={:?} current_manifest_seq={}", fname, seq_for_prune, largest_seq, smallest_seq, m.last_persisted_sequence);
     // Use largest_seq from entries (which includes resolved merge operations)
@@ -182,7 +186,12 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
         "INSTRUMENT bg_flush_after_manifest_seq_set new_manifest_seq={} file={}",
         m.last_persisted_sequence, fname
     );
-    let size_bytes = std::fs::metadata(&sst_path).map(|md| md.len()).unwrap_or(0);
+    // Get file size (skip filesystem access in memory mode)
+    let size_bytes = if config.mem_mode {
+        0 // Size not relevant for in-memory SSTs
+    } else {
+        std::fs::metadata(&sst_path).map(|md| md.len()).unwrap_or(0)
+    };
 
     // Assign sublevel based on overlap with existing L0 files
     let sublevel = if let (Some(sk), Some(lk)) = (&smallest_key, &largest_key) {
@@ -215,19 +224,22 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
         total_entries,
     });
 
-    tracing::info!(
-        "persisting manifest after creating SST {}",
-        sst_path.display()
-    );
-    m.save_atomic(&config.db_path)?;
-    tracing::debug!(target:"midge.instrument", action="bg_flush_after_manifest_persist", file = %fname, manifest_seq = m.last_persisted_sequence, file_count = m.files.len());
-    eprintln!(
-        "INSTRUMENT bg_flush_after_manifest_persist manifest_seq={} file_count={} file={}",
-        m.last_persisted_sequence,
-        m.files.len(),
-        fname
-    );
-    tracing::info!("manifest persisted successfully");
+    // Save manifest (skip in memory mode)
+    if !config.mem_mode {
+        tracing::info!(
+            "persisting manifest after creating SST {}",
+            sst_path.display()
+        );
+        m.save_atomic(&config.db_path)?;
+        tracing::debug!(target:"midge.instrument", action="bg_flush_after_manifest_persist", file = %fname, manifest_seq = m.last_persisted_sequence, file_count = m.files.len());
+        eprintln!(
+            "INSTRUMENT bg_flush_after_manifest_persist manifest_seq={} file_count={} file={}",
+            m.last_persisted_sequence,
+            m.files.len(),
+            fname
+        );
+        tracing::info!("manifest persisted successfully");
+    }
 
     // Update engine's cached manifest so reads can immediately see the new SST
     if let Some(ref callback) = config.manifest_update_callback {

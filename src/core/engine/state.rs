@@ -71,13 +71,11 @@ pub fn open(opts: crate::MidgeOptions) -> MidgeResult<MidgeEngine> {
     // and creating the FsSstFactory before the directory exists can cause
     // subsequent file creation to fail with NotFound. Try to create it here and
     // log a warning on failure.
+    // Skip directory creation entirely in memory mode.
     if !mem_mode {
         if let Err(e) = std::fs::create_dir_all(&sst_dir) {
             tracing::warn!("failed to create sst dir {}: {}", sst_dir.display(), e);
         }
-    } else {
-        // For in-memory mode, best-effort create (no error propagation)
-        let _ = std::fs::create_dir_all(&sst_dir);
     }
 
     // Choose SST writer factory based on storage mode
@@ -174,8 +172,12 @@ pub fn open_with_factories(
         crate::core::engine::factory::acquire_db_lock(&db_path, opts.read_only, mem_mode)?;
     tracing::debug!("acquired db lock (or running read-only/mem)");
     tracing::debug!("initializing manifest...");
-    let (manifest, max_cf_id) =
-        crate::core::engine::factory::init_manifest(&db_path, opts.read_only, opts.memtable_size)?;
+    let (manifest, max_cf_id) = crate::core::engine::factory::init_manifest(
+        &db_path,
+        opts.read_only,
+        opts.memtable_size,
+        mem_mode,
+    )?;
     tracing::debug!(
         "manifest initialized: last_seq={}",
         manifest.last_persisted_sequence
@@ -214,8 +216,6 @@ pub fn open_with_factories(
     tracing::debug!("creating sst dir: {}", sst_dir.display());
     if !mem_mode {
         std::fs::create_dir_all(&sst_dir)?;
-    } else {
-        std::fs::create_dir_all(&sst_dir).ok();
     }
 
     let metrics_arc = Arc::new(Metrics::new());
@@ -267,6 +267,7 @@ pub fn open_with_factories(
         version_set_atomic.clone(),
         db_path.clone(),
         opts.test_hooks.clone(),
+        mem_mode,
     ));
 
     // Delegate flush and compaction coordinator setup to factory module
