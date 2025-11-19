@@ -190,7 +190,7 @@ mod tests {
         // Act
         let factory = CloudSstFactory::new(backend, "sst".to_string());
 
-        // Assert - factory should be usable
+        // Assert
         let writer = factory.create(crate::common::codec::CompressionType::None, 4096, false);
         assert!(writer.finish_bytes().is_ok());
     }
@@ -220,7 +220,7 @@ mod tests {
         let backend = Arc::new(MockCloudBackend::new());
         let write_factory = CloudSstFactory::new(backend.clone(), "sst".to_string());
 
-        // Act - Write
+        // Act
         let mut writer =
             write_factory.create(crate::common::codec::CompressionType::None, 4096, false);
         writer.add(b"apple", b"A").unwrap();

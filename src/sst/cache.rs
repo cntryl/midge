@@ -216,7 +216,9 @@ mod tests {
         let cache = SstCache::new(temp_dir.path().to_path_buf());
         cache.populate_from_manifest(&manifest);
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert!(cache.bloom_cache.may_contain("sst_001.blob", b"apple"));
         assert!(!cache
             .bloom_cache

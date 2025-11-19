@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn should_find_target_key_in_linear_search() {
-        // Arrange - Build a proper data block
+        // Arrange
         use crate::sst::format::DataBlockBuilder;
         let mut builder = DataBlockBuilder::new(16);
         builder.add(b"apple", b"v1").unwrap();
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn should_return_none_when_key_not_found() {
-        // Arrange - Build a proper data block
+        // Arrange
         use crate::sst::format::DataBlockBuilder;
         let mut builder = DataBlockBuilder::new(16);
         builder.add(b"apple", b"v1").unwrap();
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn should_stop_search_when_key_exceeds_target() {
-        // Arrange - Build a proper data block
+        // Arrange
         use crate::sst::format::DataBlockBuilder;
         let mut builder = DataBlockBuilder::new(16);
         builder.add(b"apple", b"v1").unwrap();
@@ -744,7 +744,7 @@ mod tests {
         let restarts_start = block_data.len() - 4 - (num_restarts * 4);
         let entries_end = restarts_start - 1;
 
-        // Act - search for "avocado" which is between "apple" and "banana"
+        // Act
         let result = linear_search_data_block(&block_data, 0, entries_end, b"avocado", false)
             .expect("search");
 
@@ -797,7 +797,9 @@ mod tests {
 
     #[test]
     fn should_encode_put_operation() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let encoded = encode(b"key", 0, Some(b"value"), 100, false, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
@@ -807,7 +809,9 @@ mod tests {
 
     #[test]
     fn should_encode_delete_operation() {
-        // Arrange & Act
+        // Arrange
+
+        // Act
         let encoded = encode(b"key", 0, None, 100, true, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
@@ -817,7 +821,7 @@ mod tests {
 
     #[test]
     fn should_handle_tombstone_with_value() {
-        // Arrange - tombstone but with non-empty value (edge case)
+        // Arrange
         let value = b"tombstone_value";
 
         // Act
@@ -904,7 +908,7 @@ mod tests {
         let seq = 42;
         let expiration = Some(123456789u64);
 
-        // Act - encode/decode 10 times
+        // Act
         let mut current_encoded = encode(
             key_delta,
             shared_len,

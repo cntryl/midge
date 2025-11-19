@@ -326,20 +326,16 @@ mod tests {
         // Arrange
         let fm = FileManager::new();
 
-        // Act - Register some files
+        // Act
         fm.register_file(Path::new("file1.sst"), 1000).unwrap();
         fm.register_file(Path::new("file2.sst"), 2000).unwrap();
-
-        // Assert
         let stats = fm.stats();
-        assert_eq!(stats.current_total_bytes, 3000);
-
-        // Act - Unregister
         fm.unregister_file(Path::new("file1.sst"), 1000);
+        let stats2 = fm.stats();
 
         // Assert
-        let stats = fm.stats();
-        assert_eq!(stats.current_total_bytes, 2000);
+        assert_eq!(stats.current_total_bytes, 3000);
+        assert_eq!(stats2.current_total_bytes, 2000);
     }
 
     #[test]
@@ -347,11 +343,9 @@ mod tests {
         // Arrange
         let fm = FileManager::with_limits(5000, 0);
 
-        // Act - Should succeed
+        // Act
         fm.register_file(Path::new("file1.sst"), 2000).unwrap();
         fm.register_file(Path::new("file2.sst"), 2000).unwrap();
-
-        // Act - Should fail - would exceed quota
         let result = fm.register_file(Path::new("file3.sst"), 2000);
 
         // Assert
@@ -371,7 +365,7 @@ mod tests {
         // Arrange
         let fm = FileManager::new();
 
-        // Act - Mark files for deletion
+        // Act
         fm.mark_for_deletion(PathBuf::from("old1.sst"), 1000);
         fm.mark_for_deletion(PathBuf::from("old2.sst"), 2000);
 
@@ -394,7 +388,7 @@ mod tests {
         fm.mark_for_deletion(file1.clone(), 5);
         fm.mark_for_deletion(file2.clone(), 5);
 
-        // Act - Immediate execution shouldn't delete (grace period = 1 sec)
+        // Act
         let deleted = fm.execute_pending_deletions(Duration::from_secs(1));
 
         // Assert

@@ -395,7 +395,7 @@ mod tests {
         let file = File::open(tmp.path()).unwrap();
         let mut reader = SequentialReader::new(file, 0);
 
-        // Act - Multiple sequential reads should not need seeks
+        // Act
         let mut buf = [0u8; 2];
         reader.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"AB");
