@@ -100,15 +100,13 @@ fn should_background_compact_when_threshold_exceeded() {
         .with_test_writer()
         .try_init();
 
-    // Arrange: enable compaction with low threshold so it triggers
+    // Arrange: Disable compaction during setup to prevent race conditions
     let dir = test_temp_dir();
     let mut opts = MidgeOptions::default();
     opts.storage_mode = StorageMode::LocalDisk {
         db_path: dir.path().to_path_buf(),
     };
-    opts.enable_compaction = true;
-    opts.compaction_sst_threshold = 1;
-    opts.compaction_check_interval_ms = 50;
+    opts.enable_compaction = false; // Disable during setup
     opts.wal_buffer_size = 64;
     opts.memtable_size = 1024;
 
@@ -138,6 +136,22 @@ fn should_background_compact_when_threshold_exceeded() {
         drop(eng);
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+
+    // Verify all 4 SST files were created before starting background compaction
+    {
+        let manifest_before = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path())
+            .expect("load manifest");
+        assert_eq!(
+            manifest_before.ssts.len(),
+            4,
+            "Expected 4 SST files before compaction"
+        );
+    }
+
+    // Now enable compaction for the final engine instance
+    opts.enable_compaction = true;
+    opts.compaction_sst_threshold = 1;
+    opts.compaction_check_interval_ms = 50;
 
     // Open engine with background compaction enabled
     {

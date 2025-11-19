@@ -60,17 +60,24 @@ pub(crate) fn collect_compaction_versions(
     let mut versions = Vec::new();
     let mut seen: HashSet<(Vec<u8>, u64, bool)> = HashSet::new();
 
-    for name in sst_names.iter().rev() {
+    // Process files in the order given by the compaction strategy
+    // For L0, this is newest first (higher sequence numbers)
+    for name in sst_names.iter() {
         let path = sst_dir.join(name);
         if !path.exists() {
+            tracing::warn!(file = %name, "SST file not found during collection");
             continue;
         }
         let Ok(sst) = reader_factory.open(&path) else {
+            tracing::warn!(file = %name, "Failed to open SST during collection");
             continue;
         };
         let Ok(rows) = sst.scan_range_state(None, None) else {
+            tracing::warn!(file = %name, "Failed to scan SST during collection");
             continue;
         };
+        
+        let mut file_versions = Vec::new();
         for (raw_key, state) in rows {
             // The key returned by scan_range_state is now a user key (after SST encoding fix)
             // The sequence number is in the KeyState, not in the key itself
@@ -81,6 +88,7 @@ pub(crate) fn collect_compaction_versions(
                 crate::sst::KeyState::Absent => continue,
             };
             if seen.insert((user_key.clone(), seq, tombstone)) {
+                file_versions.push((user_key.clone(), seq));
                 versions.push(CompactionVersion {
                     user_key,
                     seq,
@@ -825,4 +833,166 @@ mod tests {
     // NOTE: Removed test should_fail_given_duplicate_keys_when_writing_sst
     // Duplicate user keys are intentionally allowed for snapshot-aware compaction.
     // The SST format with internal keys (user_key||seq||kind) ensures uniqueness.
+
+    // ============================================================================
+    // Unit Tests for Version Merging Logic
+    // ============================================================================
+
+    #[test]
+    fn should_sort_versions_with_newest_first() {
+        // Arrange: Create versions of same key with different sequences (unsorted)
+        let mut versions = vec![
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 1,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v1")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 10,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v10")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 5,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v5")),
+                expiration: None,
+            },
+        ];
+
+        // Act
+        sort_versions_for_output(&mut versions);
+
+        // Assert: Same key should be together, with highest seq first
+        assert_eq!(versions[0].seq, 10);
+        assert_eq!(versions[1].seq, 5);
+        assert_eq!(versions[2].seq, 1);
+    }
+
+    #[test]
+    fn should_deduplicate_keeping_only_newest_version_when_no_snapshots() {
+        // Arrange: Multiple versions of same key, sorted newest first
+        let versions = vec![
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 10,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v10")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 5,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v5")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 1,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v1")),
+                expiration: None,
+            },
+        ];
+
+        // Act: No active snapshots
+        let result = deduplicate_versions(&versions, None);
+
+        // Assert: Only newest version should remain
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].seq, 10);
+        assert_eq!(result[0].value, Some(Bytes::from_static(b"v10")));
+    }
+
+    #[test]
+    fn should_preserve_versions_visible_to_snapshots() {
+        // Arrange: Multiple versions with a snapshot at seq=7
+        let versions = vec![
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 10,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v10")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 5,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v5")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key1".to_vec(),
+                seq: 1,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"v1")),
+                expiration: None,
+            },
+        ];
+
+        // Act: Snapshot at seq=7 can see versions < 7 (seq 5 and 1)
+        let result = deduplicate_versions(&versions, Some(7));
+
+        // Assert: Keep newest (10) and versions visible to snapshot (5, 1)
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].seq, 10);
+        assert_eq!(result[1].seq, 5);
+        assert_eq!(result[2].seq, 1);
+    }
+
+    #[test]
+    fn should_handle_multiple_keys_with_different_sequences() {
+        // Arrange: Two keys with multiple versions each
+        let mut versions = vec![
+            CompactionVersion {
+                user_key: b"key_a".to_vec(),
+                seq: 3,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"a3")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key_b".to_vec(),
+                seq: 8,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"b8")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key_a".to_vec(),
+                seq: 1,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"a1")),
+                expiration: None,
+            },
+            CompactionVersion {
+                user_key: b"key_b".to_vec(),
+                seq: 2,
+                tombstone: false,
+                value: Some(Bytes::from_static(b"b2")),
+                expiration: None,
+            },
+        ];
+
+        // Act
+        sort_versions_for_output(&mut versions);
+        let result = deduplicate_versions(&versions, None);
+
+        // Assert: Two keys, each with newest version only
+        assert_eq!(result.len(), 2);
+        // key_a comes first (alphabetically)
+        assert_eq!(result[0].user_key, b"key_a");
+        assert_eq!(result[0].seq, 3);
+        // key_b comes second
+        assert_eq!(result[1].user_key, b"key_b");
+        assert_eq!(result[1].seq, 8);
+    }
 }
+
