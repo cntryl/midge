@@ -15,13 +15,16 @@ use common::{
 fn should_retry_compaction_given_disk_full_error_when_writing_sst() {
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
-        // Arrange - This tests that compaction errors don't crash
-        let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
+        // Arrange - Create engine with hooks initially disabled
+        let hooks = TestHooks::new().with_io_behavior(IoBehavior::Normal);
         let mut opts = compaction_test_opts(storage_mode);
-        opts.test_hooks = Some(hooks);
+        opts.test_hooks = Some(hooks.clone());
         let engine = MidgeEngine::open(opts).unwrap();
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
+
+        // Enable disk full errors for compaction
+        hooks.set_io_behavior(IoBehavior::FailWithEnospc);
 
         // Act - Attempt compaction when disk is full
         let result = engine.compact_all();

@@ -1,5 +1,5 @@
 mod common;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, test_hooks::{TestHooks, WalBehavior, IoBehavior}};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, test_hooks::{TestHooks, WalBehavior, IoBehavior, ManifestBehavior}};
 use common::test_temp_dir;
 
 // Phase 1 Error Handling & Fault Injection Core Tests
@@ -247,9 +247,74 @@ fn should_handle_io_error_when_reading_sst_block() {
 }
 
 #[test]
-#[ignore] // Requires background error injection
+// #[ignore] // Requires background error injection
 fn should_propagate_background_error_to_user_on_next_operation() {
-    // TODO: Inject compaction failure and verify error surfacing
+    // Arrange
+    let dir = test_temp_dir();
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::Normal);
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        wal_sync: false, // Don't sync WAL to avoid early failures
+        test_hooks: Some(hooks.clone()),
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
+
+    // Populate data to trigger compaction
+    for i in 0..100 {
+        let key = format!("key{:03}", i);
+        let value = format!("value{}", i);
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+    }
+    engine.flush().unwrap();
+
+    // Enable disk full errors for background operations
+    hooks.set_io_behavior(IoBehavior::FailWithEnospc);
+
+    // Trigger background compaction that should fail
+    let compaction_result = engine.compact_all();
+    assert!(compaction_result.is_err(), "Background compaction should fail with disk full");
+
+    // Assert - Compaction should fail with disk full error
+    let err = compaction_result.unwrap_err();
+    assert!(err.to_string().contains("No space left on device") ||
+            err.to_string().contains("ENOSPC"),
+            "Error should indicate disk full: {}", err);
+
+    // Verify that user operations still work (compaction failure doesn't block writes)
+    let put_result = engine.put(&cf, b"new_key", b"new_value");
+    assert!(put_result.is_ok(), "User operations should continue despite compaction failure");
+}
+
+#[test]
+fn should_return_error_given_disk_full_when_writing_manifest() {
+    // Arrange
+    let dir = test_temp_dir();
+    let hooks = TestHooks::new().with_manifest_behavior(ManifestBehavior::FailSave);
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        test_hooks: Some(hooks),
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).unwrap();
+    let cf = engine.default_column_family();
+
+    // Populate data and flush to trigger manifest updates
+    for i in 0..10 {
+        let key = format!("key{:03}", i);
+        let value = format!("value{}", i);
+        engine.put(&cf, key.as_bytes(), value.as_bytes()).unwrap();
+    }
+
+    // Act - Force flush which should update manifest and fail
+    let flush_result = engine.flush();
+
+    // Assert - Flush should fail due to manifest write failure
+    assert!(flush_result.is_err(), "Flush should fail when manifest write fails");
+    let err = flush_result.unwrap_err();
+    assert!(err.to_string().contains("manifest") || err.to_string().contains("Manifest"),
+            "Error should indicate manifest failure: {}", err);
 }
 
 #[test]

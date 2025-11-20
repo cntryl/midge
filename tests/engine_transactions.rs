@@ -5,21 +5,14 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use cntryl_midge::{KvTransaction, MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{KvTransaction, test_hooks::{TestHooks, IoBehavior}};
 
 mod common;
-use common::test_temp_dir;
+use common::{new_engine, new_engine_with_test_hooks};
 #[test]
 fn should_commit_transaction_atomically_given_multiple_operations() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
     // Act: create transaction and stage operations
@@ -46,14 +39,7 @@ fn should_commit_transaction_atomically_given_multiple_operations() {
 #[test]
 fn should_rollback_transaction_on_drop_given_uncommitted() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
     // Act: create transaction, stage operations, then drop without committing
@@ -70,14 +56,7 @@ fn should_rollback_transaction_on_drop_given_uncommitted() {
 #[test]
 fn should_provide_snapshot_isolation_in_transaction() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
     engine.put(&cf, b"k1", b"v1").expect("put");
 
@@ -95,14 +74,7 @@ fn should_provide_snapshot_isolation_in_transaction() {
 #[test]
 fn should_stage_delete_range_in_transaction() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
     // Pre-populate some keys
@@ -140,14 +112,7 @@ fn should_stage_delete_range_in_transaction() {
 #[test]
 fn should_see_uncommitted_writes_in_scan_within_transaction() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
     // Pre-populate committed data
@@ -206,14 +171,7 @@ fn should_see_uncommitted_writes_in_scan_within_transaction() {
 #[test]
 fn should_handle_delete_range_in_transaction_scan() {
     // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let (_dir, engine) = new_engine();
     let cf = engine.default_column_family();
 
     // Pre-populate data
@@ -236,4 +194,62 @@ fn should_handle_delete_range_in_transaction_scan() {
     assert!(!keys.contains(&b"key2".as_ref()));
     assert!(!keys.contains(&b"key3".as_ref()));
     assert!(keys.contains(&b"key4".as_ref()));
+}
+
+#[test]
+fn should_fail_transaction_commit_when_disk_full() {
+    // Arrange
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::Normal);
+    let (_dir, engine) = new_engine_with_test_hooks(64 * 1024 * 1024, true, hooks.clone());
+    let cf = engine.default_column_family();
+
+    // Pre-populate some data
+    engine.put(&cf, b"existing_key", b"existing_value").expect("put");
+    engine.flush().expect("flush");
+
+    // Create transaction with operations
+    let mut txn = engine.begin_transaction(&cf).expect("begin");
+    txn.put(b"txn_key1", b"txn_value1").expect("put");
+
+    // Set disk full behavior
+    hooks.set_io_behavior(IoBehavior::FailWithEnospc);
+
+    // Act: attempt to commit transaction
+    let result = engine.commit_transaction(txn, cntryl_midge::WriteOptions::sync());
+
+    // Assert: transaction commit should fail with disk full error
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("No space left on device"));
+}
+
+#[test]
+fn should_allow_operations_after_transaction_commit_disk_full_failure() {
+    // Arrange
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::Normal);
+    let (_dir, engine) = new_engine_with_test_hooks(64 * 1024 * 1024, true, hooks.clone());
+    let cf = engine.default_column_family();
+
+    // Pre-populate some data
+    engine.put(&cf, b"existing_key", b"existing_value").expect("put");
+    engine.flush().expect("flush");
+
+    // Create transaction with operations
+    let mut txn = engine.begin_transaction(&cf).expect("begin");
+    txn.put(b"txn_key1", b"txn_value1").expect("put");
+
+    // Set disk full behavior and attempt commit (should fail)
+    hooks.set_io_behavior(IoBehavior::FailWithEnospc);
+    let _ = engine.commit_transaction(txn, cntryl_midge::WriteOptions::sync()); // Ignore result, expect failure
+
+    // Reset behavior
+    hooks.set_io_behavior(IoBehavior::Normal);
+
+    // Act: perform operation after disk full error
+    engine.put(&cf, b"new_key", b"new_value").expect("put");
+    let result = engine.get(&cf, b"new_key");
+
+    // Assert: engine still works after disk full error
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Some(bytes::Bytes::from("new_value")));
 }

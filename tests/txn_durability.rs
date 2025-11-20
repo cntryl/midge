@@ -4,7 +4,7 @@
 // Transaction ACID tests - P0 Priority
 // Tests document expected behavior and will fail until features are implemented
 
-use cntryl_midge::{KvTransaction, MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{KvTransaction, MidgeEngine, MidgeOptions, StorageMode, test_hooks::{TestHooks, IoBehavior}};
 use std::sync::Arc;
 
 mod common;
@@ -126,4 +126,41 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
             i
         );
     }
+}
+
+#[test]
+fn should_fail_transaction_commit_when_disk_full() {
+    // Arrange
+    let dir = test_temp_dir();
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::Normal);
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        test_hooks: Some(hooks.clone()),
+        ..Default::default()
+    };
+    let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
+    let cf = engine.default_column_family();
+
+    let mut txn = engine.begin_transaction(&cf).expect("begin_transaction");
+    txn.put(b"txn_key", b"txn_value").unwrap();
+
+    // Set disk full behavior
+    hooks.set_io_behavior(IoBehavior::FailWithEnospc);
+
+    // Act: attempt to commit transaction
+    let result = engine.commit_transaction(txn, cntryl_midge::WriteOptions::sync());
+
+    // Assert: commit should fail with disk full error
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("No space left on device"));
+
+    // Reset behavior
+    hooks.set_io_behavior(IoBehavior::Normal);
+
+    // Verify engine still works after disk full error
+    // Note: The transaction data may be in memtable but not durable
+    let _ = engine.put(&cf, b"test_key", b"test_value").expect("put after failed commit");
 }

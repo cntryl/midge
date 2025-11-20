@@ -175,7 +175,7 @@ impl MidgeEngine {
         }
         // Durability for the batch
         if sync {
-            let _ = self.wal_coordinator.sync();
+            self.wal_coordinator.sync()?;
         }
         // OPTIMIZATION: When wal_sync=false, don't flush on every write.
         if self.with_default_memtable(|mt| mt.is_full(self.memtable_size)) {

@@ -448,9 +448,15 @@ impl MidgeEngine {
         // Write manifest.json verbatim into checkpoint
         let manifest_path = dst_dir.join("manifest.json");
         let data = serde_json::to_vec_pretty(&m)?;
-        std::fs::write(&manifest_path, &data)?;
+        let mut manifest_file = std::fs::File::create(&manifest_path)?;
+        crate::fs::write_all(&mut manifest_file, &data)?;
+        crate::fs::sync_data_only(&manifest_file, self.test_hooks.as_ref())?;
+        
         // Write CURRENT pointer
-        std::fs::write(dst_dir.join("CURRENT"), b"manifest.json")?;
+        let current_path = dst_dir.join("CURRENT");
+        let mut current_file = std::fs::File::create(&current_path)?;
+        crate::fs::write_all(&mut current_file, b"manifest.json")?;
+        crate::fs::sync_data_only(&current_file, self.test_hooks.as_ref())?;
         Ok(())
     }
 

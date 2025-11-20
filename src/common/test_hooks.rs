@@ -287,6 +287,11 @@ impl TestHooks {
         self
     }
 
+    /// Dynamically set I/O behavior during test execution.
+    pub fn set_io_behavior(&self, behavior: IoBehavior) {
+        *self.io_behavior.write() = behavior;
+    }
+
     /// Install a deterministic compaction gate for tests and return a handle to control it.
     pub fn install_compaction_gate(&self, point: CompactionGatePoint) -> CompactionGateHandle {
         let (ready_tx, ready_rx) = channel::bounded(1);
