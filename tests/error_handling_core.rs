@@ -185,7 +185,7 @@ fn should_not_persist_unfsynced_data_when_fsync_skipped() {
 fn should_return_error_given_disk_full_when_writing_wal() {
     // Arrange
     let dir = test_temp_dir();
-    let hooks = TestHooks::new();
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
         wal_sync: true,
