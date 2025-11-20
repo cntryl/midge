@@ -178,31 +178,29 @@ impl MidgeEngine {
             if frozen && cf_id == DEFAULT_CF_ID {
                 let _ = self.flush();
             } else if column_family.should_stall_writes() {
-                // If a background error is present on the engine, wait until cleared
                 if self.background_error.read().is_some() {
-                    // Wait until cleared or timeout (use exponential backoff)
                     self.wait_for_background_error_cleared();
-                }
-            } else if column_family.should_stall_writes() {
-                // Implement backpressure: sleep with exponential backoff
-                let mut backoff_ms = 1;
-                let max_backoff_ms = 100;
-                let max_stall_attempts = 1000;
+                } else {
+                    // Implement backpressure: sleep with exponential backoff
+                    let mut backoff_ms = 1;
+                    let max_backoff_ms = 100;
+                    let max_stall_attempts = 1000;
 
-                for attempt in 0..max_stall_attempts {
-                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                    for attempt in 0..max_stall_attempts {
+                        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
 
-                    if !column_family.should_stall_writes() {
-                        self.metrics.record_write_stall(attempt + 1);
-                        break;
-                    }
+                        if !column_family.should_stall_writes() {
+                            self.metrics.record_write_stall(attempt + 1);
+                            break;
+                        }
 
-                    backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
+                        backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
 
-                    if attempt == max_stall_attempts - 1 {
-                        return Err(crate::error::MidgeError::invalid_config(
-                            "Write stall timeout: flush queue not draining",
-                        ));
+                        if attempt == max_stall_attempts - 1 {
+                            return Err(crate::error::MidgeError::invalid_config(
+                                "Write stall timeout: flush queue not draining",
+                            ));
+                        }
                     }
                 }
             }

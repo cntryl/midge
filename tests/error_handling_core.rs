@@ -384,40 +384,26 @@ fn should_return_error_given_disk_full_when_writing_manifest() {
 fn should_pause_writes_given_background_error_until_cleared() {
     // Arrange
     let dir = test_temp_dir();
-    let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
     let mut opts = MidgeOptions::default();
     opts.storage_mode = StorageMode::LocalDisk { db_path: dir.path().to_path_buf() };
-    opts.memtable_size = 256; // small memtable to force rollovers
-    opts.wal_buffer_size = 64; // small WAL to rotate quickly
-    opts.test_hooks = Some(hooks.clone());
+    opts.memtable_size = 256; // small overall engine memtable size
+    opts.wal_buffer_size = 64; // small WAL buffer
 
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
-    // Use a non-default column family so writes rely on background flush (no inline flush calls)
     use cntryl_midge::api::column_family::ColumnFamilyConfig;
     let mut cf_cfg = ColumnFamilyConfig::default();
-    cf_cfg.memtable_max_bytes = 128; // very small to force rapid freezes
-    cf_cfg.max_immutable_memtables = 1; // stall once one immutable memtable pending
+    cf_cfg.memtable_max_bytes = 64; // tiny so each value triggers full
+    cf_cfg.max_immutable_memtables = 1; // single immutable allowed then stall
     let stall_cf = engine.create_column_family("stall_cf", cf_cfg).expect("create CF");
 
-    // Fill memtables to exhaust immutable queue. Each write will cause freeze; we will manually
-    // inject a background error to simulate failed flush worker.
-    for i in 0..8 {
-        let key = format!("k{:03}", i);
-        let val = vec![b'x'; 96];
-        engine.put_with_ttl(&stall_cf, key.as_bytes(), &val, 0).unwrap();
-    }
+    // First write fills memtable and freezes, producing one immutable memtable
+    let first_val = vec![b'x'; 96];
+    engine.put_with_ttl(&stall_cf, b"seed", &first_val, 0).unwrap();
 
-    // Manually inject a background error (simulating failed flush)
+    // Inject background error AFTER first freeze so next write stalls while error present
     engine.set_background_error(cntryl_midge::MidgeError::internal("simulated background flush failure"));
 
-    // Force active memtable to fill again so next write hits memtable_full path (required for stall logic)
-    for i in 0..4 {
-        let key = format!("refill{:02}", i);
-        let val = vec![b'y'; 96];
-        let _ = engine.put_with_ttl(&stall_cf, key.as_bytes(), &val, 0); // ignore result
-    }
-
-    // Act: Start a writer that will attempt to write and should stall due to background error + full immutable queue
+    // Act: Start a writer that will attempt a write and should stall due to background error + full immutable queue
     let (done_tx, done_rx) = crossbeam::channel::bounded::<bool>(1);
     let eng_clone = Arc::clone(&engine);
     let cf_clone = stall_cf.clone();
@@ -427,18 +413,20 @@ fn should_pause_writes_given_background_error_until_cleared() {
         let _ = done_tx.send(ok);
     });
 
-    // Wait a short time and expect the write not yet complete (blocked)
+    // Wait briefly and expect the write not complete (blocked)
     match done_rx.recv_timeout(std::time::Duration::from_millis(200)) {
         Ok(_) => panic!("Write should be blocked when background error present"),
         Err(_) => {}
     }
 
-    // Clear background error so subsequent writes can resume
+    // Clear background error so subsequent write can proceed
     engine.clear_background_error();
 
-    // Force flush of the stalled CF to drain immutable queue
-    let _ = engine.flush_cf(&stall_cf); // ignore result
+    // Drain immutable by flushing CF
+    let _ = engine.flush_cf(&stall_cf);
     engine.wait_for_flush(std::time::Duration::from_secs(2)).unwrap();
+
+    // Writer should now complete
     let done_ok = done_rx.recv_timeout(std::time::Duration::from_secs(1)).expect("writer should complete");
     assert!(done_ok, "Write should succeed once background error cleared and flush completed");
 }
