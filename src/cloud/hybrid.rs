@@ -1216,7 +1216,7 @@ mod tests {
     // ===== Metrics Tests =====
 
     #[test]
-    fn should_track_cache_statistics() {
+    fn should_track_cache_hit_miss_metrics_when_reading() {
         // Arrange
         let backend = Arc::new(MockCloudBackend::new());
         let cache_dir = std::env::temp_dir().join("hybrid_test_cache_metrics");
