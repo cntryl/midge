@@ -1,5 +1,8 @@
 mod common;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, test_hooks::{TestHooks, WalBehavior, IoBehavior, ManifestBehavior}};
+use cntryl_midge::sst::fs::FsSstFactory;
+use cntryl_midge::common::codec::CompressionType;
+use cntryl_midge::sst::traits::{SstFactory, SstReaderFactory};
 use common::test_temp_dir;
 
 // Phase 1 Error Handling & Fault Injection Core Tests
@@ -241,9 +244,67 @@ fn should_return_error_given_disk_full_when_flushing_memtable() {
 }
 
 #[test]
-#[ignore] // Requires SST corruption infrastructure
 fn should_handle_io_error_when_reading_sst_block() {
-    // TODO: Corrupt SST block and verify error handling
+    // Arrange
+    let dir = test_temp_dir();
+    let sst_dir = dir.path().join("sst");
+    std::fs::create_dir_all(&sst_dir).unwrap();
+    
+    // Create SST file directly using SST writer
+    let factory = FsSstFactory::new(sst_dir.clone());
+    let mut writer = factory.create(CompressionType::None, 4096, false);
+    
+    // Add some test data
+    for i in 0..10 {
+        let key = format!("key{:02}", i);
+        let value = format!("value{}", i);
+        writer.add(key.as_bytes(), value.as_bytes()).unwrap();
+    }
+    
+    // Finish writing to create the SST file
+    let sst_path = sst_dir.join("test_corruption.sst");
+    writer.finish_to_path(&sst_path).unwrap();
+
+    // Corrupt the SST file by overwriting some bytes in the middle
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&sst_path)
+        .unwrap();
+
+    // Get file size and corrupt the CRC checksum of a data block (not the footer)
+    let file_size = file.metadata().unwrap().len();
+    println!("SST file size: {}", file_size);
+    if file_size > 100 {  // Make sure we have enough data to corrupt
+        // Corrupt bytes that are likely to be in a block CRC (try a few positions)
+        // Skip the footer (last 48 bytes) and corrupt somewhere in the middle
+        let footer_start = file_size.saturating_sub(48);
+        let corrupt_offset = (footer_start / 2).max(100); // Middle of the file, but not in footer
+        
+        use std::io::{Seek, SeekFrom, Write};
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+
+        // Write garbage data that might corrupt a CRC
+        let garbage = [0xFF, 0xFF, 0xFF, 0xFF];
+        file.write_all(&garbage).unwrap();
+        file.flush().unwrap();
+        println!("Corrupted 4 bytes at offset {} (avoiding footer)", corrupt_offset);
+    }
+
+    // Try to read from the corrupted SST file using SST reader
+    let reader_factory = cntryl_midge::sst::fs::FsSstReaderFactory::new(false);
+    match reader_factory.open(&sst_path) {
+        Ok(_) => panic!("Reading from corrupted SST should fail"),
+        Err(err) => {
+            // The error could be InvalidData (CRC mismatch) or other corruption-related errors
+            let err_str = format!("{}", err);
+            assert!(err_str.contains("InvalidData") ||
+                    err_str.contains("corrupt") ||
+                    err_str.contains("CRC") ||
+                    err_str.contains("decode"),
+                    "Error should indicate data corruption: {}", err_str);
+        }
+    }
 }
 
 #[test]
