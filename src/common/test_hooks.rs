@@ -275,6 +275,11 @@ impl TestHooks {
         self
     }
 
+    /// Dynamically set manifest behavior during test execution.
+    pub fn set_manifest_behavior(&self, behavior: ManifestBehavior) {
+        *self.manifest_behavior.write() = behavior;
+    }
+
     /// Set compaction behavior for testing.
     pub fn with_compaction_behavior(self, behavior: CompactionBehavior) -> Self {
         *self.compaction_behavior.write() = behavior;

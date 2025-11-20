@@ -134,13 +134,13 @@ impl MidgeEngine {
 
     /// Set the engine background error (e.g. reported by background flush/compaction)
     /// This will cause write operations to block until the error is cleared.
-    pub(crate) fn set_background_error(&self, err: crate::error::MidgeError) {
+    pub fn set_background_error(&self, err: crate::error::MidgeError) {
         *self.background_error.write() = Some(err);
         tracing::warn!("Engine background error set: {}", self.background_error.read().as_ref().map(|e| e.to_string()).unwrap_or_else(|| "<unknown>".to_string()));
     }
 
     /// Clear the engine background error and resume normal operations.
-    pub(crate) fn clear_background_error(&self) {
+    pub fn clear_background_error(&self) {
         *self.background_error.write() = None;
         tracing::info!("Engine background error cleared");
     }

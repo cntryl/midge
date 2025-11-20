@@ -241,7 +241,12 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
             "persisting manifest after creating SST {}",
             sst_path.display()
         );
-        m.save_atomic(&config.db_path)?;
+        // Use test hooks if provided so background flush can inject failures
+        if let Some(ref hooks) = config.test_hooks {
+            m.save_atomic_with_hooks(&config.db_path, Some(hooks))?;
+        } else {
+            m.save_atomic(&config.db_path)?;
+        }
         tracing::debug!(target:"midge.instrument", action="bg_flush_after_manifest_persist", file = %fname, manifest_seq = m.last_persisted_sequence, file_count = m.files.len());
         tracing::info!("manifest persisted successfully");
     }

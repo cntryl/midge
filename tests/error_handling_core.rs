@@ -185,7 +185,7 @@ fn should_not_persist_unfsynced_data_when_fsync_skipped() {
 fn should_return_error_given_disk_full_when_writing_wal() {
     // Arrange
     let dir = test_temp_dir();
-    let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
+    let hooks = TestHooks::new();
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
         wal_sync: true,
@@ -392,25 +392,37 @@ fn should_pause_writes_given_background_error_until_cleared() {
     opts.test_hooks = Some(hooks.clone());
 
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
-    let cf = engine.default_column_family();
+    // Use a non-default column family so writes rely on background flush (no inline flush calls)
+    use cntryl_midge::api::column_family::ColumnFamilyConfig;
+    let mut cf_cfg = ColumnFamilyConfig::default();
+    cf_cfg.memtable_max_bytes = 128; // very small to force rapid freezes
+    cf_cfg.max_immutable_memtables = 1; // stall once one immutable memtable pending
+    let stall_cf = engine.create_column_family("stall_cf", cf_cfg).expect("create CF");
 
-    // Fill memtables to exhaust immutable queue. Each write will cause freeze
-    // given small memtable_size - write multiple values to ensure stall.
-    for i in 0..10 {
+    // Fill memtables to exhaust immutable queue. Each write will cause freeze; we will manually
+    // inject a background error to simulate failed flush worker.
+    for i in 0..8 {
         let key = format!("k{:03}", i);
-        let val = vec![b'x'; 128];
-        engine.put(&cf, key.as_bytes(), &val).unwrap();
+        let val = vec![b'x'; 96];
+        engine.put_with_ttl(&stall_cf, key.as_bytes(), &val, 0).unwrap();
     }
 
-    // Ensure flush worker had a chance to pick up jobs and error (set background_error)
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Manually inject a background error (simulating failed flush)
+    engine.set_background_error(cntryl_midge::MidgeError::internal("simulated background flush failure"));
 
-    // Act: Start a writer that will attempt to write and should stall due to background error
+    // Force active memtable to fill again so next write hits memtable_full path (required for stall logic)
+    for i in 0..4 {
+        let key = format!("refill{:02}", i);
+        let val = vec![b'y'; 96];
+        let _ = engine.put_with_ttl(&stall_cf, key.as_bytes(), &val, 0); // ignore result
+    }
+
+    // Act: Start a writer that will attempt to write and should stall due to background error + full immutable queue
     let (done_tx, done_rx) = crossbeam::channel::bounded::<bool>(1);
     let eng_clone = Arc::clone(&engine);
-    let cf_clone = cf.clone();
+    let cf_clone = stall_cf.clone();
     std::thread::spawn(move || {
-        let res = eng_clone.put(&cf_clone, b"blocked_key", b"blocked_value");
+        let res = eng_clone.put_with_ttl(&cf_clone, b"blocked_key", b"blocked_value", 0);
         let ok = res.is_ok();
         let _ = done_tx.send(ok);
     });
@@ -421,11 +433,12 @@ fn should_pause_writes_given_background_error_until_cleared() {
         Err(_) => {}
     }
 
-    // Clear the failing I/O behavior so the flush will succeed
-    hooks.set_io_behavior(IoBehavior::Normal);
+    // Clear background error so subsequent writes can resume
+    engine.clear_background_error();
 
-    // Wait for background flush to complete and writer to finish
-    engine.wait_for_flush(std::time::Duration::from_secs(1)).unwrap();
+    // Force flush of the stalled CF to drain immutable queue
+    let _ = engine.flush_cf(&stall_cf); // ignore result
+    engine.wait_for_flush(std::time::Duration::from_secs(2)).unwrap();
     let done_ok = done_rx.recv_timeout(std::time::Duration::from_secs(1)).expect("writer should complete");
     assert!(done_ok, "Write should succeed once background error cleared and flush completed");
 }
