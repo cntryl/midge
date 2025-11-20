@@ -279,6 +279,7 @@ pub(crate) fn setup_flush_coordinator(
     cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     mem_mode: bool,
     manifest_update_callback: Option<Arc<dyn Fn(crate::core::manifest::Manifest) + Send + Sync>>,
+    background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
 ) -> MidgeResult<crate::core::FlushCoordinator> {
     let config = FlushWorkerConfig {
         sst_factory: sst_factory_arc,
@@ -292,6 +293,7 @@ pub(crate) fn setup_flush_coordinator(
         metrics: metrics_arc,
         test_hooks: opts.test_hooks.clone(),
         manifest_update_callback,
+        background_error,
     };
     crate::core::FlushCoordinator::spawn(config)
 }
@@ -308,6 +310,7 @@ pub(crate) fn setup_compaction_coordinator(
     metrics_arc: Arc<Metrics>,
     cf_set_arc: Arc<super::column_family::ColumnFamilySet>,
     version_manager: Arc<crate::core::manifest::VersionManager>,
+    background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
 ) -> MidgeResult<Option<crate::core::CompactionController>> {
     if opts.enable_compaction && !opts.read_only {
         // Create CloudSstManager if in cloud-backed mode
@@ -360,6 +363,7 @@ pub(crate) fn setup_compaction_coordinator(
             cf_set: cf_set_arc,
             test_hooks: opts.test_hooks.clone(),
             version_manager,
+            background_error,
         };
 
         Ok(Some(crate::core::CompactionController::spawn(config)?))

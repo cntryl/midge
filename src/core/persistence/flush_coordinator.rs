@@ -132,6 +132,7 @@ mod tests {
             metrics: Arc::new(Metrics::new()),
             test_hooks: None,
             manifest_update_callback: None,
+            background_error: None,
         }
     }
 

@@ -178,6 +178,12 @@ impl MidgeEngine {
             if frozen && cf_id == DEFAULT_CF_ID {
                 let _ = self.flush();
             } else if column_family.should_stall_writes() {
+                // If a background error is present on the engine, wait until cleared
+                if self.background_error.read().is_some() {
+                    // Wait until cleared or timeout (use exponential backoff)
+                    self.wait_for_background_error_cleared();
+                }
+            } else if column_family.should_stall_writes() {
                 // Implement backpressure: sleep with exponential backoff
                 let mut backoff_ms = 1;
                 let max_backoff_ms = 100;

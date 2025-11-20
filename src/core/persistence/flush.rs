@@ -71,6 +71,9 @@ pub struct FlushWorkerConfig {
     /// Callback to update the engine's manifest cache after flush completes
     /// This ensures reads can immediately see newly flushed SST files
     pub manifest_update_callback: Option<Arc<dyn Fn(Manifest) + Send + Sync>>,
+    /// Optional shared background error container. When worker encounters a
+    /// background error, it should set this to Some(err).
+    pub background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
 }
 
 /// Spawn a background thread that processes flush jobs.
@@ -86,6 +89,7 @@ pub(crate) fn spawn_flush_worker(
 ) -> MidgeResult<(channel::Sender<FlushMsg>, JoinHandle<()>)> {
     let (tx, rx) = channel::unbounded::<FlushMsg>();
 
+    let background_error = config.background_error.clone();
     let handle = thread::Builder::new()
         .name("midge-flush-worker".to_string())
         .spawn(move || {
@@ -97,7 +101,19 @@ pub(crate) fn spawn_flush_worker(
                         }
 
                         // Process the flush job
-                        let _ = process_flush_job(&config, job);
+                        let res = process_flush_job(&config, job);
+                        if let Err(e) = res {
+                            // Mark background error if we were able to capture a container
+                            if let Some(bg) = &background_error {
+                                *bg.write() = Some(crate::error::MidgeError::internal(e.to_string()));
+                            }
+                        } else {
+                            // If there was previously a background error, clear it upon
+                            // successful flush so writes can resume.
+                            if let Some(bg) = &background_error {
+                                *bg.write() = None;
+                            }
+                        }
                     }
                     FlushMsg::Shutdown => break,
                     FlushMsg::Barrier { reply } => {

@@ -3,6 +3,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, test
 use cntryl_midge::sst::fs::FsSstFactory;
 use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::traits::{SstFactory, SstReaderFactory};
+use std::sync::Arc;
 use common::test_temp_dir;
 
 // Phase 1 Error Handling & Fault Injection Core Tests
@@ -319,7 +320,7 @@ fn should_propagate_background_error_to_user_on_next_operation() {
         test_hooks: Some(hooks.clone()),
         ..Default::default()
     };
-    let engine = MidgeEngine::open(opts).unwrap();
+    let engine = std::sync::Arc::new(MidgeEngine::open(opts).unwrap());
     let cf = engine.default_column_family();
 
     // Populate data to trigger compaction
@@ -358,7 +359,7 @@ fn should_return_error_given_disk_full_when_writing_manifest() {
         test_hooks: Some(hooks),
         ..Default::default()
     };
-    let engine = MidgeEngine::open(opts).unwrap();
+    let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     let cf = engine.default_column_family();
 
     // Populate data and flush to trigger manifest updates
@@ -379,7 +380,52 @@ fn should_return_error_given_disk_full_when_writing_manifest() {
 }
 
 #[test]
-#[ignore] // Requires background error injection
+// Temporarily enabling test for validation; leave if it passes
 fn should_pause_writes_given_background_error_until_cleared() {
-    // TODO: Force background error and verify write blocking
+    // Arrange
+    let dir = test_temp_dir();
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
+    let mut opts = MidgeOptions::default();
+    opts.storage_mode = StorageMode::LocalDisk { db_path: dir.path().to_path_buf() };
+    opts.memtable_size = 256; // small memtable to force rollovers
+    opts.wal_buffer_size = 64; // small WAL to rotate quickly
+    opts.test_hooks = Some(hooks.clone());
+
+    let engine = Arc::new(MidgeEngine::open(opts).unwrap());
+    let cf = engine.default_column_family();
+
+    // Fill memtables to exhaust immutable queue. Each write will cause freeze
+    // given small memtable_size - write multiple values to ensure stall.
+    for i in 0..10 {
+        let key = format!("k{:03}", i);
+        let val = vec![b'x'; 128];
+        engine.put(&cf, key.as_bytes(), &val).unwrap();
+    }
+
+    // Ensure flush worker had a chance to pick up jobs and error (set background_error)
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Act: Start a writer that will attempt to write and should stall due to background error
+    let (done_tx, done_rx) = crossbeam::channel::bounded::<bool>(1);
+    let eng_clone = Arc::clone(&engine);
+    let cf_clone = cf.clone();
+    std::thread::spawn(move || {
+        let res = eng_clone.put(&cf_clone, b"blocked_key", b"blocked_value");
+        let ok = res.is_ok();
+        let _ = done_tx.send(ok);
+    });
+
+    // Wait a short time and expect the write not yet complete (blocked)
+    match done_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+        Ok(_) => panic!("Write should be blocked when background error present"),
+        Err(_) => {}
+    }
+
+    // Clear the failing I/O behavior so the flush will succeed
+    hooks.set_io_behavior(IoBehavior::Normal);
+
+    // Wait for background flush to complete and writer to finish
+    engine.wait_for_flush(std::time::Duration::from_secs(1)).unwrap();
+    let done_ok = done_rx.recv_timeout(std::time::Duration::from_secs(1)).expect("writer should complete");
+    assert!(done_ok, "Write should succeed once background error cleared and flush completed");
 }

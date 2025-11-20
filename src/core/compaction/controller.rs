@@ -59,6 +59,8 @@ pub struct CompactionWorkerConfig {
     pub cf_set: Arc<crate::core::engine::column_family::ColumnFamilySet>,
     pub test_hooks: Option<crate::common::test_hooks::TestHooks>,
     pub version_manager: Arc<crate::core::manifest::VersionManager>,
+    /// Optional shared background error container used to report errors back to the engine.
+    pub background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
 }
 
 /// Internal work item representing a single compaction plan.
@@ -106,6 +108,7 @@ impl CompactionController {
         let cf_set = config.cf_set.clone();
         let test_hooks = config.test_hooks.clone();
         let version_manager = config.version_manager.clone();
+        let background_error = config.background_error.clone();
 
         let handle = thread::Builder::new()
             .name("midge-compaction-worker".to_string())
@@ -367,11 +370,19 @@ impl CompactionController {
                             if let Some(ref hooks) = test_hooks {
                                 hooks.after_compaction();
                             }
+                            // Clear background error on successful compaction run
+                            if let Some(bg) = &background_error {
+                                *bg.write() = None;
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(error = ?e, "compaction execution failed");
                             if let Some(ref hooks) = test_hooks {
                                 hooks.compaction_failed();
+                            }
+                            // Set background error indicator if provided
+                            if let Some(bg) = &background_error {
+                                *bg.write() = Some(crate::error::MidgeError::internal(e.to_string()));
                             }
                         }
                     }
@@ -577,6 +588,7 @@ mod tests {
             cf_set: Arc::new(crate::core::engine::column_family::ColumnFamilySet::new()),
             test_hooks: None,
             version_manager: Arc::clone(&version_manager),
+            background_error: None,
         };
 
         let guard = TestGuard {

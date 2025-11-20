@@ -79,6 +79,9 @@ pub struct MidgeEngine {
     pub(crate) version_set: crate::core::manifest::AtomicVersionSet,
     /// Version manager actor for serialized manifest updates
     pub(crate) version_manager: Arc<crate::core::manifest::VersionManager>,
+    /// Background error reported by async maintenance (flush/compaction). When set,
+    /// write operations should be blocked until cleared to avoid data loss.
+    pub(crate) background_error: Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>,
 }
 
 impl MidgeEngine {
@@ -127,6 +130,32 @@ impl MidgeEngine {
     /// Delegated to `state::open()`.
     pub fn open(opts: crate::MidgeOptions) -> MidgeResult<Self> {
         crate::core::engine::state::open(opts)
+    }
+
+    /// Set the engine background error (e.g. reported by background flush/compaction)
+    /// This will cause write operations to block until the error is cleared.
+    pub(crate) fn set_background_error(&self, err: crate::error::MidgeError) {
+        *self.background_error.write() = Some(err);
+        tracing::warn!("Engine background error set: {}", self.background_error.read().as_ref().map(|e| e.to_string()).unwrap_or_else(|| "<unknown>".to_string()));
+    }
+
+    /// Clear the engine background error and resume normal operations.
+    pub(crate) fn clear_background_error(&self) {
+        *self.background_error.write() = None;
+        tracing::info!("Engine background error cleared");
+    }
+
+    /// Block until any background error is cleared. Returns immediately if no background error.
+    pub(crate) fn wait_for_background_error_cleared(&self) {
+        let mut backoff_ms = 1u64;
+        let max_backoff_ms = 100u64;
+        loop {
+            if self.background_error.read().is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
+        }
     }
 
     /// Open with a provided `SstFactory` implementation.

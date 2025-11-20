@@ -271,6 +271,9 @@ pub fn open_with_factories(
     ));
 
     // Delegate flush and compaction coordinator setup to factory module
+    // Shared background error container used by background workers to report errors
+    let background_error = Arc::new(parking_lot::RwLock::new(None));
+
     let flush_coordinator = crate::core::engine::factory::setup_flush_coordinator(
         &opts,
         sst_factory_arc.clone(),
@@ -280,6 +283,7 @@ pub fn open_with_factories(
         cloud_sst_manager.clone(),
         mem_mode,
         Some(manifest_update_callback),
+        Some(background_error.clone()),
     )?;
 
     let compaction_coordinator = crate::core::engine::factory::setup_compaction_coordinator(
@@ -292,6 +296,7 @@ pub fn open_with_factories(
         metrics_arc.clone(),
         cf_set_arc.clone(),
         version_manager.clone(),
+        Some(background_error.clone()),
     )?;
     let manifest = manifest_cache.get();
 
@@ -385,5 +390,6 @@ pub fn open_with_factories(
         test_hooks: opts.test_hooks.clone(),
         version_set: version_set_atomic,
         version_manager,
+        background_error: background_error.clone(),
     })
 }
