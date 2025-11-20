@@ -2,7 +2,7 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use cntryl_midge::MidgeEngine;
+use cntryl_midge::{MidgeEngine, test_hooks::{TestHooks, IoBehavior}};
 
 mod common;
 use common::{
@@ -16,24 +16,22 @@ fn should_retry_compaction_given_disk_full_error_when_writing_sst() {
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
         // Arrange - This tests that compaction errors don't crash
-        let opts = compaction_test_opts(storage_mode);
+        let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
+        let mut opts = compaction_test_opts(storage_mode);
+        opts.test_hooks = Some(hooks);
         let engine = MidgeEngine::open(opts).unwrap();
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
 
-        // Act - Multiple compaction attempts (simulates retry behavior)
-        let result1 = engine.compact_all();
-        let result2 = engine.compact_all();
+        // Act - Attempt compaction when disk is full
+        let result = engine.compact_all();
 
-        // Assert - Both should succeed (or fail gracefully)
-        assert!(result1.is_ok() || result1.is_err());
-        assert!(result2.is_ok() || result2.is_err());
-
-        // Data should still be accessible
-        for i in 0..10 {
-            let key = format!("key{:03}", i);
-            assert!(engine.get(&cf, key.as_bytes()).is_ok());
-        }
+        // Assert - Compaction should fail with disk full error
+        assert!(result.is_err(), "Compaction should fail when disk is full");
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("No space left on device") ||
+                err.to_string().contains("ENOSPC"),
+                "Error should indicate disk full: {}", err);
     }
 }
 

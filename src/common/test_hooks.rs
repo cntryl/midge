@@ -68,6 +68,17 @@ pub enum CompactionBehavior {
     CrashBeforeFsync,
 }
 
+/// Behavior for I/O operations during tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoBehavior {
+    /// Normal I/O behavior (default)
+    Normal,
+    /// Fail writes with ENOSPC (disk full)
+    FailWithEnospc,
+    /// Fail writes with EIO (I/O error)
+    FailWithEio,
+}
+
 /// Gate points for deterministic compaction coordination in tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionGatePoint {
@@ -178,6 +189,8 @@ pub struct TestHooks {
     manifest_behavior: Arc<parking_lot::RwLock<ManifestBehavior>>,
     /// Compaction behavior control
     compaction_behavior: Arc<parking_lot::RwLock<CompactionBehavior>>,
+    /// I/O behavior control
+    io_behavior: Arc<parking_lot::RwLock<IoBehavior>>,
 
     // Instrumentation counters
     /// Number of fsync calls made
@@ -218,6 +231,7 @@ impl TestHooks {
             wal_behavior: Arc::new(parking_lot::RwLock::new(WalBehavior::Normal)),
             manifest_behavior: Arc::new(parking_lot::RwLock::new(ManifestBehavior::Normal)),
             compaction_behavior: Arc::new(parking_lot::RwLock::new(CompactionBehavior::Normal)),
+            io_behavior: Arc::new(parking_lot::RwLock::new(IoBehavior::Normal)),
             fsync_count: Arc::new(AtomicU64::new(0)),
             wal_append_count: Arc::new(AtomicU64::new(0)),
             manifest_update_count: Arc::new(AtomicU64::new(0)),
@@ -264,6 +278,12 @@ impl TestHooks {
     /// Set compaction behavior for testing.
     pub fn with_compaction_behavior(self, behavior: CompactionBehavior) -> Self {
         *self.compaction_behavior.write() = behavior;
+        self
+    }
+
+    /// Set I/O behavior for testing.
+    pub fn with_io_behavior(self, behavior: IoBehavior) -> Self {
+        *self.io_behavior.write() = behavior;
         self
     }
 
@@ -389,6 +409,15 @@ impl TestHooks {
             *self.compaction_behavior.read(),
             CompactionBehavior::CrashBeforeFsync
         )
+    }
+
+    /// Hook called before I/O write operations. Returns an error message to fail with, or None for success.
+    pub fn before_io_write(&self) -> Option<&'static str> {
+        match *self.io_behavior.read() {
+            IoBehavior::Normal => None,
+            IoBehavior::FailWithEnospc => Some("No space left on device"),
+            IoBehavior::FailWithEio => Some("I/O error"),
+        }
     }
 
     /// Internal helper for flush code to honor deterministic gates.

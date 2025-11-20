@@ -31,11 +31,70 @@ const DIRECT_WRITE_THRESHOLD: usize = BUF_CAP * 2;
 
 /// Mutable state of the WAL that needs interior mutability for &self methods
 struct WalInner {
-    file: BufWriter<std::fs::File>,
+    file: FsBufWriter,
     /// Track current file position to avoid seek() calls
     pos: u64,
     /// Reusable page-aligned buffer for batching (avoids per-call allocations)
     scratch: Arena,
+}
+
+/// Custom BufWriter that uses fs functions for I/O error injection in tests
+struct FsBufWriter {
+    inner: BufWriter<std::fs::File>,
+    test_hooks: Option<crate::common::test_hooks::TestHooks>,
+}
+
+impl FsBufWriter {
+    fn new(file: std::fs::File, test_hooks: Option<crate::common::test_hooks::TestHooks>) -> Self {
+        Self {
+            inner: BufWriter::with_capacity(BUF_CAP, file),
+            test_hooks,
+        }
+    }
+
+    fn set_test_hooks(&mut self, test_hooks: Option<crate::common::test_hooks::TestHooks>) {
+        self.test_hooks = test_hooks;
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+
+    fn get_ref(&self) -> &std::fs::File {
+        self.inner.get_ref()
+    }
+
+    fn get_mut(&mut self) -> &mut std::fs::File {
+        self.inner.get_mut()
+    }
+
+    fn into_inner(self) -> Result<std::fs::File, std::io::IntoInnerError<BufWriter<std::fs::File>>> {
+        self.inner.into_inner()
+    }
+}
+
+impl Write for FsBufWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.inner.write_all(buf)
+    }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> std::io::Result<usize> {
+        self.inner.write_vectored(bufs)
+    }
+}
+
+impl Seek for FsBufWriter {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
 }
 
 pub struct Wal {
@@ -57,6 +116,12 @@ pub struct Wal {
 }
 
 impl Wal {
+    /// Set test hooks for fault injection. This also propagates to the underlying FsBufWriter.
+    pub fn set_test_hooks(&mut self, test_hooks: Option<crate::common::test_hooks::TestHooks>) {
+        self.test_hooks = test_hooks.clone();
+        let mut inner = self.inner.lock();
+        inner.file.set_test_hooks(test_hooks);
+    }
     pub fn open(dir: &Path) -> MidgeResult<Self> {
         Self::open_with_mode(dir, WalSyncMode::default())
     }
@@ -82,8 +147,8 @@ impl Wal {
             .open(&path)?;
         // Get initial file size
         let pos = file.metadata()?.len();
-        // Wrap file in BufWriter with 128KB buffer (balanced for throughput)
-        let file = BufWriter::with_capacity(BUF_CAP, file);
+        // Wrap file in FsBufWriter with 128KB buffer (balanced for throughput)
+        let file = FsBufWriter::new(file, None);
 
         // Create group commit coordinator if needed
         let group_commit = if sync_mode == WalSyncMode::BatchedSync {
@@ -152,7 +217,7 @@ impl Wal {
 
         // Use the fs-level vectored writer which will dispatch to io_uring
         // when enabled (feature-gated) or fall back to blocking writev.
-        crate::fs::write_vectored(file, &[&frag.header, &frag.body])?;
+        crate::fs::write_vectored_with_hooks(file, &[&frag.header, &frag.body], self.test_hooks.as_ref())?;
 
         let written = (frag.header.len() + frag.body.len()) as u64;
         inner.pos += written;
@@ -202,7 +267,7 @@ impl WalWriter for Wal {
         inner.file.flush()?;
         let file = inner.file.get_mut();
 
-        crate::fs::write_vectored(file, &[&frag.header, &frag.body])?;
+        crate::fs::write_vectored_with_hooks(file, &[&frag.header, &frag.body], self.test_hooks.as_ref())?;
 
         // Advance position to reflect newly-written bytes
         inner.pos += (frag.header.len() + frag.body.len()) as u64;
@@ -744,7 +809,7 @@ impl crate::wal::WalFactory for FsWalFactory {
         test_hooks: Option<crate::common::test_hooks::TestHooks>,
     ) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
         let mut wal = Wal::open(dir)?;
-        wal.test_hooks = test_hooks;
+        wal.set_test_hooks(test_hooks);
         Ok(Box::new(wal))
     }
 

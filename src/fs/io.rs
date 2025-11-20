@@ -114,6 +114,16 @@ pub fn read_from_end(file: &mut File, bytes_from_end: u64, buf: &mut [u8]) -> Mi
 /// Wrapper around `write_all()` with better error context.
 #[inline]
 pub fn write_all(file: &mut File, buf: &[u8]) -> MidgeResult<()> {
+    write_all_with_hooks(file, buf, None)
+}
+
+/// Write all bytes with optional test hooks for fault injection.
+#[inline]
+pub fn write_all_with_hooks(
+    file: &mut File, 
+    buf: &[u8], 
+    _test_hooks: Option<&crate::common::test_hooks::TestHooks>
+) -> MidgeResult<()> {
     file.write_all(buf)?;
     Ok(())
 }
@@ -166,18 +176,36 @@ pub fn file_size(file: &mut File) -> MidgeResult<u64> {
 /// io_uring-backed implementation. Otherwise it falls back to the
 /// synchronous `write_vectored` implementation below.
 pub fn write_vectored(file: &mut File, buffers: &[&[u8]]) -> MidgeResult<()> {
+    write_vectored_with_hooks(file, buffers, None)
+}
+
+/// Vectored write with optional test hooks for fault injection.
+pub fn write_vectored_with_hooks(
+    file: &mut File, 
+    buffers: &[&[u8]], 
+    test_hooks: Option<&crate::common::test_hooks::TestHooks>
+) -> MidgeResult<()> {
     #[cfg(feature = "uring")]
     {
-        return uring::write_vectored_uring(file, buffers);
+        return uring::write_vectored_uring_with_hooks(file, buffers, test_hooks);
     }
 
-    write_vectored_fallback(file, buffers)
+    write_vectored_fallback_with_hooks(file, buffers, test_hooks)
 }
 
 /// Internal fallback implementation used when io_uring is not enabled.
 /// Kept separate so the io_uring module can call it when still relying on
 /// blocking I/O while iterating on the async implementation.
 pub fn write_vectored_fallback(file: &mut File, buffers: &[&[u8]]) -> MidgeResult<()> {
+    write_vectored_fallback_with_hooks(file, buffers, None)
+}
+
+/// Internal fallback implementation with optional test hooks.
+pub fn write_vectored_fallback_with_hooks(
+    file: &mut File, 
+    buffers: &[&[u8]], 
+    _test_hooks: Option<&crate::common::test_hooks::TestHooks>
+) -> MidgeResult<()> {
     // Try to use the platform's vectored write implementation via `Write::write_vectored`.
     // This lets Rust forward to `writev` on Unix where available. We handle partial
     // writes by reconstructing IoSlice references starting at the appropriate offsets.

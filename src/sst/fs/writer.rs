@@ -5,7 +5,7 @@ use crate::sst::format::{
 };
 use crate::sst::traits::RangeTombstone;
 use std::fs::OpenOptions;
-use std::io::{Seek, Write};
+use std::io::Seek;
 use std::path::{Path, PathBuf};
 
 /// Streaming filesystem-backed DynSstWriter.
@@ -80,7 +80,7 @@ impl FsDynWriter {
         let encoded = block.encode()?;
         // Use write_all to ensure full buffer is written; amortize syscalls by writing
         // larger encoded buffers at once.
-        self.file.write_all(&encoded)?;
+        crate::fs::write_all_with_hooks(&mut self.file, &encoded, self.test_hooks.as_ref())?;
         let written = encoded.len() as u64;
         let handle = BlockHandle::new(self.offset, written);
         self.offset = self.offset.saturating_add(written);
@@ -156,7 +156,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         let index_block =
             Block::new(index_payload, BlockType::Index, CompressionType::None).encode()?;
         let index_off = s.offset;
-        s.file.write_all(&index_block)?;
+        crate::fs::write_all_with_hooks(&mut s.file, &index_block, s.test_hooks.as_ref())?;
         let index_handle = BlockHandle::new(index_off, index_block.len() as u64);
         s.offset += index_block.len() as u64;
 
@@ -166,7 +166,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         let bloom_block =
             Block::new(bloom_bytes, BlockType::Filter, CompressionType::None).encode()?;
         let bloom_off = s.offset;
-        s.file.write_all(&bloom_block)?;
+        crate::fs::write_all_with_hooks(&mut s.file, &bloom_block, s.test_hooks.as_ref())?;
         let bloom_handle = BlockHandle::new(bloom_off, bloom_block.len() as u64);
         s.offset += bloom_block.len() as u64;
 
@@ -177,7 +177,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
             let tomb_block =
                 Block::new(tomb_bytes, BlockType::Filter, CompressionType::None).encode()?;
             let tomb_off = s.offset;
-            s.file.write_all(&tomb_block)?;
+            crate::fs::write_all_with_hooks(&mut s.file, &tomb_block, s.test_hooks.as_ref())?;
             s.offset += tomb_block.len() as u64;
             Some(BlockHandle::new(tomb_off, tomb_block.len() as u64))
         } else {
@@ -197,13 +197,13 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         let meta_block =
             Block::new(meta_payload, BlockType::MetaIndex, CompressionType::None).encode()?;
         let meta_off = s.offset;
-        s.file.write_all(&meta_block)?;
+        crate::fs::write_all_with_hooks(&mut s.file, &meta_block, s.test_hooks.as_ref())?;
         let meta_handle = BlockHandle::new(meta_off, meta_block.len() as u64);
         s.offset += meta_block.len() as u64;
 
         // Footer
         let footer = Footer::new(index_handle, meta_handle).encode();
-        s.file.write_all(&footer)?;
+        crate::fs::write_all_with_hooks(&mut s.file, &footer, s.test_hooks.as_ref())?;
         s.offset += footer.len() as u64;
 
         // Ensure all bytes flushed (honor test hooks when present)
@@ -232,7 +232,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         let index_block =
             Block::new(index_payload, BlockType::Index, CompressionType::None).encode()?;
         let index_off = s.offset;
-        s.file.write_all(&index_block)?;
+        crate::fs::write_all_with_hooks(&mut s.file, &index_block, s.test_hooks.as_ref())?;
         let index_handle = BlockHandle::new(index_off, index_block.len() as u64);
         s.offset += index_block.len() as u64;
 
@@ -242,7 +242,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         let bloom_block =
             Block::new(bloom_bytes, BlockType::Filter, CompressionType::None).encode()?;
         let bloom_off = s.offset;
-        s.file.write_all(&bloom_block)?;
+        crate::fs::write_all_with_hooks(&mut s.file, &bloom_block, s.test_hooks.as_ref())?;
         let bloom_handle = BlockHandle::new(bloom_off, bloom_block.len() as u64);
         s.offset += bloom_block.len() as u64;
 
@@ -253,7 +253,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
             let tomb_block =
                 Block::new(tomb_bytes, BlockType::Filter, CompressionType::None).encode()?;
             let tomb_off = s.offset;
-            s.file.write_all(&tomb_block)?;
+            crate::fs::write_all_with_hooks(&mut s.file, &tomb_block, s.test_hooks.as_ref())?;
             s.offset += tomb_block.len() as u64;
             Some(BlockHandle::new(tomb_off, tomb_block.len() as u64))
         } else {
@@ -273,13 +273,13 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         let meta_block =
             Block::new(meta_payload, BlockType::MetaIndex, CompressionType::None).encode()?;
         let meta_off = s.offset;
-        s.file.write_all(&meta_block)?;
+        crate::fs::write_all_with_hooks(&mut s.file, &meta_block, s.test_hooks.as_ref())?;
         let meta_handle = BlockHandle::new(meta_off, meta_block.len() as u64);
         s.offset += meta_block.len() as u64;
 
         // Footer
         let footer = Footer::new(index_handle, meta_handle).encode();
-        s.file.write_all(&footer)?;
+        crate::fs::write_all_with_hooks(&mut s.file, &footer, s.test_hooks.as_ref())?;
         s.offset += footer.len() as u64;
 
         crate::fs::sync_data_only(&s.file, s.test_hooks.as_ref())?;

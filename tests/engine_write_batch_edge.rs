@@ -1,6 +1,6 @@
 mod common;
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch, WalRecoveryMode, test_hooks::{TestHooks, WalBehavior}};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch, WalRecoveryMode, test_hooks::{TestHooks, WalBehavior, IoBehavior}};
 use common::test_temp_dir;
 
 // Phase 1 WriteBatch Remaining Atomicity Edge Tests
@@ -129,9 +129,35 @@ fn should_maintain_consistency_given_batch_and_regular_write_concurrent() {
 }
 
 #[test]
-#[ignore] // Requires disk full simulation infrastructure
 fn should_propagate_error_given_disk_full_when_writing_batch() {
-    // TODO: Implement when disk full simulation layer available
+    // Arrange
+    let dir = test_temp_dir();
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        wal_sync: true,
+        test_hooks: Some(hooks.clone()),
+        ..Default::default()
+    };
+
+    // Act - attempt to write batch when disk is full
+    let eng = MidgeEngine::open(opts).expect("open should succeed initially");
+    let cf = eng.default_column_family();
+    let mut batch = WriteBatch::new();
+    batch.put(cf.id(), Bytes::from_static(b"batch_key1"), Bytes::from_static(b"batch_val1"));
+    batch.put(cf.id(), Bytes::from_static(b"batch_key2"), Bytes::from_static(b"batch_val2"));
+    let result = eng.write_batch(&batch);
+
+    // Assert - batch write should fail with disk full error
+    assert!(result.is_err(), "Batch write should fail when disk is full");
+    let err = result.unwrap_err();
+    match err {
+        cntryl_midge::MidgeError::Io(io_err) => {
+            assert!(io_err.to_string().contains("No space left on device"), 
+                   "Error should indicate disk full: {}", io_err);
+        }
+        _ => panic!("Expected I/O error, got: {:?}", err),
+    }
 }
 
 #[test]

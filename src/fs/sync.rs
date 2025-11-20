@@ -39,6 +39,10 @@ pub fn sync_data_only(
             // Test hook wants to skip fsync (simulate crash before sync)
             return Ok(());
         }
+        // Check for I/O error injection
+        if let Some(error_msg) = hooks.before_io_write() {
+            return Err(io::Error::new(io::ErrorKind::Other, error_msg));
+        }
     }
 
     #[cfg(unix)]

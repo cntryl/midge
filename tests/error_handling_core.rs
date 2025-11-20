@@ -1,5 +1,5 @@
 mod common;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, test_hooks::{TestHooks, WalBehavior}};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, test_hooks::{TestHooks, WalBehavior, IoBehavior}};
 use common::test_temp_dir;
 
 // Phase 1 Error Handling & Fault Injection Core Tests
@@ -178,15 +178,66 @@ fn should_not_persist_unfsynced_data_when_fsync_skipped() {
 // These are deferred as they need infrastructure not yet in TestHooks
 
 #[test]
-#[ignore] // Requires disk full simulation infrastructure
 fn should_return_error_given_disk_full_when_writing_wal() {
-    // TODO: Implement when disk full simulation layer available
+    // Arrange
+    let dir = test_temp_dir();
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        wal_sync: true,
+        test_hooks: Some(hooks.clone()),
+        ..Default::default()
+    };
+
+    // Act - attempt to write data when disk is full
+    let eng = MidgeEngine::open(opts).expect("open should succeed initially");
+    let cf = eng.default_column_family();
+    let result = eng.put(&cf, b"key1", b"value1");
+
+    // Assert - write should fail with disk full error
+    assert!(result.is_err(), "Write should fail when disk is full");
+    let err = result.unwrap_err();
+    match err {
+        cntryl_midge::MidgeError::Io(io_err) => {
+            assert!(io_err.to_string().contains("No space left on device"), 
+                   "Error should indicate disk full: {}", io_err);
+        }
+        _ => panic!("Expected I/O error, got: {:?}", err),
+    }
 }
 
 #[test]
-#[ignore] // Requires disk full simulation infrastructure  
 fn should_return_error_given_disk_full_when_flushing_memtable() {
-    // TODO: Implement when disk full simulation layer available
+    // Arrange
+    let dir = test_temp_dir();
+    let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        wal_sync: false, // Don't sync WAL writes, only flush should fail
+        test_hooks: Some(hooks.clone()),
+        ..Default::default()
+    };
+
+    // Act - write data then force flush when disk is full
+    let eng = MidgeEngine::open(opts).expect("open should succeed initially");
+    let cf = eng.default_column_family();
+    
+    // Write some data to memtable
+    eng.put(&cf, b"key1", b"value1").expect("initial write should succeed");
+    
+    // Force flush - this should fail with disk full
+    let result = eng.flush();
+
+    // Assert - flush should fail with disk full error
+    assert!(result.is_err(), "Flush should fail when disk is full");
+    let err = result.unwrap_err();
+    match err {
+        cntryl_midge::MidgeError::Io(io_err) => {
+            assert!(io_err.to_string().contains("No space left on device"), 
+                   "Error should indicate disk full: {}", io_err);
+        }
+        _ => panic!("Expected I/O error, got: {:?}", err),
+    }
 }
 
 #[test]
