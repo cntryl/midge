@@ -39,6 +39,107 @@ fn wal_record_encoded_len(
 }
 
 impl MidgeEngine {
+    /// Internal helper to manage write stalls caused by full immutable memtable queue.
+    /// Attempts to proactively flush and waits (bounded) for stall condition to clear.
+    /// Latency target: typically < 2s once background error is cleared and a flush drains.
+    fn handle_write_stall(
+        &self,
+        cf: &ColumnFamilyHandle,
+        column_family: &Arc<crate::core::engine::column_family::ColumnFamily>,
+    ) -> MidgeResult<()> {
+        use std::time::{Duration, Instant};
+        use std::sync::atomic::Ordering;
+
+        let mut background_wait_duration_ms = 0u64;
+        let mut capacity_wait_duration_ms = 0u64;
+        let mut background_blocked = false;
+
+        if self.background_error.read().is_some() {
+            background_blocked = true;
+            let bg_start = Instant::now();
+            self.wait_for_background_error_cleared();
+            background_wait_duration_ms = bg_start.elapsed().as_millis() as u64;
+        }
+
+        let mut is_stalled = column_family.should_stall_writes();
+        let mut had_capacity_stall = is_stalled;
+
+        if !is_stalled && !background_blocked {
+            return Ok(());
+        }
+
+        if background_blocked && !is_stalled {
+            let total_duration_ms = background_wait_duration_ms;
+            self.metrics.record_write_stall(total_duration_ms);
+            self.metrics
+                .record_background_write_stall(background_wait_duration_ms);
+            return Ok(());
+        }
+
+        if column_family.should_stall_writes() {
+            let _ = self.flush_cf(cf);
+            if column_family.should_stall_writes() {
+                let _ = self.rollover_and_queue_flush(cf.id());
+            }
+        }
+
+        let max_wait = Duration::from_millis(2000); // Upper bound on active waiting
+        let mut attempts: usize = 0;
+
+        is_stalled = column_family.should_stall_writes();
+        if is_stalled {
+            had_capacity_stall = true;
+        }
+
+        if is_stalled {
+            let loop_start = Instant::now();
+            let mut backoff_ms = 20u64;
+            let max_backoff_ms = 100u64;
+
+            while column_family.should_stall_writes() {
+                let imm_len = {
+                    let imm_len = column_family.immutable_memtables.lock().len();
+                    column_family.immutable_count.store(imm_len, Ordering::Release);
+                    imm_len
+                };
+                if imm_len == 0 {
+                    break;
+                }
+
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+
+                let _ = self.wait_for_flush(Duration::from_millis(50));
+                attempts += 1;
+
+                if attempts % 4 == 0 {
+                    let _ = self.rollover_and_queue_flush(cf.id());
+                }
+
+                backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
+
+                if loop_start.elapsed() >= max_wait {
+                    break;
+                }
+            }
+
+            capacity_wait_duration_ms = loop_start.elapsed().as_millis() as u64;
+        }
+
+        if background_blocked || had_capacity_stall {
+            let total_duration_ms = background_wait_duration_ms + capacity_wait_duration_ms;
+            self.metrics.record_write_stall(total_duration_ms);
+            if background_blocked {
+                self.metrics
+                    .record_background_write_stall(background_wait_duration_ms);
+            }
+            if had_capacity_stall {
+                self.metrics
+                    .record_capacity_write_stall(capacity_wait_duration_ms);
+            }
+        }
+
+        Ok(())
+    }
     /// Put a key-value pair into a specific column family.
     pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         if self.read_only {
@@ -174,50 +275,13 @@ impl MidgeEngine {
 
         if memtable_full {
             let frozen = column_family.try_freeze_memtable();
-
             if frozen && cf_id == DEFAULT_CF_ID {
                 let _ = self.flush();
-            } else if column_family.should_stall_writes() {
-                if self.background_error.read().is_some() {
-                    // Block until background error cleared, then opportunistically flush CF immutables to reduce stall duration
-                    self.wait_for_background_error_cleared();
-                    if column_family.should_stall_writes() {
-                        // Best-effort flush to drain immutables and decrement stall counter
-                        let _ = self.flush_cf(cf);
-                    }
-                } else {
-                    // Implement backpressure: sleep with exponential backoff
-                    let mut backoff_ms = 1;
-                    let max_backoff_ms = 100;
-                    let max_stall_attempts = 1000;
-
-                    for attempt in 0..max_stall_attempts {
-                        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-
-                        // Re-sync immutable_count with actual queue length to avoid stale atomic preventing progress
-                        {
-                            let imm_len = column_family.immutable_memtables.lock().len();
-                            column_family
-                                .immutable_count
-                                .store(imm_len, Ordering::Release);
-                        }
-
-                        if !column_family.should_stall_writes() {
-                            self.metrics.record_write_stall(attempt + 1);
-                            break;
-                        }
-
-                        backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
-
-                        if attempt == max_stall_attempts - 1 {
-                            return Err(crate::error::MidgeError::invalid_config(
-                                "Write stall timeout: flush queue not draining",
-                            ));
-                        }
-                    }
-                }
             }
         }
+
+        // Unified stall handling
+        self.handle_write_stall(cf, &column_family)?;
 
         Ok(())
     }
@@ -309,6 +373,9 @@ impl MidgeEngine {
             let mt = column_family.memtable.load();
             mt.delete_range_with_seq(start, end, seq);
         }
+
+        // Apply stall handling for consistency with other write paths (e.g., put_with_ttl, merge)
+        self.handle_write_stall(cf, &column_family)?;
 
         Ok(())
     }
@@ -562,14 +629,14 @@ impl MidgeEngine {
 
         if memtable_full {
             let frozen = column_family.try_freeze_memtable();
-
             if frozen && cf_id == DEFAULT_CF_ID {
                 let _ = self.flush();
-            } else if column_family.should_stall_writes() {
-                return Err(crate::error::MidgeError::invalid_config(
-                    "Write stall: too many immutable memtables pending flush",
-                ));
             }
+            // Apply unified stall handling instead of returning error
+            self.handle_write_stall(cf, &column_family)?;
+        } else {
+            // Even if not full, immutable queue may already be saturated by prior freezes.
+            self.handle_write_stall(cf, &column_family)?;
         }
 
         Ok(())

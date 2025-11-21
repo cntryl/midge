@@ -380,7 +380,6 @@ fn should_return_error_given_disk_full_when_writing_manifest() {
 }
 
 #[test]
-// Temporarily enabling test for validation; leave if it passes
 fn should_pause_writes_given_background_error_until_cleared() {
     // Arrange
     let dir = test_temp_dir();

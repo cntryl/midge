@@ -65,6 +65,10 @@ struct MetricsInner {
     // Write stall metrics
     write_stalls: AtomicU64,
     write_stall_duration_ms: AtomicU64,
+    background_write_stalls: AtomicU64,
+    background_write_stall_duration_ms: AtomicU64,
+    capacity_write_stalls: AtomicU64,
+    capacity_write_stall_duration_ms: AtomicU64,
 
     // Autotuning metrics
     autotune_wal_interval_adjustments: AtomicU64,
@@ -126,6 +130,10 @@ impl Metrics {
 
                 write_stalls: AtomicU64::new(0),
                 write_stall_duration_ms: AtomicU64::new(0),
+                background_write_stalls: AtomicU64::new(0),
+                background_write_stall_duration_ms: AtomicU64::new(0),
+                capacity_write_stalls: AtomicU64::new(0),
+                capacity_write_stall_duration_ms: AtomicU64::new(0),
 
                 autotune_wal_interval_adjustments: AtomicU64::new(0),
                 autotune_compaction_thread_adjustments: AtomicU64::new(0),
@@ -379,11 +387,29 @@ impl Metrics {
     }
 
     // Write stall metrics
-    pub fn record_write_stall(&self, stall_attempts: usize) {
+    pub fn record_write_stall(&self, stall_duration_ms: u64) {
         self.inner.write_stalls.fetch_add(1, Ordering::Relaxed);
         self.inner
             .write_stall_duration_ms
-            .fetch_add(stall_attempts as u64, Ordering::Relaxed);
+            .fetch_add(stall_duration_ms, Ordering::Relaxed);
+    }
+
+    pub fn record_background_write_stall(&self, stall_duration_ms: u64) {
+        self.inner
+            .background_write_stalls
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .background_write_stall_duration_ms
+            .fetch_add(stall_duration_ms, Ordering::Relaxed);
+    }
+
+    pub fn record_capacity_write_stall(&self, stall_duration_ms: u64) {
+        self.inner
+            .capacity_write_stalls
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .capacity_write_stall_duration_ms
+            .fetch_add(stall_duration_ms, Ordering::Relaxed);
     }
 
     pub fn get_write_stalls(&self) -> u64 {
@@ -392,6 +418,28 @@ impl Metrics {
 
     pub fn get_write_stall_duration_ms(&self) -> u64 {
         self.inner.write_stall_duration_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn get_background_write_stalls(&self) -> u64 {
+        self.inner
+            .background_write_stalls
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn get_background_write_stall_duration_ms(&self) -> u64 {
+        self.inner
+            .background_write_stall_duration_ms
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn get_capacity_write_stalls(&self) -> u64 {
+        self.inner.capacity_write_stalls.load(Ordering::Relaxed)
+    }
+
+    pub fn get_capacity_write_stall_duration_ms(&self) -> u64 {
+        self.inner
+            .capacity_write_stall_duration_ms
+            .load(Ordering::Relaxed)
     }
 
     // Autotuning metrics

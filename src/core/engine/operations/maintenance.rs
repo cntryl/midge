@@ -264,7 +264,10 @@ impl MidgeEngine {
         {
             use std::sync::atomic::Ordering;
             let mut immutables = column_family.immutable_memtables.lock();
-            if !immutables.is_empty() {
+            if immutables.is_empty() {
+                // Ensure atomic counter reflects actual queue length if another thread already drained it.
+                column_family.immutable_count.store(0, Ordering::Release);
+            } else {
                 let frozen_list: Vec<_> = immutables.drain(..).collect();
                 column_family
                     .immutable_count
