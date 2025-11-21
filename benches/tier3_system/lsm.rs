@@ -20,7 +20,7 @@ use criterion::{
 use criterion_helper::criterion_config;
 use rand::Rng;
 use std::hint::black_box;
-use std::path::PathBuf;
+use std::path::Path;
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -32,10 +32,10 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 type Db = MidgeEngine;
 
-fn open_db(path: &PathBuf) -> Db {
+fn open_db(path: &Path) -> Db {
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
-            db_path: path.clone(),
+            db_path: path.to_path_buf(),
         },
         enable_compaction: true,
         wal_buffer_size: 1 * 1024 * 1024,

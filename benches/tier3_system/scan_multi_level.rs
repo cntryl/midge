@@ -57,8 +57,8 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
 
             // Now scan a large range across all levels
             let query = Query::new()
-                .start_key("key_0000000000".as_bytes())
-                .end_key("key_0000049999".as_bytes());
+                .start_key("key_0000000000".as_bytes().into())
+                .end_key("key_0000049999".as_bytes().into());
             
             let results = engine.scan(&cf, query).unwrap();
             black_box(results.len());

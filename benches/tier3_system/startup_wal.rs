@@ -57,10 +57,10 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
                 ..Default::default()
             };
             let engine = MidgeEngine::open(opts).unwrap();
-            
+
             // Verify data was recovered from WAL
             let cf = engine.default_column_family();
-            let result = engine.get(&cf, b"key_0000025000");
+            let result = engine.get(&cf, b"key_0000025000").unwrap();
             black_box(result);
         })
     });

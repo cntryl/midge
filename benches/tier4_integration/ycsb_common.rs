@@ -21,11 +21,14 @@ use tempfile::TempDir;
 // Workload Constants
 // ============================================================================
 
+#[allow(dead_code)]
 pub const OPS_PER_ITER: usize = 5_000;
+#[allow(dead_code)]
 pub const RECORD_COUNT: usize = 25_000;
 pub const VALUE_SIZE: usize = 1_000;
 pub const BATCH_SIZE: usize = 100;
 
+#[allow(dead_code)]
 pub const THREAD_COUNTS: [usize; 3] = [1, 2, 8];
 
 // ============================================================================
@@ -50,9 +53,12 @@ pub fn pregen_values(count: usize, seed: u64) -> Vec<Bytes> {
 
 // ---------- PRECOMPUTED KEYS AND VALUES (OnceLock) -------------------------
 
+#[allow(dead_code)]
 pub static PREGEN_KEYS: OnceLock<Vec<Bytes>> = OnceLock::new();
+#[allow(dead_code)]
 pub static PREGEN_VALUES: OnceLock<Vec<Bytes>> = OnceLock::new();
 
+#[allow(dead_code)]
 pub fn init_pregen() {
     PREGEN_KEYS.get_or_init(|| (0..RECORD_COUNT).map(generate_key).collect());
     PREGEN_VALUES.get_or_init(|| pregen_values(RECORD_COUNT, 0xD1CE_F00D_CAFE_F00D));
@@ -62,6 +68,7 @@ pub fn init_pregen() {
 // Zipfian Distribution
 // ============================================================================
 
+#[allow(dead_code)]
 pub struct ZipfianGenerator {
     items: usize,
     theta: f64,
@@ -90,6 +97,7 @@ impl ZipfianGenerator {
         (1..=n).map(|i| 1.0 / (i as f64).powf(theta)).sum()
     }
 
+    #[allow(dead_code)]
     pub fn next(&self, rng: &mut StdRng) -> usize {
         // Deterministic [0,1) from u64, no FP RNG in hot loop
         let u: f64 = {
@@ -115,18 +123,22 @@ impl ZipfianGenerator {
 
 // ---- Global Zipf (OnceLock) ----------------------------------------------
 
+#[allow(dead_code)]
 pub static ZIPF_DEFAULT: OnceLock<ZipfianGenerator> = OnceLock::new();
 
+#[allow(dead_code)]
 pub fn init_zipf() {
     ZIPF_DEFAULT.get_or_init(|| ZipfianGenerator::new(RECORD_COUNT, 0.99));
 }
 
 /// Convenience for YCSB benches: call once at top of `bench_*`.
+#[allow(dead_code)]
 pub fn init_ycsb_globals() {
     init_pregen();
     init_zipf();
 }
 
+#[allow(dead_code)]
 pub fn make_thread_rng(thread_id: usize, workload_seed: u64) -> StdRng {
     StdRng::seed_from_u64(workload_seed ^ ((thread_id as u64) << 32))
 }
@@ -136,6 +148,7 @@ pub fn make_thread_rng(thread_id: usize, workload_seed: u64) -> StdRng {
 // ============================================================================
 
 /// Load the full pre-generated dataset (RECORD_COUNT records) into the engine.
+#[allow(dead_code)]
 pub fn load_full_dataset(engine: &MidgeEngine) {
     let keys = PREGEN_KEYS.get().expect("call init_ycsb_globals()");
     let vals = PREGEN_VALUES.get().expect("call init_ycsb_globals()");
@@ -172,6 +185,7 @@ pub fn load_data_batched(
 // Scan Range Helpers (Workload E)
 // ============================================================================
 
+#[allow(dead_code)]
 pub fn pregen_scan_ranges(count: usize, scan_len: usize) -> Vec<(Bytes, Bytes)> {
     let keys = PREGEN_KEYS.get().expect("call init_ycsb_globals()");
     (0..count)
@@ -188,6 +202,7 @@ pub fn pregen_scan_ranges(count: usize, scan_len: usize) -> Vec<(Bytes, Bytes)> 
 // Engine Setup Variants (FS)
 // ============================================================================
 
+#[allow(dead_code)]
 pub fn setup_engine_fs_nosync() -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let opts = MidgeOptions {
@@ -202,6 +217,7 @@ pub fn setup_engine_fs_nosync() -> (MidgeEngine, TempDir) {
     (MidgeEngine::open(opts).unwrap(), dir)
 }
 
+#[allow(dead_code)]
 pub fn setup_engine_fs_sync() -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let opts = MidgeOptions {
@@ -220,6 +236,7 @@ pub fn setup_engine_fs_sync() -> (MidgeEngine, TempDir) {
 // Engine Setup Variants (Cloud-backed)
 // ============================================================================
 
+#[allow(dead_code)]
 pub fn setup_engine_cloud_nosync_with_latency(
     cloud_latency_ms: u64,
 ) -> (MidgeEngine, TempDir) {
@@ -245,6 +262,7 @@ pub fn setup_engine_cloud_nosync_with_latency(
     (MidgeEngine::open(opts).unwrap(), dir)
 }
 
+#[allow(dead_code)]
 pub fn setup_engine_cloud_sync_with_latency(
     cloud_latency_ms: u64,
 ) -> (MidgeEngine, TempDir) {
@@ -272,10 +290,12 @@ pub fn setup_engine_cloud_sync_with_latency(
 
 // Convenience wrappers with a “typical” cloud latency (1ms)
 
+#[allow(dead_code)]
 pub fn setup_engine_cloud_nosync() -> (MidgeEngine, TempDir) {
     setup_engine_cloud_nosync_with_latency(1)
 }
 
+#[allow(dead_code)]
 pub fn setup_engine_cloud_sync() -> (MidgeEngine, TempDir) {
     setup_engine_cloud_sync_with_latency(1)
 }

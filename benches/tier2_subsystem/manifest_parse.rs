@@ -46,17 +46,16 @@ fn bench_manifest_parse_small(c: &mut Criterion) {
     group.bench_function("parse_small", |b| {
         b.iter(|| {
             let mut version_set = VersionSet::new(Default::default());
-            
+
             // Apply edits (simulates parsing/building manifest state)
             for edit in &edits {
-                version_set.apply_edit(edit.clone()).unwrap();
+                version_set = version_set.apply_edit(edit.clone()).unwrap();
             }
-            
-            // Read back state (simulates serialization)
-            let current = version_set.current();
-            let level_count = current.get_num_levels();
-            
-            black_box((version_set, level_count));
+
+            // Read back state from manifest (simulates serialization)
+            let file_count = version_set.manifest.files.len();
+
+            black_box((version_set, file_count));
         })
     });
 
@@ -80,17 +79,16 @@ fn bench_manifest_parse_large(c: &mut Criterion) {
     group.bench_function("parse_large", |b| {
         b.iter(|| {
             let mut version_set = VersionSet::new(Default::default());
-            
+
             // Apply all edits
             for edit in &edits {
-                version_set.apply_edit(edit.clone()).unwrap();
+                version_set = version_set.apply_edit(edit.clone()).unwrap();
             }
-            
-            // Read back state
-            let current = version_set.current();
-            let level_count = current.get_num_levels();
-            
-            black_box((version_set, level_count));
+
+            // Read back state from manifest
+            let file_count = version_set.manifest.files.len();
+
+            black_box((version_set, file_count));
         })
     });
 

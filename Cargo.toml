@@ -347,6 +347,9 @@ harness = false
 name = "ycsb_workload_f"
 path = "benches/tier4_integration/ycsb_workload_f.rs"
 harness = false
+
+[[bench]]
+name = "system_recovery"
 path = "benches/tier3_system/recovery.rs"
 harness = false
 

@@ -28,7 +28,7 @@ fn make_wal_record(key_size: usize, value_size: usize, seq: u64) -> WalRecord {
 /// Encode a WAL record to bytes
 fn make_encoded_frame(key_size: usize, value_size: usize) -> Bytes {
     let record = make_wal_record(key_size, value_size, 42);
-    encode(&record).expect("encode failed")
+    encode(&record).expect("encode failed").into()
 }
 
 /// Benchmark small WAL record parsing (16-byte key, 64-byte value)

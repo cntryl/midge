@@ -51,8 +51,8 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
 
             // Now scan the entire range (all L0 files)
             let query = Query::new()
-                .start_key("key_0000000000".as_bytes())
-                .end_key("key_9999999999".as_bytes());
+                .start_key("key_0000000000".as_bytes().into())
+                .end_key("key_9999999999".as_bytes().into());
             
             let results = engine.scan(&cf, query).unwrap();
             black_box(results.len());

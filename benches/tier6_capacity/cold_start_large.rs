@@ -64,11 +64,11 @@ fn bench_cold_start_large(c: &mut Criterion) {
             };
             
             let engine = MidgeEngine::open(opts).unwrap();
-            
+
             // Verify database is accessible
             let cf = engine.default_column_family();
-            let result = engine.get(&cf, b"large_key_0000000000");
-            
+            let result = engine.get(&cf, b"large_key_0000000000").unwrap();
+
             black_box((engine, result));
         })
     });
