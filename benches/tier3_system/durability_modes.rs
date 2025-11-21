@@ -15,6 +15,7 @@ mod criterion_helper;
 #[path = "../tier4_integration/ycsb_common.rs"]
 mod ycsb_common;
 
+use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
@@ -31,6 +32,21 @@ use ycsb_common::*;
 
 const OPS_PER_THREAD: usize = 5_000;
 const RECORD_COUNT: usize = 25_000;
+
+// ============================================================================
+// Missing functions
+// ============================================================================
+
+fn load_data(engine: &MidgeEngine, count: usize) {
+    let keys = (0..count).map(|i| generate_key(i)).collect::<Vec<_>>();
+    let values = pregen_values(count, 42);
+    load_data_batched(engine, &keys, &values, BATCH_SIZE);
+}
+
+fn generate_value(key_id: usize, random: u64) -> Bytes {
+    // Simple value generation: key_id + random
+    Bytes::from(format!("value_{}_{}", key_id, random))
+}
 
 // ============================================================================
 // Database Setup - Durability Modes

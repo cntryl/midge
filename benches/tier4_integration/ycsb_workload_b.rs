@@ -183,14 +183,8 @@ fn bench_workload_b(c: &mut Criterion) {
             let (engine, _tmp) = match scenario {
                 "fs_nosync" => setup_engine_fs_nosync(),
                 "fs_sync" => setup_engine_fs_sync(),
-                "cloud_nosync" => {
-                    let (e, _b) = setup_engine_cloud_nosync_with_latency(1);
-                    (e, ())
-                }
-                "cloud_sync" => {
-                    let (e, _b) = setup_engine_cloud_sync_with_latency(1);
-                    (e, ())
-                }
+                "cloud_nosync" => setup_engine_cloud_nosync(),
+                "cloud_sync" => setup_engine_cloud_sync(),
                 _ => unreachable!(),
             };
 

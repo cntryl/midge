@@ -222,7 +222,7 @@ pub fn setup_engine_fs_sync() -> (MidgeEngine, TempDir) {
 
 pub fn setup_engine_cloud_nosync_with_latency(
     cloud_latency_ms: u64,
-) -> (MidgeEngine, Arc<MockCloudBackend>) {
+) -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let backend =
         Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(cloud_latency_ms)));
@@ -242,12 +242,12 @@ pub fn setup_engine_cloud_nosync_with_latency(
         ..Default::default()
     };
 
-    (MidgeEngine::open(opts).unwrap(), backend)
+    (MidgeEngine::open(opts).unwrap(), dir)
 }
 
 pub fn setup_engine_cloud_sync_with_latency(
     cloud_latency_ms: u64,
-) -> (MidgeEngine, Arc<MockCloudBackend>) {
+) -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let backend =
         Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(cloud_latency_ms)));
@@ -267,15 +267,15 @@ pub fn setup_engine_cloud_sync_with_latency(
         ..Default::default()
     };
 
-    (MidgeEngine::open(opts).unwrap(), backend)
+    (MidgeEngine::open(opts).unwrap(), dir)
 }
 
 // Convenience wrappers with a “typical” cloud latency (1ms)
 
-pub fn setup_engine_cloud_nosync() -> (MidgeEngine, Arc<MockCloudBackend>) {
+pub fn setup_engine_cloud_nosync() -> (MidgeEngine, TempDir) {
     setup_engine_cloud_nosync_with_latency(1)
 }
 
-pub fn setup_engine_cloud_sync() -> (MidgeEngine, Arc<MockCloudBackend>) {
+pub fn setup_engine_cloud_sync() -> (MidgeEngine, TempDir) {
     setup_engine_cloud_sync_with_latency(1)
 }

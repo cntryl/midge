@@ -24,6 +24,8 @@ use cntryl_midge::MidgeEngine;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
 use hdrhistogram::Histogram;
+use bytes::Bytes;
+use cntryl_midge::Query;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -70,8 +72,8 @@ fn run_workload_e(
         let start = Instant::now();
 
         // Execute the scan
-        let mut iter = engine.scan(cf, start_key, end_key).unwrap();
-        while let Some(item) = iter.next() {
+        let iter = engine.scan(cf, Query::new().start_key(start_key.clone()).end_key(end_key.clone())).unwrap();
+        for item in &iter {
             black_box(item);
         }
 
@@ -104,8 +106,8 @@ fn run_workload_e_concurrent(
 
         let start = Instant::now();
 
-        let mut iter = engine.scan(cf, start_key, end_key).unwrap();
-        while let Some(item) = iter.next() {
+        let iter = engine.scan(cf, Query::new().start_key(start_key.clone()).end_key(end_key.clone())).unwrap();
+        for item in &iter {
             black_box(item);
         }
 
