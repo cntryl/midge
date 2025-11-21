@@ -31,16 +31,20 @@ fn bench_bloom_maybe_contains(c: &mut Criterion) {
     }
     let filter = builder.finish();
 
+    // Precompute keys
+    let hit_key = make_test_key(42);
+    let miss_key = make_test_key(1000);
+
     group.bench_function("maybe_contains_hit", |b| {
         b.iter(|| {
-            let result = filter.may_contain(&make_test_key(42));
+            let result = filter.may_contain(&hit_key);
             black_box(result);
         })
     });
 
     group.bench_function("maybe_contains_miss", |b| {
         b.iter(|| {
-            let result = filter.may_contain(&make_test_key(1000)); // Not in filter
+            let result = filter.may_contain(&miss_key);
             black_box(result);
         })
     });
@@ -59,9 +63,12 @@ fn bench_bloom_compute_hashes(c: &mut Criterion) {
     }
     let filter = builder.finish();
 
+    // Precompute miss key
+    let miss_key = make_test_key(1000);
+
     group.bench_function("compute_hashes_via_miss", |b| {
         b.iter(|| {
-            let result = filter.may_contain(&make_test_key(1000)); // Miss, involves hashing
+            let result = filter.may_contain(&miss_key); // Miss, involves hashing
             black_box(result);
         })
     });
@@ -78,9 +85,12 @@ fn bench_bloom_filter_hot_check(c: &mut Criterion) {
     builder.add_key(&make_test_key(42));
     let filter = builder.finish();
 
+    // Precompute hit key
+    let hit_key = make_test_key(42);
+
     group.bench_function("hot_check_hit", |b| {
         b.iter(|| {
-            let result = filter.may_contain(&make_test_key(42));
+            let result = filter.may_contain(&hit_key);
             black_box(result);
         })
     });
