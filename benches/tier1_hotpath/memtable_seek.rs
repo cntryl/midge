@@ -5,7 +5,7 @@
 //!
 //! Covers memtable seek/lookup hot paths:
 //! - Point lookups and version finding
-//! - Forward and reverse iteration
+//! - Forward and reverse iteration (using get_all_keys)
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -14,51 +14,7 @@ use bytes::Bytes;
 use cntryl_midge::core::memtable::MemTable;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
-use std::collections::BTreeMap;
 use std::hint::black_box;
-
-// Approximate mock memtable for seek benchmarks (iterators not exposed in MemTable)
-struct MockMemtable {
-    data: BTreeMap<Bytes, Vec<Bytes>>, // Key -> multiple versions
-}
-
-impl MockMemtable {
-    fn new() -> Self {
-        Self {
-            data: BTreeMap::new(),
-        }
-    }
-
-    fn put(&mut self, key: Bytes, value: Bytes) {
-        self.data.entry(key).or_insert_with(Vec::new).push(value);
-    }
-
-    fn seek_forward(&self, start_key: &Bytes, steps: usize) -> Vec<Bytes> {
-        let mut results = Vec::new();
-        let mut iter = self.data.range::<Bytes, _>(start_key..);
-        for _ in 0..steps {
-            if let Some((key, _)) = iter.next() {
-                results.push(key.clone());
-            } else {
-                break;
-            }
-        }
-        results
-    }
-
-    fn seek_reverse(&self, start_key: &Bytes, steps: usize) -> Vec<Bytes> {
-        let mut results = Vec::new();
-        let mut iter = self.data.range::<Bytes, _>(..=start_key).rev();
-        for _ in 0..steps {
-            if let Some((key, _)) = iter.next() {
-                results.push(key.clone());
-            } else {
-                break;
-            }
-        }
-        results
-    }
-}
 
 fn make_key(i: usize) -> Bytes {
     Bytes::from(format!("key_{:010}", i))
@@ -122,22 +78,33 @@ fn bench_memtable_get_latest_version(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark forward seek
+/// Benchmark forward seek using get_all_keys
+/// Simulates forward iteration from a start key
 fn bench_memtable_seek_forward_32steps(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_seek_forward_32steps");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(32));
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let mut memtable = MockMemtable::new();
+    let memtable = MemTable::new();
     // Pre-populate sequential keys
     for i in 0..100 {
-        memtable.put(make_key(i), make_value(i));
+        memtable.put(make_key(i).as_ref(), make_value(i).as_ref());
     }
 
     group.bench_function("seek_forward_32", |b| {
         b.iter(|| {
-            let results = memtable.seek_forward(&make_key(10), 32);
+            let start_key = make_key(10);
+            let all_keys = memtable.get_all_keys();
+            
+            // Filter keys >= start_key and take 32
+            let results: Vec<_> = all_keys
+                .iter()
+                .filter(|k| k.as_ref() >= start_key.as_ref())
+                .take(32)
+                .cloned()
+                .collect();
+            
             black_box(results);
         })
     });
@@ -145,22 +112,34 @@ fn bench_memtable_seek_forward_32steps(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark reverse seek
+/// Benchmark reverse seek using get_all_keys
+/// Simulates reverse iteration from a start key
 fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_seek_reverse_32steps");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(32));
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let mut memtable = MockMemtable::new();
+    let memtable = MemTable::new();
     // Pre-populate sequential keys
     for i in 0..100 {
-        memtable.put(make_key(i), make_value(i));
+        memtable.put(make_key(i).as_ref(), make_value(i).as_ref());
     }
 
     group.bench_function("seek_reverse_32", |b| {
         b.iter(|| {
-            let results = memtable.seek_reverse(&make_key(50), 32);
+            let start_key = make_key(50);
+            let all_keys = memtable.get_all_keys();
+            
+            // Filter keys <= start_key, reverse, and take 32
+            let mut results: Vec<_> = all_keys
+                .iter()
+                .filter(|k| k.as_ref() <= start_key.as_ref())
+                .cloned()
+                .collect();
+            results.reverse();
+            results.truncate(32);
+            
             black_box(results);
         })
     });
