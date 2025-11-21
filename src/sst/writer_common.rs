@@ -344,7 +344,10 @@ mod tests {
 
     #[test]
     fn should_create_default_config() {
+        // Arrange & Act
         let config = WriterConfig::new(4096, CompressionType::None);
+
+        // Assert
         assert_eq!(config.block_size, 4096);
         assert_eq!(config.bloom_bits_per_key, 10);
         assert!(!config.use_internal_keys);
@@ -352,8 +355,11 @@ mod tests {
 
     #[test]
     fn should_create_config_with_internal_keys() {
-        // Arrange & Act
-        let config = WriterConfig::new(4096, CompressionType::None).with_internal_keys(true);
+        // Arrange
+        let base_config = WriterConfig::new(4096, CompressionType::None);
+
+        // Act
+        let config = base_config.with_internal_keys(true);
 
         // Assert
         assert!(config.use_internal_keys);
@@ -361,8 +367,11 @@ mod tests {
 
     #[test]
     fn should_create_config_with_bloom_bits() {
-        // Arrange & Act
-        let config = WriterConfig::new(4096, CompressionType::None).with_bloom_bits(15);
+        // Arrange
+        let base_config = WriterConfig::new(4096, CompressionType::None);
+
+        // Act
+        let config = base_config.with_bloom_bits(15);
 
         // Assert
         assert_eq!(config.bloom_bits_per_key, 15);

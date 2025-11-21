@@ -208,8 +208,9 @@ mod tests {
             fac.open(p).expect("open mem reader")
         };
 
-        // Act & Assert
+        // Act
         run_sst_behavior_tests(writer_factory, reader_factory);
+        // Assert - run_sst_behavior_tests validates the behavior
     }
 
     #[test]
@@ -224,8 +225,9 @@ mod tests {
             Box::new(crate::sst::fs::SstFile::open(p).expect("test SST file should open"))
         };
 
-        // Act & Assert
+        // Act
         run_sst_behavior_tests(writer_factory, reader_factory);
+        // Assert - run_sst_behavior_tests validates the behavior
     }
 
     // Dummy reader that only implements the base methods; default fallbacks should delegate to them.

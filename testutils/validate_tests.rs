@@ -84,9 +84,9 @@ pub fn test_single_test(
 
     // Check 2: AAA structure (only for tests >5 lines)
     if test_lines > 5 {
-        let arrange_re = Regex::new(r"//\s*Arrange\s*(\r?\n|$)").unwrap();
-        let act_re = Regex::new(r"//\s*Act\s*(\r?\n|$)").unwrap();
-        let assert_re = Regex::new(r"//\s*Assert\s*(\r?\n|$)").unwrap();
+        let arrange_re = Regex::new(r"//\s*Arrange").unwrap();
+        let act_re = Regex::new(r"//\s*Act").unwrap();
+        let assert_re = Regex::new(r"//\s*Assert").unwrap();
         let combined_re = Regex::new(r"//\s*(Arrange|Act|Assert)\s*[+&]").unwrap();
 
         let has_arrange = arrange_re.is_match(&test_body);

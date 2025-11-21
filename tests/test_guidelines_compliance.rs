@@ -22,21 +22,8 @@ mod validate_tests;
 
 use validate_tests::{check_test_organization, get_all_test_results, TestResult};
 
-// Helper: only run these meta-tests when the environment variable
-// `CI_STRICT_TEST_GUIDELINES=1` is set. This lets CI and local
-// development proceed while we incrementally fix guideline violations.
-fn meta_tests_enabled() -> bool {
-    std::env::var("CI_STRICT_TEST_GUIDELINES")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
 #[test]
 fn should_enforce_test_naming_convention() {
-    if !meta_tests_enabled() {
-        println!("tests/test_guidelines_compliance.rs: skipping naming checks (CI_STRICT_TEST_GUIDELINES!=1)");
-        return;
-    }
     // Arrange
     let all_results = get_all_test_results();
 
@@ -70,10 +57,6 @@ fn should_enforce_test_naming_convention() {
 
 #[test]
 fn should_enforce_arrange_act_assert_structure() {
-    if !meta_tests_enabled() {
-        println!("tests/test_guidelines_compliance.rs: skipping AAA checks (CI_STRICT_TEST_GUIDELINES!=1)");
-        return;
-    }
     // Arrange
     let all_results = get_all_test_results();
 
@@ -122,10 +105,6 @@ fn should_enforce_arrange_act_assert_structure() {
 
 #[test]
 fn should_enforce_single_behavior_per_test() {
-    if !meta_tests_enabled() {
-        println!("tests/test_guidelines_compliance.rs: skipping single-behavior checks (CI_STRICT_TEST_GUIDELINES!=1)");
-        return;
-    }
     // Arrange
     let all_results = get_all_test_results();
 
@@ -173,10 +152,6 @@ fn should_enforce_single_behavior_per_test() {
 
 #[test]
 fn should_enforce_module_organization() {
-    if !meta_tests_enabled() {
-        println!("tests/test_guidelines_compliance.rs: skipping organization checks (CI_STRICT_TEST_GUIDELINES!=1)");
-        return;
-    }
     // Arrange
     let issues = check_test_organization();
 

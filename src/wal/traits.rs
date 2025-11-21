@@ -193,6 +193,9 @@ mod tests {
 
     #[test]
     fn should_default_to_cf_zero_given_new_record() {
+        // Arrange - Create a WAL record without specifying CF
+
+        // Act
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from("key"),
@@ -200,6 +203,7 @@ mod tests {
             100,
         );
 
+        // Assert
         assert_eq!(record.cf_id, 0);
         assert_eq!(record.column_family_id().as_u32(), 0);
         assert_eq!(record.seq, 100);
@@ -207,9 +211,13 @@ mod tests {
 
     #[test]
     fn should_use_custom_cf_given_new_cf_record() {
+        // Arrange
         let cf_id = ColumnFamilyId::new(5);
+
+        // Act
         let record = WalRecord::new_cf(cf_id, WalOpKind::Delete, Bytes::from("key"), None, 200);
 
+        // Assert
         assert_eq!(record.cf_id, 5);
         assert_eq!(record.column_family_id(), cf_id);
         assert_eq!(record.seq, 200);
@@ -217,6 +225,7 @@ mod tests {
 
     #[test]
     fn should_roundtrip_record_given_serialization() {
+        // Arrange
         let record = WalRecord::new_cf(
             ColumnFamilyId::new(3),
             WalOpKind::Put,
@@ -225,10 +234,11 @@ mod tests {
             42,
         );
 
-        // Serialize and deserialize
+        // Act
         let encoded = bincode::serialize(&record).expect("serialize");
         let decoded: WalRecord = bincode::deserialize(&encoded).expect("deserialize");
 
+        // Assert
         assert_eq!(decoded.cf_id, 3);
         assert_eq!(decoded.op, WalOpKind::Put);
         assert_eq!(decoded.key, Bytes::from("test_key"));
@@ -238,10 +248,11 @@ mod tests {
 
     #[test]
     fn should_maintain_backward_compatibility_given_default_cf() {
-        // For backward compatibility with old WAL files that don't have cf_id,
+        // Arrange - For backward compatibility with old WAL files that don't have cf_id,
         // we can manually construct records with cf_id = 0 when reading old format.
         // This test verifies that new records default to cf_id = 0.
 
+        // Act
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from("key"),
@@ -249,7 +260,7 @@ mod tests {
             100,
         );
 
-        // New records default to cf_id = 0
+        // Assert - New records default to cf_id = 0
         assert_eq!(record.cf_id, 0);
 
         // Can serialize and deserialize with cf_id included
