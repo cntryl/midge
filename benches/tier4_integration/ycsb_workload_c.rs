@@ -1,14 +1,16 @@
-//! YCSB Workload C: 100% Read (Read-Only)
+//! YCSB Workload C — 100% Read (Read-Only)
 //!
-//! Benchmarks read-heavy workload across column families (1, 2, 4, 8, 16)
-//! and scales concurrency (1, 2, 8 threads).
+//! - Uses Zipfian read distribution
+//! - Exercises CF scaling (1, 2, 4, 8, 16)
+//! - Exercises concurrency scaling (1, 2, 8 threads)
+//! - Measures p50 / p99 / p99.9 tail latency
 //!
-//! **Enhanced with Latency Tracking:**
-//! - Measures p50, p99, p99.9 read latencies
-//! - Reports cache efficiency and read-path performance
+//! Hot path: only `engine.get()` + Zipf + CF index math.
+//! No heap allocs, no string formatting, no RNG beyond fast next_u64().
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
+
 #[path = "ycsb_common.rs"]
 mod ycsb_common;
 
@@ -16,22 +18,24 @@ use cntryl_midge::MidgeEngine;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
 use hdrhistogram::Histogram;
+
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+
 use ycsb_common::*;
 
 const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
 
 // ============================================================================
-// Latency tracking structures
+// Latency stats
 // ============================================================================
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct LatencyStats {
     p50: u64,
     p99: u64,
@@ -45,61 +49,71 @@ struct LatencyStats {
 fn run_workload_c(
     engine: &MidgeEngine,
     operations: usize,
-    record_count: usize,
     cf_count: usize,
+    seed: u64,
 ) -> LatencyStats {
     let cf_list = engine.list_column_families();
-    let mut rng = StdRng::seed_from_u64(12345);
-    let zipfian = ZipfianGenerator::new(record_count, 0.99);
-    let mut histogram = Histogram::<u64>::new(3).unwrap();
+
+    // Precomputed globals
+    let keys = PREGEN_KEYS.get().unwrap();
+    let zipf = ZIPF_DEFAULT.get().unwrap();
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut hist = Histogram::<u64>::new(3).unwrap();
 
     for _ in 0..operations {
-        let key_id = zipfian.next(&mut rng);
-        let key = generate_key(key_id);
-        let cf_index = rng.gen_range(0..cf_count);
-        let cf = &cf_list[cf_index];
+        // Zipf key
+        let key_id = zipf.next(&mut rng);
+        let key = &keys[key_id];
+
+        // Pick CF
+        let cf = &cf_list[rng.gen_range(0..cf_count)];
 
         let start = Instant::now();
-        let _ = black_box(engine.get(cf, &key));
+        let _ = black_box(engine.get(cf, key));
         let elapsed_us = start.elapsed().as_micros() as u64;
-        let _ = histogram.record(elapsed_us.max(1));
+
+        let _ = hist.record(elapsed_us.max(1));
     }
 
     LatencyStats {
-        p50: histogram.value_at_percentile(50.0),
-        p99: histogram.value_at_percentile(99.0),
-        p99_9: histogram.value_at_percentile(99.9),
+        p50: hist.value_at_percentile(50.0),
+        p99: hist.value_at_percentile(99.0),
+        p99_9: hist.value_at_percentile(99.9),
     }
 }
 
 fn run_workload_c_concurrent(
     engine: Arc<MidgeEngine>,
-    operations_per_thread: usize,
-    record_count: usize,
+    ops_per_thread: usize,
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {
     let cf_list = engine.list_column_families();
-    let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
-    let zipfian = ZipfianGenerator::new(record_count, 0.99);
-    let mut histogram = Histogram::<u64>::new(3).unwrap();
 
-    for _ in 0..operations_per_thread {
-        let key_id = zipfian.next(&mut rng);
-        let key = generate_key(key_id);
-        let cf_index = rng.gen_range(0..cf_count);
-        let cf = &cf_list[cf_index];
+    let keys = PREGEN_KEYS.get().unwrap();
+    let zipf = ZIPF_DEFAULT.get().unwrap();
+
+    let mut rng = make_thread_rng(thread_id, 0xC0FFEE);
+    let mut hist = Histogram::<u64>::new(3).unwrap();
+
+    for _ in 0..ops_per_thread {
+        let key_id = zipf.next(&mut rng);
+        let key = &keys[key_id];
+
+        let cf = &cf_list[rng.gen_range(0..cf_count)];
 
         let start = Instant::now();
-        let _ = black_box(engine.get(cf, &key));
+        let _ = black_box(engine.get(cf, key));
         let elapsed_us = start.elapsed().as_micros() as u64;
-        let _ = histogram.record(elapsed_us.max(1));
+
+        let _ = hist.record(elapsed_us.max(1));
     }
 
     LatencyStats {
-        p50: histogram.value_at_percentile(50.0),
-        p99: histogram.value_at_percentile(99.0),
-        p99_9: histogram.value_at_percentile(99.9),
+        p50: hist.value_at_percentile(50.0),
+        p99: hist.value_at_percentile(99.0),
+        p99_9: hist.value_at_percentile(99.9),
     }
 }
 
@@ -108,82 +122,83 @@ fn run_workload_c_concurrent(
 // ============================================================================
 
 fn bench_workload_c(c: &mut Criterion) {
+    // Ensure OnceLock globals exist
+    init_ycsb_globals();
+
     let mut group = c.benchmark_group("ycsb_workload_c_cf_variants");
     group.throughput(Throughput::Elements(OPS_PER_ITER as u64));
 
-    // For this read-only benchmark we exercise two scenarios:
-    // - fs_nosync (local disk, no WAL sync)
-    // - cloud_nosync (cloud-backed, local cache, no WAL sync)
+    // We only benchmark no-sync variants here — read workload does not care about WAL
     let scenarios = ["fs_nosync", "cloud_nosync"];
 
     for &cf_count in CF_COUNTS {
+        // ----------------------------------------------------
+        // Storage variants
+        // ----------------------------------------------------
         for &scenario in &scenarios {
-            let (engine, _backend) = match scenario {
-                "fs_nosync" => {
-                    let (e, _t) = setup_engine_fs_nosync();
-                    (e, None)
-                }
+            let (engine, _tmp) = match scenario {
+                "fs_nosync" => setup_engine_fs_nosync(),
                 "cloud_nosync" => {
-                    let (e, b) = setup_engine_cloud_nosync();
-                    (e, Some(b))
+                    let (e, _b) = setup_engine_cloud_nosync_with_latency(1);
+                    (e, ())
                 }
                 _ => unreachable!(),
             };
 
-            // Create additional column families
+            // Create CFs up front (zero allocations later)
             for i in 1..cf_count {
-                let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
+                let _ =
+                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
             }
 
-            load_data(&engine, RECORD_COUNT);
+            // Pre-load dataset
+            load_full_dataset(&engine);
 
             group.bench_with_input(
                 BenchmarkId::new(format!("{scenario}_cf{cf_count}"), "100r"),
                 &cf_count,
-                |b, &_cf_count| {
+                |b, &_cf| {
                     b.iter(|| {
-                        let stats = run_workload_c(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count);
+                        let stats = run_workload_c(&engine, OPS_PER_ITER, cf_count, 0xC0FFEE00);
                         black_box(stats)
                     })
                 },
             );
         }
 
-        // Concurrent (threads × cf_count)
+        // ----------------------------------------------------
+        // Concurrency scaling (fs_nosync only)
+        // ----------------------------------------------------
         for &threads in &THREAD_COUNTS {
-            let (engine, _temp_dir) = setup_engine_fs_nosync();
+            let (engine, _tmp) = setup_engine_fs_nosync();
 
-            // Create additional column families
             for i in 1..cf_count {
-                let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
+                let _ =
+                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
             }
 
-            load_data(&engine, RECORD_COUNT);
+            load_full_dataset(&engine);
+
             let engine = Arc::new(engine);
-            let total_ops = OPS_PER_ITER;
-            let ops_per_thread = total_ops / threads;
+            let ops_per_thread = OPS_PER_ITER / threads;
 
             group.bench_with_input(
                 BenchmarkId::new(format!("concurrent_cf{cf_count}"), threads),
                 &threads,
-                |b, &_threads| {
+                |b, &_t| {
                     b.iter(|| {
                         let handles: Vec<_> = (0..threads)
-                            .map(|thread_id| {
+                            .map(|tid| {
                                 let engine = Arc::clone(&engine);
                                 thread::spawn(move || {
-                                    run_workload_c_concurrent(
-                                        engine,
-                                        ops_per_thread,
-                                        RECORD_COUNT,
-                                        thread_id,
-                                        cf_count,
-                                    )
+                                    run_workload_c_concurrent(engine, ops_per_thread, tid, cf_count)
                                 })
                             })
                             .collect();
+
                         let _stats: Vec<_> =
                             handles.into_iter().map(|h| h.join().unwrap()).collect();
+
                         black_box(_stats)
                     })
                 },

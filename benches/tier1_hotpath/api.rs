@@ -12,7 +12,9 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{
+    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
@@ -47,6 +49,7 @@ fn setup_db(name: &str) -> MidgeEngine {
 /// Benchmark batch put operations (hot path for write throughput)
 fn bench_batch_put(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_batch_put");
+    group.sampling_mode(SamplingMode::Flat);
 
     // Setup database once, reuse across iterations
     let engine = setup_db("batch_put");
@@ -56,6 +59,7 @@ fn bench_batch_put(c: &mut Criterion) {
     for &batch_size in &[100, 1_000] {
         // Precompute keys and values outside the loop
         let (keys, vals) = make_fixed_kv(batch_size);
+        group.throughput(Throughput::Elements(batch_size as u64));
 
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
@@ -87,6 +91,8 @@ fn bench_batch_put(c: &mut Criterion) {
 /// Benchmark single get operations (hot path for reads)
 fn bench_single_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_single_get");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
 
     let engine = setup_db("single_get");
     let cf = engine.default_column_family();
@@ -133,6 +139,8 @@ fn bench_single_get(c: &mut Criterion) {
 /// Benchmark single put operations (baseline for comparison)
 fn bench_single_put(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_single_put");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
 
     let engine = setup_db("single_put");
     let cf = engine.default_column_family();
@@ -157,6 +165,7 @@ fn bench_single_put(c: &mut Criterion) {
 /// Benchmark batch delete operations
 fn bench_batch_delete(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_batch_delete");
+    group.sampling_mode(SamplingMode::Flat);
 
     let engine = setup_db("batch_delete");
     let cf = engine.default_column_family();
@@ -174,6 +183,8 @@ fn bench_batch_delete(c: &mut Criterion) {
 
     let mut offset = 0;
     for &batch_size in &[100, 1_000] {
+        group.throughput(Throughput::Elements(batch_size as u64));
+
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
@@ -204,6 +215,7 @@ fn bench_batch_delete(c: &mut Criterion) {
 /// Benchmark mixed batch operations (put + delete)
 fn bench_batch_mixed(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_batch_mixed");
+    group.sampling_mode(SamplingMode::Flat);
 
     let engine = setup_db("batch_mixed");
     let cf = engine.default_column_family();
@@ -223,6 +235,7 @@ fn bench_batch_mixed(c: &mut Criterion) {
     for &batch_size in &[100, 1_000] {
         // Precompute keys for this batch size
         let (batch_keys, batch_vals) = make_fixed_kv(batch_size);
+        group.throughput(Throughput::Elements(batch_size as u64));
 
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
@@ -263,6 +276,7 @@ fn bench_range_scan(c: &mut Criterion) {
     use cntryl_midge::Query;
 
     let mut group = c.benchmark_group("hotpath_range_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     let engine = setup_db("range_scan");
     let cf = engine.default_column_family();
@@ -285,6 +299,7 @@ fn bench_range_scan(c: &mut Criterion) {
     let end_key_1000 = keys[999].clone(); // key for 999
 
     // Scan 100 keys
+    group.throughput(Throughput::Elements(100));
     group.bench_function("scan_100_keys", |b| {
         b.iter(|| {
             let query = Query::new()
@@ -296,6 +311,7 @@ fn bench_range_scan(c: &mut Criterion) {
     });
 
     // Scan 1000 keys
+    group.throughput(Throughput::Elements(1000));
     group.bench_function("scan_1000_keys", |b| {
         b.iter(|| {
             let query = Query::new()

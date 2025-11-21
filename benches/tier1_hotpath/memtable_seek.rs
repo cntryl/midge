@@ -11,12 +11,13 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion};
+use cntryl_midge::core::memtable::MemTable;
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
 use std::collections::BTreeMap;
 use std::hint::black_box;
 
-// Mock memtable for hot path testing
+// Approximate mock memtable for seek benchmarks (iterators not exposed in MemTable)
 struct MockMemtable {
     data: BTreeMap<Bytes, Vec<Bytes>>, // Key -> multiple versions
 }
@@ -30,10 +31,6 @@ impl MockMemtable {
 
     fn put(&mut self, key: Bytes, value: Bytes) {
         self.data.entry(key).or_insert_with(Vec::new).push(value);
-    }
-
-    fn get(&self, key: &Bytes) -> Option<&Bytes> {
-        self.data.get(key).and_then(|versions| versions.last())
     }
 
     fn seek_forward(&self, start_key: &Bytes, steps: usize) -> Vec<Bytes> {
@@ -74,24 +71,26 @@ fn make_value(i: usize) -> Bytes {
 /// Benchmark point lookup
 fn bench_memtable_get_point_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_get_point_lookup");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let mut memtable = MockMemtable::new();
+    let memtable = MemTable::new();
     // Pre-populate
     for i in 0..1000 {
-        memtable.put(make_key(i), make_value(i));
+        memtable.put(make_key(i).as_ref(), make_value(i).as_ref());
     }
 
     group.bench_function("point_lookup_hit", |b| {
         b.iter(|| {
-            let result = memtable.get(&make_key(500));
+            let result = memtable.get(make_key(500).as_ref());
             black_box(result);
         })
     });
 
     group.bench_function("point_lookup_miss", |b| {
         b.iter(|| {
-            let result = memtable.get(&make_key(2000)); // Not present
+            let result = memtable.get(make_key(2000).as_ref()); // Not present
             black_box(result);
         })
     });
@@ -102,18 +101,20 @@ fn bench_memtable_get_point_lookup(c: &mut Criterion) {
 /// Benchmark getting latest version
 fn bench_memtable_get_latest_version(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_get_latest_version");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let mut memtable = MockMemtable::new();
+    let memtable = MemTable::new();
     let key = make_key(42);
-    // Add multiple versions
+    // Add multiple versions (using sequence numbers)
     for i in 0..5 {
-        memtable.put(key.clone(), make_value(i));
+        memtable.put_with_seq(key.as_ref(), make_value(i).as_ref(), i as u64);
     }
 
     group.bench_function("get_latest_version", |b| {
         b.iter(|| {
-            let result = memtable.get(&key);
+            let result = memtable.get(key.as_ref());
             black_box(result);
         })
     });
@@ -124,6 +125,8 @@ fn bench_memtable_get_latest_version(c: &mut Criterion) {
 /// Benchmark forward seek
 fn bench_memtable_seek_forward_32steps(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_seek_forward_32steps");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(32));
     group.measurement_time(std::time::Duration::from_millis(200));
 
     let mut memtable = MockMemtable::new();
@@ -145,6 +148,8 @@ fn bench_memtable_seek_forward_32steps(c: &mut Criterion) {
 /// Benchmark reverse seek
 fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_seek_reverse_32steps");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(32));
     group.measurement_time(std::time::Duration::from_millis(200));
 
     let mut memtable = MockMemtable::new();

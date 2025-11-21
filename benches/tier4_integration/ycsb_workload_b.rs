@@ -1,11 +1,17 @@
-//! YCSB Workload B: 95% Read / 5% Write (Read-Heavy)
+//! YCSB Workload B — 95% Read / 5% Update (Read-Heavy)
 //!
-//! Benchmarks both storage backends (fs/cloud, sync/nosync) and
-//! scales by number of column families (1, 2, 4, 8, 16) and threads.
+//! Behavior Profile:
+//! - Random point reads (Zipfian)
+//! - Occasional updates (Zipfian)
+//! - Batched writes (BATCH_SIZE)
+//! - Varying CF counts (1, 2, 4, 8, 16)
+//! - Varying thread counts (1, 2, 8)
 //!
-//! **Enhanced with Latency Tracking:**
-//! - Measures p50, p99, p99.9 operation latencies
-//! - Reports tail latency insights for read-heavy workloads
+//! Latency Tracking:
+//! - p50, p99, p99.9 read/update latencies
+//!
+//! All hot loops: no string formatting, no heap allocs beyond precomputed
+//! keys/values, no CF name construction, and minimal RNG per op.
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -16,22 +22,24 @@ use cntryl_midge::{MidgeEngine, WriteBatch};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
 use hdrhistogram::Histogram;
+
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngCore, SeedableRng};
+
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+
 use ycsb_common::*;
 
 const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
 
 // ============================================================================
-// Latency tracking structures
+// Latency stats
 // ============================================================================
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct LatencyStats {
     p50: u64,
     p99: u64,
@@ -45,101 +53,114 @@ struct LatencyStats {
 fn run_workload_b(
     engine: &MidgeEngine,
     operations: usize,
-    record_count: usize,
+    _record_count: usize,
     cf_count: usize,
+    rng_seed: u64,
 ) -> LatencyStats {
     let cf_list = engine.list_column_families();
-    let mut rng = StdRng::seed_from_u64(12345);
-    let zipfian = ZipfianGenerator::new(record_count, 0.99);
+    let mut rng = StdRng::seed_from_u64(rng_seed);
+
+    // Precomputed Zipfian + keys/values
+    let zipf = ZIPF_DEFAULT.get().unwrap();
+    let keys = PREGEN_KEYS.get().unwrap();
+    let values = PREGEN_VALUES.get().unwrap();
+
+    let mut hist = Histogram::<u64>::new(3).unwrap();
     let mut batch = WriteBatch::new();
-    let mut histogram = Histogram::<u64>::new(3).unwrap();
 
     for _ in 0..operations {
-        let key_id = zipfian.next(&mut rng);
-        let key = generate_key(key_id);
-        let cf_index = rng.gen_range(0..cf_count);
-        let cf = &cf_list[cf_index];
+        // Zipfian key
+        let key_id = zipf.next(&mut rng);
+        let key = keys[key_id].clone();
+
+        // CF selection
+        let cf = &cf_list[rng.gen_range(0..cf_count)];
         let cf_id = cf.id();
 
         let start = Instant::now();
-        if rng.random_bool(0.95) {
-            // Read operation
+
+        // 95% read, 5% update — use simple modulo to avoid float math
+        if rng.next_u32() % 20 != 0 {
+            // READ
             let _ = black_box(engine.get(cf, &key));
         } else {
-            // Write operation - add to batch
-            let value = generate_value(key_id, rng.random());
+            // UPDATE
+            let value = values[key_id].clone();
             batch.put(cf_id, key, value);
 
-            // Flush batch every BATCH_SIZE writes
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();
                 batch.clear();
             }
         }
+
         let elapsed_us = start.elapsed().as_micros() as u64;
-        let _ = histogram.record(elapsed_us.max(1));
+        let _ = hist.record(elapsed_us.max(1));
     }
 
-    // Flush any remaining writes
     if !batch.is_empty() {
         engine.write_batch(&batch).unwrap();
     }
 
     LatencyStats {
-        p50: histogram.value_at_percentile(50.0),
-        p99: histogram.value_at_percentile(99.0),
-        p99_9: histogram.value_at_percentile(99.9),
+        p50: hist.value_at_percentile(50.0),
+        p99: hist.value_at_percentile(99.0),
+        p99_9: hist.value_at_percentile(99.9),
     }
 }
 
 fn run_workload_b_concurrent(
     engine: Arc<MidgeEngine>,
-    operations_per_thread: usize,
-    record_count: usize,
+    ops_per_thread: usize,
+    _record_count: usize,
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {
     let cf_list = engine.list_column_families();
-    let mut rng = StdRng::seed_from_u64(12345 + thread_id as u64);
-    let zipfian = ZipfianGenerator::new(record_count, 0.99);
-    let mut batch = WriteBatch::new();
-    let mut histogram = Histogram::<u64>::new(3).unwrap();
+    let mut rng = make_thread_rng(thread_id, 0xB0B0_F00D);
 
-    for _ in 0..operations_per_thread {
-        let key_id = zipfian.next(&mut rng);
-        let key = generate_key(key_id);
-        let cf_index = rng.gen_range(0..cf_count);
-        let cf = &cf_list[cf_index];
+    let zipf = ZIPF_DEFAULT.get().unwrap();
+    let keys = PREGEN_KEYS.get().unwrap();
+    let values = PREGEN_VALUES.get().unwrap();
+
+    let mut hist = Histogram::<u64>::new(3).unwrap();
+    let mut batch = WriteBatch::new();
+
+    for _ in 0..ops_per_thread {
+        let key_id = zipf.next(&mut rng);
+        let key = keys[key_id].clone();
+
+        let cf = &cf_list[rng.gen_range(0..cf_count)];
         let cf_id = cf.id();
 
         let start = Instant::now();
-        if rng.random_bool(0.95) {
-            // Read operation
+
+        if rng.next_u32() % 20 != 0 {
+            // READ
             let _ = black_box(engine.get(cf, &key));
         } else {
-            // Write operation - add to batch
-            let value = generate_value(key_id, rng.random());
+            // UPDATE
+            let value = values[key_id].clone();
             batch.put(cf_id, key, value);
 
-            // Flush batch every BATCH_SIZE writes
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();
                 batch.clear();
             }
         }
+
         let elapsed_us = start.elapsed().as_micros() as u64;
-        let _ = histogram.record(elapsed_us.max(1));
+        let _ = hist.record(elapsed_us.max(1));
     }
 
-    // Flush any remaining writes
     if !batch.is_empty() {
         engine.write_batch(&batch).unwrap();
     }
 
     LatencyStats {
-        p50: histogram.value_at_percentile(50.0),
-        p99: histogram.value_at_percentile(99.0),
-        p99_9: histogram.value_at_percentile(99.9),
+        p50: hist.value_at_percentile(50.0),
+        p99: hist.value_at_percentile(99.0),
+        p99_9: hist.value_at_percentile(99.9),
     }
 }
 
@@ -148,87 +169,95 @@ fn run_workload_b_concurrent(
 // ============================================================================
 
 fn bench_workload_b(c: &mut Criterion) {
+    // Ensure keys, values, and Zipf are ready
+    init_ycsb_globals();
+
     let mut group = c.benchmark_group("ycsb_workload_b_cf_variants");
     group.throughput(Throughput::Elements(OPS_PER_ITER as u64));
 
     let scenarios = ["fs_nosync", "fs_sync", "cloud_nosync", "cloud_sync"];
 
     for &cf_count in CF_COUNTS {
+        // Storage-mode variants (fs / cloud, sync / nosync)
         for &scenario in &scenarios {
-            let (engine, _backend) = match scenario {
-                "fs_nosync" => {
-                    let (e, _t) = setup_engine_fs_nosync();
-                    (e, None)
-                }
-                "fs_sync" => {
-                    let (e, _t) = setup_engine_fs_sync();
-                    (e, None)
-                }
+            let (engine, _tmp) = match scenario {
+                "fs_nosync" => setup_engine_fs_nosync(),
+                "fs_sync" => setup_engine_fs_sync(),
                 "cloud_nosync" => {
-                    let (e, b) = setup_engine_cloud_nosync();
-                    (e, Some(b))
+                    let (e, _b) = setup_engine_cloud_nosync_with_latency(1);
+                    (e, ())
                 }
                 "cloud_sync" => {
-                    let (e, b) = setup_engine_cloud_sync();
-                    (e, Some(b))
+                    let (e, _b) = setup_engine_cloud_sync_with_latency(1);
+                    (e, ())
                 }
                 _ => unreachable!(),
             };
 
-            // Create additional column families
+            // Create CFs
             for i in 1..cf_count {
-                let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
+                let _ =
+                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
             }
 
-            load_data(&engine, RECORD_COUNT);
+            // Load dataset once per variant
+            load_full_dataset(&engine);
 
             group.bench_with_input(
                 BenchmarkId::new(format!("{scenario}_cf{cf_count}"), "95r_5w"),
                 &cf_count,
-                |b, &_cf_count| {
+                |b, &_cf| {
                     b.iter(|| {
-                        let stats = run_workload_b(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count);
+                        let stats = run_workload_b(
+                            &engine,
+                            OPS_PER_ITER,
+                            RECORD_COUNT,
+                            cf_count,
+                            0xBEEF_1234,
+                        );
                         black_box(stats)
                     })
                 },
             );
         }
 
-        // Concurrent (threads × cf_count)
+        // Concurrent (fs_nosync only) for contention profile
         for &threads in &THREAD_COUNTS {
-            let (engine, _temp_dir) = setup_engine_fs_nosync();
+            let (engine, _tmp) = setup_engine_fs_nosync();
 
-            // Create additional column families
             for i in 1..cf_count {
-                let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
+                let _ =
+                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
             }
 
-            load_data(&engine, RECORD_COUNT);
+            load_full_dataset(&engine);
+
             let engine = Arc::new(engine);
-            let total_ops = OPS_PER_ITER;
-            let ops_per_thread = total_ops / threads;
+            let ops_per_thread = OPS_PER_ITER / threads;
 
             group.bench_with_input(
                 BenchmarkId::new(format!("concurrent_cf{cf_count}"), threads),
                 &threads,
-                |b, &_threads| {
+                |b, &_t| {
                     b.iter(|| {
                         let handles: Vec<_> = (0..threads)
-                            .map(|thread_id| {
+                            .map(|tid| {
                                 let engine = Arc::clone(&engine);
                                 thread::spawn(move || {
                                     run_workload_b_concurrent(
                                         engine,
                                         ops_per_thread,
                                         RECORD_COUNT,
-                                        thread_id,
+                                        tid,
                                         cf_count,
                                     )
                                 })
                             })
                             .collect();
+
                         let _stats: Vec<_> =
                             handles.into_iter().map(|h| h.join().unwrap()).collect();
+
                         black_box(_stats)
                     })
                 },

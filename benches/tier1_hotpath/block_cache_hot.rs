@@ -11,30 +11,10 @@
 mod criterion_helper;
 
 use bytes::Bytes;
+use cntryl_midge::sst::block_cache::{BlockKey, BlockType, CachedBlock, create_basic_cache};
 use criterion::{criterion_group, criterion_main, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
-
-// Mock block cache for hot path testing
-struct MockBlockCache {
-    data: std::collections::HashMap<u64, Bytes>,
-}
-
-impl MockBlockCache {
-    fn new() -> Self {
-        Self {
-            data: std::collections::HashMap::new(),
-        }
-    }
-
-    fn get(&self, key: u64) -> Option<&Bytes> {
-        self.data.get(&key)
-    }
-
-    fn insert(&mut self, key: u64, value: Bytes) {
-        self.data.insert(key, value);
-    }
-}
 
 fn make_block_data(size: usize) -> Bytes {
     Bytes::from(vec![0xAB; size])
@@ -45,15 +25,27 @@ fn bench_block_cache_get_hot(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_block_cache_get_hot");
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let mut cache = MockBlockCache::new();
+    let cache = create_basic_cache(10 * 1024 * 1024); // 10MB cache
     // Pre-populate with hot data
     for i in 0..1000 {
-        cache.insert(i, make_block_data(4096));
+        let key = BlockKey {
+            file_name: "test.sst".to_string(),
+            block_type: BlockType::Data,
+            offset: i,
+        };
+        let block = CachedBlock { data: make_block_data(4096) };
+        cache.insert(key, block);
     }
+
+    let hot_key = BlockKey {
+        file_name: "test.sst".to_string(),
+        block_type: BlockType::Data,
+        offset: 42,
+    };
 
     group.bench_function("get_hot_4k_block", |b| {
         b.iter(|| {
-            let result = cache.get(42);
+            let result = cache.get(&hot_key);
             black_box(result);
         })
     });
@@ -69,16 +61,27 @@ fn bench_block_cache_insert_hot(c: &mut Criterion) {
     group.bench_function("insert_4k_block", |b| {
         b.iter_batched(
             || {
-                let mut cache = MockBlockCache::new();
+                let cache = create_basic_cache(10 * 1024 * 1024);
                 // Pre-populate to simulate hot cache
                 for i in 0..100 {
-                    cache.insert(i, make_block_data(4096));
+                    let key = BlockKey {
+                        file_name: "test.sst".to_string(),
+                        block_type: BlockType::Data,
+                        offset: i,
+                    };
+                    let block = CachedBlock { data: make_block_data(4096) };
+                    cache.insert(key, block);
                 }
                 cache
             },
-            |mut cache| {
-                let key = 1000 + (cache.data.len() as u64);
-                cache.insert(key, make_block_data(4096));
+            |cache| {
+                let key = BlockKey {
+                    file_name: "test.sst".to_string(),
+                    block_type: BlockType::Data,
+                    offset: 1000,
+                };
+                let block = CachedBlock { data: make_block_data(4096) };
+                cache.insert(key, block);
                 black_box(&cache);
             },
             criterion::BatchSize::SmallInput,
@@ -93,24 +96,34 @@ fn bench_block_cache_hit_ratio_fast(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_block_cache_hit_ratio_fast");
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let mut cache = MockBlockCache::new();
+    let cache = create_basic_cache(10 * 1024 * 1024);
     // Pre-populate
     for i in 0..100 {
-        cache.insert(i, make_block_data(1024));
+        let key = BlockKey {
+            file_name: "test.sst".to_string(),
+            block_type: BlockType::Data,
+            offset: i,
+        };
+        let block = CachedBlock { data: make_block_data(1024) };
+        cache.insert(key, block);
     }
 
-    let mut hits = 0;
-    let mut total = 0;
+    // Precompute keys for accesses (all hits for simplicity)
+    let access_keys: Vec<BlockKey> = (0..100).map(|i| BlockKey {
+        file_name: "test.sst".to_string(),
+        block_type: BlockType::Data,
+        offset: i,
+    }).collect();
 
     group.bench_function("hit_ratio_calc_100_accesses", |b| {
         b.iter(|| {
-            for i in 0..100 {
-                total += 1;
-                if cache.get(i % 100).is_some() {
+            let mut hits = 0;
+            for key in &access_keys {
+                if cache.get(key).is_some() {
                     hits += 1;
                 }
             }
-            let ratio = hits as f64 / total as f64;
+            let ratio = hits as f64 / access_keys.len() as f64;
             black_box(ratio);
         })
     });

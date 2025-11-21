@@ -11,27 +11,10 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion};
+use cntryl_midge::core::memtable::MemTable;
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
-use std::collections::BTreeMap;
 use std::hint::black_box;
-
-// Mock memtable for hot path testing
-struct MockMemtable {
-    data: BTreeMap<Bytes, Bytes>,
-}
-
-impl MockMemtable {
-    fn new() -> Self {
-        Self {
-            data: BTreeMap::new(),
-        }
-    }
-
-    fn put(&mut self, key: Bytes, value: Bytes) {
-        self.data.insert(key, value);
-    }
-}
 
 fn make_key(i: usize) -> Bytes {
     Bytes::from(format!("key_{:010}", i))
@@ -44,13 +27,15 @@ fn make_value(size: usize) -> Bytes {
 /// Benchmark small key-value insertion
 fn bench_memtable_put_key_small(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_put_key_small");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
     group.measurement_time(std::time::Duration::from_millis(200));
 
     group.bench_function("put_small_kv", |b| {
         b.iter_batched(
-            || MockMemtable::new(),
-            |mut memtable| {
-                memtable.put(make_key(42), make_value(64));
+            || MemTable::new(),
+            |memtable| {
+                memtable.put(make_key(42).as_ref(), make_value(64).as_ref());
                 black_box(&memtable);
             },
             criterion::BatchSize::SmallInput,
@@ -63,13 +48,15 @@ fn bench_memtable_put_key_small(c: &mut Criterion) {
 /// Benchmark medium key-value insertion
 fn bench_memtable_put_key_medium(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_put_key_medium");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
     group.measurement_time(std::time::Duration::from_millis(200));
 
     group.bench_function("put_medium_kv", |b| {
         b.iter_batched(
-            || MockMemtable::new(),
-            |mut memtable| {
-                memtable.put(make_key(42), make_value(1024));
+            || MemTable::new(),
+            |memtable| {
+                memtable.put(make_key(42).as_ref(), make_value(1024).as_ref());
                 black_box(&memtable);
             },
             criterion::BatchSize::SmallInput,
@@ -82,13 +69,15 @@ fn bench_memtable_put_key_medium(c: &mut Criterion) {
 /// Benchmark large key-value insertion
 fn bench_memtable_put_key_large(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_put_key_large");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
     group.measurement_time(std::time::Duration::from_millis(200));
 
     group.bench_function("put_large_kv", |b| {
         b.iter_batched(
-            || MockMemtable::new(),
-            |mut memtable| {
-                memtable.put(make_key(42), make_value(4096));
+            || MemTable::new(),
+            |memtable| {
+                memtable.put(make_key(42).as_ref(), make_value(4096).as_ref());
                 black_box(&memtable);
             },
             criterion::BatchSize::SmallInput,
@@ -101,14 +90,16 @@ fn bench_memtable_put_key_large(c: &mut Criterion) {
 /// Benchmark sequential insertions
 fn bench_memtable_seq_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_seq_insert");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(100));
     group.measurement_time(std::time::Duration::from_millis(200));
 
     group.bench_function("seq_insert_100", |b| {
         b.iter_batched(
-            || MockMemtable::new(),
-            |mut memtable| {
+            || MemTable::new(),
+            |memtable| {
                 for i in 0..100 {
-                    memtable.put(make_key(i), make_value(128));
+                    memtable.put(make_key(i).as_ref(), make_value(128).as_ref());
                 }
                 black_box(&memtable);
             },

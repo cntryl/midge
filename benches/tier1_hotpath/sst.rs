@@ -13,7 +13,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
 
 use cntryl_midge::common::codec::CompressionType;
@@ -34,6 +34,7 @@ fn shared_prefix_len(a: &[u8], b: &[u8]) -> usize {
 // ---------------------------------------------------------------------------
 fn bench_encode(c: &mut Criterion) {
     let mut g = c.benchmark_group("hotpath_sst_encode");
+    g.sampling_mode(SamplingMode::Flat);
     g.throughput(Throughput::Elements(1));
 
     let prev = b"user:1000:settings";
@@ -65,6 +66,7 @@ fn bench_encode(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 fn bench_decode(c: &mut Criterion) {
     let mut g = c.benchmark_group("hotpath_sst_decode");
+    g.sampling_mode(SamplingMode::Flat);
     g.throughput(Throughput::Elements(1));
 
     let prev = b"user:1000:settings";
@@ -88,6 +90,7 @@ fn bench_decode(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 fn bench_iterator_step(c: &mut Criterion) {
     let mut g = c.benchmark_group("hotpath_sst_iter_step");
+    g.sampling_mode(SamplingMode::Flat);
     g.throughput(Throughput::Elements(1));
 
     // Pre-build 10-entry block outside benchmarking
@@ -114,6 +117,7 @@ fn bench_iterator_step(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 fn bench_roundtrip(c: &mut Criterion) {
     let mut g = c.benchmark_group("hotpath_sst_roundtrip");
+    g.sampling_mode(SamplingMode::Flat);
     g.throughput(Throughput::Elements(1));
 
     let prev = b"user:1000:settings";
@@ -139,6 +143,7 @@ fn bench_roundtrip(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 fn bench_writer_tiny(c: &mut Criterion) {
     let mut g = c.benchmark_group("hotpath_sst_writer_tiny");
+    g.sampling_mode(SamplingMode::Flat);
     g.throughput(Throughput::Elements(10));
 
     // Precompute key/value slices

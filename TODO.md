@@ -1,10 +1,8 @@
 # TODO: Implement Stubbed Benchmark Methods
 
-This document provides a complete audit of all benchmark methods across all tiers. Stubbed methods (those currently calling `black_box` with a static value) are marked with **(STUB)** and need full implementation.
+This document provides a complete audit of all benchmark methods across all tiers. Stubbed methods (those currently calling `black_box` with a static value) are marked with  and need full implementation.
 
-## Tier 1 Hot Path Benchmarks
 
-All Tier 1 benchmarks are fully implemented. No stubs found.
 
 ### `benches/tier1_hotpath/api.rs`
 - `bench_batch_put`
@@ -97,9 +95,9 @@ All Tier 1 benchmarks are fully implemented. No stubs found.
 ## Tier 2 Subsystem Benchmarks
 
 ### `benches/tier2_subsystem/block_cache.rs`
-- `bench_block_cache_eviction_scan`
-- `bench_block_cache_fill_then_hit`
-- `bench_block_cache_hotset_rotation`
+- `bench_block_cache_eviction_scan` 
+- `bench_block_cache_fill_then_hit`  
+- `bench_block_cache_hotset_rotation` 
 
 ### `benches/tier2_subsystem/block_cache_eviction.rs`
 - `bench_block_cache_lru_eviction_1k`
@@ -155,19 +153,19 @@ All Tier 1 benchmarks are fully implemented. No stubs found.
 - `bench_manifest_apply_10k_ops`
 
 ### `benches/tier2_subsystem/manifest_large_history.rs`
-- `bench_manifest_replay_100k_entries` **(STUB)**
+- `bench_manifest_replay_100k_entries`
 
 ### `benches/tier2_subsystem/manifest_parse.rs`
 - `bench_manifest_parse_small`
 - `bench_manifest_parse_large`
 
 ### `benches/tier2_subsystem/memtable_full.rs`
-- `bench_memtable_full_scan` **(STUB)**
+- `bench_memtable_full_scan`
 - `bench_memtable_full_eviction_trigger`
 
 ### `benches/tier2_subsystem/memtable_rotate.rs`
-- `bench_memtable_rotate_small` **(STUB)**
-- `bench_memtable_rotate_large` **(STUB)**
+- `bench_memtable_rotate_small`
+- `bench_memtable_rotate_large`
 
 ### `benches/tier2_subsystem/sst.rs`
 - `bench_sst_iterator_full`
@@ -184,13 +182,13 @@ All Tier 1 benchmarks are fully implemented. No stubs found.
 - `bench_merge_iterator`
 
 ### `benches/tier2_subsystem/wal_replay.rs`
-- `bench_wal_replay_small_file` **(STUB)**
-- `bench_wal_replay_large_file` **(STUB)**
+- `bench_wal_replay_small_file`
+- `bench_wal_replay_large_file`
 - `bench_wal_replay_corrupted_tail`
 
 ### `benches/tier2_subsystem/wal_segment_rollover.rs`
-- `bench_wal_rollover_small_segments` **(STUB)**
-- `bench_wal_rollover_large_segments` **(STUB)**
+- `bench_wal_rollover_small_segments`
+- `bench_wal_rollover_large_segments`
 
 ## Tier 3 System Benchmarks
 
@@ -199,9 +197,9 @@ All Tier 1 benchmarks are fully implemented. No stubs found.
 - `bench_compact_all`
 
 ### `benches/tier3_system/contention_heavy.rs`
-- `bench_engine_heavy_write_contention` **(STUB)**
-- `bench_engine_heavy_read_contention` **(STUB)**
-- `bench_engine_mixed_contention` **(STUB)**
+- `bench_engine_heavy_write_contention` 
+- `bench_engine_heavy_read_contention` 
+- `bench_engine_mixed_contention` 
 
 ### `benches/tier3_system/durability_modes.rs`
 - `bench_durability_async_wal`
@@ -223,16 +221,16 @@ All Tier 1 benchmarks are fully implemented. No stubs found.
 - `bench_recovery_speed_comparison`
 
 ### `benches/tier3_system/scan_l0_only.rs`
-- `bench_scan_l0_direct` **(STUB)**
+- `bench_scan_l0_direct` 
 
 ### `benches/tier3_system/scan_multi_level.rs`
-- `bench_scan_multi_level_range` **(STUB)**
+- `bench_scan_multi_level_range` 
 
 ### `benches/tier3_system/startup_large.rs`
-- `bench_engine_startup_100k_sst_files` **(STUB)**
+- `bench_engine_startup_100k_sst_files` 
 
 ### `benches/tier3_system/startup_wal.rs`
-- `bench_engine_startup_from_wal` **(STUB)**
+- `bench_engine_startup_from_wal` 
 
 ## Tier 4 Integration Benchmarks
 
@@ -256,10 +254,10 @@ All Tier 1 benchmarks are fully implemented. No stubs found.
 ## Tier 5 Soak Benchmarks
 
 ### `benches/tier5_soak/compaction_backlog_growth.rs`
-- `bench_compaction_backlog_growth` **(STUB)**
+- `bench_compaction_backlog_growth` 
 
 ### `benches/tier5_soak/level_drift.rs`
-- `bench_level_drift` **(STUB)**
+- `bench_level_drift` 
 
 ### `benches/tier5_soak/space_amplification.rs`
 - `bench_space_amplification`
@@ -267,14 +265,14 @@ All Tier 1 benchmarks are fully implemented. No stubs found.
 ## Tier 6 Capacity Benchmarks
 
 ### `benches/tier6_capacity/cold_start_large.rs`
-- `bench_cold_start_large` **(STUB)**
+- `bench_cold_start_large` 
 
 ### `benches/tier6_capacity/large_dataset_compaction.rs`
-- `bench_large_dataset_compaction` **(STUB)**
+- `bench_large_dataset_compaction` 
 
 ### `benches/tier6_capacity/large_dataset_insert.rs`
-- `bench_large_dataset_insert` **(STUB)**
+- `bench_large_dataset_insert` 
 
 ### `benches/tier6_capacity/wal_growth_large.rs`
-- `bench_wal_growth_large` **(STUB)**
+- `bench_wal_growth_large` 
 

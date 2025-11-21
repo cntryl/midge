@@ -10,52 +10,10 @@
 mod criterion_helper;
 
 use bytes::Bytes;
+use cntryl_midge::sst::bloom::BloomFilterBuilder;
 use criterion::{criterion_group, criterion_main, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
-
-// Simple mock bloom filter for hot path testing
-struct MockBloomFilter {
-    bits: Vec<bool>,
-    hash_count: usize,
-}
-
-impl MockBloomFilter {
-    fn new(size: usize, hash_count: usize) -> Self {
-        Self {
-            bits: vec![false; size],
-            hash_count,
-        }
-    }
-
-    fn add(&mut self, key: &[u8]) {
-        for i in 0..self.hash_count {
-            let hash = self.hash(key, i);
-            let index = hash % self.bits.len();
-            self.bits[index] = true;
-        }
-    }
-
-    fn maybe_contains(&self, key: &[u8]) -> bool {
-        for i in 0..self.hash_count {
-            let hash = self.hash(key, i);
-            let index = hash % self.bits.len();
-            if !self.bits[index] {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn hash(&self, key: &[u8], seed: usize) -> usize {
-        // Simple hash for benchmarking
-        let mut h = seed as u64;
-        for &b in key {
-            h = h.wrapping_mul(31).wrapping_add(b as u64);
-        }
-        h as usize
-    }
-}
 
 fn make_test_key(i: usize) -> Bytes {
     Bytes::from(format!("key_{:010}", i))
@@ -66,22 +24,23 @@ fn bench_bloom_maybe_contains(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_bloom_maybe_contains");
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let mut filter = MockBloomFilter::new(1024, 3);
+    let mut builder = BloomFilterBuilder::with_bits_per_key(10);
     // Pre-populate with some keys
     for i in 0..100 {
-        filter.add(&make_test_key(i));
+        builder.add_key(&make_test_key(i));
     }
+    let filter = builder.finish();
 
     group.bench_function("maybe_contains_hit", |b| {
         b.iter(|| {
-            let result = filter.maybe_contains(&make_test_key(42));
+            let result = filter.may_contain(&make_test_key(42));
             black_box(result);
         })
     });
 
     group.bench_function("maybe_contains_miss", |b| {
         b.iter(|| {
-            let result = filter.maybe_contains(&make_test_key(1000)); // Not in filter
+            let result = filter.may_contain(&make_test_key(1000)); // Not in filter
             black_box(result);
         })
     });
@@ -89,49 +48,39 @@ fn bench_bloom_maybe_contains(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark hash computation
+/// Benchmark hash computation (via may_contain on miss)
 fn bench_bloom_compute_hashes(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_bloom_compute_hashes");
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let filter = MockBloomFilter::new(1024, 3);
-    let key = make_test_key(42);
+    let mut builder = BloomFilterBuilder::with_bits_per_key(10);
+    for i in 0..100 {
+        builder.add_key(&make_test_key(i));
+    }
+    let filter = builder.finish();
 
-    group.bench_function("compute_3_hashes", |b| {
+    group.bench_function("compute_hashes_via_miss", |b| {
         b.iter(|| {
-            let mut hashes = Vec::with_capacity(3);
-            for i in 0..3 {
-                hashes.push(filter.hash(&key, i));
-            }
-            black_box(hashes);
+            let result = filter.may_contain(&make_test_key(1000)); // Miss, involves hashing
+            black_box(result);
         })
     });
 
     group.finish();
 }
 
-/// Benchmark hot filter check (pre-computed hashes)
+/// Benchmark hot filter check (may_contain on hit)
 fn bench_bloom_filter_hot_check(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_bloom_filter_hot_check");
     group.measurement_time(std::time::Duration::from_millis(200));
 
-    let mut filter = MockBloomFilter::new(1024, 3);
-    filter.add(&make_test_key(42));
+    let mut builder = BloomFilterBuilder::with_bits_per_key(10);
+    builder.add_key(&make_test_key(42));
+    let filter = builder.finish();
 
-    // Pre-compute hashes for hot path
-    let key = make_test_key(42);
-    let hashes: Vec<usize> = (0..3).map(|i| filter.hash(&key, i)).collect();
-
-    group.bench_function("hot_check_precomputed", |b| {
+    group.bench_function("hot_check_hit", |b| {
         b.iter(|| {
-            let mut result = true;
-            for &hash in &hashes {
-                let index = hash % filter.bits.len();
-                if !filter.bits[index] {
-                    result = false;
-                    break;
-                }
-            }
+            let result = filter.may_contain(&make_test_key(42));
             black_box(result);
         })
     });

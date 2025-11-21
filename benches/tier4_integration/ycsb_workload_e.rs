@@ -1,164 +1,218 @@
-//! YCSB Workload E: Range Scans
+//! YCSB Workload E — Short Range Scan (Read-Only)
 //!
-//! **Target Runtime:** ~1 minute
-//! **Run Frequency:** Nightly CI
+//! Models real systems that perform:
+//! - short forward scans (10–50 keys)
+//! - hot-key distribution (Zipfian)
 //!
-//! Benchmarks range query workload:
-//! - 95% short range scans (10-100 records)
-//! - 5% inserts (to maintain dataset size)
-//! - Scales by thread count (1, 2, 8) and column families (1-16)
-//! - Realistic for analytical/reporting queries
+//! Features:
+//! - 100% read-only
+//! - realistic range iteration
+//! - p50 / p99 / p99.9 latency
 //!
-//! **Enhanced with Latency Tracking:**
-//! - Measures p50, p99, p99.9 scan operation latencies
-//! - Reports range scan performance characteristics
+//! Zero-allocation rules:
+//! - No string formatting in hot loop
+//! - Uses PREGEN_KEYS and pre-generated scan ranges
+//! - No heap allocations
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
+
 #[path = "ycsb_common.rs"]
 mod ycsb_common;
 
-use cntryl_midge::api::query::Query;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::MidgeEngine;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
+use hdrhistogram::Histogram;
+
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
+
 use ycsb_common::*;
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
-const OPS_PER_THREAD: usize = 5_000;
-const RECORD_COUNT: usize = 25_000;
-const SCAN_LENGTH_MIN: usize = 10;
-const SCAN_LENGTH_MAX: usize = 100;
+const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
+const SCAN_LENGTH: usize = 50;
+const RANGE_COUNT: usize = OPS_PER_ITER;
 
 // ============================================================================
-// Setup and Workload Logic
+// Latency stats
 // ============================================================================
 
-fn setup_workload_e_db(cf_count: usize) -> MidgeEngine {
-    let path = std::env::temp_dir().join(format!("midge_ycsb_e_{}", cf_count));
-    let _ = std::fs::remove_dir_all(&path);
-
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path },
-        memtable_size: 8 * 1024 * 1024,
-        enable_compaction: false,
-        wal_sync: false,
-        ..Default::default()
-    };
-
-    let engine = MidgeEngine::open(opts).unwrap();
-
-    // Create column families
-    for i in 1..cf_count {
-        let _ = engine.create_column_family(&format!("cf{}", i), Default::default());
-    }
-
-    // Load initial dataset
-    load_data(&engine, RECORD_COUNT);
-
-    engine
+#[derive(Clone)]
+struct LatencyStats {
+    p50: u64,
+    p99: u64,
+    p99_9: u64,
 }
 
-/// Execute workload E: 95% scans, 5% inserts
-fn run_workload_e(engine: &MidgeEngine, operations: usize, cf_count: usize) -> usize {
+// ============================================================================
+// Core workload logic
+// ============================================================================
+
+fn run_workload_e(
+    engine: &MidgeEngine,
+    ranges: &[(Bytes, Bytes)],
+    cf_count: usize,
+    seed: u64,
+) -> LatencyStats {
     let cf_list = engine.list_column_families();
-    let mut rng = StdRng::seed_from_u64(54321);
-    let zipfian = ZipfianGenerator::new(RECORD_COUNT, 0.99);
-    let mut scan_count = 0;
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut hist = Histogram::<u64>::new(3).unwrap();
 
-    for _ in 0..operations {
-        let cf_index = rng.gen_range(0..cf_count);
-        let cf = &cf_list[cf_index];
+    for (start_key, end_key) in ranges.iter() {
+        let cf = &cf_list[rng.gen_range(0..cf_count)];
 
-        if rng.random::<f64>() < 0.95 {
-            // Scan operation (95%)
-            let scan_start = zipfian.next(&mut rng);
-            let scan_len = rng.gen_range(SCAN_LENGTH_MIN..=SCAN_LENGTH_MAX);
-            let start_key = generate_key(scan_start);
-            let end_key = generate_key(scan_start + scan_len);
+        let start = Instant::now();
 
-            let query = Query::new().start_key(start_key).end_key(end_key);
-            let _ = black_box(engine.scan(cf, query).unwrap_or_default());
-            scan_count += 1;
-        } else {
-            // Insert operation (5%)
-            let new_id = RECORD_COUNT + rng.gen_range(0..10_000); // Insert new keys
-            let key = generate_key(new_id);
-            let value = generate_value(new_id, rng.random());
-            let _ = engine.put(cf, &key, &value);
+        // Execute the scan
+        let mut iter = engine.scan(cf, start_key, end_key).unwrap();
+        while let Some(item) = iter.next() {
+            black_box(item);
         }
+
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let _ = hist.record(elapsed_us.max(1));
     }
 
-    scan_count
+    LatencyStats {
+        p50: hist.value_at_percentile(50.0),
+        p99: hist.value_at_percentile(99.0),
+        p99_9: hist.value_at_percentile(99.9),
+    }
+}
+
+fn run_workload_e_concurrent(
+    engine: Arc<MidgeEngine>,
+    ranges: Arc<Vec<(Bytes, Bytes)>>,
+    ops_per_thread: usize,
+    thread_id: usize,
+    cf_count: usize,
+) -> LatencyStats {
+    let cf_list = engine.list_column_families();
+    let mut rng = make_thread_rng(thread_id, 0xABCDEF01);
+
+    let mut hist = Histogram::<u64>::new(3).unwrap();
+
+    for i in 0..ops_per_thread {
+        let (start_key, end_key) = &ranges[i];
+        let cf = &cf_list[rng.gen_range(0..cf_count)];
+
+        let start = Instant::now();
+
+        let mut iter = engine.scan(cf, start_key, end_key).unwrap();
+        while let Some(item) = iter.next() {
+            black_box(item);
+        }
+
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        let _ = hist.record(elapsed_us.max(1));
+    }
+
+    LatencyStats {
+        p50: hist.value_at_percentile(50.0),
+        p99: hist.value_at_percentile(99.0),
+        p99_9: hist.value_at_percentile(99.9),
+    }
 }
 
 // ============================================================================
-// Benchmarks
+// Benchmark driver
 // ============================================================================
 
-fn bench_workload_e_single_thread(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ycsb_workload_e_single");
+fn bench_workload_e(c: &mut Criterion) {
+    // Init OnceLock globals
+    init_ycsb_globals();
 
-    for &cf_count in &[1, 2, 4, 8, 16] {
-        group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(cf_count),
-            &cf_count,
-            |b, &cf_count| {
-                b.iter_batched(
-                    || setup_workload_e_db(cf_count),
-                    |engine| {
-                        let scans = run_workload_e(&engine, OPS_PER_THREAD, cf_count);
-                        black_box(scans);
-                    },
-                    criterion::BatchSize::SmallInput,
-                )
-            },
-        );
-    }
+    let scan_ranges = pregen_scan_ranges(RANGE_COUNT, SCAN_LENGTH);
+    let scan_ranges = Arc::new(scan_ranges);
 
-    group.finish();
-}
+    let mut group = c.benchmark_group("ycsb_workload_e_cf_variants");
+    group.throughput(Throughput::Elements(OPS_PER_ITER as u64));
 
-fn bench_workload_e_multi_thread(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ycsb_workload_e_multi");
+    let scenarios = ["fs_nosync", "cloud_nosync"];
 
-    for &thread_count in &[2, 8] {
-        for &cf_count in &[1, 4, 8, 16] {
-            let total_ops = thread_count * OPS_PER_THREAD;
-            group.throughput(Throughput::Elements(total_ops as u64));
+    for &cf_count in CF_COUNTS {
+        // Storage variations
+        for &scenario in &scenarios {
+            let engine = match scenario {
+                "fs_nosync" => {
+                    let (e, _t) = setup_engine_fs_nosync();
+                    e
+                }
+                "cloud_nosync" => {
+                    let (e, _b) = setup_engine_cloud_nosync_with_latency(1);
+                    e
+                }
+                _ => unreachable!(),
+            };
+
+            for i in 1..cf_count {
+                let _ =
+                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
+            }
+
+            load_full_dataset(&engine);
+
+            let ranges_ref = scan_ranges.clone();
 
             group.bench_with_input(
-                BenchmarkId::new(format!("t{}", thread_count), cf_count),
-                &(thread_count, cf_count),
-                |b, &(thread_count, cf_count)| {
-                    b.iter_batched(
-                        || setup_workload_e_db(cf_count),
-                        |engine| {
-                            let engine = Arc::new(engine);
+                BenchmarkId::new(format!("{scenario}_cf{cf_count}"), "range_scan"),
+                &cf_count,
+                |b, &_cf| {
+                    b.iter(|| {
+                        let stats =
+                            run_workload_e(&engine, ranges_ref.as_slice(), cf_count, 0xFEED_CAFE);
+                        black_box(stats)
+                    })
+                },
+            );
+        }
 
-                            thread::scope(|scope| {
-                                for _ in 0..thread_count {
-                                    let e = Arc::clone(&engine);
+        // Concurrent: fs_nosync only
+        for &threads in &THREAD_COUNTS {
+            let (engine, _t) = setup_engine_fs_nosync();
+            for i in 1..cf_count {
+                let _ =
+                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
+            }
+            load_full_dataset(&engine);
 
-                                    scope.spawn(move || {
-                                        let _ = run_workload_e(&e, OPS_PER_THREAD, cf_count);
-                                    });
-                                }
-                            });
+            let engine = Arc::new(engine);
+            let ranges = scan_ranges.clone();
+            let ops_per_thread = OPS_PER_ITER / threads;
 
-                            black_box(());
-                        },
-                        criterion::BatchSize::SmallInput,
-                    )
+            group.bench_with_input(
+                BenchmarkId::new(format!("concurrent_cf{cf_count}"), threads),
+                &threads,
+                |b, &_t| {
+                    b.iter(|| {
+                        let handles: Vec<_> = (0..threads)
+                            .map(|tid| {
+                                let engine = Arc::clone(&engine);
+                                let ranges = ranges.clone();
+
+                                thread::spawn(move || {
+                                    run_workload_e_concurrent(
+                                        engine,
+                                        ranges,
+                                        ops_per_thread,
+                                        tid,
+                                        cf_count,
+                                    )
+                                })
+                            })
+                            .collect();
+
+                        let _stats: Vec<_> =
+                            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+                        black_box(_stats)
+                    })
                 },
             );
         }
@@ -167,51 +221,9 @@ fn bench_workload_e_multi_thread(c: &mut Criterion) {
     group.finish();
 }
 
-// ============================================================================
-// Scan Length Impact
-// ============================================================================
-
-/// Measure how scan length affects throughput
-fn bench_workload_e_scan_lengths(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ycsb_workload_e_scan_lengths");
-
-    for &scan_max_len in &[10, 50, 100, 500] {
-        group.bench_with_input(
-            BenchmarkId::new("max_scan_len", scan_max_len),
-            &scan_max_len,
-            |b, &max_len| {
-                b.iter_batched(
-                    || setup_workload_e_db(4),
-                    |engine| {
-                        let cf_list = engine.list_column_families();
-                        let cf = &cf_list[0];
-                        let mut rng = StdRng::seed_from_u64(99999);
-                        let zipfian = ZipfianGenerator::new(RECORD_COUNT, 0.99);
-
-                        for _ in 0..2_000 {
-                            let start_key_id = zipfian.next(&mut rng);
-                            let start_key = generate_key(start_key_id);
-                            let end_key = generate_key(start_key_id + max_len);
-
-                            let query = Query::new().start_key(start_key).end_key(end_key);
-                            let _ = black_box(engine.scan(cf, query).unwrap_or_default());
-                        }
-                    },
-                    criterion::BatchSize::SmallInput,
-                )
-            },
-        );
-    }
-
-    group.finish();
-}
-
 criterion_group! {
     name = ycsb_workload_e;
     config = criterion_config();
-    targets =
-        bench_workload_e_single_thread,
-        bench_workload_e_multi_thread,
-        bench_workload_e_scan_lengths
+    targets = bench_workload_e
 }
 criterion_main!(ycsb_workload_e);
