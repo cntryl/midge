@@ -8,7 +8,6 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
 
 #[test]
-#[ignore] // TODO: Requires full SST-level delete range support
 fn should_delete_keys_across_multiple_levels_when_delete_range_applied() {
     // Arrange
     let dir = test_temp_dir();
@@ -42,7 +41,6 @@ fn should_delete_keys_across_multiple_levels_when_delete_range_applied() {
 }
 
 #[test]
-#[ignore] // TODO: Requires SST-level delete range overlap resolution
 fn should_resolve_overlapping_ranges_correctly_when_multiple_delete_ranges_issued() {
     // Arrange
     let dir = test_temp_dir();
@@ -104,7 +102,6 @@ fn should_handle_point_writes_and_range_deletes_correctly_when_interleaved() {
 }
 
 #[test]
-#[ignore] // TODO: Requires compaction to apply range tombstones
 fn should_apply_range_tombstones_during_compaction_when_compacting_levels() {
     // Arrange
     let dir = test_temp_dir();
@@ -136,7 +133,6 @@ fn should_apply_range_tombstones_during_compaction_when_compacting_levels() {
 }
 
 #[test]
-#[ignore] // TODO: Requires snapshot-aware range tombstone retention
 fn should_retain_range_tombstones_when_snapshots_exist() {
     // Arrange
     let dir = test_temp_dir();
@@ -170,7 +166,6 @@ fn should_retain_range_tombstones_when_snapshots_exist() {
 }
 
 #[test]
-#[ignore] // TODO: Requires SST-level delete range support
 fn should_handle_large_range_deletion_efficiently_when_spanning_many_keys() {
     // Arrange
     let dir = test_temp_dir();
@@ -266,7 +261,6 @@ fn should_apply_range_deletes_in_memtable_and_sst_when_querying() {
 }
 
 #[test]
-#[ignore] // TODO: Requires compaction to preserve range tombstone priority
 fn should_prevent_key_resurrection_when_range_delete_applied_before_compaction() {
     // Arrange
     let dir = test_temp_dir();

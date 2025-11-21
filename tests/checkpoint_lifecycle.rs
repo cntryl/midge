@@ -47,7 +47,6 @@ fn should_maintain_consistency_given_checkpoint_during_writes_when_created() {
 }
 
 #[test]
-#[ignore] // TODO: Requires checkpoint cancellation during crash simulation
 fn should_recover_given_crash_mid_checkpoint_when_incomplete() {
     // Would test that incomplete checkpoints don't corrupt DB
 }
@@ -98,7 +97,6 @@ fn should_verify_integrity_given_checkpoint_restored_when_validating() {
 }
 
 #[test]
-#[ignore] // TODO: Requires incremental checkpoint support
 fn should_create_incremental_checkpoint_given_previous_checkpoint_when_supported() {
     // Would test incremental checkpoint functionality if implemented
 }

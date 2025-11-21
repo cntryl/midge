@@ -133,7 +133,6 @@ fn should_handle_duplicate_wal_replay_idempotently_when_recovering_twice() {
 }
 
 #[test]
-#[ignore] // TODO: Requires orphaned SST detection logic
 fn should_discover_ssts_given_out_of_order_recovery_when_manifest_incomplete() {
     // Arrange - manually create SST without manifest entry
     let dir = test_temp_dir();
@@ -168,7 +167,6 @@ fn should_discover_ssts_given_out_of_order_recovery_when_manifest_incomplete() {
 }
 
 #[test]
-#[ignore] // TODO: Requires manifest rebuild from SST discovery
 fn should_rebuild_manifest_given_missing_manifest_when_ssts_present() {
     // Arrange
     let dir = test_temp_dir();

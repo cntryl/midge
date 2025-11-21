@@ -8,13 +8,11 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
 
 #[test]
-#[ignore] // TODO: Requires compaction blocking based on oldest snapshot
 fn should_block_compaction_given_long_lived_snapshot_when_data_needed() {
     // Would test that compaction retains data needed by old snapshots
 }
 
 #[test]
-#[ignore] // TODO: Requires memory metrics for snapshot overhead tracking
 fn should_track_memory_overhead_given_multiple_snapshots_when_created() {
     // Would test memory consumption scales with snapshot count
 }
@@ -93,7 +91,6 @@ fn should_preserve_data_given_snapshot_and_compaction_when_interacting() {
 }
 
 #[test]
-#[ignore] // TODO: Requires snapshot expiration/cleanup API
 fn should_expire_snapshot_given_ttl_when_time_elapsed() {
     // Would test automatic snapshot cleanup after TTL
 }

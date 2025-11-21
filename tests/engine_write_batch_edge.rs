@@ -161,7 +161,6 @@ fn should_propagate_error_given_disk_full_when_writing_batch() {
 }
 
 #[test]
-#[ignore] // Requires explicit error injection in write path
 fn should_rollback_batch_given_write_error() {
     // TODO: Implement when write error injection available
 }

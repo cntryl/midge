@@ -8,7 +8,6 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 use common::test_temp_dir;
 
 #[test]
-#[ignore] // TODO: Requires safe concurrent compaction + iteration
 fn should_continue_safely_given_compaction_when_iterating() {
     // Arrange
     let dir = test_temp_dir();
@@ -72,7 +71,6 @@ fn should_skip_deleted_key_when_seeking_after_delete() {
 }
 
 #[test]
-#[ignore] // TODO: Requires SST file removal detection during iteration
 fn should_handle_gracefully_given_sst_removed_when_iterating() {
     // Arrange
     let dir = test_temp_dir();

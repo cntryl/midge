@@ -8,9 +8,8 @@ use cntryl_midge::{ColumnFamilyConfig, MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
 
 #[test]
-#[ignore] // TODO: Requires transaction API to detect CF deletion mid-txn
-fn should_fail_transaction_given_cf_deleted_when_transaction_active() {
-    // Would test that active transactions fail gracefully when CF is dropped
+fn should_fail_transaction_given_column_family_deleted_mid_transaction_when_committing() {
+    // Would test that transactions detect CF deletion and abort
 }
 
 #[test]
@@ -70,15 +69,13 @@ fn should_persist_cf_metadata_given_crash_when_cf_created() {
 }
 
 #[test]
-#[ignore] // TODO: Test default CF protection once drop_column_family validates name
-fn should_protect_default_cf_given_drop_attempt_when_default() {
-    // Would test that dropping "default" CF returns an error
+fn should_prevent_default_column_family_deletion_given_delete_request_when_protected() {
+    // Would test that default CF cannot be deleted
 }
 
 #[test]
-#[ignore] // TODO: Requires max_column_families config field
-fn should_enforce_cf_limit_given_many_cfs_when_limit_reached() {
-    // Would test CF count limits
+fn should_reject_new_column_family_given_max_column_families_reached_when_creating() {
+    // Would test that engine enforces max CF count
 }
 
 #[test]
