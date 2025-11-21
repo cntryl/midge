@@ -71,6 +71,7 @@ impl VersionManager {
         tracing::info!("Version manager actor started");
 
         while let Ok(request) = rx.recv() {
+            let start = std::time::Instant::now();
             let result = Self::process_edit(
                 &version_set,
                 &db_path,
@@ -78,6 +79,8 @@ impl VersionManager {
                 test_hooks.as_ref(),
                 mem_mode,
             );
+
+            tracing::trace!(dur_ms = %start.elapsed().as_millis(), "version_manager.process_edit duration (ms)");
 
             // Send response if caller is waiting
             if let Some(response_tx) = request.response_tx {
@@ -121,14 +124,21 @@ impl VersionManager {
     /// Returns immediately - edit is queued for processing.
     pub fn apply_edit_async(&self, edit: VersionEdit) -> MidgeResult<()> {
         let tx_guard = self.tx.lock();
-        tx_guard
+        let started = std::time::Instant::now();
+        let res = tx_guard
             .as_ref()
             .ok_or_else(|| MidgeError::internal("version manager stopped"))?
             .send(VersionEditRequest {
                 edit,
                 response_tx: None,
             })
-            .map_err(|_| MidgeError::internal("version manager stopped"))
+            .map_err(|_| MidgeError::internal("version manager stopped"));
+
+        if res.is_ok() {
+            tracing::trace!(dur_ms = %started.elapsed().as_millis(), "version_manager.apply_edit_async send duration (ms)");
+        }
+
+        res
     }
 
     /// Apply a version edit synchronously.
@@ -137,6 +147,7 @@ impl VersionManager {
         let (response_tx, response_rx) = bounded(1);
 
         let tx_guard = self.tx.lock();
+        let started = std::time::Instant::now();
         tx_guard
             .as_ref()
             .ok_or_else(|| MidgeError::internal("version manager stopped"))?
@@ -145,11 +156,18 @@ impl VersionManager {
                 response_tx: Some(response_tx),
             })
             .map_err(|_| MidgeError::internal("version manager stopped"))?;
+        tracing::trace!(send_ms = %started.elapsed().as_millis(), "version_manager.apply_edit_sync send duration (ms)");
         drop(tx_guard); // Release lock before blocking on response
 
-        response_rx
+        // Wait for the actor to process the request and send a response.
+        let started_recv = std::time::Instant::now();
+        let res = response_rx
             .recv()
             .map_err(|_| MidgeError::internal("version manager response lost"))?
+        ;
+        tracing::trace!(recv_ms = %started_recv.elapsed().as_millis(), "version_manager.apply_edit_sync recv duration (ms)");
+
+        res
     }
 
     /// Shutdown the version manager and wait for pending edits.

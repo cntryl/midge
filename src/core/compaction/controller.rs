@@ -113,6 +113,7 @@ impl CompactionController {
         let handle = thread::Builder::new()
             .name("midge-compaction-worker".to_string())
             .spawn(move || {
+                tracing::info!(interval_ms = interval.as_millis(), "Compaction worker started");
                 // Pending work items (manual + automatic).
                 let mut work_queue: VecDeque<WorkItem> = VecDeque::new();
                 // Number of compactions that are queued or in-flight.
@@ -121,64 +122,47 @@ impl CompactionController {
                 let mut barrier_waiters: Vec<channel::Sender<()>> = Vec::new();
 
                 loop {
-                    // 1) Drain all pending control messages.
-                    while let Ok(msg) = rx.try_recv() {
-                        match msg {
-                            CompactionMsg::CompactLevel { cf_id, level } => {
-                                let manifest = Manifest::load(&db_path).unwrap_or_default();
-
-                                let cf_config = manifest
-                                    .column_families
-                                    .iter()
-                                    .find(|cf| cf.id == cf_id)
-                                    .and_then(|cf| cf.config.clone())
-                                    .unwrap_or_default();
-
-                                if let Some(plan) = compactor.pick_manual_compaction_level(
-                                    &manifest.files,
-                                    cf_id,
-                                    level,
-                                    cf_config.level_size_multiplier,
-                                    cf_config.target_file_size,
-                                ) {
-                                    work_queue.push_back(WorkItem { plan });
-                                    inflight += 1;
-                                }
-                            }
-                            CompactionMsg::CompactRange {
-                                cf_id,
-                                start_key,
-                                end_key,
-                            } => {
-                                let manifest = Manifest::load(&db_path).unwrap_or_default();
-
-                                let cf_config = manifest
-                                    .column_families
-                                    .iter()
-                                    .find(|cf| cf.id == cf_id)
-                                    .and_then(|cf| cf.config.clone())
-                                    .unwrap_or_default();
-
-                                if let Some(plan) = compactor.pick_manual_compaction_range(
-                                    &manifest.files,
-                                    cf_id,
-                                    start_key.as_deref(),
-                                    end_key.as_deref(),
-                                    cf_config.level_size_multiplier,
-                                    cf_config.target_file_size,
-                                ) {
-                                    work_queue.push_back(WorkItem { plan });
-                                    inflight += 1;
-                                }
-                            }
-                            CompactionMsg::Barrier { reply } => {
-                                // Enqueue barrier waiter; we'll notify once we are truly idle.
-                                barrier_waiters.push(reply);
-                            }
-                            CompactionMsg::Shutdown => {
-                                debug!("Compaction shutdown requested");
+                    let tick_start = std::time::Instant::now();
+                    // Step 1: Block until the next message or timeout (interval). This
+                    // reduces busy polling and ensures immediate responsiveness to messages.
+                    match rx.recv_timeout(interval) {
+                        Ok(msg) => {
+                            tracing::trace!(wait_ms = %tick_start.elapsed().as_millis(), "compaction received message after wait (ms)");
+                            // We received a control message. Process the message and
+                            // drain any additional messages available to batch work.
+                            if Self::handle_compaction_msg(msg, &db_path, &compactor, &mut work_queue, &mut inflight, &mut barrier_waiters) {
+                                // Shutdown requested
                                 return;
                             }
+                            while let Ok(msg) = rx.try_recv() {
+                                if Self::handle_compaction_msg(msg, &db_path, &compactor, &mut work_queue, &mut inflight, &mut barrier_waiters) {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(channel::RecvTimeoutError::Timeout) => {
+                            tracing::trace!(wait_ms = %tick_start.elapsed().as_millis(), "compaction recv timeout tick (ms)");
+                            // Periodic tick: if we are idle, attempt automatic compaction.
+                            if work_queue.is_empty() {
+                                let manifest = Manifest::load(&db_path).unwrap_or_default();
+                                let default_cf_config = manifest
+                                    .column_families
+                                    .first()
+                                    .and_then(|cf| cf.config.clone())
+                                    .unwrap_or_default();
+                                if let Some(plan) = compactor.pick_leveled_compaction(
+                                    &manifest.files, 0, default_cf_config.level_size_multiplier, default_cf_config.target_file_size,
+                                ) {
+                                    tracing::info!(cf_id = plan.cf_id, source_level = plan.source_level, target_level = plan.target_level, input_count = plan.input_files.len(), "automatic compaction plan selected");
+                                    work_queue.push_back(WorkItem { plan });
+                                    inflight += 1;
+                                }
+                            }
+                        }
+                        Err(channel::RecvTimeoutError::Disconnected) => {
+                            tracing::warn!("compaction worker channel disconnected unexpectedly");
+                            debug!("Compaction receiver disconnected");
+                            return;
                         }
                     }
 
@@ -226,8 +210,7 @@ impl CompactionController {
                             }
                         }
 
-                        // Sleep until the next interval and then re-check.
-                        thread::sleep(interval);
+                        // No queued work: loop back and wait on the channel (recv_timeout)
                         continue;
                     }
 
@@ -256,7 +239,7 @@ impl CompactionController {
                         false
                     };
 
-                    let result = (|| -> Result<(), crate::error::MidgeError> {
+                        let result = (|| -> Result<(), crate::error::MidgeError> {
                         if should_fail {
                             return Err(crate::error::MidgeError::internal(
                                 "Compaction failed midway (test hook)",
@@ -320,7 +303,7 @@ impl CompactionController {
                         let write_res =
                             super::executor::write_compacted_sst(&ctx, &deduped, plan.cf_id)?;
 
-                        if let Some((_path, meta)) = write_res {
+                            if let Some((_path, meta)) = write_res {
                             // Update manifest and version_set atomically via VersionManager.
                             if let Some(ref hooks) = test_hooks {
                                 hooks.maybe_pause_compaction(
@@ -329,14 +312,22 @@ impl CompactionController {
                             }
 
                             let combined = crate::core::manifest::VersionEdit::CombinedAddRemove { add: Box::new(meta.clone()), remove: plan.input_files.clone() };
-                            version_manager.apply_edit_sync(combined)?;
+                            {
+                                let vm_start = std::time::Instant::now();
+                                version_manager.apply_edit_sync(combined)?;
+                                tracing::trace!(dur_ms = %vm_start.elapsed().as_millis(), "version_manager.apply_edit_sync duration (ms)");
+                            }
                             // Also update the manifest's persisted sequence to reflect the
                             // largest sequence present in the newly written compacted SST.
-                            if let Some(lg) = meta.largest_seq {
+                                if let Some(lg) = meta.largest_seq {
                                 let current_seq = Manifest::load_with_retry(&db_path, 5, std::time::Duration::from_millis(10)).unwrap_or_default().last_persisted_sequence;
                                 let seq_to_set = std::cmp::max(current_seq, lg);
                                 let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence { sequence: seq_to_set };
-                                version_manager.apply_edit_sync(seq_edit)?;
+                                {
+                                    let vm2_start = std::time::Instant::now();
+                                    version_manager.apply_edit_sync(seq_edit)?;
+                                    tracing::trace!(dur_ms = %vm2_start.elapsed().as_millis(), "version_manager.apply_edit_sync UpdateSequence duration (ms)");
+                                }
                             }
 
                             if let Some(ref hooks) = test_hooks {
@@ -409,6 +400,68 @@ impl CompactionController {
         })
     }
 
+    /// Internal helper to process a single compaction control message. Returns
+    /// true if the worker should shut down immediately (Shutdown received).
+    fn handle_compaction_msg(
+        msg: CompactionMsg,
+        db_path: &PathBuf,
+        compactor: &Compactor,
+        work_queue: &mut VecDeque<WorkItem>,
+        inflight: &mut usize,
+        barrier_waiters: &mut Vec<channel::Sender<()>>,
+    ) -> bool {
+        match msg {
+            CompactionMsg::CompactLevel { cf_id, level } => {
+                let manifest = Manifest::load(&db_path).unwrap_or_default();
+                let cf_config = manifest
+                    .column_families
+                    .iter()
+                    .find(|cf| cf.id == cf_id)
+                    .and_then(|cf| cf.config.clone())
+                    .unwrap_or_default();
+                if let Some(plan) = compactor.pick_manual_compaction_level(
+                    &manifest.files,
+                    cf_id,
+                    level,
+                    cf_config.level_size_multiplier,
+                    cf_config.target_file_size,
+                ) {
+                    work_queue.push_back(WorkItem { plan });
+                    *inflight += 1;
+                }
+            }
+            CompactionMsg::CompactRange { cf_id, start_key, end_key } => {
+                let manifest = Manifest::load(&db_path).unwrap_or_default();
+                let cf_config = manifest
+                    .column_families
+                    .iter()
+                    .find(|cf| cf.id == cf_id)
+                    .and_then(|cf| cf.config.clone())
+                    .unwrap_or_default();
+                if let Some(plan) = compactor.pick_manual_compaction_range(
+                    &manifest.files,
+                    cf_id,
+                    start_key.as_deref(),
+                    end_key.as_deref(),
+                    cf_config.level_size_multiplier,
+                    cf_config.target_file_size,
+                ) {
+                    work_queue.push_back(WorkItem { plan });
+                    *inflight += 1;
+                }
+            }
+            CompactionMsg::Barrier { reply } => {
+                barrier_waiters.push(reply);
+            }
+            CompactionMsg::Shutdown => {
+                debug!("Compaction shutdown requested");
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Request compaction of a specific level in a column family.
     ///
     /// Sends a manual compaction request to the background worker. This is non-blocking
@@ -467,6 +520,7 @@ impl CompactionController {
                     match r2.recv_timeout(std::time::Duration::from_millis(50)) {
                         Ok(()) => {
                             // Still idle after stability period - we're done
+                                tracing::trace!(wait_ms = %start_time.elapsed().as_millis(), "Compaction wait_until_idle completed (ms)");
                             return Ok(());
                         }
                         Err(channel::RecvTimeoutError::Timeout) => {

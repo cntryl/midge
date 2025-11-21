@@ -45,7 +45,7 @@ benches/
 │   ├── basic.rs      # Basic engine operations
 │   └── insert.rs     # Bulk insert performance
 │
-├── hotpath/          # Tier 1 — Hot Path Micro-benchmarks
+├── tier1_hotpath/    # Tier 1 — Hot Path Micro-benchmarks
 │   ├── api.rs        # API entry point overhead
 │   ├── cache.rs      # Block cache hit/miss patterns
 │   ├── index.rs      # Index lookup micro-benchmarks
@@ -55,13 +55,13 @@ benches/
 │   ├── tlv.rs        # TLV encoding/decoding
 │   └── wal.rs        # WAL write overhead
 │
-├── subsystem/        # Tier 2-3 — Subsystem & Integration Benchmarks
+├── tier2_subsystem/  # Tier 2 — Subsystem Benchmarks
 │   ├── engine_basic.rs            # Tier 1-2: CRUD (put/get/delete, write modes)
 │   ├── engine_advanced.rs         # Tier 2: TTL, CF scaling, large values, delete-heavy
 │   ├── concurrency_stress.rs      # Tier 3: Concurrent writers, read/write contention, multi-CF
 │   └── isolation_mvcc.rs          # Tier 3: Snapshots, MVCC, transactions, compaction interaction
 │
-├── system/           # Tier 3 — System-Level Benchmarks
+├── tier3_system/     # Tier 3 — System-Level Benchmarks
 │   ├── compaction.rs       # Full compaction cycles
 │   ├── recovery.rs         # Crash recovery & WAL replay
 │   ├── durability_modes.rs # WAL sync modes comparison
@@ -81,7 +81,7 @@ benches/
 
 ## Benchmark Tiers
 
-### Tier 1 — Hot Path Micro-benchmarks (hotpath/)
+### Tier 1 — Hot Path Micro-benchmarks (tier1_hotpath/)
 
 **Target Runtime:** < 5 seconds  
 **Run Frequency:** CI / Pre-commit
@@ -91,7 +91,7 @@ Micro-benchmarks focused on individual components with minimal setup overhead:
 - Subsystem overhead analysis
 - Optimal case performance baseline
 
-### Tier 2-3 — Subsystem Benchmarks (subsystem/)
+### Tier 2 — Subsystem Benchmarks (tier2_subsystem/)
 
 **Target Runtime:** < 30 seconds total (4 separate benchmarks)  
 **Run Frequency:** Daily CI / Nightly
@@ -105,7 +105,7 @@ Integrated benchmarks that test multiple components together:
 | **concurrency_stress.rs** | 3 | ~10s | Concurrent puts (1-16 threads), read/write contention, compaction pressure, concurrent deletes, multi-CF scaling |
 | **isolation_mvcc.rs** | 3 | ~15s | Snapshot stress, transaction isolation, MVCC overhead, baseline latency (p50/p99), compaction amplification, read interference during compaction |
 
-### Tier 3 — System Benchmarks (system/)
+### Tier 3 — System Benchmarks (tier3_system/)
 
 **Target Runtime:** Varies (5-60s per workload)  
 **Run Frequency:** Nightly / Release validation

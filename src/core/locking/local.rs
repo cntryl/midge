@@ -120,6 +120,7 @@ impl DbLock for LocalFileLock {
     fn try_acquire(&mut self, timeout: Duration) -> MidgeResult<()> {
         let start = Instant::now();
         let mut delay = Duration::from_millis(100);
+        let mut tries: usize = 0;
 
         let meta = LockMeta::new(self.ttl_ms);
 
@@ -149,6 +150,10 @@ impl DbLock for LocalFileLock {
 
                     // Exponential backoff with jitter
                     thread::sleep(delay);
+                    tries += 1;
+                    if start.elapsed() > Duration::from_millis(250) {
+                        tracing::warn!(elapsed_ms = %start.elapsed().as_millis(), tries, "LocalFileLock.try_acquire is blocking for >250ms");
+                    }
                     delay = std::cmp::min(delay * 2, Duration::from_secs(5));
                 }
                 Err(e) => return Err(e),

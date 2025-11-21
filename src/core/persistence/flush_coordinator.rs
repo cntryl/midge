@@ -47,13 +47,17 @@ impl FlushCoordinator {
     /// This sends a Barrier message and waits for an acknowledgment. A timeout is
     /// required to avoid indefinite blocking if the worker is deadlocked.
     pub fn wait_until_idle(&self, timeout: std::time::Duration) -> MidgeResult<()> {
+        let start = std::time::Instant::now();
         let (s, r) = channel::bounded::<()>(1);
         self.tx
             .send(FlushMsg::Barrier { reply: s })
             .map_err(|_| MidgeError::internal("Flush worker channel closed"))?;
 
         match r.recv_timeout(timeout) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                tracing::trace!(wait_ms = %start.elapsed().as_millis(), "FlushCoordinator.wait_until_idle completed (ms)");
+                Ok(())
+            }
             Err(channel::RecvTimeoutError::Timeout) => Err(MidgeError::internal(
                 "Timed out waiting for flush worker to become idle",
             )),

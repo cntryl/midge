@@ -268,3 +268,13 @@ name = "subsystem_storage"
 path = "benches/subsystem/storage.rs"
 harness = false
 
+[[bench]]
+name = "subsystem_sst"
+path = "benches/subsystem/sst.rs"
+harness = false
+
+[[bench]]
+name = "system_lsm"
+path = "benches/system/lsm.rs"
+harness = false
+
