@@ -159,10 +159,6 @@ fn should_maintain_consistency_given_merge_operator_changed_when_reopening() {
 
 // Note: WAL replay merge error testing requires crash simulation with active merges in WAL
 #[test]
-#[test]
-fn should_abort_wal_replay_given_merge_error_when_recovering() {
-    // TODO: Implement when WAL replay error injection available
-}
 fn should_abort_wal_replay_given_merge_error_when_recovering() {
     // TODO: Implement when WAL replay error injection available
 }

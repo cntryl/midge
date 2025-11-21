@@ -357,6 +357,18 @@ impl MemTable {
         self.range_tombstones.drain()
     }
 
+    /// Returns true if any active range tombstone covers `key` (current view, unflushed).
+    #[inline]
+    pub fn is_range_deleted(&self, key: &[u8]) -> bool {
+        self.range_tombstones.covers(key)
+    }
+
+    /// Returns true if a range tombstone with sequence <= `seq` covers `key` (snapshot view).
+    #[inline]
+    pub fn is_range_deleted_at(&self, key: &[u8], seq: u64) -> bool {
+        self.range_tombstones.covers_at(key, seq)
+    }
+
     /// Return a sorted list of key/value pairs in the range [start, end).
     /// If a bound is None, it's unbounded on that side. Tombstones are skipped.
     pub fn scan_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Bytes, Bytes)> {

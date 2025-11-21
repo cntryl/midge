@@ -179,7 +179,12 @@ impl MidgeEngine {
                 let _ = self.flush();
             } else if column_family.should_stall_writes() {
                 if self.background_error.read().is_some() {
+                    // Block until background error cleared, then opportunistically flush CF immutables to reduce stall duration
                     self.wait_for_background_error_cleared();
+                    if column_family.should_stall_writes() {
+                        // Best-effort flush to drain immutables and decrement stall counter
+                        let _ = self.flush_cf(cf);
+                    }
                 } else {
                     // Implement backpressure: sleep with exponential backoff
                     let mut backoff_ms = 1;
@@ -188,6 +193,14 @@ impl MidgeEngine {
 
                     for attempt in 0..max_stall_attempts {
                         std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+
+                        // Re-sync immutable_count with actual queue length to avoid stale atomic preventing progress
+                        {
+                            let imm_len = column_family.immutable_memtables.lock().len();
+                            column_family
+                                .immutable_count
+                                .store(imm_len, Ordering::Release);
+                        }
 
                         if !column_family.should_stall_writes() {
                             self.metrics.record_write_stall(attempt + 1);

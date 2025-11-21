@@ -91,6 +91,10 @@ impl MidgeEngine {
             } else if let Some(v) = mt.get(key) {
                 return Ok(Some(v));
             }
+            // No point value found; honor any active range tombstone before probing deeper levels
+            if mt.is_range_deleted(key) {
+                return Ok(None);
+            }
         }
 
         // Check immutable memtables (newest to oldest)
@@ -470,6 +474,13 @@ impl MidgeEngine {
             v.push(0);
             v
         };
+        // Honor active range tombstones at snapshot sequence before checking point tombstones
+        {
+            let mt = column_family.memtable.load();
+            if mt.is_range_deleted_at(key, snap.seq) {
+                return Ok(None);
+            }
+        }
         let tombs = {
             let mt = column_family.memtable.load();
             mt.tombstones_range_at(Some(key), Some(end_key.as_slice()), snap.seq)

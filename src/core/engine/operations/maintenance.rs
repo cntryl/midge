@@ -259,6 +259,24 @@ impl MidgeEngine {
             })?
         };
 
+        // Flush any immutable (frozen) memtables first. These were created via try_freeze_memtable
+        // and increment immutable_count; failing to flush them causes persistent write stalls.
+        {
+            use std::sync::atomic::Ordering;
+            let mut immutables = column_family.immutable_memtables.lock();
+            if !immutables.is_empty() {
+                let frozen_list: Vec<_> = immutables.drain(..).collect();
+                column_family
+                    .immutable_count
+                    .fetch_sub(frozen_list.len(), Ordering::Release);
+                drop(immutables); // release lock before performing flush I/O
+                for frozen in frozen_list {
+                    // Each flush handles merge resolution and manifest updates
+                    let _ = self.flush_frozen_memtable(cf, frozen)?;
+                }
+            }
+        }
+
         // Check if active memtable is empty
         let is_empty = {
             let mt = column_family.memtable.load();

@@ -45,6 +45,30 @@ impl RangeTombstones {
             .map(|r| (r.start, r.end, r.seq))
             .collect()
     }
+
+    /// Returns true if any active (non-drained) range tombstone covers `key`.
+    /// Coverage uses inclusive start, exclusive end semantics: [start, end).
+    pub(super) fn covers(&self, key: &[u8]) -> bool {
+        let tombstones = self.inner.read();
+        for r in tombstones.iter() {
+            if key >= r.start.as_slice() && key < r.end.as_slice() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Returns true if a range tombstone with sequence <= `seq` covers `key`.
+    /// Used for snapshot reads. Assumes MVCC where tombstone seq hides keys <= snapshot seq.
+    pub(super) fn covers_at(&self, key: &[u8], seq: u64) -> bool {
+        let tombstones = self.inner.read();
+        for r in tombstones.iter() {
+            if r.seq <= seq && key >= r.start.as_slice() && key < r.end.as_slice() {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
