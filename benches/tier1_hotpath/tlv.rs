@@ -197,19 +197,179 @@ fn bench_tlv_writer(c: &mut Criterion) {
         });
     });
 
-    // Remaining parts omitted for brevity
+    // Write with medium bytes field (typical value)
+    group.bench_function("write_medium_bytes", |b| {
+        let value = vec![0u8; 256];
+        b.iter(|| {
+            let mut writer = TlvWriter::new();
+            writer.write_bytes(tags::VALUE, black_box(&value));
+            black_box(writer.finish());
+        });
+    });
+
+    // Write complete record (realistic WAL-like structure)
+    group.bench_function("write_complete_record", |b| {
+        let key = b"user:12345";
+        let value = vec![0u8; 256];
+        b.iter(|| {
+            let mut writer = TlvWriter::with_capacity(320);
+            writer.write_u8(tags::OPERATION, black_box(0));
+            writer.write_u32(tags::CF_ID, black_box(0));
+            writer.write_u64(tags::SEQUENCE, black_box(12345));
+            writer.write_bytes(tags::KEY, black_box(key));
+            writer.write_bytes(tags::VALUE, black_box(&value));
+            black_box(writer.finish());
+        });
+    });
+
+    // Write with reuse (pre-allocated capacity)
+    group.bench_function("write_with_reuse", |b| {
+        let mut writer = TlvWriter::with_capacity(128);
+        let key = b"key";
+        b.iter(|| {
+            writer.clear();
+            writer.write_u8(tags::OPERATION, black_box(1));
+            writer.write_bytes(tags::KEY, black_box(key));
+            black_box(writer.as_bytes());
+        });
+    });
 
     group.finish();
 }
 
-criterion_group!(
-    name = hotpath_tlv,
-    config = criterion_config(),
-    targets = bench_varint32_encode,
-    bench_varint64_encode,
-    bench_varint32_decode,
-    bench_varint64_decode,
-    bench_tlv_writer
-);
+// ============================================================================
+// TlvReader Benchmarks
+// ============================================================================
 
+fn bench_tlv_reader(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hotpath_tlv_reader");
+    group.throughput(Throughput::Elements(1));
+
+    // Pre-encode test records
+    let mut writer = TlvWriter::new();
+    writer.write_u8(tags::OPERATION, 1);
+    writer.write_u32(tags::CF_ID, 0);
+    writer.write_u64(tags::SEQUENCE, 12345);
+    let simple_record = writer.finish();
+
+    let mut writer = TlvWriter::new();
+    writer.write_u8(tags::OPERATION, 0);
+    writer.write_u32(tags::CF_ID, 0);
+    writer.write_u64(tags::SEQUENCE, 12345);
+    writer.write_bytes(tags::KEY, b"user:12345");
+    writer.write_bytes(tags::VALUE, &vec![0u8; 256]);
+    let complete_record = writer.finish();
+
+    // Parse simple record (3 fields)
+    group.bench_function("read_simple_record", |b| {
+        b.iter(|| {
+            let reader = TlvReader::new(black_box(&simple_record));
+            for (tag, _value) in reader {
+                black_box(tag);
+            }
+        });
+    });
+
+    // Parse complete record (5 fields with bytes)
+    group.bench_function("read_complete_record", |b| {
+        b.iter(|| {
+            let reader = TlvReader::new(black_box(&complete_record));
+            for (tag, _value) in reader {
+                black_box(tag);
+            }
+        });
+    });
+
+    // Parse with field extraction (realistic usage)
+    group.bench_function("read_and_extract_fields", |b| {
+        b.iter(|| {
+            let reader = TlvReader::new(black_box(&complete_record));
+            let mut op = 0u8;
+            let mut seq = 0u64;
+            let mut key: &[u8] = &[];
+
+            for (tag, value) in reader {
+                match tag {
+                    tags::OPERATION => op = value[0],
+                    tags::SEQUENCE => {
+                        seq = u64::from_be_bytes([
+                            value[0], value[1], value[2], value[3], value[4], value[5], value[6],
+                            value[7],
+                        ]);
+                    }
+                    tags::KEY => key = value,
+                    _ => {}
+                }
+            }
+
+            black_box((op, seq, key));
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Round-trip Benchmarks
+// ============================================================================
+
+fn bench_tlv_roundtrip(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hotpath_tlv_roundtrip");
+    group.throughput(Throughput::Elements(1));
+
+    let key = b"user:12345";
+    let value = vec![0u8; 256];
+
+    // Encode + decode simple record
+    group.bench_function("simple_record", |b| {
+        b.iter(|| {
+            // Encode
+            let mut writer = TlvWriter::new();
+            writer.write_u8(tags::OPERATION, black_box(0));
+            writer.write_u64(tags::SEQUENCE, black_box(12345));
+            let encoded = writer.finish();
+
+            // Decode
+            let reader = TlvReader::new(&encoded);
+            for (tag, _value) in reader {
+                black_box(tag);
+            }
+        });
+    });
+
+    // Encode + decode complete record
+    group.bench_function("complete_record", |b| {
+        b.iter(|| {
+            // Encode
+            let mut writer = TlvWriter::with_capacity(320);
+            writer.write_u8(tags::OPERATION, black_box(0));
+            writer.write_u32(tags::CF_ID, black_box(0));
+            writer.write_u64(tags::SEQUENCE, black_box(12345));
+            writer.write_bytes(tags::KEY, black_box(key));
+            writer.write_bytes(tags::VALUE, black_box(&value));
+            let encoded = writer.finish();
+
+            // Decode
+            let reader = TlvReader::new(&encoded);
+            for (tag, _value) in reader {
+                black_box(tag);
+            }
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group! {
+    name = hotpath_tlv;
+    config = criterion_config();
+    targets =
+        bench_varint32_encode,
+        bench_varint64_encode,
+        bench_varint32_decode,
+        bench_varint64_decode,
+        bench_tlv_writer,
+        bench_tlv_reader,
+        bench_tlv_roundtrip
+}
 criterion_main!(hotpath_tlv);

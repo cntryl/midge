@@ -199,11 +199,243 @@ fn bench_concurrent_cf_scaling(c: &mut Criterion) {
                     // measure write amplification after workload
                     let wa_after = engine.write_amplification();
 
-                    // (we could assert or report metrics here; criterion bench collects time)
+                    // Print a brief summary for this iteration so CI logs capture it.
+                    println!(
+                        "concurrent_cf scaling: threads={} ops={} elapsed_ms={:.3} p99_us={} wa_before={:.2}x wa_after={:.2}x",
+                        threads,
+                        threads * ops_per_thread,
+                        elapsed.as_secs_f64() * 1000.0,
+                        p99,
+                        wa_before,
+                        wa_after
+                    );
                 }
 
                 total_elapsed
-            })
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// GET Operations
+// ============================================================================
+
+fn bench_get_hit_miss(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_get");
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
+
+    group.throughput(Throughput::Elements(250));
+    group.bench_function("hit_mixed", |b| {
+        let engine = setup_db("get_hit", false);
+        let cf = engine.default_column_family();
+        for i in 0..1000 {
+            engine.put(&cf, &make_key(i), &make_value(i, 100)).unwrap();
+        }
+
+        b.iter(|| {
+            for i in (0..1000).step_by(4) {
+                let _ = engine.get(&cf, &make_key(i)).unwrap();
+            }
+        })
+    });
+
+    group.throughput(Throughput::Elements(100));
+    group.bench_function("miss_random", |b| {
+        let engine = setup_db("get_miss", false);
+        let cf = engine.default_column_family();
+
+        b.iter(|| {
+            for i in 1000..1100 {
+                let _ = engine.get(&cf, &make_key(i)).unwrap();
+            }
+        })
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// DELETE Operations
+// ============================================================================
+
+fn bench_delete(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_delete");
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
+
+    group.throughput(Throughput::Elements(1000));
+    group.bench_function("delete_existing", |b| {
+        b.iter_batched(
+            || {
+                let engine = setup_db("delete", false);
+                let cf = engine.default_column_family();
+                for i in 0..1000 {
+                    engine.put(&cf, &make_key(i), &make_value(i, 100)).unwrap();
+                }
+                engine
+            },
+            |engine| {
+                let cf = engine.default_column_family();
+                for i in 0..1000 {
+                    engine.delete(&cf, &make_key(i)).unwrap();
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Write Modes
+// ============================================================================
+
+fn bench_write_modes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_write_modes");
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
+
+    group.throughput(Throughput::Elements(500));
+    group.bench_function("nosync_batched", |b| {
+        b.iter_batched(
+            || setup_db("nosync", false),
+            |engine| {
+                let cf = engine.default_column_family();
+                for i in 0..500 {
+                    engine.put(&cf, &make_key(i), &make_value(i, 100)).unwrap();
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.throughput(Throughput::Elements(500));
+    group.bench_function("sync_every_write", |b| {
+        b.iter_batched(
+            || setup_db("sync", true),
+            |engine| {
+                let cf = engine.default_column_family();
+                for i in 0..500 {
+                    engine.put(&cf, &make_key(i), &make_value(i, 100)).unwrap();
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.throughput(Throughput::Elements(500));
+    group.bench_function("small_batch_write", |b| {
+        b.iter_batched(
+            || setup_db("batch", false),
+            |engine| {
+                let cf = engine.default_column_family();
+                for i in 0..500 {
+                    engine.put(&cf, &make_key(i), &make_value(i, 100)).unwrap();
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Memory Mode
+// ============================================================================
+
+fn bench_memory_mode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_memory_mode");
+    group.measurement_time(Duration::from_millis(200));
+    group.sample_size(30);
+
+    // 100 writes + 50 reads per iteration = 150 element operations
+    group.throughput(Throughput::Elements(150));
+    group.bench_function("read_write_mix", |b| {
+        b.iter_batched(
+            || setup_db("memory_mode", false),
+            |engine| {
+                let cf = engine.default_column_family();
+
+                // writes
+                for i in 0..100 {
+                    engine.put(&cf, &make_key(i), &make_value(i, 200)).unwrap();
+                }
+
+                // reads
+                for i in (0..100).step_by(2) {
+                    let _ = engine.get(&cf, &make_key(i)).unwrap();
+                }
+
+                black_box(());
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Full-stack end-to-end throughput
+// ============================================================================
+fn bench_full_stack_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_end_to_end");
+    let cf_counts = [1usize, 4, 8, 16];
+    let n_ops = 10_000usize;
+
+    for &n_cfs in &cf_counts {
+        group.throughput(Throughput::Elements(n_ops as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n_cfs), &n_cfs, |b, &n_cfs| {
+            b.iter_batched(
+                || {
+                    let engine = setup_db(&format!("end_to_end_{}", n_cfs), false);
+                    // create CF handles (default + extras)
+                    let mut cfs = vec![engine.default_column_family()];
+                    for i in 1..n_cfs {
+                        let name = format!("bench_cf_{}", i);
+                        let cf = engine
+                            .create_column_family(&name, ColumnFamilyConfig::default())
+                            .unwrap();
+                        cfs.push(cf);
+                    }
+
+                    let keys: Vec<Bytes> = (0..n_ops).map(make_key).collect();
+                    (engine, cfs, keys)
+                },
+                |(engine, cfs, keys)| {
+                    // 1) Writes spread across CFs
+                    for (i, k) in keys.iter().enumerate() {
+                        let cf = &cfs[i % n_cfs];
+                        engine.put(cf, k, &make_value(i, 100)).unwrap();
+                    }
+
+                    // 2) Mixed reads (hits then misses)
+                    for k in keys.iter().take(9_000) {
+                        black_box(engine.get(&cfs[0], k).unwrap());
+                    }
+                    for i in 0..1_000 {
+                        black_box(engine.get(&cfs[0], &make_key(n_ops + i)).unwrap());
+                    }
+
+                    // 3) Deletes
+                    for (i, k) in keys.iter().take(2_000).enumerate() {
+                        let cf = &cfs[i % n_cfs];
+                        engine.delete(cf, k).unwrap();
+                    }
+
+                    // 4) Flush all CFs
+                    for cf in &cfs {
+                        engine.flush_cf(cf).unwrap();
+                    }
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
 
@@ -215,7 +447,12 @@ criterion_group! {
     config = criterion_config();
     targets =
         bench_put_variants,
+        bench_get_hit_miss,
+        bench_delete,
+        bench_write_modes,
+        bench_memory_mode,
+        bench_full_stack_throughput
+        ,
         bench_concurrent_cf_scaling
 }
-
 criterion_main!(subsystem_engine_basic);

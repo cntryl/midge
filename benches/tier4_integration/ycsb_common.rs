@@ -1,4 +1,4 @@
-//! Common utilities for YCSB benchmarks (copied under tier4)
+//! Common utilities for YCSB benchmarks
 
 use bytes::Bytes;
 use cntryl_midge::cloud::mock::MockCloudBackend;

@@ -12,7 +12,7 @@
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
-#[path = "ycsb_common.rs"]
+#[path = "../tier4_integration/ycsb_common.rs"]
 mod ycsb_common;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
