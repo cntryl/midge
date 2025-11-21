@@ -251,8 +251,10 @@ mod tests {
 
     #[test]
     fn should_create_coordinator_with_default_config() {
-        // Arrange & Act
+        // Arrange
         let config = BatchedSyncConfig::default();
+
+        // Act
         let coordinator = BatchedSyncCoordinator::new(config);
 
         // Assert

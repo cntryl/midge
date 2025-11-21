@@ -73,9 +73,11 @@ fn should_support_kvstore_trait_operations() {
 
     let cf = adapter.default_column_family();
 
-    // Act & Assert - Put and Get
+    // Act
     adapter.put(cf, b"key1", b"value1").expect("put");
     let result = adapter.get(cf, b"key1").expect("get");
+
+    // Assert
     assert_eq!(result.as_deref(), Some(b"value1".as_ref()));
 }
 

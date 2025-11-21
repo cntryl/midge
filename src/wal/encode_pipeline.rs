@@ -649,6 +649,8 @@ mod tests {
             max_body_len: u32::MAX as usize,
             parallel_threshold_bytes: 1,
         };
+
+        // Act
         let encoder = WalEncoder::new(cfg, DefaultBodyEncoder).unwrap();
 
         // Assert

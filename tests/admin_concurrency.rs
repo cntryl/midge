@@ -173,6 +173,7 @@ fn should_preserve_data_during_high_concurrency_writes_with_admin_queries_when_s
         h.join().expect("Thread panicked");
     }
 
+    // Assert
     // Sample a few keys from different writer threads to verify data persistence
     // We check every 3rd thread to reduce test time while still validating concurrent writes
     let mut verified_count = 0;

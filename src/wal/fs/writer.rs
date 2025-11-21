@@ -1091,9 +1091,10 @@ mod tests {
             wal.append_op(crate::wal::WalOpKind::Put, b"key1", Some(b"value1"))
                 .expect("append");
 
-            // Act: truncate while file is open
+            // Act
             let result = wal.truncate();
 
+            // Assert
             // On Windows, truncate might fail due to file locking
             // On Unix, it should succeed
             #[cfg(unix)]

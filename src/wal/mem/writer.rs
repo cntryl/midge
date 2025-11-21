@@ -105,7 +105,8 @@ mod tests {
 
     #[test]
     fn should_initialize_with_zero_position() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let wal = WalMem::new();
 
         // Assert
@@ -241,7 +242,8 @@ mod tests {
 
     #[test]
     fn should_initialize_connected_writer_reader_pair() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let (writer, _reader) = WalMem::new_pair();
 
         // Assert

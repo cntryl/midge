@@ -63,7 +63,7 @@ fn should_produce_identical_output_given_same_input_runs_when_compacting() {
 
     let mut first_run_hash = None;
 
-    // Act & Assert - First run
+    // Act - First run
     with_engine_restart(
         opts.clone(),
         |eng| {
@@ -150,7 +150,7 @@ fn should_remove_deleted_keys_given_tombstones_when_compaction_runs() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -199,7 +199,7 @@ fn should_keep_write_amplification_under_target_given_mixed_workload() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -315,7 +315,7 @@ fn should_preserve_ordering_values_during_compaction_with_overwrites() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {

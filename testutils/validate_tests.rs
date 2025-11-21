@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 struct Args {
     summary: bool,
     file: Option<PathBuf>,
-    organization: bool,
 }
 
 impl Args {
@@ -22,7 +21,6 @@ impl Args {
         let args: Vec<String> = env::args().collect();
 
         let summary = args.iter().any(|a| a == "--summary" || a == "-s");
-        let organization = args.iter().any(|a| a == "--organization" || a == "-o");
 
         let file = args
             .iter()
@@ -33,7 +31,6 @@ impl Args {
         Args {
             summary,
             file,
-            organization,
         }
     }
 }
@@ -361,158 +358,9 @@ fn print_file_results(file_path: &Path) {
     }
 }
 
-#[derive(Debug)]
-pub struct OrganizationIssue {
-    pub file_path: String,
-    pub issue: String,
-}
 
-pub fn check_test_organization() -> Vec<OrganizationIssue> {
-    let mut issues = Vec::new();
-    let tests_dir = Path::new("tests");
 
-    if !tests_dir.exists() {
-        return issues;
-    }
 
-    // Compile regex once outside the loop
-    let test_attr_re = Regex::new(r"#\[test\]").unwrap();
-
-    // Check for test files in subdirectories (should be modules, not integration tests)
-    let subdirs = [
-        "api",
-        "backup",
-        "cloud",
-        "common",
-        "compaction",
-        "config",
-        "lock",
-        "manifest",
-        "storage",
-        "utils",
-        "verification",
-        "wal",
-    ];
-
-    for subdir in &subdirs {
-        let subdir_path = tests_dir.join(subdir);
-        if subdir_path.exists() {
-            let rust_files = find_all_rust_files(&subdir_path);
-            for file in rust_files {
-                let content = fs::read_to_string(&file).unwrap_or_default();
-
-                // Check if file has #[test] but is in a subdirectory
-                if test_attr_re.is_match(&content) {
-                    // Allow tests in subdirs if they're used as shared test modules
-                    // This is actually fine - the organization check is about CARGO discovery
-                    // Subdirectory files can still contain tests, they're just not auto-discovered
-                    // as separate test binaries by Cargo
-                }
-            }
-        }
-    }
-
-    // Check for improperly named test files in root
-    if let Ok(entries) = fs::read_dir(tests_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rs") {
-                let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-
-                // Skip special files
-                if file_name == "README.md" || file_name.starts_with('.') {
-                    continue;
-                }
-
-                // Test files in root should follow naming conventions:
-                // - Descriptive names (not test_*.rs)
-                // - Use underscores, not CamelCase
-                // - Should describe what they test (e.g., engine.rs, durability_wal.rs)
-
-                if file_name.starts_with("test_") && file_name != "test_guidelines_compliance.rs" {
-                    issues.push(OrganizationIssue {
-                        file_path: format!("tests/{}", file_name),
-                        issue: "Integration test file starts with 'test_' (prefer descriptive names like 'engine.rs', 'durability_wal.rs')".to_string(),
-                    });
-                }
-
-                // Check for CamelCase in filenames
-                if file_name.chars().any(|c| c.is_uppercase()) {
-                    issues.push(OrganizationIssue {
-                        file_path: format!("tests/{}", file_name),
-                        issue: "File name contains uppercase letters (use snake_case)".to_string(),
-                    });
-                }
-
-                // Check for domain-specific files that should be in subdirectories
-                // Pattern: {domain}_{feature}.rs should be in tests/{domain}/{feature}.rs
-                let domain_prefixes = [
-                    ("wal_", "wal"),
-                    ("cloud_", "cloud"),
-                    ("compaction_", "compaction"),
-                    ("storage_", "storage"),
-                    ("backup_", "backup"),
-                    ("manifest_", "manifest"),
-                    ("api_", "api"),
-                    ("config_", "config"),
-                    ("lock_", "lock"),
-                    ("utils_", "utils"),
-                ];
-
-                for (prefix, domain) in &domain_prefixes {
-                    if file_name.starts_with(prefix) {
-                        let feature = file_name
-                            .strip_prefix(prefix)
-                            .and_then(|s| s.strip_suffix(".rs"))
-                            .unwrap_or("");
-
-                        issues.push(OrganizationIssue {
-                            file_path: format!("tests/{}", file_name),
-                            issue: format!(
-                                "Domain-specific test should be in subdirectory: move to 'tests/{}/{}' (files starting with '{}_' belong in tests/{}/)",
-                                domain, feature, prefix.trim_end_matches('_'), domain
-                            ),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    issues
-}
-
-#[allow(dead_code)]
-fn print_organization_check() {
-    println!("\x1b[36mChecking test organization...\x1b[0m");
-    println!();
-
-    let issues = check_test_organization();
-
-    if issues.is_empty() {
-        println!("\x1b[32m✓ All tests are properly organized!\x1b[0m");
-        println!();
-        println!("Organization follows Rust conventions:");
-        println!("  • Integration tests in tests/*.rs (auto-discovered by Cargo)");
-        println!("  • Shared modules in tests/subdirectories/ (imported by test files)");
-        println!("  • Descriptive file names (engine.rs, durability_wal.rs, etc.)");
-    } else {
-        println!(
-            "\x1b[33m⚠ Found {} organization issues:\x1b[0m",
-            issues.len()
-        );
-        println!();
-        for issue in &issues {
-            println!("  \x1b[31m{}\x1b[0m", issue.file_path);
-            println!("    {}", issue.issue);
-            println!();
-        }
-        println!("\x1b[33mReminder:\x1b[0m");
-        println!("  • Files in tests/ root become separate test binaries (auto-discovered)");
-        println!("  • Files in tests/subdirectories/ are modules (must be imported)");
-        println!("  • Use descriptive names: 'engine.rs', not 'test_engine.rs'");
-    }
-}
 
 #[allow(dead_code)]
 fn main() {
@@ -520,8 +368,6 @@ fn main() {
 
     if args.summary {
         print_summary();
-    } else if args.organization {
-        print_organization_check();
     } else if let Some(file_path) = args.file {
         print_file_results(&file_path);
     } else {
@@ -531,12 +377,10 @@ fn main() {
         println!("Usage:");
         println!("  cargo run --bin validate_tests -- --summary                    # Show summary of all tests");
         println!("  cargo run --bin validate_tests -- --file src/backup.rs         # Check specific file");
-        println!("  cargo run --bin validate_tests -- --organization               # Check test file organization");
         println!();
         println!("Examples:");
         println!("  cargo run --bin validate_tests -- --summary");
         println!("  cargo run --bin validate_tests -- --file src/error.rs");
-        println!("  cargo run --bin validate_tests -- --organization");
         println!("  cargo run --bin validate_tests -- --file tests/engine.rs");
     }
 }

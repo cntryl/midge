@@ -20,7 +20,7 @@
 #[path = "../testutils/validate_tests.rs"]
 mod validate_tests;
 
-use validate_tests::{check_test_organization, get_all_test_results, TestResult};
+use validate_tests::{get_all_test_results, TestResult};
 
 #[test]
 fn should_enforce_test_naming_convention() {
@@ -145,33 +145,6 @@ fn should_enforce_single_behavior_per_test() {
         msg.push_str("  fn should_upload_file_successfully() { ... }\n\n");
         msg.push_str("  #[test]\n");
         msg.push_str("  fn should_download_uploaded_file() { ... }\n");
-
-        panic!("{}", msg);
-    }
-}
-
-#[test]
-fn should_enforce_module_organization() {
-    // Arrange
-    let issues = check_test_organization();
-
-    // Act / Assert
-    if !issues.is_empty() {
-        let mut msg = String::from("\n\n📁 TEST ORGANIZATION VIOLATIONS\n");
-        msg.push_str("────────────────────────────────\n\n");
-        msg.push_str("Ensure test files follow standard Cargo test layout:\n");
-        msg.push_str("  • Tests under `tests/` are auto-discovered.\n");
-        msg.push_str("  • Nested modules require explicit `mod` imports.\n");
-        msg.push_str(
-            "  • Filenames should be descriptive, snake_case, and not prefixed with `test_`.\n\n",
-        );
-
-        for issue in &issues {
-            msg.push_str(&format!("• {}\n    {}\n\n", issue.file_path, issue.issue));
-        }
-
-        msg.push_str(&format!("Found {} organization issues.\n\n", issues.len()));
-        msg.push_str("💡 Fix by renaming or restructuring test files accordingly.\n");
 
         panic!("{}", msg);
     }

@@ -260,12 +260,16 @@ mod tests {
         // Arrange
         let d = Dummy;
 
-        // Act & Assert - Any snapshot should behave the same as get_state
-        match SstStateReader::get_state_at(&d, b"a", 0).expect("get_state_at should succeed") {
+        // Act
+        let result1 = SstStateReader::get_state_at(&d, b"a", 0).expect("get_state_at should succeed");
+        let result2 = SstStateReader::get_state_at(&d, b"z", 123).expect("get_state_at should succeed");
+
+        // Assert
+        match result1 {
             KeyState::Value(v, 0, _exp) => assert_eq!(v.as_ref(), b"X"),
             other => panic!("unexpected: {:?}", other),
         }
-        match SstStateReader::get_state_at(&d, b"z", 123).expect("get_state_at should succeed") {
+        match result2 {
             KeyState::Absent => {}
             other => panic!("unexpected: {:?}", other),
         }
@@ -336,20 +340,23 @@ mod tests {
         }
         let mut writer: Box<dyn DynSstWriter> = Box::new(TestWriter);
 
-        // Act & Assert - Should not panic or error, just no-op
+        // Act - Should not panic or error, just no-op
         writer.add_range_tombstone(b"a", b"z", 100).unwrap();
+
+        // Assert
+        // No assertions needed - the call succeeding is the test
     }
 
     #[test]
     fn should_create_range_tombstone_struct() {
-        // Arrange & Act - Test that RangeTombstone can be created and cloned
+        // Arrange
         let rt = RangeTombstone {
             start: b"key1".to_vec(),
             end: b"key9".to_vec(),
             seq: 42,
         };
 
-        // Assert
+        // Assert - Check initial values
         assert_eq!(rt.start, b"key1");
         assert_eq!(rt.end, b"key9");
         assert_eq!(rt.seq, 42);
@@ -357,7 +364,7 @@ mod tests {
         // Act - Clone
         let rt2 = rt.clone();
 
-        // Assert
+        // Assert - Check cloned values
         assert_eq!(rt2.seq, 42);
     }
 }

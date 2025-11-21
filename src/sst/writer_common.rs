@@ -344,7 +344,8 @@ mod tests {
 
     #[test]
     fn should_create_default_config() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let config = WriterConfig::new(4096, CompressionType::None);
 
         // Assert

@@ -151,6 +151,7 @@ fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_r
     // Wait for background uploads with timeout (observability)
     let upload_succeeded = mock_backend.wait_for_uploads(1, Duration::from_millis(500));
 
+    // Assert
     // Verify data remains accessible
     for i in 0..10 {
         let result = eng
