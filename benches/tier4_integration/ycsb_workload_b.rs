@@ -136,7 +136,7 @@ fn run_workload_b_concurrent(
 
         let start = Instant::now();
 
-        if rng.next_u32() % 20 != 0 {
+        if !rng.next_u32().is_multiple_of(20) {
             // READ
             let _ = black_box(engine.get(cf, &key));
         } else {

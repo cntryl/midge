@@ -46,6 +46,7 @@ const RANGE_COUNT: usize = OPS_PER_ITER;
 // ============================================================================
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct LatencyStats {
     p50: u64,
     p99: u64,

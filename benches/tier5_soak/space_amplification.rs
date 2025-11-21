@@ -30,7 +30,7 @@ fn bench_space_amplification(c: &mut Criterion) {
             
             let opts = MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
-                memtable_size: 1 * 1024 * 1024,
+                memtable_size: 1024 * 1024,
                 enable_compaction: true,
                 ..Default::default()
             };
@@ -48,7 +48,7 @@ fn bench_space_amplification(c: &mut Criterion) {
             engine.flush().unwrap();
             
             // Measure initial disk usage
-            let initial_size = estimate_disk_usage(&path);
+            let _initial_size = estimate_disk_usage(&path);
             
             // Phase 2: Repeated updates (creates obsolete versions)
             // Update same 5k keys multiple times

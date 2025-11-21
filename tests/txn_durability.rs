@@ -162,5 +162,5 @@ fn should_fail_transaction_commit_when_disk_full() {
 
     // Verify engine still works after disk full error
     // Note: The transaction data may be in memtable but not durable
-    let _ = engine.put(&cf, b"test_key", b"test_value").expect("put after failed commit");
+    engine.put(&cf, b"test_key", b"test_value").expect("put after failed commit");
 }

@@ -41,6 +41,7 @@ const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
 // ============================================================================
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct LatencyStats {
     p50: u64,
     p99: u64,

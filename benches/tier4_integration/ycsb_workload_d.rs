@@ -40,6 +40,7 @@ const READ_RATIO: f64 = 0.95;
 // ============================================================================
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct LatencyStats {
     p50: u64,
     p99: u64,
@@ -51,8 +52,8 @@ struct LatencyStats {
 fn latest_index_from_zipf(zipf_sample: usize) -> usize {
     // zipf_sample is biased to small numbers; invert to hit tail
     let base = zipf_sample.min(RECORD_COUNT - 1);
-    let idx = RECORD_COUNT - 1 - base;
-    idx
+    
+    RECORD_COUNT - 1 - base
 }
 
 // ============================================================================

@@ -68,6 +68,7 @@ impl FsBufWriter {
         self.inner.get_mut()
     }
 
+    #[allow(dead_code)]
     fn into_inner(self) -> Result<std::fs::File, std::io::IntoInnerError<BufWriter<std::fs::File>>> {
         self.inner.into_inner()
     }

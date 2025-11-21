@@ -39,6 +39,7 @@ const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
 // ============================================================================
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct LatencyStats {
     p50: u64,
     p99: u64,
@@ -52,7 +53,7 @@ struct LatencyStats {
 fn run_workload_a(
     engine: &MidgeEngine,
     operations: usize,
-    record_count: usize,
+    _record_count: usize,
     cf_count: usize,
     rng_seed: u64,
 ) -> LatencyStats {
@@ -113,7 +114,7 @@ fn run_workload_a(
 fn run_workload_a_concurrent(
     engine: Arc<MidgeEngine>,
     ops_per_thread: usize,
-    record_count: usize,
+    _record_count: usize,
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {

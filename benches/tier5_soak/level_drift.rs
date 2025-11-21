@@ -29,7 +29,7 @@ fn bench_level_drift(c: &mut Criterion) {
             
             let opts = MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: path },
-                memtable_size: 1 * 1024 * 1024, // 1MB memtable
+                memtable_size: 1024 * 1024, // 1MB memtable
                 enable_compaction: true,
                 ..Default::default()
             };

@@ -41,7 +41,7 @@ pub fn sync_data_only(
         }
         // Check for I/O error injection
         if let Some(error_msg) = hooks.before_io_write() {
-            return Err(io::Error::new(io::ErrorKind::Other, error_msg));
+            return Err(io::Error::other(error_msg));
         }
     }
 

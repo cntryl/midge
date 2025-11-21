@@ -384,16 +384,20 @@ fn should_return_error_given_disk_full_when_writing_manifest() {
 fn should_pause_writes_given_background_error_until_cleared() {
     // Arrange
     let dir = test_temp_dir();
-    let mut opts = MidgeOptions::default();
-    opts.storage_mode = StorageMode::LocalDisk { db_path: dir.path().to_path_buf() };
-    opts.memtable_size = 256; // small overall engine memtable size
-    opts.wal_buffer_size = 64; // small WAL buffer
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        memtable_size: 256, // small overall engine memtable size
+        wal_buffer_size: 64, // small WAL buffer
+        ..Default::default()
+    };
 
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     use cntryl_midge::api::column_family::ColumnFamilyConfig;
-    let mut cf_cfg = ColumnFamilyConfig::default();
-    cf_cfg.memtable_max_bytes = 64; // tiny so each value triggers full
-    cf_cfg.max_immutable_memtables = 1; // single immutable allowed then stall
+    let cf_cfg = ColumnFamilyConfig {
+        memtable_max_bytes: 64, // tiny so each value triggers full
+        max_immutable_memtables: 1, // single immutable allowed then stall
+        ..Default::default()
+    };
     let stall_cf = engine.create_column_family("stall_cf", cf_cfg).expect("create CF");
 
     // First write fills memtable and freezes, producing one immutable memtable
@@ -414,10 +418,7 @@ fn should_pause_writes_given_background_error_until_cleared() {
     });
 
     // Wait briefly and expect the write not complete (blocked)
-    match done_rx.recv_timeout(std::time::Duration::from_millis(200)) {
-        Ok(_) => panic!("Write should be blocked when background error present"),
-        Err(_) => {}
-    }
+    if done_rx.recv_timeout(std::time::Duration::from_millis(200)).is_ok() { panic!("Write should be blocked when background error present") }
 
     // Clear background error so subsequent write can proceed
     engine.clear_background_error();

@@ -19,7 +19,7 @@ fn setup_multi_level_db() -> (MidgeEngine, TempDir) {
     let path = tmp.path().join("scan_multi");
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path: path },
-        memtable_size: 1 * 1024 * 1024,
+        memtable_size: 1024 * 1024,
         enable_compaction: true, // Enable to get multi-level LSM
         ..Default::default()
     };

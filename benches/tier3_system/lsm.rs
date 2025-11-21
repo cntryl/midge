@@ -38,7 +38,7 @@ fn open_db(path: &Path) -> Db {
             db_path: path.to_path_buf(),
         },
         enable_compaction: true,
-        wal_buffer_size: 1 * 1024 * 1024,
+        wal_buffer_size: 1024 * 1024,
         memtable_size: 4 * 1024 * 1024,
         ..Default::default()
     };

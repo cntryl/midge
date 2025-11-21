@@ -11,7 +11,7 @@ use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
 use crossbeam::channel;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -404,7 +404,7 @@ impl CompactionController {
     /// true if the worker should shut down immediately (Shutdown received).
     fn handle_compaction_msg(
         msg: CompactionMsg,
-        db_path: &PathBuf,
+        db_path: &Path,
         compactor: &Compactor,
         work_queue: &mut VecDeque<WorkItem>,
         inflight: &mut usize,
@@ -412,7 +412,7 @@ impl CompactionController {
     ) -> bool {
         match msg {
             CompactionMsg::CompactLevel { cf_id, level } => {
-                let manifest = Manifest::load(&db_path).unwrap_or_default();
+                let manifest = Manifest::load(db_path).unwrap_or_default();
                 let cf_config = manifest
                     .column_families
                     .iter()
@@ -431,7 +431,7 @@ impl CompactionController {
                 }
             }
             CompactionMsg::CompactRange { cf_id, start_key, end_key } => {
-                let manifest = Manifest::load(&db_path).unwrap_or_default();
+                let manifest = Manifest::load(db_path).unwrap_or_default();
                 let cf_config = manifest
                     .column_families
                     .iter()
