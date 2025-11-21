@@ -22,7 +22,7 @@ fn should_preserve_consistency_given_crash_between_sst_write_and_manifest_update
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -90,7 +90,7 @@ fn should_fsync_sst_update_manifest_before_wal_truncation() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -161,7 +161,7 @@ fn should_not_truncate_wal_given_manifest_save_failure() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -224,7 +224,7 @@ fn should_fsync_manifest_before_truncating_wal() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();

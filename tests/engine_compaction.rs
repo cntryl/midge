@@ -154,7 +154,7 @@ fn should_background_compact_when_threshold_exceeded() {
     opts.compaction_sst_threshold = 1;
     opts.compaction_check_interval_ms = 50;
 
-    // Open engine with background compaction enabled
+    // Act - Open engine with background compaction enabled
     {
         let _eng = MidgeEngine::open(opts.clone()).expect("open for background compaction");
 

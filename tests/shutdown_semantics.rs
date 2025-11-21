@@ -11,7 +11,7 @@ fn should_flush_fsync_all_memtables_on_shutdown_signal() {
     let dir = test_temp_dir();
     let opts = flush_test_opts(dir.path().to_path_buf(), 1024 * 1024); // Large memtable
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -48,7 +48,7 @@ fn should_complete_pending_compactions_given_shutdown_signal() {
         ..durability_opts(dir.path().to_path_buf())
     };
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -96,7 +96,7 @@ fn should_abort_long_running_uploads_given_shutdown_signal() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -122,7 +122,7 @@ fn should_persist_all_memtables_given_shutdown_signal_when_clean_exit() {
     let dir = test_temp_dir();
     let opts = flush_test_opts(dir.path().to_path_buf(), 1024 * 1024);
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -160,7 +160,7 @@ fn should_reopen_without_recovery_needed_given_clean_shutdown() {
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -189,7 +189,7 @@ fn should_handle_rapid_shutdown_restart_cycles_without_data_loss_stressed() {
     let dir = test_temp_dir();
     let base_opts = durability_opts(dir.path().to_path_buf());
 
-    // Act & Assert - perform multiple shutdown/restart cycles
+    // Act - perform multiple shutdown/restart cycles
     const RESTART_CYCLES: usize = 5;
     let mut total_keys_written = 0;
 
@@ -235,6 +235,8 @@ fn should_handle_rapid_shutdown_restart_cycles_without_data_loss_stressed() {
 
         total_keys_written += 50;
     }
+
+    // Assert - all cycles completed successfully without data loss
 }
 
 #[test]

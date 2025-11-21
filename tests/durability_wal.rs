@@ -12,7 +12,7 @@ fn should_recover_without_loss_given_crash_after_wal_append_before_fsync() {
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
 
-    // Act & Assert - write with fsync enabled, then verify after restart
+    // Act - write with fsync enabled, then verify after restart
     with_engine_restart(
         opts,
         |eng| {
@@ -99,7 +99,7 @@ fn should_not_acknowledge_commit_given_wal_unsynced_when_crash_occurs() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -183,7 +183,7 @@ fn should_replay_all_valid_records_given_multiple_segments_when_recovering() {
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -222,7 +222,7 @@ fn should_discard_partial_record_given_truncated_wal_segment_when_recovering() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();

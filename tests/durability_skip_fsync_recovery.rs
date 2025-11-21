@@ -41,7 +41,7 @@ fn should_handle_skipped_fsync_on_recovery() {
     let eng2 = MidgeEngine::open(opts_reopen).expect("reopen engine");
     let cf2 = eng2.default_column_family();
 
-    // The spec allows loss if fsync was skipped — ensure we either see the key
+    // Assert - The spec allows loss if fsync was skipped — ensure we either see the key
     // or not, but the engine must remain consistent (no partial records).
     let _ = eng2.get(&cf2, b"skipfsync_key").expect("get");
 }

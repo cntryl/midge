@@ -24,7 +24,7 @@ fn should_detect_ignore_compacted_wal_entries_with_manifest_sequence() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -88,7 +88,7 @@ fn should_replay_to_last_synced_sequence_given_fullsync_mode_when_recover() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -140,7 +140,7 @@ fn should_recover_last_committed_state_given_crash_during_write() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -193,7 +193,7 @@ fn should_rebuild_manifest_up_to_last_fsynced_sequence() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -226,7 +226,7 @@ fn should_deduplicate_replay_given_partial_flush_in_manifest() {
     let dir = test_temp_dir();
     let opts = flush_test_opts(dir.path().to_path_buf(), 1024);
 
-    // Act & Assert
+    // Act
     with_engine_restart(
         opts,
         |eng| {

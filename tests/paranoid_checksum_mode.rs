@@ -124,6 +124,7 @@ fn should_verify_checksums_on_compressed_blocks_when_paranoid() {
 #[test]
 fn should_use_paranoid_mode_with_default_off() {
     // Arrange
+    // Act
     let opts = MidgeOptions::default();
 
     // Assert

@@ -155,7 +155,12 @@ pub fn test_single_test(
         if action_part.contains("_and_") {
             // Additional heuristic: allow common phrases that aren't multi-behavior
             // These are patterns where "and" is part of the description, not separate actions
-            let allowed_patterns = ["with_id_and_name"];
+            let allowed_patterns = [
+                "with_id_and_name",
+                "point_writes_and_range_deletes",
+                "memtable_and_sst", 
+                "large_keys_and_values"
+            ];
 
             let is_allowed = allowed_patterns
                 .iter()

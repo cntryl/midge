@@ -122,7 +122,7 @@ fn should_reject_operations_given_aborted_transaction_when_used() {
         .expect("first commit should succeed");
     // txn1 is now consumed and cannot be used again (compile-time enforced)
 
-    // Act & Assert - verify the data was written
+    // Act - verify the data was written
     let result = engine.get(&cf, b"key1").expect("get should work");
     assert_eq!(result.as_deref(), Some(b"value1".as_ref()));
 

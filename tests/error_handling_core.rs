@@ -266,7 +266,7 @@ fn should_handle_io_error_when_reading_sst_block() {
     let sst_path = sst_dir.join("test_corruption.sst");
     writer.finish_to_path(&sst_path).unwrap();
 
-    // Corrupt the SST file by overwriting some bytes in the middle
+    // Act - Corrupt the SST file by overwriting some bytes in the middle
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -297,7 +297,7 @@ fn should_handle_io_error_when_reading_sst_block() {
     match reader_factory.open(&sst_path) {
         Ok(_) => panic!("Reading from corrupted SST should fail"),
         Err(err) => {
-            // The error could be InvalidData (CRC mismatch) or other corruption-related errors
+            // Assert - The error could be InvalidData (CRC mismatch) or other corruption-related errors
             let err_str = format!("{}", err);
             assert!(err_str.contains("InvalidData") ||
                     err_str.contains("corrupt") ||
@@ -426,7 +426,7 @@ fn should_pause_writes_given_background_error_until_cleared() {
     let _ = engine.flush_cf(&stall_cf);
     engine.wait_for_flush(std::time::Duration::from_secs(2)).unwrap();
 
-    // Writer should now complete
+    // Assert - Writer should now complete
     let done_ok = done_rx.recv_timeout(std::time::Duration::from_secs(1)).expect("writer should complete");
     assert!(done_ok, "Write should succeed once background error cleared and flush completed");
 }
