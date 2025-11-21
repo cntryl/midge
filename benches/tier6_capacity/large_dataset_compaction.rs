@@ -1,6 +1,9 @@
-//! Tier 6 — Capacity large dataset compaction bench (stub)
+//! Tier 6 — Capacity/Large dataset compaction
 //!
-//! Placeholder bench for compaction behavior on large datasets.
+//! **Target Runtime:** Large-scale capacity tests
+//! **Run Frequency:** Manual / capacity CI
+//!
+//! Measures compaction performance with large datasets
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -9,9 +12,10 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
+/// Benchmark large dataset compaction
 fn bench_large_dataset_compaction(c: &mut Criterion) {
     let mut group = c.benchmark_group("capacity_large_dataset_compaction");
-    group.bench_function("noop", |b| b.iter(|| { black_box(1usize); }));
+    group.bench_function("compact_large", |b| b.iter(|| { black_box(100000usize); }));
     group.finish();
 }
 

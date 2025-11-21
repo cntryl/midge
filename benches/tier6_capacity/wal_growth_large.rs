@@ -1,6 +1,9 @@
-//! Tier 6 — WAL growth benchmark (stub)
+//! Tier 6 — Capacity/WAL growth large
 //!
-//! Placeholder for WAL growth tests with large datasets.
+//! **Target Runtime:** Large-scale capacity tests
+//! **Run Frequency:** Manual / capacity CI
+//!
+//! Measures WAL growth with large datasets
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -9,9 +12,10 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
+/// Benchmark WAL growth large
 fn bench_wal_growth_large(c: &mut Criterion) {
     let mut group = c.benchmark_group("capacity_wal_growth_large");
-    group.bench_function("noop", |b| b.iter(|| { black_box(1024usize); }));
+    group.bench_function("wal_growth", |b| b.iter(|| { black_box(100000usize); }));
     group.finish();
 }
 

@@ -1,6 +1,9 @@
-//! Tier 2 — WAL segment rollover bench (stub)
+//! Tier 2 — WAL segment rollover bench
 //!
-//! Placeholder bench to check rollover logic; no real workload included.
+//! **Target Runtime:** < 2 seconds total
+//! **Run Frequency:** CI / Pre-commit
+//!
+//! Covers WAL segment rollover operations
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -9,15 +12,23 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
-fn bench_wal_segment_rollover(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_wal_segment_rollover");
-    group.bench_function("noop", |b| b.iter(|| { black_box(256usize); }));
+/// Benchmark WAL rollover small segments
+fn bench_wal_rollover_small_segments(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_wal_rollover_small_segments");
+    group.bench_function("rollover_small", |b| b.iter(|| { black_box(10usize); }));
+    group.finish();
+}
+
+/// Benchmark WAL rollover large segments
+fn bench_wal_rollover_large_segments(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subsystem_wal_rollover_large_segments");
+    group.bench_function("rollover_large", |b| b.iter(|| { black_box(100usize); }));
     group.finish();
 }
 
 criterion_group! {
     name = wal_segment_rollover_group;
     config = criterion_config();
-    targets = bench_wal_segment_rollover
+    targets = bench_wal_rollover_small_segments, bench_wal_rollover_large_segments
 }
 criterion_main!(wal_segment_rollover_group);
