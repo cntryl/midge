@@ -155,6 +155,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     // Act - Write data to create multiple SSTs and trigger compaction
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
+    let compaction_starts_before = hooks.compaction_start_count();
     for round in 0..3 {
         let round_value = vec![b'0' + round as u8; 100]; // 100 bytes per value
         for i in 0..100 {
@@ -162,10 +163,15 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
                 .expect("put");
         }
     }
+    eng.flush().unwrap(); // Force flush to create SSTs and trigger compaction
     // Wait for compaction to complete - use stability-aware wait
     eng.wait_for_compaction(std::time::Duration::from_secs(5))
         .expect("compaction should complete");
+    let compaction_started = hooks.compaction_start_count() > compaction_starts_before;
     drop(eng);
+
+    // Assert - compaction should have started
+    assert!(compaction_started, "Compaction should have started");
 
     // Assert - latest values should be present, old SSTs should be cleaned
     let opts_recovery = MidgeOptions {
