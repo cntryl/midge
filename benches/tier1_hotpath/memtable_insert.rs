@@ -33,7 +33,7 @@ fn bench_memtable_put_key_small(c: &mut Criterion) {
 
     group.bench_function("put_small_kv", |b| {
         b.iter_batched(
-            || MemTable::new(),
+            MemTable::new,
             |memtable| {
                 memtable.put(make_key(42).as_ref(), make_value(64).as_ref());
                 black_box(&memtable);
@@ -54,7 +54,7 @@ fn bench_memtable_put_key_medium(c: &mut Criterion) {
 
     group.bench_function("put_medium_kv", |b| {
         b.iter_batched(
-            || MemTable::new(),
+            MemTable::new,
             |memtable| {
                 memtable.put(make_key(42).as_ref(), make_value(1024).as_ref());
                 black_box(&memtable);
@@ -75,7 +75,7 @@ fn bench_memtable_put_key_large(c: &mut Criterion) {
 
     group.bench_function("put_large_kv", |b| {
         b.iter_batched(
-            || MemTable::new(),
+            MemTable::new,
             |memtable| {
                 memtable.put(make_key(42).as_ref(), make_value(4096).as_ref());
                 black_box(&memtable);
@@ -96,7 +96,7 @@ fn bench_memtable_seq_insert(c: &mut Criterion) {
 
     group.bench_function("seq_insert_100", |b| {
         b.iter_batched(
-            || MemTable::new(),
+            MemTable::new,
             |memtable| {
                 for i in 0..100 {
                     memtable.put(make_key(i).as_ref(), make_value(128).as_ref());

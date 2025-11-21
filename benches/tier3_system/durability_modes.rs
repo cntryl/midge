@@ -38,7 +38,7 @@ const RECORD_COUNT: usize = 25_000;
 // ============================================================================
 
 fn load_data(engine: &MidgeEngine, count: usize) {
-    let keys = (0..count).map(|i| generate_key(i)).collect::<Vec<_>>();
+    let keys = (0..count).map(generate_key).collect::<Vec<_>>();
     let values = pregen_values(count, 42);
     load_data_batched(engine, &keys, &values, BATCH_SIZE);
 }
