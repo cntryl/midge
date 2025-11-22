@@ -20,6 +20,7 @@ fn create_file_meta(i: usize, level: u32) -> FileMeta {
         level,
         size_bytes: 4096,
         cf_id: 0,
+        sst_seq: i as u64,
         smallest_key: Some(key.as_bytes().to_vec()),
         largest_key: Some(format!("key_{:010}", i + 100).as_bytes().to_vec()),
         smallest_seq: Some(i as u64),
