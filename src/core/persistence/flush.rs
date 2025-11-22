@@ -173,8 +173,9 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     }
 
     // Finish and persist (streaming writer will write directly to disk)
-    // Format: dbpath/{cf_id}/{sst_seq}.sst
-    let sst_path = crate::core::naming::sst_path(&config.sst_dir, cf_id, sst_seq);
+    // Format: dbpath/sst/{cf_id}/{sst_seq}.sst
+    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id.as_u32()), crate::core::naming::sst_filename(sst_seq));
+    let sst_path = config.sst_dir.join(&sst_name);
     if let Some(parent) = sst_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -217,7 +218,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let key_range_for_upload = (smallest_key.clone(), largest_key.clone());
     let seq_range_for_upload = (smallest_seq, largest_seq);
 
-    let sst_name = crate::core::naming::sst_filename(sst_seq);
+    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id.as_u32()), crate::core::naming::sst_filename(sst_seq));
     m.ssts.push(sst_name.clone());
     m.files.push(crate::core::manifest::FileMeta {
         name: sst_name.clone(),

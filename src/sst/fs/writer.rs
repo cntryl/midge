@@ -78,7 +78,7 @@ impl FsDynWriter {
         sst_seq: u64,
         test_hooks: Option<crate::common::test_hooks::TestHooks>,
     ) -> MidgeResult<Self> {
-        let temp_path = temp_dir.join(format!("{}.sst.tmp", sst_seq));
+        let temp_path = temp_dir.join(format!("{:016}.sst.tmp", sst_seq));
         // Create file with write+read to allow finalization and possible readback
         let file = OpenOptions::new()
             .create(true)
