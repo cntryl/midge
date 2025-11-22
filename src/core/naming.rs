@@ -25,7 +25,7 @@ fn pad(n: u64) -> String {
 static NEXT_WAL_SEQ: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(1));
 
 /// Per-CF SST sequence allocators (key: cf_id).
-static NEXT_SST_SEQS: LazyLock<DashMap<u32, AtomicU64>> = LazyLock::new(|| DashMap::new());
+static NEXT_SST_SEQS: LazyLock<DashMap<u32, AtomicU64>> = LazyLock::new(DashMap::new);
 
 /// Initialize sequence allocators from manifest.
 pub fn initialize_sequences(manifest: &crate::core::manifest::Manifest) {
@@ -64,12 +64,11 @@ pub fn current_next_wal_seq() -> u64 {
 pub fn current_next_sst_seqs() -> std::collections::HashMap<u32, u64> {
     NEXT_SST_SEQS
         .iter()
-        .map(|e| (e.key().clone(), e.value().load(Ordering::Relaxed)))
+        .map(|e| (*e.key(), e.value().load(Ordering::Relaxed)))
         .collect()
 }
 
 /// ---- Naming helpers --------------------------------------------------------
-
 pub fn wal_filename(wal_seq: u64) -> String {
     format!("{}.wal", pad(wal_seq))
 }
@@ -95,7 +94,6 @@ pub fn manifest_path(db_path: &Path) -> PathBuf {
 }
 
 /// ---- Parsing ---------------------------------------------------------------
-
 pub fn parse_wal_seq(filename: &str) -> Option<u64> {
     filename.strip_suffix(".wal")?.parse().ok()
 }
@@ -109,7 +107,6 @@ pub fn parse_cf_id_from_dir(dirname: &str) -> Option<u32> {
 }
 
 /// ---- Tests -----------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;

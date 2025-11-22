@@ -444,7 +444,7 @@ pub(crate) fn write_compacted_sst(
     // Persist SST using writer.finish_to_path so that filesystem-backed
     // writers (FsDynWriter) can perform atomic rename + fsync operations.
     // This ensures the SST is fully durable before manifest updates.
-    let file_path = crate::core::naming::sst_path(&sst_dir, cf_id_obj, sst_seq);
+    let file_path = crate::core::naming::sst_path(sst_dir, cf_id_obj, sst_seq);
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

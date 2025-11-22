@@ -150,7 +150,7 @@ pub trait SstFactory: Send + Sync {
         compression: crate::common::codec::CompressionType,
         block_size: usize,
         use_internal: bool,
-        sst_seq: u64,
+        _sst_seq: u64,
     ) -> Box<dyn DynSstWriter> {
         // Default implementation ignores sequence and delegates to create()
         self.create(compression, block_size, use_internal)

@@ -551,7 +551,7 @@ where
 
     // Persist to file (streaming writer should write directly to disk)
     // Format: dbpath/{cf_id}/{sst_seq}.sst
-    let file_path = crate::core::naming::sst_path(&config.sst_dir, cf_id, sst_seq);
+    let file_path = crate::core::naming::sst_path(config.sst_dir, cf_id, sst_seq);
     let boxed = Box::new(dyn_writer);
     boxed.finish_to_path(&file_path)?;
 
