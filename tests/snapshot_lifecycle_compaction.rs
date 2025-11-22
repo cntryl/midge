@@ -1,12 +1,13 @@
 // Long-lived snapshots + compaction tests
 mod common;
-use common::*;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query, StorageMode};
+use common::*;
 use std::time::Duration;
 
 #[test]
-fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_reading_from_old_snapshot() {
+fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_reading_from_old_snapshot(
+) {
     // Arrange: create a long-lived snapshot and perform writes
     let dir = test_temp_dir();
     let opts = compaction_test_opts(StorageMode::LocalDisk {
@@ -17,7 +18,8 @@ fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_
 
     // Initial data
     for i in 0..100 {
-        eng.put(&cf, format!("k{:03}", i).as_bytes(), b"v1").unwrap();
+        eng.put(&cf, format!("k{:03}", i).as_bytes(), b"v1")
+            .unwrap();
     }
     eng.flush().unwrap();
 
@@ -27,18 +29,27 @@ fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_
     // Act: run many flush and compaction cycles
     for cycle in 0..5 {
         for i in 0..100 {
-            eng.put(&cf, format!("k{:03}", i).as_bytes(), format!("v{}", cycle + 2).as_bytes()).unwrap();
+            eng.put(
+                &cf,
+                format!("k{:03}", i).as_bytes(),
+                format!("v{}", cycle + 2).as_bytes(),
+            )
+            .unwrap();
         }
         eng.flush().unwrap();
         eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
     }
 
     // Assert: snapshot view remains stable
-    let results = eng.scan_at(
-        &cf,
-        Query::new().start_key(Bytes::from_static(b"k000")).end_key(Bytes::from_static(b"k100")),
-        &snapshot,
-    ).unwrap();
+    let results = eng
+        .scan_at(
+            &cf,
+            Query::new()
+                .start_key(Bytes::from_static(b"k000"))
+                .end_key(Bytes::from_static(b"k100")),
+            &snapshot,
+        )
+        .unwrap();
     assert_eq!(results.len(), 100);
     for (_key, value) in results {
         assert_eq!(value.as_ref(), b"v1");
@@ -57,7 +68,8 @@ fn should_release_old_files_given_snapshot_expiry_when_all_new_reads_use_fresh_s
 
     // Initial data
     for i in 0..100 {
-        eng.put(&cf, format!("k{:03}", i).as_bytes(), b"v1").unwrap();
+        eng.put(&cf, format!("k{:03}", i).as_bytes(), b"v1")
+            .unwrap();
     }
     eng.flush().unwrap();
 
@@ -66,7 +78,8 @@ fn should_release_old_files_given_snapshot_expiry_when_all_new_reads_use_fresh_s
 
     // Write new data
     for i in 0..100 {
-        eng.put(&cf, format!("k{:03}", i).as_bytes(), b"v2").unwrap();
+        eng.put(&cf, format!("k{:03}", i).as_bytes(), b"v2")
+            .unwrap();
     }
     eng.flush().unwrap();
     eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
@@ -75,7 +88,14 @@ fn should_release_old_files_given_snapshot_expiry_when_all_new_reads_use_fresh_s
     drop(_snapshot);
 
     // Assert: old files can be cleaned up (hard to test directly, but no crash)
-    let results = eng.scan(&cf, Query::new().start_key(Bytes::from_static(b"k000")).end_key(Bytes::from_static(b"k100"))).unwrap();
+    let results = eng
+        .scan(
+            &cf,
+            Query::new()
+                .start_key(Bytes::from_static(b"k000"))
+                .end_key(Bytes::from_static(b"k100")),
+        )
+        .unwrap();
     assert_eq!(results.len(), 100);
     for (_key, value) in results {
         assert_eq!(value.as_ref(), b"v2");
@@ -83,7 +103,8 @@ fn should_release_old_files_given_snapshot_expiry_when_all_new_reads_use_fresh_s
 }
 
 #[test]
-fn should_not_leak_disk_space_given_long_lived_snapshot_and_heavy_write_load_when_compactions_continue_to_run() {
+fn should_not_leak_disk_space_given_long_lived_snapshot_and_heavy_write_load_when_compactions_continue_to_run(
+) {
     // Arrange: create long-lived snapshot and heavy write load
     let dir = test_temp_dir();
     let opts = compaction_test_opts(StorageMode::LocalDisk {
@@ -94,7 +115,8 @@ fn should_not_leak_disk_space_given_long_lived_snapshot_and_heavy_write_load_whe
 
     // Initial data
     for i in 0..100 {
-        eng.put(&cf, format!("k{:03}", i).as_bytes(), b"v1").unwrap();
+        eng.put(&cf, format!("k{:03}", i).as_bytes(), b"v1")
+            .unwrap();
     }
     eng.flush().unwrap();
 
@@ -104,19 +126,32 @@ fn should_not_leak_disk_space_given_long_lived_snapshot_and_heavy_write_load_whe
     // Act: heavy write load with compactions
     for cycle in 0..10 {
         for i in 0..100 {
-            eng.put(&cf, format!("k{:03}", i).as_bytes(), format!("v{}", cycle + 2).as_bytes()).unwrap();
+            eng.put(
+                &cf,
+                format!("k{:03}", i).as_bytes(),
+                format!("v{}", cycle + 2).as_bytes(),
+            )
+            .unwrap();
         }
         eng.flush().unwrap();
         eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
     }
 
     // Assert: no leak (check keys are present)
-    let results = eng.scan(&cf, Query::new().start_key(Bytes::from_static(b"k000")).end_key(Bytes::from_static(b"k100"))).unwrap();
+    let results = eng
+        .scan(
+            &cf,
+            Query::new()
+                .start_key(Bytes::from_static(b"k000"))
+                .end_key(Bytes::from_static(b"k100")),
+        )
+        .unwrap();
     assert_eq!(results.len(), 100);
 }
 
 #[test]
-fn should_preserve_range_delete_visibility_given_snapshot_spanning_pre_and_post_delete_state_when_iterating_keys() {
+fn should_preserve_range_delete_visibility_given_snapshot_spanning_pre_and_post_delete_state_when_iterating_keys(
+) {
     // Arrange: take snapshot spanning pre/post delete
     let dir = test_temp_dir();
     let opts = compaction_test_opts(StorageMode::LocalDisk {
@@ -140,16 +175,24 @@ fn should_preserve_range_delete_visibility_given_snapshot_spanning_pre_and_post_
     eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
 
     // Act: iterate keys from the snapshot
-    let results = eng.scan_at(
-        &cf,
-        Query::new().start_key(Bytes::from_static(b"k000")).end_key(Bytes::from_static(b"k100")),
-        &snapshot,
-    ).unwrap();
+    let results = eng
+        .scan_at(
+            &cf,
+            Query::new()
+                .start_key(Bytes::from_static(b"k000"))
+                .end_key(Bytes::from_static(b"k100")),
+            &snapshot,
+        )
+        .unwrap();
 
     // Assert: visibility preserved, all original keys visible in snapshot
     assert_eq!(results.len(), 100);
     for i in 0..100 {
         let key = format!("k{:03}", i);
-        assert!(results.iter().any(|(k, _)| k == key.as_bytes()), "Key {} missing in snapshot", key);
+        assert!(
+            results.iter().any(|(k, _)| k == key.as_bytes()),
+            "Key {} missing in snapshot",
+            key
+        );
     }
 }

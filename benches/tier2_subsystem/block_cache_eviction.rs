@@ -12,8 +12,8 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
-use cntryl_midge::sst::{create_basic_cache, BlockKey, CachedBlock};
 use cntryl_midge::sst::block_cache::BlockType;
+use cntryl_midge::sst::{create_basic_cache, BlockKey, CachedBlock};
 
 fn make_block_key(file_idx: usize, block_idx: usize) -> BlockKey {
     BlockKey {
@@ -40,21 +40,21 @@ fn bench_block_cache_lru_eviction_1k(c: &mut Criterion) {
         b.iter(|| {
             // 512KB cache = ~125 blocks of 4KB each
             let cache = create_basic_cache(512 * 1024);
-            
+
             // Fill cache to capacity (125 blocks)
             for i in 0..125 {
                 let key = make_block_key(0, i);
                 let block = make_cached_block(4096);
                 cache.insert(key, block);
             }
-            
+
             // Insert 1k more blocks, triggering evictions
             for i in 125..1125 {
                 let key = make_block_key(0, i);
                 let block = make_cached_block(4096);
                 cache.insert(key, block);
             }
-            
+
             black_box(cache);
         })
     });
@@ -73,21 +73,21 @@ fn bench_block_cache_lru_eviction_10k(c: &mut Criterion) {
         b.iter(|| {
             // 2MB cache = ~500 blocks of 4KB each
             let cache = create_basic_cache(2 * 1024 * 1024);
-            
+
             // Fill cache to capacity
             for i in 0..500 {
                 let key = make_block_key(0, i);
                 let block = make_cached_block(4096);
                 cache.insert(key, block);
             }
-            
+
             // Insert 10k more blocks, heavy eviction pressure
             for i in 500..10_500 {
                 let key = make_block_key(0, i);
                 let block = make_cached_block(4096);
                 cache.insert(key, block);
             }
-            
+
             black_box(cache);
         })
     });

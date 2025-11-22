@@ -104,14 +104,14 @@ fn bench_wal_replay_corrupted_tail(c: &mut Criterion) {
     group.bench_function("replay_corrupted", |b| {
         b.iter(|| {
             let memtable = MemTable::new();
-            
+
             // Simulate replay with corruption detection
             // In practice, this would involve trying to decode records and handling errors
             let mut valid_count = 0;
             for record in &records {
                 // Simulate corruption check (e.g., checksum validation)
                 let is_corrupted = record.seq % 100 == 99; // Simulate 1% corruption rate
-                
+
                 if !is_corrupted {
                     // Only replay valid records
                     memtable.put(&record.key, record.value.as_ref().unwrap());
@@ -121,7 +121,7 @@ fn bench_wal_replay_corrupted_tail(c: &mut Criterion) {
                     break; // Stop at first corruption
                 }
             }
-            
+
             black_box((memtable, valid_count));
         })
     });

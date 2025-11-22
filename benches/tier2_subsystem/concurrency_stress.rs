@@ -317,7 +317,11 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
                                         let base = cf_idx * 2 * 2_500 + tid * 2_500;
                                         for i in 0..2_500 {
                                             engine
-                                                .put(&cf, &multi_cf_keys[base + i], &multi_cf_vals[base + i])
+                                                .put(
+                                                    &cf,
+                                                    &multi_cf_keys[base + i],
+                                                    &multi_cf_vals[base + i],
+                                                )
                                                 .unwrap();
                                         }
                                     });

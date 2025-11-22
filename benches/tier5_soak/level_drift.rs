@@ -26,17 +26,17 @@ fn bench_level_drift(c: &mut Criterion) {
         b.iter(|| {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("level_drift");
-            
+
             let opts = MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: path },
                 memtable_size: 1024 * 1024, // 1MB memtable
                 enable_compaction: true,
                 ..Default::default()
             };
-            
+
             let engine = MidgeEngine::open(opts).unwrap();
             let cf = engine.default_column_family();
-            
+
             // Phase 1: Initial population (creates baseline levels)
             for i in 0..10_000 {
                 let key = format!("key_{:010}", i);
@@ -45,7 +45,7 @@ fn bench_level_drift(c: &mut Criterion) {
             }
             engine.flush().unwrap();
             let _ = engine.compact_level(&cf, 0); // Push to L1
-            
+
             // Phase 2: Mixed workload (updates, deletes, new keys)
             for i in 0..10_000 {
                 match i % 3 {
@@ -67,16 +67,16 @@ fn bench_level_drift(c: &mut Criterion) {
                         engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
                     }
                 }
-                
+
                 // Periodic flush to observe level drift
                 if i % 1000 == 999 {
                     engine.flush().unwrap();
                 }
             }
-            
+
             // Final state measurement
             engine.flush().unwrap();
-            
+
             // Level drift metric = variance in level sizes
             // Would need manifest API to measure actual distribution
             black_box(engine);

@@ -69,7 +69,9 @@ impl FsBufWriter {
     }
 
     #[allow(dead_code)]
-    fn into_inner(self) -> Result<std::fs::File, std::io::IntoInnerError<BufWriter<std::fs::File>>> {
+    fn into_inner(
+        self,
+    ) -> Result<std::fs::File, std::io::IntoInnerError<BufWriter<std::fs::File>>> {
         self.inner.into_inner()
     }
 }
@@ -218,7 +220,11 @@ impl Wal {
 
         // Use the fs-level vectored writer which will dispatch to io_uring
         // when enabled (feature-gated) or fall back to blocking writev.
-        crate::fs::write_vectored_with_hooks(file, &[&frag.header, &frag.body], self.test_hooks.as_ref())?;
+        crate::fs::write_vectored_with_hooks(
+            file,
+            &[&frag.header, &frag.body],
+            self.test_hooks.as_ref(),
+        )?;
 
         let written = (frag.header.len() + frag.body.len()) as u64;
         inner.pos += written;
@@ -268,7 +274,11 @@ impl WalWriter for Wal {
         inner.file.flush()?;
         let file = inner.file.get_mut();
 
-        crate::fs::write_vectored_with_hooks(file, &[&frag.header, &frag.body], self.test_hooks.as_ref())?;
+        crate::fs::write_vectored_with_hooks(
+            file,
+            &[&frag.header, &frag.body],
+            self.test_hooks.as_ref(),
+        )?;
 
         // Advance position to reflect newly-written bytes
         inner.pos += (frag.header.len() + frag.body.len()) as u64;

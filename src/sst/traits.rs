@@ -64,6 +64,14 @@ pub trait SstStateReader {
         // Default fallback
         self.scan_range_state(start, end)
     }
+
+    /// Return all range tombstones stored in this SST's metadata.
+    ///
+    /// Default implementation returns an empty list for readers that
+    /// do not persist range tombstones.
+    fn range_tombstones(&self) -> Vec<RangeTombstone> {
+        Vec::new()
+    }
 }
 
 /// Writer contract for SST implementations.
@@ -261,8 +269,10 @@ mod tests {
         let d = Dummy;
 
         // Act
-        let result1 = SstStateReader::get_state_at(&d, b"a", 0).expect("get_state_at should succeed");
-        let result2 = SstStateReader::get_state_at(&d, b"z", 123).expect("get_state_at should succeed");
+        let result1 =
+            SstStateReader::get_state_at(&d, b"a", 0).expect("get_state_at should succeed");
+        let result2 =
+            SstStateReader::get_state_at(&d, b"z", 123).expect("get_state_at should succeed");
 
         // Assert
         match result1 {

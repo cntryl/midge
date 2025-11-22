@@ -38,19 +38,19 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
         b.iter(|| {
             let (engine, _tmp) = setup_multi_level_db();
             let cf = engine.default_column_family();
-            
+
             // Populate with 50k keys to trigger multiple flushes and compactions
             for i in 0..50_000 {
                 let key = format!("key_{:010}", i);
                 let val = format!("value_{}", i);
                 engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
-                
+
                 // Flush periodically to create multiple files
                 if i % 5000 == 4999 {
                     engine.flush().unwrap();
                 }
             }
-            
+
             // Trigger compactions to spread data across levels
             engine.flush().unwrap();
             let _ = engine.compact_level(&cf, 0); // Compact L0 to L1
@@ -59,7 +59,7 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
             let query = Query::new()
                 .start_key("key_0000000000".as_bytes().into())
                 .end_key("key_0000049999".as_bytes().into());
-            
+
             let results = engine.scan(&cf, query).unwrap();
             black_box(results.len());
         })

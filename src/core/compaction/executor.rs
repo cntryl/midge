@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::MidgeResult;
+use crate::sst::traits::RangeTombstone as SstRangeTombstone;
 
 // ============================================================================
 // Types
@@ -33,6 +34,14 @@ pub struct CompactionVersion {
     pub tombstone: bool,
     pub value: Option<Bytes>,
     pub expiration: Option<u64>, // TTL: Unix milliseconds when key expires
+}
+
+/// A range tombstone participating in a compaction run.
+#[derive(Debug, Clone)]
+pub struct CompactionRangeTombstone {
+    pub start: Vec<u8>,
+    pub end: Vec<u8>,
+    pub seq: u64,
 }
 
 // ============================================================================
@@ -103,6 +112,43 @@ pub(crate) fn collect_compaction_versions(
     versions
 }
 
+/// Collect all range tombstones from a set of SST files for compaction.
+pub(crate) fn collect_compaction_range_tombstones(
+    reader_factory: &Arc<dyn crate::sst::SstReaderFactory>,
+    sst_dir: &std::path::Path,
+    sst_names: &[String],
+) -> Vec<CompactionRangeTombstone> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<(Vec<u8>, Vec<u8>, u64)> = HashSet::new();
+
+    for name in sst_names.iter() {
+        let path = sst_dir.join(name);
+        if !path.exists() {
+            tracing::warn!(file = %name, "SST file not found during range tombstone collection");
+            continue;
+        }
+
+        let Ok(sst) = reader_factory.open(&path) else {
+            tracing::warn!(file = %name, "Failed to open SST during range tombstone collection");
+            continue;
+        };
+
+        let rts = sst.range_tombstones();
+        for rt in rts {
+            let key = (rt.start.clone(), rt.end.clone(), rt.seq);
+            if seen.insert(key.clone()) {
+                out.push(CompactionRangeTombstone {
+                    start: key.0,
+                    end: key.1,
+                    seq: key.2,
+                });
+            }
+        }
+    }
+
+    out
+}
+
 /// Sort versions by user_key (ascending), then sequence (descending), then tombstone flag.
 ///
 /// This establishes the canonical ordering for compacted output:
@@ -118,6 +164,45 @@ pub(crate) fn sort_versions_for_output(versions: &mut [CompactionVersion]) {
         },
         other => other,
     });
+}
+
+/// Convert values to point tombstones when they are covered by a range tombstone
+/// at or before their sequence number.
+pub(crate) fn filter_versions_with_range_tombstones(
+    versions: &[CompactionVersion],
+    range_tombs: &[CompactionRangeTombstone],
+) -> Vec<CompactionVersion> {
+    if range_tombs.is_empty() {
+        return versions.to_vec();
+    }
+
+    let mut rt_vec = Vec::with_capacity(range_tombs.len());
+    for rt in range_tombs {
+        rt_vec.push(SstRangeTombstone {
+            start: rt.start.clone(),
+            end: rt.end.clone(),
+            seq: rt.seq,
+        });
+    }
+
+    versions
+        .iter()
+        .cloned()
+        .map(|mut v| {
+            let mut max_rt_seq: Option<u64> = None;
+            for rt in &rt_vec {
+                if v.user_key >= rt.start && v.user_key < rt.end && v.seq <= rt.seq {
+                    max_rt_seq = Some(max_rt_seq.map_or(rt.seq, |m| m.max(rt.seq)));
+                }
+            }
+            if let Some(max_seq) = max_rt_seq {
+                v.tombstone = true;
+                v.value = None;
+                v.seq = max_seq;
+            }
+            v
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -361,7 +446,7 @@ pub(crate) fn write_compacted_sst(
 
     // Calculate tombstone counts
     let point_tombstone_count = versions.iter().filter(|v| v.tombstone).count() as u64;
-    let range_tombstone_count = 0; // Range tombstones handled separately in versions
+    let range_tombstone_count = 0; // Range tombstones currently not written by compaction
     let total_entries = versions.len() as u64;
 
     let size_bytes = std::fs::metadata(&file_path)

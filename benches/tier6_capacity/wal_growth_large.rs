@@ -11,8 +11,8 @@ mod criterion_helper;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
-use std::hint::black_box;
 use std::fs;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 /// Benchmark WAL file growth and rotation behavior under sustained writes
@@ -28,25 +28,27 @@ fn bench_wal_growth_large(c: &mut Criterion) {
         b.iter(|| {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("wal_growth");
-            
+
             let opts = MidgeOptions {
-                storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+                storage_mode: StorageMode::LocalDisk {
+                    db_path: path.clone(),
+                },
                 memtable_size: 512 * 1024, // Small memtable = frequent flushes & WAL rotation
                 enable_compaction: false,
                 ..Default::default()
             };
-            
+
             let engine = MidgeEngine::open(opts).unwrap();
             let cf = engine.default_column_family();
-            
+
             let mut wal_sizes = Vec::new();
-            
+
             // Sustained write workload
             for i in 0..50_000 {
                 let key = format!("wal_key_{:010}", i);
                 let val = vec![b'w'; 128]; // 128-byte values
                 engine.put(&cf, key.as_bytes(), &val).unwrap();
-                
+
                 // Sample WAL size periodically
                 if i % 5000 == 0 {
                     engine.flush().unwrap(); // Should truncate WAL
@@ -54,10 +56,10 @@ fn bench_wal_growth_large(c: &mut Criterion) {
                     wal_sizes.push(wal_size);
                 }
             }
-            
+
             engine.flush().unwrap();
             let final_wal_size = measure_wal_size(&path);
-            
+
             // WAL should be small after flush (truncation working)
             // Unbounded growth = bug
             black_box((wal_sizes, final_wal_size));

@@ -26,26 +26,26 @@ fn bench_compaction_backlog_growth(c: &mut Criterion) {
         b.iter(|| {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("backlog_growth");
-            
+
             let opts = MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: path },
                 memtable_size: 512 * 1024, // Small memtable = frequent flushes
                 enable_compaction: true,
                 ..Default::default()
             };
-            
+
             let engine = MidgeEngine::open(opts).unwrap();
             let cf = engine.default_column_family();
-            
+
             // Sustained write workload: 10k operations
             // Track L0 file accumulation (backlog indicator)
             let mut l0_counts = Vec::new();
-            
+
             for i in 0..10_000 {
                 let key = format!("soak_key_{:010}", i);
                 let val = format!("value_{}", i);
                 engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
-                
+
                 // Sample L0 file count periodically
                 if i % 500 == 0 {
                     // Get current manifest state (would need to expose this API)
@@ -54,10 +54,10 @@ fn bench_compaction_backlog_growth(c: &mut Criterion) {
                     l0_counts.push(i);
                 }
             }
-            
+
             // Final flush and measure
             engine.flush().unwrap();
-            
+
             // Backlog growth rate = (L0 files at end) / (operations)
             // Higher ratio = compaction can't keep up
             black_box(l0_counts.len());

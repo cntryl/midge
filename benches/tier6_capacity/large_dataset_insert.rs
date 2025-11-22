@@ -27,17 +27,17 @@ fn bench_large_dataset_insert(c: &mut Criterion) {
         b.iter(|| {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("large_insert");
-            
+
             let opts = MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: path },
                 memtable_size: 2 * 1024 * 1024, // 2MB memtable
                 enable_compaction: true,
                 ..Default::default()
             };
-            
+
             let engine = MidgeEngine::open(opts).unwrap();
             let cf = engine.default_column_family();
-            
+
             // Insert 100k keys with realistic value sizes
             let start = std::time::Instant::now();
             for i in 0..100_000 {
@@ -47,7 +47,7 @@ fn bench_large_dataset_insert(c: &mut Criterion) {
             }
             engine.flush().unwrap();
             let elapsed = start.elapsed();
-            
+
             black_box(elapsed);
         })
     });

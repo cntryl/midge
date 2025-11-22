@@ -26,14 +26,14 @@ fn make_value(size: usize) -> Bytes {
 fn setup_db(name: &str) -> (MidgeEngine, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let path = tmp.path().join(name);
-    
+
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path: path },
         memtable_size: 16 * 1024 * 1024, // 16MB memtable
         enable_compaction: false,
         ..Default::default()
     };
-    
+
     let engine = MidgeEngine::open(opts).expect("open engine");
     (engine, tmp)
 }
@@ -50,12 +50,12 @@ fn bench_flush_small_memtable(c: &mut Criterion) {
             || {
                 let (engine, _tmp) = setup_db("flush_small");
                 let cf = engine.default_column_family();
-                
+
                 // Populate memtable with 1000 keys (~128 bytes each)
                 for i in 0..1000 {
                     engine.put(&cf, &make_key(i), &make_value(128)).unwrap();
                 }
-                
+
                 (engine, _tmp)
             },
             |(engine, _tmp)| {
@@ -83,12 +83,12 @@ fn bench_flush_large_memtable(c: &mut Criterion) {
             || {
                 let (engine, _tmp) = setup_db("flush_large");
                 let cf = engine.default_column_family();
-                
+
                 // Populate memtable with 100k keys (~128 bytes each = ~12.8MB)
                 for i in 0..100_000 {
                     engine.put(&cf, &make_key(i), &make_value(128)).unwrap();
                 }
-                
+
                 (engine, _tmp)
             },
             |(engine, _tmp)| {
@@ -115,12 +115,12 @@ fn bench_flush_sparse_index_build(c: &mut Criterion) {
             || {
                 let (engine, _tmp) = setup_db("flush_sparse");
                 let cf = engine.default_column_family();
-                
+
                 // Populate with 10k keys - enough to build a meaningful sparse index
                 for i in 0..10_000 {
                     engine.put(&cf, &make_key(i), &make_value(256)).unwrap();
                 }
-                
+
                 (engine, _tmp)
             },
             |(engine, _tmp)| {

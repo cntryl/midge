@@ -38,7 +38,7 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
         b.iter(|| {
             let (engine, _tmp) = setup_l0_only_db();
             let cf = engine.default_column_family();
-            
+
             // Populate and flush multiple times to create multiple L0 files
             for batch in 0..5 {
                 for i in 0..2000 {
@@ -53,7 +53,7 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
             let query = Query::new()
                 .start_key("key_0000000000".as_bytes().into())
                 .end_key("key_9999999999".as_bytes().into());
-            
+
             let results = engine.scan(&cf, query).unwrap();
             black_box(results.len());
         })

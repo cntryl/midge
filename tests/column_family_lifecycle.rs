@@ -23,14 +23,16 @@ fn should_invalidate_handle_given_cf_dropped_when_accessing() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).unwrap();
-    let cf = eng.create_column_family("test_cf", ColumnFamilyConfig::default()).unwrap();
-    
+    let cf = eng
+        .create_column_family("test_cf", ColumnFamilyConfig::default())
+        .unwrap();
+
     eng.put(&cf, b"key1", b"val1").unwrap();
     eng.flush().unwrap();
-    
+
     // Act
     eng.drop_column_family(&cf).unwrap();
-    
+
     // Assert - operations on dropped CF should fail
     let result = eng.get(&cf, b"key1");
     assert!(result.is_err());
@@ -48,12 +50,14 @@ fn should_persist_cf_metadata_given_crash_when_cf_created() {
             ..Default::default()
         };
         let eng = MidgeEngine::open(opts).unwrap();
-        
-        let cf = eng.create_column_family("persistent_cf", ColumnFamilyConfig::default()).unwrap();
+
+        let cf = eng
+            .create_column_family("persistent_cf", ColumnFamilyConfig::default())
+            .unwrap();
         eng.put(&cf, b"key1", b"val1").unwrap();
         eng.flush().unwrap();
     }
-    
+
     // Act - reopen (CF should persist automatically)
     let opts2 = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
@@ -62,10 +66,13 @@ fn should_persist_cf_metadata_given_crash_when_cf_created() {
         ..Default::default()
     };
     let eng2 = MidgeEngine::open(opts2).unwrap();
-    
+
     // Assert - CF should exist and contain data
     let all_cfs = eng2.list_column_families();
-    assert!(all_cfs.iter().any(|cf| cf.name() == "persistent_cf"), "CF should persist across restarts");
+    assert!(
+        all_cfs.iter().any(|cf| cf.name() == "persistent_cf"),
+        "CF should persist across restarts"
+    );
 }
 
 #[test]
@@ -90,10 +97,14 @@ fn should_isolate_compaction_given_per_cf_config_when_compacting() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).unwrap();
-    
-    let cf1 = eng.create_column_family("cf1", ColumnFamilyConfig::default()).unwrap();
-    let cf2 = eng.create_column_family("cf2", ColumnFamilyConfig::default()).unwrap();
-    
+
+    let cf1 = eng
+        .create_column_family("cf1", ColumnFamilyConfig::default())
+        .unwrap();
+    let cf2 = eng
+        .create_column_family("cf2", ColumnFamilyConfig::default())
+        .unwrap();
+
     // Write to both CFs
     for i in 0..100 {
         let key = format!("key{}", i);
@@ -121,9 +132,13 @@ fn should_allow_same_key_across_cfs_given_different_cf_when_writing() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).unwrap();
-    
-    let cf1 = eng.create_column_family("cf1", ColumnFamilyConfig::default()).unwrap();
-    let cf2 = eng.create_column_family("cf2", ColumnFamilyConfig::default()).unwrap();
+
+    let cf1 = eng
+        .create_column_family("cf1", ColumnFamilyConfig::default())
+        .unwrap();
+    let cf2 = eng
+        .create_column_family("cf2", ColumnFamilyConfig::default())
+        .unwrap();
 
     // Act - same key, different values in different CFs
     eng.put(&cf1, b"shared_key", b"value_in_cf1").unwrap();
@@ -151,8 +166,10 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).unwrap();
-    
-    let cf = eng.create_column_family("temp_cf", ColumnFamilyConfig::default()).unwrap();
+
+    let cf = eng
+        .create_column_family("temp_cf", ColumnFamilyConfig::default())
+        .unwrap();
     for i in 0..100 {
         let key = format!("key{}", i);
         eng.put(&cf, key.as_bytes(), b"val").unwrap();
@@ -171,7 +188,9 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
         ..Default::default()
     };
     let eng2 = MidgeEngine::open(opts2).unwrap();
-    let cf_new = eng2.create_column_family("temp_cf", ColumnFamilyConfig::default()).unwrap();
+    let cf_new = eng2
+        .create_column_family("temp_cf", ColumnFamilyConfig::default())
+        .unwrap();
     // Fresh CF should have no data
     assert!(eng2.get(&cf_new, b"key50").unwrap().is_none());
 }

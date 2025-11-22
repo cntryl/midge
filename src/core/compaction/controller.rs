@@ -257,9 +257,16 @@ impl CompactionController {
                             return Ok(());
                         }
 
+                        let range_tombs = super::executor::collect_compaction_range_tombstones(
+                            &sst_reader_factory,
+                            &sst_dir,
+                            &plan.input_files,
+                        );
+
                         // Sort, filter tombstones, apply compaction filter, dedupe.
                         super::executor::sort_versions_for_output(&mut versions);
 
+                        let versions = super::executor::filter_versions_with_range_tombstones(&versions, &range_tombs);
                         let min_snapshot_seq = snapshot_registry.min_active_seq();
                         let (versions_after_filter, _removed) =
                             super::executor::filter_safe_tombstones(&versions, min_snapshot_seq);
@@ -430,7 +437,11 @@ impl CompactionController {
                     *inflight += 1;
                 }
             }
-            CompactionMsg::CompactRange { cf_id, start_key, end_key } => {
+            CompactionMsg::CompactRange {
+                cf_id,
+                start_key,
+                end_key,
+            } => {
                 let manifest = Manifest::load(db_path).unwrap_or_default();
                 let cf_config = manifest
                     .column_families
@@ -520,7 +531,7 @@ impl CompactionController {
                     match r2.recv_timeout(std::time::Duration::from_millis(50)) {
                         Ok(()) => {
                             // Still idle after stability period - we're done
-                                tracing::trace!(wait_ms = %start_time.elapsed().as_millis(), "Compaction wait_until_idle completed (ms)");
+                            tracing::trace!(wait_ms = %start_time.elapsed().as_millis(), "Compaction wait_until_idle completed (ms)");
                             return Ok(());
                         }
                         Err(channel::RecvTimeoutError::Timeout) => {

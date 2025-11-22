@@ -5,7 +5,10 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use cntryl_midge::{KvTransaction, test_hooks::{TestHooks, IoBehavior}};
+use cntryl_midge::{
+    test_hooks::{IoBehavior, TestHooks},
+    KvTransaction,
+};
 
 mod common;
 use common::{new_engine, new_engine_with_test_hooks};
@@ -204,7 +207,9 @@ fn should_fail_transaction_commit_when_disk_full() {
     let cf = engine.default_column_family();
 
     // Pre-populate some data
-    engine.put(&cf, b"existing_key", b"existing_value").expect("put");
+    engine
+        .put(&cf, b"existing_key", b"existing_value")
+        .expect("put");
     engine.flush().expect("flush");
 
     // Create transaction with operations
@@ -231,7 +236,9 @@ fn should_allow_operations_after_transaction_commit_disk_full_failure() {
     let cf = engine.default_column_family();
 
     // Pre-populate some data
-    engine.put(&cf, b"existing_key", b"existing_value").expect("put");
+    engine
+        .put(&cf, b"existing_key", b"existing_value")
+        .expect("put");
     engine.flush().expect("flush");
 
     // Create transaction with operations

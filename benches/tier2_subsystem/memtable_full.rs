@@ -54,13 +54,13 @@ fn bench_memtable_full_eviction_trigger(c: &mut Criterion) {
         b.iter(|| {
             let memtable = MemTable::new();
             let size_limit = 1024 * 1024; // 1MB limit
-            
+
             // Add entries until full, checking is_full each time
             for i in 0..10_000 {
                 let key = format!("key_{:05}", i);
                 let value = format!("value_{:05}", i);
                 memtable.put(key.as_bytes(), value.as_bytes());
-                
+
                 // Check if full (this is the eviction trigger check)
                 let _is_full = memtable.is_full(size_limit);
                 black_box(_is_full);

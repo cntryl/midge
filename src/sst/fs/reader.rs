@@ -729,7 +729,6 @@ impl SstStateReader for SstFile {
     fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState> {
         self.get_state_internal(key)
     }
-
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,
@@ -741,7 +740,6 @@ impl SstStateReader for SstFile {
     fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState> {
         self.get_state_at_internal(key, snapshot_seq)
     }
-
     fn scan_range_state_at(
         &self,
         start: Option<&[u8]>,
@@ -749,5 +747,9 @@ impl SstStateReader for SstFile {
         snapshot_seq: u64,
     ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
         self.scan_range_state_at_internal(start, end, snapshot_seq)
+    }
+
+    fn range_tombstones(&self) -> Vec<RangeTombstone> {
+        self.range_tombstones.clone()
     }
 }

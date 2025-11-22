@@ -1,14 +1,15 @@
 // Multi-column-family compaction + recovery observable tests
 mod common;
-use common::*;
 use cntryl_midge::api::column_family::ColumnFamilyConfig;
 use cntryl_midge::MidgeOptions;
+use common::*;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 #[test]
-fn should_recover_all_column_families_consistently_given_mixed_writes_and_compactions_when_restarting_repeatedly() {
+fn should_recover_all_column_families_consistently_given_mixed_writes_and_compactions_when_restarting_repeatedly(
+) {
     for mode in disk_storage_modes() {
         let (_name, storage_mode, _tmp) = create_storage_mode(mode);
         let opts = compaction_test_opts(storage_mode);
@@ -24,8 +25,10 @@ fn should_recover_all_column_families_consistently_given_mixed_writes_and_compac
 
             // Initial writes
             for i in 0..100 {
-                eng.put(&cf1, format!("a{:03}", i).as_bytes(), b"v1").unwrap();
-                eng.put(&cf2, format!("b{:03}", i).as_bytes(), b"v2").unwrap();
+                eng.put(&cf1, format!("a{:03}", i).as_bytes(), b"v1")
+                    .unwrap();
+                eng.put(&cf2, format!("b{:03}", i).as_bytes(), b"v2")
+                    .unwrap();
             }
             eng.flush().unwrap();
         });
@@ -40,8 +43,10 @@ fn should_recover_all_column_families_consistently_given_mixed_writes_and_compac
                     let cf2 = eng.get_column_family("cf2").expect("get cf2");
 
                     for i in 0..50 {
-                        eng.put(&cf1, format!("a{:03}", cycle * 50 + i).as_bytes(), b"v1b").unwrap();
-                        eng.put(&cf2, format!("b{:03}", cycle * 50 + i).as_bytes(), b"v2b").unwrap();
+                        eng.put(&cf1, format!("a{:03}", cycle * 50 + i).as_bytes(), b"v1b")
+                            .unwrap();
+                        eng.put(&cf2, format!("b{:03}", cycle * 50 + i).as_bytes(), b"v2b")
+                            .unwrap();
                     }
                     eng.flush().unwrap();
 
@@ -61,7 +66,8 @@ fn should_recover_all_column_families_consistently_given_mixed_writes_and_compac
 }
 
 #[test]
-fn should_not_cross_contaminate_keys_between_column_families_given_heavy_compaction_when_replaying_wal_on_restart() {
+fn should_not_cross_contaminate_keys_between_column_families_given_heavy_compaction_when_replaying_wal_on_restart(
+) {
     for mode in disk_storage_modes() {
         let (_name, storage_mode, _tmp) = create_storage_mode(mode);
         let opts = compaction_test_opts(storage_mode);
@@ -77,8 +83,10 @@ fn should_not_cross_contaminate_keys_between_column_families_given_heavy_compact
 
             // Write same logical key into both CFs with different values
             for i in 0..200 {
-                eng.put(&cf1, b"shared", format!("v1_{}", i).as_bytes()).unwrap();
-                eng.put(&cf2, b"shared", format!("v2_{}", i).as_bytes()).unwrap();
+                eng.put(&cf1, b"shared", format!("v1_{}", i).as_bytes())
+                    .unwrap();
+                eng.put(&cf2, b"shared", format!("v2_{}", i).as_bytes())
+                    .unwrap();
                 if i % 20 == 0 {
                     eng.flush().unwrap();
                 }
@@ -89,14 +97,18 @@ fn should_not_cross_contaminate_keys_between_column_families_given_heavy_compact
 
         // Restart and validate no cross-contamination
         // Assert
-        with_engine_restart(opts.clone(), |_| {}, |eng| {
-            let cf1 = eng.get_column_family("isolate1").expect("get isolate1");
-            let cf2 = eng.get_column_family("isolate2").expect("get isolate2");
-            let v1 = eng.get(&cf1, b"shared").unwrap().expect("v1 exists");
-            let v2 = eng.get(&cf2, b"shared").unwrap().expect("v2 exists");
-            assert!(v1.as_ref().starts_with(b"v1_"));
-            assert!(v2.as_ref().starts_with(b"v2_"));
-        });
+        with_engine_restart(
+            opts.clone(),
+            |_| {},
+            |eng| {
+                let cf1 = eng.get_column_family("isolate1").expect("get isolate1");
+                let cf2 = eng.get_column_family("isolate2").expect("get isolate2");
+                let v1 = eng.get(&cf1, b"shared").unwrap().expect("v1 exists");
+                let v2 = eng.get(&cf2, b"shared").unwrap().expect("v2 exists");
+                assert!(v1.as_ref().starts_with(b"v1_"));
+                assert!(v2.as_ref().starts_with(b"v2_"));
+            },
+        );
     }
 }
 
@@ -121,7 +133,9 @@ fn should_handle_cf_drop_gracefully_given_inflight_compaction_when_reopening_dat
             .create_column_family("to_drop", ColumnFamilyConfig::default())
             .expect("create to_drop");
         for i in 0..1000 {
-            eng_arc.put(&cf, format!("k{:04}", i).as_bytes(), b"v").unwrap();
+            eng_arc
+                .put(&cf, format!("k{:04}", i).as_bytes(), b"v")
+                .unwrap();
         }
         eng_arc.flush().unwrap();
 

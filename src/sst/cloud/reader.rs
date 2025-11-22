@@ -420,6 +420,10 @@ impl SstStateReader for SstCloudReader {
 
         Ok(results)
     }
+
+    fn range_tombstones(&self) -> Vec<RangeTombstone> {
+        self.range_tombstones.clone()
+    }
 }
 
 impl crate::sst::SstReader for SstCloudReader {

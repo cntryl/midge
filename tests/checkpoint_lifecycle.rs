@@ -19,7 +19,7 @@ fn should_maintain_consistency_given_checkpoint_during_writes_when_created() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"val1").unwrap();
     eng.put(&cf, b"key2", b"val2").unwrap();
     eng.flush().unwrap();
@@ -27,7 +27,7 @@ fn should_maintain_consistency_given_checkpoint_during_writes_when_created() {
     // Act - checkpoint
     let checkpoint_path = dir.path().join("checkpoint1");
     eng.create_checkpoint(&checkpoint_path).unwrap();
-    
+
     // Write more data after checkpoint
     eng.put(&cf, b"key3", b"val3").unwrap();
 
@@ -40,7 +40,7 @@ fn should_maintain_consistency_given_checkpoint_during_writes_when_created() {
     };
     let ckpt_eng = MidgeEngine::open(ckpt_opts).unwrap();
     let ckpt_cf = ckpt_eng.default_column_family();
-    
+
     assert!(ckpt_eng.get(&ckpt_cf, b"key1").unwrap().is_some());
     assert!(ckpt_eng.get(&ckpt_cf, b"key2").unwrap().is_some());
     assert!(ckpt_eng.get(&ckpt_cf, b"key3").unwrap().is_none());
@@ -63,7 +63,7 @@ fn should_verify_integrity_given_checkpoint_restored_when_validating() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     // Write deterministic data
     for i in 0..100 {
         let key = format!("key{:03}", i);
@@ -75,7 +75,7 @@ fn should_verify_integrity_given_checkpoint_restored_when_validating() {
     // Act - checkpoint and restore
     let checkpoint_path = dir.path().join("checkpoint_verify");
     eng.create_checkpoint(&checkpoint_path).unwrap();
-    
+
     let ckpt_opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
             db_path: checkpoint_path,
@@ -113,10 +113,10 @@ fn should_isolate_checkpoint_given_original_modified_when_independent() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"val1").unwrap();
     eng.flush().unwrap();
-    
+
     let checkpoint_path = dir.path().join("checkpoint_isolated");
     eng.create_checkpoint(&checkpoint_path).unwrap();
 
@@ -134,7 +134,7 @@ fn should_isolate_checkpoint_given_original_modified_when_independent() {
     };
     let ckpt_eng = MidgeEngine::open(ckpt_opts).unwrap();
     let ckpt_cf = ckpt_eng.default_column_family();
-    
+
     assert_eq!(
         ckpt_eng.get(&ckpt_cf, b"key1").unwrap().unwrap(),
         Bytes::from("val1")
@@ -153,17 +153,17 @@ fn should_create_multiple_checkpoints_given_sequential_creation_when_requested()
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key", b"v1").unwrap();
     eng.flush().unwrap();
     let ckpt1 = dir.path().join("ckpt1");
     eng.create_checkpoint(&ckpt1).unwrap();
-    
+
     eng.put(&cf, b"key", b"v2").unwrap();
     eng.flush().unwrap();
     let ckpt2 = dir.path().join("ckpt2");
     eng.create_checkpoint(&ckpt2).unwrap();
-    
+
     eng.put(&cf, b"key", b"v3").unwrap();
     eng.flush().unwrap();
     let ckpt3 = dir.path().join("ckpt3");
@@ -173,16 +173,19 @@ fn should_create_multiple_checkpoints_given_sequential_creation_when_requested()
     let eng1 = MidgeEngine::open(MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path: ckpt1 },
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     let eng2 = MidgeEngine::open(MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path: ckpt2 },
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     let eng3 = MidgeEngine::open(MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path: ckpt3 },
         ..Default::default()
-    }).unwrap();
-    
+    })
+    .unwrap();
+
     let cf1 = eng1.default_column_family();
     let cf2 = eng2.default_column_family();
     let cf3 = eng3.default_column_family();
@@ -218,7 +221,7 @@ fn should_checkpoint_empty_db_given_no_data_when_created() {
     };
     let ckpt_eng = MidgeEngine::open(ckpt_opts).unwrap();
     let ckpt_cf = ckpt_eng.default_column_family();
-    
+
     assert!(ckpt_eng.get(&ckpt_cf, b"any_key").unwrap().is_none());
 }
 
@@ -233,11 +236,13 @@ fn should_include_all_column_families_given_checkpoint_when_multiple_cfs() {
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).unwrap();
-    
+
     use cntryl_midge::ColumnFamilyConfig;
     let cf1 = eng.default_column_family();
-    let cf2 = eng.create_column_family("cf2", ColumnFamilyConfig::default()).unwrap();
-    
+    let cf2 = eng
+        .create_column_family("cf2", ColumnFamilyConfig::default())
+        .unwrap();
+
     eng.put(&cf1, b"key_default", b"val_default").unwrap();
     eng.put(&cf2, b"key_cf2", b"val_cf2").unwrap();
     eng.flush().unwrap();
@@ -254,7 +259,7 @@ fn should_include_all_column_families_given_checkpoint_when_multiple_cfs() {
         ..Default::default()
     };
     let ckpt_eng = MidgeEngine::open(ckpt_opts).unwrap();
-    
+
     let all_cfs = ckpt_eng.list_column_families();
     assert!(all_cfs.iter().any(|cf| cf.name() == "default"));
     assert!(all_cfs.iter().any(|cf| cf.name() == "cf2"));

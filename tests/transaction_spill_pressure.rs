@@ -1,10 +1,13 @@
 // Transaction spill / memory pressure tests
 mod common;
+use cntryl_midge::{
+    IsolationLevel, KvTransaction, MidgeEngine, MidgeOptions, StorageMode, WriteOptions,
+};
 use common::*;
-use cntryl_midge::{IsolationLevel, KvTransaction, MidgeEngine, MidgeOptions, StorageMode, WriteOptions};
 
 #[test]
-fn should_complete_transaction_correctly_given_large_spill_file_when_restart_occurs_before_commit() {
+fn should_complete_transaction_correctly_given_large_spill_file_when_restart_occurs_before_commit()
+{
     // Arrange: create a large transaction that spills to disk
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -42,14 +45,19 @@ fn should_complete_transaction_correctly_given_large_spill_file_when_restart_occ
             for i in 0..2000 {
                 let key = format!("key{:06}", i);
                 let value = eng.get(&cf, key.as_bytes()).unwrap();
-                assert!(value.is_none(), "Key {} should not exist after rollback", key);
+                assert!(
+                    value.is_none(),
+                    "Key {} should not exist after rollback",
+                    key
+                );
             }
         },
     );
 }
 
 #[test]
-fn should_not_starve_foreground_writes_given_background_spill_activity_when_memory_pressure_is_high() {
+fn should_not_starve_foreground_writes_given_background_spill_activity_when_memory_pressure_is_high(
+) {
     // Arrange: simulate high memory pressure and background spill activity
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -63,12 +71,7 @@ fn should_not_starve_foreground_writes_given_background_spill_activity_when_memo
 
     // Start a large transaction that will spill
     let mut spill_txn = eng
-        .begin_transaction_with_options(
-            &cf,
-            None,
-            1024 * 1024,
-            IsolationLevel::default(),
-        )
+        .begin_transaction_with_options(&cf, None, 1024 * 1024, IsolationLevel::default())
         .unwrap();
     for i in 0..1000 {
         spill_txn
@@ -78,7 +81,8 @@ fn should_not_starve_foreground_writes_given_background_spill_activity_when_memo
 
     // Act: perform foreground writes
     for i in 0..100 {
-        eng.put(&cf, format!("fg{:06}", i).as_bytes(), b"v").unwrap();
+        eng.put(&cf, format!("fg{:06}", i).as_bytes(), b"v")
+            .unwrap();
     }
 
     // Assert: foreground writes succeeded
@@ -90,7 +94,8 @@ fn should_not_starve_foreground_writes_given_background_spill_activity_when_memo
 }
 
 #[test]
-fn should_recover_spill_state_safely_given_crash_during_spill_file_rotation_when_reopening_engine() {
+fn should_recover_spill_state_safely_given_crash_during_spill_file_rotation_when_reopening_engine()
+{
     // Arrange: trigger spill rotation and simulate crash
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -107,19 +112,15 @@ fn should_recover_spill_state_safely_given_crash_during_spill_file_rotation_when
             let cf = eng.default_column_family();
             // Create transaction that spills
             let mut txn = eng
-                .begin_transaction_with_options(
-                    &cf,
-                    None,
-                    1024 * 1024,
-                    IsolationLevel::default(),
-                )
+                .begin_transaction_with_options(&cf, None, 1024 * 1024, IsolationLevel::default())
                 .unwrap();
             for i in 0..2000 {
                 txn.put(format!("key{:06}", i).as_bytes(), &vec![0u8; 1024])
                     .unwrap();
             }
             // Commit to ensure spill files are written
-            eng.commit_transaction(txn, WriteOptions::default()).unwrap();
+            eng.commit_transaction(txn, WriteOptions::default())
+                .unwrap();
         },
         |eng| {
             let cf = eng.default_column_family();
@@ -134,7 +135,8 @@ fn should_recover_spill_state_safely_given_crash_during_spill_file_rotation_when
 }
 
 #[test]
-fn should_enforce_transaction_size_limits_given_spill_disabled_when_user_exceeds_configured_threshold() {
+fn should_enforce_transaction_size_limits_given_spill_disabled_when_user_exceeds_configured_threshold(
+) {
     // Arrange: configure spill disabled by setting very low mem_limit (but spill is always enabled)
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -163,7 +165,8 @@ fn should_enforce_transaction_size_limits_given_spill_disabled_when_user_exceeds
     }
 
     // Assert: transaction succeeds due to spill
-    eng.commit_transaction(txn, WriteOptions::default()).unwrap();
+    eng.commit_transaction(txn, WriteOptions::default())
+        .unwrap();
     for i in 0..100 {
         let key = format!("key{:06}", i);
         let value = eng.get(&cf, key.as_bytes()).unwrap();

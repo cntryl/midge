@@ -19,12 +19,12 @@ fn should_delete_keys_across_multiple_levels_when_delete_range_applied() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"val1").unwrap();
     eng.put(&cf, b"key2", b"val2").unwrap();
     eng.put(&cf, b"key3", b"val3").unwrap();
     eng.flush().unwrap();
-    
+
     eng.put(&cf, b"key4", b"val4").unwrap();
     eng.put(&cf, b"key5", b"val5").unwrap();
     eng.flush().unwrap();
@@ -52,7 +52,7 @@ fn should_resolve_overlapping_ranges_correctly_when_multiple_delete_ranges_issue
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     for i in 0..10 {
         let key = format!("key{:02}", i);
         eng.put(&cf, key.as_bytes(), b"val").unwrap();
@@ -83,7 +83,7 @@ fn should_handle_point_writes_and_range_deletes_correctly_when_interleaved() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"val1").unwrap();
     eng.put(&cf, b"key2", b"val2").unwrap();
     eng.put(&cf, b"key3", b"val3").unwrap();
@@ -113,13 +113,13 @@ fn should_apply_range_tombstones_during_compaction_when_compacting_levels() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     for i in 0..20 {
         let key = format!("key{:03}", i);
         eng.put(&cf, key.as_bytes(), b"val").unwrap();
     }
     eng.flush().unwrap();
-    
+
     eng.delete_range(&cf, b"key005", b"key015").unwrap();
     eng.flush().unwrap();
 
@@ -144,11 +144,11 @@ fn should_retain_range_tombstones_when_snapshots_exist() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"val1").unwrap();
     eng.put(&cf, b"key2", b"val2").unwrap();
     eng.flush().unwrap();
-    
+
     let snapshot = eng.snapshot();
 
     // Act
@@ -160,7 +160,7 @@ fn should_retain_range_tombstones_when_snapshots_exist() {
         eng.get_at(&cf, b"key1", &snapshot).unwrap().unwrap(),
         Bytes::from("val1")
     );
-    
+
     // Current view should not see deleted keys
     assert!(eng.get(&cf, b"key1").unwrap().is_none());
 }
@@ -177,7 +177,7 @@ fn should_handle_large_range_deletion_efficiently_when_spanning_many_keys() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     for i in 0..1000 {
         let key = format!("key{:06}", i);
         eng.put(&cf, key.as_bytes(), b"value").unwrap();
@@ -206,15 +206,15 @@ fn should_recover_range_tombstones_after_restart_when_persisted_in_wal() {
         };
         let eng = MidgeEngine::open(opts).unwrap();
         let cf = eng.default_column_family();
-        
+
         eng.put(&cf, b"key1", b"val1").unwrap();
         eng.put(&cf, b"key2", b"val2").unwrap();
         eng.put(&cf, b"key3", b"val3").unwrap();
-        
+
         // Act - delete range without flush
         eng.delete_range(&cf, b"key1", b"key3").unwrap();
     }
-    
+
     // Assert - reopen and check
     let opts2 = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
@@ -224,7 +224,7 @@ fn should_recover_range_tombstones_after_restart_when_persisted_in_wal() {
     };
     let eng2 = MidgeEngine::open(opts2).unwrap();
     let cf2 = eng2.default_column_family();
-    
+
     assert!(eng2.get(&cf2, b"key1").unwrap().is_none());
     assert!(eng2.get(&cf2, b"key2").unwrap().is_none());
     assert!(eng2.get(&cf2, b"key3").unwrap().is_some());
@@ -242,13 +242,13 @@ fn should_apply_range_deletes_in_memtable_and_sst_when_querying() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"sst_val1").unwrap();
     eng.put(&cf, b"key2", b"sst_val2").unwrap();
     eng.flush().unwrap();
-    
+
     eng.delete_range(&cf, b"key0", b"key2").unwrap();
-    
+
     // Act - new key in memtable after range delete
     eng.put(&cf, b"key1", b"mem_val1").unwrap();
 
@@ -272,11 +272,11 @@ fn should_prevent_key_resurrection_when_range_delete_applied_before_compaction()
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key5", b"old_val").unwrap();
     eng.flush().unwrap();
     eng.compact_range(&cf, Some(b""), Some(b"~")).unwrap();
-    
+
     eng.delete_range(&cf, b"key0", b"key9").unwrap();
     eng.flush().unwrap();
 
@@ -299,7 +299,7 @@ fn should_handle_empty_range_delete_when_start_equals_end() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"val1").unwrap();
     eng.put(&cf, b"key2", b"val2").unwrap();
 

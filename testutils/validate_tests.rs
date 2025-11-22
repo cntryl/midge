@@ -28,10 +28,7 @@ impl Args {
             .and_then(|i| args.get(i + 1))
             .map(PathBuf::from);
 
-        Args {
-            summary,
-            file,
-        }
+        Args { summary, file }
     }
 }
 
@@ -158,8 +155,8 @@ pub fn test_single_test(
             let allowed_patterns = [
                 "with_id_and_name",
                 "point_writes_and_range_deletes",
-                "memtable_and_sst", 
-                "large_keys_and_values"
+                "memtable_and_sst",
+                "large_keys_and_values",
             ];
 
             let is_allowed = allowed_patterns
@@ -304,7 +301,10 @@ fn print_summary() {
         }
 
         // Print all multi-behavior violations
-        let multi_violations: Vec<_> = non_compliant.iter().filter(|r| r.issues.iter().any(|i| i.starts_with("MULTI-BEHAVIOR:"))).collect();
+        let multi_violations: Vec<_> = non_compliant
+            .iter()
+            .filter(|r| r.issues.iter().any(|i| i.starts_with("MULTI-BEHAVIOR:")))
+            .collect();
         if !multi_violations.is_empty() {
             println!("\x1b[33mAll Multi-behavior violations:\x1b[0m");
             for result in multi_violations {
@@ -362,10 +362,6 @@ fn print_file_results(file_path: &Path) {
         }
     }
 }
-
-
-
-
 
 #[allow(dead_code)]
 fn main() {

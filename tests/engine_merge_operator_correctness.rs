@@ -192,10 +192,10 @@ fn should_resolve_merges_correctly_after_compaction() {
     // Arrange - add data and flush multiple times
     engine.put(&cf, b"counter", b"5").expect("put");
     engine.flush().expect("flush");
-    
+
     engine.merge_cf(&cf, b"counter", b"10").expect("merge");
     engine.flush().expect("flush");
-    
+
     engine.merge_cf(&cf, b"counter", b"15").expect("merge");
     engine.flush().expect("flush");
 
@@ -283,7 +283,7 @@ fn should_merge_across_different_column_families_independently() {
     // Act
     engine.merge_cf(&cf1, b"counter", b"5").expect("merge");
     engine.merge_cf(&cf1, b"counter", b"10").expect("merge");
-    
+
     engine.merge_cf(&cf2, b"list", b"A").expect("merge");
     engine.merge_cf(&cf2, b"list", b"B").expect("merge");
 
@@ -292,10 +292,7 @@ fn should_merge_across_different_column_families_independently() {
         engine.get(&cf1, b"counter").unwrap(),
         Some(Bytes::from("15"))
     );
-    assert_eq!(
-        engine.get(&cf2, b"list").unwrap(),
-        Some(Bytes::from("A-B"))
-    );
+    assert_eq!(engine.get(&cf2, b"list").unwrap(), Some(Bytes::from("A-B")));
 }
 
 #[test]
@@ -511,12 +508,8 @@ fn should_merge_with_binary_data() {
 
     // Act - use binary representation
     let binary_key = vec![0x00, 0xFF, 0xAB, 0xCD];
-    engine
-        .merge_cf(&cf, &binary_key, b"42")
-        .expect("merge");
-    engine
-        .merge_cf(&cf, &binary_key, b"8")
-        .expect("merge");
+    engine.merge_cf(&cf, &binary_key, b"42").expect("merge");
+    engine.merge_cf(&cf, &binary_key, b"8").expect("merge");
 
     // Assert
     let result = engine.get(&cf, &binary_key).unwrap();
@@ -539,7 +532,9 @@ fn should_not_merge_across_delete_range() {
 
     // Arrange
     engine.merge_cf(&cf, b"key1", b"10").expect("merge");
-    engine.delete_range(&cf, b"key0", b"key2").expect("delete_range");
+    engine
+        .delete_range(&cf, b"key0", b"key2")
+        .expect("delete_range");
 
     // Act
     engine.merge_cf(&cf, b"key1", b"5").expect("merge");

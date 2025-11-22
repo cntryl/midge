@@ -77,7 +77,10 @@ fn should_return_consistent_results_given_no_merge_operator_when_reading() {
 
     // Assert - reading should not panic
     let result = engine.get(&cf, b"key");
-    assert!(result.is_ok(), "Read should not panic without merge operator");
+    assert!(
+        result.is_ok(),
+        "Read should not panic without merge operator"
+    );
 }
 
 #[test]
@@ -103,7 +106,7 @@ fn should_propagate_error_given_failing_merge_operator_when_flushing() {
     // Act - write merges that will trigger flush
     engine.put(&cf, b"key", b"10").expect("put");
     let _ = engine.merge_cf(&cf, b"key", b"5");
-    
+
     let large_value = vec![b'x'; 256];
     for i in 0..30 {
         let _ = engine.put(&cf, format!("filler{:03}", i).as_bytes(), &large_value);
@@ -111,7 +114,7 @@ fn should_propagate_error_given_failing_merge_operator_when_flushing() {
 
     // Flush may succeed or fail depending on when merge resolution happens
     let flush_result = engine.flush_cf(&cf);
-    
+
     // Assert - either flush fails or read later surfaces the error
     if flush_result.is_ok() {
         // If flush succeeded, merge error should surface on read
@@ -140,7 +143,7 @@ fn should_maintain_consistency_given_merge_operator_changed_when_reopening() {
             .create_column_family("test_cf", ColumnFamilyConfig::default())
             .expect("create cf");
         engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
-        
+
         engine.put(&cf, b"key", b"10").expect("put");
         let _ = engine.merge_cf(&cf, b"key", b"5");
         engine.flush_cf(&cf).ok();
@@ -148,9 +151,7 @@ fn should_maintain_consistency_given_merge_operator_changed_when_reopening() {
 
     // Reopen and read (operator not re-registered)
     let engine = MidgeEngine::open(opts).expect("reopen");
-    let cf = engine
-        .get_column_family("test_cf")
-        .expect("get cf");
+    let cf = engine.get_column_family("test_cf").expect("get cf");
 
     // Assert - read should not panic or corrupt data
     let result = engine.get(&cf, b"key");

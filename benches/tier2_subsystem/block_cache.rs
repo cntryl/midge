@@ -14,8 +14,8 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
-use cntryl_midge::sst::{create_basic_cache, BlockKey, CachedBlock};
 use cntryl_midge::sst::block_cache::BlockType;
+use cntryl_midge::sst::{create_basic_cache, BlockKey, CachedBlock};
 
 fn make_block_key(file_idx: usize, block_idx: usize) -> BlockKey {
     BlockKey {
@@ -41,7 +41,7 @@ fn bench_block_cache_eviction_scan(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let cache = create_basic_cache(1024 * 1024); // 1MB cache
-                // Fill cache
+                                                             // Fill cache
                 for i in 0..1000 {
                     let key = make_block_key(0, i);
                     let block = make_cached_block(4096);
@@ -77,7 +77,7 @@ fn bench_block_cache_fill_then_hit(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let cache = create_basic_cache(1024 * 1024); // 1MB cache
-                // Fill with initial data
+                                                             // Fill with initial data
                 for i in 0..100 {
                     let key = make_block_key(0, i);
                     let block = make_cached_block(4096);
@@ -117,7 +117,7 @@ fn bench_block_cache_hotset_rotation(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let cache = create_basic_cache(1024 * 1024); // 1MB cache
-                // Establish hot set
+                                                             // Establish hot set
                 for i in 0..50 {
                     let key = make_block_key(0, i);
                     let block = make_cached_block(4096);

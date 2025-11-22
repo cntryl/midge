@@ -120,9 +120,9 @@ pub fn write_all(file: &mut File, buf: &[u8]) -> MidgeResult<()> {
 /// Write all bytes with optional test hooks for fault injection.
 #[inline]
 pub fn write_all_with_hooks(
-    file: &mut File, 
-    buf: &[u8], 
-    _test_hooks: Option<&crate::common::test_hooks::TestHooks>
+    file: &mut File,
+    buf: &[u8],
+    _test_hooks: Option<&crate::common::test_hooks::TestHooks>,
 ) -> MidgeResult<()> {
     file.write_all(buf)?;
     Ok(())
@@ -181,9 +181,9 @@ pub fn write_vectored(file: &mut File, buffers: &[&[u8]]) -> MidgeResult<()> {
 
 /// Vectored write with optional test hooks for fault injection.
 pub fn write_vectored_with_hooks(
-    file: &mut File, 
-    buffers: &[&[u8]], 
-    test_hooks: Option<&crate::common::test_hooks::TestHooks>
+    file: &mut File,
+    buffers: &[&[u8]],
+    test_hooks: Option<&crate::common::test_hooks::TestHooks>,
 ) -> MidgeResult<()> {
     #[cfg(feature = "uring")]
     {
@@ -202,9 +202,9 @@ pub fn write_vectored_fallback(file: &mut File, buffers: &[&[u8]]) -> MidgeResul
 
 /// Internal fallback implementation with optional test hooks.
 pub fn write_vectored_fallback_with_hooks(
-    file: &mut File, 
-    buffers: &[&[u8]], 
-    _test_hooks: Option<&crate::common::test_hooks::TestHooks>
+    file: &mut File,
+    buffers: &[&[u8]],
+    _test_hooks: Option<&crate::common::test_hooks::TestHooks>,
 ) -> MidgeResult<()> {
     // Try to use the platform's vectored write implementation via `Write::write_vectored`.
     // This lets Rust forward to `writev` on Unix where available. We handle partial

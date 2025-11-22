@@ -1,10 +1,11 @@
 // Fitz-style (queue/log-ish) workloads
 mod common;
-use common::*;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::*;
 
 #[test]
-fn should_handle_hot_partition_workload_given_many_appends_to_same_key_when_compactions_run_in_background() {
+fn should_handle_hot_partition_workload_given_many_appends_to_same_key_when_compactions_run_in_background(
+) {
     // Arrange: hot-partition append workload
     let dir = test_temp_dir();
     let opts = compaction_test_opts(StorageMode::LocalDisk {
@@ -15,10 +16,12 @@ fn should_handle_hot_partition_workload_given_many_appends_to_same_key_when_comp
 
     // Act: many appends to same key
     for i in 0..1000 {
-        eng.put(&cf, b"hot_key", format!("append{}", i).as_bytes()).unwrap();
+        eng.put(&cf, b"hot_key", format!("append{}", i).as_bytes())
+            .unwrap();
     }
     eng.flush().unwrap();
-    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(std::time::Duration::from_secs(10))
+        .unwrap();
 
     // Assert: data correctness (latest value)
     let value = eng.get(&cf, b"hot_key").unwrap();
@@ -26,7 +29,8 @@ fn should_handle_hot_partition_workload_given_many_appends_to_same_key_when_comp
 }
 
 #[test]
-fn should_keep_tail_latencies_low_given_millions_of_small_writes_when_periodic_flush_and_compaction_are_enabled() {
+fn should_keep_tail_latencies_low_given_millions_of_small_writes_when_periodic_flush_and_compaction_are_enabled(
+) {
     // Arrange: prepare workload
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -88,7 +92,8 @@ fn should_respect_ttl_semantics_given_heavy_delete_expiry_workload_when_backgrou
 }
 
 #[test]
-fn should_avoid_pathological_write_amplification_given_log_structured_append_only_workload_when_levels_fill_up() {
+fn should_avoid_pathological_write_amplification_given_log_structured_append_only_workload_when_levels_fill_up(
+) {
     // Arrange: append-only workload
     let dir = test_temp_dir();
     let opts = compaction_test_opts(StorageMode::LocalDisk {
@@ -99,10 +104,12 @@ fn should_avoid_pathological_write_amplification_given_log_structured_append_onl
 
     // Act: append-only writes
     for i in 0..1000 {
-        eng.put(&cf, format!("log{:04}", i).as_bytes(), b"entry").unwrap();
+        eng.put(&cf, format!("log{:04}", i).as_bytes(), b"entry")
+            .unwrap();
     }
     eng.flush().unwrap();
-    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(std::time::Duration::from_secs(10))
+        .unwrap();
 
     // Assert: data present
     for i in 0..1000 {

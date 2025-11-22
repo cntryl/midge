@@ -26,24 +26,26 @@ fn bench_engine_startup_100k_sst_files(c: &mut Criterion) {
         b.iter(|| {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("startup_large");
-            
+
             // Create database and populate with many small flushes to simulate many SST files
             {
                 let opts = MidgeOptions {
-                    storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+                    storage_mode: StorageMode::LocalDisk {
+                        db_path: path.clone(),
+                    },
                     memtable_size: 64 * 1024, // Small memtable = more SSTs
                     enable_compaction: false,
                     ..Default::default()
                 };
                 let engine = MidgeEngine::open(opts).unwrap();
                 let cf = engine.default_column_family();
-                
+
                 // Write 5000 keys with periodic flushes to create many SST files
                 for i in 0..5000 {
                     let key = format!("key_{:010}", i);
                     let val = format!("value_{}", i);
                     engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
-                    
+
                     // Flush every 100 keys to create ~50 SST files
                     if i % 100 == 99 {
                         engine.flush().unwrap();

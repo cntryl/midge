@@ -83,18 +83,14 @@ fn bench_sst_full_decode(c: &mut Criterion) {
         let block = build_test_block(entries);
         g.throughput(Throughput::Elements(entries as u64));
 
-        g.bench_with_input(
-            BenchmarkId::from_parameter(entries),
-            &block,
-            |b, block| {
-                b.iter(|| {
-                    let iter = TlvBlockIterator::new(block.as_ref());
-                    for result in iter {
-                        black_box(result.unwrap());
-                    }
-                });
-            },
-        );
+        g.bench_with_input(BenchmarkId::from_parameter(entries), &block, |b, block| {
+            b.iter(|| {
+                let iter = TlvBlockIterator::new(block.as_ref());
+                for result in iter {
+                    black_box(result.unwrap());
+                }
+            });
+        });
     }
 
     g.finish();

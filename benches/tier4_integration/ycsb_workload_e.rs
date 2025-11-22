@@ -20,12 +20,12 @@ mod criterion_helper;
 #[path = "ycsb_common.rs"]
 mod ycsb_common;
 
+use bytes::Bytes;
 use cntryl_midge::MidgeEngine;
+use cntryl_midge::Query;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::criterion_config;
 use hdrhistogram::Histogram;
-use bytes::Bytes;
-use cntryl_midge::Query;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -73,7 +73,14 @@ fn run_workload_e(
         let start = Instant::now();
 
         // Execute the scan
-        let iter = engine.scan(cf, Query::new().start_key(start_key.clone()).end_key(end_key.clone())).unwrap();
+        let iter = engine
+            .scan(
+                cf,
+                Query::new()
+                    .start_key(start_key.clone())
+                    .end_key(end_key.clone()),
+            )
+            .unwrap();
         for item in &iter {
             black_box(item);
         }
@@ -107,7 +114,14 @@ fn run_workload_e_concurrent(
 
         let start = Instant::now();
 
-        let iter = engine.scan(cf, Query::new().start_key(start_key.clone()).end_key(end_key.clone())).unwrap();
+        let iter = engine
+            .scan(
+                cf,
+                Query::new()
+                    .start_key(start_key.clone())
+                    .end_key(end_key.clone()),
+            )
+            .unwrap();
         for item in &iter {
             black_box(item);
         }

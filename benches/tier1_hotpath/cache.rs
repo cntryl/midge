@@ -10,7 +10,9 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use cntryl_midge::sst::{create_basic_cache, BlockKey, CacheBlockType, CachedBlock};
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
@@ -29,7 +31,10 @@ fn make_cached_block(size: usize) -> CachedBlock {
     }
 }
 
-fn precompute_keys_and_blocks(num_blocks: usize, block_size: usize) -> (Vec<BlockKey>, Vec<CachedBlock>) {
+fn precompute_keys_and_blocks(
+    num_blocks: usize,
+    block_size: usize,
+) -> (Vec<BlockKey>, Vec<CachedBlock>) {
     let mut keys = Vec::with_capacity(num_blocks);
     let mut blocks = Vec::with_capacity(num_blocks);
     for i in 0..num_blocks {

@@ -237,9 +237,7 @@ pub fn setup_engine_fs_sync() -> (MidgeEngine, TempDir) {
 // ============================================================================
 
 #[allow(dead_code)]
-pub fn setup_engine_cloud_nosync_with_latency(
-    cloud_latency_ms: u64,
-) -> (MidgeEngine, TempDir) {
+pub fn setup_engine_cloud_nosync_with_latency(cloud_latency_ms: u64) -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let backend =
         Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(cloud_latency_ms)));
@@ -263,9 +261,7 @@ pub fn setup_engine_cloud_nosync_with_latency(
 }
 
 #[allow(dead_code)]
-pub fn setup_engine_cloud_sync_with_latency(
-    cloud_latency_ms: u64,
-) -> (MidgeEngine, TempDir) {
+pub fn setup_engine_cloud_sync_with_latency(cloud_latency_ms: u64) -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
     let backend =
         Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(cloud_latency_ms)));

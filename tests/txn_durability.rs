@@ -4,7 +4,10 @@
 // Transaction ACID tests - P0 Priority
 // Tests document expected behavior and will fail until features are implemented
 
-use cntryl_midge::{KvTransaction, MidgeEngine, MidgeOptions, StorageMode, test_hooks::{TestHooks, IoBehavior}};
+use cntryl_midge::{
+    test_hooks::{IoBehavior, TestHooks},
+    KvTransaction, MidgeEngine, MidgeOptions, StorageMode,
+};
 use std::sync::Arc;
 
 mod common;
@@ -162,5 +165,7 @@ fn should_fail_transaction_commit_when_disk_full() {
 
     // Verify engine still works after disk full error
     // Note: The transaction data may be in memtable but not durable
-    engine.put(&cf, b"test_key", b"test_value").expect("put after failed commit");
+    engine
+        .put(&cf, b"test_key", b"test_value")
+        .expect("put after failed commit");
 }

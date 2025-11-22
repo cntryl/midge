@@ -686,4 +686,8 @@ impl SstStateReader for SstMemReader {
     ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
         self.scan_range_state_at_internal(start, end, snapshot_seq)
     }
+
+    fn range_tombstones(&self) -> Vec<RangeTombstone> {
+        self.range_tombstones.clone()
+    }
 }

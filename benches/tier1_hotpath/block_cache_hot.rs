@@ -11,7 +11,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::block_cache::{BlockKey, BlockType, CachedBlock, create_basic_cache};
+use cntryl_midge::sst::block_cache::{create_basic_cache, BlockKey, BlockType, CachedBlock};
 use criterion::{criterion_group, criterion_main, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
@@ -26,14 +26,16 @@ fn bench_block_cache_get_hot(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_millis(200));
 
     let cache = create_basic_cache(10 * 1024 * 1024); // 10MB cache
-    // Pre-populate with hot data
+                                                      // Pre-populate with hot data
     for i in 0..1000 {
         let key = BlockKey {
             file_name: "test.sst".to_string(),
             block_type: BlockType::Data,
             offset: i,
         };
-        let block = CachedBlock { data: make_block_data(4096) };
+        let block = CachedBlock {
+            data: make_block_data(4096),
+        };
         cache.insert(key, block);
     }
 
@@ -69,7 +71,9 @@ fn bench_block_cache_insert_hot(c: &mut Criterion) {
                         block_type: BlockType::Data,
                         offset: i,
                     };
-                    let block = CachedBlock { data: make_block_data(4096) };
+                    let block = CachedBlock {
+                        data: make_block_data(4096),
+                    };
                     cache.insert(key, block);
                 }
                 cache
@@ -80,7 +84,9 @@ fn bench_block_cache_insert_hot(c: &mut Criterion) {
                     block_type: BlockType::Data,
                     offset: 1000,
                 };
-                let block = CachedBlock { data: make_block_data(4096) };
+                let block = CachedBlock {
+                    data: make_block_data(4096),
+                };
                 cache.insert(key, block);
                 black_box(&cache);
             },
@@ -104,16 +110,20 @@ fn bench_block_cache_hit_ratio_fast(c: &mut Criterion) {
             block_type: BlockType::Data,
             offset: i,
         };
-        let block = CachedBlock { data: make_block_data(1024) };
+        let block = CachedBlock {
+            data: make_block_data(1024),
+        };
         cache.insert(key, block);
     }
 
     // Precompute keys for accesses (all hits for simplicity)
-    let access_keys: Vec<BlockKey> = (0..100).map(|i| BlockKey {
-        file_name: "test.sst".to_string(),
-        block_type: BlockType::Data,
-        offset: i,
-    }).collect();
+    let access_keys: Vec<BlockKey> = (0..100)
+        .map(|i| BlockKey {
+            file_name: "test.sst".to_string(),
+            block_type: BlockType::Data,
+            offset: i,
+        })
+        .collect();
 
     group.bench_function("hit_ratio_calc_100_accesses", |b| {
         b.iter(|| {

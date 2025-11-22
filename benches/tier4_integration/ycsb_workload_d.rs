@@ -52,7 +52,7 @@ struct LatencyStats {
 fn latest_index_from_zipf(zipf_sample: usize) -> usize {
     // zipf_sample is biased to small numbers; invert to hit tail
     let base = zipf_sample.min(RECORD_COUNT - 1);
-    
+
     RECORD_COUNT - 1 - base
 }
 

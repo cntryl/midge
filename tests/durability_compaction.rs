@@ -164,23 +164,24 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
         }
     }
     eng.flush().unwrap(); // Force flush to create SSTs and trigger compaction
-    // Manually trigger compaction of level 0
+                          // Manually trigger compaction of level 0
     eng.compact_level(&cf, 0).unwrap();
     // Wait for compaction to complete - use stability-aware wait
     eng.wait_for_compaction(std::time::Duration::from_secs(10))
         .expect("compaction should complete");
     let compaction_started = hooks.compaction_start_count() > compaction_starts_before;
     let compaction_completed = hooks.compaction_complete_count() > 0;
-    
+
     // Wait for manifest to be updated
     let manifest_updates_before = hooks.manifest_update_count();
-    for _ in 0..50 { // Wait up to 5 seconds for manifest update
+    for _ in 0..50 {
+        // Wait up to 5 seconds for manifest update
         if hooks.manifest_update_count() > manifest_updates_before {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    
+
     drop(eng);
 
     // Assert - compaction should have started and completed
@@ -195,7 +196,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     let eng = MidgeEngine::open(opts_recovery).expect("recover");
     let expected_value = vec![b'2'; 100];
     let cf = eng.default_column_family();
-    
+
     // Retry the check a few times in case of timing issues
     let mut all_correct = false;
     for _ in 0..3 {
@@ -214,8 +215,11 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    
-    assert!(all_correct, "All keys should have the latest value after compaction");
+
+    assert!(
+        all_correct,
+        "All keys should have the latest value after compaction"
+    );
 }
 
 #[test]

@@ -5,10 +5,16 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, test_hooks::{TestHooks, IoBehavior}};
+use cntryl_midge::{
+    test_hooks::{IoBehavior, TestHooks},
+    MidgeEngine, MidgeOptions, StorageMode,
+};
 
 mod common;
-use common::{assert_get_equals, durability_opts, flush_test_opts, new_engine, new_engine_with_test_hooks, test_temp_dir};
+use common::{
+    assert_get_equals, durability_opts, flush_test_opts, new_engine, new_engine_with_test_hooks,
+    test_temp_dir,
+};
 #[test]
 fn should_create_checkpoint_when_data_exists() {
     // Arrange
@@ -149,7 +155,10 @@ fn should_create_checkpoint_with_multiple_sst_files() {
     let cp_sst_dir = cp_dir.join("sst");
     assert!(cp_sst_dir.exists());
     let sst_files = std::fs::read_dir(&cp_sst_dir).unwrap().count();
-    assert!(sst_files >= 2, "Should have at least 2 SST files in checkpoint");
+    assert!(
+        sst_files >= 2,
+        "Should have at least 2 SST files in checkpoint"
+    );
 }
 
 #[test]
@@ -187,7 +196,7 @@ fn should_read_data_from_checkpoint_when_created() {
     eng.put(&cf, b"k1", b"v1").unwrap();
     eng.put(&cf, b"k2", b"v2").unwrap();
     eng.flush().unwrap();
-    
+
     let cp_dir = dir.path().join("checkpoint");
     eng.create_checkpoint(&cp_dir).unwrap();
 

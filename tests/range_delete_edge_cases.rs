@@ -1,8 +1,8 @@
 // Range delete deep edge cases
 mod common;
-use common::*;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query, StorageMode};
+use common::*;
 
 #[test]
 fn should_honor_large_range_deletes_given_many_levels_when_compactions_run_repeatedly() {
@@ -26,7 +26,8 @@ fn should_honor_large_range_deletes_given_many_levels_when_compactions_run_repea
             eng.delete_range(&cf, b"k100", b"k200").unwrap();
             eng.flush().unwrap();
             // Run compaction
-            eng.wait_for_compaction(std::time::Duration::from_secs(2)).ok();
+            eng.wait_for_compaction(std::time::Duration::from_secs(2))
+                .ok();
 
             // Assert: keys in range deleted
             for i in 100..200 {
@@ -41,7 +42,8 @@ fn should_honor_large_range_deletes_given_many_levels_when_compactions_run_repea
 }
 
 #[test]
-fn should_not_resurrect_deleted_keys_given_interleaved_puts_and_range_deletes_when_reading_after_multiple_compactions() {
+fn should_not_resurrect_deleted_keys_given_interleaved_puts_and_range_deletes_when_reading_after_multiple_compactions(
+) {
     // Arrange: interleave puts and range deletes across memtable/ssts
     // Act: run compactions and reopen engine to simulate recovery
     // Assert: deleted keys are not resurrected after compactions/recovery
@@ -63,7 +65,8 @@ fn should_not_resurrect_deleted_keys_given_interleaved_puts_and_range_deletes_wh
                 eng.flush().unwrap();
                 // More puts
                 for i in 50..150 {
-                    eng.put(&cf, format!("r{:03}", i).as_bytes(), b"v2").unwrap();
+                    eng.put(&cf, format!("r{:03}", i).as_bytes(), b"v2")
+                        .unwrap();
                 }
                 eng.flush().unwrap();
             },
@@ -83,7 +86,8 @@ fn should_not_resurrect_deleted_keys_given_interleaved_puts_and_range_deletes_wh
 }
 
 #[test]
-fn should_respect_snapshot_visibility_given_range_delete_applied_after_snapshot_when_iterating_from_snapshot() {
+fn should_respect_snapshot_visibility_given_range_delete_applied_after_snapshot_when_iterating_from_snapshot(
+) {
     // Arrange: populate data, create snapshot, then apply range delete
     let dir = test_temp_dir();
     let opts = compaction_test_opts(StorageMode::LocalDisk {
@@ -106,23 +110,32 @@ fn should_respect_snapshot_visibility_given_range_delete_applied_after_snapshot_
     eng.flush().unwrap();
 
     // Act: scan_at from the snapshot
-    let results = eng.scan_at(
-        &cf,
-        Query::new().start_key(Bytes::from_static(b"r000")).end_key(Bytes::from_static(b"r100")),
-        &snapshot,
-    ).unwrap();
+    let results = eng
+        .scan_at(
+            &cf,
+            Query::new()
+                .start_key(Bytes::from_static(b"r000"))
+                .end_key(Bytes::from_static(b"r100")),
+            &snapshot,
+        )
+        .unwrap();
 
     // Assert: snapshot should see all original keys, including the deleted range
     assert_eq!(results.len(), 100);
     for i in 0..100 {
         let key = format!("r{:03}", i);
         let expected = (Bytes::from(key.clone()), Bytes::from_static(b"v"));
-        assert!(results.contains(&expected), "Missing key {} in snapshot", key);
+        assert!(
+            results.contains(&expected),
+            "Missing key {} in snapshot",
+            key
+        );
     }
 }
 
 #[test]
-fn should_apply_range_deletes_consistently_across_memtable_and_sst_boundaries_given_crash_between_flush_and_compaction() {
+fn should_apply_range_deletes_consistently_across_memtable_and_sst_boundaries_given_crash_between_flush_and_compaction(
+) {
     // Arrange: apply range delete, flush to SST, then crash (restart)
     let dir = test_temp_dir();
     let opts = compaction_test_opts(StorageMode::LocalDisk {
@@ -147,21 +160,40 @@ fn should_apply_range_deletes_consistently_across_memtable_and_sst_boundaries_gi
         |eng| {
             let cf = eng.default_column_family();
             // Act: scan after restart (recovery may trigger compaction)
-            let results = eng.scan(&cf, Query::new().start_key(Bytes::from_static(b"k000")).end_key(Bytes::from_static(b"k100"))).unwrap();
+            let results = eng
+                .scan(
+                    &cf,
+                    Query::new()
+                        .start_key(Bytes::from_static(b"k000"))
+                        .end_key(Bytes::from_static(b"k100")),
+                )
+                .unwrap();
 
             // Assert: range delete applied consistently - deleted keys absent
             assert_eq!(results.len(), 40); // 100 - 60 deleted
             for i in 0..20 {
                 let key = format!("k{:03}", i);
-                assert!(results.iter().any(|(k, _)| k == key.as_bytes()), "Key {} should be present", key);
+                assert!(
+                    results.iter().any(|(k, _)| k == key.as_bytes()),
+                    "Key {} should be present",
+                    key
+                );
             }
             for i in 20..80 {
                 let key = format!("k{:03}", i);
-                assert!(!results.iter().any(|(k, _)| k == key.as_bytes()), "Key {} should be deleted", key);
+                assert!(
+                    !results.iter().any(|(k, _)| k == key.as_bytes()),
+                    "Key {} should be deleted",
+                    key
+                );
             }
             for i in 80..100 {
                 let key = format!("k{:03}", i);
-                assert!(results.iter().any(|(k, _)| k == key.as_bytes()), "Key {} should be present", key);
+                assert!(
+                    results.iter().any(|(k, _)| k == key.as_bytes()),
+                    "Key {} should be present",
+                    key
+                );
             }
         },
     );

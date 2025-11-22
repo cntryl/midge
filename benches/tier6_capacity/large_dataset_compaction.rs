@@ -27,34 +27,34 @@ fn bench_large_dataset_compaction(c: &mut Criterion) {
         b.iter(|| {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("large_compact");
-            
+
             let opts = MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: path },
                 memtable_size: 512 * 1024, // Small memtable = many L0 files
                 enable_compaction: false,  // Manual compaction control
                 ..Default::default()
             };
-            
+
             let engine = MidgeEngine::open(opts).unwrap();
             let cf = engine.default_column_family();
-            
+
             // Populate 100k keys (creates many L0 files)
             for i in 0..100_000 {
                 let key = format!("compact_key_{:010}", i);
                 let val = vec![b'x'; 128]; // 128-byte values
                 engine.put(&cf, key.as_bytes(), &val).unwrap();
-                
+
                 if i % 2000 == 0 {
                     engine.flush().unwrap(); // Create L0 file
                 }
             }
             engine.flush().unwrap();
-            
+
             // Measure compaction time: L0 → L1
             let start = std::time::Instant::now();
             let _ = engine.compact_level(&cf, 0);
             let elapsed = start.elapsed();
-            
+
             black_box(elapsed);
         })
     });

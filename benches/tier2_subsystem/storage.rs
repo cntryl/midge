@@ -19,21 +19,17 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{
-    criterion_group, criterion_main, Criterion, SamplingMode,
-};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
 use criterion_helper::criterion_config;
 
 use cntryl_midge::{
     api::{column_family::ColumnFamilyId, write_batch::WriteBatch},
     core::data_structures::merge_iterator::{IteratorSource, MergingIterator, VecSource},
-    wal::{traits::WalWriter, WalRecord, WalOpKind},
     wal::mem::WalMem,
+    wal::{traits::WalWriter, WalOpKind, WalRecord},
 };
 
-use std::{
-    hint::black_box,
-};
+use std::hint::black_box;
 
 // ============================================================================
 // Helpers

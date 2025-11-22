@@ -60,12 +60,12 @@ fn bench_manifest_apply_100_ops(c: &mut Criterion) {
     group.bench_function("apply_100", |b| {
         b.iter(|| {
             let mut version = VersionSet::new(Manifest::default());
-            
+
             // Apply all 100 edits
             for edit in &edits {
                 version = version.apply_edit(edit.clone()).unwrap();
             }
-            
+
             black_box(version);
         })
     });
@@ -99,12 +99,12 @@ fn bench_manifest_apply_10k_ops(c: &mut Criterion) {
     group.bench_function("apply_10k", |b| {
         b.iter(|| {
             let mut version = VersionSet::new(Manifest::default());
-            
+
             // Apply all 10k edits
             for edit in &edits {
                 version = version.apply_edit(edit.clone()).unwrap();
             }
-            
+
             black_box(version);
         })
     });

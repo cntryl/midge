@@ -48,13 +48,15 @@ fn bench_engine_heavy_write_contention(c: &mut Criterion) {
                 let engine_clone = Arc::clone(&engine);
                 let cf_clone = cf.clone();
                 let barrier_clone = Arc::clone(&barrier);
-                
+
                 handles.push(thread::spawn(move || {
                     barrier_clone.wait(); // Sync start
                     for i in 0..1000 {
                         let key = format!("t{:02}_key_{:06}", tid, i);
                         let val = format!("value_{}", i);
-                        engine_clone.put(&cf_clone, key.as_bytes(), val.as_bytes()).unwrap();
+                        engine_clone
+                            .put(&cf_clone, key.as_bytes(), val.as_bytes())
+                            .unwrap();
                     }
                 }));
             }
@@ -82,7 +84,7 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
         b.iter(|| {
             let (engine, _tmp) = setup_db("read_contention");
             let cf = engine.default_column_family();
-            
+
             // Pre-populate with data
             for i in 0..2000 {
                 let key = format!("key_{:06}", i);
@@ -99,7 +101,7 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
                 let engine_clone = Arc::clone(&engine);
                 let cf_clone = cf.clone();
                 let barrier_clone = Arc::clone(&barrier);
-                
+
                 handles.push(thread::spawn(move || {
                     barrier_clone.wait();
                     for i in 0..2000 {
@@ -132,7 +134,7 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
         b.iter(|| {
             let (engine, _tmp) = setup_db("mixed_contention");
             let cf = engine.default_column_family();
-            
+
             // Pre-populate
             for i in 0..1500 {
                 let key = format!("key_{:06}", i);
@@ -147,7 +149,7 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
                 let engine_clone = Arc::clone(&engine);
                 let cf_clone = cf.clone();
                 let barrier_clone = Arc::clone(&barrier);
-                
+
                 handles.push(thread::spawn(move || {
                     barrier_clone.wait();
                     for i in 0..1500 {
@@ -155,7 +157,9 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
                             // Write
                             let key = format!("key_{:06}", i);
                             let val = format!("t{}_v{}", tid, i);
-                            engine_clone.put(&cf_clone, key.as_bytes(), val.as_bytes()).unwrap();
+                            engine_clone
+                                .put(&cf_clone, key.as_bytes(), val.as_bytes())
+                                .unwrap();
                         } else {
                             // Read
                             let key = format!("key_{:06}", i);

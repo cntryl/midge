@@ -1,7 +1,7 @@
 // WAL vs manifest divergence tests (simplified, observable outcomes)
 mod common;
-use common::*;
 use cntryl_midge::MidgeOptions;
+use common::*;
 
 #[test]
 fn should_prefer_wal_replay_given_manifest_lagging_latest_commit_when_recovering_after_crash() {
@@ -27,20 +27,27 @@ fn should_prefer_wal_replay_given_manifest_lagging_latest_commit_when_recovering
                 // Assert: value should be recovered from WAL after restart
                 let cf = eng.default_column_family();
                 let got = eng.get(&cf, b"wal_only").expect("get");
-                assert!(got.is_some(), "wal-only entry should be replayed on recovery");
+                assert!(
+                    got.is_some(),
+                    "wal-only entry should be replayed on recovery"
+                );
             },
         );
     }
 }
 
 #[test]
-fn should_rollback_manifest_view_given_manifest_ahead_of_persisted_ssts_when_detecting_inconsistent_state_on_restart() {
+fn should_rollback_manifest_view_given_manifest_ahead_of_persisted_ssts_when_detecting_inconsistent_state_on_restart(
+) {
     // Arrange: create a key and flush to produce SSTs
 
     // Act: tamper with manifest file (best-effort) then reopen
     for mode in disk_storage_modes() {
         let (_n, storage_mode, tmp) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
 
         with_engine(opts.clone(), |eng| {
             let cf = eng.default_column_family();
@@ -66,13 +73,17 @@ fn should_rollback_manifest_view_given_manifest_ahead_of_persisted_ssts_when_det
 }
 
 #[test]
-fn should_refuse_to_open_database_given_irreconcilable_manifest_and_wal_states_when_corruption_detected() {
+fn should_refuse_to_open_database_given_irreconcilable_manifest_and_wal_states_when_corruption_detected(
+) {
     // Arrange: write and flush
 
     // Act: corrupt both manifest and WAL file to simulate irreconcilable state
     for mode in disk_storage_modes() {
         let (_n, storage_mode, tmp) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
 
         with_engine(opts.clone(), |eng| {
             let cf = eng.default_column_family();
@@ -96,13 +107,17 @@ fn should_refuse_to_open_database_given_irreconcilable_manifest_and_wal_states_w
 }
 
 #[test]
-fn should_rebuild_manifest_from_ssts_given_missing_manifest_and_clean_wal_tail_when_starting_after_disk_issue() {
+fn should_rebuild_manifest_from_ssts_given_missing_manifest_and_clean_wal_tail_when_starting_after_disk_issue(
+) {
     // Arrange: create data and flush to SSTs
 
     // Act: remove manifest file and reopen
     for mode in disk_storage_modes() {
         let (_n, storage_mode, tmp) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
 
         with_engine(opts.clone(), |eng| {
             let cf = eng.default_column_family();
@@ -119,7 +134,10 @@ fn should_rebuild_manifest_from_ssts_given_missing_manifest_and_clean_wal_tail_w
             // Assert: engine can reopen and recover data from SSTs
             let cf = eng.default_column_family();
             let got = eng.get(&cf, b"rb_k").unwrap();
-            assert!(got.is_some(), "data should be recoverable after manifest rebuild");
+            assert!(
+                got.is_some(),
+                "data should be recoverable after manifest rebuild"
+            );
         });
     }
 }

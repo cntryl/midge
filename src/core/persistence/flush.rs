@@ -105,7 +105,8 @@ pub(crate) fn spawn_flush_worker(
                         if let Err(e) = res {
                             // Mark background error if we were able to capture a container
                             if let Some(bg) = &background_error {
-                                *bg.write() = Some(crate::error::MidgeError::internal(e.to_string()));
+                                *bg.write() =
+                                    Some(crate::error::MidgeError::internal(e.to_string()));
                             }
                         } else {
                             // If there was previously a background error, clear it upon

@@ -47,8 +47,8 @@ impl MidgeEngine {
         cf: &ColumnFamilyHandle,
         column_family: &Arc<crate::core::engine::column_family::ColumnFamily>,
     ) -> MidgeResult<()> {
-        use std::time::{Duration, Instant};
         use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
 
         let mut background_wait_duration_ms = 0u64;
         let mut capacity_wait_duration_ms = 0u64;
@@ -99,7 +99,9 @@ impl MidgeEngine {
             while column_family.should_stall_writes() {
                 let imm_len = {
                     let imm_len = column_family.immutable_memtables.lock().len();
-                    column_family.immutable_count.store(imm_len, Ordering::Release);
+                    column_family
+                        .immutable_count
+                        .store(imm_len, Ordering::Release);
                     imm_len
                 };
                 if imm_len == 0 {

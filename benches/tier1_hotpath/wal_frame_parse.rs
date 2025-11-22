@@ -9,10 +9,10 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
 use cntryl_midge::wal::encoding::{decode, encode};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
+use criterion_helper::criterion_config;
 use std::hint::black_box;
 
 /// Create a WAL record with specified key/value sizes

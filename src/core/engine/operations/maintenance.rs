@@ -472,7 +472,7 @@ impl MidgeEngine {
         let mut manifest_file = std::fs::File::create(&manifest_path)?;
         crate::fs::write_all(&mut manifest_file, &data)?;
         crate::fs::sync_data_only(&manifest_file, self.test_hooks.as_ref())?;
-        
+
         // Write CURRENT pointer
         let current_path = dst_dir.join("CURRENT");
         let mut current_file = std::fs::File::create(&current_path)?;

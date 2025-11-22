@@ -1,12 +1,13 @@
 // Cross-subsystem invariant tests (observable outcomes only)
 mod common;
-use common::*;
 use cntryl_midge::MidgeOptions;
+use common::*;
 use std::time::Duration;
 
 // 1) Ensure that after repeated overlapping writes + compactions the visible state is consistent.
 #[test]
-fn should_maintain_non_overlapping_sst_key_ranges_given_long_random_workload_when_compactions_run() {
+fn should_maintain_non_overlapping_sst_key_ranges_given_long_random_workload_when_compactions_run()
+{
     for mode in disk_storage_modes() {
         let (mode_name, storage_mode, _tmp) = create_storage_mode(mode);
 
@@ -34,7 +35,8 @@ fn should_maintain_non_overlapping_sst_key_ranges_given_long_random_workload_whe
 
 // 2) Repeated flush/compact + restart cycles keep manifest and files in-sync (observable by reopen and key presence)
 #[test]
-fn should_keep_manifest_files_in_sync_given_repeated_flush_compact_cycles_when_restarting_many_times() {
+fn should_keep_manifest_files_in_sync_given_repeated_flush_compact_cycles_when_restarting_many_times(
+) {
     for mode in disk_storage_modes() {
         let (_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
@@ -74,7 +76,8 @@ fn should_keep_manifest_files_in_sync_given_repeated_flush_compact_cycles_when_r
 
 // 3) Simulate crash during flush/compaction by forcing failures; ensure recovery yields consistent state (observable)
 #[test]
-fn should_not_leave_orphaned_ssts_given_crash_during_flush_and_subsequent_compaction_when_recovering_from_disk() {
+fn should_not_leave_orphaned_ssts_given_crash_during_flush_and_subsequent_compaction_when_recovering_from_disk(
+) {
     for mode in disk_storage_modes() {
         let (_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
@@ -113,7 +116,8 @@ fn should_not_leave_orphaned_ssts_given_crash_during_flush_and_subsequent_compac
 
 // 4) Mixed put + delete-range + delete operations preserve latest value semantics across recovery
 #[test]
-fn should_preserve_latest_value_for_all_keys_given_mixed_put_delete_range_delete_when_running_full_recovery() {
+fn should_preserve_latest_value_for_all_keys_given_mixed_put_delete_range_delete_when_running_full_recovery(
+) {
     for mode in disk_storage_modes() {
         let (_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 

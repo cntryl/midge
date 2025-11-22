@@ -163,8 +163,7 @@ impl VersionManager {
         let started_recv = std::time::Instant::now();
         let res = response_rx
             .recv()
-            .map_err(|_| MidgeError::internal("version manager response lost"))?
-        ;
+            .map_err(|_| MidgeError::internal("version manager response lost"))?;
         tracing::trace!(recv_ms = %started_recv.elapsed().as_millis(), "version_manager.apply_edit_sync recv duration (ms)");
 
         res

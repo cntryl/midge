@@ -1,10 +1,13 @@
 mod common;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, test_hooks::{TestHooks, WalBehavior, IoBehavior, ManifestBehavior}};
-use cntryl_midge::sst::fs::FsSstFactory;
 use cntryl_midge::common::codec::CompressionType;
+use cntryl_midge::sst::fs::FsSstFactory;
 use cntryl_midge::sst::traits::{SstFactory, SstReaderFactory};
-use std::sync::Arc;
+use cntryl_midge::{
+    test_hooks::{IoBehavior, ManifestBehavior, TestHooks, WalBehavior},
+    MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode,
+};
 use common::test_temp_dir;
+use std::sync::Arc;
 
 // Phase 1 Error Handling & Fault Injection Core Tests
 // Each test targets ONE behavior using TestHooks for deterministic fault injection.
@@ -15,7 +18,9 @@ fn should_recover_given_wal_corruption_mid_record_when_tolerant_mode() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_wal_behavior(WalBehavior::TruncateAfterWrite);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: true,
         wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
         test_hooks: Some(hooks.clone()),
@@ -27,12 +32,17 @@ fn should_recover_given_wal_corruption_mid_record_when_tolerant_mode() {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
         eng.put(&cf, b"key1", b"value1").expect("put");
-        assert!(hooks.wal_append_count() > 0, "WAL append should have been called");
+        assert!(
+            hooks.wal_append_count() > 0,
+            "WAL append should have been called"
+        );
     }
 
     // Assert - reopen should succeed with TolerateCorruptedTail
     let opts_reopen = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: true,
         wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
         test_hooks: None,
@@ -50,7 +60,9 @@ fn should_fail_open_given_wal_corruption_mid_record_when_strict_mode() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_wal_behavior(WalBehavior::TruncateAfterWrite);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: true,
         wal_recovery_mode: WalRecoveryMode::AbsoluteConsistency,
         test_hooks: Some(hooks.clone()),
@@ -66,7 +78,9 @@ fn should_fail_open_given_wal_corruption_mid_record_when_strict_mode() {
 
     // Assert - reopen with AbsoluteConsistency should potentially fail (depending on corruption location)
     let opts_reopen = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: true,
         wal_recovery_mode: WalRecoveryMode::AbsoluteConsistency,
         test_hooks: None,
@@ -82,7 +96,9 @@ fn should_recover_gracefully_given_manifest_corruption_with_wal_fallback() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         memtable_size: 512,
         wal_sync: true,
         ..Default::default()
@@ -94,7 +110,8 @@ fn should_recover_gracefully_given_manifest_corruption_with_wal_fallback() {
         let cf = eng.default_column_family();
         let large_value = vec![b'x'; 256];
         for i in 0..20 {
-            eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value).expect("put");
+            eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value)
+                .expect("put");
         }
         eng.flush().ok(); // Force manifest write
     }
@@ -121,12 +138,14 @@ fn should_recover_gracefully_given_manifest_corruption_with_wal_fallback() {
 #[test]
 fn should_track_fsync_calls_when_wal_sync_enabled() {
     use cntryl_midge::test_hooks::FsyncBehavior;
-    
+
     // Arrange
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::RecordOnly);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: true,
         test_hooks: Some(hooks.clone()),
         ..Default::default()
@@ -140,18 +159,23 @@ fn should_track_fsync_calls_when_wal_sync_enabled() {
     let fsync_after = hooks.fsync_count();
 
     // Assert
-    assert!(fsync_after > fsync_before, "Fsync should be called when wal_sync enabled");
+    assert!(
+        fsync_after > fsync_before,
+        "Fsync should be called when wal_sync enabled"
+    );
 }
 
 #[test]
 fn should_not_persist_unfsynced_data_when_fsync_skipped() {
     use cntryl_midge::test_hooks::FsyncBehavior;
-    
+
     // Arrange
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::Skip);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: true,
         test_hooks: Some(hooks),
         ..Default::default()
@@ -166,7 +190,9 @@ fn should_not_persist_unfsynced_data_when_fsync_skipped() {
 
     // Assert - reopen and data may be lost (fsync was skipped)
     let opts_reopen = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: true,
         wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
         test_hooks: None,
@@ -187,7 +213,9 @@ fn should_return_error_given_disk_full_when_writing_wal() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: true,
         test_hooks: Some(hooks.clone()),
         ..Default::default()
@@ -203,8 +231,11 @@ fn should_return_error_given_disk_full_when_writing_wal() {
     let err = result.unwrap_err();
     match err {
         cntryl_midge::MidgeError::Io(io_err) => {
-            assert!(io_err.to_string().contains("No space left on device"), 
-                   "Error should indicate disk full: {}", io_err);
+            assert!(
+                io_err.to_string().contains("No space left on device"),
+                "Error should indicate disk full: {}",
+                io_err
+            );
         }
         _ => panic!("Expected I/O error, got: {:?}", err),
     }
@@ -216,7 +247,9 @@ fn should_return_error_given_disk_full_when_flushing_memtable() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_io_behavior(IoBehavior::FailWithEnospc);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: false, // Don't sync WAL writes, only flush should fail
         test_hooks: Some(hooks.clone()),
         ..Default::default()
@@ -225,10 +258,11 @@ fn should_return_error_given_disk_full_when_flushing_memtable() {
     // Act - write data then force flush when disk is full
     let eng = MidgeEngine::open(opts).expect("open should succeed initially");
     let cf = eng.default_column_family();
-    
+
     // Write some data to memtable
-    eng.put(&cf, b"key1", b"value1").expect("initial write should succeed");
-    
+    eng.put(&cf, b"key1", b"value1")
+        .expect("initial write should succeed");
+
     // Force flush - this should fail with disk full
     let result = eng.flush();
 
@@ -237,8 +271,11 @@ fn should_return_error_given_disk_full_when_flushing_memtable() {
     let err = result.unwrap_err();
     match err {
         cntryl_midge::MidgeError::Io(io_err) => {
-            assert!(io_err.to_string().contains("No space left on device"), 
-                   "Error should indicate disk full: {}", io_err);
+            assert!(
+                io_err.to_string().contains("No space left on device"),
+                "Error should indicate disk full: {}",
+                io_err
+            );
         }
         _ => panic!("Expected I/O error, got: {:?}", err),
     }
@@ -250,18 +287,18 @@ fn should_handle_io_error_when_reading_sst_block() {
     let dir = test_temp_dir();
     let sst_dir = dir.path().join("sst");
     std::fs::create_dir_all(&sst_dir).unwrap();
-    
+
     // Create SST file directly using SST writer
     let factory = FsSstFactory::new(sst_dir.clone());
     let mut writer = factory.create(CompressionType::None, 4096, false);
-    
+
     // Add some test data
     for i in 0..10 {
         let key = format!("key{:02}", i);
         let value = format!("value{}", i);
         writer.add(key.as_bytes(), value.as_bytes()).unwrap();
     }
-    
+
     // Finish writing to create the SST file
     let sst_path = sst_dir.join("test_corruption.sst");
     writer.finish_to_path(&sst_path).unwrap();
@@ -276,12 +313,13 @@ fn should_handle_io_error_when_reading_sst_block() {
     // Get file size and corrupt the CRC checksum of a data block (not the footer)
     let file_size = file.metadata().unwrap().len();
     println!("SST file size: {}", file_size);
-    if file_size > 100 {  // Make sure we have enough data to corrupt
+    if file_size > 100 {
+        // Make sure we have enough data to corrupt
         // Corrupt bytes that are likely to be in a block CRC (try a few positions)
         // Skip the footer (last 48 bytes) and corrupt somewhere in the middle
         let footer_start = file_size.saturating_sub(48);
         let corrupt_offset = (footer_start / 2).max(100); // Middle of the file, but not in footer
-        
+
         use std::io::{Seek, SeekFrom, Write};
         file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
 
@@ -289,7 +327,10 @@ fn should_handle_io_error_when_reading_sst_block() {
         let garbage = [0xFF, 0xFF, 0xFF, 0xFF];
         file.write_all(&garbage).unwrap();
         file.flush().unwrap();
-        println!("Corrupted 4 bytes at offset {} (avoiding footer)", corrupt_offset);
+        println!(
+            "Corrupted 4 bytes at offset {} (avoiding footer)",
+            corrupt_offset
+        );
     }
 
     // Try to read from the corrupted SST file using SST reader
@@ -299,11 +340,14 @@ fn should_handle_io_error_when_reading_sst_block() {
         Err(err) => {
             // Assert - The error could be InvalidData (CRC mismatch) or other corruption-related errors
             let err_str = format!("{}", err);
-            assert!(err_str.contains("InvalidData") ||
-                    err_str.contains("corrupt") ||
-                    err_str.contains("CRC") ||
-                    err_str.contains("decode"),
-                    "Error should indicate data corruption: {}", err_str);
+            assert!(
+                err_str.contains("InvalidData")
+                    || err_str.contains("corrupt")
+                    || err_str.contains("CRC")
+                    || err_str.contains("decode"),
+                "Error should indicate data corruption: {}",
+                err_str
+            );
         }
     }
 }
@@ -315,7 +359,9 @@ fn should_propagate_background_error_to_user_on_next_operation() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_io_behavior(IoBehavior::Normal);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         wal_sync: false, // Don't sync WAL to avoid early failures
         test_hooks: Some(hooks.clone()),
         ..Default::default()
@@ -336,17 +382,25 @@ fn should_propagate_background_error_to_user_on_next_operation() {
 
     // Trigger background compaction that should fail
     let compaction_result = engine.compact_all();
-    assert!(compaction_result.is_err(), "Background compaction should fail with disk full");
+    assert!(
+        compaction_result.is_err(),
+        "Background compaction should fail with disk full"
+    );
 
     // Assert - Compaction should fail with disk full error
     let err = compaction_result.unwrap_err();
-    assert!(err.to_string().contains("No space left on device") ||
-            err.to_string().contains("ENOSPC"),
-            "Error should indicate disk full: {}", err);
+    assert!(
+        err.to_string().contains("No space left on device") || err.to_string().contains("ENOSPC"),
+        "Error should indicate disk full: {}",
+        err
+    );
 
     // Verify that user operations still work (compaction failure doesn't block writes)
     let put_result = engine.put(&cf, b"new_key", b"new_value");
-    assert!(put_result.is_ok(), "User operations should continue despite compaction failure");
+    assert!(
+        put_result.is_ok(),
+        "User operations should continue despite compaction failure"
+    );
 }
 
 #[test]
@@ -355,7 +409,9 @@ fn should_return_error_given_disk_full_when_writing_manifest() {
     let dir = test_temp_dir();
     let hooks = TestHooks::new().with_manifest_behavior(ManifestBehavior::FailSave);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
         test_hooks: Some(hooks),
         ..Default::default()
     };
@@ -373,10 +429,16 @@ fn should_return_error_given_disk_full_when_writing_manifest() {
     let flush_result = engine.flush();
 
     // Assert - Flush should fail due to manifest write failure
-    assert!(flush_result.is_err(), "Flush should fail when manifest write fails");
+    assert!(
+        flush_result.is_err(),
+        "Flush should fail when manifest write fails"
+    );
     let err = flush_result.unwrap_err();
-    assert!(err.to_string().contains("manifest") || err.to_string().contains("Manifest"),
-            "Error should indicate manifest failure: {}", err);
+    assert!(
+        err.to_string().contains("manifest") || err.to_string().contains("Manifest"),
+        "Error should indicate manifest failure: {}",
+        err
+    );
 }
 
 #[test]
@@ -384,8 +446,10 @@ fn should_pause_writes_given_background_error_until_cleared() {
     // Arrange
     let dir = test_temp_dir();
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() },
-        memtable_size: 256, // small overall engine memtable size
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 256,  // small overall engine memtable size
         wal_buffer_size: 64, // small WAL buffer
         ..Default::default()
     };
@@ -393,18 +457,24 @@ fn should_pause_writes_given_background_error_until_cleared() {
     let engine = Arc::new(MidgeEngine::open(opts).unwrap());
     use cntryl_midge::api::column_family::ColumnFamilyConfig;
     let cf_cfg = ColumnFamilyConfig {
-        memtable_max_bytes: 64, // tiny so each value triggers full
+        memtable_max_bytes: 64,     // tiny so each value triggers full
         max_immutable_memtables: 1, // single immutable allowed then stall
         ..Default::default()
     };
-    let stall_cf = engine.create_column_family("stall_cf", cf_cfg).expect("create CF");
+    let stall_cf = engine
+        .create_column_family("stall_cf", cf_cfg)
+        .expect("create CF");
 
     // First write fills memtable and freezes, producing one immutable memtable
     let first_val = vec![b'x'; 96];
-    engine.put_with_ttl(&stall_cf, b"seed", &first_val, 0).unwrap();
+    engine
+        .put_with_ttl(&stall_cf, b"seed", &first_val, 0)
+        .unwrap();
 
     // Inject background error AFTER first freeze so next write stalls while error present
-    engine.set_background_error(cntryl_midge::MidgeError::internal("simulated background flush failure"));
+    engine.set_background_error(cntryl_midge::MidgeError::internal(
+        "simulated background flush failure",
+    ));
 
     // Act: Start a writer that will attempt a write and should stall due to background error + full immutable queue
     let (done_tx, done_rx) = crossbeam::channel::bounded::<bool>(1);
@@ -417,16 +487,28 @@ fn should_pause_writes_given_background_error_until_cleared() {
     });
 
     // Wait briefly and expect the write not complete (blocked)
-    if done_rx.recv_timeout(std::time::Duration::from_millis(200)).is_ok() { panic!("Write should be blocked when background error present") }
+    if done_rx
+        .recv_timeout(std::time::Duration::from_millis(200))
+        .is_ok()
+    {
+        panic!("Write should be blocked when background error present")
+    }
 
     // Clear background error so subsequent write can proceed
     engine.clear_background_error();
 
     // Drain immutable by flushing CF
     let _ = engine.flush_cf(&stall_cf);
-    engine.wait_for_flush(std::time::Duration::from_secs(2)).unwrap();
+    engine
+        .wait_for_flush(std::time::Duration::from_secs(2))
+        .unwrap();
 
     // Assert - Writer should now complete
-    let done_ok = done_rx.recv_timeout(std::time::Duration::from_secs(1)).expect("writer should complete");
-    assert!(done_ok, "Write should succeed once background error cleared and flush completed");
+    let done_ok = done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("writer should complete");
+    assert!(
+        done_ok,
+        "Write should succeed once background error cleared and flush completed"
+    );
 }

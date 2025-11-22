@@ -3,19 +3,17 @@
 // Each test follows the repository test conventions: Arrange / Act / Assert.
 
 mod common;
-use common::*;
-use cntryl_midge::{
-    cloud::mock::MockCloudBackend,
-    config::cloud::StorageContext,
-    MidgeOptions,
-    StorageMode,
-};
-use cntryl_midge::cloud::backend::StorageBackend;
 use bytes::Bytes;
+use cntryl_midge::cloud::backend::StorageBackend;
+use cntryl_midge::{
+    cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
+};
+use common::*;
 use std::sync::Arc;
 
 #[test]
-fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifest_was_already_updated() {
+fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifest_was_already_updated(
+) {
     // Arrange: open engine with a cloud-backed storage mode and a failing backend
     let dir = test_temp_dir();
     let backend = Arc::new(MockCloudBackend::new());
@@ -47,7 +45,10 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
             // Flush will attempt to upload SST to cloud and may encounter failures
             if let Err(e) = eng.flush_cf(&cf) {
                 // With our simulated cloud failure it's acceptable for flush/upload to return an error.
-                eprintln!("flush encountered error (expected in simulated failure): {:?}", e);
+                eprintln!(
+                    "flush encountered error (expected in simulated failure): {:?}",
+                    e
+                );
             }
             // Allow background upload attempts to run
             common::cloud::wait_for_cloud_upload();
@@ -62,7 +63,10 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
 
             let cf = eng.default_column_family();
             let result = eng.get(&cf, b"key1").expect("get");
-            assert!(result.is_some(), "Data should be present after recovery despite partial cloud upload");
+            assert!(
+                result.is_some(),
+                "Data should be present after recovery despite partial cloud upload"
+            );
         },
     );
 }
@@ -81,16 +85,23 @@ fn should_retry_idempotently_given_duplicate_cloud_upload_requests_when_network_
     let second = backend.put_blob_if_not_exists("sst/dup.sst", Bytes::from("payload"));
 
     // Assert: duplicate put must fail while existing blob is still discoverable
-    assert!(second.is_err(), "duplicate put should return an error indicating existing blob");
+    assert!(
+        second.is_err(),
+        "duplicate put should return an error indicating existing blob"
+    );
     // The existing blob is discoverable via head_blob
     let head = backend.head_blob("sst/dup.sst").expect("head_blob");
-    assert!(head.is_some(), "head_blob should report metadata for existing SST");
+    assert!(
+        head.is_some(),
+        "head_blob should report metadata for existing SST"
+    );
     let meta = head.unwrap();
     assert!(meta.etag.is_some() || !etag.is_empty());
 }
 
 #[test]
-fn should_tolerate_eventual_consistency_given_cloud_listing_missing_recent_sst_when_rebuilding_version_set() {
+fn should_tolerate_eventual_consistency_given_cloud_listing_missing_recent_sst_when_rebuilding_version_set(
+) {
     // Arrange: upload an SST blob, then install a stale manifest that omits it
     let (tmp_dir, backend, _manifest_lock) = common::cloud::setup_cloud_test();
 
@@ -109,10 +120,16 @@ fn should_tolerate_eventual_consistency_given_cloud_listing_missing_recent_sst_w
     let cloud_manifest_bytes = backend.get_blob("manifest.json");
 
     // Assert: listing should include the SST even if manifest is stale
-    assert!(listed.iter().any(|k| k.ends_with("recent.sst")), "Cloud listing should contain the uploaded SST");
+    assert!(
+        listed.iter().any(|k| k.ends_with("recent.sst")),
+        "Cloud listing should contain the uploaded SST"
+    );
     // Manifest read should succeed (returns the stale manifest we set), or be missing
     if let Ok(bytes) = cloud_manifest_bytes {
-        assert!(!bytes.is_empty(), "manifest.json should be readable (stale manifest)");
+        assert!(
+            !bytes.is_empty(),
+            "manifest.json should be readable (stale manifest)"
+        );
     }
 
     // Cleanup
@@ -120,16 +137,22 @@ fn should_tolerate_eventual_consistency_given_cloud_listing_missing_recent_sst_w
 }
 
 #[test]
-fn should_fail_fast_leaving_engine_in_safe_state_given_corrupted_cloud_sst_index_block_when_reading_data() {
+fn should_fail_fast_leaving_engine_in_safe_state_given_corrupted_cloud_sst_index_block_when_reading_data(
+) {
     // Arrange: use a mock backend and write a deliberately corrupted SST blob
     let backend = MockCloudBackend::new();
-    <MockCloudBackend as StorageBackend>::put_blob(&backend, "sst/corrupt.sst", Bytes::from(&b"corrupted-content"[..])).expect("write corrupt sst");
+    <MockCloudBackend as StorageBackend>::put_blob(
+        &backend,
+        "sst/corrupt.sst",
+        Bytes::from(&b"corrupted-content"[..]),
+    )
+    .expect("write corrupt sst");
 
     // Act: read the blob back from the cloud backend
-    let got = <MockCloudBackend as StorageBackend>::get_blob(&backend, "sst/corrupt.sst").expect("get corrupt sst");
+    let got = <MockCloudBackend as StorageBackend>::get_blob(&backend, "sst/corrupt.sst")
+        .expect("get corrupt sst");
 
     // Assert
     assert_eq!(got, Bytes::from(&b"corrupted-content"[..]));
     // Engine-level behavior when encountering corrupted SSTs is covered by separate engine tests.
 }
-

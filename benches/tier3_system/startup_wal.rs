@@ -26,11 +26,13 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
         b.iter(|| {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("startup_wal");
-            
+
             // Phase 1: Create WAL with 50k operations WITHOUT flushing
             {
                 let opts = MidgeOptions {
-                    storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+                    storage_mode: StorageMode::LocalDisk {
+                        db_path: path.clone(),
+                    },
                     memtable_size: 100 * 1024 * 1024, // Large memtable = no auto flush
                     enable_compaction: false,
                     wal_sync: false, // Faster WAL writes for setup
@@ -38,7 +40,7 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
                 };
                 let engine = MidgeEngine::open(opts).unwrap();
                 let cf = engine.default_column_family();
-                
+
                 // Write 50k ops to WAL without flushing
                 for i in 0..50_000 {
                     let key = format!("key_{:010}", i);

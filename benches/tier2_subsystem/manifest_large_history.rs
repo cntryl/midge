@@ -17,7 +17,7 @@ use cntryl_midge::core::manifest::{FileMeta, VersionEdit, VersionSet};
 fn make_test_file_meta(i: usize) -> FileMeta {
     FileMeta {
         name: format!("sst_{:06}.sst", i),
-        level: (i % 7) as u32, // Spread across levels 0-6
+        level: (i % 7) as u32,   // Spread across levels 0-6
         size_bytes: 1024 * 1024, // 1MB files
         cf_id: 0,
         smallest_key: Some(format!("key_{:010}", i * 1000).into_bytes()),
@@ -45,12 +45,12 @@ fn bench_manifest_replay_100k_entries(c: &mut Criterion) {
     group.bench_function("replay_100k", |b| {
         b.iter(|| {
             let mut version_set = VersionSet::new(Default::default());
-            
+
             // Apply all 100k edits sequentially
             for edit in &edits {
                 version_set = version_set.apply_edit(edit.clone()).unwrap();
             }
-            
+
             black_box(version_set);
         })
     });

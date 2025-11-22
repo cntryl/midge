@@ -1,12 +1,13 @@
 // Concurrency + internal races tests (observable outcomes)
 mod common;
-use common::*;
 use cntryl_midge::{MidgeOptions, Query};
+use common::*;
 use std::sync::Arc;
 use std::thread;
 
 #[test]
-fn should_preserve_iterator_correctness_given_concurrent_writes_and_memtable_freeze_when_scanning_forward() {
+fn should_preserve_iterator_correctness_given_concurrent_writes_and_memtable_freeze_when_scanning_forward(
+) {
     // Arrange: set up engine with background writers
     for mode in disk_storage_modes() {
         let (_n, storage_mode, _tmp) = create_storage_mode(mode);
@@ -22,7 +23,9 @@ fn should_preserve_iterator_correctness_given_concurrent_writes_and_memtable_fre
 
         // Initial data
         for i in 0..10 {
-            eng_arc.put(&cf, format!("k{:02}", i).as_bytes(), b"v").unwrap();
+            eng_arc
+                .put(&cf, format!("k{:02}", i).as_bytes(), b"v")
+                .unwrap();
         }
         eng_arc.flush().unwrap();
 
@@ -31,7 +34,11 @@ fn should_preserve_iterator_correctness_given_concurrent_writes_and_memtable_fre
             let eng_clone = eng_arc.clone();
             thread::spawn(move || {
                 for i in 10..20 {
-                    let _ = eng_clone.put(&eng_clone.default_column_family(), format!("k{:02}", i).as_bytes(), b"v");
+                    let _ = eng_clone.put(
+                        &eng_clone.default_column_family(),
+                        format!("k{:02}", i).as_bytes(),
+                        b"v",
+                    );
                 }
             })
         };
@@ -51,7 +58,8 @@ fn should_preserve_iterator_correctness_given_concurrent_writes_and_memtable_fre
 }
 
 #[test]
-fn should_not_deadlock_flush_coordinator_given_many_parallel_flush_requests_when_backpressure_is_applied() {
+fn should_not_deadlock_flush_coordinator_given_many_parallel_flush_requests_when_backpressure_is_applied(
+) {
     // Arrange: spawn many concurrent flush requests
     for mode in disk_storage_modes() {
         let (_n, storage_mode, _tmp) = create_storage_mode(mode);
@@ -67,16 +75,20 @@ fn should_not_deadlock_flush_coordinator_given_many_parallel_flush_requests_when
 
         // Fill memtable
         for i in 0..100 {
-            eng_arc.put(&cf, format!("f{:03}", i).as_bytes(), b"v").unwrap();
+            eng_arc
+                .put(&cf, format!("f{:03}", i).as_bytes(), b"v")
+                .unwrap();
         }
 
         // Spawn multiple flush threads
-        let handles: Vec<_> = (0..5).map(|_| {
-            let eng_clone = eng_arc.clone();
-            thread::spawn(move || {
-                let _ = eng_clone.flush();
+        let handles: Vec<_> = (0..5)
+            .map(|_| {
+                let eng_clone = eng_arc.clone();
+                thread::spawn(move || {
+                    let _ = eng_clone.flush();
+                })
             })
-        }).collect();
+            .collect();
 
         // Act: wait for all to complete
         for h in handles {
@@ -91,7 +103,8 @@ fn should_not_deadlock_flush_coordinator_given_many_parallel_flush_requests_when
 }
 
 #[test]
-fn should_maintain_manifest_version_ordering_given_concurrent_compaction_and_flush_jobs_when_applying_edits() {
+fn should_maintain_manifest_version_ordering_given_concurrent_compaction_and_flush_jobs_when_applying_edits(
+) {
     // Arrange: schedule compactions and flushes concurrently
     for mode in disk_storage_modes() {
         let (_n, storage_mode, _tmp) = create_storage_mode(mode);
@@ -108,7 +121,11 @@ fn should_maintain_manifest_version_ordering_given_concurrent_compaction_and_flu
         let compact_handle = {
             let eng_clone = eng_arc.clone();
             thread::spawn(move || {
-                let _ = eng_clone.compact_range(&eng_clone.default_column_family(), Some(b""), Some(b"~"));
+                let _ = eng_clone.compact_range(
+                    &eng_clone.default_column_family(),
+                    Some(b""),
+                    Some(b"~"),
+                );
             })
         };
 
@@ -125,13 +142,17 @@ fn should_maintain_manifest_version_ordering_given_concurrent_compaction_and_flu
 
         // Assert: engine still consistent
         let got = eng_arc.get(&cf, b"key000").unwrap();
-        assert!(got.is_some(), "data consistent after concurrent compaction and flush");
+        assert!(
+            got.is_some(),
+            "data consistent after concurrent compaction and flush"
+        );
         drop(eng_arc);
     }
 }
 
 #[test]
-fn should_not_drop_committed_writes_given_racing_wal_group_commit_and_memtable_rollover_when_under_load() {
+fn should_not_drop_committed_writes_given_racing_wal_group_commit_and_memtable_rollover_when_under_load(
+) {
     // Arrange: create heavy write load and small WAL group thresholds
     for mode in disk_storage_modes() {
         let (_n, storage_mode, _tmp) = create_storage_mode(mode);

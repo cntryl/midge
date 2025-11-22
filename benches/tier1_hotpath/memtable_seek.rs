@@ -96,7 +96,7 @@ fn bench_memtable_seek_forward_32steps(c: &mut Criterion) {
         b.iter(|| {
             let start_key = make_key(10);
             let all_keys = memtable.get_all_keys();
-            
+
             // Filter keys >= start_key and take 32
             let results: Vec<_> = all_keys
                 .iter()
@@ -104,7 +104,7 @@ fn bench_memtable_seek_forward_32steps(c: &mut Criterion) {
                 .take(32)
                 .cloned()
                 .collect();
-            
+
             black_box(results);
         })
     });
@@ -130,7 +130,7 @@ fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
         b.iter(|| {
             let start_key = make_key(50);
             let all_keys = memtable.get_all_keys();
-            
+
             // Filter keys <= start_key, reverse, and take 32
             let mut results: Vec<_> = all_keys
                 .iter()
@@ -139,7 +139,7 @@ fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
                 .collect();
             results.reverse();
             results.truncate(32);
-            
+
             black_box(results);
         })
     });

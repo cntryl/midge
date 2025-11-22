@@ -2,7 +2,10 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use cntryl_midge::{MidgeEngine, test_hooks::{TestHooks, IoBehavior}};
+use cntryl_midge::{
+    test_hooks::{IoBehavior, TestHooks},
+    MidgeEngine,
+};
 
 mod common;
 use common::{
@@ -32,9 +35,12 @@ fn should_retry_compaction_given_disk_full_error_when_writing_sst() {
         // Assert - Compaction should fail with disk full error
         assert!(result.is_err(), "Compaction should fail when disk is full");
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("No space left on device") ||
-                err.to_string().contains("ENOSPC"),
-                "Error should indicate disk full: {}", err);
+        assert!(
+            err.to_string().contains("No space left on device")
+                || err.to_string().contains("ENOSPC"),
+            "Error should indicate disk full: {}",
+            err
+        );
     }
 }
 

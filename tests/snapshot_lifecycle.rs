@@ -30,13 +30,13 @@ fn should_recover_gracefully_given_crash_with_active_snapshots_when_reopening() 
         };
         let eng = MidgeEngine::open(opts).unwrap();
         let cf = eng.default_column_family();
-        
+
         eng.put(&cf, b"key1", b"val1").unwrap();
         let _snapshot = eng.snapshot(); // Create snapshot but don't use it
         eng.put(&cf, b"key2", b"val2").unwrap();
         // Crash with active snapshot
     }
-    
+
     // Act - reopen
     let opts2 = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
@@ -64,12 +64,12 @@ fn should_preserve_data_given_snapshot_and_compaction_when_interacting() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"v1").unwrap();
     eng.flush().unwrap();
-    
+
     let snapshot = eng.snapshot();
-    
+
     // Overwrite and delete
     eng.put(&cf, b"key1", b"v2").unwrap();
     eng.delete(&cf, b"key2").unwrap();
@@ -84,10 +84,7 @@ fn should_preserve_data_given_snapshot_and_compaction_when_interacting() {
         Bytes::from("v1")
     );
     // Current view sees new data
-    assert_eq!(
-        eng.get(&cf, b"key1").unwrap().unwrap(),
-        Bytes::from("v2")
-    );
+    assert_eq!(eng.get(&cf, b"key1").unwrap().unwrap(), Bytes::from("v2"));
 }
 
 #[test]
@@ -107,13 +104,13 @@ fn should_maintain_multiple_snapshots_given_concurrent_creation_when_reading() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key", b"v1").unwrap();
     let snap1 = eng.snapshot();
-    
+
     eng.put(&cf, b"key", b"v2").unwrap();
     let snap2 = eng.snapshot();
-    
+
     eng.put(&cf, b"key", b"v3").unwrap();
     let snap3 = eng.snapshot();
 
@@ -142,7 +139,7 @@ fn should_handle_snapshot_given_empty_db_when_created() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     // Act - snapshot of empty DB
     let snapshot = eng.snapshot();
     eng.put(&cf, b"key1", b"val1").unwrap();
@@ -164,12 +161,12 @@ fn should_read_consistently_given_snapshot_after_delete_when_querying() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"val1").unwrap();
     eng.put(&cf, b"key2", b"val2").unwrap();
-    
+
     let snapshot = eng.snapshot();
-    
+
     // Act - delete after snapshot
     eng.delete(&cf, b"key1").unwrap();
 
@@ -190,14 +187,14 @@ fn should_allow_writes_given_snapshot_released_when_no_longer_needed() {
     };
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
-    
+
     eng.put(&cf, b"key1", b"val1").unwrap();
-    
+
     // Act - create and immediately drop snapshot
     {
         let _snapshot = eng.snapshot();
     } // Snapshot dropped here
-    
+
     eng.put(&cf, b"key2", b"val2").unwrap();
     eng.flush().unwrap();
 

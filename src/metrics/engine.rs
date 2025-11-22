@@ -421,9 +421,7 @@ impl Metrics {
     }
 
     pub fn get_background_write_stalls(&self) -> u64 {
-        self.inner
-            .background_write_stalls
-            .load(Ordering::Relaxed)
+        self.inner.background_write_stalls.load(Ordering::Relaxed)
     }
 
     pub fn get_background_write_stall_duration_ms(&self) -> u64 {

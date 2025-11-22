@@ -25,25 +25,27 @@ fn bench_cold_start_large(c: &mut Criterion) {
     // Pre-create large dataset once
     let tmp = TempDir::new().expect("tempdir");
     let path = tmp.path().join("cold_start_large");
-    
+
     // Setup: Create 100k keys across many SST files
     {
         let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+            storage_mode: StorageMode::LocalDisk {
+                db_path: path.clone(),
+            },
             memtable_size: 256 * 1024, // Small memtable = many SST files
             enable_compaction: true,
             ..Default::default()
         };
-        
+
         let engine = MidgeEngine::open(opts).unwrap();
         let cf = engine.default_column_family();
-        
+
         // Populate 100k keys
         for i in 0..100_000 {
             let key = format!("large_key_{:010}", i);
             let val = format!("large_value_{}", i);
             engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
-            
+
             if i % 5000 == 0 {
                 engine.flush().unwrap();
             }
@@ -57,12 +59,14 @@ fn bench_cold_start_large(c: &mut Criterion) {
         b.iter(|| {
             // Cold start: Open existing database
             let opts = MidgeOptions {
-                storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+                storage_mode: StorageMode::LocalDisk {
+                    db_path: path.clone(),
+                },
                 memtable_size: 256 * 1024,
                 enable_compaction: true,
                 ..Default::default()
             };
-            
+
             let engine = MidgeEngine::open(opts).unwrap();
 
             // Verify database is accessible

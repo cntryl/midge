@@ -1,10 +1,11 @@
 // Autotune stability tests
 mod common;
-use common::*;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::*;
 
 #[test]
-fn should_adjust_memtable_size_smoothly_given_sustained_high_write_throughput_when_autotune_enabled() {
+fn should_adjust_memtable_size_smoothly_given_sustained_high_write_throughput_when_autotune_enabled(
+) {
     // Arrange: simulate sustained high write throughput
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -32,7 +33,8 @@ fn should_adjust_memtable_size_smoothly_given_sustained_high_write_throughput_wh
 }
 
 #[test]
-fn should_not_enter_feedback_loop_oscillation_given_fluctuating_write_load_when_autotune_controls_compaction_threads() {
+fn should_not_enter_feedback_loop_oscillation_given_fluctuating_write_load_when_autotune_controls_compaction_threads(
+) {
     // Arrange: fluctuating write load
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -59,7 +61,8 @@ fn should_not_enter_feedback_loop_oscillation_given_fluctuating_write_load_when_
 }
 
 #[test]
-fn should_respect_configured_limits_given_autotune_recommendations_exceed_maximums_when_system_under_extreme_load() {
+fn should_respect_configured_limits_given_autotune_recommendations_exceed_maximums_when_system_under_extreme_load(
+) {
     // Arrange: configure strict limits
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -83,7 +86,8 @@ fn should_respect_configured_limits_given_autotune_recommendations_exceed_maximu
 }
 
 #[test]
-fn should_revert_to_safe_defaults_given_corrupted_autotune_state_on_startup_when_recovering_engine() {
+fn should_revert_to_safe_defaults_given_corrupted_autotune_state_on_startup_when_recovering_engine()
+{
     // Arrange: normal startup
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -105,7 +109,8 @@ fn should_revert_to_safe_defaults_given_corrupted_autotune_state_on_startup_when
             db_path: dir.path().to_path_buf(),
         },
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
 
     // Assert: reverts to safe defaults (data preserved)
     let cf2 = eng2.default_column_family();
