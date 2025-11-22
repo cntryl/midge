@@ -164,20 +164,16 @@ impl MidgeEngine {
             .filter(|f| f.cf_id == cf_id.as_u32())
             .collect();
 
-        // // Collect all range tombstones from SSTs for this CF
-        // let mut all_range_tombstones: Vec<crate::sst::traits::RangeTombstone> = Vec::new();
-        // for file in &cf_files {
-        //     let p = self.sst_dir.join(&file.name);
-        //     if let Ok(sst) = self.sst_reader_factory.open(&p) {
-        //         all_range_tombstones.extend(sst.range_tombstones());
-        //     }
-        // }
+        // Collect all range tombstones from SSTs for this CF
+        let mut all_range_tombstones: Vec<crate::sst::traits::RangeTombstone> = Vec::new();
+        for file in &cf_files {
+            let p = self.sst_dir.join(&file.name);
+            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+                all_range_tombstones.extend(sst.range_tombstones());
+            }
+        }
 
-        // // Check if key is covered by any range tombstone
-        // if is_covered_by_range_tombstone(&all_range_tombstones, key, u64::MAX) {
-        //     return Ok(None);
-        // }
-
+        // Check SST files from newest to oldest (reverse iteration)
         for file in cf_files.iter().rev() {
             let p = self.sst_dir.join(&file.name);
             // CloudSstReaderFactory will download from cloud if not in local cache
@@ -185,7 +181,7 @@ impl MidgeEngine {
                 Ok(sst) => {
                     let state_result = sst.get_state(key);
                     match state_result {
-                        Ok(crate::sst::KeyState::Value(v, _, expiration)) => {
+                        Ok(crate::sst::KeyState::Value(v, seq, expiration)) => {
                             // Check if key is expired
                             if let Some(exp_ts) = expiration {
                                 let now_millis = timestamp::now_millis();
@@ -194,9 +190,26 @@ impl MidgeEngine {
                                     return Ok(None);
                                 }
                             }
+                            // Before returning the value, check if any range tombstone
+                            // with a higher sequence covers this key
+                            // Check if any range tombstone with seq >= value's seq covers this key
+                            // Tombstone semantics: a tombstone at sequence T deletes all keys with seq < T
+                            // that fall in its range
+                            let covered_by_tombstone = all_range_tombstones.iter().any(|t| {
+                                key >= t.start.as_slice() 
+                                    && key < t.end.as_slice()
+                                    && seq < t.seq  // Value written before tombstone
+                            });
+                            
+                            if covered_by_tombstone {
+                                return Ok(None);
+                            }
+                            
                             return Ok(Some(v));
                         }
-                        Ok(crate::sst::KeyState::Tombstone(_)) => return Ok(None),
+                        Ok(crate::sst::KeyState::Tombstone(_seq)) => {
+                            return Ok(None);
+                        }
                         Ok(crate::sst::KeyState::Absent) => continue,
                         Err(_) => continue,
                     }
@@ -204,6 +217,13 @@ impl MidgeEngine {
                 Err(_) => continue,
             }
         }
+        
+        // If we didn't find any value/tombstone in SSTs, check if range tombstones cover it
+        // (only relevant if there are no point entries for this key)
+        if is_covered_by_range_tombstone(&all_range_tombstones, key, u64::MAX) {
+            return Ok(None);
+        }
+        
         Ok(None)
     }
 

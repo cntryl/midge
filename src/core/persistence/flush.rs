@@ -96,10 +96,6 @@ pub(crate) fn spawn_flush_worker(
             for msg in rx.iter() {
                 match msg {
                     FlushMsg::Entries(job) => {
-                        if job.entries.is_empty() {
-                            continue;
-                        }
-
                         // Process the flush job
                         let res = process_flush_job(&config, job);
                         if let Err(e) = res {
@@ -541,7 +537,9 @@ where
 
     // Persist to file (streaming writer should write directly to disk)
     // Format: {seq:020}_{cf_id:04}.sst for per-CF identification
-    let seq = smallest_seq.unwrap_or(0);
+    // Use largest_seq to ensure uniqueness (smallest_seq can collide when
+    // multiple flushes start at the same sequence)
+    let seq = largest_seq.unwrap_or(smallest_seq.unwrap_or(0));
     let fname = format!("{:020}_{:04}.sst", seq, cf_id.as_u32());
     let file_path = config.sst_dir.join(&fname);
     let boxed = Box::new(dyn_writer);

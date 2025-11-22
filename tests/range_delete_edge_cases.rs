@@ -72,10 +72,15 @@ fn should_not_resurrect_deleted_keys_given_interleaved_puts_and_range_deletes_wh
             },
             |eng| {
                 let cf = eng.default_column_family();
-                // Assert: deleted range gone
-                for i in 20..80 {
+                // Assert: deleted range r020-r049 is gone (not rewritten in batch 3)
+                for i in 20..50 {
                     let got = eng.get(&cf, format!("r{:03}", i).as_bytes()).unwrap();
                     assert!(got.is_none(), "deleted key {} resurrected", i);
+                }
+                // Keys r050-r079 were rewritten in batch 3 so should be visible
+                for i in 50..80 {
+                    let got = eng.get(&cf, format!("r{:03}", i).as_bytes()).unwrap();
+                    assert!(got.is_some(), "key {} should be visible (rewritten after delete_range)", i);
                 }
                 // Other keys present
                 let got = eng.get(&cf, b"r000").unwrap();

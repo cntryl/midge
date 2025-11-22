@@ -142,8 +142,9 @@ impl MidgeEngine {
 
         let cf_id = cf.id();
 
-        // Check if the frozen memtable is empty
-        if memtable.is_empty() {
+        // Check if the frozen memtable is completely empty (no entries and no tombstones)
+        // We must flush even if is_empty() returns true if there are range tombstones present
+        if memtable.is_empty() && !memtable.has_range_tombstones() {
             return Ok(());
         }
         // Get CF config
@@ -152,7 +153,10 @@ impl MidgeEngine {
         // Drain the frozen memtable
         let entries = memtable.drain_with_meta_internal();
         let range_tombstones = memtable.drain_range_tombstones();
-        if entries.is_empty() {
+        // If both entries and range tombstones are empty, nothing to flush.
+        // Previously we returned early when entries were empty which caused
+        // pure-range-tombstone memtables to be dropped (tombstones lost).
+        if entries.is_empty() && range_tombstones.is_empty() {
             return Ok(());
         }
 
@@ -203,22 +207,14 @@ impl MidgeEngine {
             0
         };
 
-        // SAFETY ORDERING CHANGE:
-        // Persist the new SST (AddFile) BEFORE advancing last_persisted_sequence.
-        // Rationale: If we advance the sequence first and crash before AddFile is durable,
-        // WAL replay will skip the latest writes whose data is not yet referenced by any SST.
-        // By adding the file first, a crash between AddFile and UpdateSequence leaves
-        // sequence conservative (older) and replay simply re-applies recent WAL entries (safe).
-        // This mirrors the background flush behavior where sequence advancement occurs in the same
-        // atomic manifest write that adds the file.
-
-        // 1. AddFile edit (makes SST discoverable)
+        // Add file to manifest and update last_persisted_sequence atomically
+        // The sequence will be updated based on the file's largest_seq during manifest write
         let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
             file: Box::new(file_meta.clone()),
         };
         self.version_manager.apply_edit_sync(add_file_edit)?;
 
-        // 2. UpdateSequence edit (now safe to advance durable sequence)
+        // Explicitly update sequence if needed
         if let Some(largest_seq) = file_meta.largest_seq {
             let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
                 sequence: largest_seq,
@@ -280,12 +276,16 @@ impl MidgeEngine {
             }
         }
 
-        // Check if active memtable is empty
-        let is_empty = {
+        // Check if active memtable is both empty AND has no range tombstones.
+        // If memtable is empty but contains range tombstones, we must still flush
+        // to persist those tombstones; otherwise deletes are lost on restart.
+        let (is_empty, has_tombs) = {
             let mt = column_family.memtable.load();
-            mt.is_empty()
+            (mt.is_empty(), mt.has_range_tombstones())
         };
-        if is_empty {
+        
+        // Early return only if completely empty (no entries and no tombstones)
+        if is_empty && !has_tombs {
             return Ok(());
         }
 

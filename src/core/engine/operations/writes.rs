@@ -432,7 +432,7 @@ impl MidgeEngine {
         let now_millis = timestamp::now_millis();
 
         for op in batch.operations() {
-            let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+            let seq = self.seq.fetch_add(1, Ordering::SeqCst);
 
             let expiration = if op.ttl_seconds() > 0 {
                 Some(now_millis + (op.ttl_seconds() * 1000))

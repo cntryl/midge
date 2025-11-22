@@ -380,6 +380,11 @@ impl MemTable {
         self.inner.tombstones_range(start, end)
     }
 
+    /// Returns true if there are any range tombstones recorded in this memtable.
+    pub fn has_range_tombstones(&self) -> bool {
+        !self.range_tombstones.is_empty()
+    }
+
     /// Return tombstoned keys visible at snapshot within [start, end).
     pub fn tombstones_range_at(
         &self,

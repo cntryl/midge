@@ -46,6 +46,12 @@ impl RangeTombstones {
             .collect()
     }
 
+    /// Returns true if there are no recorded range tombstones.
+    pub(super) fn is_empty(&self) -> bool {
+        let tombstones = self.inner.read();
+        tombstones.is_empty()
+    }
+
     /// Returns true if any active (non-drained) range tombstone covers `key`.
     /// Coverage uses inclusive start, exclusive end semantics: [start, end).
     pub(super) fn covers(&self, key: &[u8]) -> bool {
