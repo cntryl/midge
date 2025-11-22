@@ -257,6 +257,21 @@ pub(super) fn setup_wal_writer(
                     }
                 }
             }
+
+            // Also replay the active WAL file if it exists
+            let active_wal_path = wal_dir.join("wal.log");
+            if active_wal_path.exists() {
+                if let Ok(records) =
+                    crate::wal::fs::replay_wal_file_with_mode(&active_wal_path, opts.wal_recovery_mode)
+                {
+                    let replay_max = MidgeEngine::replay_wal_to_cfs_after_seq(
+                        cf_set,
+                        &records,
+                        last_persisted,
+                    );
+                    max_replay_seq = max_replay_seq.max(replay_max);
+                }
+            }
         }
 
         // Local filesystem WAL with test hooks if configured

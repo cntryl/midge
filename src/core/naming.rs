@@ -116,48 +116,136 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn wal_naming() {
-        let dir = TempDir::new().unwrap();
-        assert_eq!(wal_filename(1), format!("{:016}.wal", 1));
-        assert_eq!(
-            wal_path(dir.path(), 1),
-            dir.path().join(format!("{:016}.wal", 1))
-        );
+    fn should_generate_wal_filename_when_sequence_provided() {
+        // Arrange
+        let seq = 1;
 
-        assert_eq!(parse_wal_seq("0000000000000005.wal"), Some(5));
-        assert!(parse_wal_seq("x.wal").is_none());
+        // Act
+        let filename = wal_filename(seq);
+
+        // Assert
+        assert_eq!(filename, format!("{:016}.wal", 1));
     }
 
     #[test]
-    fn sst_naming() {
+    fn should_generate_wal_path_when_sequence_provided() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let seq = 1;
+
+        // Act
+        let path = wal_path(dir.path(), seq);
+
+        // Assert
+        assert_eq!(path, dir.path().join(format!("{:016}.wal", 1)));
+    }
+
+    #[test]
+    fn should_parse_wal_sequence_when_valid_filename_provided() {
+        // Arrange
+        let filename = "0000000000000005.wal";
+
+        // Act
+        let seq = parse_wal_seq(filename);
+
+        // Assert
+        assert_eq!(seq, Some(5));
+    }
+
+    #[test]
+    fn should_return_none_when_parsing_invalid_wal_filename() {
+        // Arrange
+        let filename = "x.wal";
+
+        // Act
+        let seq = parse_wal_seq(filename);
+
+        // Assert
+        assert!(seq.is_none());
+    }
+
+    #[test]
+    fn should_generate_sst_filename_when_sequence_provided() {
+        // Arrange
+        let seq = 3;
+
+        // Act
+        let filename = sst_filename(seq);
+
+        // Assert
+        assert_eq!(filename, format!("{:016}.sst", 3));
+    }
+
+    #[test]
+    fn should_generate_sst_path_when_sequence_and_cf_provided() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let cf = ColumnFamilyId::new(7);
+        let seq = 3;
 
-        assert_eq!(sst_filename(3), format!("{:016}.sst", 3));
-        assert_eq!(
-            sst_path(dir.path(), cf, 3),
-            dir.path().join("7").join(format!("{:016}.sst", 3))
-        );
+        // Act
+        let path = sst_path(dir.path(), cf, seq);
 
-        assert_eq!(parse_sst_seq("0000000000000042.sst"), Some(42));
-        assert_eq!(parse_cf_id_from_dir("7"), Some(7));
+        // Assert
+        assert_eq!(path, dir.path().join("7").join(format!("{:016}.sst", 3)));
     }
 
     #[test]
-    fn seq_alloc() {
+    fn should_parse_sst_sequence_when_valid_filename_provided() {
+        // Arrange
+        let filename = "0000000000000042.sst";
+
+        // Act
+        let seq = parse_sst_seq(filename);
+
+        // Assert
+        assert_eq!(seq, Some(42));
+    }
+
+    #[test]
+    fn should_parse_cf_id_when_valid_directory_name_provided() {
+        // Arrange
+        let dirname = "7";
+
+        // Act
+        let cf_id = parse_cf_id_from_dir(dirname);
+
+        // Assert
+        assert_eq!(cf_id, Some(7));
+    }
+
+    #[test]
+    fn should_allocate_incrementing_wal_sequences() {
+        // Arrange
         NEXT_WAL_SEQ.store(1, Ordering::Relaxed);
+
+        // Act
+        let seq1 = allocate_wal_seq();
+        let seq2 = allocate_wal_seq();
+        let next = current_next_wal_seq();
+
+        // Assert
+        assert_eq!(seq1, 1);
+        assert_eq!(seq2, 2);
+        assert_eq!(next, 3);
+    }
+
+    #[test]
+    fn should_allocate_incrementing_sst_sequences_per_column_family() {
+        // Arrange
         NEXT_SST_SEQS.clear();
-
-        assert_eq!(allocate_wal_seq(), 1);
-        assert_eq!(allocate_wal_seq(), 2);
-        assert_eq!(current_next_wal_seq(), 3);
-
         let cf = ColumnFamilyId::new(1);
-        assert_eq!(allocate_sst_seq(cf), 1);
-        assert_eq!(allocate_sst_seq(cf), 2);
-        assert_eq!(allocate_sst_seq(cf), 3);
 
+        // Act
+        let seq1 = allocate_sst_seq(cf);
+        let seq2 = allocate_sst_seq(cf);
+        let seq3 = allocate_sst_seq(cf);
         let map = current_next_sst_seqs();
+
+        // Assert
+        assert_eq!(seq1, 1);
+        assert_eq!(seq2, 2);
+        assert_eq!(seq3, 3);
         assert_eq!(map.get(&1), Some(&4));
     }
 }
