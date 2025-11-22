@@ -347,8 +347,7 @@ impl CompactionController {
                             // Use FileManager's grace period mechanism if available to prevent race conditions
                             for old_sst in &plan.input_files {
                                 let old_path = sst_dir.join(old_sst);
-                                if old_path.exists() {
-                                    
+                                if old_path.exists() {                                    
                                     // Delete immediately after manifest update to prevent stale reads
                                     if let Err(e) = std::fs::remove_file(&old_path) {
                                         tracing::warn!(path = %old_path.display(), error = %e, "failed to remove old SST during compaction");

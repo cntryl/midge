@@ -500,7 +500,7 @@ where
     // Drain memtable with metadata and persist to disk under sst dir
     let (entries, range_tombstones) = memtable_drain();
 
-    if entries.is_empty() {
+    if entries.is_empty() && range_tombstones.is_empty() {
         return Err(crate::error::MidgeError::internal(
             "memtable empty on flush",
         ));

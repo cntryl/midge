@@ -12,6 +12,7 @@ use crate::{
     common::timestamp,
     core::manifest::Manifest,
     error::MidgeResult,
+    sst::range_tombstone::is_covered_by_range_tombstone,
 };
 
 use super::super::MidgeEngine;
@@ -292,6 +293,15 @@ impl MidgeEngine {
             .filter(|f| f.cf_id == cf_id.as_u32())
             .collect();
 
+        // Collect all range tombstones from SSTs for this CF
+        let mut all_range_tombstones: Vec<crate::sst::traits::RangeTombstone> = Vec::new();
+        for file in &cf_files {
+            let p = self.sst_dir.join(&file.name);
+            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+                all_range_tombstones.extend(sst.range_tombstones());
+            }
+        }
+
         // Sort SST files by largest_seq (newest first) so that newer versions
         // are added to merge iterator first (get lower source_id)
         cf_files.sort_by(|a, b| {
@@ -307,7 +317,7 @@ impl MidgeEngine {
                 if let Ok(rows) = sst.scan_range_state(start, end_ref) {
                     let now_millis = timestamp::now_millis();
 
-                    let items: Vec<(Bytes, Option<Bytes>, u64)> = rows
+                    let mut items: Vec<(Bytes, Option<Bytes>, u64)> = rows
                         .into_iter()
                         .map(|(k, st)| {
                             use crate::sst::KeyState;
@@ -327,6 +337,12 @@ impl MidgeEngine {
                             }
                         })
                         .collect();
+
+                    // Filter out keys covered by range tombstones
+                    items.retain(|(k, _, _)| {
+                        !is_covered_by_range_tombstone(&all_range_tombstones, k.as_ref(), u64::MAX)
+                    });
+
                     if !items.is_empty() {
                         if query.reverse {
                             sources.push(Box::new(
