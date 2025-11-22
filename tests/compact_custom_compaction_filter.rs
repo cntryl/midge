@@ -36,7 +36,7 @@ fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
         let opts = cntryl_midge::MidgeOptions {
             storage_mode,
             memtable_size: 512,
-            enable_compaction: true,
+            enable_compaction: false,
             ..Default::default()
         };
         let eng = cntryl_midge::MidgeEngine::open(opts).expect("open engine");
