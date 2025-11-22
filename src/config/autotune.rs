@@ -91,7 +91,6 @@ impl Autotuner {
     }
 
     /// Set adjustment interval (primarily for testing).
-    #[cfg(test)]
     pub fn with_adjustment_interval(mut self, interval: Duration) -> Self {
         self.adjustment_interval = interval;
         self

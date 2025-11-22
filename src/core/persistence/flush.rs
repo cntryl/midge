@@ -149,7 +149,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
 
     // Allocate SST sequence number for this CF FIRST (before creating writer)
     let sst_seq = crate::core::naming::allocate_sst_seq(cf_id);
-    let sst_name = format!("{}/{}", cf_id.as_u32(), sst_seq);
+    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id.as_u32()), crate::core::naming::sst_filename(sst_seq));
 
     // Create SST writer with sequence for deterministic temp file naming
     let mut writer = config
@@ -175,6 +175,9 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     // Finish and persist (streaming writer will write directly to disk)
     // Format: dbpath/{cf_id}/{sst_seq}.sst
     let sst_path = crate::core::naming::sst_path(&config.sst_dir, cf_id, sst_seq);
+    if let Some(parent) = sst_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     // Prefer streaming finish_to_path; default implementation will write bytes
     let boxed_writer = Box::new(writer);
     boxed_writer.finish_to_path(&sst_path)?;
@@ -547,11 +550,14 @@ where
 
     // Allocate SST sequence number for this CF
     let sst_seq = crate::core::naming::allocate_sst_seq(cf_id);
-    let sst_name = format!("{}/{}", cf_id.as_u32(), sst_seq);
+    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id.as_u32()), crate::core::naming::sst_filename(sst_seq));
 
     // Persist to file (streaming writer should write directly to disk)
     // Format: dbpath/{cf_id}/{sst_seq}.sst
     let file_path = crate::core::naming::sst_path(config.sst_dir, cf_id, sst_seq);
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let boxed = Box::new(dyn_writer);
     boxed.finish_to_path(&file_path)?;
 

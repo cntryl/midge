@@ -299,7 +299,47 @@ impl MidgeEngine {
 
         // Now flush the old memtable using the frozen memtable path
         // (flush_frozen_memtable already acquires the flush_mutex)
-        self.flush_frozen_memtable(cf, old_memtable)
+        self.flush_frozen_memtable(cf, old_memtable)?;
+
+        // Run autotune if enabled
+        if let Some(ref autotuner) = self.autotuner {
+            use crate::config::autotune::ObservedMetrics;
+
+            // Gather current metrics for autotuning
+            let metrics = ObservedMetrics {
+                write_latency_p99_us: 5000, // TODO: track actual p99 write latency
+                l0_file_count: self.version_set.load().manifest.files_at_level(0).len(),
+                cache_hit_ratio: self.metrics.block_cache_hit_rate(),
+                bloom_fpr: self.metrics.bloom_false_positive_rate(),
+                cloud_upload_latency_p99_ms: None, // TODO: track cloud latency if applicable
+            };
+            autotuner.update_metrics(metrics);
+
+            // Capture current autotuner values before adjustment
+            let wal_before = autotuner.wal_interval_ms();
+            let comp_before = autotuner.compaction_threads();
+            let bloom_before = autotuner.bloom_bits();
+
+            // Attempt adjustment
+            if autotuner.adjust() {
+                // Record which parameters were adjusted
+                let wal_after = autotuner.wal_interval_ms();
+                let comp_after = autotuner.compaction_threads();
+                let bloom_after = autotuner.bloom_bits();
+
+                if wal_after != wal_before {
+                    self.metrics.record_wal_interval_adjustment(wal_before, wal_after);
+                }
+                if comp_after != comp_before {
+                    self.metrics.record_compaction_thread_adjustment(comp_before, comp_after);
+                }
+                if bloom_after != bloom_before {
+                    self.metrics.record_bloom_bits_adjustment(bloom_before as u32, bloom_after as u32);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Trigger manual compaction for a specific level in a column family.

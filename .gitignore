@@ -123,5 +123,6 @@ midge_db/
 test_db_*/
 
 tools/
+tmp/
 .docker/bench/results
 .docker/bench/target

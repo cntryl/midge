@@ -17,8 +17,15 @@ use dashmap::DashMap;
 /// Ensures lexicographic sort == numeric sort across all storage backends.
 const PAD_WIDTH: usize = 16;
 
+/// Fixed width for padded column family IDs.
+const CF_PAD_WIDTH: usize = 8;
+
 fn pad(n: u64) -> String {
     format!("{:0width$}", n, width = PAD_WIDTH)
+}
+
+pub fn pad_cf_id(cf_id: u32) -> String {
+    format!("{:0width$}", cf_id, width = CF_PAD_WIDTH)
 }
 
 /// Global WAL sequence allocator.
@@ -82,7 +89,7 @@ pub fn sst_filename(sst_seq: u64) -> String {
 }
 
 pub fn sst_cf_dir(db_path: &Path, cf_id: ColumnFamilyId) -> PathBuf {
-    db_path.join(cf_id.as_u32().to_string())
+    db_path.join(pad_cf_id(cf_id.as_u32()))
 }
 
 pub fn sst_path(db_path: &Path, cf_id: ColumnFamilyId, sst_seq: u64) -> PathBuf {
