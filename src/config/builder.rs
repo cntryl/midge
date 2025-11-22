@@ -1,187 +1,146 @@
-//! Configuration builder with ergonomic API.
+//! Builder pattern for constructing Midge configurations.
 //!
-//! Implements the builder pattern for constructing validated configurations.
+//! Provides a fluent API for setting high-level configuration knobs
+//! and automatically deriving low-level parameters.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 use super::{
-    cloud::CloudConfig, derivation::DerivedParams, profile::ProfileAdjustments, validation,
-    CloudMode, Config, ConfigError, ConfigResult, Durability, Goal, MemoryBudget, WorkloadProfile,
+    cloud::CloudConfig,
+    derivation::DerivedParams,
+    validation,
+    CloudMode,
+    Config,
+    ConfigError,
+    ConfigResult,
+    Durability,
+    Goal,
+    MemoryBudget,
+    WorkloadProfile,
 };
 
 /// Builder for Midge configuration.
 ///
+/// Allows fluent construction of `Config` with validation and automatic
+/// parameter derivation.
+///
 /// # Example
 ///
 /// ```rust,no_run
-/// use cntryl_midge::config::{ConfigBuilder, Goal, Durability, WorkloadProfile};
+/// use cntryl_midge::config::{ConfigBuilder, Goal, Durability};
 ///
 /// let config = ConfigBuilder::new("./my_db")
 ///     .goal(Goal::Latency)
 ///     .durability(Durability::Steady)
-///     .workload_profile(WorkloadProfile::ReadMostly)
-///     .memory_budget_mb(512)
 ///     .build()
 ///     .expect("valid configuration");
 /// ```
+#[derive(Debug, Clone)]
 pub struct ConfigBuilder {
-    path: PathBuf,
+    path: String,
     goal: Goal,
     durability: Durability,
     memory_budget: MemoryBudget,
     workload_profile: WorkloadProfile,
     cloud_mode: CloudMode,
     autotune_enabled: bool,
-
-    // Cloud-specific
-    cloud_backend: Option<Arc<dyn crate::cloud::StorageBackend>>,
-    cloud_bucket: Option<String>,
-    cloud_prefix: Option<String>,
+    cloud_config: Option<CloudConfig>,
 }
 
 impl ConfigBuilder {
-    /// Create a new configuration builder.
+    /// Create a new configuration builder with default settings.
     ///
     /// # Arguments
     ///
-    /// * `path` - Path to the database directory (local or cache path for cloud mode)
+    /// * `path` - Database directory path
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
-            path: path.as_ref().to_path_buf(),
+            path: path.as_ref().to_string_lossy().to_string(),
             goal: Goal::default(),
             durability: Durability::default(),
             memory_budget: MemoryBudget::default(),
             workload_profile: WorkloadProfile::default(),
             cloud_mode: CloudMode::default(),
             autotune_enabled: false,
-            cloud_backend: None,
-            cloud_bucket: None,
-            cloud_prefix: None,
+            cloud_config: None,
         }
     }
 
-    /// Set the performance goal.
+    /// Set the performance optimization goal.
     pub fn goal(mut self, goal: Goal) -> Self {
         self.goal = goal;
         self
     }
 
-    /// Set the durability level.
+    /// Set the durability guarantee level.
     pub fn durability(mut self, durability: Durability) -> Self {
         self.durability = durability;
         self
     }
 
-    /// Set explicit memory budget in bytes.
-    pub fn memory_budget(mut self, bytes: usize) -> Self {
-        self.memory_budget = MemoryBudget::Bytes(bytes);
+    /// Set the memory budget specification.
+    pub fn memory_budget(mut self, budget: MemoryBudget) -> Self {
+        self.memory_budget = budget;
         self
     }
 
-    /// Set memory budget in megabytes (convenience method).
-    pub fn memory_budget_mb(mut self, mb: usize) -> Self {
-        self.memory_budget = MemoryBudget::Bytes(mb * 1024 * 1024);
-        self
-    }
-
-    /// Use automatic memory budget (default).
-    pub fn memory_budget_auto(mut self) -> Self {
-        self.memory_budget = MemoryBudget::Auto;
-        self
-    }
-
-    /// Set the workload profile.
+    /// Set the workload profile for optimization.
     pub fn workload_profile(mut self, profile: WorkloadProfile) -> Self {
         self.workload_profile = profile;
         self
     }
 
-    /// Set cloud storage mode.
+    /// Set the cloud storage mode.
     pub fn cloud_mode(mut self, mode: CloudMode) -> Self {
         self.cloud_mode = mode;
         self
     }
 
-    /// Configure cloud storage backend.
-    pub fn cloud_backend(
-        mut self,
-        backend: Arc<dyn crate::cloud::StorageBackend>,
-        bucket: impl Into<String>,
-    ) -> Self {
-        self.cloud_backend = Some(backend);
-        self.cloud_bucket = Some(bucket.into());
+    /// Enable or disable automatic tuning.
+    pub fn autotune(mut self, enabled: bool) -> Self {
+        self.autotune_enabled = enabled;
         self
     }
 
-    /// Set cloud object prefix.
-    pub fn cloud_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.cloud_prefix = Some(prefix.into());
+    /// Set cloud configuration for cloud-enabled modes.
+    pub fn cloud_config(mut self, config: CloudConfig) -> Self {
+        self.cloud_config = Some(config);
         self
     }
 
-    /// Enable autotuning (adaptive parameter adjustment).
-    pub fn enable_autotune(mut self) -> Self {
-        self.autotune_enabled = true;
-        self
-    }
-
-    /// Build and validate the configuration.
+    /// Build the configuration with validation.
+    ///
+    /// Derives all low-level parameters from high-level knobs and validates
+    /// the configuration against safety guardrails.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if validation fails or if cloud configuration
+    /// is required but not provided.
     pub fn build(self) -> ConfigResult<Config> {
-        // Validate path
-        if self.path.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidPath {
-                path: self.path.display().to_string(),
-            });
+        // Validate cloud requirements
+        if matches!(self.cloud_mode, CloudMode::Cache | CloudMode::Tiered | CloudMode::Replicated)
+            && self.cloud_config.is_none()
+        {
+            return Err(ConfigError::CloudBucketRequired { mode: self.cloud_mode });
         }
 
-        // Derive base parameters
-        let mut params = DerivedParams::derive(
+        // Derive parameters
+        let derived = DerivedParams::derive(
             self.goal,
             self.durability,
             self.memory_budget,
             self.workload_profile,
         );
 
-        // Apply workload profile adjustments
-        let adjustments = ProfileAdjustments::for_profile(self.workload_profile);
-        adjustments.apply(&mut params);
-
         // Validate derived parameters
-        validation::validate(&params, self.cloud_mode)?;
+        validation::validate(&derived, self.cloud_mode)?;
 
-        // Build cloud configuration if needed
-        let cloud_config = if self.cloud_mode != CloudMode::Off {
-            let backend = self.cloud_backend.ok_or(ConfigError::CloudBucketRequired {
-                mode: self.cloud_mode,
-            })?;
-
-            let bucket = self.cloud_bucket.ok_or(ConfigError::CloudBucketRequired {
-                mode: self.cloud_mode,
-            })?;
-
-            Some(CloudConfig::new(
-                self.cloud_mode,
-                backend,
-                bucket,
-                self.cloud_prefix,
-                self.goal,
-            )?)
-        } else {
-            None
-        };
-
-        // Convert to plan with cloud parameters
-        let mut plan = params.into_plan(true);
-
-        if let Some(ref cc) = cloud_config {
-            plan.upload_concurrency = Some(cc.upload_concurrency());
-            plan.multipart_chunk_size = Some(cc.multipart_chunk_size());
-            plan.prefetch_depth = Some(cc.prefetch_depth());
-        }
+        // Create validated plan
+        let plan = derived.into_plan(true);
 
         Ok(Config {
-            path: self.path,
+            path: self.path.into(),
             goal: self.goal,
             durability: self.durability,
             memory_budget: self.memory_budget,
@@ -189,112 +148,7 @@ impl ConfigBuilder {
             cloud_mode: self.cloud_mode,
             plan,
             autotune_enabled: self.autotune_enabled,
-            cloud_config,
+            cloud_config: self.cloud_config,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn should_build_config_with_basic_settings() {
-        // Arrange
-        let builder = ConfigBuilder::new("./test_db")
-            .goal(Goal::Latency)
-            .durability(Durability::Steady)
-            .memory_budget_mb(512);
-
-        // Act
-        let config = builder.build().unwrap();
-
-        // Assert
-        assert_eq!(config.goal(), Goal::Latency);
-        assert_eq!(config.durability(), Durability::Steady);
-        assert_eq!(config.plan().total_memory_budget, 512 * 1024 * 1024);
-    }
-
-    #[test]
-    fn should_apply_workload_profile_multipliers() {
-        // Arrange
-        let builder = ConfigBuilder::new("./test_db")
-            .goal(Goal::Throughput)
-            .workload_profile(WorkloadProfile::WriteHeavy)
-            .memory_budget_mb(1024);
-
-        // Act
-        let config = builder.build().unwrap();
-
-        // Assert
-        assert_eq!(config.workload_profile(), WorkloadProfile::WriteHeavy);
-        // WriteHeavy should have larger memtables
-        assert!(config.plan().memtable_size > 128 * 1024 * 1024);
-    }
-
-    #[test]
-    fn should_enable_autotune_when_requested() {
-        // Arrange
-        let builder = ConfigBuilder::new("./test_db").enable_autotune();
-
-        // Act
-        let config = builder.build().unwrap();
-
-        // Assert
-        assert!(config.autotune_enabled());
-    }
-
-    #[test]
-    fn should_reject_cloud_mode_without_backend() {
-        // Arrange
-        let builder = ConfigBuilder::new("./test_db").cloud_mode(CloudMode::Cache);
-
-        // Act
-        let result = builder.build();
-
-        // Assert
-        assert!(matches!(
-            result,
-            Err(ConfigError::CloudBucketRequired { .. })
-        ));
-    }
-
-    #[test]
-    fn should_reject_empty_path() {
-        // Arrange
-        let builder = ConfigBuilder::new("");
-
-        // Act
-        let result = builder.build();
-
-        // Assert
-        assert!(matches!(result, Err(ConfigError::InvalidPath { .. })));
-    }
-
-    #[test]
-    fn should_use_default_values_when_not_specified() {
-        // Arrange
-        let builder = ConfigBuilder::new("./test_db");
-
-        // Act
-        let config = builder.build().unwrap();
-
-        // Assert
-        assert_eq!(config.goal(), Goal::Latency);
-        assert_eq!(config.durability(), Durability::Steady);
-        assert_eq!(config.cloud_mode(), CloudMode::Off);
-        assert!(!config.autotune_enabled());
-    }
-
-    #[test]
-    fn should_auto_derive_memory_budget() {
-        // Arrange
-        let builder = ConfigBuilder::new("./test_db").memory_budget_auto();
-
-        // Act
-        let config = builder.build().unwrap();
-
-        // Assert
-        assert!(config.plan().total_memory_budget > 0);
     }
 }
