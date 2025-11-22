@@ -111,7 +111,7 @@ impl MidgeEngine {
                 let _ = self.wait_for_flush(Duration::from_millis(50));
                 attempts += 1;
 
-                if attempts % 4 == 0 {
+                if attempts.is_multiple_of(4) {
                     let _ = self.rollover_and_queue_flush(cf.id());
                 }
 

@@ -275,7 +275,7 @@ impl MidgeEngine {
                 drop(immutables); // release lock before performing flush I/O
                 for frozen in frozen_list {
                     // Each flush handles merge resolution and manifest updates
-                    let _ = self.flush_frozen_memtable(cf, frozen)?;
+                    self.flush_frozen_memtable(cf, frozen)?;
                 }
             }
         }

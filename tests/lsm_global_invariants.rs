@@ -1,7 +1,7 @@
 // Cross-subsystem invariant tests (observable outcomes only)
 mod common;
 use common::*;
-use cntryl_midge::{MidgeOptions, StorageMode};
+use cntryl_midge::MidgeOptions;
 use std::time::Duration;
 
 // 1) Ensure that after repeated overlapping writes + compactions the visible state is consistent.
@@ -14,14 +14,14 @@ fn should_maintain_non_overlapping_sst_key_ranges_given_long_random_workload_whe
         let opts = compaction_test_opts(storage_mode);
 
         with_engine(opts, |eng| {
-            // Populate overlapping levels using helper
+            // Arrange: populate overlapping levels using helper
             let cf = eng.default_column_family();
-            populate_multi_level_data(&eng, &cf);
+            populate_multi_level_data(eng, &cf);
 
-            // Allow compaction to run
-            std::thread::sleep(Duration::from_millis(200));
+            // Act: wait for background compaction to make progress (best-effort)
+            eng.wait_for_compaction(Duration::from_millis(500)).ok();
 
-            // Verify that reads return the latest values across the keyspace (no visible contradictions)
+            // Assert: verify that reads return the latest values across the keyspace (no visible contradictions)
             for i in 0..100 {
                 let key = format!("key{:03}", i);
                 let res = eng.get(&cf, key.as_bytes()).expect("get");
@@ -34,7 +34,7 @@ fn should_maintain_non_overlapping_sst_key_ranges_given_long_random_workload_whe
 
 // 2) Repeated flush/compact + restart cycles keep manifest and files in-sync (observable by reopen and key presence)
 #[test]
-fn should_keep_manifest_and_files_in_sync_given_repeated_flush_compact_cycles_when_restarting_many_times() {
+fn should_keep_manifest_files_in_sync_given_repeated_flush_compact_cycles_when_restarting_many_times() {
     for mode in disk_storage_modes() {
         let (_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
@@ -49,15 +49,18 @@ fn should_keep_manifest_and_files_in_sync_given_repeated_flush_compact_cycles_wh
             with_engine_restart(
                 opts.clone(),
                 |eng| {
+                    // Arrange: write a batch of keys, then flush
                     let cf = eng.default_column_family();
                     for i in 0..50 {
                         let k = format!("c{}_k{:03}", cycle, i);
                         eng.put(&cf, k.as_bytes(), b"v").expect("put");
                     }
                     eng.flush().expect("flush");
-                    std::thread::sleep(Duration::from_millis(100));
+                    // Act: wait for compaction to proceed (best-effort)
+                    eng.wait_for_compaction(Duration::from_millis(200)).ok();
                 },
                 |eng| {
+                    // Assert
                     let cf = eng.default_column_family();
                     // Check that a sample key from last cycle exists
                     let sample = format!("c{}_k{:03}", cycle, 0);
@@ -81,7 +84,9 @@ fn should_not_leave_orphaned_ssts_given_crash_during_flush_and_subsequent_compac
             ..Default::default()
         };
 
+        // Arrange
         // Write and flush, then drop without clean compaction (simulate crash by restart)
+        // Act
         with_engine_restart(
             opts.clone(),
             |eng| {
@@ -94,6 +99,7 @@ fn should_not_leave_orphaned_ssts_given_crash_during_flush_and_subsequent_compac
                 let _ = eng.flush();
             },
             |eng| {
+                // Assert: keys from the last cycle are still present after restart
                 let cf = eng.default_column_family();
                 for i in 0..100 {
                     let k = format!("orphan_k{:03}", i);
@@ -120,6 +126,7 @@ fn should_preserve_latest_value_for_all_keys_given_mixed_put_delete_range_delete
         };
 
         // Arrange: write keys, delete a range, then write later values
+        // Act
         with_engine_restart(
             opts.clone(),
             |eng| {
@@ -142,6 +149,7 @@ fn should_preserve_latest_value_for_all_keys_given_mixed_put_delete_range_delete
                 }
             },
             |eng| {
+                // Assert: latest values must be visible after recovery
                 let cf = eng.default_column_family();
                 for i in 0..50 {
                     let k = format!("rk{:03}", i);
