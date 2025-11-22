@@ -536,11 +536,11 @@ where
     }
 
     // Persist to file (streaming writer should write directly to disk)
-    // Format: {seq:020}_{cf_id:04}.sst for per-CF identification
-    // Use largest_seq to ensure uniqueness (smallest_seq can collide when
-    // multiple flushes start at the same sequence)
-    let seq = largest_seq.unwrap_or(smallest_seq.unwrap_or(0));
-    let fname = format!("{:020}_{:04}.sst", seq, cf_id.as_u32());
+    // Format: {smallest_seq:020}_{largest_seq:020}_{cf_id:04}.sst for uniqueness
+    // Using both seqs ensures no collisions even when multiple flushes have same smallest_seq
+    let s_seq = smallest_seq.unwrap_or(0);
+    let l_seq = largest_seq.unwrap_or(s_seq);
+    let fname = format!("{:020}_{:020}_{:04}.sst", s_seq, l_seq, cf_id.as_u32());
     let file_path = config.sst_dir.join(&fname);
     let boxed = Box::new(dyn_writer);
     boxed.finish_to_path(&file_path)?;

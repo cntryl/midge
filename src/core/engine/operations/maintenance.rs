@@ -207,14 +207,13 @@ impl MidgeEngine {
             0
         };
 
-        // Add file to manifest and update last_persisted_sequence atomically
-        // The sequence will be updated based on the file's largest_seq during manifest write
+        // Add file and update sequence (keeping as separate operations for now to match background flush pattern)
         let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
             file: Box::new(file_meta.clone()),
         };
         self.version_manager.apply_edit_sync(add_file_edit)?;
-
-        // Explicitly update sequence if needed
+        
+        // Update sequence after file is added
         if let Some(largest_seq) = file_meta.largest_seq {
             let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
                 sequence: largest_seq,
