@@ -29,7 +29,6 @@ fn bench_memtable_put_key_small(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_put_key_small");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
-    group.measurement_time(std::time::Duration::from_millis(200));
 
     group.bench_function("put_small_kv", |b| {
         b.iter_batched(
@@ -50,7 +49,6 @@ fn bench_memtable_put_key_medium(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_put_key_medium");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
-    group.measurement_time(std::time::Duration::from_millis(200));
 
     group.bench_function("put_medium_kv", |b| {
         b.iter_batched(
@@ -71,7 +69,6 @@ fn bench_memtable_put_key_large(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_put_key_large");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
-    group.measurement_time(std::time::Duration::from_millis(200));
 
     group.bench_function("put_large_kv", |b| {
         b.iter_batched(
@@ -92,7 +89,6 @@ fn bench_memtable_seq_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_memtable_seq_insert");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(100));
-    group.measurement_time(std::time::Duration::from_millis(200));
 
     group.bench_function("seq_insert_100", |b| {
         b.iter_batched(
