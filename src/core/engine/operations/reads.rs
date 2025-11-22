@@ -164,6 +164,20 @@ impl MidgeEngine {
             .filter(|f| f.cf_id == cf_id.as_u32())
             .collect();
 
+        // // Collect all range tombstones from SSTs for this CF
+        // let mut all_range_tombstones: Vec<crate::sst::traits::RangeTombstone> = Vec::new();
+        // for file in &cf_files {
+        //     let p = self.sst_dir.join(&file.name);
+        //     if let Ok(sst) = self.sst_reader_factory.open(&p) {
+        //         all_range_tombstones.extend(sst.range_tombstones());
+        //     }
+        // }
+
+        // // Check if key is covered by any range tombstone
+        // if is_covered_by_range_tombstone(&all_range_tombstones, key, u64::MAX) {
+        //     return Ok(None);
+        // }
+
         for file in cf_files.iter().rev() {
             let p = self.sst_dir.join(&file.name);
             // CloudSstReaderFactory will download from cloud if not in local cache
