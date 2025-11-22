@@ -488,6 +488,7 @@ mod tests {
             level,
             size_bytes: size,
             cf_id: 0, // Default CF for tests
+            sst_seq: 0, // Default for tests
             smallest_key: Some(smallest.to_vec()),
             largest_key: Some(largest.to_vec()),
             smallest_seq: Some(0),

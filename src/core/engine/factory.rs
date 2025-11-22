@@ -56,6 +56,9 @@ pub(crate) fn init_manifest(
 ) -> MidgeResult<(Manifest, u32)> {
     let mut manifest = Manifest::load(db_path).unwrap_or_default();
 
+    // Initialize sequence allocators from manifest
+    crate::core::naming::initialize_sequences(&manifest);
+
     // Ensure default CF is in manifest (for new DBs)
     if !manifest.has_cf(DEFAULT_CF_ID) {
         let default_cf_config = ColumnFamilyConfig {
@@ -132,11 +135,9 @@ pub(super) fn replay_local_wal_segments(
                 let p = entry.path();
                 if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
                     if let Some(num_str) = name.strip_suffix(".wal") {
-                        if num_str.len() == 20 {
-                            if let Ok(seq) = num_str.parse::<u64>() {
-                                if seq > last_persisted_sequence {
-                                    wal_segments.push((seq, p.clone()));
-                                }
+                        if let Ok(seq) = num_str.parse::<u64>() {
+                            if seq > last_persisted_sequence {
+                                wal_segments.push((seq, p.clone()));
                             }
                         }
                     }

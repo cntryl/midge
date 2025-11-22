@@ -34,6 +34,7 @@ pub mod engine;
 pub mod locking;
 pub mod manifest;
 pub mod memtable;
+pub mod naming;
 pub mod persistence;
 pub mod transaction;
 

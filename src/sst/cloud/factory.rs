@@ -78,6 +78,17 @@ impl crate::sst::SstFactory for CloudSstFactory {
         })
     }
 
+    fn create_with_seq(
+        &self,
+        compression: crate::common::codec::CompressionType,
+        block_size: usize,
+        use_internal: bool,
+        _sst_seq: u64,
+    ) -> Box<dyn crate::sst::DynSstWriter> {
+        // Cloud writers don't use sequence numbers for temp file naming
+        self.create(compression, block_size, use_internal)
+    }
+
     fn create_with_bloom(
         &self,
         compression: crate::common::codec::CompressionType,
@@ -95,6 +106,18 @@ impl crate::sst::SstFactory for CloudSstFactory {
                 bloom_bits_per_key,
             ),
         })
+    }
+
+    fn create_with_bloom_and_seq(
+        &self,
+        compression: crate::common::codec::CompressionType,
+        block_size: usize,
+        use_internal: bool,
+        bloom_bits_per_key: u32,
+        _sst_seq: u64,
+    ) -> Box<dyn crate::sst::DynSstWriter> {
+        // Cloud writers don't use sequence numbers for temp file naming
+        self.create_with_bloom(compression, block_size, use_internal, bloom_bits_per_key)
     }
 }
 

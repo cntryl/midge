@@ -138,6 +138,7 @@ mod tests {
                 level: 0,
                 size_bytes: 1024,
                 cf_id: 0,
+                sst_seq: i as u64,
                 smallest_key: Some(b"a".to_vec()),
                 largest_key: Some(b"z".to_vec()),
                 smallest_seq: Some(i as u64),

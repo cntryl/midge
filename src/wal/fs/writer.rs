@@ -132,16 +132,8 @@ impl Wal {
     pub fn open_with_mode(dir: &Path, sync_mode: WalSyncMode) -> MidgeResult<Self> {
         std::fs::create_dir_all(dir)?;
 
-        // Find the latest WAL file number using shared fs utilities
-        let latest_number = fs::find_latest_numbered_file(dir, "wal")?;
-
-        // Reuse the existing file if it exists, otherwise create the first one
-        let file_number = if latest_number == 0 {
-            1 // Start with 00000000000000000001.wal if no files exist
-        } else {
-            latest_number // Reuse the latest file (append mode)
-        };
-        let path = fs::numbered_file_path(dir, file_number, "wal");
+        // Use wal.log as the active WAL file
+        let path = dir.join("wal.log");
 
         let file = OpenOptions::new()
             .create(true)
@@ -174,7 +166,7 @@ impl Wal {
             }),
             sync_mode,
             group_commit,
-            file_number,
+            file_number: 0, // Not used for wal.log
             encoder,
             test_hooks: None, // Will be set by factory if needed
         };
@@ -831,9 +823,16 @@ impl crate::wal::WalFactory for FsWalFactory {
         })
     }
 
-    fn rotate_writer(&self, dir: &Path, _seq: u64) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
-        // For filesystem WAL, rotation is handled internally by Wal
-        // Just create a new writer which will use the latest file
+    fn rotate_writer(&self, dir: &Path, seq: u64) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
+        // Rename the current wal.log to {seq}.wal
+        let current_path = dir.join("wal.log");
+        let rotated_path = crate::core::naming::wal_path(dir, seq);
+        
+        if current_path.exists() {
+            std::fs::rename(&current_path, &rotated_path)?;
+        }
+        
+        // Create a new wal.log
         Ok(Box::new(Wal::open(dir)?))
     }
 }
@@ -1276,7 +1275,7 @@ mod tests {
     fn should_detect_corrupted_crc() {
         // Arrange
         let dir = TempDir::new().expect("temp dir");
-        let wal_path = fs::numbered_file_path(dir.path(), 1, "wal");
+        let wal_path = dir.path().join("wal.log");
 
         // Write a valid record
         {
@@ -1314,7 +1313,7 @@ mod tests {
     fn should_ignore_corrupted_tail_in_tolerant_mode() {
         // Arrange
         let dir = TempDir::new().expect("temp dir");
-        let wal_path = fs::numbered_file_path(dir.path(), 1, "wal");
+        let wal_path = dir.path().join("wal.log");
 
         // Write two valid records
         {
@@ -1368,7 +1367,7 @@ mod tests {
     fn should_invoke_fallback_when_truncate_simulation_fails() {
         // Arrange
         let dir = TempDir::new().expect("temp dir");
-        let wal_path = fs::numbered_file_path(dir.path(), 1, "wal");
+        let wal_path = dir.path().join("wal.log");
 
         let mut wal = Wal::open(dir.path()).expect("open");
 
@@ -1635,7 +1634,7 @@ mod tests {
         // Arrange
         let dir = tempfile::TempDir::new().unwrap();
         let test_data = b"original data";
-        let wal_path = fs::numbered_file_path(dir.path(), 1, "wal");
+        let wal_path = dir.path().join("wal.log");
         {
             let wal = Wal::open(dir.path()).unwrap();
             wal.append_op(crate::wal::WalOpKind::Put, b"key", Some(test_data))
@@ -1733,7 +1732,7 @@ mod tests {
         // Arrange
         let dir = tempfile::TempDir::new().unwrap();
         let test_data = Bytes::from("critical data that must survive crash");
-        let wal_path = fs::numbered_file_path(dir.path(), 1, "wal");
+        let wal_path = dir.path().join("wal.log");
 
         // Act
         {

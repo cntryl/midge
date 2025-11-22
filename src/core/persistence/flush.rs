@@ -14,7 +14,6 @@
 
 use crossbeam::channel;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -148,10 +147,14 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let range_tombstone_count = range_tombstones.len() as u64;
     let total_entries = entries.len() as u64;
 
-    // Create SST writer and add all entries
+    // Allocate SST sequence number for this CF FIRST (before creating writer)
+    let sst_seq = crate::core::naming::allocate_sst_seq(cf_id);
+    let sst_name = format!("{}/{}", cf_id.as_u32(), sst_seq);
+
+    // Create SST writer with sequence for deterministic temp file naming
     let mut writer = config
         .sst_factory
-        .create(config.compression, config.block_size, true);
+        .create_with_seq(config.compression, config.block_size, true, sst_seq);
 
     // Add entries with metadata (sequence, tombstone, and expiration)
     for entry in entries {
@@ -170,9 +173,8 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     }
 
     // Finish and persist (streaming writer will write directly to disk)
-    // Format: {seq:020}_{cf_id:04}.sst for per-CF identification
-    let fname = format!("{:020}_{:04}.sst", seq_for_prune, cf_id.as_u32());
-    let sst_path = config.sst_dir.join(&fname);
+    // Format: dbpath/{cf_id}/{sst_seq}.sst
+    let sst_path = crate::core::naming::sst_path(&config.sst_dir, cf_id, sst_seq);
     // Prefer streaming finish_to_path; default implementation will write bytes
     let boxed_writer = Box::new(writer);
     boxed_writer.finish_to_path(&sst_path)?;
@@ -188,12 +190,12 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     } else {
         Manifest::load_with_retry(&config.db_path, 10, std::time::Duration::from_millis(10))?
     };
-    tracing::debug!(target:"midge.instrument", action="bg_flush_before_manifest_update", fname = %fname, seq_for_prune, largest_seq = largest_seq, smallest_seq = smallest_seq, current_manifest_seq = m.last_persisted_sequence);
+    tracing::debug!(target:"midge.instrument", action="bg_flush_before_manifest_update", fname = %sst_name, seq_for_prune, largest_seq = largest_seq, smallest_seq = smallest_seq, current_manifest_seq = m.last_persisted_sequence);
     // Use largest_seq from entries (which includes resolved merge operations)
     // instead of seq_for_prune (which is the WAL rotation sequence)
     // Fall back to seq_for_prune if no entries were flushed
     m.last_persisted_sequence = largest_seq.unwrap_or(seq_for_prune);
-    tracing::debug!(target:"midge.instrument", action="bg_flush_after_manifest_seq_set", new_manifest_seq = m.last_persisted_sequence, file = %fname);
+    tracing::debug!(target:"midge.instrument", action="bg_flush_after_manifest_seq_set", new_manifest_seq = m.last_persisted_sequence, file = %sst_name);
     // Get file size (skip filesystem access in memory mode)
     let size_bytes = if config.mem_mode {
         0 // Size not relevant for in-memory SSTs
@@ -212,12 +214,14 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let key_range_for_upload = (smallest_key.clone(), largest_key.clone());
     let seq_range_for_upload = (smallest_seq, largest_seq);
 
-    m.ssts.push(fname.clone());
+    let sst_name = format!("{}/{}", cf_id.as_u32(), sst_seq);
+    m.ssts.push(sst_name.clone());
     m.files.push(crate::core::manifest::FileMeta {
-        name: fname.clone(),
+        name: sst_name.clone(),
         level: 0,
         size_bytes,
         cf_id: cf_id.as_u32(),
+        sst_seq,
         smallest_key,
         largest_key,
         smallest_seq,
@@ -233,6 +237,10 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     });
 
     // Save manifest (skip in memory mode)
+    // Update manifest with current sequence allocators before saving
+    m.next_wal_seq = crate::core::naming::current_next_wal_seq();
+    m.next_sst_seqs = crate::core::naming::current_next_sst_seqs();
+
     if !config.mem_mode {
         tracing::info!(
             "persisting manifest after creating SST {}",
@@ -244,7 +252,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
         } else {
             m.save_atomic(&config.db_path)?;
         }
-        tracing::debug!(target:"midge.instrument", action="bg_flush_after_manifest_persist", file = %fname, manifest_seq = m.last_persisted_sequence, file_count = m.files.len());
+        tracing::debug!(target:"midge.instrument", action="bg_flush_after_manifest_persist", file = %sst_name, manifest_seq = m.last_persisted_sequence, file_count = m.files.len());
         tracing::info!("manifest persisted successfully");
     }
 
@@ -262,7 +270,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
 
     // Upload SST to cloud if cloud manager is configured
     if let Some(cloud_manager) = &config.cloud_sst_manager {
-        let sst_id = fname.clone();
+        let sst_id = sst_name.clone();
         let sequence_range = (
             seq_range_for_upload.0.unwrap_or(0),
             seq_range_for_upload.1.unwrap_or(0),
@@ -355,17 +363,19 @@ fn prune_old_wal_files(wal_dir: &Path, safe_sequence: u64) -> MidgeResult<usize>
             None => continue,
         };
 
-        // Format: NNNNNNNNNNNNNNNNNNNN.wal (20-digit, e.g., 00000000000000000001.wal)
-        if filename.ends_with(".wal") && filename.len() == 24 {
-            if let Ok(seq) = filename[..20].parse::<u64>() {
-                if seq <= safe_sequence {
-                    match std::fs::remove_file(&path) {
-                        Ok(_) => {
-                            tracing::info!("pruned WAL file: {}", path.display());
-                            pruned_count += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!("failed to prune WAL file {}: {}", path.display(), e);
+        // Format: {seq}.wal (e.g., 1.wal, 42.wal)
+        if filename.ends_with(".wal") && filename != "wal.log" {
+            if let Some(seq_str) = filename.strip_suffix(".wal") {
+                if let Ok(seq) = seq_str.parse::<u64>() {
+                    if seq <= safe_sequence {
+                        match std::fs::remove_file(&path) {
+                            Ok(_) => {
+                                tracing::info!("pruned WAL file: {}", path.display());
+                                pruned_count += 1;
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to prune WAL file {}: {}", path.display(), e);
+                            }
                         }
                     }
                 }
@@ -535,22 +545,23 @@ where
         dyn_writer.add_range_tombstone(&start, &end, seq)?;
     }
 
+    // Allocate SST sequence number for this CF
+    let sst_seq = crate::core::naming::allocate_sst_seq(cf_id);
+    let sst_name = format!("{}/{}", cf_id.as_u32(), sst_seq);
+
     // Persist to file (streaming writer should write directly to disk)
-    // Format: {smallest_seq:020}_{largest_seq:020}_{cf_id:04}.sst for uniqueness
-    // Using both seqs ensures no collisions even when multiple flushes have same smallest_seq
-    let s_seq = smallest_seq.unwrap_or(0);
-    let l_seq = largest_seq.unwrap_or(s_seq);
-    let fname = format!("{:020}_{:020}_{:04}.sst", s_seq, l_seq, cf_id.as_u32());
-    let file_path = config.sst_dir.join(&fname);
+    // Format: dbpath/{cf_id}/{sst_seq}.sst
+    let file_path = crate::core::naming::sst_path(&config.sst_dir, cf_id, sst_seq);
     let boxed = Box::new(dyn_writer);
     boxed.finish_to_path(&file_path)?;
 
     // Build FileMeta (size to be filled by caller)
     let fm = crate::core::manifest::FileMeta {
-        name: fname.clone(),
+        name: sst_name.clone(),
         level: 0,
         size_bytes: 0,
         cf_id: cf_id.as_u32(),
+        sst_seq,
         smallest_key: smallest_key.clone(),
         largest_key: largest_key.clone(),
         smallest_seq,
@@ -571,7 +582,7 @@ where
 
         // Queue async upload (no callback needed - manifest updated by worker)
         mgr.upload_sst_async(
-            fname.clone(),
+            sst_name.clone(),
             file_path.clone(),
             sequence_range,
             (smallest_key, largest_key),
@@ -588,7 +599,7 @@ where
 /// Rollover WAL and queue flush job for background processing.
 ///
 /// This function:
-/// 1. Increments the sequence counter
+/// 1. Allocates a global WAL sequence number
 /// 2. Closes the current WAL and creates a new one
 /// 3. Drains the memtable
 /// 4. Sends a flush job to the background worker
@@ -596,7 +607,6 @@ where
 /// Returns the sequence number of the rotated WAL segment.
 pub(crate) fn rollover_and_queue_flush<F>(
     cf_id: crate::api::column_family::ColumnFamilyId,
-    seq_counter: &std::sync::atomic::AtomicU64,
     wal: &parking_lot::RwLock<Box<dyn crate::wal::WalWriter>>,
     wal_factory: &Arc<dyn crate::wal::WalFactory>,
     wal_dir: &Path,
@@ -606,10 +616,10 @@ pub(crate) fn rollover_and_queue_flush<F>(
 where
     F: FnOnce() -> (Vec<crate::core::EntryMeta>, Vec<(Vec<u8>, Vec<u8>, u64)>),
 {
-    // Increment sequence
-    let seq = seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    // Allocate global WAL sequence
+    let seq = crate::core::naming::allocate_wal_seq();
 
-    // Rotate writer (this will rename wal.log -> wal-<seq>.log for FS)
+    // Rotate writer (this will rename wal.log -> wal-<seq>.wal for FS)
     let mut w = wal.write();
     let _ = w.close();
     let new_w = wal_factory.rotate_writer(wal_dir, seq)?;

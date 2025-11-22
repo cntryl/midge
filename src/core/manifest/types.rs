@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::column_family::ColumnFamilyConfig;
 
 /// The manifest tracks all SSTs, column families, and checkpoint state.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub last_persisted_sequence: u64,
     pub ssts: Vec<String>,
@@ -18,6 +18,31 @@ pub struct Manifest {
     /// Cloud checkpoint tracking for WAL pruning coordination
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_checkpoint: Option<CloudCheckpoint>,
+    /// Next available WAL sequence number (global monotonic)
+    #[serde(default = "default_next_wal_seq")]
+    pub next_wal_seq: u64,
+    /// Next available SST sequence numbers (per-CF monotonic)
+    /// Key is cf_id, value is next available sst_seq for that CF
+    #[serde(default)]
+    pub next_sst_seqs: std::collections::HashMap<u32, u64>,
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            last_persisted_sequence: 0,
+            ssts: Vec::new(),
+            files: Vec::new(),
+            column_families: Vec::new(),
+            cloud_checkpoint: None,
+            next_wal_seq: default_next_wal_seq(),
+            next_sst_seqs: std::collections::HashMap::new(),
+        }
+    }
+}
+
+fn default_next_wal_seq() -> u64 {
+    1
 }
 
 /// Checkpoint tracking highest WAL sequence fully materialized to cloud SSTs.
@@ -51,6 +76,9 @@ pub struct FileMeta {
     /// Column family this file belongs to. Defaults to 0 (default CF).
     #[serde(default)]
     pub cf_id: u32,
+    /// SST sequence number (monotonic per CF)
+    #[serde(default)]
+    pub sst_seq: u64,
     #[serde(default)]
     pub smallest_key: Option<Vec<u8>>,
     #[serde(default)]

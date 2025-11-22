@@ -393,11 +393,15 @@ pub(crate) fn write_compacted_sst(
         return Ok(None);
     }
 
+    // Allocate SST sequence first for deterministic temp file naming
+    let cf_id_obj = crate::api::column_family::ColumnFamilyId::new(cf_id);
+    let sst_seq = crate::core::naming::allocate_sst_seq(cf_id_obj);
+
     // Note: versions may contain multiple entries for the same user_key when snapshots are active.
     // This is correct behavior - we preserve different versions for snapshot visibility.
     // The SST format with internal keys (user_key || seq || kind) handles this correctly.
 
-    let mut writer = sst_factory.create(*compression, *block_size, true);
+    let mut writer = sst_factory.create_with_seq(*compression, *block_size, true, sst_seq);
     let mut smallest_key: Option<Vec<u8>> = None;
     let mut largest_key: Option<Vec<u8>> = None;
     let mut smallest_seq: Option<u64> = None;
@@ -440,8 +444,10 @@ pub(crate) fn write_compacted_sst(
     // Persist SST using writer.finish_to_path so that filesystem-backed
     // writers (FsDynWriter) can perform atomic rename + fsync operations.
     // This ensures the SST is fully durable before manifest updates.
-    let id = uuid::Uuid::new_v4().to_string();
-    let file_path = sst_dir.join(format!("{}.sst", id));
+    let file_path = crate::core::naming::sst_path(&sst_dir, cf_id_obj, sst_seq);
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     writer.finish_to_path(&file_path)?;
 
     // Calculate tombstone counts
@@ -452,16 +458,13 @@ pub(crate) fn write_compacted_sst(
     let size_bytes = std::fs::metadata(&file_path)
         .map(|md| md.len())
         .unwrap_or(0);
-    let name = file_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
+    let sst_name = format!("{}/{}", cf_id, sst_seq);
     let meta = crate::manifest::FileMeta {
-        name: name.clone(),
+        name: sst_name.clone(),
         level: 0,
         size_bytes,
         cf_id,
+        sst_seq,
         smallest_key,
         largest_key,
         smallest_seq,
@@ -478,7 +481,7 @@ pub(crate) fn write_compacted_sst(
 
     // Upload SST to cloud if cloud manager is configured
     if let Some(cloud_manager) = cloud_sst_manager {
-        let sst_id = id.clone();
+        let sst_id = sst_name.clone();
         let sequence_range = (smallest_seq.unwrap_or(0), largest_seq.unwrap_or(0));
         let key_range = (
             meta.smallest_key.clone().map(|k| k.to_vec()),

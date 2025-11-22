@@ -69,6 +69,40 @@ impl FsDynWriter {
         })
     }
 
+    /// Create a new FsDynWriter with a specific SST sequence for deterministic temp file naming.
+    pub fn new_with_seq(
+        temp_dir: &Path,
+        compression: CompressionType,
+        block_size: usize,
+        use_internal: bool,
+        sst_seq: u64,
+        test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    ) -> MidgeResult<Self> {
+        let temp_path = temp_dir.join(format!("{}.sst.tmp", sst_seq));
+        // Create file with write+read to allow finalization and possible readback
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&temp_path)?;
+        Ok(Self {
+            file,
+            temp_path,
+            block_size,
+            compression,
+            use_internal_keys: use_internal,
+            cur_block: DataBlockBuilder::new(16),
+            last_key_in_block: None,
+            offsets: Vec::new(),
+            index: IndexBlockBuilder::new(),
+            bloom_builder: crate::sst::bloom::BloomFilterBuilder::with_bits_per_key(10),
+            range_tombstones: Vec::new(),
+            offset: 0,
+            test_hooks,
+        })
+    }
+
     fn flush_block_if_needed_inner(&mut self) -> MidgeResult<()> {
         if self.cur_block.is_empty() {
             return Ok(());

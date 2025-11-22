@@ -143,6 +143,19 @@ pub trait SstFactory: Send + Sync {
         use_internal: bool,
     ) -> Box<dyn DynSstWriter>;
 
+    /// Create an SST writer with a specific sequence number for temp file naming.
+    /// The sequence number is used to create deterministic temp file names.
+    fn create_with_seq(
+        &self,
+        compression: crate::common::codec::CompressionType,
+        block_size: usize,
+        use_internal: bool,
+        sst_seq: u64,
+    ) -> Box<dyn DynSstWriter> {
+        // Default implementation ignores sequence and delegates to create()
+        self.create(compression, block_size, use_internal)
+    }
+
     /// Create an SST writer with custom bloom filter configuration.
     fn create_with_bloom(
         &self,
@@ -153,6 +166,19 @@ pub trait SstFactory: Send + Sync {
     ) -> Box<dyn DynSstWriter> {
         // Default implementation delegates to create(), ignoring bloom config
         self.create(compression, block_size, use_internal)
+    }
+
+    /// Create an SST writer with custom bloom filter configuration and sequence.
+    fn create_with_bloom_and_seq(
+        &self,
+        compression: crate::common::codec::CompressionType,
+        block_size: usize,
+        use_internal: bool,
+        _bloom_bits_per_key: u32,
+        _sst_seq: u64,
+    ) -> Box<dyn DynSstWriter> {
+        // Default implementation delegates to create_with_seq(), ignoring bloom config
+        self.create_with_seq(compression, block_size, use_internal, _sst_seq)
     }
 }
 

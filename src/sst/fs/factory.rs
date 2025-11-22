@@ -137,6 +137,61 @@ impl SstFactory for FsSstFactory {
         }
     }
 
+    fn create_with_seq(
+        &self,
+        compression: CompressionType,
+        block_size: usize,
+        use_internal: bool,
+        sst_seq: u64,
+    ) -> Box<dyn crate::sst::DynSstWriter> {
+        match FsDynWriter::new_with_seq(
+            &self.temp_dir,
+            compression,
+            block_size,
+            use_internal,
+            sst_seq,
+            self.test_hooks.clone(),
+        ) {
+            Ok(w) => Box::new(w),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to create FsDynWriter with seq {} in {}: {}",
+                    sst_seq,
+                    self.temp_dir.display(),
+                    e
+                );
+                // Try falling back to the OS temp dir as a best-effort recovery for tests
+                let sys_tmp = std::env::temp_dir();
+                match FsDynWriter::new_with_seq(
+                    &sys_tmp,
+                    compression,
+                    block_size,
+                    use_internal,
+                    sst_seq,
+                    self.test_hooks.clone(),
+                ) {
+                    Ok(w2) => {
+                        tracing::warn!(
+                            "FsDynWriter fell back to system temp dir: {}",
+                            sys_tmp.display()
+                        );
+                        Box::new(w2)
+                    }
+                    Err(e2) => {
+                        // If even the system temp fails, panic with both errors for debugging
+                        panic!(
+                            "Failed to create FsDynWriter with seq {} in {} and fallback {}: {}",
+                            sst_seq,
+                            self.temp_dir.display(),
+                            sys_tmp.display(),
+                            e2
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn create_with_bloom(
         &self,
         compression: CompressionType,
