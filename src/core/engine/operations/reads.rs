@@ -167,7 +167,7 @@ impl MidgeEngine {
         // Collect all range tombstones from SSTs for this CF
         let mut all_range_tombstones: Vec<crate::sst::traits::RangeTombstone> = Vec::new();
         for file in &cf_files {
-            let p = self.sst_dir.join(&file.name);
+            let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             if let Ok(sst) = self.sst_reader_factory.open(&p) {
                 all_range_tombstones.extend(sst.range_tombstones());
             }
@@ -175,7 +175,7 @@ impl MidgeEngine {
 
         // Check SST files from newest to oldest (reverse iteration)
         for file in cf_files.iter().rev() {
-            let p = self.sst_dir.join(&file.name);
+            let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             // CloudSstReaderFactory will download from cloud if not in local cache
             match self.sst_reader_factory.open(&p) {
                 Ok(sst) => {
@@ -330,7 +330,7 @@ impl MidgeEngine {
         // Collect all range tombstones from SSTs for this CF
         let mut all_range_tombstones: Vec<crate::sst::traits::RangeTombstone> = Vec::new();
         for file in &cf_files {
-            let p = self.sst_dir.join(&file.name);
+            let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             if let Ok(sst) = self.sst_reader_factory.open(&p) {
                 all_range_tombstones.extend(sst.range_tombstones());
             }
@@ -345,7 +345,7 @@ impl MidgeEngine {
         });
 
         for file in &cf_files {
-            let p = self.sst_dir.join(&file.name);
+            let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             // CloudSstReaderFactory will download from cloud if not in local cache
             if let Ok(sst) = self.sst_reader_factory.open(&p) {
                 if let Ok(rows) = sst.scan_range_state(start, end_ref) {
@@ -385,6 +385,60 @@ impl MidgeEngine {
                         } else {
                             sources
                                 .push(Box::new(crate::core::merge_iterator::VecSource::new(items)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Scan SST files from newest to oldest (reverse iteration)
+        let manifest = Manifest::load(&self.db_path).unwrap_or_default();
+        let cf_files: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| f.cf_id == cf_id.as_u32())
+            .collect();
+        for file in cf_files.iter().rev() {
+            let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
+            // CloudSstReaderFactory will download from cloud if not in local cache
+            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+                if let Ok(rows) = sst.scan_range_state(start, end_ref) {
+                    let now_millis = timestamp::now_millis();
+
+                    let items: Vec<(Bytes, Option<Bytes>, u64)> = rows
+                        .into_iter()
+                        .map(|(k, st)| {
+                            let user_key =
+                                crate::common::internal_key::decode_internal_key(k.as_ref())
+                                    .map(|(u, s, _t)| (Bytes::from(u), s))
+                                    .unwrap_or_else(|| (k, 0));
+                            match st {
+                                crate::sst::KeyState::Value(v, seq, expiration) => {
+                                    // Check if key is expired
+                                    if let Some(exp_ts) = expiration {
+                                        if exp_ts <= now_millis {
+                                            // Key is expired, treat as tombstone
+                                            return (user_key.0, None, seq);
+                                        }
+                                    }
+                                    (user_key.0, Some(v), seq)
+                                }
+                                crate::sst::KeyState::Tombstone(seq) => (user_key.0, None, seq),
+                                crate::sst::KeyState::Absent => (user_key.0, None, 0),
+                            }
+                        })
+                        .filter(|(_, val, _)| val.is_some() || val.is_none()) // Keep all (values and tombstones)
+                        .collect();
+
+                    if !items.is_empty() {
+                        if query.reverse {
+                            sources.push(Box::new(
+                                crate::core::merge_iterator::VecSource::new_reverse(items),
+                            ));
+                        } else {
+                            sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
+                                items,
+                            )));
                         }
                     }
                 }
@@ -438,8 +492,13 @@ impl MidgeEngine {
         }
 
         let manifest = Manifest::load(&self.db_path).unwrap_or_default();
-        for name in manifest.ssts.iter().rev() {
-            let p = self.sst_dir.join(name);
+        let cf_files: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| f.cf_id == 0)  // Default CF
+            .collect();
+        for file in cf_files.iter().rev() {
+            let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             // CloudSstReaderFactory will download from cloud if not in local cache
             if let Ok(sst) = self.sst_reader_factory.open(&p) {
                 if let Ok(rows) = sst.scan_range_state(start, end_ref) {

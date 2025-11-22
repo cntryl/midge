@@ -191,7 +191,7 @@ mod tests {
         let path = sst_path(dir.path(), cf, seq);
 
         // Assert
-        assert_eq!(path, dir.path().join("7").join(format!("{:016}.sst", 3)));
+        assert_eq!(path, dir.path().join("00000007").join(format!("{:016}.sst", 3)));
     }
 
     #[test]

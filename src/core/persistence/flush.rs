@@ -217,7 +217,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let key_range_for_upload = (smallest_key.clone(), largest_key.clone());
     let seq_range_for_upload = (smallest_seq, largest_seq);
 
-    let sst_name = format!("{}/{}", cf_id.as_u32(), sst_seq);
+    let sst_name = crate::core::naming::sst_filename(sst_seq);
     m.ssts.push(sst_name.clone());
     m.files.push(crate::core::manifest::FileMeta {
         name: sst_name.clone(),

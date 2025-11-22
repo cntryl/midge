@@ -451,23 +451,38 @@ impl MidgeEngine {
 
         // Link or copy each SST into checkpoint/sst
         // Use manifest.files which includes CF-specific files, falling back to legacy ssts list
-        let sst_names: Vec<String> = if !m.files.is_empty() {
-            m.files.iter().map(|f| f.name.clone()).collect()
-        } else {
-            m.ssts.clone()
-        };
-
-        for name in &sst_names {
-            let src = self.sst_dir.join(name);
-            let dst = dst_sst.join(name);
-            if !src.exists() {
-                continue;
+        if !m.files.is_empty() {
+            for file_meta in &m.files {
+                let cf_id = file_meta.cf_id;
+                let sst_seq = file_meta.sst_seq;
+                let src = crate::core::naming::sst_path(&self.sst_dir, cf_id.into(), sst_seq);
+                let dst = crate::core::naming::sst_path(&dst_sst, cf_id.into(), sst_seq);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if !src.exists() {
+                    continue;
+                }
+                // Try copy first, fallback to hard link
+                // Note: On Windows, hard link may fail if file is open, so prefer copy for checkpoints
+                if std::fs::copy(&src, &dst).is_err() {
+                    // If copy fails, try hard link as fallback
+                    let _ = std::fs::hard_link(&src, &dst);
+                }
             }
-            // Try hard link, fallback to copy
-            match std::fs::hard_link(&src, &dst) {
-                Ok(_) => {}
-                Err(_) => {
-                    std::fs::copy(&src, &dst)?;
+        } else {
+            // Legacy fallback for manifests without FileMeta
+            for name in &m.ssts {
+                let src = self.sst_dir.join(name);
+                let dst = dst_sst.join(name);
+                if !src.exists() {
+                    continue;
+                }
+                // Try copy first, fallback to hard link
+                // Note: On Windows, hard link may fail if file is open, so prefer copy for checkpoints
+                if std::fs::copy(&src, &dst).is_err() {
+                    // If copy fails, try hard link as fallback
+                    let _ = std::fs::hard_link(&src, &dst);
                 }
             }
         }

@@ -458,7 +458,7 @@ pub(crate) fn write_compacted_sst(
     let size_bytes = std::fs::metadata(&file_path)
         .map(|md| md.len())
         .unwrap_or(0);
-    let sst_name = format!("{}/{}", cf_id, sst_seq);
+    let sst_name = crate::core::naming::sst_filename(sst_seq);
     let meta = crate::manifest::FileMeta {
         name: sst_name.clone(),
         level: 0,
