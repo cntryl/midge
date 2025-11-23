@@ -1,8 +1,8 @@
 mod common;
 use common::*;
 
-use cntryl_midge::WriteOptions;
 use cntryl_midge::KvTransaction;
+use cntryl_midge::WriteOptions;
 
 #[test]
 fn should_preserve_snapshot_view_across_range_delete_and_compaction() {
@@ -38,7 +38,7 @@ fn should_abort_transaction_safely_during_range_delete_spill() {
     let cf = eng.default_column_family();
 
     eng.put(&cf, b"k1", b"v1").unwrap();
-    
+
     // Act
     let mut txn = eng.begin_transaction(&cf).unwrap();
     txn.delete_range(b"a", b"z").unwrap();

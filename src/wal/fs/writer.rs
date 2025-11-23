@@ -827,11 +827,11 @@ impl crate::wal::WalFactory for FsWalFactory {
         // Rename the current wal.log to {seq}.wal
         let current_path = dir.join("wal.log");
         let rotated_path = crate::core::naming::wal_path(dir, seq);
-        
+
         if current_path.exists() {
             std::fs::rename(&current_path, &rotated_path)?;
         }
-        
+
         // Create a new wal.log
         Ok(Box::new(Wal::open(dir)?))
     }

@@ -136,16 +136,12 @@ fn should_background_compact_when_threshold_exceeded() {
         drop(eng);
         // Wait briefly until the SST/manifest shows the expected files for this iteration
         let db_path = opts.storage_mode.local_path();
-        let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_millis(500);
-        while start.elapsed() < timeout {
-            if let Ok(m) = cntryl_midge::manifest::Manifest::load(&db_path) {
-                if m.ssts.len() >= (i as usize + 1) {
-                    break;
-                }
-            }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        let _ = common::wait_for_condition(timeout, std::time::Duration::from_millis(10), || {
+            cntryl_midge::manifest::Manifest::load(&db_path)
+                .map(|m| m.ssts.len() >= (i as usize + 1))
+                .unwrap_or(false)
+        });
     }
 
     // Verify all 4 SST files were created before starting background compaction

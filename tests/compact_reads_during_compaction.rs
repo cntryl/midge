@@ -4,8 +4,8 @@
 // Compaction During Concurrent Operations tests - P1 Priority
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 // using channel-based coordination and yields instead of sleeps
 use std::sync::mpsc::channel;
@@ -125,7 +125,7 @@ fn should_return_correct_value_given_key_being_compacted() {
         // Continuously read the target key during compaction
         let engine_clone = Arc::clone(&engine);
         let read_handle = thread::spawn(move || {
-                for _ in 0..100 {
+            for _ in 0..100 {
                 let result = engine_clone.get(&cf, b"target_key").unwrap();
                 // Assert - Should always return the latest value
                 assert!(result.is_some());
@@ -175,7 +175,7 @@ fn should_handle_scan_given_files_being_merged() {
         let engine_clone = Arc::clone(&engine);
         let cf_clone = cf.clone();
         let scan_handle = thread::spawn(move || {
-                for _ in 0..20 {
+            for _ in 0..20 {
                 let query = Query::new()
                     .start_key(Bytes::from("key000"))
                     .end_key(Bytes::from("key099"));

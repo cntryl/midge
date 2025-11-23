@@ -9,8 +9,8 @@ use cntryl_midge::{
     cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
 };
 use common::*;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifest_was_already_updated(

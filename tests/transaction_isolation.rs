@@ -260,7 +260,8 @@ fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested()
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let txn_handle = std::thread::spawn(move || {
         let mut txn = eng_txn.begin_transaction(&cf_txn).expect("begin");
-        txn.put(b"dirty_read_key", b"uncommitted_value").expect("put");
+        txn.put(b"dirty_read_key", b"uncommitted_value")
+            .expect("put");
         // Signal that the transaction is ready and still uncommitted
         ready_tx.send(()).unwrap();
         // Wait until main thread tells us to finish

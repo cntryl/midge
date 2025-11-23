@@ -384,7 +384,7 @@ pub fn compaction_test_opts(storage_mode: StorageMode) -> MidgeOptions {
     MidgeOptions {
         storage_mode,
         memtable_size: 1024,         // Small memtable to trigger flushes easily
-        enable_compaction: false,     // Disable background compaction for deterministic manual tests
+        enable_compaction: false,    // Disable background compaction for deterministic manual tests
         compaction_sst_threshold: 2, // Not used when background compaction is disabled
         ..Default::default()
     }
@@ -756,4 +756,27 @@ pub fn all_storage_modes() -> &'static [&'static str] {
 #[allow(dead_code)]
 pub fn disk_storage_modes() -> &'static [&'static str] {
     &["LocalDisk", "CloudBacked"]
+}
+
+/// Wait for a condition to become true within a timeout.
+///
+/// Polls `cond()` every `interval` until it returns true or `timeout` elapses.
+/// Returns true if condition became true, false if timed out.
+#[allow(dead_code)]
+pub fn wait_for_condition<F>(
+    timeout: std::time::Duration,
+    interval: std::time::Duration,
+    cond: F,
+) -> bool
+where
+    F: Fn() -> bool,
+{
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(interval);
+    }
+    cond()
 }

@@ -64,7 +64,10 @@ fn should_recover_large_value_batches_after_crash() {
         |eng| {
             // Assert
             for i in 0..10u8 {
-                assert!(eng.get(&eng.default_column_family(), &[i]).unwrap().is_some());
+                assert!(eng
+                    .get(&eng.default_column_family(), &[i])
+                    .unwrap()
+                    .is_some());
             }
         },
     );
@@ -84,7 +87,10 @@ fn should_respect_snapshot_visibility_for_large_values() {
 
     // Assert
     // Snapshot should see the old value while engine returns new one
-    assert_eq!(snap.get(&eng, &cf, b"k").unwrap().unwrap(), Bytes::from("v1"));
+    assert_eq!(
+        snap.get(&eng, &cf, b"k").unwrap().unwrap(),
+        Bytes::from("v1")
+    );
     assert_eq!(eng.get(&cf, b"k").unwrap().unwrap(), big);
 
     drop(eng);

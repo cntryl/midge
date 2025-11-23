@@ -38,27 +38,23 @@ fn should_rotate_wal_given_small_buffer_when_multiple_puts() {
     let wal_dir = opts.storage_mode.local_path().join("wal");
     let sst_dir = opts.storage_mode.local_path().join("sst");
 
-    // Wait up to 2000ms for either a WAL file or an SST file to appear.
-    // In some configurations the flush worker may quickly rotate and prune
-    // WAL files after creating SSTs, so asserting exclusively on WAL files
-    // is flaky. Accept either artifact as evidence that rotation occurred.
-    let mut waited = 0u64;
-    while waited < 2000 {
-        let wal_has_file = wal_dir.exists()
-            && fs::read_dir(&wal_dir)
-                .map(|mut it| it.next().is_some())
-                .unwrap_or(false);
-        let sst_has_file = sst_dir.exists()
-            && fs::read_dir(&sst_dir)
-                .map(|mut it| it.next().is_some())
-                .unwrap_or(false);
-        if wal_has_file || sst_has_file {
-            break;
-        }
-        // Sleep a bit to give background components some time; 10ms reduces CPU spin
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        waited += 10;
-    }
+    // Wait up to 2000ms for either a WAL file or an SST file to appear. Use
+    // the shared test helper to avoid ad-hoc polling loops across tests.
+    let _found = common::wait_for_condition(
+        std::time::Duration::from_millis(2000),
+        std::time::Duration::from_millis(10),
+        || {
+            let wal_has_file = wal_dir.exists()
+                && fs::read_dir(&wal_dir)
+                    .map(|mut it| it.next().is_some())
+                    .unwrap_or(false);
+            let sst_has_file = sst_dir.exists()
+                && fs::read_dir(&sst_dir)
+                    .map(|mut it| it.next().is_some())
+                    .unwrap_or(false);
+            wal_has_file || sst_has_file
+        },
+    );
 
     let wal_has_file = wal_dir.exists()
         && fs::read_dir(&wal_dir)

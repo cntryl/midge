@@ -48,7 +48,9 @@ fn should_adjust_memtable_size_smoothly_given_sustained_high_write_throughput_wh
 fn should_not_enter_feedback_loop_oscillation_given_fluctuating_write_load_when_autotune_controls_compaction_threads(
 ) {
     // Arrange: fluctuating write load
-    let db_path = std::env::current_dir().unwrap().join(format!("tmp/test_db_oscillation_{}", std::process::id()));
+    let db_path = std::env::current_dir()
+        .unwrap()
+        .join(format!("tmp/test_db_oscillation_{}", std::process::id()));
     std::fs::remove_dir_all(&db_path).ok();
     std::fs::create_dir_all(&db_path).unwrap();
     let opts = MidgeOptions {

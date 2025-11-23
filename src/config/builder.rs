@@ -6,17 +6,8 @@
 use std::path::Path;
 
 use super::{
-    cloud::CloudConfig,
-    derivation::DerivedParams,
-    validation,
-    CloudMode,
-    Config,
-    ConfigError,
-    ConfigResult,
-    Durability,
-    Goal,
-    MemoryBudget,
-    WorkloadProfile,
+    cloud::CloudConfig, derivation::DerivedParams, validation, CloudMode, Config, ConfigError,
+    ConfigResult, Durability, Goal, MemoryBudget, WorkloadProfile,
 };
 
 /// Builder for Midge configuration.
@@ -119,10 +110,14 @@ impl ConfigBuilder {
     /// is required but not provided.
     pub fn build(self) -> ConfigResult<Config> {
         // Validate cloud requirements
-        if matches!(self.cloud_mode, CloudMode::Cache | CloudMode::Tiered | CloudMode::Replicated)
-            && self.cloud_config.is_none()
+        if matches!(
+            self.cloud_mode,
+            CloudMode::Cache | CloudMode::Tiered | CloudMode::Replicated
+        ) && self.cloud_config.is_none()
         {
-            return Err(ConfigError::CloudBucketRequired { mode: self.cloud_mode });
+            return Err(ConfigError::CloudBucketRequired {
+                mode: self.cloud_mode,
+            });
         }
 
         // Derive parameters

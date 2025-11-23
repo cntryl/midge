@@ -444,7 +444,11 @@ pub(crate) fn write_compacted_sst(
     // Persist SST using writer.finish_to_path so that filesystem-backed
     // writers (FsDynWriter) can perform atomic rename + fsync operations.
     // This ensures the SST is fully durable before manifest updates.
-    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id_obj.as_u32()), crate::core::naming::sst_filename(sst_seq));
+    let sst_name = format!(
+        "{}/{}",
+        crate::core::naming::pad_cf_id(cf_id_obj.as_u32()),
+        crate::core::naming::sst_filename(sst_seq)
+    );
     let file_path = sst_dir.join(&sst_name);
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -459,7 +463,11 @@ pub(crate) fn write_compacted_sst(
     let size_bytes = std::fs::metadata(&file_path)
         .map(|md| md.len())
         .unwrap_or(0);
-    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id), crate::core::naming::sst_filename(sst_seq));
+    let sst_name = format!(
+        "{}/{}",
+        crate::core::naming::pad_cf_id(cf_id),
+        crate::core::naming::sst_filename(sst_seq)
+    );
     let meta = crate::manifest::FileMeta {
         name: sst_name.clone(),
         level: 0,

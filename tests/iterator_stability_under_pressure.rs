@@ -69,9 +69,11 @@ fn should_handle_freeze_then_compaction_then_iterate_sequence() {
         |_| {},
         |eng2| {
             // Assert
-            let rows = eng2.scan(&eng2.default_column_family(), Query::new()).expect("scan");
+            let rows = eng2
+                .scan(&eng2.default_column_family(), Query::new())
+                .expect("scan");
             assert_eq!(rows.len(), 20);
-        }
+        },
     );
 
     drop(tmp);
@@ -98,7 +100,9 @@ fn should_yield_stable_results_with_cf_flush_in_progress() {
     });
 
     let guard = eng_ref.lock().unwrap();
-    let rows = guard.scan(&guard.default_column_family(), Query::new()).expect("scan");
+    let rows = guard
+        .scan(&guard.default_column_family(), Query::new())
+        .expect("scan");
     let count = rows.len();
 
     // Assert

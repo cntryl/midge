@@ -1,9 +1,9 @@
 mod common;
 
-use cntryl_midge::core::manifest::Manifest;
+use bytes::Bytes;
 use cntryl_midge::cloud::backend::StorageBackend;
 use cntryl_midge::cloud::mock::MockCloudBackend;
-use bytes::Bytes;
+use cntryl_midge::core::manifest::Manifest;
 
 #[test]
 fn should_handle_cloud_listing_lag_when_manifest_references_new_sst() {
@@ -20,7 +20,8 @@ fn should_handle_cloud_listing_lag_when_manifest_references_new_sst() {
     backend.reset_counters();
 
     // Assert - cloud has no manifest set yet (reading manifest.json should return KeyNotFound)
-    let cloud_manifest_read = <MockCloudBackend as StorageBackend>::get_blob(&*backend, "manifest.json");
+    let cloud_manifest_read =
+        <MockCloudBackend as StorageBackend>::get_blob(&*backend, "manifest.json");
     assert!(cloud_manifest_read.is_err());
     // The test verifies the mock API surface: local manifest contains sst while cloud has no manifest
     assert!(m.ssts.contains(&"sst/new_sst.blob".to_string()));
@@ -38,10 +39,18 @@ fn should_retry_cloud_upload_atomically_under_latency_spike() {
 
     // Act
     // Use the mock backend directly and perform two uploads; first will fail, second should succeed
-    let _ = <MockCloudBackend as StorageBackend>::put_blob(&*backend, "sst/1.blob", Bytes::from_static(b"a"));
+    let _ = <MockCloudBackend as StorageBackend>::put_blob(
+        &*backend,
+        "sst/1.blob",
+        Bytes::from_static(b"a"),
+    );
     // Second upload (should succeed once failure threshold reached)
     backend.set_fail_upload_after(usize::MAX);
-    let second = <MockCloudBackend as StorageBackend>::put_blob(&*backend, "sst/2.blob", Bytes::from_static(b"b"));
+    let second = <MockCloudBackend as StorageBackend>::put_blob(
+        &*backend,
+        "sst/2.blob",
+        Bytes::from_static(b"b"),
+    );
 
     // Assert
     assert!(second.is_ok());
@@ -55,7 +64,12 @@ fn should_rehydrate_partial_cloud_object_without_corruption() {
 
     // Simulate a partial object by writing a short file to blob path directly
     let key = "sst/partial.blob";
-    <MockCloudBackend as StorageBackend>::put_blob(&*backend, key, Bytes::from_static(b"prefix-partial")).unwrap();
+    <MockCloudBackend as StorageBackend>::put_blob(
+        &*backend,
+        key,
+        Bytes::from_static(b"prefix-partial"),
+    )
+    .unwrap();
 
     // Act
     let got = <MockCloudBackend as StorageBackend>::get_blob(&*backend, key);

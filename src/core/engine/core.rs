@@ -222,7 +222,10 @@ impl MidgeEngine {
     /// - background compaction is disabled in test opts
     /// - every SST file belonging to the CF is rewritten
     /// - independent of LSM layout, sizes, levels, or thresholds
-    pub fn compact_cf_full_rewrite(&self, cf: &crate::api::column_family::ColumnFamilyHandle) -> MidgeResult<()> {
+    pub fn compact_cf_full_rewrite(
+        &self,
+        cf: &crate::api::column_family::ColumnFamilyHandle,
+    ) -> MidgeResult<()> {
         use crate::core::compaction::CompactionPlan;
 
         let cf_id: u32 = cf.id().into();
@@ -241,9 +244,23 @@ impl MidgeEngine {
         }
 
         let input_files: Vec<String> = cf_files.iter().map(|f| f.name.clone()).collect();
-        let min_level = cf_files.iter().map(|f| f.level).min().unwrap();
-        let max_level = cf_files.iter().map(|f| f.level).max().unwrap();
-        let target_level = if max_level < 6 { max_level + 1 } else { max_level };
+
+        // Compute min and max levels without unwrap() so linting prohibits
+        // using unwrap/expect in non-test builds. We already return early
+        // above if cf_files is empty, but avoid unwrap for clarity.
+        let (min_level, max_level) = {
+            let mut levels = cf_files.iter().map(|f| f.level);
+            let first = match levels.next() {
+                Some(v) => v,
+                None => return Ok(()),
+            };
+            levels.fold((first, first), |(min, max), v| (std::cmp::min(min, v), std::cmp::max(max, v)))
+        };
+        let target_level = if max_level < 6 {
+            max_level + 1
+        } else {
+            max_level
+        };
 
         let plan = CompactionPlan {
             input_files,
@@ -463,7 +480,12 @@ mod tests {
         impl RecordingController {
             fn new() -> (Self, Arc<parking_lot::RwLock<Option<CompactionPlan>>>) {
                 let slot = Arc::new(parking_lot::RwLock::new(None));
-                (Self { last_plan: slot.clone() }, slot)
+                (
+                    Self {
+                        last_plan: slot.clone(),
+                    },
+                    slot,
+                )
             }
         }
 
@@ -529,7 +551,9 @@ mod tests {
             ..Default::default()
         };
 
-        engine.version_set = crate::core::manifest::AtomicVersionSet::new(crate::core::manifest::VersionSet::new(manifest));
+        engine.version_set = crate::core::manifest::AtomicVersionSet::new(
+            crate::core::manifest::VersionSet::new(manifest),
+        );
 
         let cf = engine.default_column_family();
 

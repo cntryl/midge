@@ -2,7 +2,7 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use cntryl_midge::{MidgeEngine, test_hooks::TestHooks};
+use cntryl_midge::{test_hooks::TestHooks, MidgeEngine};
 // replaced hard sleeps with deterministic polling; avoid unused imports
 
 mod common;

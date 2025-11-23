@@ -18,13 +18,17 @@ fn should_not_expose_sst_without_manifest_entry_after_crash() {
 
     // Act
     // Load manifest (none present) -> ManifestCache will initialise with default manifest
-    let cache = cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap();
+    let cache =
+        cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap();
 
     // Assert
     // The manifest should not list the orphan SST since it wasn't added to the manifest
     let m = cache.get();
     assert!(m.ssts.is_empty(), "manifest must not list orphan SSTs");
-    assert!(orphan.exists(), "file should be present on disk but not in manifest");
+    assert!(
+        orphan.exists(),
+        "file should be present on disk but not in manifest"
+    );
 }
 
 #[test]
@@ -40,7 +44,8 @@ fn should_delete_orphan_sst_on_recovery_when_manifest_missing() {
     // Simulate loading manifest and cleaning step: Manifest::load should return default manifest
     // and engine higher layers are expected to treat orphan SSTs as unreferenced. Here we assert
     // that the manifest is empty and make the test's expected clean-up decision explicit.
-    let cache = cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap();
+    let cache =
+        cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap();
 
     // Assert
     assert!(cache.get().ssts.is_empty());
@@ -100,7 +105,8 @@ fn should_resolve_conflict_when_sst_exists_but_manifest_behind() {
     // Act
     // Manifest is behind (empty) while SST exists. ManifestCache should only reflect manifest
     // contents — it will not auto-claim arbitrary files as manifest entries.
-    let cache = cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap();
+    let cache =
+        cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap();
 
     // Assert
     assert!(cache.get().ssts.is_empty());
@@ -134,7 +140,9 @@ fn should_maintain_atomicity_under_concurrent_flush_manifest_fsync() {
     // Create a persisted on-disk manifest and then load via the cache to test concurrency
     let manifest = cntryl_midge::core::manifest::Manifest::default();
     manifest.save_atomic(temp.path()).unwrap();
-    let cache = std::sync::Arc::new(cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap());
+    let cache = std::sync::Arc::new(
+        cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap(),
+    );
 
     // Act
     let threads: Vec<_> = (0..4)
@@ -164,7 +172,9 @@ fn should_maintain_order_when_multiple_cfs_flush_concurrently() {
     let temp = TempDir::new().unwrap();
     let manifest = cntryl_midge::core::manifest::Manifest::default();
     manifest.save_atomic(temp.path()).unwrap();
-    let cache = std::sync::Arc::new(cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap());
+    let cache = std::sync::Arc::new(
+        cntryl_midge::sst::manifest_cache::ManifestCache::new(temp.path().to_path_buf()).unwrap(),
+    );
 
     // Act
     let writers: Vec<_> = (0..3)
@@ -173,7 +183,8 @@ fn should_maintain_order_when_multiple_cfs_flush_concurrently() {
             std::thread::spawn(move || {
                 for j in 0..10 {
                     let mut m = c.get();
-                    m.last_persisted_sequence = m.last_persisted_sequence.saturating_add(1 + (i + j) as u64);
+                    m.last_persisted_sequence =
+                        m.last_persisted_sequence.saturating_add(1 + (i + j) as u64);
                     c.update(m);
                 }
             })

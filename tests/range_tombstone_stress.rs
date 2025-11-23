@@ -1,7 +1,6 @@
 mod common;
 use common::*;
 
-
 #[test]
 fn should_coalesce_large_tombstone_fanout_during_compaction() {
     // Arrange

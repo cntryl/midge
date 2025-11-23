@@ -1,20 +1,25 @@
 mod common;
 use common::*;
 
-use cntryl_midge::api::column_family::ColumnFamilyConfig;
 use bytes::Bytes;
+use cntryl_midge::api::column_family::ColumnFamilyConfig;
 
 #[test]
 fn should_not_starve_cf_compaction_under_multi_cf_pressure() {
     // Arrange
     let (tmp, eng) = new_engine();
-    let cf1 = eng.create_column_family("cf1", ColumnFamilyConfig::default()).unwrap();
-    let cf2 = eng.create_column_family("cf2", ColumnFamilyConfig::default()).unwrap();
+    let cf1 = eng
+        .create_column_family("cf1", ColumnFamilyConfig::default())
+        .unwrap();
+    let cf2 = eng
+        .create_column_family("cf2", ColumnFamilyConfig::default())
+        .unwrap();
 
     // Act
     for i in 0..100u8 {
         eng.put(&cf1, &[i], format!("a{}", i).as_bytes()).unwrap();
-        eng.put(&cf2, &[i + 200], format!("b{}", i).as_bytes()).unwrap();
+        eng.put(&cf2, &[i + 200], format!("b{}", i).as_bytes())
+            .unwrap();
     }
 
     // Assert
@@ -32,8 +37,12 @@ fn should_not_starve_cf_compaction_under_multi_cf_pressure() {
 fn should_keep_cf_compaction_independent_under_write_pressure() {
     // Arrange
     let (tmp, eng) = new_engine();
-    let cf1 = eng.create_column_family("hot", ColumnFamilyConfig::default()).unwrap();
-    let cf2 = eng.create_column_family("cold", ColumnFamilyConfig::default()).unwrap();
+    let cf1 = eng
+        .create_column_family("hot", ColumnFamilyConfig::default())
+        .unwrap();
+    let cf2 = eng
+        .create_column_family("cold", ColumnFamilyConfig::default())
+        .unwrap();
 
     // Act
     for i in 0..50u8 {
@@ -46,7 +55,10 @@ fn should_keep_cf_compaction_independent_under_write_pressure() {
     // Assert
     // Under pressure, the small CF2's data remains accessible and consistent
     for i in 0..5u8 {
-        assert_eq!(eng.get(&cf2, &[i]).unwrap().unwrap(), Bytes::from("coldval"));
+        assert_eq!(
+            eng.get(&cf2, &[i]).unwrap().unwrap(),
+            Bytes::from("coldval")
+        );
     }
 
     drop(eng);
@@ -57,8 +69,12 @@ fn should_keep_cf_compaction_independent_under_write_pressure() {
 fn should_handle_cf_drop_during_other_cf_compaction() {
     // Arrange
     let (tmp, eng) = new_engine();
-    let cf1 = eng.create_column_family("one", ColumnFamilyConfig::default()).unwrap();
-    let cf2 = eng.create_column_family("two", ColumnFamilyConfig::default()).unwrap();
+    let cf1 = eng
+        .create_column_family("one", ColumnFamilyConfig::default())
+        .unwrap();
+    let cf2 = eng
+        .create_column_family("two", ColumnFamilyConfig::default())
+        .unwrap();
 
     for i in 0..20u8 {
         eng.put(&cf1, &[i], b"x").unwrap();
@@ -81,12 +97,17 @@ fn should_handle_cf_drop_during_other_cf_compaction() {
 fn should_not_unblock_freeze_for_other_cf_during_unrelated_compaction() {
     // Arrange
     let (tmp, eng) = new_engine();
-    let cf_a = eng.create_column_family("a", ColumnFamilyConfig::default()).unwrap();
-    let cf_b = eng.create_column_family("b", ColumnFamilyConfig::default()).unwrap();
+    let cf_a = eng
+        .create_column_family("a", ColumnFamilyConfig::default())
+        .unwrap();
+    let cf_b = eng
+        .create_column_family("b", ColumnFamilyConfig::default())
+        .unwrap();
 
     for i in 0..10u8 {
         eng.put(&cf_a, &[i], format!("A{}", i).as_bytes()).unwrap();
-        eng.put(&cf_b, &[i + 50], format!("B{}", i).as_bytes()).unwrap();
+        eng.put(&cf_b, &[i + 50], format!("B{}", i).as_bytes())
+            .unwrap();
     }
 
     // Act

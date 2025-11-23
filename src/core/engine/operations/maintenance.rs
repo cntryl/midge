@@ -212,7 +212,7 @@ impl MidgeEngine {
             file: Box::new(file_meta.clone()),
         };
         self.version_manager.apply_edit_sync(add_file_edit)?;
-        
+
         // Update sequence after file is added
         if let Some(largest_seq) = file_meta.largest_seq {
             let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
@@ -282,7 +282,7 @@ impl MidgeEngine {
             let mt = column_family.memtable.load();
             (mt.is_empty(), mt.has_range_tombstones())
         };
-        
+
         // Early return only if completely empty (no entries and no tombstones)
         if is_empty && !has_tombs {
             return Ok(());
@@ -328,13 +328,16 @@ impl MidgeEngine {
                 let bloom_after = autotuner.bloom_bits();
 
                 if wal_after != wal_before {
-                    self.metrics.record_wal_interval_adjustment(wal_before, wal_after);
+                    self.metrics
+                        .record_wal_interval_adjustment(wal_before, wal_after);
                 }
                 if comp_after != comp_before {
-                    self.metrics.record_compaction_thread_adjustment(comp_before, comp_after);
+                    self.metrics
+                        .record_compaction_thread_adjustment(comp_before, comp_after);
                 }
                 if bloom_after != bloom_before {
-                    self.metrics.record_bloom_bits_adjustment(bloom_before as u32, bloom_after as u32);
+                    self.metrics
+                        .record_bloom_bits_adjustment(bloom_before as u32, bloom_after as u32);
                 }
             }
         }

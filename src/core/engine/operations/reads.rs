@@ -196,15 +196,14 @@ impl MidgeEngine {
                             // Tombstone semantics: a tombstone at sequence T deletes all keys with seq < T
                             // that fall in its range
                             let covered_by_tombstone = all_range_tombstones.iter().any(|t| {
-                                key >= t.start.as_slice() 
-                                    && key < t.end.as_slice()
-                                    && seq < t.seq  // Value written before tombstone
+                                key >= t.start.as_slice() && key < t.end.as_slice() && seq < t.seq
+                                // Value written before tombstone
                             });
-                            
+
                             if covered_by_tombstone {
                                 return Ok(None);
                             }
-                            
+
                             return Ok(Some(v));
                         }
                         Ok(crate::sst::KeyState::Tombstone(_seq)) => {
@@ -217,13 +216,13 @@ impl MidgeEngine {
                 Err(_) => continue,
             }
         }
-        
+
         // If we didn't find any value/tombstone in SSTs, check if range tombstones cover it
         // (only relevant if there are no point entries for this key)
         if is_covered_by_range_tombstone(&all_range_tombstones, key, u64::MAX) {
             return Ok(None);
         }
-        
+
         Ok(None)
     }
 
@@ -436,9 +435,8 @@ impl MidgeEngine {
                                 crate::core::merge_iterator::VecSource::new_reverse(items),
                             ));
                         } else {
-                            sources.push(Box::new(crate::core::merge_iterator::VecSource::new(
-                                items,
-                            )));
+                            sources
+                                .push(Box::new(crate::core::merge_iterator::VecSource::new(items)));
                         }
                     }
                 }
@@ -495,7 +493,7 @@ impl MidgeEngine {
         let cf_files: Vec<_> = manifest
             .files
             .iter()
-            .filter(|f| f.cf_id == 0)  // Default CF
+            .filter(|f| f.cf_id == 0) // Default CF
             .collect();
         for file in cf_files.iter().rev() {
             let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);

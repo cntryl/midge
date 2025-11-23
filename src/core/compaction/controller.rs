@@ -441,7 +441,8 @@ impl CompactionController {
 
         super::executor::sort_versions_for_output(&mut versions);
 
-        let versions = super::executor::filter_versions_with_range_tombstones(&versions, &range_tombs);
+        let versions =
+            super::executor::filter_versions_with_range_tombstones(&versions, &range_tombs);
         let min_snapshot_seq = snapshot_registry.min_active_seq();
         let (versions_after_filter, _removed) =
             super::executor::filter_safe_tombstones(&versions, min_snapshot_seq);
@@ -467,10 +468,7 @@ impl CompactionController {
             )
         };
 
-        let deduped = super::executor::deduplicate_versions(
-            &versions_after_cf,
-            min_snapshot_seq,
-        );
+        let deduped = super::executor::deduplicate_versions(&versions_after_cf, min_snapshot_seq);
 
         let ctx = super::executor::SstWriterContext {
             sst_factory,
@@ -494,11 +492,14 @@ impl CompactionController {
             version_manager.apply_edit_sync(combined)?;
 
             if let Some(lg) = meta.largest_seq {
-                let current_seq = Manifest::load_with_retry(db_path, 5, std::time::Duration::from_millis(10))
-                    .unwrap_or_default()
-                    .last_persisted_sequence;
+                let current_seq =
+                    Manifest::load_with_retry(db_path, 5, std::time::Duration::from_millis(10))
+                        .unwrap_or_default()
+                        .last_persisted_sequence;
                 let seq_to_set = std::cmp::max(current_seq, lg);
-                let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence { sequence: seq_to_set };
+                let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
+                    sequence: seq_to_set,
+                };
                 version_manager.apply_edit_sync(seq_edit)?;
             }
 

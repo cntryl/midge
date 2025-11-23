@@ -29,7 +29,7 @@ fn should_create_checkpoint_during_concurrent_writes() {
     let engine_writer = engine.clone();
     let cf_clone = cf.clone();
     let writer = thread::spawn(move || {
-            for i in 0..50u32 {
+        for i in 0..50u32 {
             engine_writer
                 .put(&cf_clone, format!("key_{}", i).as_bytes(), b"value")
                 .expect("put");
@@ -39,15 +39,13 @@ fn should_create_checkpoint_during_concurrent_writes() {
     });
 
     // Wait until at least one write is visible (fail fast)
-    let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(1);
-    while start.elapsed() < timeout {
-        if engine.get(&cf, format!("key_{}", 0).as_bytes()).unwrap().is_some() {
-            break;
-        }
-        // Avoid tight spin while waiting for writer to make progress
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let _ = common::wait_for_condition(timeout, std::time::Duration::from_millis(10), || {
+        engine
+            .get(&cf, format!("key_{}", 0).as_bytes())
+            .unwrap()
+            .is_some()
+    });
 
     // Act - Create checkpoint while writes are ongoing
     let cp_dir = dir.path().join("checkpoint");
@@ -153,14 +151,13 @@ fn should_create_consistent_checkpoint_under_high_load() {
     });
 
     // Wait for some load to flush/apply (fail fast)
-    let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(1);
-    while start.elapsed() < timeout {
-        if engine.get(&cf, format!("load_{}", 0).as_bytes()).unwrap().is_some() {
-            break;
-        }
-        std::thread::yield_now();
-    }
+    let _ = common::wait_for_condition(timeout, std::time::Duration::from_millis(10), || {
+        engine
+            .get(&cf, format!("load_{}", 0).as_bytes())
+            .unwrap()
+            .is_some()
+    });
 
     // Act - Create checkpoint during load
     let cp_dir = dir.path().join("checkpoint_load");

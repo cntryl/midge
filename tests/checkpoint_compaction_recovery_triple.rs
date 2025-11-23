@@ -9,7 +9,12 @@ use cntryl_midge::StorageMode;
 fn should_recover_consistently_given_checkpoint_during_compaction_then_crash() {
     // Arrange
     let dir = test_temp_dir();
-    let opts = MidgeOptions { storage_mode: StorageMode::LocalDisk { db_path: dir.path().to_path_buf() }, ..Default::default() };
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
 
     // Act
     with_engine_restart(
@@ -17,7 +22,9 @@ fn should_recover_consistently_given_checkpoint_during_compaction_then_crash() {
         |eng| {
             // perform writes and create checkpoint
             let cf = eng.default_column_family();
-            for i in 0..20u8 { eng.put(&cf, &[i], format!("v{}", i).as_bytes()).unwrap(); }
+            for i in 0..20u8 {
+                eng.put(&cf, &[i], format!("v{}", i).as_bytes()).unwrap();
+            }
             let cp_dir = dir.path().join("cp1");
             eng.create_checkpoint(&cp_dir).expect("checkpoint");
         },
@@ -25,7 +32,7 @@ fn should_recover_consistently_given_checkpoint_during_compaction_then_crash() {
             // Assert after restart - ensure the first inserted (raw-byte) key exists
             let cf = eng.default_column_family();
             assert!(eng.get(&cf, &[0]).unwrap().is_some());
-        }
+        },
     );
 }
 
@@ -41,7 +48,12 @@ fn should_not_produce_partial_checkpoint_when_manifest_is_stale() {
     eng.create_checkpoint(&cp_dir).expect("create checkpoint");
 
     // Assert - checkpoint should open successfully
-    let cp_opts = cntryl_midge::MidgeOptions { storage_mode: cntryl_midge::StorageMode::LocalDisk { db_path: cp_dir.clone() }, ..Default::default() };
+    let cp_opts = cntryl_midge::MidgeOptions {
+        storage_mode: cntryl_midge::StorageMode::LocalDisk {
+            db_path: cp_dir.clone(),
+        },
+        ..Default::default()
+    };
     let cp = MidgeEngine::open(cp_opts).expect("open checkpoint");
     assert!(cp.get(&cp.default_column_family(), b"x").unwrap().is_some());
 }
@@ -78,7 +90,9 @@ fn should_resolve_conflict_between_checkpoint_and_inflight_compaction_on_restart
     let cf = eng.default_column_family();
 
     // Act
-    for i in 0..10u8 { eng.put(&cf, &[i], b"v").unwrap(); }
+    for i in 0..10u8 {
+        eng.put(&cf, &[i], b"v").unwrap();
+    }
     eng.flush().unwrap();
     let cp_dir = tmp.path().join("cp4");
     eng.create_checkpoint(&cp_dir).unwrap();
@@ -88,9 +102,17 @@ fn should_resolve_conflict_between_checkpoint_and_inflight_compaction_on_restart
     drop(eng);
 
     // Reopen engine to simulate restart during compaction
-    let opts = MidgeOptions { storage_mode: StorageMode::LocalDisk { db_path: tmp.path().to_path_buf() }, ..Default::default() };
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: tmp.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
     let eng2 = MidgeEngine::open(opts).unwrap();
 
     // Assert
-    assert!(eng2.get(&eng2.default_column_family(), b"extra").unwrap().is_some());
+    assert!(eng2
+        .get(&eng2.default_column_family(), b"extra")
+        .unwrap()
+        .is_some());
 }

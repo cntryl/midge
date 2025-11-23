@@ -211,7 +211,10 @@ mod tests {
         let path = sst_path(dir.path(), cf, seq);
 
         // Assert
-        assert_eq!(path, dir.path().join("00000007").join(format!("{:016}.sst", 3)));
+        assert_eq!(
+            path,
+            dir.path().join("00000007").join(format!("{:016}.sst", 3))
+        );
     }
 
     #[test]
@@ -285,7 +288,10 @@ mod tests {
 
         // Assert: allocator should not be lowered
         let nxt = current_next_wal_seq();
-        assert!(nxt >= 100, "NEXT_WAL_SEQ was lowered by initialize_sequences");
+        assert!(
+            nxt >= 100,
+            "NEXT_WAL_SEQ was lowered by initialize_sequences"
+        );
     }
 
     #[test]
