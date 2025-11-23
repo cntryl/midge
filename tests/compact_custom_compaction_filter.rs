@@ -33,11 +33,12 @@ fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
-        // deterministic: no background compaction
+        // deterministic: use explicit full-rewrite compaction entrypoint; we
+        // still enable the compaction controller so filters are wired but do
+        // not rely on background compaction.
         let opts = cntryl_midge::MidgeOptions {
             storage_mode,
             memtable_size: 32,
-            enable_compaction: false,
             ..Default::default()
         };
 
@@ -99,7 +100,6 @@ fn should_drop_key_given_filter_returns_remove_decision() {
         let opts = cntryl_midge::MidgeOptions {
             storage_mode,
             memtable_size: 32,
-            enable_compaction: false,
             ..Default::default()
         };
 
@@ -151,7 +151,6 @@ fn should_keep_key_given_filter_returns_keep_decision() {
         let opts = cntryl_midge::MidgeOptions {
             storage_mode,
             memtable_size: 32,
-            enable_compaction: false,
             ..Default::default()
         };
 

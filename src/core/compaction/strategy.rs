@@ -473,8 +473,9 @@ impl Compactor {
         _db_path: &std::path::Path,
         plan: CompactionPlan,
     ) -> MidgeResult<Vec<String>> {
-        // Placeholder: no-op execution; return outputs as given
-        Ok(plan.output_files)
+        // Strategy/plan selection only; real execution is handled by the
+        // CompactionController. For now, just surface the planned inputs.
+        Ok(plan.input_files.clone())
     }
 }
 

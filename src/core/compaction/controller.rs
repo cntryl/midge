@@ -406,6 +406,129 @@ impl CompactionController {
         })
     }
 
+    /// Synchronously run a single compaction plan using the same logic as the
+    /// background worker. This is intended for deterministic tests that want
+    /// to drive compaction end-to-end without relying on background threads.
+    pub fn run_plan_sync(
+        &self,
+        db_path: &Path,
+        cf_set: &Arc<crate::core::engine::column_family::ColumnFamilySet>,
+        sst_dir: &Path,
+        sst_factory: &Arc<dyn crate::sst::SstFactory>,
+        sst_reader_factory: &Arc<dyn crate::sst::traits::SstReaderFactory>,
+        snapshot_registry: &Arc<crate::api::snapshot::SnapshotRegistry>,
+        compression: crate::common::codec::CompressionType,
+        block_size: usize,
+        cloud_sst_manager: &Option<Arc<crate::sst::cloud::CloudSstManager>>,
+        test_hooks: &Option<crate::common::test_hooks::TestHooks>,
+        version_manager: &Arc<crate::core::manifest::VersionManager>,
+        background_error: &Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
+        plan: CompactionPlan,
+    ) -> MidgeResult<()> {
+        // This mirrors the inner portion of the worker loop that executes a
+        // single CompactionPlan, but runs on the caller's thread.
+        let mut versions = super::executor::collect_compaction_versions(
+            sst_reader_factory,
+            sst_dir,
+            &plan.input_files,
+        );
+
+        let range_tombs = super::executor::collect_compaction_range_tombstones(
+            sst_reader_factory,
+            sst_dir,
+            &plan.input_files,
+        );
+
+        super::executor::sort_versions_for_output(&mut versions);
+
+        let versions = super::executor::filter_versions_with_range_tombstones(&versions, &range_tombs);
+        let min_snapshot_seq = snapshot_registry.min_active_seq();
+        let (versions_after_filter, _removed) =
+            super::executor::filter_safe_tombstones(&versions, min_snapshot_seq);
+
+        let filter_arc: Option<Arc<dyn super::filter::CompactionFilter>> =
+            cf_set.cfs.get(&plan.cf_id).and_then(|cf| {
+                let guard = cf.compaction_filter.read();
+                guard.as_ref().map(Arc::clone)
+            });
+
+        let versions_after_cf = if let Some(filter) = filter_arc {
+            super::executor::apply_compaction_filter(
+                &versions_after_filter,
+                filter.as_ref(),
+                plan.target_level,
+            )
+        } else {
+            let noop = super::filter::NoOpFilter;
+            super::executor::apply_compaction_filter(
+                &versions_after_filter,
+                &noop,
+                plan.target_level,
+            )
+        };
+
+        let deduped = super::executor::deduplicate_versions(
+            &versions_after_cf,
+            min_snapshot_seq,
+        );
+
+        let ctx = super::executor::SstWriterContext {
+            sst_factory,
+            compression,
+            block_size,
+            sst_dir,
+            cloud_sst_manager: cloud_sst_manager.as_ref(),
+        };
+
+        let write_res = super::executor::write_compacted_sst(&ctx, &deduped, plan.cf_id)?;
+
+        if let Some((_path, meta)) = write_res {
+            if let Some(ref hooks) = test_hooks {
+                hooks.maybe_pause_compaction(CompactionGatePoint::BeforeManifestUpdate);
+            }
+
+            let combined = crate::core::manifest::VersionEdit::CombinedAddRemove {
+                add: Box::new(meta.clone()),
+                remove: plan.input_files.clone(),
+            };
+            version_manager.apply_edit_sync(combined)?;
+
+            if let Some(lg) = meta.largest_seq {
+                let current_seq = Manifest::load_with_retry(db_path, 5, std::time::Duration::from_millis(10))
+                    .unwrap_or_default()
+                    .last_persisted_sequence;
+                let seq_to_set = std::cmp::max(current_seq, lg);
+                let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence { sequence: seq_to_set };
+                version_manager.apply_edit_sync(seq_edit)?;
+            }
+
+            if let Some(ref hooks) = test_hooks {
+                hooks.maybe_pause_compaction(CompactionGatePoint::AfterManifestUpdate);
+            }
+
+            for old_sst in &plan.input_files {
+                let old_path = sst_dir.join(old_sst);
+                if old_path.exists() {
+                    if let Err(e) = std::fs::remove_file(&old_path) {
+                        tracing::warn!(path = %old_path.display(), error = %e, "failed to remove old SST during compaction");
+                    } else {
+                        tracing::debug!(path = %old_path.display(), "removed old SST during compaction");
+                    }
+                }
+            }
+
+            if let Some(ref hooks) = test_hooks {
+                hooks.after_compaction();
+            }
+
+            if let Some(bg) = background_error {
+                *bg.write() = None;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Internal helper to process a single compaction control message. Returns
     /// true if the worker should shut down immediately (Shutdown received).
     fn handle_compaction_msg(
