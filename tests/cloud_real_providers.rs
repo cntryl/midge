@@ -14,9 +14,8 @@
 // AWS S3 Real Provider Tests
 // ============================================================================
 
-#[cfg(feature = "cloud-aws")]
+#[cfg(feature = "cloud_integration")]
 #[test]
-#[ignore]
 fn should_upload_to_real_s3_when_credentials_configured() {
     use cntryl_midge::cloud::aws::AwsS3Backend;
     use cntryl_midge::cloud::StorageBackend;
@@ -39,9 +38,8 @@ fn should_upload_to_real_s3_when_credentials_configured() {
     let _ = backend.delete_blob(&test_key);
 }
 
-#[cfg(feature = "cloud-aws")]
+#[cfg(feature = "cloud_integration")]
 #[test]
-#[ignore]
 fn should_download_from_real_s3_when_blob_exists() {
     use cntryl_midge::cloud::aws::AwsS3Backend;
     use cntryl_midge::cloud::StorageBackend;
@@ -69,9 +67,8 @@ fn should_download_from_real_s3_when_blob_exists() {
     let _ = backend.delete_blob(&test_key);
 }
 
-#[cfg(feature = "cloud-aws")]
+#[cfg(feature = "cloud_integration")]
 #[test]
-#[ignore]
 fn should_list_blobs_from_real_s3_with_prefix() {
     use cntryl_midge::cloud::aws::AwsS3Backend;
     use cntryl_midge::cloud::StorageBackend;
@@ -106,9 +103,8 @@ fn should_list_blobs_from_real_s3_with_prefix() {
     let _ = backend.delete_blob(&key2);
 }
 
-#[cfg(feature = "cloud-aws")]
+#[cfg(feature = "cloud_integration")]
 #[test]
-#[ignore]
 fn should_perform_ranged_read_from_real_s3() {
     use cntryl_midge::cloud::aws::AwsS3Backend;
     use cntryl_midge::cloud::StorageBackend;
@@ -140,9 +136,8 @@ fn should_perform_ranged_read_from_real_s3() {
 // Azure Blob Storage Real Provider Tests
 // ============================================================================
 
-#[cfg(feature = "cloud-azure")]
+#[cfg(feature = "cloud_integration")]
 #[test]
-#[ignore]
 fn should_upload_to_real_azure_when_credentials_configured() {
     use cntryl_midge::cloud::azure::AzureBlobBackend;
     use cntryl_midge::cloud::StorageBackend;
@@ -165,9 +160,8 @@ fn should_upload_to_real_azure_when_credentials_configured() {
     let _ = backend.delete_blob(&test_key);
 }
 
-#[cfg(feature = "cloud-azure")]
+#[cfg(feature = "cloud_integration")]
 #[test]
-#[ignore]
 fn should_download_from_real_azure_when_blob_exists() {
     use cntryl_midge::cloud::azure::AzureBlobBackend;
     use cntryl_midge::cloud::StorageBackend;
@@ -199,9 +193,8 @@ fn should_download_from_real_azure_when_blob_exists() {
 // GCP Cloud Storage Real Provider Tests
 // ============================================================================
 
-#[cfg(feature = "cloud-gcp")]
+#[cfg(feature = "cloud_integration")]
 #[test]
-#[ignore]
 fn should_upload_to_real_gcs_when_credentials_configured() {
     use cntryl_midge::cloud::gcp::GcpStorageBackend;
     use cntryl_midge::cloud::StorageBackend;
@@ -223,9 +216,8 @@ fn should_upload_to_real_gcs_when_credentials_configured() {
     let _ = backend.delete_blob(&test_key);
 }
 
-#[cfg(feature = "cloud-gcp")]
+#[cfg(feature = "cloud_integration")]
 #[test]
-#[ignore]
 fn should_download_from_real_gcs_when_blob_exists() {
     use cntryl_midge::cloud::gcp::GcpStorageBackend;
     use cntryl_midge::cloud::StorageBackend;

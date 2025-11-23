@@ -128,6 +128,9 @@ cloud-azure = ["cloud-common"]
 cloud-gcp = ["cloud-common", "dep:urlencoding"]
 cloud-oci = ["cloud-common", "dep:urlencoding"]
 
+# Feature to enable real cloud integration tests (enables all cloud backends)
+cloud_integration = ["cloud-all"]
+
 # -----------------------------------------------------------------------------
 # Profiles
 # -----------------------------------------------------------------------------

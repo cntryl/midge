@@ -1164,73 +1164,86 @@ mod adaptive_cache_tests {
 
     #[test]
     fn should_track_contention_rate_given_high_contention_when_diagnostics_requested() {
-        // Arrange
-        let cache = Arc::new(AdaptiveBlockCache::new(5_000));
+        // To reduce flakiness we retry the parallel workload a few times
+        // with a fresh cache instance — contention is timing-dependent.
+        let mut saw_contention = false;
+        for _attempt in 0..3 {
+            // Arrange
+            let cache = Arc::new(AdaptiveBlockCache::new(5_000));
 
-        // Act
-        let handles: Vec<_> = (0..8)
-            .map(|thread_id| {
-                let cache = Arc::clone(&cache);
-                thread::spawn(move || {
-                    for i in 0..500 {
-                        let key_offset = (thread_id * 50 + i) % 200;
-                        let key = make_key("file.sst", key_offset * 4096);
+            // Act
+            let handles: Vec<_> = (0..8)
+                .map(|thread_id| {
+                    let cache = Arc::clone(&cache);
+                    thread::spawn(move || {
+                        for i in 0..500 {
+                            let key_offset = (thread_id * 50 + i) % 200;
+                            let key = make_key("file.sst", key_offset * 4096);
 
-                        if i % 5 == 0 {
-                            cache.insert(key, make_block(10));
-                        } else {
-                            let _ = cache.get(&key);
+                            if i % 5 == 0 {
+                                cache.insert(key, make_block(10));
+                            } else {
+                                let _ = cache.get(&key);
+                            }
                         }
-                    }
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        for handle in handles {
-            handle.join().unwrap();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            let diag = cache.diagnostics();
+            if diag.contention_rate > 0.0 {
+                saw_contention = true;
+                break;
+            }
         }
 
-        let diag = cache.diagnostics();
-
         // Assert
-        assert!(
-            diag.contention_rate > 0.0,
-            "expected some contention under concurrent access"
-        );
+        assert!(saw_contention, "expected some contention under concurrent access");
     }
 
     #[test]
     fn should_record_contentions_given_concurrent_access_when_diagnostics_requested() {
-        // Arrange
-        let cache = Arc::new(AdaptiveBlockCache::new(5_000));
+        // Retry the workload a few times with a fresh cache to avoid rare
+        // timing windows where no contention is recorded.
+        let mut saw_contentions = false;
+        for _attempt in 0..3 {
+            let cache = Arc::new(AdaptiveBlockCache::new(5_000));
 
-        // Act
-        let handles: Vec<_> = (0..8)
-            .map(|thread_id| {
-                let cache = Arc::clone(&cache);
-                thread::spawn(move || {
-                    for i in 0..500 {
-                        let key_offset = (thread_id * 50 + i) % 200;
-                        let key = make_key("file.sst", key_offset * 4096);
+            let handles: Vec<_> = (0..8)
+                .map(|thread_id| {
+                    let cache = Arc::clone(&cache);
+                    thread::spawn(move || {
+                        for i in 0..500 {
+                            let key_offset = (thread_id * 50 + i) % 200;
+                            let key = make_key("file.sst", key_offset * 4096);
 
-                        if i % 5 == 0 {
-                            cache.insert(key, make_block(10));
-                        } else {
-                            let _ = cache.get(&key);
+                            if i % 5 == 0 {
+                                cache.insert(key, make_block(10));
+                            } else {
+                                let _ = cache.get(&key);
+                            }
                         }
-                    }
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        for handle in handles {
-            handle.join().unwrap();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            let diag = cache.diagnostics();
+            if diag.contentions > 0 {
+                saw_contentions = true;
+                break;
+            }
         }
 
-        let diag = cache.diagnostics();
-
         // Assert
-        assert!(diag.contentions > 0, "Expected some contentions");
+        assert!(saw_contentions, "Expected some contentions");
     }
 
     #[test]

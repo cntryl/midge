@@ -17,6 +17,26 @@ use crate::{
 
 use super::super::MidgeEngine;
 
+
+
+use std::path::Path;
+use std::time::Duration;
+
+// Try opening an SST reader a few times to tolerate brief filesystem
+// transitions during compaction (rename/replace windows semantics).
+fn open_sst_with_retries(
+    factory: &dyn crate::sst::SstReaderFactory,
+    path: &Path,
+) -> Option<Box<dyn crate::sst::SstStateReader>> {
+    for _ in 0..10 {
+        match factory.open(path) {
+            Ok(s) => return Some(s),
+            Err(_) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    None
+}
+
 impl MidgeEngine {
     /// Get a value by key from a specific column family.
     ///
@@ -165,10 +185,19 @@ impl MidgeEngine {
             .collect();
 
         // Collect all range tombstones from SSTs for this CF
+        // Ensure files are ordered by sequence (newest first) for correct
+        // read semantics — manifest order is not guaranteed.
+        let mut cf_files = cf_files;
+        cf_files.sort_by(|a, b| {
+            let a_seq = a.largest_seq.unwrap_or(0);
+            let b_seq = b.largest_seq.unwrap_or(0);
+            b_seq.cmp(&a_seq)
+        });
+
         let mut all_range_tombstones: Vec<crate::sst::traits::RangeTombstone> = Vec::new();
         for file in &cf_files {
             let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
-            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+            if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
                 all_range_tombstones.extend(sst.range_tombstones());
             }
         }
@@ -177,8 +206,8 @@ impl MidgeEngine {
         for file in cf_files.iter().rev() {
             let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             // CloudSstReaderFactory will download from cloud if not in local cache
-            match self.sst_reader_factory.open(&p) {
-                Ok(sst) => {
+            if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
+                {
                     let state_result = sst.get_state(key);
                     match state_result {
                         Ok(crate::sst::KeyState::Value(v, seq, expiration)) => {
@@ -213,7 +242,8 @@ impl MidgeEngine {
                         Err(_) => continue,
                     }
                 }
-                Err(_) => continue,
+            } else {
+                continue;
             }
         }
 
@@ -330,7 +360,7 @@ impl MidgeEngine {
         let mut all_range_tombstones: Vec<crate::sst::traits::RangeTombstone> = Vec::new();
         for file in &cf_files {
             let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
-            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+            if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
                 all_range_tombstones.extend(sst.range_tombstones());
             }
         }
@@ -346,7 +376,7 @@ impl MidgeEngine {
         for file in &cf_files {
             let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             // CloudSstReaderFactory will download from cloud if not in local cache
-            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+            if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
                 if let Ok(rows) = sst.scan_range_state(start, end_ref) {
                     let now_millis = timestamp::now_millis();
 
@@ -451,7 +481,7 @@ impl MidgeEngine {
         for file in cf_files.iter().rev() {
             let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             // CloudSstReaderFactory will download from cloud if not in local cache
-            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+            if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
                 if let Ok(rows) = sst.scan_range_state(start, end_ref) {
                     let now_millis = timestamp::now_millis();
 
@@ -563,7 +593,7 @@ impl MidgeEngine {
         for file in cf_files.iter().rev() {
             let p = self.sst_dir.join(&file.name);
             // CloudSstReaderFactory will download from cloud if not in local cache
-            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+            if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
                 match sst.get_state_at(key, snap.seq) {
                     Ok(crate::sst::KeyState::Value(v, _seq, exp)) => {
                         // Check if value is expired
@@ -679,7 +709,7 @@ impl MidgeEngine {
 
         for file in cf_files.iter().rev() {
             let p = self.sst_dir.join(&file.name);
-            if let Ok(sst) = self.sst_reader_factory.open(&p) {
+            if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
                 if let Ok(rows) = sst.scan_range_state_at(start, end, snap.seq) {
                     for (k, st) in rows {
                         let key_vec = k.to_vec();
