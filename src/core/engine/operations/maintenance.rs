@@ -445,8 +445,12 @@ impl MidgeEngine {
         if !self.read_only {
             let _ = self.flush();
         }
-        // Load manifest snapshot
-        let m = Manifest::load(&self.db_path).unwrap_or_default();
+        // Use the in-memory manifest snapshot which reflects the latest
+        // applied VersionManager edits. Reading the on-disk manifest.json
+        // can race with in-flight version manager writes and miss recently
+        // added SSTs; using the version_set ensures the checkpoint includes
+        // all SSTs visible to the engine at the time of the call.
+        let m = self.version_set.load().manifest.clone();
         // Prepare checkpoint directories
         std::fs::create_dir_all(dst_dir)?;
         let dst_sst = dst_dir.join("sst");
@@ -464,6 +468,39 @@ impl MidgeEngine {
                     std::fs::create_dir_all(parent)?;
                 }
                 if !src.exists() {
+                    // If the final SST file hasn't been renamed into place yet, there
+                    // may be a temp file (e.g. `{:016}.sst.tmp` or `uuid.sst.tmp`) in the
+                    // same directory. Attempt to locate a matching temp file and copy
+                    // that into the checkpoint as the final SST name so checkpoints
+                    // created concurrently with a flush still include the file.
+                    let parent = src.parent().unwrap_or(&self.sst_dir);
+                    let padded = format!("{:016}", file_meta.sst_seq);
+                    let seq_tmp = parent.join(format!("{}.sst.tmp", padded));
+                    let mut used_tmp: Option<std::path::PathBuf> = None;
+                    if seq_tmp.exists() {
+                        used_tmp = Some(seq_tmp);
+                    } else if let Ok(entries) = std::fs::read_dir(parent) {
+                        for e in entries.flatten() {
+                            if let Some(name) = e.file_name().to_str() {
+                                if name.ends_with(".sst.tmp") && name.contains(&padded) {
+                                    used_tmp = Some(e.path());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(tmp_path) = used_tmp {
+                        // Ensure parent exists for destination
+                        if let Some(parent) = dst.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        if std::fs::copy(&tmp_path, &dst).is_err() {
+                            let _ = std::fs::hard_link(&tmp_path, &dst);
+                        }
+                        continue;
+                    }
+                    // No source or tmp file found; skip this file
                     continue;
                 }
                 // Try copy first, fallback to hard link

@@ -384,7 +384,7 @@ pub fn compaction_test_opts(storage_mode: StorageMode) -> MidgeOptions {
     MidgeOptions {
         storage_mode,
         memtable_size: 1024,         // Small memtable to trigger flushes easily
-        enable_compaction: false,    // Disable background compaction for deterministic manual tests
+        enable_compaction: true,    // Enable background compaction for compaction workloads in tests
         compaction_sst_threshold: 2, // Not used when background compaction is disabled
         ..Default::default()
     }

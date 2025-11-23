@@ -145,7 +145,47 @@ fn should_create_checkpoint_with_multiple_sst_files() {
     eng.flush().unwrap();
 
     // Act: create checkpoint with multiple SST files
+    // Wait for at least two SST files to appear in the DB before checkpointing.
+    // Flaky systems may schedule flush/manifest writes slightly delayed; ensure
+    // the DB directory contains the expected SST files before copying.
+    let sst_dir = dir.path().join("sst");
+    let ok = common::wait_for_condition(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_millis(25),
+        || {
+            if !sst_dir.exists() {
+                return false;
+            }
+            match std::fs::read_dir(&sst_dir) {
+                Ok(rd) => rd.flatten().count() >= 2,
+                Err(_) => false,
+            }
+        },
+    );
+    assert!(ok, "Timed out waiting for SST files to be flushed to disk");
+
     let cp_dir = dir.path().join("checkpoint");
+    // Debug: list SST files present in DB before checkpoint (recursive)
+    fn list_all_files(p: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_file() {
+                    if let Some(s) = p.file_name().and_then(|n| n.to_str()) {
+                        out.push(s.to_string());
+                    }
+                } else if p.is_dir() {
+                    out.extend(list_all_files(&p));
+                }
+            }
+        }
+        out
+    }
+
+    let db_sst_files = list_all_files(&sst_dir);
+    println!("DB SST files before checkpoint: {:?}", db_sst_files);
+
     let result = eng.create_checkpoint(&cp_dir);
 
     // Assert: checkpoint creation should handle multiple SST files
@@ -154,11 +194,8 @@ fn should_create_checkpoint_with_multiple_sst_files() {
     // Verify SST files were copied
     let cp_sst_dir = cp_dir.join("sst");
     assert!(cp_sst_dir.exists());
-    let sst_files = std::fs::read_dir(&cp_sst_dir).unwrap().count();
-    assert!(
-        sst_files >= 2,
-        "Should have at least 2 SST files in checkpoint"
-    );
+    let cp_sst_files = list_all_files(&cp_sst_dir);
+    assert!(cp_sst_files.len() >= 2, "Should have at least 2 SST files in checkpoint; db_ssts={:?} cp_ssts={:?}", db_sst_files, cp_sst_files);
 }
 
 #[test]
