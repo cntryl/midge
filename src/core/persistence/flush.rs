@@ -149,12 +149,12 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
 
     // Allocate SST sequence number for this CF FIRST (before creating writer)
     let sst_seq = crate::core::naming::allocate_sst_seq(cf_id);
-    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id.as_u32()), crate::core::naming::sst_filename(sst_seq));
 
     // Create SST writer with sequence for deterministic temp file naming
-    let mut writer = config
-        .sst_factory
-        .create_with_seq(config.compression, config.block_size, true, sst_seq);
+    let mut writer =
+        config
+            .sst_factory
+            .create_with_seq(config.compression, config.block_size, true, sst_seq);
 
     // Add entries with metadata (sequence, tombstone, and expiration)
     for entry in entries {
@@ -174,7 +174,11 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
 
     // Finish and persist (streaming writer will write directly to disk)
     // Format: dbpath/sst/{cf_id}/{sst_seq}.sst
-    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id.as_u32()), crate::core::naming::sst_filename(sst_seq));
+    let sst_name = format!(
+        "{}/{}",
+        crate::core::naming::pad_cf_id(cf_id.as_u32()),
+        crate::core::naming::sst_filename(sst_seq)
+    );
     let sst_path = config.sst_dir.join(&sst_name);
     if let Some(parent) = sst_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -218,7 +222,11 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let key_range_for_upload = (smallest_key.clone(), largest_key.clone());
     let seq_range_for_upload = (smallest_seq, largest_seq);
 
-    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id.as_u32()), crate::core::naming::sst_filename(sst_seq));
+    let sst_name = format!(
+        "{}/{}",
+        crate::core::naming::pad_cf_id(cf_id.as_u32()),
+        crate::core::naming::sst_filename(sst_seq)
+    );
     m.ssts.push(sst_name.clone());
     m.files.push(crate::core::manifest::FileMeta {
         name: sst_name.clone(),
@@ -378,7 +386,11 @@ fn prune_old_wal_files(wal_dir: &Path, safe_sequence: u64) -> MidgeResult<usize>
                                 pruned_count += 1;
                             }
                             Err(e) => {
-                                tracing::warn!("failed to prune WAL file {}: {}", path.display(), e);
+                                tracing::warn!(
+                                    "failed to prune WAL file {}: {}",
+                                    path.display(),
+                                    e
+                                );
                             }
                         }
                     }
@@ -551,7 +563,11 @@ where
 
     // Allocate SST sequence number for this CF
     let sst_seq = crate::core::naming::allocate_sst_seq(cf_id);
-    let sst_name = format!("{}/{}", crate::core::naming::pad_cf_id(cf_id.as_u32()), crate::core::naming::sst_filename(sst_seq));
+    let sst_name = format!(
+        "{}/{}",
+        crate::core::naming::pad_cf_id(cf_id.as_u32()),
+        crate::core::naming::sst_filename(sst_seq)
+    );
 
     // Persist to file (streaming writer should write directly to disk)
     // Format: dbpath/{cf_id}/{sst_seq}.sst

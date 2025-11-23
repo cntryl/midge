@@ -1,11 +1,11 @@
 // Focused autotune behavior tests
 
 mod common;
-use common::*;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use std::time::Duration;
-use std::sync::Arc;
 use cntryl_midge::config::Autotuner;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use common::*;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 fn should_record_autotune_metrics_when_under_sustained_write_load() {
@@ -16,7 +16,9 @@ fn should_record_autotune_metrics_when_under_sustained_write_load() {
             db_path: dir.path().to_path_buf(),
         },
         memtable_size: 64 * 1024,
-        autotuner: Some(Arc::new(Autotuner::new().with_adjustment_interval(Duration::from_secs(0)))),
+        autotuner: Some(Arc::new(
+            Autotuner::new().with_adjustment_interval(Duration::from_secs(0)),
+        )),
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open engine");
@@ -166,14 +168,13 @@ fn should_bound_autotune_adjustments_when_metrics_fluctuate() {
             db_path: dir.path().to_path_buf(),
         },
         memtable_size: 32 * 1024,
-        autotuner: Some(Arc::new(Autotuner::new().with_adjustment_interval(Duration::from_secs(0)))),
+        autotuner: Some(Arc::new(
+            Autotuner::new().with_adjustment_interval(Duration::from_secs(0)),
+        )),
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open engine");
     let cf = eng.default_column_family();
-
-    // Capture initial snapshot of autotune-controlled parameters
-    let snap0 = eng.metrics().snapshot();
 
     // Act: alternate between bursts of writes and idle flushes to generate
     // changing load patterns that exercise the autotuner over time.
