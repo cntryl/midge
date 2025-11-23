@@ -5,6 +5,7 @@
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 // using channel-based coordination and yields instead of sleeps
 use std::sync::mpsc::channel;
@@ -26,23 +27,33 @@ fn should_serve_reads_given_compaction_in_progress() {
         populate_multi_level_data(&engine, &cf);
 
         // Act - Trigger compaction in background thread once readers are ready.
+        // Use an AtomicBool to broadcast "compaction started" to many reader
+        // threads (mpsc::Receiver is single-consumer so it can't be reused).
         let (start_tx, start_rx) = channel::<()>();
-        let (started_tx, started_rx) = channel::<()>();
+        let started = Arc::new(AtomicBool::new(false));
         let engine_clone = Arc::clone(&engine);
+        let started_clone = Arc::clone(&started);
         let compaction_handle = thread::spawn(move || {
             // Wait until main thread signals to begin compaction
             let _ = start_rx.recv();
             // Notify readers that compaction is beginning
-            let _ = started_tx.send(());
+            started_clone.store(true, Ordering::SeqCst);
             let _ = engine_clone.compact_all();
         });
 
-        // Perform concurrent reads while compaction runs
+        // Perform concurrent reads while compaction runs. Readers will wait
+        // until compaction sets `started` so we get deterministic overlap.
         let mut read_handles = vec![];
         for _ in 0..10 {
             let engine_clone = Arc::clone(&engine);
             let cf_clone = cf.clone();
+            let started_clone = Arc::clone(&started);
             let handle = thread::spawn(move || {
+                // Wait for compaction to start
+                while !started_clone.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+
                 for i in 0..100 {
                     let key = format!("key{:03}", i);
                     let result = engine_clone.get(&cf_clone, key.as_bytes());
@@ -52,14 +63,15 @@ fn should_serve_reads_given_compaction_in_progress() {
             });
             read_handles.push(handle);
         }
+        // Signal compaction to run — the compaction thread will set `started`
+        // once it actually begins which will wake all readers.
+        let _ = start_tx.send(());
 
+        // Let readers run concurrently with compaction; join readers first
+        // then join compaction to ensure overlap.
         for handle in read_handles {
             handle.join().unwrap();
         }
-        // Signal compaction to run once readers are started
-        let _ = start_tx.send(());
-        // Ensure compaction started before we join (best-effort)
-        let _ = started_rx.recv();
         compaction_handle.join().unwrap();
 
         // Assert - All reads completed successfully without errors
@@ -142,17 +154,23 @@ fn should_handle_scan_given_files_being_merged() {
         populate_multi_level_data(&engine, &cf);
 
         // Act - Trigger compaction in background
-        // Start compaction in the background and ensure it signals when it begins
-        let (started_tx_scan, started_rx_scan) = channel::<()>();
+        // Start compaction in the background and ensure it signals when it begins.
+        // We'll use an AtomicBool so a single compaction-start event can be
+        // observed by multiple consumers without relying on a single-use
+        // mpsc receiver.
+        let (started_tx_scan, start_rx_scan) = channel::<()>();
+        let started_scan = Arc::new(AtomicBool::new(false));
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
             // signal that compaction is about to start so scanner can begin
             let _ = started_tx_scan.send(());
+            // publish that compaction is in-progress
+            started_scan.store(true, Ordering::SeqCst);
             let _ = engine_clone.compact_all();
         });
 
         // Wait until compaction is signalled as started, then perform range scans while compaction runs
-        let _ = started_rx_scan.recv();
+        let _ = start_rx_scan.recv();
         // Perform range scans while compaction runs
         let engine_clone = Arc::clone(&engine);
         let cf_clone = cf.clone();
@@ -172,8 +190,7 @@ fn should_handle_scan_given_files_being_merged() {
             }
         });
 
-        // Wait until compaction has started before joining to ensure the overlap ran
-        let _ = started_rx_scan.recv();
+        // Wait for the scan tasks to complete; compaction will join below.
         scan_handle.join().unwrap();
         compaction_handle.join().unwrap();
 

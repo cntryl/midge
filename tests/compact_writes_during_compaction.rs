@@ -193,7 +193,9 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
         let engine_clone = Arc::clone(&engine);
         let cf_clone = cf.clone();
         let flush_handle = thread::spawn(move || {
-            // Write and flush new data
+            // Wait for compaction to actually begin, then write and flush new data so
+            // the flush happens while compaction is in progress.
+            let _ = started_rx4.recv();
             for i in 300..350 {
                 let key = format!("late_key{:03}", i);
                 engine_clone
@@ -203,9 +205,10 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
             engine_clone.flush().unwrap();
         });
 
-        // After flush is started, trigger compaction
+        // After flush is started, trigger compaction; the flush thread is
+        // waiting on `started_rx4` so it will run while compaction is in
+        // progress.
         let _ = start_tx4.send(());
-        let _ = started_rx4.recv();
         flush_handle.join().unwrap();
         compaction_handle.join().unwrap();
 
