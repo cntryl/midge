@@ -23,8 +23,7 @@ fn should_evict_oldest_files_given_cache_full_when_adding_new_files() {
         HybridStorage::new(dir.path().to_path_buf(), mock_backend.clone(), cache_size)
             .expect("failed to create hybrid storage"),
     );
-    hybrid.spawn_background_workers();
-
+    // Use synchronous writes so eviction happens deterministically inside write
     let storage = Arc::new(HybridStorageBackend::new(hybrid.clone(), true));
 
     // Act - Write files that exceed cache size (each ~2KB)
@@ -34,17 +33,14 @@ fn should_evict_oldest_files_given_cache_full_when_adding_new_files() {
         storage.put_blob(&key, data).expect("put failed");
     }
 
-    // Wait until background eviction has reduced file count (poll, fail fast)
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(2);
-    while start.elapsed() < timeout {
-        let stats = hybrid.cache_stats();
-        if stats.file_count < 10 {
-            break;
-        }
-        // Poll briefly while waiting for background eviction
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    // Eviction occurs synchronously in update_cache_state, so we can assert immediately
+    let stats = hybrid.cache_stats();
+    assert!(
+        stats.file_count < 10,
+        "Cache should have evicted files (file_count={}, cache {}KB)",
+        stats.file_count,
+        cache_size / 1024
+    );
 
     // Assert - Cache should have evicted some files
     let stats = hybrid.cache_stats();
@@ -74,7 +70,7 @@ fn should_handle_concurrent_reads_writes_to_cache() {
         HybridStorage::new(dir.path().to_path_buf(), mock_backend.clone(), cache_size)
             .expect("failed to create hybrid storage"),
     );
-    hybrid.spawn_background_workers();
+    // background workers not required for deterministic synchronous writes
 
     let storage = Arc::new(HybridStorageBackend::new(hybrid.clone(), true));
 
@@ -162,22 +158,9 @@ fn should_maintain_correctness_under_rapid_cache_churn() {
         storage.put_blob(key, data.clone()).expect("put failed");
     }
 
-    // Wait up to 1s for churn operations to settle
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(1);
-    while start.elapsed() < timeout {
-        let mut all_ok = true;
-        for (key, _) in &test_data {
-            if storage.get_blob(key).is_err() {
-                all_ok = false;
-                break;
-            }
-        }
-        if all_ok {
-            break;
-        }
-        // Pause briefly to avoid busy spinning while awaiting cloud/cache stability
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    // Synchronous writes ensure data is already uploaded; assert immediately
+    for (key, _) in &test_data {
+        assert!(storage.get_blob(key).is_ok(), "get should succeed for {}", key);
     }
 
     // Assert - All data should be retrievable and correct
@@ -270,24 +253,7 @@ fn should_recover_from_cache_directory_deletion() {
             .expect("put failed");
     }
 
-    // Wait a short while for background workers to settle
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(1);
-    while start.elapsed() < timeout {
-        let mut ok = true;
-        for i in 0..10 {
-            let key = format!("resilient-{}.dat", i);
-            if storage.get_blob(&key).is_err() {
-                ok = false;
-                break;
-            }
-        }
-        if ok {
-            break;
-        }
-        // Short pause to let background workers settle without tight spin
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    // Writes are synchronous, so data should be immediately retrievable from cloud
 
     // Act - Simulate cache corruption/deletion (cloud still has data)
     // In reality, cache directory corruption is handled by HybridStorage internally

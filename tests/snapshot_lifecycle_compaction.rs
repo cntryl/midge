@@ -44,14 +44,9 @@ fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_
         let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
         eng.compact_level(&cf, 0).unwrap();
         assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+        // Release the compaction gate and wait deterministically for compaction to finish
         gate.release();
-        let start = std::time::Instant::now();
-        while hooks.compaction_complete_count() == 0 {
-            if start.elapsed() > Duration::from_secs(10) {
-                panic!("Compaction did not complete in time");
-            }
-            std::thread::yield_now();
-        }
+        eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
     }
 
     // Assert: snapshot view remains stable
@@ -102,13 +97,7 @@ fn should_release_old_files_given_snapshot_expiry_when_all_new_reads_use_fresh_s
     eng.compact_level(&cf, 0).unwrap();
     assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
     gate.release();
-    let start = std::time::Instant::now();
-    while hooks.compaction_complete_count() == 0 {
-        if start.elapsed() > Duration::from_secs(10) {
-            panic!("Compaction did not complete in time");
-        }
-        std::thread::yield_now();
-    }
+    eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
 
     // Act: drop snapshot (simulate expiry)
     drop(_snapshot);
@@ -166,13 +155,7 @@ fn should_not_leak_disk_space_given_long_lived_snapshot_and_heavy_write_load_whe
         eng.compact_level(&cf, 0).unwrap();
         assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
         gate.release();
-        let start = std::time::Instant::now();
-        while hooks.compaction_complete_count() == 0 {
-            if start.elapsed() > Duration::from_secs(10) {
-                panic!("Compaction did not complete in time");
-            }
-            std::thread::yield_now();
-        }
+        eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
     }
 
     // Assert: no leak (check keys are present)

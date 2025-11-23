@@ -86,13 +86,7 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
     // by observing the compaction completion hook. We avoid sleeping and use
     // a bounded spin (yield) to wait for the logical event.
     after_gate.release();
-    let start = std::time::Instant::now();
-    while hooks.compaction_complete_count() == 0 {
-        if start.elapsed() > std::time::Duration::from_secs(10) {
-            panic!("Compaction did not complete in time");
-        }
-        std::thread::yield_now();
-    }
+    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
 
     drop(eng);
 
@@ -145,13 +139,7 @@ fn should_cleanup_partial_output_given_compaction_failure() {
     // Deterministically trigger compaction and wait for the failure hook.
     eng.flush().expect("flush should succeed");
     eng.compact_level(&cf, 0).expect("compact_level");
-    let start = std::time::Instant::now();
-    while hooks.compaction_failed_count() == 0 {
-        if start.elapsed() > std::time::Duration::from_secs(10) {
-            panic!("Compaction did not fail in time");
-        }
-        std::thread::yield_now();
-    }
+    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
     let compaction_started = hooks.compaction_start_count() > 0;
     let compaction_failed = hooks.compaction_failed_count() > 0;
 
@@ -431,13 +419,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
 
     // Allow compaction to finish and wait deterministically for its completion.
     after_gate.release();
-    let start = std::time::Instant::now();
-    while hooks.compaction_complete_count() == 0 {
-        if start.elapsed() > std::time::Duration::from_secs(10) {
-            panic!("Compaction did not complete in time");
-        }
-        std::thread::yield_now();
-    }
+    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
 
     drop(eng);
 
@@ -555,13 +537,7 @@ fn should_keep_source_ssts_present_until_manifest_persisted() {
     }
 
     after_gate.release();
-    let start = std::time::Instant::now();
-    while hooks.compaction_complete_count() == 0 {
-        if start.elapsed() > std::time::Duration::from_secs(10) {
-            panic!("Compaction did not complete in time");
-        }
-        std::thread::yield_now();
-    }
+    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
 }
 
 #[test]

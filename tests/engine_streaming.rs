@@ -31,9 +31,8 @@ fn should_streaming_scan_match_regular_scan() {
         eng.put(&cf, &key, &val).expect("put");
     }
 
-    // Wait for flush
-    eng.wait_for_flush(std::time::Duration::from_millis(100))
-        .expect("flush should complete");
+    // Force a deterministic flush so SST vs memtable split is predictable
+    eng.flush().expect("flush should complete");
 
     // Add more keys to memtable
     for i in 5..10u8 {
@@ -190,8 +189,8 @@ fn should_handle_streaming_scan_after_engine_flush() {
         eng.put(&cf, &[b'k', b'0' + i], &[b'v', b'0' + i])
             .expect("put");
     }
-    eng.wait_for_flush(std::time::Duration::from_millis(100))
-        .expect("flush");
+    // Ensure a deterministic flush so streaming scan reads from SSTs as expected
+    eng.flush().expect("flush");
 
     // Act - Stream after flush
     let results = eng.scan_streaming(Query::new()).expect("scan_streaming");
@@ -286,9 +285,8 @@ fn should_streaming_scan_handle_large_dataset() {
         eng.put(&cf, key.as_bytes(), value.as_bytes()).expect("put");
     }
 
-    // Wait for flushes
-    eng.wait_for_flush(std::time::Duration::from_millis(200))
-        .expect("flush");
+    // Flush deterministically to persist any memtable contents so the scan spans SSTs
+    eng.flush().expect("flush");
 
     // Act - Stream result set spanning multiple SSTables
     let results = eng.scan_streaming(Query::new()).expect("scan_streaming");
