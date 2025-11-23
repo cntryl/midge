@@ -167,7 +167,7 @@ fn should_background_compact_when_threshold_exceeded() {
 
         // Background compaction runs every 50ms. Wait up to 10 seconds for compaction to run.
         // Use engine's wait_for_compaction helper instead of manual polling.
-        if let Err(_) = _eng.wait_for_compaction(std::time::Duration::from_secs(10)) {
+        if _eng.wait_for_compaction(std::time::Duration::from_secs(10)).is_err() {
             tracing::warn!(
                 "Timeout: compaction did not complete within 10 seconds (manifest may not be reduced)"
             );

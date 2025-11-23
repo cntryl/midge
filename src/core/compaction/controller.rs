@@ -409,6 +409,7 @@ impl CompactionController {
     /// Synchronously run a single compaction plan using the same logic as the
     /// background worker. This is intended for deterministic tests that want
     /// to drive compaction end-to-end without relying on background threads.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_plan_sync(
         &self,
         db_path: &Path,

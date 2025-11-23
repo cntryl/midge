@@ -84,7 +84,7 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
     let eng = MidgeEngine::open(opts_recovery).expect("recover");
     let cf = eng.default_column_family();
     // DEBUG: inspect manifest after recovery to understand which files were loaded
-    match cntryl_midge::manifest::Manifest::load(&dir.path()) {
+    match cntryl_midge::manifest::Manifest::load(dir.path()) {
         Ok(m) => {
             eprintln!(
                 "[DEBUG] manifest after recovery: ssts={} files={}",
@@ -214,7 +214,7 @@ fn should_cleanup_partial_output_given_compaction_failure() {
         eprintln!("[DEBUG] sst dir missing before drop");
     }
 
-    match cntryl_midge::manifest::Manifest::load(&dir.path()) {
+    match cntryl_midge::manifest::Manifest::load(dir.path()) {
         Ok(m) => eprintln!(
             "[DEBUG] manifest before drop: ssts={} files={}",
             m.ssts.len(),
@@ -250,7 +250,7 @@ fn should_cleanup_partial_output_given_compaction_failure() {
     let eng = MidgeEngine::open(opts_recovery).expect("recover");
     let cf = eng.default_column_family();
     // DEBUG: inspect manifest and WAL after recovery
-    match cntryl_midge::manifest::Manifest::load(&dir.path()) {
+    match cntryl_midge::manifest::Manifest::load(dir.path()) {
         Ok(m) => {
             eprintln!(
                 "[DEBUG] manifest after recovery: last_persisted_seq={} ssts={} files={}",
@@ -493,7 +493,7 @@ fn should_keep_source_ssts_present_until_manifest_persisted() {
         }
 
         // Show manifest if loadable
-        match cntryl_midge::manifest::Manifest::load(&dir.path()) {
+        match cntryl_midge::manifest::Manifest::load(dir.path()) {
             Ok(m) => eprintln!(
                 "DEBUG: manifest ssts={} files={:?}",
                 m.ssts.len(),

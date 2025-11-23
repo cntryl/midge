@@ -280,8 +280,7 @@ mod tests {
     fn initialize_sequences_does_not_lower_wal_seq() {
         // Arrange: make the in-memory allocator higher than manifest
         NEXT_WAL_SEQ.store(100, Ordering::Relaxed);
-        let mut manifest = crate::core::manifest::Manifest::default();
-        manifest.next_wal_seq = 1;
+        let manifest = crate::core::manifest::Manifest { next_wal_seq: 1, ..Default::default() };
 
         // Act
         initialize_sequences(&manifest);

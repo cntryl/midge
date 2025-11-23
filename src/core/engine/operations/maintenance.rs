@@ -337,7 +337,7 @@ impl MidgeEngine {
                 }
                 if bloom_after != bloom_before {
                     self.metrics
-                        .record_bloom_bits_adjustment(bloom_before as u32, bloom_after as u32);
+                        .record_bloom_bits_adjustment(bloom_before, bloom_after);
                 }
             }
         }

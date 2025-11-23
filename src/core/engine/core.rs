@@ -473,26 +473,11 @@ mod tests {
     fn should_build_plan_over_all_cf_files_when_compacting_full_rewrite() {
         use crate::core::compaction::CompactionPlan;
 
-        struct RecordingController {
-            last_plan: Arc<parking_lot::RwLock<Option<CompactionPlan>>>,
-        }
-
-        impl RecordingController {
-            fn new() -> (Self, Arc<parking_lot::RwLock<Option<CompactionPlan>>>) {
-                let slot = Arc::new(parking_lot::RwLock::new(None));
-                (
-                    Self {
-                        last_plan: slot.clone(),
-                    },
-                    slot,
-                )
-            }
-        }
-
-        impl crate::core::CompactionController {
-            // This impl block is only to satisfy the type checker in the
-            // synthetic test below; the real implementation lives elsewhere.
-        }
+        // Note: earlier versions defined a RecordingController and a nested
+        // impl for `crate::core::CompactionController` here — those were
+        // unused and caused non-local impl warnings. The test below does
+        // not require any test-only impls, so we omit them to keep the
+        // test scoped and avoid clippy noise.
 
         // Build a minimal engine with a fabricated manifest and a stub controller.
         let opts = crate::MidgeOptions {
