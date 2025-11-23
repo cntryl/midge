@@ -64,6 +64,9 @@ fn should_handle_freeze_then_compaction_then_iterate_sequence() {
     let dirpath = tmp.path().to_path_buf();
 
     // Restart engine to simulate an internal lifecycle (freeze/compact)
+    // Drop the original engine so the restart can re-open the same path
+    // deterministically without encountering a lock held by the prior handle.
+    drop(eng);
     with_engine_restart(
         durability_opts(dirpath.clone()),
         |_| {},

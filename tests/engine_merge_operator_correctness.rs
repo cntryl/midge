@@ -199,8 +199,13 @@ fn should_resolve_merges_correctly_after_compaction() {
     engine.merge_cf(&cf, b"counter", b"15").expect("merge");
     engine.flush().expect("flush");
 
-    // Act - trigger compaction
+    // Act - trigger compaction and wait deterministically for background worker
     engine.compact_range(&cf, None, None).expect("compact");
+    // compact_range enqueues work for the background compaction thread; wait
+    // for compaction to finish so the assertion below is deterministic.
+    engine
+        .wait_for_compaction(std::time::Duration::from_secs(10))
+        .expect("compaction did not finish in time");
 
     // Assert - all merges should be resolved
     // NOTE: Current behavior shows merges aren't fully resolved across levels

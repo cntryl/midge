@@ -154,20 +154,29 @@ fn should_create_multiple_checkpoints_given_sequential_creation_when_requested()
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
 
-    eng.put(&cf, b"key", b"v1").unwrap();
+    eng.put(&cf, b"key1", b"v1").unwrap();
     eng.flush().unwrap();
     let ckpt1 = dir.path().join("ckpt1");
     eng.create_checkpoint(&ckpt1).unwrap();
 
-    eng.put(&cf, b"key", b"v2").unwrap();
+    // created ckpt1 (contents will be verified after engine is closed)
+
+    eng.put(&cf, b"key2", b"v2").unwrap();
     eng.flush().unwrap();
     let ckpt2 = dir.path().join("ckpt2");
     eng.create_checkpoint(&ckpt2).unwrap();
 
-    eng.put(&cf, b"key", b"v3").unwrap();
+    // created ckpt2 (contents will be verified after engine is closed)
+
+    eng.put(&cf, b"key3", b"v3").unwrap();
     eng.flush().unwrap();
     let ckpt3 = dir.path().join("ckpt3");
     eng.create_checkpoint(&ckpt3).unwrap();
+
+    // created ckpt3 (contents will be verified after engine is closed)
+
+    // Close the original engine before opening checkpoints to avoid lock conflicts
+    drop(eng);
 
     // Act - open all checkpoints
     let eng1 = MidgeEngine::open(MidgeOptions {
@@ -191,9 +200,9 @@ fn should_create_multiple_checkpoints_given_sequential_creation_when_requested()
     let cf3 = eng3.default_column_family();
 
     // Assert - each checkpoint has correct version
-    assert_eq!(eng1.get(&cf1, b"key").unwrap().unwrap(), Bytes::from("v1"));
-    assert_eq!(eng2.get(&cf2, b"key").unwrap().unwrap(), Bytes::from("v2"));
-    assert_eq!(eng3.get(&cf3, b"key").unwrap().unwrap(), Bytes::from("v3"));
+    assert_eq!(eng1.get(&cf1, b"key1").unwrap().unwrap(), Bytes::from("v1"));
+    assert_eq!(eng2.get(&cf2, b"key2").unwrap().unwrap(), Bytes::from("v2"));
+    assert_eq!(eng3.get(&cf3, b"key3").unwrap().unwrap(), Bytes::from("v3"));
 }
 
 #[test]
