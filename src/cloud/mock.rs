@@ -973,9 +973,13 @@ mod tests {
         backend.put_blob(key, data.clone()).unwrap();
         let etag1 = backend.etags.lock().get(key).cloned().unwrap();
 
-        std::thread::sleep(Duration::from_millis(1)); // Ensure time difference
+        // Advance test clock instead of real sleep so tests remain fast and deterministic
+        crate::common::timestamp::add_clock_offset_millis(1);
 
         backend.put_blob(key, data).unwrap();
+
+        // Revert the clock adjustment to avoid impacting other tests
+        crate::common::timestamp::add_clock_offset_millis(-1);
         let etag2 = backend.etags.lock().get(key).cloned().unwrap();
 
         // Assert

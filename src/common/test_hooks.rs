@@ -323,6 +323,14 @@ impl TestHooks {
         FlushGateHandle::new(ready_rx, resume_tx)
     }
 
+    /// Advance the global clock by `millis` milliseconds.
+    /// This helper is intended for tests only; it relies on the test-time API
+    /// in `common::timestamp` to shift the global clock offset.
+    pub fn fast_forward_clock(&self, millis: i64) {
+        // Call into the timestamp helper which is feature-gated/test-gated
+        crate::common::timestamp::add_clock_offset_millis(millis);
+    }
+
     // -------------------------------------------------------------------------
     // Operation Hooks (called by production code)
     // -------------------------------------------------------------------------

@@ -45,7 +45,8 @@ fn should_create_checkpoint_during_concurrent_writes() {
         if engine.get(&cf, format!("key_{}", 0).as_bytes()).unwrap().is_some() {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Avoid tight spin while waiting for writer to make progress
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
     // Act - Create checkpoint while writes are ongoing

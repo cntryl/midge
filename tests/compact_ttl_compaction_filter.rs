@@ -2,7 +2,7 @@
 // Extracted from compaction_concurrent.rs
 
 // Compaction During Concurrent Operations tests - P1 Priority
-use cntryl_midge::MidgeEngine;
+use cntryl_midge::{MidgeEngine, test_hooks::TestHooks};
 // replaced hard sleeps with deterministic polling; avoid unused imports
 
 mod common;
@@ -13,7 +13,9 @@ fn should_remove_expired_keys_given_ttl_exceeded_when_compacting() {
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let mut opts = compaction_test_opts(storage_mode);
+        let hooks = TestHooks::new();
+        opts.test_hooks = Some(hooks.clone());
         let engine = MidgeEngine::open(opts).unwrap();
         let cf = engine.default_column_family();
 
@@ -26,16 +28,8 @@ fn should_remove_expired_keys_given_ttl_exceeded_when_compacting() {
         }
         engine.flush().unwrap();
 
-        // Wait for expiration (poll, fail fast if it doesn't happen in reasonable time)
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(3);
-        // Poll until the first key is observed to be expired or timeout
-        while start.elapsed() < timeout {
-            if engine.get(&cf, format!("ttl_key{:02}", 0).as_bytes()).unwrap().is_none() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // Fast-forward the test clock so the TTLs expire immediately instead of sleeping.
+        hooks.fast_forward_clock(2000);
 
         // Act - Compact (should remove expired keys)
         engine.compact_all().unwrap();
@@ -56,7 +50,9 @@ fn should_preserve_non_expired_keys_given_ttl_not_reached() {
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let mut opts = compaction_test_opts(storage_mode);
+        let hooks = TestHooks::new();
+        opts.test_hooks = Some(hooks.clone());
         let engine = MidgeEngine::open(opts).unwrap();
         let cf = engine.default_column_family();
 
@@ -87,7 +83,9 @@ fn should_respect_cf_ttl_setting_given_column_family_config() {
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
         // Arrange - Uses default CF which may have TTL config
-        let opts = compaction_test_opts(storage_mode);
+        let mut opts = compaction_test_opts(storage_mode);
+        let hooks = TestHooks::new();
+        opts.test_hooks = Some(hooks.clone());
         let engine = MidgeEngine::open(opts).unwrap();
         let cf = engine.default_column_family();
 
@@ -96,14 +94,8 @@ fn should_respect_cf_ttl_setting_given_column_family_config() {
         engine.put_with_ttl(&cf, b"with_ttl", b"temp", 1).unwrap();
         engine.flush().unwrap();
 
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(3);
-        while start.elapsed() < timeout {
-            if engine.get(&cf, b"with_ttl").unwrap().is_none() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // Advance clock for the TTL key only in negative cases; in this test we want with_ttl to expire
+        hooks.fast_forward_clock(2000);
 
         // Act
         engine.compact_all().unwrap();
@@ -118,7 +110,9 @@ fn should_update_metrics_given_ttl_filtered_keys() {
     for mode in common::disk_storage_modes() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let mut opts = compaction_test_opts(storage_mode);
+        let hooks = TestHooks::new();
+        opts.test_hooks = Some(hooks.clone());
         let engine = MidgeEngine::open(opts).unwrap();
         let cf = engine.default_column_family();
 
@@ -130,15 +124,8 @@ fn should_update_metrics_given_ttl_filtered_keys() {
         }
         engine.flush().unwrap();
 
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(3);
-        while start.elapsed() < timeout {
-            // If any one of the inserted keys is already expired, proceed
-            if engine.get(&cf, format!("metric_k{:02}", 0).as_bytes()).unwrap().is_none() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // Use the test hooks to advance the clock so TTLs expire deterministically
+        hooks.fast_forward_clock(2000);
 
         // Act - Compact and potentially filter expired keys
         let result = engine.compact_all();

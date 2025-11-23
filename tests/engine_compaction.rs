@@ -144,7 +144,7 @@ fn should_background_compact_when_threshold_exceeded() {
                     break;
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
@@ -169,28 +169,12 @@ fn should_background_compact_when_threshold_exceeded() {
     {
         let _eng = MidgeEngine::open(opts.clone()).expect("open for background compaction");
 
-        // Background compaction runs every 50ms. Wait up to 10 seconds for compaction to reduce file count.
-        // Check every 500ms to see if file count has decreased.
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(10);
-        let db_path = opts.storage_mode.local_path();
-
-        loop {
-            if let Ok(m) = cntryl_midge::manifest::Manifest::load(&db_path) {
-                if m.ssts.len() < 4 {
-                    tracing::info!(
-                        "Compaction succeeded: SST count reduced to {}",
-                        m.ssts.len()
-                    );
-                    break;
-                }
-            }
-            if start.elapsed() > timeout {
-                tracing::warn!("Timeout: compaction did not reduce SST count within 10 seconds");
-                break;
-            }
-            // Poll more frequently for responsiveness in CI (originally 500ms)
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        // Background compaction runs every 50ms. Wait up to 10 seconds for compaction to run.
+        // Use engine's wait_for_compaction helper instead of manual polling.
+        if let Err(_) = _eng.wait_for_compaction(std::time::Duration::from_secs(10)) {
+            tracing::warn!(
+                "Timeout: compaction did not complete within 10 seconds (manifest may not be reduced)"
+            );
         }
     }
 

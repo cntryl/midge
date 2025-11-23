@@ -55,6 +55,7 @@ fn should_rotate_wal_given_small_buffer_when_multiple_puts() {
         if wal_has_file || sst_has_file {
             break;
         }
+        // Sleep a bit to give background components some time; 10ms reduces CPU spin
         std::thread::sleep(std::time::Duration::from_millis(10));
         waited += 10;
     }

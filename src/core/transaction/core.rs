@@ -620,8 +620,11 @@ mod tests {
         );
 
         // Act
-        std::thread::sleep(Duration::from_millis(1));
+        // Use test-only clock fast-forward rather than sleeping to keep tests deterministic
+        crate::common::timestamp::add_clock_offset_millis(2);
         let expired = txn.is_expired();
+        // Revert the small offset so other tests remain deterministic
+        crate::common::timestamp::add_clock_offset_millis(-2);
 
         // Assert
         assert!(expired);

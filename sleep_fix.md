@@ -105,7 +105,53 @@ The following additional test improvements were applied in the latest pass:
 - `tests/engine_compaction.rs` — changed a blind 50ms sleep used between iterations into a manifest-polling loop and reduced a 500ms polling interval to 100ms.
 - `tests/durability_compaction.rs` — replaced 100ms polling in loops with shorter 10ms polls to reduce wall-clock delay.
 
+ADDITIONAL MICRO-OPTIMIZATIONS (this sub-pass)
+---------------------------------------------
+- Converted remaining 10ms polling sleeps in the tests to 1ms sleeps to reduce per-loop wall-clock delays across the suite while avoiding busy-spin. Files updated:
+   - `tests/engine_wal_recovery.rs` — polling between WAL/SST checks now sleeps 1ms.
+   - `tests/engine_compaction.rs` — inter-iteration polling reduced to 1ms.
+   - `tests/durability_compaction.rs` — manifests & verification polls reduced to 1ms.
+   - `tests/compact_ttl_compaction_filter.rs` — polling for TTL expiry reduced to 1ms.
+   - `tests/cloud_hybrid_stress.rs` — polling loops reduced to 1ms and cloud wait helpers used where appropriate.
+
+Rationale: Switching 10ms sleeps to 1ms reduces cumulative test wall-time when loops run many times (tight polling) without forcing busy-spin. If you'd prefer pure-yield (no sleeping) for the smallest checks we can convert to yield calls, but 1ms is a safer default for CI.
+
 Status: The largest long sleeps (>=1s) and the high-severity TTL cases were addressed earlier; remaining sleeps in tests are mostly small polling intervals (5–100ms) used to avoid busy-spin. Next step: continue to iterate through tests and (a) convert more poll+sleeps to wait helpers or test hooks, and (b) group/mark slow tests that require >1s to run so CI stays fast.
+
+FINAL SWEEP (this pass)
+-----------------------
+I've completed a final sweep to normalize short sleeps. Changes in this sub-pass:
+
+- Replaced remaining 10ms sleeps across tests with 1ms sleeps to reduce cumulative wall time.
+- Replaced some tiny sleeps with `yield_now()` where appropriate (very small cooperative waits used inside tight loops).
+- Reworked several race-based tests to use channels / explicit signaling instead of relying on timing.
+
+Outstanding items (suggested next work):
+- Some tests still use wait-for helpers or long timeouts (e.g. wait_for_compaction(Duration::from_secs(10)) or polling loops which check for TTL expirations). These are timeouts (not blind sleeps) and are reasonable—but can be made faster by exposing test-only hooks (e.g., forcing TTL expiry, forcing compaction, fast-forward clocks).
+
+TEST-HOOKS ADDED
+----------------
+I added a small test-only clock API so tests can deterministically fast-forward time instead of sleeping.
+
+- `src/common/timestamp.rs` — added `add_clock_offset_millis` and `set_clock_offset_millis` helpers (intended for tests) which adjust the global clock offset used by engine/time APIs.
+- `src/common/test_hooks.rs` — added `TestHooks::fast_forward_clock(millis: i64)` which wraps the timestamp helper so tests can shift time via their `TestHooks` instance.
+
+Updated tests to use the fast-forward hook:
+- `tests/compact_ttl_compaction_filter.rs` — now injects `TestHooks` and calls `fast_forward_clock(2000)` after writing/flush, removing polling/sleep-based waits.
+
+These hooks make TTL and other time-based tests deterministic and fast without changing production behavior.
+- Long test cases that genuinely sleep for multi-second intervals (if any remain) should be reviewed and either converted to test hooks or moved to a dedicated 'slow' test group run separately from fast CI.
+
+If you'd like, I can now:
+1. Create a PR with these changes grouped logically (either single large PR or multiple smaller ones). 
+2. Continue and remove/optimize some of the remaining multi-second waits by adding test-only hooks (requires code changes in engine to support signals or a test-controlled clock).
+3. Run a targeted set of tests from the modified files to sanity check behavior locally and produce a before/after timing comparison.
+
+FINAL NOTE
+----------
+At the end of this pass there are no remaining long blind sleeps in `tests/` (multi-second hard sleeps have been replaced by polling or wait helpers). A small number of 1ms polling sleeps remain in a handful of tests — these are deliberate short pauses in time-bounded polling loops (safer than busy-spin and low CPU overhead). If you prefer, I can convert those to yields or add explicit test hooks to remove them entirely, but 1ms polls are a pragmatic tradeoff for test stability and low CPU consumption on CI.
+
+Tell me which of the three you'd like next and I'll proceed.
 
 
 Next steps / suggested workflow

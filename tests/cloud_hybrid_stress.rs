@@ -42,6 +42,7 @@ fn should_evict_oldest_files_given_cache_full_when_adding_new_files() {
         if stats.file_count < 10 {
             break;
         }
+        // Poll briefly while waiting for background eviction
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
@@ -175,6 +176,7 @@ fn should_maintain_correctness_under_rapid_cache_churn() {
         if all_ok {
             break;
         }
+        // Pause briefly to avoid busy spinning while awaiting cloud/cache stability
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
@@ -283,6 +285,7 @@ fn should_recover_from_cache_directory_deletion() {
         if ok {
             break;
         }
+        // Short pause to let background workers settle without tight spin
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 

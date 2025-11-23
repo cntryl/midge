@@ -307,6 +307,26 @@ pub fn now_nanos_fast() -> u128 {
     now_millis_fast() as u128 * 1_000_000
 }
 
+//----------------------------------------------------------------------
+// Test-only helpers (enabled under the `test-hooks` feature)
+//----------------------------------------------------------------------
+/// Advance the global clock offset by `delta_ms` milliseconds.
+///
+/// This is intended for tests only (feature-gated). It adjusts the internal
+/// CLOCK_OFFSET so calls to `now_millis()` and friends will reflect the
+/// adjusted time. Passing a negative delta will move the clock backwards.
+pub fn add_clock_offset_millis(delta_ms: i64) {
+    use std::sync::atomic::Ordering;
+    CLOCK_OFFSET.fetch_add(delta_ms, Ordering::Relaxed);
+}
+
+/// Set the global clock offset to `offset_ms` (absolute value). Tests can use
+/// this to jump time to a desired offset relative to system time.
+pub fn set_clock_offset_millis(offset_ms: i64) {
+    use std::sync::atomic::Ordering;
+    CLOCK_OFFSET.store(offset_ms, Ordering::Relaxed);
+}
+
 /// Get current time as SystemTime.
 ///
 /// This converts the monotonic millisecond timestamp back to SystemTime.

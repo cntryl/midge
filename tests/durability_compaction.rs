@@ -179,7 +179,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
         if hooks.manifest_update_count() > manifest_updates_before {
             break;
         }
-        // Poll faster (short sleep) to fail fast and reduce test wall-time
+        // Poll briefly to fail fast but avoid busy spin
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
@@ -214,7 +214,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
         if all_correct {
             break;
         }
-        // Shorter sleep for faster retries
+        // Give a short pause between retries to avoid tight busy loops
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
