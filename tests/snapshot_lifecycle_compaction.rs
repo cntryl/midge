@@ -2,6 +2,7 @@
 mod common;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query, StorageMode};
+use cntryl_midge::test_hooks::{TestHooks, CompactionGatePoint};
 use common::*;
 use std::time::Duration;
 
@@ -10,9 +11,11 @@ fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_
 ) {
     // Arrange: create a long-lived snapshot and perform writes
     let dir = test_temp_dir();
-    let opts = compaction_test_opts(StorageMode::LocalDisk {
+    let hooks = TestHooks::new();
+    let mut opts = compaction_test_opts(StorageMode::LocalDisk {
         db_path: dir.path().to_path_buf(),
     });
+    opts.test_hooks = Some(hooks.clone());
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
 
@@ -37,7 +40,18 @@ fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_
             .unwrap();
         }
         eng.flush().unwrap();
-        eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
+        // Deterministically trigger compaction and wait via hooks
+        let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+        eng.compact_level(&cf, 0).unwrap();
+        assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+        gate.release();
+        let start = std::time::Instant::now();
+        while hooks.compaction_complete_count() == 0 {
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!("Compaction did not complete in time");
+            }
+            std::thread::yield_now();
+        }
     }
 
     // Assert: snapshot view remains stable
@@ -60,9 +74,11 @@ fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_
 fn should_release_old_files_given_snapshot_expiry_when_all_new_reads_use_fresh_snapshots() {
     // Arrange: create snapshots and write new data
     let dir = test_temp_dir();
-    let opts = compaction_test_opts(StorageMode::LocalDisk {
+    let hooks = TestHooks::new();
+    let mut opts = compaction_test_opts(StorageMode::LocalDisk {
         db_path: dir.path().to_path_buf(),
     });
+    opts.test_hooks = Some(hooks.clone());
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
 
@@ -82,7 +98,17 @@ fn should_release_old_files_given_snapshot_expiry_when_all_new_reads_use_fresh_s
             .unwrap();
     }
     eng.flush().unwrap();
-    eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
+    let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+    eng.compact_level(&cf, 0).unwrap();
+    assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+    gate.release();
+    let start = std::time::Instant::now();
+    while hooks.compaction_complete_count() == 0 {
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!("Compaction did not complete in time");
+        }
+        std::thread::yield_now();
+    }
 
     // Act: drop snapshot (simulate expiry)
     drop(_snapshot);
@@ -107,9 +133,11 @@ fn should_not_leak_disk_space_given_long_lived_snapshot_and_heavy_write_load_whe
 ) {
     // Arrange: create long-lived snapshot and heavy write load
     let dir = test_temp_dir();
-    let opts = compaction_test_opts(StorageMode::LocalDisk {
+    let hooks = TestHooks::new();
+    let mut opts = compaction_test_opts(StorageMode::LocalDisk {
         db_path: dir.path().to_path_buf(),
     });
+    opts.test_hooks = Some(hooks.clone());
     let eng = MidgeEngine::open(opts).unwrap();
     let cf = eng.default_column_family();
 
@@ -134,7 +162,17 @@ fn should_not_leak_disk_space_given_long_lived_snapshot_and_heavy_write_load_whe
             .unwrap();
         }
         eng.flush().unwrap();
-        eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
+        let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+        eng.compact_level(&cf, 0).unwrap();
+        assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+        gate.release();
+        let start = std::time::Instant::now();
+        while hooks.compaction_complete_count() == 0 {
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!("Compaction did not complete in time");
+            }
+            std::thread::yield_now();
+        }
     }
 
     // Assert: no leak (check keys are present)

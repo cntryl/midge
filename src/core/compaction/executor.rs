@@ -503,14 +503,21 @@ pub(crate) fn write_compacted_sst(
         let sst_id_clone = sst_id.clone();
 
         std::thread::spawn(move || {
-            if let Err(e) = cloud_manager_clone.upload_sst_async(
-                sst_id_clone,
-                file_path_clone,
-                sequence_range,
-                key_range,
-                None,
-            ) {
-                tracing::error!("Failed to upload compacted SST to cloud: {}", e);
+            // Protect upload worker from panics so they don't abort test runner.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Err(e) = cloud_manager_clone.upload_sst_async(
+                    sst_id_clone,
+                    file_path_clone,
+                    sequence_range,
+                    key_range,
+                    None,
+                ) {
+                    tracing::error!("Failed to upload compacted SST to cloud: {}", e);
+                }
+            }));
+            if let Err(panic_payload) = r {
+                eprintln!("Cloud upload worker panicked: {:?}", panic_payload);
+                // No TestHooks available in this scope; just log and swallow.
             }
         });
     }

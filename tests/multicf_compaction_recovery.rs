@@ -3,6 +3,7 @@ mod common;
 use cntryl_midge::api::column_family::ColumnFamilyConfig;
 use cntryl_midge::MidgeOptions;
 use common::*;
+use cntryl_midge::test_hooks::{TestHooks, CompactionGatePoint};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -12,7 +13,9 @@ fn should_recover_all_column_families_consistently_given_mixed_writes_and_compac
 ) {
     for mode in disk_storage_modes() {
         let (_name, storage_mode, _tmp) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let hooks = TestHooks::new();
+        let mut opts = compaction_test_opts(storage_mode);
+        opts.test_hooks = Some(hooks.clone());
 
         // Create engine and column families
         with_engine(opts.clone(), |eng| {
@@ -49,9 +52,18 @@ fn should_recover_all_column_families_consistently_given_mixed_writes_and_compac
                             .unwrap();
                     }
                     eng.flush().unwrap();
-
-                    // Act: wait for background compaction to make progress (best-effort)
-                    eng.wait_for_compaction(Duration::from_millis(200)).ok();
+                    // Deterministically trigger compaction and wait via hooks
+                    let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+                    eng.compact_level(&cf1, 0).ok();
+                    assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+                    gate.release();
+                    let start = std::time::Instant::now();
+                    while hooks.compaction_complete_count() == 0 {
+                        if start.elapsed() > Duration::from_secs(10) {
+                            panic!("Compaction did not complete in time");
+                        }
+                        std::thread::yield_now();
+                    }
                 },
                 |eng| {
                     // Assert: both CFs should still have data
@@ -70,7 +82,9 @@ fn should_not_cross_contaminate_keys_between_column_families_given_heavy_compact
 ) {
     for mode in disk_storage_modes() {
         let (_name, storage_mode, _tmp) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let hooks = TestHooks::new();
+        let mut opts = compaction_test_opts(storage_mode);
+        opts.test_hooks = Some(hooks.clone());
 
         // Arrange
         with_engine(opts.clone(), |eng| {
@@ -91,8 +105,19 @@ fn should_not_cross_contaminate_keys_between_column_families_given_heavy_compact
                     eng.flush().unwrap();
                 }
             }
-            // Act: wait for background compaction to make progress (best-effort)
-            eng.wait_for_compaction(Duration::from_millis(300)).ok();
+            eng.flush().unwrap();
+            // Deterministically trigger compaction and wait via hooks
+            let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+            eng.compact_level(&cf1, 0).ok();
+            assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+            gate.release();
+            let start = std::time::Instant::now();
+            while hooks.compaction_complete_count() == 0 {
+                if start.elapsed() > Duration::from_secs(10) {
+                    panic!("Compaction did not complete in time");
+                }
+                std::thread::yield_now();
+            }
         });
 
         // Restart and validate no cross-contamination

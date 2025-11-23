@@ -199,9 +199,20 @@ fn should_increment_compaction_counters_during_manual_compaction() {
     eng.compact_range(&cf, Some(b""), Some(b"~"))
         .expect("compact");
 
-    // Wait for compaction to complete
-    eng.wait_for_compaction(std::time::Duration::from_secs(2))
-        .expect("compaction should complete");
+    // Deterministically wait for compaction using hooks.
+    let after_gate = hooks.install_compaction_gate(cntryl_midge::test_hooks::CompactionGatePoint::AfterManifestUpdate);
+    assert!(
+        after_gate.wait_until_blocked(std::time::Duration::from_secs(10)),
+        "Compaction did not reach AfterManifestUpdate"
+    );
+    after_gate.release();
+    let start = std::time::Instant::now();
+    while hooks.compaction_complete_count() == 0 {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("Compaction did not complete in time");
+        }
+        std::thread::yield_now();
+    }
 
     let final_start = hooks.compaction_start_count();
     let final_complete = hooks.compaction_complete_count();

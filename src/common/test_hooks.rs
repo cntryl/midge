@@ -205,6 +205,8 @@ pub struct TestHooks {
     compaction_complete_count: Arc<AtomicU64>,
     /// Number of compactions failed
     compaction_failed_count: Arc<AtomicU64>,
+    /// Number of worker thread panics observed during tests
+    worker_panic_count: Arc<AtomicU64>,
 
     // Verification flags
     /// Whether WAL was truncated after manifest update
@@ -238,6 +240,7 @@ impl TestHooks {
             compaction_start_count: Arc::new(AtomicU64::new(0)),
             compaction_complete_count: Arc::new(AtomicU64::new(0)),
             compaction_failed_count: Arc::new(AtomicU64::new(0)),
+            worker_panic_count: Arc::new(AtomicU64::new(0)),
             wal_truncated_after_manifest: Arc::new(AtomicBool::new(false)),
             manifest_fsynced_before_wal_truncate: Arc::new(AtomicBool::new(false)),
             compaction_gate: Arc::new(Mutex::new(None)),
@@ -490,6 +493,20 @@ impl TestHooks {
         self.compaction_failed_count.load(Ordering::SeqCst)
     }
 
+    /// Record that a background worker thread panicked. This is intentionally
+    /// lightweight: it increments a counter and logs the event so tests can
+    /// assert expected failure modes without letting a panic unwind into the
+    /// test runner.
+    pub fn record_worker_panic(&self, kind: &str) {
+        self.worker_panic_count.fetch_add(1, Ordering::SeqCst);
+        eprintln!("[TEST-HOOK] worker panic recorded (kind={})", kind);
+    }
+
+    /// Get the number of worker panics recorded via `record_worker_panic`.
+    pub fn worker_panic_count(&self) -> u64 {
+        self.worker_panic_count.load(Ordering::SeqCst)
+    }
+
     /// Verify that manifest was fsynced before WAL truncation.
     pub fn verify_manifest_fsynced_before_wal_truncate(&self) -> bool {
         self.manifest_fsynced_before_wal_truncate
@@ -509,6 +526,7 @@ impl TestHooks {
         self.compaction_start_count.store(0, Ordering::SeqCst);
         self.compaction_complete_count.store(0, Ordering::SeqCst);
         self.compaction_failed_count.store(0, Ordering::SeqCst);
+        self.worker_panic_count.store(0, Ordering::SeqCst);
         self.wal_truncated_after_manifest
             .store(false, Ordering::SeqCst);
         self.manifest_fsynced_before_wal_truncate

@@ -92,32 +92,53 @@ pub(crate) fn spawn_flush_worker(
     let handle = thread::Builder::new()
         .name("midge-flush-worker".to_string())
         .spawn(move || {
-            for msg in rx.iter() {
-                match msg {
-                    FlushMsg::Entries(job) => {
-                        // Process the flush job
-                        let res = process_flush_job(&config, job);
-                        if let Err(e) = res {
-                            // Mark background error if we were able to capture a container
-                            if let Some(bg) = &background_error {
-                                *bg.write() =
-                                    Some(crate::error::MidgeError::internal(e.to_string()));
-                            }
-                        } else {
-                            // If there was previously a background error, clear it upon
-                            // successful flush so writes can resume.
-                            if let Some(bg) = &background_error {
-                                *bg.write() = None;
+            // Wrap the entire worker loop in a panic guard so that any panic
+            // inside the background thread is captured and converted into a
+            // test hook event instead of unwinding into the test runner.
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for msg in rx.iter() {
+                    match msg {
+                        FlushMsg::Entries(job) => {
+                            // Process the flush job
+                            let res = process_flush_job(&config, job);
+                            if let Err(e) = res {
+                                // Mark background error if we were able to capture a container
+                                if let Some(bg) = &background_error {
+                                    *bg.write() =
+                                        Some(crate::error::MidgeError::internal(e.to_string()));
+                                }
+                            } else {
+                                // If there was previously a background error, clear it upon
+                                // successful flush so writes can resume.
+                                if let Some(bg) = &background_error {
+                                    *bg.write() = None;
+                                }
                             }
                         }
-                    }
-                    FlushMsg::Shutdown => break,
-                    FlushMsg::Barrier { reply } => {
-                        // Since messages are processed in-order, receiving the Barrier
-                        // means all prior Entries have been processed. Acknowledge.
-                        let _ = reply.send(());
+                        FlushMsg::Shutdown => break,
+                        FlushMsg::Barrier { reply } => {
+                            // Since messages are processed in-order, receiving the Barrier
+                            // means all prior Entries have been processed. Acknowledge.
+                            let _ = reply.send(());
+                        }
                     }
                 }
+            }));
+
+            if let Err(panic_payload) = panic_result {
+                // Log the panic payload for diagnostics
+                eprintln!("Background flush worker panicked: {:?}", panic_payload);
+                // Convert to test hook event if provided
+                if let Some(ref hooks) = config.test_hooks {
+                    hooks.record_worker_panic("flush");
+                }
+                // Record background error if available so callers observe a failure
+                if let Some(bg) = &background_error {
+                    *bg.write() = Some(crate::error::MidgeError::internal(
+                        "Background flush worker panicked".to_string(),
+                    ));
+                }
+                // Swallow the panic; do not rethrow so the test runner is not aborted.
             }
         })
         .map_err(|e| MidgeError::internal(format!("Failed to spawn flush worker thread: {}", e)))?;

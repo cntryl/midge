@@ -11,7 +11,9 @@ fn should_honor_large_range_deletes_given_many_levels_when_compactions_run_repea
     // Assert: deleted keys remain deleted and no resurrection occurs
     for mode in disk_storage_modes() {
         let (_n, storage_mode, _tmp) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let hooks = cntryl_midge::test_hooks::TestHooks::new();
+        let mut opts = compaction_test_opts(storage_mode);
+        opts.test_hooks = Some(hooks.clone());
 
         with_engine(opts.clone(), |eng| {
             let cf = eng.default_column_family();
@@ -25,9 +27,19 @@ fn should_honor_large_range_deletes_given_many_levels_when_compactions_run_repea
             // Act: delete range 100-199
             eng.delete_range(&cf, b"k100", b"k200").unwrap();
             eng.flush().unwrap();
-            // Run compaction
-            eng.wait_for_compaction(std::time::Duration::from_secs(2))
-                .ok();
+            // Run compaction deterministically using hooks
+            eng.flush().unwrap();
+            let gate = hooks.install_compaction_gate(cntryl_midge::test_hooks::CompactionGatePoint::AfterManifestUpdate);
+            eng.compact_level(&cf, 0).unwrap();
+            assert!(gate.wait_until_blocked(std::time::Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+            gate.release();
+            let start = std::time::Instant::now();
+            while hooks.compaction_complete_count() == 0 {
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    panic!("Compaction did not complete in time");
+                }
+                std::thread::yield_now();
+            }
 
             // Assert: keys in range deleted
             for i in 100..200 {

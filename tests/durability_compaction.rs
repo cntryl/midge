@@ -50,28 +50,48 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
         ..Default::default()
     };
 
-    // Act - Write overlapping keys to trigger compaction
+    // Act - Write overlapping keys to create SSTs deterministically and then
+    // trigger a deterministic compaction using compaction gate points.
     let eng = MidgeEngine::open(opts.clone()).expect("open");
     let cf = eng.default_column_family();
     let compaction_starts_before = hooks.compaction_start_count();
-    // Write larger values to exceed memtable_size and trigger flushes
+
+    // Write larger values to exceed memtable_size and create SSTs.
     let large_value = vec![b'x'; 100]; // 100 bytes per value
     for i in 0..200 {
         eng.put(&cf, format!("key{:04}", i % 50).as_bytes(), &large_value)
             .expect("put");
     }
-    // Wait for compaction to trigger
-    eng.wait_for_compaction(std::time::Duration::from_secs(2))
-        .expect("compaction should complete");
-    let compaction_complete = hooks.compaction_start_count() > compaction_starts_before;
 
-    // DEBUG: Check compaction trigger counts
-    if !compaction_complete {
-        tracing::debug!(
-            "Compaction didn't start. Starts: {} (before: {})",
-            hooks.compaction_start_count(),
-            compaction_starts_before
-        );
+    // Force a deterministic flush so SSTs exist before compaction starts.
+    eng.flush().expect("flush should succeed");
+
+    // Install a compaction gate to pause after the manifest update so we can
+    // assert on filesystem & manifest state deterministically.
+    let after_gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+
+    // Trigger compaction explicitly so it won't race with background workers.
+    eng.compact_level(&cf, 0).expect("compact_level");
+
+    // Wait for compaction to reach the gate (i.e. manifest was updated and
+    // compaction is paused). This waits on the hook, not on wall-clock.
+    assert!(
+        after_gate.wait_until_blocked(std::time::Duration::from_secs(10)),
+        "Compaction did not reach AfterManifestUpdate"
+    );
+
+    let compaction_started = hooks.compaction_start_count() > compaction_starts_before;
+
+    // Now allow compaction to finish and wait deterministically for completion
+    // by observing the compaction completion hook. We avoid sleeping and use
+    // a bounded spin (yield) to wait for the logical event.
+    after_gate.release();
+    let start = std::time::Instant::now();
+    while hooks.compaction_complete_count() == 0 {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("Compaction did not complete in time");
+        }
+        std::thread::yield_now();
     }
 
     drop(eng);
@@ -83,20 +103,6 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
     };
     let eng = MidgeEngine::open(opts_recovery).expect("recover");
     let cf = eng.default_column_family();
-    // DEBUG: inspect manifest after recovery to understand which files were loaded
-    match cntryl_midge::manifest::Manifest::load(dir.path()) {
-        Ok(m) => {
-            eprintln!(
-                "[DEBUG] manifest after recovery: ssts={} files={}",
-                m.ssts.len(),
-                m.files.len()
-            );
-            for f in &m.files {
-                eprintln!("[DEBUG] file meta after recovery: name={} seq={} entries={} smallest_seq={:?} largest_seq={:?}", f.name, f.sst_seq, f.total_entries, f.smallest_seq, f.largest_seq);
-            }
-        }
-        Err(e) => eprintln!("[DEBUG] failed to load manifest after recovery: {}", e),
-    }
     let expected_value = vec![b'x'; 100];
     for i in 0..50 {
         let result = eng
@@ -109,7 +115,7 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
         );
         assert_eq!(result.unwrap(), expected_value, "Value should match");
     }
-    assert!(compaction_complete, "Compaction should have started");
+    assert!(compaction_started, "Compaction should have started");
 }
 
 #[test]
@@ -136,9 +142,16 @@ fn should_cleanup_partial_output_given_compaction_failure() {
         eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value)
             .expect("put");
     }
-    // Wait for compaction attempt to execute
-    eng.wait_for_compaction(std::time::Duration::from_secs(2))
-        .expect("compaction should complete");
+    // Deterministically trigger compaction and wait for the failure hook.
+    eng.flush().expect("flush should succeed");
+    eng.compact_level(&cf, 0).expect("compact_level");
+    let start = std::time::Instant::now();
+    while hooks.compaction_failed_count() == 0 {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("Compaction did not fail in time");
+        }
+        std::thread::yield_now();
+    }
     let compaction_started = hooks.compaction_start_count() > 0;
     let compaction_failed = hooks.compaction_failed_count() > 0;
 
@@ -377,33 +390,65 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
                 .expect("put");
         }
     }
-    eng.flush().unwrap(); // Force flush to create SSTs and trigger compaction
-                          // Manually trigger compaction of level 0
-    eng.compact_level(&cf, 0).unwrap();
-    // Wait for compaction to complete - use stability-aware wait
-    eng.wait_for_compaction(std::time::Duration::from_secs(10))
-        .expect("compaction should complete");
-    let compaction_started = hooks.compaction_start_count() > compaction_starts_before;
-    let compaction_completed = hooks.compaction_complete_count() > 0;
+    // Install a deterministic compaction gate so we can observe manifest update
+    // without polling. The gate will pause compaction immediately after the
+    // manifest update completes, allowing the test to assert filesystem state
+    // before letting compaction finish.
+    let after_gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
 
-    // Wait for manifest to be updated
-    let manifest_updates_before = hooks.manifest_update_count();
-    for _ in 0..50 {
-        // Wait up to 5 seconds for manifest update
-        if hooks.manifest_update_count() > manifest_updates_before {
-            break;
+    // Force flush to create SSTs deterministically before compaction begins.
+    eng.flush().unwrap();
+    // Capture the current source SST files so we can later assert they remain
+    // present until manifest persistence.
+    let sst_dir = dir.path().join("sst");
+    let source_files = collect_sst_files(&sst_dir);
+    assert!(!source_files.is_empty(), "Expected SST files after flush");
+
+    // Manually trigger compaction of level 0. Compaction will run and block
+    // at the `AfterManifestUpdate` gate we installed above.
+    eng.compact_level(&cf, 0).unwrap();
+
+    // Wait for compaction to reach the AfterManifestUpdate gate (i.e. manifest
+    // has been updated and the engine is paused immediately after that). This
+    // replaces the previous polling loop and eliminates timing assumptions.
+    assert!(
+        after_gate.wait_until_blocked(std::time::Duration::from_secs(10)),
+        "Compaction did not reach AfterManifestUpdate"
+    );
+
+    let compaction_started = hooks.compaction_start_count() > compaction_starts_before;
+
+    // While compaction is paused immediately after the manifest update, the
+    // original source SST files must still exist on disk. This asserts the
+    // logical event (manifest persisted) rather than relying on timing.
+    for file in &source_files {
+        assert!(
+            sst_dir.join(file).exists(),
+            "Source SST {} should remain until manifest persistence completes",
+            file
+        );
+    }
+
+    // Allow compaction to finish and wait deterministically for its completion.
+    after_gate.release();
+    let start = std::time::Instant::now();
+    while hooks.compaction_complete_count() == 0 {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("Compaction did not complete in time");
         }
-        // Poll briefly to fail fast but avoid busy spin
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::yield_now();
     }
 
     drop(eng);
 
     // Assert - compaction should have started and completed
     assert!(compaction_started, "Compaction should have started");
-    assert!(compaction_completed, "Compaction should have completed");
+    assert!(
+        hooks.compaction_complete_count() > 0,
+        "Compaction should have completed"
+    );
 
-    // Assert - latest values should be present, old SSTs should be cleaned
+    // Assert - latest values should be present after recovery
     let opts_recovery = MidgeOptions {
         test_hooks: None,
         ..opts
@@ -412,30 +457,17 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     let expected_value = vec![b'2'; 100];
     let cf = eng.default_column_family();
 
-    // Retry the check a few times in case of timing issues
-    let mut all_correct = false;
-    for _ in 0..3 {
-        all_correct = true;
-        for i in 0..100 {
-            let result = eng
-                .get(&cf, format!("key{:04}", i).as_bytes())
-                .expect("get");
-            if result.as_ref().map(|v| v.as_ref()) != Some(expected_value.as_slice()) {
-                all_correct = false;
-                break;
-            }
-        }
-        if all_correct {
-            break;
-        }
-        // Give a short pause between retries to avoid tight busy loops
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    for i in 0..100 {
+        let result = eng
+            .get(&cf, format!("key{:04}", i).as_bytes())
+            .expect("get");
+        assert_eq!(
+            result.as_ref().map(|v| v.as_ref()),
+            Some(expected_value.as_slice()),
+            "Key {} should have latest value after compaction",
+            i
+        );
     }
-
-    assert!(
-        all_correct,
-        "All keys should have the latest value after compaction"
-    );
 }
 
 #[test]
@@ -523,8 +555,13 @@ fn should_keep_source_ssts_present_until_manifest_persisted() {
     }
 
     after_gate.release();
-    eng.wait_for_compaction(std::time::Duration::from_secs(2))
-        .expect("compaction should complete");
+    let start = std::time::Instant::now();
+    while hooks.compaction_complete_count() == 0 {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("Compaction did not complete in time");
+        }
+        std::thread::yield_now();
+    }
 }
 
 #[test]
@@ -553,9 +590,22 @@ fn should_fsync_new_ssts_before_updating_manifest() {
         eng.put(&cf, format!("key{:04}", i % 50).as_bytes(), &large_value)
             .expect("put");
     }
-    // Wait for compaction
-    eng.wait_for_compaction(std::time::Duration::from_secs(2))
-        .expect("compaction should complete");
+    // Deterministically trigger compaction and wait for completion.
+    eng.flush().expect("flush should succeed");
+    let after_gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+    eng.compact_level(&cf, 0).expect("compact_level");
+    assert!(
+        after_gate.wait_until_blocked(std::time::Duration::from_secs(10)),
+        "Compaction did not reach AfterManifestUpdate"
+    );
+    after_gate.release();
+    let start = std::time::Instant::now();
+    while hooks.compaction_complete_count() == 0 {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("Compaction did not complete in time");
+        }
+        std::thread::yield_now();
+    }
     let fsync_count_after = hooks.fsync_count();
     let compaction_completed = hooks.compaction_complete_count() > compaction_starts_before;
     drop(eng);
@@ -604,10 +654,18 @@ fn should_recover_consistent_state_given_crash_mid_compaction_when_restart() {
         eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value)
             .expect("put");
     }
-    // Wait for compaction to reach crash point
-    eng.wait_for_compaction(std::time::Duration::from_secs(2))
-        .expect("compaction should complete");
-    let compaction_attempted = hooks.compaction_start_count() > 0;
+    // Deterministically trigger compaction and wait until it reaches the
+    // crash point (observed via compaction start or failed counters).
+    eng.flush().expect("flush should succeed");
+    eng.compact_level(&cf, 0).expect("compact_level");
+    let start = std::time::Instant::now();
+    while hooks.compaction_start_count() == 0 {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("Compaction did not start in time");
+        }
+        std::thread::yield_now();
+    }
+    let compaction_attempted = true;
     drop(eng);
 
     // Assert - all data should be present after recovery (either from old SSTs or WAL)
@@ -653,10 +711,18 @@ fn should_preserve_source_ssts_when_compaction_output_not_fsynced() {
         eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value)
             .expect("put");
     }
-    // Wait for compaction to reach crash point
-    eng.wait_for_compaction(std::time::Duration::from_secs(2))
-        .expect("compaction should complete");
-    let compaction_attempted = hooks.compaction_start_count() > 0;
+    // Deterministically trigger compaction and wait until it reaches the
+    // crash point (observed via compaction start counter).
+    eng.flush().expect("flush should succeed");
+    eng.compact_level(&cf, 0).expect("compact_level");
+    let start = std::time::Instant::now();
+    while hooks.compaction_start_count() == 0 {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("Compaction did not start in time");
+        }
+        std::thread::yield_now();
+    }
+    let compaction_attempted = true;
     drop(eng);
 
     // Assert - data should be recoverable from source SSTs
