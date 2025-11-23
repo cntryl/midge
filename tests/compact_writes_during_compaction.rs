@@ -123,12 +123,14 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
         populate_multi_level_data(&engine, &cf);
 
         // Act - Trigger compaction in background and coordinate its start with the flush worker
-        let (start_tx3, start_rx3) = channel::<()>();
-        let (started_tx3, started_rx3) = channel::<()>();
+        // Use the same start/started channel names and pattern as other tests in this file
+        // (compaction waits for `start_rx`, then sends `started_tx`; flush/writer waits on `started_rx`).
+        let (start_tx, start_rx) = channel::<()>();
+        let (started_tx, started_rx) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
-            let _ = start_rx3.recv();
-            let _ = started_tx3.send(());
+            let _ = start_rx.recv();
+            let _ = started_tx.send(());
             let _ = engine_clone.compact_all();
         });
 
@@ -137,7 +139,7 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
         let cf_clone = cf.clone();
         let flush_handle = thread::spawn(move || {
             // Wait for compaction to start before performing flush
-            let _ = started_rx3.recv();
+            let _ = started_rx.recv();
 
             // Write to memtable
             for i in 200..250 {
@@ -153,9 +155,9 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
             assert!(result.is_ok(), "Flush should succeed during compaction");
         });
 
-        flush_handle.join().unwrap();
         // Trigger compaction to begin; this ensures the flush happens while compaction is running
-        let _ = start_tx3.send(());
+        let _ = start_tx.send(());
+        flush_handle.join().unwrap();
         compaction_handle.join().unwrap();
 
         // Assert - Flushed data should be readable
