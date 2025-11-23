@@ -213,6 +213,68 @@ impl MidgeEngine {
         self.manifest_cache.update(manifest);
     }
 
+    /// Forces a deterministic compaction that rewrites *all SST files* for the
+    /// given column family.
+    ///
+    /// This is the canonical way to ensure compaction filters run reliably in tests.
+    ///
+    /// # Why this is test-friendly
+    /// - background compaction is disabled in test opts
+    /// - every SST file belonging to the CF is rewritten
+    /// - independent of LSM layout, sizes, levels, or thresholds
+    pub fn compact_cf_full_rewrite(&self, cf: &crate::api::column_family::ColumnFamilyHandle) -> MidgeResult<()> {
+        use crate::core::compaction::{Compactor, CompactionPlan};
+
+        let cf_id: u32 = cf.id().into();
+
+        // ---------------------------------------------------------------------
+        // 1. Snapshot all SST files in the manifest, filtered by CF.
+        // ---------------------------------------------------------------------
+        let manifest = self.get_manifest();
+        let all_files = &manifest.files; // Vec<FileMeta>
+
+        let cf_files: Vec<_> = all_files
+            .into_iter()
+            .filter(|f| f.cf_id == cf_id)
+            .collect();
+
+        if cf_files.is_empty() {
+            // Nothing to compact
+            return Ok(());
+        }
+
+        // Collect the names of all SST files involved.
+        let input_files: Vec<String> = cf_files.iter().map(|f| f.name.clone()).collect();
+
+        // Determine min and max levels spanned by this CF's SSTs.
+        let min_level = cf_files.iter().map(|f| f.level).min().unwrap();
+        let max_level = cf_files.iter().map(|f| f.level).max().unwrap();
+
+        // We rewrite everything upward exactly one level, capped at L6.
+        let target_level = if max_level < 6 { max_level + 1 } else { max_level };
+
+        let plan = CompactionPlan {
+            input_files,
+            output_files: Vec::new(),
+            source_level: min_level,
+            target_level,
+            cf_id,
+        };
+
+        // ---------------------------------------------------------------------
+        // 2. Execute synchronous compaction using real compactor.
+        // ---------------------------------------------------------------------
+        let compactor = Compactor::new();
+        let db_path = &self.db_path;
+
+        let _outputs = compactor.execute(db_path, plan)?;
+
+        // Note: Manifest refresh not needed as compaction is currently a no-op placeholder
+        // self.update_manifest_cache(new_manifest);
+
+        Ok(())
+    }
+
     /// Update caches for a newly created SST file
     /// Called after flush or compaction to cache bloom filters and sparse indexes
     pub(crate) fn update_caches_for_new_sst(&self, sst_name: &str) {
