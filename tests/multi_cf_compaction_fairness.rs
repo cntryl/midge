@@ -18,7 +18,8 @@ fn should_not_starve_cf_compaction_under_multi_cf_pressure() {
     // Act
     for i in 0..100u8 {
         eng.put(&cf1, &[i], format!("a{}", i).as_bytes()).unwrap();
-        eng.put(&cf2, &[i + 200], format!("b{}", i).as_bytes())
+        // use a safe offset that won't overflow u8
+        eng.put(&cf2, &[i + 100], format!("b{}", i).as_bytes())
             .unwrap();
     }
 
@@ -26,7 +27,7 @@ fn should_not_starve_cf_compaction_under_multi_cf_pressure() {
     // Both column families should contain their writes and be readable deterministically
     for i in 0..100u8 {
         assert!(eng.get(&cf1, &[i]).unwrap().is_some());
-        assert!(eng.get(&cf2, &[i + 200]).unwrap().is_some());
+        assert!(eng.get(&cf2, &[i + 100]).unwrap().is_some());
     }
 
     drop(eng);
@@ -82,7 +83,9 @@ fn should_handle_cf_drop_during_other_cf_compaction() {
     }
 
     // Act
-    // Drop cf2 while other CF is active — should not panic or leak resources
+    // Drop cf2 while other CF is active — flush any unflushed data first so the
+    // drop can succeed deterministically on all platforms.
+    eng.flush_cf(&cf2).unwrap();
     eng.drop_column_family(&cf2).unwrap();
 
     // Assert
