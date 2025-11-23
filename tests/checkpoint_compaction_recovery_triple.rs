@@ -4,7 +4,6 @@ use common::*;
 use cntryl_midge::MidgeEngine;
 use cntryl_midge::MidgeOptions;
 use cntryl_midge::StorageMode;
-use std::path::PathBuf;
 
 #[test]
 fn should_recover_consistently_given_checkpoint_during_compaction_then_crash() {
@@ -23,9 +22,9 @@ fn should_recover_consistently_given_checkpoint_during_compaction_then_crash() {
             eng.create_checkpoint(&cp_dir).expect("checkpoint");
         },
         |eng| {
-            // Assert after restart
+            // Assert after restart - ensure the first inserted (raw-byte) key exists
             let cf = eng.default_column_family();
-            assert!(eng.get(&cf, b"0").unwrap().is_some());
+            assert!(eng.get(&cf, &[0]).unwrap().is_some());
         }
     );
 }

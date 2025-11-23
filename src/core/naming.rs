@@ -36,11 +36,31 @@ static NEXT_SST_SEQS: LazyLock<DashMap<u32, AtomicU64>> = LazyLock::new(DashMap:
 
 /// Initialize sequence allocators from manifest.
 pub fn initialize_sequences(manifest: &crate::core::manifest::Manifest) {
-    NEXT_WAL_SEQ.store(manifest.next_wal_seq, Ordering::Relaxed);
+    // Never lower the global WAL sequence. If the in-memory allocator is already
+    // higher than what's in the manifest (possible in tests where globals are
+    // shared across modules), keep the larger value to preserve monotonicity.
+    let current = NEXT_WAL_SEQ.load(Ordering::Relaxed);
+    if manifest.next_wal_seq > current {
+        NEXT_WAL_SEQ.store(manifest.next_wal_seq, Ordering::Relaxed);
+    }
 
-    NEXT_SST_SEQS.clear();
+    // For per-CF SST sequences, make sure we don't decrease any existing
+    // allocator values. If a CF allocator exists, update it to the max of the
+    // current value and the manifest value; otherwise insert a new allocator
+    // seeded with the manifest value.
     for (&cf_id, &next_seq) in &manifest.next_sst_seqs {
-        NEXT_SST_SEQS.insert(cf_id, AtomicU64::new(next_seq));
+        if let Some(entry) = NEXT_SST_SEQS.get(&cf_id) {
+            // Ensure we only ever increase an existing allocator
+            let mut cur = entry.load(Ordering::Relaxed);
+            while next_seq > cur {
+                match entry.compare_exchange(cur, next_seq, Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => break,
+                    Err(updated) => cur = updated,
+                }
+            }
+        } else {
+            NEXT_SST_SEQS.insert(cf_id, AtomicU64::new(next_seq));
+        }
     }
 }
 
@@ -251,5 +271,37 @@ mod tests {
         assert_eq!(seq2, 2);
         assert_eq!(seq3, 3);
         assert_eq!(map.get(&1), Some(&4));
+    }
+
+    #[test]
+    fn initialize_sequences_does_not_lower_wal_seq() {
+        // Arrange: make the in-memory allocator higher than manifest
+        NEXT_WAL_SEQ.store(100, Ordering::Relaxed);
+        let mut manifest = crate::core::manifest::Manifest::default();
+        manifest.next_wal_seq = 1;
+
+        // Act
+        initialize_sequences(&manifest);
+
+        // Assert: allocator should not be lowered
+        let nxt = current_next_wal_seq();
+        assert!(nxt >= 100, "NEXT_WAL_SEQ was lowered by initialize_sequences");
+    }
+
+    #[test]
+    fn initialize_sequences_does_not_lower_sst_seq_per_cf() {
+        // Arrange
+        NEXT_SST_SEQS.clear();
+        NEXT_SST_SEQS.insert(7, AtomicU64::new(200));
+        let mut manifest = crate::core::manifest::Manifest::default();
+        manifest.next_sst_seqs.insert(7, 1);
+
+        // Act
+        initialize_sequences(&manifest);
+
+        // Assert: per-CF allocator should not be lowered
+        let entry = NEXT_SST_SEQS.get(&7).expect("entry must exist");
+        let val = entry.load(Ordering::Relaxed);
+        assert!(val >= 200, "SST allocator for CF 7 was lowered");
     }
 }
