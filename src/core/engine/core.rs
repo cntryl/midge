@@ -16,6 +16,7 @@ use crate::metrics::Metrics;
 
 // Import from sibling modules
 use super::column_family::{ColumnFamily, ColumnFamilySet};
+use crate::core::compaction::CompactionPlan;
 
 /// Core LSM-tree storage engine with WAL, memtables, SSTs, and background compaction.
 ///
@@ -226,7 +227,7 @@ impl MidgeEngine {
         &self,
         cf: &crate::api::column_family::ColumnFamilyHandle,
     ) -> MidgeResult<()> {
-        use crate::core::compaction::CompactionPlan;
+        // test-level import removed (not required by this test)
 
         let cf_id: u32 = cf.id().into();
 
@@ -471,8 +472,6 @@ mod tests {
 
     #[test]
     fn should_build_plan_over_all_cf_files_when_compacting_full_rewrite() {
-        use crate::core::compaction::CompactionPlan;
-
         // Note: earlier versions defined a RecordingController and a nested
         // impl for `crate::core::CompactionController` here — those were
         // unused and caused non-local impl warnings. The test below does
