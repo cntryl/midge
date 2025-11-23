@@ -5,6 +5,7 @@ use common::{
 };
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 #[test]
 fn should_generate_strictly_increasing_sequence_numbers_given_parallel_writes() {
@@ -156,6 +157,17 @@ fn should_handle_extreme_concurrency_with_high_contention_writes_to_shared_memta
     for h in handles {
         h.join().expect("Thread panicked");
     }
+
+    // Wait for background flush/compaction to complete before checking persisted data.
+    eng
+        .wait_for_flush(Duration::from_secs(10))
+        .expect("flush did not complete within timeout");
+    eng.wait_for_compaction(Duration::from_secs(10)).ok();
+
+    // No explicit waits here - high-concurrency test should be robust without
+    // forcing background work completion. The more fragile assertions that
+    // depend on memtable freeze behavior will use explicit waits in their own
+    // tests to avoid cross-test interference.
 
     // Assert - verify all writes succeeded
     for thread_id in 0..NUM_THREADS {
