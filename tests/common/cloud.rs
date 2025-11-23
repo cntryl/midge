@@ -96,6 +96,9 @@ pub fn create_test_sst(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
 /// assert!(backend.has_file("some_file"));
 /// ```
 #[allow(dead_code)]
-pub fn wait_for_cloud_upload() {
-    std::thread::sleep(std::time::Duration::from_millis(200));
+pub fn wait_for_cloud_upload(backend: &MockCloudBackend) -> bool {
+    // Prefer the mock backend's structured wait helper which polls with a short sleep
+    // interval rather than sleeping blind. Return whether an upload occurred within
+    // the provided timeout window.
+    backend.wait_for_uploads(1, std::time::Duration::from_secs(2))
 }

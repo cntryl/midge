@@ -5,7 +5,7 @@
 use cntryl_midge::MidgeEngine;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::sync::mpsc::channel;
 
 mod common;
 use common::{
@@ -76,17 +76,20 @@ fn should_handle_put_to_compacting_key_range() {
         }
         engine.flush().unwrap();
 
-        // Act - Start compaction in background
+        // Act - Start compaction in background but coordinate so writes happen while compaction is running.
+        let (start_tx, start_rx) = channel::<()>();
+        let (started_tx, started_rx) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(10));
+            let _ = start_rx.recv();
+            let _ = started_tx.send(());
             let _ = engine_clone.compact_all();
         });
 
-        // Write to keys that are being compacted
+        // Write to keys that are being compacted; wait until compaction signals it has started
         let engine_clone = Arc::clone(&engine);
         let write_handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(5)); // Let compaction start
+            let _ = started_rx.recv();
             for i in 25..75 {
                 let key = format!("key{:03}", i);
                 let result = engine_clone.put(&cf, key.as_bytes(), "newest_value".as_bytes());
@@ -94,6 +97,9 @@ fn should_handle_put_to_compacting_key_range() {
                 assert!(result.is_ok(), "Write to compacting range should succeed");
             }
         });
+
+        // Now trigger compaction to start
+        let _ = start_tx.send(());
 
         write_handle.join().unwrap();
         compaction_handle.join().unwrap();
@@ -116,9 +122,13 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
 
-        // Act - Trigger compaction in background
+        // Act - Trigger compaction in background and coordinate its start with the flush worker
+        let (start_tx3, start_rx3) = channel::<()>();
+        let (started_tx3, started_rx3) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
+            let _ = start_rx3.recv();
+            let _ = started_tx3.send(());
             let _ = engine_clone.compact_all();
         });
 
@@ -126,7 +136,8 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
         let engine_clone = Arc::clone(&engine);
         let cf_clone = cf.clone();
         let flush_handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(10)); // Let compaction start
+            // Wait for compaction to start before performing flush
+            let _ = started_rx3.recv();
 
             // Write to memtable
             for i in 200..250 {
@@ -143,6 +154,8 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
         });
 
         flush_handle.join().unwrap();
+        // Trigger compaction to begin; this ensures the flush happens while compaction is running
+        let _ = start_tx3.send(());
         compaction_handle.join().unwrap();
 
         // Assert - Flushed data should be readable
@@ -164,9 +177,13 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
         populate_multi_level_data(&engine, &cf);
 
         // Act - Start compaction and flush new data concurrently
+        // We'll ensure compaction actually begins after the flush has started using channels
+        let (start_tx4, start_rx4) = channel::<()>();
+        let (started_tx4, started_rx4) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(15)); // Let flush happen first
+            let _ = start_rx4.recv();
+            let _ = started_tx4.send(());
             let _ = engine_clone.compact_all();
         });
 
@@ -184,6 +201,9 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
             engine_clone.flush().unwrap();
         });
 
+        // After flush is started, trigger compaction
+        let _ = start_tx4.send(());
+        let _ = started_rx4.recv();
         flush_handle.join().unwrap();
         compaction_handle.join().unwrap();
 

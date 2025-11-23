@@ -249,19 +249,27 @@ fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested()
         .expect("put");
 
     // Act - one thread modifies, other thread tries to read
+
+    // Wait for the transaction goroutine to indicate it has prepared the uncommitted write.
+    // We'll use a channel from the transaction thread to confirm setup.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+
+    // Rework txn thread: create a new thread that sends 'ready' before waiting for reader
     let eng_txn = Arc::clone(&engine);
     let cf_txn = cf.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let txn_handle = std::thread::spawn(move || {
         let mut txn = eng_txn.begin_transaction(&cf_txn).expect("begin");
-        txn.put(b"dirty_read_key", b"uncommitted_value")
-            .expect("put");
-        // Hold transaction open without committing
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        txn.put(b"dirty_read_key", b"uncommitted_value").expect("put");
+        // Signal that the transaction is ready and still uncommitted
+        ready_tx.send(()).unwrap();
+        // Wait until main thread tells us to finish
+        let _ = done_rx.recv();
         txn
     });
 
-    // Small delay to ensure transaction is open
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Wait for the txn thread to prepare the uncommitted write
+    ready_rx.recv().expect("txn ready signal");
 
     // Reader thread attempts to read while transaction is open
     let eng_reader = Arc::clone(&engine);
@@ -270,6 +278,8 @@ fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested()
         std::thread::spawn(move || eng_reader.get(&cf_reader, b"dirty_read_key").expect("get"));
 
     let read_value = reader_result.join().expect("reader panicked");
+    // Let the txn thread continue and finish (commit/drop after reader finished)
+    let _ = done_tx.send(());
     let _txn = txn_handle.join().expect("txn panicked");
 
     // Assert - reader should NOT see the uncommitted value

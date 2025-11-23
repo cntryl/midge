@@ -103,7 +103,9 @@ fn should_abort_long_running_uploads_given_shutdown_signal() {
             let cf = eng.default_column_family();
             eng.put(&cf, b"key1", b"value1").expect("put");
             eng.flush_cf(&cf).expect("flush");
-            std::thread::sleep(Duration::from_millis(100));
+            // Wait deterministically for background uploads to start/complete
+            // The mock backend provides a helper to wait for uploads rather than sleeping.
+            assert!(backend.wait_for_uploads(1, Duration::from_secs(2)));
         },
         |eng| {
             // Assert - local data should be consistent after long uploads

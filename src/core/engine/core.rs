@@ -529,7 +529,7 @@ mod tests {
             ..Default::default()
         };
 
-        engine.version_set = crate::core::manifest::AtomicVersionSet::new(manifest);
+        engine.version_set = crate::core::manifest::AtomicVersionSet::new(crate::core::manifest::VersionSet::new(manifest));
 
         let cf = engine.default_column_family();
 

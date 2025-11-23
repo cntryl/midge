@@ -28,8 +28,14 @@ fn should_timeout_transaction_given_exceed_deadline_when_committing() {
         .unwrap();
     timeout_txn.put(b"key", b"value").unwrap();
 
-    // Sleep longer than the timeout
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    // Wait deterministically for the transaction timeout to elapse.
+    // Use a very short spin-wait with yields instead of a blind long sleep
+    // so tests are faster and less flaky under CI.
+    let start = std::time::Instant::now();
+    let wait = std::time::Duration::from_millis(1);
+    while std::time::Instant::now().duration_since(start) < wait {
+        std::thread::yield_now();
+    }
 
     // Act
     let result = engine.commit_transaction(timeout_txn, cntryl_midge::WriteOptions::default());

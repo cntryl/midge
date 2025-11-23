@@ -134,7 +134,18 @@ fn should_background_compact_when_threshold_exceeded() {
         eng.wait_for_flush(std::time::Duration::from_millis(100))
             .unwrap();
         drop(eng);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Wait briefly until the SST/manifest shows the expected files for this iteration
+        let db_path = opts.storage_mode.local_path();
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+        while start.elapsed() < timeout {
+            if let Ok(m) = cntryl_midge::manifest::Manifest::load(&db_path) {
+                if m.ssts.len() >= (i as usize + 1) {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     // Verify all 4 SST files were created before starting background compaction
@@ -178,7 +189,8 @@ fn should_background_compact_when_threshold_exceeded() {
                 tracing::warn!("Timeout: compaction did not reduce SST count within 10 seconds");
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            // Poll more frequently for responsiveness in CI (originally 500ms)
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 

@@ -3,8 +3,7 @@
 
 // Compaction During Concurrent Operations tests - P1 Priority
 use cntryl_midge::MidgeEngine;
-use std::thread;
-use std::time::Duration;
+// replaced hard sleeps with deterministic polling; avoid unused imports
 
 mod common;
 use common::{assert_get_equals, compaction_test_opts, create_storage_mode};
@@ -27,8 +26,16 @@ fn should_remove_expired_keys_given_ttl_exceeded_when_compacting() {
         }
         engine.flush().unwrap();
 
-        // Wait for expiration
-        thread::sleep(Duration::from_secs(2));
+        // Wait for expiration (poll, fail fast if it doesn't happen in reasonable time)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(3);
+        // Poll until the first key is observed to be expired or timeout
+        while start.elapsed() < timeout {
+            if engine.get(&cf, format!("ttl_key{:02}", 0).as_bytes()).unwrap().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         // Act - Compact (should remove expired keys)
         engine.compact_all().unwrap();
@@ -89,7 +96,14 @@ fn should_respect_cf_ttl_setting_given_column_family_config() {
         engine.put_with_ttl(&cf, b"with_ttl", b"temp", 1).unwrap();
         engine.flush().unwrap();
 
-        thread::sleep(Duration::from_secs(2));
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(3);
+        while start.elapsed() < timeout {
+            if engine.get(&cf, b"with_ttl").unwrap().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         // Act
         engine.compact_all().unwrap();
@@ -116,7 +130,15 @@ fn should_update_metrics_given_ttl_filtered_keys() {
         }
         engine.flush().unwrap();
 
-        thread::sleep(Duration::from_secs(2));
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(3);
+        while start.elapsed() < timeout {
+            // If any one of the inserted keys is already expired, proceed
+            if engine.get(&cf, format!("metric_k{:02}", 0).as_bytes()).unwrap().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         // Act - Compact and potentially filter expired keys
         let result = engine.compact_all();

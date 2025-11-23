@@ -34,8 +34,16 @@ fn should_evict_oldest_files_given_cache_full_when_adding_new_files() {
         storage.put_blob(&key, data).expect("put failed");
     }
 
-    // Give background eviction time to work
-    thread::sleep(std::time::Duration::from_millis(500));
+    // Wait until background eviction has reduced file count (poll, fail fast)
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(2);
+    while start.elapsed() < timeout {
+        let stats = hybrid.cache_stats();
+        if stats.file_count < 10 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     // Assert - Cache should have evicted some files
     let stats = hybrid.cache_stats();
@@ -153,7 +161,22 @@ fn should_maintain_correctness_under_rapid_cache_churn() {
         storage.put_blob(key, data.clone()).expect("put failed");
     }
 
-    thread::sleep(std::time::Duration::from_millis(200));
+    // Wait up to 1s for churn operations to settle
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(1);
+    while start.elapsed() < timeout {
+        let mut all_ok = true;
+        for (key, _) in &test_data {
+            if storage.get_blob(key).is_err() {
+                all_ok = false;
+                break;
+            }
+        }
+        if all_ok {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     // Assert - All data should be retrievable and correct
     for (key, expected_data) in &test_data {
@@ -207,8 +230,8 @@ fn should_upload_to_cloud_asynchronously_without_blocking_writes() {
         write_duration.as_millis()
     );
 
-    // Give background upload time to complete
-    thread::sleep(std::time::Duration::from_secs(2));
+    // Wait for all uploads to reach the cloud (mock helper)
+    assert!(mock_backend.wait_for_uploads(20, std::time::Duration::from_secs(5)));
 
     // Verify all files are in cloud
     for i in 0..20 {
@@ -245,7 +268,23 @@ fn should_recover_from_cache_directory_deletion() {
             .expect("put failed");
     }
 
-    thread::sleep(std::time::Duration::from_millis(200));
+    // Wait a short while for background workers to settle
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(1);
+    while start.elapsed() < timeout {
+        let mut ok = true;
+        for i in 0..10 {
+            let key = format!("resilient-{}.dat", i);
+            if storage.get_blob(&key).is_err() {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     // Act - Simulate cache corruption/deletion (cloud still has data)
     // In reality, cache directory corruption is handled by HybridStorage internally

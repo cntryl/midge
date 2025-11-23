@@ -28,25 +28,30 @@ fn compute_engine_data_hash(eng: &MidgeEngine) -> u32 {
 fn compute_total_sst_size(db_path: &Path) -> u64 {
     let mut total_size = 0u64;
 
-    // SST files are in the sst subdirectory
+    // SST files are in the sst subdirectory and its subdirectories
     let sst_dir = db_path.join("sst");
-    if let Ok(entries) = fs::read_dir(&sst_dir) {
+    compute_total_sst_size_recursive(&sst_dir, &mut total_size);
+    total_size
+}
+
+fn compute_total_sst_size_recursive(dir: &Path, total_size: &mut u64) {
+    if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             if let Ok(file_type) = entry.file_type() {
                 if file_type.is_file() {
                     if let Some(file_name) = entry.file_name().to_str() {
                         if file_name.ends_with(".sst") {
                             if let Ok(metadata) = entry.metadata() {
-                                total_size += metadata.len();
+                                *total_size += metadata.len();
                             }
                         }
                     }
+                } else if file_type.is_dir() {
+                    compute_total_sst_size_recursive(&entry.path(), total_size);
                 }
             }
         }
     }
-
-    total_size
 }
 
 #[test]
@@ -353,7 +358,7 @@ fn should_preserve_ordering_values_during_compaction_with_overwrites() {
                 tracing::debug!("  Key {}: {:?}", String::from_utf8_lossy(&key), result);
             }
 
-            // eng.compact_all().expect("compact");
+            eng.compact_all().expect("compact");
         },
         |eng| {
             // Assert - final values should reflect last write

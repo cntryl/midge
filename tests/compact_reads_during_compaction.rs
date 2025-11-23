@@ -6,7 +6,8 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+// using channel-based coordination and yields instead of sleeps
+use std::sync::mpsc::channel;
 
 mod common;
 use common::{
@@ -24,10 +25,15 @@ fn should_serve_reads_given_compaction_in_progress() {
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
 
-        // Act - Trigger compaction in background thread
+        // Act - Trigger compaction in background thread once readers are ready.
+        let (start_tx, start_rx) = channel::<()>();
+        let (started_tx, started_rx) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(10)); // Small delay
+            // Wait until main thread signals to begin compaction
+            let _ = start_rx.recv();
+            // Notify readers that compaction is beginning
+            let _ = started_tx.send(());
             let _ = engine_clone.compact_all();
         });
 
@@ -50,6 +56,10 @@ fn should_serve_reads_given_compaction_in_progress() {
         for handle in read_handles {
             handle.join().unwrap();
         }
+        // Signal compaction to run once readers are started
+        let _ = start_tx.send(());
+        // Ensure compaction started before we join (best-effort)
+        let _ = started_rx.recv();
         compaction_handle.join().unwrap();
 
         // Assert - All reads completed successfully without errors
@@ -103,12 +113,13 @@ fn should_return_correct_value_given_key_being_compacted() {
         // Continuously read the target key during compaction
         let engine_clone = Arc::clone(&engine);
         let read_handle = thread::spawn(move || {
-            for _ in 0..100 {
+                for _ in 0..100 {
                 let result = engine_clone.get(&cf, b"target_key").unwrap();
                 // Assert - Should always return the latest value
                 assert!(result.is_some());
                 assert_eq!(result.unwrap().as_ref(), b"new_value");
-                thread::sleep(Duration::from_micros(100));
+                // yield instead of sleeping to avoid long test wall-clock delays
+                std::thread::yield_now();
             }
         });
 
@@ -131,17 +142,22 @@ fn should_handle_scan_given_files_being_merged() {
         populate_multi_level_data(&engine, &cf);
 
         // Act - Trigger compaction in background
+        // Start compaction in the background and ensure it signals when it begins
+        let (started_tx_scan, started_rx_scan) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(10));
+            // signal that compaction is about to start so scanner can begin
+            let _ = started_tx_scan.send(());
             let _ = engine_clone.compact_all();
         });
 
+        // Wait until compaction is signalled as started, then perform range scans while compaction runs
+        let _ = started_rx_scan.recv();
         // Perform range scans while compaction runs
         let engine_clone = Arc::clone(&engine);
         let cf_clone = cf.clone();
         let scan_handle = thread::spawn(move || {
-            for _ in 0..20 {
+                for _ in 0..20 {
                 let query = Query::new()
                     .start_key(Bytes::from("key000"))
                     .end_key(Bytes::from("key099"));
@@ -151,10 +167,13 @@ fn should_handle_scan_given_files_being_merged() {
                 assert!(results.is_ok(), "Scan should succeed during compaction");
                 assert!(!results.unwrap().is_empty(), "Scan should return results");
 
-                thread::sleep(Duration::from_millis(5));
+                // yield to avoid long test sleeps while still being cooperative
+                std::thread::yield_now();
             }
         });
 
+        // Wait until compaction has started before joining to ensure the overlap ran
+        let _ = started_rx_scan.recv();
         scan_handle.join().unwrap();
         compaction_handle.join().unwrap();
 
@@ -217,7 +236,7 @@ fn should_not_expose_deleted_keys_given_tombstone_compaction_in_progress() {
                     // Assert - Deleted keys should not be visible
                     assert!(result.is_none(), "Deleted key should not be visible");
                 }
-                thread::sleep(Duration::from_millis(2));
+                std::thread::yield_now();
             }
         });
 
@@ -268,7 +287,7 @@ fn should_maintain_read_consistency_given_compaction_updates_manifest() {
                     assert!(result.is_some(), "Key should exist");
                     assert_eq!(result.unwrap().as_ref(), expected_value.as_ref());
                 }
-                thread::sleep(Duration::from_millis(2));
+                std::thread::yield_now();
             }
         });
 

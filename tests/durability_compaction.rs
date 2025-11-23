@@ -179,7 +179,8 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
         if hooks.manifest_update_count() > manifest_updates_before {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Poll faster (short sleep) to fail fast and reduce test wall-time
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
     drop(eng);
@@ -213,7 +214,8 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
         if all_correct {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Shorter sleep for faster retries
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
     assert!(

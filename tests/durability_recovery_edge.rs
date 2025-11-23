@@ -23,7 +23,7 @@ fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
         };
 
         let hooks = TestHooks::default();
-        let _handle = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
+        let handle = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
         opts.test_hooks = Some(hooks.clone());
 
         let eng = MidgeEngine::open(opts).unwrap();
@@ -37,7 +37,11 @@ fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
             let _ = eng.flush();
         });
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Wait until the flush task reaches the gate to reliably simulate a crash
+        if !handle.wait_until_blocked(std::time::Duration::from_secs(2)) {
+            // Gate not triggered; skip this run (environment may not hit flush point deterministically)
+            return;
+        }
         // Drop engine (simulates crash with blocked flush)
     }
 

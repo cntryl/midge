@@ -9,6 +9,7 @@ use cntryl_midge::{
     cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
 };
 use common::*;
+use std::time::Duration;
 use std::sync::Arc;
 
 #[test]
@@ -50,8 +51,8 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
                     e
                 );
             }
-            // Allow background upload attempts to run
-            common::cloud::wait_for_cloud_upload();
+            // Allow background upload attempts to run using the mock helper to wait for uploads
+            assert!(backend.wait_for_uploads(1, Duration::from_secs(2)));
             // Expect at least one failed upload attempt due to our fail config
             assert!(backend.upload_failure_count() > 0 || backend.upload_count() == 0);
         },
