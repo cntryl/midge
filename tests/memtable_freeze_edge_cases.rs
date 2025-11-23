@@ -2,7 +2,8 @@ mod common;
 use common::*;
 
 use bytes::Bytes;
-use cntryl_midge::Query;
+use cntryl_midge::{Query, api::merge_operator::IntegerAddOperator};
+use std::sync::Arc;
 
 #[test]
 fn should_preserve_snapshot_seq_during_concurrent_freeze() {
@@ -29,8 +30,11 @@ fn should_not_drop_range_tombstones_during_freeze_rollover() {
     let cf = eng.default_column_family();
 
     // Act
-    eng.delete_range(&cf, b"a", b"z").unwrap();
+    // First write a key in the range, then apply a range delete so we exercise
+    // memtable freeze/rollover semantics while ensuring the tombstone is visible
+    // to subsequent reads.
     eng.put(&cf, b"in-range", b"v").unwrap();
+    eng.delete_range(&cf, b"a", b"z").unwrap();
 
     // Assert
     // The delete_range should make the key absent according to the engine's visibility model
@@ -48,6 +52,9 @@ fn should_not_lose_merge_operands_across_freeze_boundary() {
     let cf = eng.default_column_family();
 
     // Act
+    // Register integer-add merge operator and apply a merge operand across the
+    // freeze boundary to ensure operands aren't lost.
+    eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
     eng.put(&cf, b"m", b"1").unwrap();
     eng.merge_cf(&cf, b"m", b"+2").unwrap();
 
