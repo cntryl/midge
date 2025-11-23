@@ -9,15 +9,27 @@ fn collect_sst_files(dir: &std::path::Path) -> Vec<String> {
     }
 
     let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".sst") {
-                    files.push(name.to_string());
+    // Recursive traversal: collect SST files in nested directories too
+    fn visit(base: &std::path::Path, cur: &std::path::Path, out: &mut Vec<String>) {
+        if let Ok(entries) = std::fs::read_dir(cur) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(base, &path, out);
+                } else if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    if name.ends_with(".sst") {
+                        // Push path relative to base so callers can join with base
+                        if let Ok(rel) = path.strip_prefix(base) {
+                            out.push(rel.to_string_lossy().to_string());
+                        } else {
+                            out.push(path.to_string_lossy().to_string());
+                        }
+                    }
                 }
             }
         }
     }
+    visit(dir, dir, &mut files);
     files.sort();
     files
 }
@@ -71,6 +83,16 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
     };
     let eng = MidgeEngine::open(opts_recovery).expect("recover");
     let cf = eng.default_column_family();
+    // DEBUG: inspect manifest after recovery to understand which files were loaded
+    match cntryl_midge::manifest::Manifest::load(&dir.path()) {
+        Ok(m) => {
+            eprintln!("[DEBUG] manifest after recovery: ssts={} files={}", m.ssts.len(), m.files.len());
+            for f in &m.files {
+                eprintln!("[DEBUG] file meta after recovery: name={} seq={} entries={} smallest_seq={:?} largest_seq={:?}", f.name, f.sst_seq, f.total_entries, f.smallest_seq, f.largest_seq);
+            }
+        }
+        Err(e) => eprintln!("[DEBUG] failed to load manifest after recovery: {}", e),
+    }
     let expected_value = vec![b'x'; 100];
     for i in 0..50 {
         let result = eng
@@ -114,6 +136,80 @@ fn should_cleanup_partial_output_given_compaction_failure() {
     eng.wait_for_compaction(std::time::Duration::from_secs(2))
         .expect("compaction should complete");
     let compaction_started = hooks.compaction_start_count() > 0;
+    let compaction_failed = hooks.compaction_failed_count() > 0;
+
+    // DEBUG: record current SST file list + manifest snapshot prior to closing engine
+    let sst_dir = dir.path().join("sst");
+    if sst_dir.exists() {
+        // Recursively list SST files in column family directories for better visibility
+        let mut all_files: Vec<String> = vec![];
+        for entry in std::fs::read_dir(&sst_dir).unwrap().flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let cf_dir = entry.path();
+                for f in std::fs::read_dir(&cf_dir).unwrap().flatten() {
+                    if let Some(name) = f.file_name().to_str() {
+                        all_files.push(format!("{}/{}", cf_dir.file_name().unwrap().to_string_lossy(), name));
+                    }
+                }
+            } else if let Some(name) = entry.file_name().to_str() {
+                all_files.push(name.to_string());
+            }
+        }
+        eprintln!("[DEBUG] sst files before drop (count={}): {:?}", all_files.len(), all_files);
+
+        // Print sizes for each SST file and sample a few keys per SST for diagnostics
+        for f in &all_files {
+            let p = dir.path().join("sst").join(f);
+            match std::fs::metadata(&p) {
+                Ok(md) => eprintln!("[DEBUG] sst {} size={} bytes", f, md.len()),
+                Err(e) => eprintln!("[DEBUG] sst {} missing metadata: {}", f, e),
+            }
+            // Try to open the SST and inspect a few entries
+            match cntryl_midge::sst::SstFile::open(&p) {
+                Ok(sst) => match cntryl_midge::sst::SstStateReader::scan_range_state(&sst, None, None) {
+                    Ok(rows) => {
+                        eprintln!("[DEBUG] sst {} rows_count={}", f, rows.len());
+                        if !rows.is_empty() {
+                            let sample_keys: Vec<_> = rows.iter().take(3).map(|(k, _)| String::from_utf8_lossy(k).to_string()).collect();
+                            eprintln!("[DEBUG] sst {} sample_keys={:?}", f, sample_keys);
+                        }
+                    }
+                    Err(e) => eprintln!("[DEBUG] sst scan failed {}: {}", f, e),
+                },
+                Err(e) => eprintln!("[DEBUG] sst open failed {}: {}", f, e),
+            }
+        }
+    // Check whether keys are present before closing engine - helps determine if loss occurred before or during recovery
+    let mut missing_before = Vec::new();
+    for i in 0..200 {
+        let key = format!("key{:04}", i);
+        let found = eng.get(&cf, key.as_bytes()).expect("get");
+        if found.is_none() {
+            missing_before.push(key);
+        }
+    }
+    eprintln!("[DEBUG] missing keys before drop count = {}", missing_before.len());
+    } else {
+        eprintln!("[DEBUG] sst dir missing before drop");
+    }
+
+    match cntryl_midge::manifest::Manifest::load(&dir.path()) {
+        Ok(m) => eprintln!("[DEBUG] manifest before drop: ssts={} files={}", m.ssts.len(), m.files.len()),
+        Err(e) => eprintln!("[DEBUG] failed to load manifest before drop: {}", e),
+    }
+    // List WAL files before shutdown
+    let wal_dir = dir.path().join("wal");
+    if wal_dir.exists() {
+        let wal_files: Vec<_> = std::fs::read_dir(&wal_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        eprintln!("[DEBUG] wal files before drop: {:?}", wal_files);
+    } else {
+        eprintln!("[DEBUG] wal dir missing before drop");
+    }
+    // After recovery we'll also inspect SST files on disk to compare their content
     drop(eng);
 
     // Assert - database should be consistent (no orphaned partial SSTs)
@@ -122,17 +218,78 @@ fn should_cleanup_partial_output_given_compaction_failure() {
         test_hooks: None,
         ..opts
     };
+    eprintln!("[DEBUG] compaction_started={} compaction_failed={}", compaction_started, compaction_failed);
     let eng = MidgeEngine::open(opts_recovery).expect("recover");
     let cf = eng.default_column_family();
-    for i in 0..200 {
-        let result = eng
-            .get(&cf, format!("key{:04}", i).as_bytes())
-            .expect("get");
-        assert!(
-            result.is_some(),
-            "Data should be preserved despite compaction failure"
-        );
+    // DEBUG: inspect manifest and WAL after recovery
+    match cntryl_midge::manifest::Manifest::load(&dir.path()) {
+        Ok(m) => {
+            eprintln!("[DEBUG] manifest after recovery: last_persisted_seq={} ssts={} files={}", m.last_persisted_sequence, m.ssts.len(), m.files.len());
+            for f in &m.files {
+                eprintln!("[DEBUG] file meta after recovery: name={} seq={} entries={} smallest_seq={:?} largest_seq={:?}", f.name, f.sst_seq, f.total_entries, f.smallest_seq, f.largest_seq);
+            }
+        }
+        Err(e) => eprintln!("[DEBUG] failed to load manifest after recovery: {}", e),
     }
+    let wal_dir = dir.path().join("wal");
+    if wal_dir.exists() {
+        let wal_files: Vec<_> = std::fs::read_dir(&wal_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        eprintln!("[DEBUG] wal files after recovery: {:?}", wal_files);
+    } else {
+        eprintln!("[DEBUG] wal dir missing after recovery");
+    }
+    // Inspect recovered SST files and print a small key sample for each
+    let rec_sst_dir = dir.path().join("sst");
+    if rec_sst_dir.exists() {
+        let mut recovered_files: Vec<String> = vec![];
+        for entry in std::fs::read_dir(&rec_sst_dir).unwrap().flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let cf_dir = entry.path();
+                for f in std::fs::read_dir(&cf_dir).unwrap().flatten() {
+                    if let Some(name) = f.file_name().to_str() {
+                        recovered_files.push(format!("{}/{}", cf_dir.file_name().unwrap().to_string_lossy(), name));
+                    }
+                }
+            } else if let Some(name) = entry.file_name().to_str() {
+                recovered_files.push(name.to_string());
+            }
+        }
+        eprintln!("[DEBUG] recovered sst files (count={}): {:?}", recovered_files.len(), recovered_files);
+        for f in &recovered_files {
+            let p = rec_sst_dir.join(f);
+            match cntryl_midge::sst::SstFile::open(&p) {
+                Ok(sst) => match cntryl_midge::sst::SstStateReader::scan_range_state(&sst, None, None) {
+                    Ok(rows) => {
+                        eprintln!("[DEBUG] recovered sst {} rows_count={}", f, rows.len());
+                        if !rows.is_empty() {
+                            let sample_keys: Vec<_> = rows.iter().take(3).map(|(k, _)| String::from_utf8_lossy(k).to_string()).collect();
+                            eprintln!("[DEBUG] recovered sst {} sample_keys={:?}", f, sample_keys);
+                        }
+                    }
+                    Err(e) => eprintln!("[DEBUG] recovered sst scan failed {}: {}", f, e),
+                },
+                Err(e) => eprintln!("[DEBUG] recovered sst open failed {}: {}", f, e),
+            }
+        }
+    }
+    // If any key is missing after recovery, log which one(s) and fail loudly.
+    let mut missing = Vec::new();
+    for i in 0..200 {
+        let key = format!("key{:04}", i);
+        let found = eng.get(&cf, key.as_bytes()).expect("get");
+        if found.is_none() {
+            missing.push(key.clone());
+        }
+    }
+
+    if !missing.is_empty() {
+        eprintln!("Missing keys after recovery (count = {}): {:?}", missing.len(), missing);
+    }
+    assert!(missing.is_empty(), "Data should be preserved despite compaction failure");
     assert!(compaction_started, "Compaction should have started");
 }
 
@@ -253,15 +410,39 @@ fn should_keep_source_ssts_present_until_manifest_persisted() {
         }
     }
 
+    // Force a flush so SST files exist deterministically before compaction begins.
+    eng.flush().expect("flush should succeed");
+
     assert!(
         before_gate.wait_until_blocked(std::time::Duration::from_secs(5)),
         "Compaction should reach the BeforeExecution gate"
     );
     let source_files = collect_sst_files(&sst_dir);
-    assert!(
-        !source_files.is_empty(),
-        "Expected flushed SSTs before compaction proceeds"
-    );
+    if source_files.is_empty() {
+        // Diagnostics: dump sst dir and manifest to help debug timing/hang
+        if sst_dir.exists() {
+            eprintln!("DEBUG: sst_dir exists {}", sst_dir.display());
+            match std::fs::read_dir(&sst_dir) {
+                Ok(entries) => {
+                    eprintln!("DEBUG: sst_dir listing:");
+                    for ent in entries.flatten() {
+                        eprintln!(" - {}", ent.path().display());
+                    }
+                }
+                Err(e) => eprintln!("DEBUG: read_dir error: {}", e),
+            }
+        } else {
+            eprintln!("DEBUG: sst_dir does not exist: {}", sst_dir.display());
+        }
+
+        // Show manifest if loadable
+        match cntryl_midge::manifest::Manifest::load(&dir.path()) {
+            Ok(m) => eprintln!("DEBUG: manifest ssts={} files={:?}", m.ssts.len(), m.files.iter().map(|f| &f.name).collect::<Vec<_>>()),
+            Err(e) => eprintln!("DEBUG: manifest load error: {}", e),
+        }
+
+        panic!("Expected flushed SSTs before compaction proceeds (diagnostics above)");
+    }
 
     let after_gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
     before_gate.release();
