@@ -1,4 +1,4 @@
-You are helping me fix a bug in the Midge LSM engine where the test suite stops early because background worker threads panic.
+You are helping me fix the bugs in the Midge LSM engine where the test suite stops early because background worker threads panic.
 
 Goal:
 Ensure that any panic inside a worker thread NEVER aborts the test process. Every worker thread must be wrapped in a panic guard that converts the panic into a TestHooks signal instead of unwinding into the runner.

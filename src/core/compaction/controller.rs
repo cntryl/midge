@@ -13,7 +13,7 @@ use crossbeam::channel;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::debug;
 
@@ -110,9 +110,11 @@ impl CompactionController {
         let version_manager = config.version_manager.clone();
         let background_error = config.background_error.clone();
 
-        let handle = thread::Builder::new()
-            .name("midge-compaction-worker".to_string())
-            .spawn(move || {
+        let background_error_for_panic = background_error.clone();
+
+        let handle = crate::common::worker::spawn_guarded(
+            "midge-compaction-worker",
+            config.test_hooks.clone(),move || {
                 tracing::info!(interval_ms = interval.as_millis(), "Compaction worker started");
                 // Pending work items (manual + automatic).
                 let mut work_queue: VecDeque<WorkItem> = VecDeque::new();
@@ -395,10 +397,16 @@ impl CompactionController {
                         }
                     }
                 }
-            })
-            .map_err(|e| {
-                MidgeError::internal(format!("Failed to spawn compaction worker: {}", e))
-            })?;
+            },
+            Some(move |_| {
+                // On panic, set the background error to indicate the panic.
+                if let Some(bg) = background_error_for_panic {
+                    *bg.write() = Some(crate::error::MidgeError::internal(
+                        "Compaction worker panicked".to_string(),
+                    ));
+                }
+            }),
+        );
 
         Ok(Self {
             tx,
