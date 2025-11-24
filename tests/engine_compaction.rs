@@ -6,6 +6,7 @@
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::test_hooks::TestHooks;
 
 mod common;
 use common::test_temp_dir;
@@ -68,6 +69,10 @@ fn should_preserve_snapshot_visibility_across_compaction() {
         db_path: dir.path().to_path_buf(),
     };
     opts.enable_compaction = false;
+    let hooks = TestHooks::new();
+    opts.test_hooks = Some(hooks.clone());
+    let hooks = TestHooks::new();
+    opts.test_hooks = Some(hooks.clone());
     opts.wal_buffer_size = 64;
     opts.memtable_size = 1024 * 1024;
     let eng = MidgeEngine::open(opts.clone()).expect("open");
@@ -109,9 +114,12 @@ fn should_background_compact_when_threshold_exceeded() {
     opts.enable_compaction = false; // Disable during setup
     opts.wal_buffer_size = 64;
     opts.memtable_size = 1024;
+    let hooks = TestHooks::new();
+    opts.test_hooks = Some(hooks.clone());
 
     // Create 4 SSTs with overlapping keys so compaction can merge them
     // The strategy compacts all L0 sublevels when file count >= 4
+    let mut manifest_updates = 0u64;
     for i in 0..4 {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -135,13 +143,15 @@ fn should_background_compact_when_threshold_exceeded() {
             .unwrap();
         drop(eng);
         // Wait briefly until the SST/manifest shows the expected files for this iteration
-        let db_path = opts.storage_mode.local_path();
-        let timeout = std::time::Duration::from_millis(500);
-        let _ = common::wait_for_condition(timeout, std::time::Duration::from_millis(10), || {
-            cntryl_midge::manifest::Manifest::load(&db_path)
-                .map(|m| m.ssts.len() >= (i as usize + 1))
-                .unwrap_or(false)
-        });
+        // Deterministically assert the manifest was updated at least once this iteration
+        assert!(
+            hooks.manifest_update_count() >= manifest_updates + 1,
+            "Expected manifest update after flush; prior_updates={}, new_updates={}  iteration={}",
+            manifest_updates,
+            hooks.manifest_update_count(),
+            i
+        );
+        manifest_updates = hooks.manifest_update_count();
     }
 
     // Verify all 4 SST files were created before starting background compaction

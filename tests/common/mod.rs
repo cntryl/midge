@@ -765,7 +765,7 @@ pub fn disk_storage_modes() -> &'static [&'static str] {
 #[allow(dead_code)]
 pub fn wait_for_condition<F>(
     timeout: std::time::Duration,
-    interval: std::time::Duration,
+    _interval: std::time::Duration,
     cond: F,
 ) -> bool
 where
@@ -776,7 +776,9 @@ where
         if cond() {
             return true;
         }
-        std::thread::sleep(interval);
+        // Use yields to allow scheduler to run other threads instead
+        // of fixed sleeps which introduce timing dependencies in tests.
+        std::thread::yield_now();
     }
     cond()
 }

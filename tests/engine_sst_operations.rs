@@ -6,6 +6,7 @@
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
+use cntryl_midge::test_hooks::{TestHooks, FlushGatePoint};
 
 mod common;
 use common::test_temp_dir;
@@ -13,7 +14,7 @@ use common::test_temp_dir;
 fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
     // Arrange: write a couple keys, then force WAL rotation to flush memtable -> SST
     let dir = test_temp_dir();
-    let opts = MidgeOptions {
+    let mut opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
             db_path: dir.path().to_path_buf(),
         },
@@ -22,6 +23,8 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         memtable_size: 1024 * 1024,
         ..Default::default()
     };
+    let hooks = TestHooks::new();
+    opts.test_hooks = Some(hooks.clone());
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
@@ -29,10 +32,16 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         eng.put(&cf, b"b", b"2").unwrap();
         // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
         let big = vec![b'v'; 128];
+        let gate = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
         eng.put(&cf, b"zz", big.as_slice()).unwrap();
-        // Wait for background flush to materialize SST and update manifest
-        eng.wait_for_flush(std::time::Duration::from_millis(100))
-            .expect("flush should complete");
+        // Flush synchronously; flush pipeline will hit the gate which we then release.
+        let _ = eng.flush();
+        assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
+        gate.release();
+        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
+        // Verify initial SST contains expected values
+        assert_eq!(eng.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));
+        assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
     }
 
     // Act: reopen engine (memtable will only have post-rotation tail; 'a' should be in SST)
@@ -57,21 +66,31 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
     opts.enable_compaction = false;
     opts.wal_buffer_size = 64; // force rotation
     opts.memtable_size = 1024 * 1024;
+    let hooks = TestHooks::new();
+    opts.test_hooks = Some(hooks.clone());
     {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
         eng.put(&cf, b"k", b"v1").unwrap();
         // rotate to flush first version
         let big = vec![b'v'; 128];
+        let gate = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
         eng.put(&cf, b"zz", big.as_slice()).unwrap();
-        eng.wait_for_flush(std::time::Duration::from_millis(100))
-            .expect("flush should complete");
+        let _ = eng.flush();
+        assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
+        gate.release();
+        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
+        // Verify initial SST contains v1
+        assert_eq!(eng.get(&cf, b"k").unwrap(), Some(Bytes::from_static(b"v1")));
         // delete and rotate again to flush tombstone
         eng.delete(&cf, b"k").unwrap();
         let big2 = vec![b'v'; 128];
+        let gate2 = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
         eng.put(&cf, b"zz2", big2.as_slice()).unwrap();
-        eng.wait_for_flush(std::time::Duration::from_millis(100))
-            .expect("flush should complete");
+        let _ = eng.flush();
+        assert!(gate2.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
+        gate2.release();
+        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
     }
 
     // Act: reopen
@@ -103,7 +122,7 @@ fn should_merge_memtable_ssts_with_last_write_wins_on_scan() {
         eng.put(&cf1, b"c", b"3").unwrap();
         let big = vec![b'v'; 256];
         eng.put(&cf1, b"zz", big.as_slice()).unwrap();
-        // Wait for background flush
+        // Force and deterministically wait for flush
         eng.wait_for_flush(std::time::Duration::from_millis(100))
             .expect("flush should complete");
     }

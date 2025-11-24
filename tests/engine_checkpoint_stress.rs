@@ -8,6 +8,7 @@ use cntryl_midge::{ColumnFamilyConfig, MidgeEngine, MidgeOptions, StorageMode};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use crossbeam::channel;
 
 mod common;
 use common::test_temp_dir;
@@ -28,24 +29,24 @@ fn should_create_checkpoint_during_concurrent_writes() {
     // Start background writes
     let engine_writer = engine.clone();
     let cf_clone = cf.clone();
+    let (ready_tx, ready_rx) = channel::bounded(1);
     let writer = thread::spawn(move || {
         for i in 0..50u32 {
             engine_writer
                 .put(&cf_clone, format!("key_{}", i).as_bytes(), b"value")
                 .expect("put");
-            // yield instead of sleeping so writer still makes progress deterministically
+            // Signal the main thread after first write, then continue
+            if i == 0 {
+                let _ = ready_tx.send(());
+            }
+            // yield to allow other threads to run and avoid busy spin
             std::thread::yield_now();
         }
     });
 
-    // Wait until at least one write is visible (fail fast)
+    // Wait until signaled by the writer that first write was performed.
     let timeout = std::time::Duration::from_secs(1);
-    let _ = common::wait_for_condition(timeout, std::time::Duration::from_millis(10), || {
-        engine
-            .get(&cf, format!("key_{}", 0).as_bytes())
-            .unwrap()
-            .is_some()
-    });
+    let _ = ready_rx.recv_timeout(timeout).expect("Writer did not report first write");
 
     // Act - Create checkpoint while writes are ongoing
     let cp_dir = dir.path().join("checkpoint");
@@ -138,6 +139,7 @@ fn should_create_consistent_checkpoint_under_high_load() {
     // Heavy write load
     let engine_writer = engine.clone();
     let cf_clone = cf.clone();
+    let (ready_tx, ready_rx) = channel::bounded(1);
     let writer = thread::spawn(move || {
         for i in 0..100u32 {
             engine_writer
@@ -147,17 +149,15 @@ fn should_create_consistent_checkpoint_under_high_load() {
                     format!("value_{}", i).as_bytes(),
                 )
                 .expect("put");
+            if i == 0 {
+                let _ = ready_tx.send(());
+            }
         }
     });
 
-    // Wait for some load to flush/apply (fail fast)
+    // Wait for writer to report first write
     let timeout = std::time::Duration::from_secs(1);
-    let _ = common::wait_for_condition(timeout, std::time::Duration::from_millis(10), || {
-        engine
-            .get(&cf, format!("load_{}", 0).as_bytes())
-            .unwrap()
-            .is_some()
-    });
+    let _ = ready_rx.recv_timeout(timeout).expect("Writer did not report first write");
 
     // Act - Create checkpoint during load
     let cp_dir = dir.path().join("checkpoint_load");
@@ -254,8 +254,9 @@ fn should_checkpoint_after_memtable_flush() {
             .put(&cf, format!("key_{}", i).as_bytes(), b"value")
             .expect("put");
     }
+    engine.flush().expect("flush");
     engine
-        .wait_for_flush(Duration::from_millis(200))
+        .wait_for_flush(Duration::from_secs(5))
         .expect("flush");
 
     // Act - Create checkpoint after flush

@@ -23,6 +23,7 @@ fn should_create_checkpoint_when_data_exists() {
     eng.put(&cf, b"k1", b"v1").unwrap();
     eng.put(&cf, b"k2", b"v2").unwrap();
     eng.flush().unwrap();
+    eng.wait_for_flush(std::time::Duration::from_secs(5)).unwrap();
 
     // Act: create checkpoint
     let cp_dir = std::env::temp_dir().join("checkpoint_test");
@@ -149,20 +150,8 @@ fn should_create_checkpoint_with_multiple_sst_files() {
     // Flaky systems may schedule flush/manifest writes slightly delayed; ensure
     // the DB directory contains the expected SST files before copying.
     let sst_dir = dir.path().join("sst");
-    let ok = common::wait_for_condition(
-        std::time::Duration::from_secs(2),
-        std::time::Duration::from_millis(25),
-        || {
-            if !sst_dir.exists() {
-                return false;
-            }
-            match std::fs::read_dir(&sst_dir) {
-                Ok(rd) => rd.flatten().count() >= 2,
-                Err(_) => false,
-            }
-        },
-    );
-    assert!(ok, "Timed out waiting for SST files to be flushed to disk");
+    let db_sst_files = list_all_files(&sst_dir);
+    assert!(db_sst_files.len() >= 2, "Expected at least 2 SST files to be present before checkpointing; found {:?}", db_sst_files);
 
     let cp_dir = dir.path().join("checkpoint");
     // Debug: list SST files present in DB before checkpoint (recursive)
