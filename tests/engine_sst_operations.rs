@@ -33,6 +33,7 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
         let big = vec![b'v'; 128];
         let gate = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
+        let prev_manifest_updates = hooks.manifest_update_count();
         // Use a write batch to predictably exceed WAL buffer size and force rotation
         let mut batch = cntryl_midge::WriteBatch::new();
         batch.put(cf.id(), Bytes::from("zz0"), Bytes::from(big.clone()));
@@ -43,8 +44,8 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         // foreground flush and bypasses the background worker (thus skipping the gate).
         assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
         gate.release();
-        // Wait for the background flush to complete deterministically.
-        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
+        // After releasing the gate, verify the background flush updated the manifest.
+        assert!(hooks.wait_for_manifest_update(prev_manifest_updates, std::time::Duration::from_secs(5)), "expected manifest update after release");
         // Verify initial SST contains expected values
         assert_eq!(eng.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));
         assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
@@ -83,15 +84,15 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
         // rotate to flush first version
         let big = vec![b'v'; 128];
         let gate = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
+        let prev_manifest_updates = hooks.manifest_update_count();
         let mut batch = cntryl_midge::WriteBatch::new();
         batch.put(cf.id(), Bytes::from("zz3"), Bytes::from(big.clone()));
         batch.put(cf.id(), Bytes::from("zz4"), Bytes::from(big.clone()));
         eng.write_batch(&batch).expect("write_batch");
         assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
         gate.release();
-        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
-        // Ensure a manifest update happened (SST persisted)
-        assert!(hooks.manifest_update_count() > 0, "expected a manifest update after flush");
+        // Confirm background flush resulted in a manifest update; avoid time-based waits.
+        assert!(hooks.wait_for_manifest_update(prev_manifest_updates, std::time::Duration::from_secs(5)), "expected a manifest update after flush");
         // Verify initial SST contains v1
         let get_k = eng.get(&cf, b"k").unwrap();
         if get_k.is_none() {

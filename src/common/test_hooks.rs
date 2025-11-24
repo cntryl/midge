@@ -20,7 +20,7 @@
 
 use crossbeam::channel;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -217,6 +217,10 @@ pub struct TestHooks {
     compaction_gate: Arc<Mutex<Option<Arc<CompactionGateState>>>>,
     /// Optional deterministic gate for coordinating flushes
     flush_gate: Arc<Mutex<Option<Arc<FlushGateState>>>>,
+    /// Notifiers for waiting on manifest updates
+    manifest_update_notifiers: Arc<Mutex<Vec<(usize, channel::Sender<()>)>>>,
+    /// Counter for unique manifest notifier ids
+    manifest_notifier_id: Arc<AtomicUsize>,
 }
 
 impl Default for TestHooks {
@@ -245,6 +249,8 @@ impl TestHooks {
             manifest_fsynced_before_wal_truncate: Arc::new(AtomicBool::new(false)),
             compaction_gate: Arc::new(Mutex::new(None)),
             flush_gate: Arc::new(Mutex::new(None)),
+            manifest_update_notifiers: Arc::new(Mutex::new(Vec::new())),
+            manifest_notifier_id: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -363,7 +369,45 @@ impl TestHooks {
     /// Hook called before manifest update. Returns whether to fail the update.
     pub fn before_manifest_update(&self) -> bool {
         self.manifest_update_count.fetch_add(1, Ordering::SeqCst);
+        // Notify any waiters waiting for a manifest update
+        let mut to_remove = Vec::new();
+        {
+            let mut guard = self.manifest_update_notifiers.lock();
+            for (id, tx) in guard.iter() {
+                if tx.send(()).is_err() {
+                    to_remove.push(*id);
+                }
+            }
+            if !to_remove.is_empty() {
+                guard.retain(|(i, _)| !to_remove.contains(i));
+            }
+        }
         matches!(*self.manifest_behavior.read(), ManifestBehavior::FailSave)
+    }
+
+    /// Wait until the manifest_update_count increases past `prev`, or until timeout.
+    /// Returns true if an update was observed, false on timeout.
+    pub fn wait_for_manifest_update(&self, prev: u64, timeout: Duration) -> bool {
+        if self.manifest_update_count() > prev {
+            return true;
+        }
+        let (tx, rx) = channel::bounded(1);
+        let id = self.manifest_notifier_id.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut guard = self.manifest_update_notifiers.lock();
+            guard.push((id, tx));
+        }
+        let res = rx.recv_timeout(timeout).is_ok();
+        // cleanup notifier
+        {
+            let mut guard = self.manifest_update_notifiers.lock();
+            guard.retain(|(i, _)| *i != id);
+        }
+        // Also check the counter again in case the notify was missed for timing reasons
+        if !res {
+            return self.manifest_update_count() > prev;
+        }
+        true
     }
 
     /// Hook called after manifest fsync, before WAL truncation.
@@ -531,6 +575,8 @@ impl TestHooks {
             .store(false, Ordering::SeqCst);
         self.manifest_fsynced_before_wal_truncate
             .store(false, Ordering::SeqCst);
+        self.manifest_update_notifiers.lock().clear();
+        self.manifest_notifier_id.store(0, Ordering::SeqCst);
         self.compaction_gate.lock().take();
         self.flush_gate.lock().take();
     }
@@ -647,5 +693,36 @@ mod tests {
 
         // Assert
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn should_wait_for_manifest_update() {
+        // Arrange
+        use std::time::Duration;
+        use std::thread;
+        let hooks = TestHooks::new();
+        let prev = hooks.manifest_update_count();
+
+        // Spawn a thread that waits a short moment then triggers a manifest update
+        let hooks_clone = hooks.clone();
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            hooks_clone.before_manifest_update();
+        });
+
+        // Act/Assert: wait_for_manifest_update should succeed before timeout
+        assert!(hooks.wait_for_manifest_update(prev, Duration::from_secs(1)));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn should_timeout_waiting_for_manifest_update() {
+        // Arrange
+        use std::time::Duration;
+        let hooks = TestHooks::new();
+        let prev = hooks.manifest_update_count();
+
+        // Act/Assert: no manifest update is triggered; wait should timeout
+        assert!(!hooks.wait_for_manifest_update(prev, Duration::from_millis(50)));
     }
 }

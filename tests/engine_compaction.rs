@@ -142,7 +142,7 @@ fn should_background_compact_when_threshold_exceeded() {
         // Wait briefly until the SST/manifest shows the expected files for this iteration
         // Deterministically assert the manifest was updated at least once this iteration
         assert!(
-            hooks.manifest_update_count() >= manifest_updates + 1,
+            hooks.wait_for_manifest_update(manifest_updates, std::time::Duration::from_secs(5)),
             "Expected manifest update after flush; prior_updates={}, new_updates={}  iteration={}",
             manifest_updates,
             hooks.manifest_update_count(),
