@@ -96,13 +96,19 @@ impl FlushCoordinator {
 
 impl Drop for FlushCoordinator {
     fn drop(&mut self) {
+        eprintln!("[SHUTDOWN] FlushCoordinator::drop - sending shutdown signal");
         // Best-effort shutdown signal
         let _ = self.tx.send(FlushMsg::Shutdown);
 
         // Wait for thread to finish if handle still exists
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            eprintln!("[SHUTDOWN] FlushCoordinator::drop - waiting for worker thread to join");
+            match handle.join() {
+                Ok(_) => eprintln!("[SHUTDOWN] FlushCoordinator worker thread joined successfully"),
+                Err(e) => eprintln!("[SHUTDOWN] FlushCoordinator worker thread panicked: {:?}", e),
+            }
         }
+        eprintln!("[SHUTDOWN] FlushCoordinator::drop - complete");
     }
 }
 

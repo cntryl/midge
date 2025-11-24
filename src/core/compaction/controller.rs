@@ -716,13 +716,19 @@ impl CompactionController {
 
 impl Drop for CompactionController {
     fn drop(&mut self) {
+        eprintln!("[SHUTDOWN] CompactionController::drop - sending shutdown signal");
         // Best-effort shutdown signal.
         let _ = self.tx.send(CompactionMsg::Shutdown);
 
         // Wait for thread to finish if handle still exists.
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            eprintln!("[SHUTDOWN] CompactionController::drop - waiting for worker thread to join");
+            match handle.join() {
+                Ok(_) => eprintln!("[SHUTDOWN] CompactionController worker thread joined successfully"),
+                Err(e) => eprintln!("[SHUTDOWN] CompactionController worker thread panicked: {:?}", e),
+            }
         }
+        eprintln!("[SHUTDOWN] CompactionController::drop - complete");
     }
 }
 

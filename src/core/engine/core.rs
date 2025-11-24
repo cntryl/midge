@@ -406,21 +406,21 @@ impl MidgeEngine {
 impl Drop for MidgeEngine {
     fn drop(&mut self) {
         // Debugging: indicate we're beginning engine drop
-        eprintln!("[DEBUG] MidgeEngine::drop - start");
+        eprintln!("[SHUTDOWN] MidgeEngine::drop - start");
         // Flush WAL to ensure all writes are persisted
-        eprintln!("[DEBUG] MidgeEngine::drop - calling wal_coordinator.flush()");
+        eprintln!("[SHUTDOWN] MidgeEngine::drop - calling wal_coordinator.flush()");
         let _ = self.wal_coordinator.flush();
-        eprintln!("[DEBUG] MidgeEngine::drop - wal_coordinator.flush returned");
+        eprintln!("[SHUTDOWN] MidgeEngine::drop - wal_coordinator.flush returned");
 
         // Shutdown VersionManager actor gracefully
-        eprintln!("[DEBUG] MidgeEngine::drop - calling version_manager.shutdown()");
+        eprintln!("[SHUTDOWN] MidgeEngine::drop - calling version_manager.shutdown()");
         self.version_manager.shutdown();
-        eprintln!("[DEBUG] MidgeEngine::drop - version_manager.shutdown returned");
+        eprintln!("[SHUTDOWN] MidgeEngine::drop - version_manager.shutdown returned");
 
         // FlushCoordinator will be automatically dropped and shutdown gracefully
-
-        // Background compaction thread is an infinite loop; rely on process exit
-        // to terminate it for now.
+        // (no explicit action needed, drop order handles it)
+        
+        eprintln!("[SHUTDOWN] MidgeEngine::drop - complete");
     }
 }
 
