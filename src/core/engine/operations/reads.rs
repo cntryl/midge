@@ -203,7 +203,9 @@ impl MidgeEngine {
         }
 
         // Check SST files from newest to oldest (reverse iteration)
-        for file in cf_files.iter().rev() {
+        // Iterate SST files from newest to oldest so the most recent version
+        // (including tombstones) wins over older versions.
+        for file in cf_files.iter() {
             let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             // CloudSstReaderFactory will download from cloud if not in local cache
             if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {

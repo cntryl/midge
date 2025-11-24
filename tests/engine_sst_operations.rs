@@ -33,12 +33,18 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         // Next put should rotate WAL due to tiny buffer; choose a larger value to be safe
         let big = vec![b'v'; 128];
         let gate = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
-        eng.put(&cf, b"zz", big.as_slice()).unwrap();
-        // Flush synchronously; flush pipeline will hit the gate which we then release.
-        let _ = eng.flush();
+        // Use a write batch to predictably exceed WAL buffer size and force rotation
+        let mut batch = cntryl_midge::WriteBatch::new();
+        batch.put(cf.id(), Bytes::from("zz0"), Bytes::from(big.clone()));
+        batch.put(cf.id(), Bytes::from("zz1"), Bytes::from(big.clone()));
+        eng.write_batch(&batch).expect("write_batch");
+        // Let the WAL rotation/background flush worker process the job and reach
+        // the gate; do NOT call `eng.flush()` here, which performs a synchronous
+        // foreground flush and bypasses the background worker (thus skipping the gate).
         assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
         gate.release();
-        eng.flush().expect("flush should complete");
+        // Wait for the background flush to complete deterministically.
+        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
         // Verify initial SST contains expected values
         assert_eq!(eng.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));
         assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
@@ -72,25 +78,43 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
         let eng = MidgeEngine::open(opts.clone()).expect("open");
         let cf = eng.default_column_family();
         eng.put(&cf, b"k", b"v1").unwrap();
+        // Sanity: value visible in memtable before flush
+        assert_eq!(eng.get(&cf, b"k").unwrap(), Some(Bytes::from_static(b"v1")));
         // rotate to flush first version
         let big = vec![b'v'; 128];
         let gate = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
-        eng.put(&cf, b"zz", big.as_slice()).unwrap();
-        let _ = eng.flush();
+        let mut batch = cntryl_midge::WriteBatch::new();
+        batch.put(cf.id(), Bytes::from("zz3"), Bytes::from(big.clone()));
+        batch.put(cf.id(), Bytes::from("zz4"), Bytes::from(big.clone()));
+        eng.write_batch(&batch).expect("write_batch");
         assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
         gate.release();
-        eng.flush().expect("flush should complete");
+        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
+        // Ensure a manifest update happened (SST persisted)
+        assert!(hooks.manifest_update_count() > 0, "expected a manifest update after flush");
         // Verify initial SST contains v1
-        assert_eq!(eng.get(&cf, b"k").unwrap(), Some(Bytes::from_static(b"v1")));
-        // delete and rotate again to flush tombstone
+        let get_k = eng.get(&cf, b"k").unwrap();
+        if get_k.is_none() {
+            // Debug: manifest & sst contents when value not found in get
+            let manifest = cntryl_midge::manifest::Manifest::load(&opts.storage_mode.local_path()).unwrap();
+            println!("manifest ssts: {:?}", manifest.ssts);
+            for s in manifest.ssts.iter() {
+                let sst_path = opts
+                    .storage_mode
+                    .local_path()
+                    .join("sst")
+                    .join(s);
+                if sst_path.exists() {
+                    let sst = cntryl_midge::sst::fs::SstFile::open(&sst_path).unwrap();
+                    let rows = cntryl_midge::sst::SstStateReader::scan_range_state(&sst, None, None).unwrap();
+                    println!("sst {} rows: {:?}", s, rows);
+                }
+            }
+        }
+        assert_eq!(get_k, Some(Bytes::from_static(b"v1")));
+        // delete and flush tombstone synchronously to ensure it persists
         eng.delete(&cf, b"k").unwrap();
-        let big2 = vec![b'v'; 128];
-        let gate2 = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
-        eng.put(&cf, b"zz2", big2.as_slice()).unwrap();
-        let _ = eng.flush();
-        assert!(gate2.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
-        gate2.release();
-        eng.flush().expect("flush should complete");
+        eng.flush().expect("flush tombstone");
     }
 
     // Act: reopen

@@ -38,6 +38,7 @@ fn should_compact_all_merge_newest_drop_tombstones() {
         eng.put(&cf, b"zz3", &vec![b'x'; 256]).unwrap();
         eng.flush().expect("flush should complete");
         // leave eng in scope to ensure flush thread has time
+        // leave eng in scope to ensure flush thread has time
     }
 
     let eng = MidgeEngine::open(opts.clone()).expect("reopen");
