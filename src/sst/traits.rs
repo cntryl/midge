@@ -141,7 +141,7 @@ pub trait SstFactory: Send + Sync {
         compression: crate::common::codec::CompressionType,
         block_size: usize,
         use_internal: bool,
-    ) -> Box<dyn DynSstWriter>;
+    ) -> crate::error::MidgeResult<Box<dyn DynSstWriter>>;
 
     /// Create an SST writer with a specific sequence number for temp file naming.
     /// The sequence number is used to create deterministic temp file names.
@@ -151,7 +151,7 @@ pub trait SstFactory: Send + Sync {
         block_size: usize,
         use_internal: bool,
         _sst_seq: u64,
-    ) -> Box<dyn DynSstWriter> {
+    ) -> crate::error::MidgeResult<Box<dyn DynSstWriter>> {
         // Default implementation ignores sequence and delegates to create()
         self.create(compression, block_size, use_internal)
     }
@@ -163,7 +163,7 @@ pub trait SstFactory: Send + Sync {
         block_size: usize,
         use_internal: bool,
         _bloom_bits_per_key: u32,
-    ) -> Box<dyn DynSstWriter> {
+    ) -> crate::error::MidgeResult<Box<dyn DynSstWriter>> {
         // Default implementation delegates to create(), ignoring bloom config
         self.create(compression, block_size, use_internal)
     }
@@ -176,7 +176,7 @@ pub trait SstFactory: Send + Sync {
         use_internal: bool,
         _bloom_bits_per_key: u32,
         _sst_seq: u64,
-    ) -> Box<dyn DynSstWriter> {
+    ) -> crate::error::MidgeResult<Box<dyn DynSstWriter>> {
         // Default implementation delegates to create_with_seq(), ignoring bloom config
         self.create_with_seq(compression, block_size, use_internal, _sst_seq)
     }
@@ -234,7 +234,7 @@ mod tests {
         // Arrange - writer: MemSstFactory -> DynSstWriter
         let writer_factory = || -> Box<dyn DynSstWriter> {
             let f = crate::sst::mem::MemSstFactory {};
-            f.create(crate::common::codec::CompressionType::None, 4096, false)
+            f.create(crate::common::codec::CompressionType::None, 4096, false).unwrap()
         };
         // reader: MemSstReaderFactory (reads bytes from the path)
         let reader_factory = |p: &std::path::Path| -> Box<dyn SstStateReader> {
@@ -252,7 +252,7 @@ mod tests {
         // Arrange
         let writer_factory = || -> Box<dyn DynSstWriter> {
             let f = crate::sst::mem::MemSstFactory {};
-            f.create(crate::common::codec::CompressionType::None, 4096, false)
+            f.create(crate::common::codec::CompressionType::None, 4096, false).unwrap()
         };
         // reader: open filesystem-backed SstFile via SstFile::open and box it
         let reader_factory = |p: &std::path::Path| -> Box<dyn SstStateReader> {

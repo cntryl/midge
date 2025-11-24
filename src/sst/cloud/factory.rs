@@ -66,8 +66,8 @@ impl crate::sst::SstFactory for CloudSstFactory {
         compression: crate::common::codec::CompressionType,
         block_size: usize,
         use_internal: bool,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
-        Box::new(CloudDynWriter {
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
+        Ok(Box::new(CloudDynWriter {
             writer: SstCloudWriter::new_with_internal(
                 self.backend.clone(),
                 self.key_prefix.clone(),
@@ -75,7 +75,7 @@ impl crate::sst::SstFactory for CloudSstFactory {
                 block_size,
                 use_internal,
             ),
-        })
+        }))
     }
 
     fn create_with_seq(
@@ -84,7 +84,7 @@ impl crate::sst::SstFactory for CloudSstFactory {
         block_size: usize,
         use_internal: bool,
         _sst_seq: u64,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
         // Cloud writers don't use sequence numbers for temp file naming
         self.create(compression, block_size, use_internal)
     }
@@ -95,8 +95,8 @@ impl crate::sst::SstFactory for CloudSstFactory {
         block_size: usize,
         use_internal: bool,
         bloom_bits_per_key: u32,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
-        Box::new(CloudDynWriter {
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
+        Ok(Box::new(CloudDynWriter {
             writer: SstCloudWriter::new_with_bloom(
                 self.backend.clone(),
                 self.key_prefix.clone(),
@@ -105,7 +105,7 @@ impl crate::sst::SstFactory for CloudSstFactory {
                 use_internal,
                 bloom_bits_per_key,
             ),
-        })
+        }))
     }
 
     fn create_with_bloom_and_seq(
@@ -115,7 +115,7 @@ impl crate::sst::SstFactory for CloudSstFactory {
         use_internal: bool,
         bloom_bits_per_key: u32,
         _sst_seq: u64,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
         // Cloud writers don't use sequence numbers for temp file naming
         self.create_with_bloom(compression, block_size, use_internal, bloom_bits_per_key)
     }
@@ -214,7 +214,9 @@ mod tests {
         let factory = CloudSstFactory::new(backend, "sst".to_string());
 
         // Assert
-        let writer = factory.create(crate::common::codec::CompressionType::None, 4096, false);
+        let writer = factory
+            .create(crate::common::codec::CompressionType::None, 4096, false)
+            .unwrap();
         assert!(writer.finish_bytes().is_ok());
     }
 
@@ -225,7 +227,9 @@ mod tests {
         let factory = CloudSstFactory::new(backend, "sst".to_string());
 
         // Act
-        let mut writer = factory.create(crate::common::codec::CompressionType::None, 4096, false);
+        let mut writer = factory
+            .create(crate::common::codec::CompressionType::None, 4096, false)
+            .unwrap();
 
         writer.add(b"key1", b"value1").unwrap();
         writer.add(b"key2", b"value2").unwrap();
@@ -244,8 +248,9 @@ mod tests {
         let write_factory = CloudSstFactory::new(backend.clone(), "sst".to_string());
 
         // Act
-        let mut writer =
-            write_factory.create(crate::common::codec::CompressionType::None, 4096, false);
+        let mut writer = write_factory
+            .create(crate::common::codec::CompressionType::None, 4096, false)
+            .unwrap();
         writer.add(b"apple", b"A").unwrap();
         writer.add(b"banana", b"B").unwrap();
         writer.add(b"cherry", b"C").unwrap();

@@ -42,15 +42,21 @@ impl MockCloudBackend {
     }
 
     pub fn with_root(root_dir: PathBuf) -> Self {
-        std::fs::create_dir_all(&root_dir).unwrap_or_else(|e| {
-            panic!(
-                "Failed to create mock backend root {}: {}",
-                root_dir.display(),
-                e
-            )
-        });
+        // Attempt to create the specified root directory; when this fails
+        // log and fall back to the system temp dir rather than panicking.
+        let actual_root = match std::fs::create_dir_all(&root_dir) {
+            Ok(_) => root_dir,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create mock backend root {}: {}; falling back to system tmpdir",
+                    root_dir.display(),
+                    e
+                );
+                std::env::temp_dir()
+            }
+        };
         Self {
-            root_dir,
+            root_dir: actual_root,
             etags: Mutex::new(HashMap::new()),
             latency: None,
             upload_count: AtomicUsize::new(0),

@@ -5,6 +5,7 @@ use crate::sst::traits::{SstReaderFactory, SstStateReader};
 
 use super::reader::SstFile;
 use super::writer::FsDynWriter;
+use crate::error::{MidgeError};
 use crate::common::codec::CompressionType;
 use crate::sst::traits::SstFactory;
 
@@ -89,10 +90,13 @@ impl SstFactory for FsSstFactory {
         compression: CompressionType,
         block_size: usize,
         use_internal: bool,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
         // Propagate test hooks through the SST factory if available later.
         // Currently create() is called from engine initialization where
         // test hooks are not readily available; use None by default.
+        // Try to create an FS-backed writer. If that fails, attempt to
+        // fallback to system temp dir. If that fails as well, return an
+        // erroring writer that always returns a MidgeError instead of panicking.
         match FsDynWriter::new(
             &self.temp_dir,
             compression,
@@ -100,7 +104,7 @@ impl SstFactory for FsSstFactory {
             use_internal,
             self.test_hooks.clone(),
         ) {
-            Ok(w) => Box::new(w),
+            Ok(w) => Ok(Box::new(w)),
             Err(e) => {
                 tracing::error!(
                     "Failed to create FsDynWriter in {}: {}",
@@ -121,16 +125,22 @@ impl SstFactory for FsSstFactory {
                             "FsDynWriter fell back to system temp dir: {}",
                             sys_tmp.display()
                         );
-                        Box::new(w2)
+                        Ok(Box::new(w2))
                     }
                     Err(e2) => {
-                        // If even the system temp fails, panic with both errors for debugging
-                        panic!(
+                        tracing::error!(
                             "Failed to create FsDynWriter in {} and fallback {}: {}",
                             self.temp_dir.display(),
                             sys_tmp.display(),
                             e2
                         );
+                        // Create a writer that fails on operations instead of panicking
+                        Err(MidgeError::internal(format!(
+                            "Failed to create FsDynWriter in {} or fallback {}: {}",
+                            self.temp_dir.display(),
+                            sys_tmp.display(),
+                            e2
+                        )))
                     }
                 }
             }
@@ -143,7 +153,7 @@ impl SstFactory for FsSstFactory {
         block_size: usize,
         use_internal: bool,
         sst_seq: u64,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
         match FsDynWriter::new_with_seq(
             &self.temp_dir,
             compression,
@@ -152,7 +162,7 @@ impl SstFactory for FsSstFactory {
             sst_seq,
             self.test_hooks.clone(),
         ) {
-            Ok(w) => Box::new(w),
+            Ok(w) => Ok(Box::new(w)),
             Err(e) => {
                 tracing::error!(
                     "Failed to create FsDynWriter with seq {} in {}: {}",
@@ -175,17 +185,23 @@ impl SstFactory for FsSstFactory {
                             "FsDynWriter fell back to system temp dir: {}",
                             sys_tmp.display()
                         );
-                        Box::new(w2)
+                        Ok(Box::new(w2))
                     }
                     Err(e2) => {
-                        // If even the system temp fails, panic with both errors for debugging
-                        panic!(
+                        tracing::error!(
                             "Failed to create FsDynWriter with seq {} in {} and fallback {}: {}",
                             sst_seq,
                             self.temp_dir.display(),
                             sys_tmp.display(),
                             e2
                         );
+                        Err(MidgeError::internal(format!(
+                            "Failed to create FsDynWriter with seq {} in {} or fallback {}: {}",
+                            sst_seq,
+                            self.temp_dir.display(),
+                            sys_tmp.display(),
+                            e2
+                        )))
                     }
                 }
             }
@@ -198,8 +214,13 @@ impl SstFactory for FsSstFactory {
         block_size: usize,
         use_internal: bool,
         _bloom_bits_per_key: u32,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
         // FsDynWriter currently ignores bloom bits and uses default of 10
         self.create(compression, block_size, use_internal)
     }
 }
+
+// Previously we allowed constructing an ErrorDynWriter fallback; now factory
+// methods return a `MidgeResult` directly, so a separate error writer is
+// unnecessary and has been removed.
+

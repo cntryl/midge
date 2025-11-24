@@ -81,7 +81,9 @@ impl WalReader for WalMemReader {
             match (len_opt, rec_opt) {
                 (None, None) => break, // EOF
                 (Some(_), Some(rec)) => cb(&rec)?,
-                _ => unreachable!(),
+                // Inconsistent state detected while reading the in-memory WAL buffer.
+                // Treat this as corruption rather than panicking.
+                _ => return Err(MidgeError::corruption("inconsistent WAL buffer state")),
             }
         }
         Ok(())

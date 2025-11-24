@@ -11,6 +11,7 @@ pub mod rate_limiter;
 pub mod test_hooks;
 pub mod timestamp;
 pub mod tlv;
+pub mod worker;
 
 // Re-export commonly used error types for convenience
 pub use error::{MidgeError, MidgeResult};

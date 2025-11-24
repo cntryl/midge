@@ -401,7 +401,7 @@ pub(crate) fn write_compacted_sst(
     // This is correct behavior - we preserve different versions for snapshot visibility.
     // The SST format with internal keys (user_key || seq || kind) handles this correctly.
 
-    let mut writer = sst_factory.create_with_seq(*compression, *block_size, true, sst_seq);
+    let mut writer = sst_factory.create_with_seq(*compression, *block_size, true, sst_seq)?;
     let mut smallest_key: Option<Vec<u8>> = None;
     let mut largest_key: Option<Vec<u8>> = None;
     let mut smallest_seq: Option<u64> = None;
@@ -502,9 +502,10 @@ pub(crate) fn write_compacted_sst(
         let file_path_clone = file_path.clone();
         let sst_id_clone = sst_id.clone();
 
-        std::thread::spawn(move || {
-            // Protect upload worker from panics so they don't abort test runner.
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _handle = crate::common::worker::spawn_guarded(
+            "compaction-cloud-upload",
+            None,
+            move || {
                 if let Err(e) = cloud_manager_clone.upload_sst_async(
                     sst_id_clone,
                     file_path_clone,
@@ -514,12 +515,9 @@ pub(crate) fn write_compacted_sst(
                 ) {
                     tracing::error!("Failed to upload compacted SST to cloud: {}", e);
                 }
-            }));
-            if let Err(panic_payload) = r {
-                eprintln!("Cloud upload worker panicked: {:?}", panic_payload);
-                // No TestHooks available in this scope; just log and swallow.
-            }
-        });
+            },
+            None::<fn(Box<dyn std::any::Any + Send>)>,
+        );
     }
 
     Ok(Some((file_path, meta)))

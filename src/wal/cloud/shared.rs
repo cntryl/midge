@@ -261,40 +261,41 @@ impl WalBatchManager {
     /// Upload a segment to cloud storage asynchronously.
     fn upload_segment_async(&self, segment: WalSegment) -> MidgeResult<DurabilityPromise> {
         let promise = DurabilityPromise::new();
-        let promise_clone = promise.clone();
         let backend = self.backend.clone();
 
-        // Spawn background thread for upload. Guard the entire closure with
-        // `catch_unwind` so a panic inside the upload worker does not unwind
-        // into the test runner. If a panic occurs, complete the promise with
-        // an internal error and log the payload.
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Spawn background thread for upload. Use the guarded spawn helper
+        // so panics are captured and the promise can be completed on panic.
+        let promise_for_worker = promise.clone();
+        let promise_for_on_panic = promise.clone();
+        let _handle = crate::common::worker::spawn_guarded(
+            "wal-cloud-upload",
+            None,
+            move || {
                 let key = segment.segment_id();
-                let data = segment.serialize()?;
+                let data_res = segment.serialize();
+                let data = match data_res {
+                    Ok(d) => d,
+                    Err(e) => {
+                        // Complete the promise with the serialization error and return.
+                        promise_for_worker.complete(Err(e));
+                        return;
+                    }
+                };
 
                 // Throttle cloud upload bandwidth if a global limiter is configured.
-                // This uses the global limiter so we don't need to change the
-                // StorageBackend trait. The limiter will be unlimited by default.
                 let limiter = crate::common::rate_limiter::global_rate_limiter();
                 limiter.request(data.len() as u64);
 
-                backend.put_blob(&key, bytes::Bytes::from(data))?;
-                Ok::<(), MidgeError>(())
-            }));
-
-            match result {
-                Ok(inner_res) => promise_clone.complete(inner_res),
-                Err(panic_payload) => {
-                    eprintln!("WAL cloud upload worker panicked: {:?}", panic_payload);
-                    // Convert to an internal error so callers see a failure instead
-                    // of letting the panic unwind into the test harness.
-                    promise_clone.complete(Err(MidgeError::internal(
-                        "WAL cloud upload worker panicked".to_string(),
-                    )));
-                }
-            }
-        });
+                let _ = backend.put_blob(&key, bytes::Bytes::from(data));
+            },
+            Some(move |_panic_payload| {
+                // Convert a panic into an internal error for the promise so
+                // callers observe a failure instead of a test abort.
+                promise_for_on_panic.complete(Err(MidgeError::internal(
+                    "WAL cloud upload worker panicked".to_string(),
+                )));
+            }),
+        );
 
         // Track this promise for sync() calls
         self.pending_uploads.lock().push(promise.clone());

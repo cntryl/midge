@@ -50,12 +50,12 @@ impl crate::sst::SstFactory for MemSstFactory {
         compression: crate::common::codec::CompressionType,
         block_size: usize,
         use_internal: bool,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
-        Box::new(MemDynWriter(SstMemWriter::new_with_internal(
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
+        Ok(Box::new(MemDynWriter(SstMemWriter::new_with_internal(
             compression,
             block_size,
             use_internal,
-        )))
+        ))))
     }
 
     fn create_with_bloom(
@@ -64,13 +64,13 @@ impl crate::sst::SstFactory for MemSstFactory {
         block_size: usize,
         use_internal: bool,
         bloom_bits_per_key: u32,
-    ) -> Box<dyn crate::sst::DynSstWriter> {
-        Box::new(MemDynWriter(SstMemWriter::new_with_bloom(
+    ) -> crate::error::MidgeResult<Box<dyn crate::sst::DynSstWriter>> {
+        Ok(Box::new(MemDynWriter(SstMemWriter::new_with_bloom(
             compression,
             block_size,
             use_internal,
             bloom_bits_per_key,
-        )))
+        ))))
     }
 }
 
@@ -231,7 +231,9 @@ mod tests {
 
         // Arrange
         let factory = MemSstFactory;
-        let mut writer = factory.create(crate::common::codec::CompressionType::None, 4096, true);
+        let mut writer = factory
+            .create(crate::common::codec::CompressionType::None, 4096, true)
+            .unwrap();
 
         // Act
         writer.add(b"a", b"1").unwrap();

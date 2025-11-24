@@ -290,7 +290,9 @@ fn should_handle_io_error_when_reading_sst_block() {
 
     // Create SST file directly using SST writer
     let factory = FsSstFactory::new(sst_dir.clone());
-    let mut writer = factory.create(CompressionType::None, 4096, false);
+    let mut writer = factory
+        .create(CompressionType::None, 4096, false)
+        .expect("create sst writer");
 
     // Add some test data
     for i in 0..10 {

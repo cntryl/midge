@@ -172,10 +172,9 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let sst_seq = crate::core::naming::allocate_sst_seq(cf_id);
 
     // Create SST writer with sequence for deterministic temp file naming
-    let mut writer =
-        config
-            .sst_factory
-            .create_with_seq(config.compression, config.block_size, true, sst_seq);
+    let mut writer = config
+        .sst_factory
+        .create_with_seq(config.compression, config.block_size, true, sst_seq)?;
 
     // Add entries with metadata (sequence, tombstone, and expiration)
     for entry in entries {
@@ -321,8 +320,12 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
         let sst_id_clone = sst_id.clone();
         let hooks_clone = config.test_hooks.clone();
 
-        std::thread::spawn(move || {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Use the centralized guarded spawn helper so panics are converted to
+        // TestHooks notifications instead of unwinding into the test harness.
+        let _handle = crate::common::worker::spawn_guarded(
+            "cloud-upload",
+            hooks_clone,
+            move || {
                 if let Err(e) = cloud_manager_clone.upload_sst_async(
                     sst_id_clone,
                     sst_path_clone,
@@ -332,16 +335,9 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
                 ) {
                     tracing::error!("Failed to upload SST to cloud: {}", e);
                 }
-            }));
-
-            if let Err(panic_payload) = r {
-                eprintln!("Cloud upload worker panicked: {:?}", panic_payload);
-                if let Some(ref hooks) = hooks_clone {
-                    hooks.record_worker_panic("cloud-upload");
-                }
-                // Swallow the panic to avoid aborting the test runner.
-            }
-        });
+            },
+            None::<fn(Box<dyn std::any::Any + Send>)>,
+        );
     }
 
     // Prune old WAL files AFTER manifest is updated (fs mode only)
@@ -488,22 +484,18 @@ pub(crate) fn compute_bounds(
 
     // Process range tombstones
     for (start, end, seq) in range_tombstones {
-        // Expand key bounds conservatively to include range endpoints
-        if smallest_key.is_none()
-            || start.as_slice()
-                < smallest_key
-                    .as_ref()
-                    .expect("smallest_key checked above")
-                    .as_slice()
+        // Expand key bounds conservatively to include range endpoints.
+        // Use `map_or` to avoid calling `expect` and panicking if our
+        // invariants are violated; return the safe behavior instead.
+        if smallest_key
+            .as_ref()
+            .map_or(true, |sk| start.as_slice() < sk.as_slice())
         {
             smallest_key = Some(start.clone());
         }
-        if largest_key.is_none()
-            || end.as_slice()
-                > largest_key
-                    .as_ref()
-                    .expect("largest_key checked above")
-                    .as_slice()
+        if largest_key
+            .as_ref()
+            .map_or(true, |lk| end.as_slice() > lk.as_slice())
         {
             largest_key = Some(end.clone());
         }
@@ -567,7 +559,7 @@ where
         config.block_size,
         true,
         config.bloom_bits_per_key,
-    );
+    )?;
 
     // Compute bounds and seq range
     let (smallest_key, largest_key, smallest_seq, largest_seq) =
@@ -609,8 +601,7 @@ where
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let boxed = Box::new(dyn_writer);
-    boxed.finish_to_path(&file_path)?;
+    dyn_writer.finish_to_path(&file_path)?;
 
     // Build FileMeta (size to be filled by caller)
     let fm = crate::core::manifest::FileMeta {
