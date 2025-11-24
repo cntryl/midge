@@ -2,6 +2,8 @@
 ///
 /// This test shows how to use TestHooks to intercept fsync operations
 /// and simulate crash scenarios for durability testing.
+mod common;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 use cntryl_midge::{
     test_hooks::{FsyncBehavior, TestHooks},
     MidgeEngine, MidgeOptions, StorageMode,
@@ -202,12 +204,13 @@ fn should_increment_compaction_counters_during_manual_compaction() {
     // Deterministically wait for compaction using hooks.
     let after_gate = hooks.install_compaction_gate(cntryl_midge::test_hooks::CompactionGatePoint::AfterManifestUpdate);
     assert!(
-        after_gate.wait_until_blocked(std::time::Duration::from_secs(10)),
+        after_gate.wait_until_blocked(TEST_GATE_TIMEOUT),
         "Compaction did not reach AfterManifestUpdate"
     );
     // Release the compaction gate and wait deterministically for compaction to finish
     after_gate.release();
     eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
 
     let final_start = hooks.compaction_start_count();
     let final_complete = hooks.compaction_complete_count();

@@ -2,6 +2,7 @@ mod common;
 use bytes::Bytes;
 use cntryl_midge::{KvTransaction, WriteOptions};
 use common::{assert_get_equals, assert_key_absent, new_engine};
+use common::test_helpers::{TEST_RECV_TIMEOUT, wait_for_signal, wait_for_signal_default};
 use std::sync::Arc;
 
 #[test]
@@ -265,12 +266,12 @@ fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested()
         // Signal that the transaction is ready and still uncommitted
         ready_tx.send(()).unwrap();
         // Wait until main thread tells us to finish
-        let _ = done_rx.recv();
+        let _ = wait_for_signal(&done_rx, TEST_RECV_TIMEOUT);
         txn
     });
 
-    // Wait for the txn thread to prepare the uncommitted write
-    ready_rx.recv().expect("txn ready signal");
+    // Wait for the txn thread to prepare the uncommitted write (bounded)
+    wait_for_signal_default(&ready_rx);
 
     // Reader thread attempts to read while transaction is open
     let eng_reader = Arc::clone(&engine);

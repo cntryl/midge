@@ -11,6 +11,7 @@ use crossbeam::channel;
 
 mod common;
 use common::test_temp_dir;
+use common::test_helpers::TEST_RECV_TIMEOUT;
 
 #[test]
 fn should_create_checkpoint_during_concurrent_writes() {
@@ -44,7 +45,7 @@ fn should_create_checkpoint_during_concurrent_writes() {
     });
 
     // Wait until signaled by the writer that first write was performed.
-    let timeout = std::time::Duration::from_secs(1);
+    let timeout = TEST_RECV_TIMEOUT;
     let _ = ready_rx.recv_timeout(timeout).expect("Writer did not report first write");
 
     // Act - Create checkpoint while writes are ongoing
@@ -155,7 +156,7 @@ fn should_create_consistent_checkpoint_under_high_load() {
     });
 
     // Wait for writer to report first write
-    let timeout = std::time::Duration::from_secs(1);
+    let timeout = TEST_RECV_TIMEOUT;
     let _ = ready_rx.recv_timeout(timeout).expect("Writer did not report first write");
 
     // Act - Create checkpoint during load

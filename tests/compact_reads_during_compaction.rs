@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::thread;
 // using channel-based coordination and yields instead of sleeps
 use std::sync::mpsc::channel;
+use common::test_helpers::wait_for_signal_default;
 
 mod common;
 use common::{
@@ -35,7 +36,7 @@ fn should_serve_reads_given_compaction_in_progress() {
         let started_clone = Arc::clone(&started);
         let compaction_handle = thread::spawn(move || {
             // Wait until main thread signals to begin compaction
-            let _ = start_rx.recv();
+            let _ = wait_for_signal_default(&start_rx);
             // Notify readers that compaction is beginning
             started_clone.store(true, Ordering::SeqCst);
             let _ = engine_clone.compact_all();
@@ -174,7 +175,7 @@ fn should_handle_scan_given_files_being_merged() {
         });
 
         // Wait until compaction is signalled as started, then perform range scans while compaction runs
-        let _ = start_rx_scan.recv();
+        let _ = wait_for_signal_default(&start_rx_scan);
         // Perform range scans while compaction runs
         let engine_clone = Arc::clone(&engine);
         let cf_clone = cf.clone();

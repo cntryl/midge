@@ -30,6 +30,7 @@
 //! ```
 
 pub mod cloud;
+pub mod test_helpers;
 
 use bytes::Bytes;
 use cntryl_midge::{

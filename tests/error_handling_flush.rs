@@ -4,7 +4,7 @@ use cntryl_midge::{
     MidgeEngine, MidgeOptions, StorageMode,
 };
 use common::{flush_test_opts, test_temp_dir};
-use std::time::Duration;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 
 // Error Handling / Flush Gate Tests
 // Focus: Crash and coordination scenarios during flush manifest update phase.
@@ -37,7 +37,7 @@ fn should_pause_flush_at_manifest_gate_when_flush_gate_installed() {
     }
 
     // Assert - flush should block at gate
-    let blocked = handle.wait_until_blocked(Duration::from_secs(2));
+    let blocked = handle.wait_until_blocked(TEST_GATE_TIMEOUT);
     if !blocked {
         // Gate not triggered (flush gating currently unavailable) - skip
         return;
@@ -66,7 +66,7 @@ fn should_preserve_memtable_data_when_crash_during_flush_before_manifest_update(
             eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value)
                 .expect("put");
         }
-        if !handle.wait_until_blocked(Duration::from_secs(2)) {
+        if !handle.wait_until_blocked(TEST_GATE_TIMEOUT) {
             // Gate not triggered; skip remaining assertions
             return;
         }
@@ -114,7 +114,7 @@ fn should_resume_flush_when_flush_gate_released() {
         eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value)
             .expect("put");
     }
-    if !handle.wait_until_blocked(Duration::from_secs(2)) {
+    if !handle.wait_until_blocked(TEST_GATE_TIMEOUT) {
         return; // Skip if gate not reached
     }
     // Release gate to allow flush to proceed
@@ -151,7 +151,7 @@ fn should_not_leave_partial_sst_files_when_crash_during_flush_manifest_update() 
             eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value)
                 .expect("put");
         }
-        if !handle.wait_until_blocked(Duration::from_secs(2)) {
+        if !handle.wait_until_blocked(TEST_GATE_TIMEOUT) {
             return; // Skip if gate not reached
         }
         // Engine dropped here simulates crash with uncommitted flush output
@@ -201,7 +201,7 @@ fn should_recover_fsynced_data_when_crash_during_flush_before_manifest_update() 
             eng.put(&cf, format!("key{:04}", i).as_bytes(), &large_value)
                 .expect("put");
         }
-        if !handle.wait_until_blocked(Duration::from_secs(2)) {
+        if !handle.wait_until_blocked(TEST_GATE_TIMEOUT) {
             return; // Skip if gate not reached
         }
     }

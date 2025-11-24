@@ -13,14 +13,11 @@ Format per task: file -> task -> suggested change -> priority -> notes
 - `src/common/test_hooks.rs`:
   - Added `wait_for_manifest_update(prev_count, timeout)` helper and notifier channel mechanics.
   - Added unit tests verifying this helper.
-
 ## Priority: High — Replace timing waits with deterministic helpers
 - `tests/**` (sweep, general):
   - Task: Search for tests that rely on `eng.wait_for_flush(timeout)` with short timeouts or on small sleeps. Replace with `eng.flush()` when a synchronous flush is acceptable, or use `TestHooks` gates and `wait_for_manifest_update()` when exercising background flush pipeline.
   - Suggested fix: If the test needs to ensure a background worker did the work -> use gates + `wait_for_manifest_update`. Otherwise, prefer `eng.flush()` for deterministic blocking behavior.
-
 ### Specific files to process
-- `tests/engine_compaction.rs`:
   - Task: Confirm `wait_for_compaction(10s)` is required. If compaction behavior is being tested, keep it; if not, prefer a gate or `eng.compact_all()` if synchronous compaction is acceptable.
   - Suggested fix: For background compaction tests, consider adding `install_compaction_gate()` if we need to assert steps in compaction; for general tests where compaction is incidental, prefer `eng.compact_all()`.
   - Priority: Medium
@@ -31,63 +28,47 @@ Format per task: file -> task -> suggested change -> priority -> notes
 
 - Other tests: (Automation — find occurrences and decide per-file)
   - Task: Find files using `std::thread::sleep`, `Duration::from_millis(...)` or small `Duration::from_secs(1..5)` in tests. Consider replacing them with one of the below approaches.
-  - Priority: High (sweep step) 
-
-## Priority: Low — Non-test production code sleeps and waits under review
-- `src/core/engine/operations/reads.rs` has a short backoff `std::thread::sleep(Duration::from_millis(5))`.
   - Task: Evaluate if this tiny sleep is necessary in production logic (it may be a minor backoff in a tight loop). If needed in production, keep; otherwise switch to a `yield` or use a more robust synchronization method.
   - Suggested fix: If we can avoid blocking, consider a `std::thread::yield_now()` or a retry counter with exponential backoff. If it’s only for tests, consider exposing a test-hook or a small synchronous check (non-production change) or making the logic event-driven.
-  - Priority: Low
-
-## Additions / Enhancements
-- Add a `TestHooks::wait_for_manifest_updates(prev: u64, expected_count: u64, timeout: Duration) -> bool` helper for tests that require multiple manifest updates in sequence.
-  - Priority: Low
 - Document `TestHooks` usage patterns in `(src/common/test_hooks.rs)` and update `tests/README` or `testutils/README.md` with best practices for deterministic tests and gate usage.
   - Priority: Medium
-
-## Work plan / workflow
 1. Sweep to locate remaining tests with timing-based waiting.
 2. For each test, decide if it needs background path tests (use gates + `wait_for_manifest_update`), or if synchronous `eng.flush()`/`eng.compact_all()` will do.
 3. Update test to use deterministic helper(s), add gating where needed, and remove `std::thread::sleep()`/timeout-based assertions.
 4. Run tests (one file at a time), fix failures. Repeat until the set passes consistently.
 5. Consider improvements to TestHooks (e.g., `wait_for_manifest_updates`, `wait_for_compaction_count`) and add documentation.
-
 ## Tasks to pick next
 - [ ] Sweep tests and list all files with timeouts or sleeps (automate using pattern searches).
 - [ ] For each file, add a recommended change comment in this TODO.md.
 - [ ] Implement and validate changes in batches (1-3 files at a time), and run targeted tests.
-- [ ] Create PR with changes and test results.
 
 ## Checklist (repo-wide)
 - [x] `tests/engine_sst_operations.rs` — converted to deterministic wait using `hooks.wait_for_manifest_update` + gate
 - [x] `tests/engine_compaction.rs` — converted to deterministic wait using `hooks.wait_for_manifest_update` (kept `wait_for_compaction` for background compaction semantics)
-- [ ] Sweep for `std::thread::sleep(...)` usage in tests and consider deterministic replacements
 - [ ] Sweep for any explicit counter-based asserts and convert to `wait_for_manifest_update` or other wait helpers
 - [ ] Document `TestHooks::wait_for_manifest_update` usage and add sample snippet in `src/common/test_hooks.rs` header or repo testutils README
 
 ## Next action (short term)
-- Sweep and report: I will sweep the entire `tests/` folder for any use of waits/polls/short timeouts and create detailed per-file tasks here.
 - After that, I'll implement changes in small batches and run targeted tests.
+
+- `tests/common/test_helpers.rs` added:
+  - Introduced `TEST_RECV_TIMEOUT` and `TEST_GATE_TIMEOUT` constants and `wait_for_signal` helper functions to centralize timeouts and improve readability across tests.
 
 ---
 
 If you'd like, I can start the first action now: "Sweep tests and list all files with timing waits and proposed fix per file" and add the findings to this TODO.md.
-
 ## Sweep findings (detected timing-based waits and suggested changes)
 
 Below are the tests that include timing-based waits, timeouts, or small sleeps identified during the sweep. Each file includes a suggested change and a short rationale.
 
-- `tests/engine_compaction.rs`
   - Occurrences: `hooks.wait_for_manifest_update(..., Duration::from_secs(5))`, `eng.wait_for_compaction(Duration::from_secs(10))`
   - Suggestion: Keep gates for background compaction tests; consider using `eng.compact_all()` for synchronous behavior in tests where background compaction isn't the focus.
   - Priority: Medium
 
-- `tests/engine_sst_operations.rs`
   - Occurrences: `gate.wait_until_blocked(Duration::from_secs(5))`, `hooks.wait_for_manifest_update(..., Duration::from_secs(5))`
   - Suggestion: Already deterministic; keep gate + manifest wait helpers. Consider lowering timeouts slightly if stable under CI.
   - Priority: Low (completed)
 
-- `tests/txn_transaction_lifecycle.rs`
   - Occurrence: `Duration::from_millis(1)` used for short waits (already manually converted to a spin/yield loop in test)
   - Suggestion: Keep spin/yield approach; it's deterministic and fast.
   - Priority: Low (done)
@@ -158,16 +139,11 @@ Below are the tests that include timing-based waits, timeouts, or small sleeps i
   - `tests/engine_sst_operations.rs` (already updated):
     - Occurrences: `hooks.wait_for_manifest_update(prev, Duration::from_secs(5))`, `gate.wait_until_blocked(Duration::from_secs(5))`.
     - Suggestion: Gate + `wait_for_manifest_update` is the recommended deterministic approach — complete.
-    - Priority: Low (done)
-
-  - `tests/shutdown_semantics.rs` and `tests/common/cloud.rs`:
-    - Occurrences: `MockCloudBackend::with_latency(Duration::from_millis(500))`, `backend.wait_for_uploads(1, Duration::from_secs(2))`
     - Suggestion: Keep latency modeling for tests that validate timing and cloud behavior. Prefer `wait_for_uploads` deterministic helpers rather than `sleep`. Consider centralizing simulated latencies.
     - Priority: Low
 
   - `tests/error_handling_flush.rs` & `tests/error_handling_core.rs`:
     - Occurrences: `install_flush_gate(...); handle.wait_until_blocked(Duration::from_secs(2))`, `recv_timeout(Duration::from_millis(200))` and `recv_timeout(Duration::from_secs(1))`.
-    - Suggestion: Keep small guards (timeouts) to avoid hanging tests; prefer hooks when asserting internal steps or results, and preserve `recv_timeout` as guard fallback.
     - Priority: Medium
 
   - `tests/engine_checkpoint_stress.rs`:
@@ -176,38 +152,23 @@ Below are the tests that include timing-based waits, timeouts, or small sleeps i
     - Priority: Medium
 
   - `tests/cloud_hybrid_stress.rs`, `tests/cloud_durability.rs`, `tests/cloud_hybrid_faults.rs`:
-    - Occurrences: `wait_for_uploads(..., Duration::from_secs(..))`
-    - Suggestion: Keep `wait_for_uploads` calls; prefer explicit counts and deterministic checks rather than sleeps or shorter guards.
     - Priority: Low
 
   ### Next actions and prioritization
   - First pass: Prefer smaller, low-risk conversions — replace `eng.wait_for_compaction` with `eng.compact_all` where appropriate and replace `wait_for_flush` with `eng.flush()` when not testing background paths.
   - Next pass: For the tests exercising background compaction/flush/upload, ensure that each uses gates and `wait_for_manifest_update` where possible. Keep timeout guards only as safety nets and increase if CI shows flakiness.
   - Implement changes in small batches (1–3 files), run targeted tests.
-
   - Occurrences: `wait_for_uploads(..., Duration::from_secs(...))` in MockCloudBackend
   - Suggestion: These are okay to keep; prefer to use `wait_for_uploads` (deterministic) instead of `sleep`. Consider reducing explicit time constants or centralize them in a test helper for consistency.
   - Priority: Low
 
-### Summary of recommended patterns
 - If a test is exercising the background pipeline (flush/compaction/upload): use TestHooks gates (`install_*_gate`) and one of `wait_for_manifest_update(prev, timeout)` or `wait_until_blocked` + `release()` to reliably observe the behavior.
 - If the test asserts a behavior that can be checked synchronously (flush/compaction not under test): prefer engine-provided synchronous calls (`eng.flush()`, `eng.compact_all()`) instead of polling/timeouts.
 - Avoid `std::thread::sleep` or `Duration::from_millis(min)` where a deterministic hook or small spin-yield loop would suffice.
 - For mock backends that simulate latency (e.g., `MockCloudBackend.with_latency()`), keep the latency used to model behavior but avoid relying on it for correctness – prefer `wait_for_uploads`.
 
-I propose we proceed by implementing changes in small batches (1–3 files):
 1. Migrate `error_handling_flush.rs`/`error_handling_core.rs` to use gates + hook notifications where applicable.
 2. For compaction tests that are not asserting background schedulers, replace `wait_for_compaction` with `compact_all()`.
-
-## CI Automation: Timing check script
-- Added `scripts/check_test_timing.ps1` — a PowerShell script to scan `tests/` for timing-related patterns such as `std::thread::sleep`, `Duration::from_millis`, `.recv()` without timeout, and `wait_for_compaction`/`wait_for_flush`.
-- Usage:
-  - Run locally via: `pwsh -File scripts/check_test_timing.ps1` (from the repo root).
-  - Exit code `1` indicates matches that require manual review; `0` means no matches found.
-
-3. For `engine_compaction.rs` and `test_hooks_integration.rs`, where the background semantics are vital, add `install_compaction_gate` if missing and use `hooks.wait_for_manifest_update` to detect progress.
-
-Next step: implement one or two sample changes and run targeted tests to validate deterministic behavior.
 
 ### Batch 1: Completed changes
 - Updated tests to remove or replace `wait_for_compaction` with `compact_all()` where the test does not require background compaction semantics:
@@ -220,10 +181,9 @@ Next step: implement one or two sample changes and run targeted tests to validat
 
 Notes:
 - These changes were verified by targeted test runs; no hangs observed.
-- Kept gate-based compaction tests (those using `install_compaction_gate`) intact; they validate background compaction semantics and should not be changed to synchronous compaction.
-
-### Next actions (short term)
-- Sweep the remaining `wait_for_compaction` uses and decide per-file whether to convert to `compact_all()` or keep as gate-based wait.
 - Add lints/checks for `std::thread::sleep(...)` and calls to `.recv()` without a timeout in `tests/`.
 
+### Batch 1: Completed changes
+
+- Updated tests to remove or replace `wait_for_compaction` with `compact_all()` where the test does not require background compaction semantics:
 

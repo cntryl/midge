@@ -1,10 +1,10 @@
 // Long-lived snapshots + compaction tests
 mod common;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query, StorageMode};
 use cntryl_midge::test_hooks::{TestHooks, CompactionGatePoint};
 use common::*;
-use std::time::Duration;
 
 #[test]
 fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_reading_from_old_snapshot(
@@ -43,10 +43,10 @@ fn should_keep_snapshot_view_stable_given_many_flush_and_compaction_cycles_when_
         // Deterministically trigger compaction and wait via hooks
         let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
         eng.compact_level(&cf, 0).unwrap();
-        assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+        assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
         // Release the compaction gate and wait deterministically for compaction to finish
         gate.release();
-        eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
+        eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
     }
 
     // Assert: snapshot view remains stable
@@ -95,9 +95,9 @@ fn should_release_old_files_given_snapshot_expiry_when_all_new_reads_use_fresh_s
     eng.flush().unwrap();
     let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
     eng.compact_level(&cf, 0).unwrap();
-    assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+    assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
     gate.release();
-    eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
 
     // Act: drop snapshot (simulate expiry)
     drop(_snapshot);
@@ -153,9 +153,9 @@ fn should_not_leak_disk_space_given_long_lived_snapshot_and_heavy_write_load_whe
         eng.flush().unwrap();
         let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
         eng.compact_level(&cf, 0).unwrap();
-        assert!(gate.wait_until_blocked(Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+        assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
         gate.release();
-        eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
+        eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
     }
 
     // Assert: no leak (check keys are present)
@@ -193,7 +193,7 @@ fn should_preserve_range_delete_visibility_given_snapshot_spanning_pre_and_post_
     // Apply range delete
     eng.delete_range(&cf, b"k020", b"k080").unwrap();
     eng.flush().unwrap();
-    eng.wait_for_compaction(Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
 
     // Act: iterate keys from the snapshot
     let results = eng

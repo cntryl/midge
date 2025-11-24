@@ -4,6 +4,7 @@
 // Compaction During Concurrent Operations tests - P1 Priority
 use cntryl_midge::MidgeEngine;
 use std::sync::mpsc::channel;
+use common::test_helpers::wait_for_signal_default;
 use std::sync::Arc;
 use std::thread;
 
@@ -81,7 +82,7 @@ fn should_handle_put_to_compacting_key_range() {
         let (started_tx, started_rx) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
-            let _ = start_rx.recv();
+            let _ = wait_for_signal_default(&start_rx);
             let _ = started_tx.send(());
             let _ = engine_clone.compact_all();
         });
@@ -89,7 +90,7 @@ fn should_handle_put_to_compacting_key_range() {
         // Write to keys that are being compacted; wait until compaction signals it has started
         let engine_clone = Arc::clone(&engine);
         let write_handle = thread::spawn(move || {
-            let _ = started_rx.recv();
+            let _ = wait_for_signal_default(&started_rx);
             for i in 25..75 {
                 let key = format!("key{:03}", i);
                 let result = engine_clone.put(&cf, key.as_bytes(), "newest_value".as_bytes());
@@ -129,7 +130,7 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
         let (started_tx, started_rx) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
-            let _ = start_rx.recv();
+            let _ = wait_for_signal_default(&start_rx);
             let _ = started_tx.send(());
             let _ = engine_clone.compact_all();
         });
@@ -139,7 +140,7 @@ fn should_write_to_new_sst_given_ongoing_compaction_when_flush() {
         let cf_clone = cf.clone();
         let flush_handle = thread::spawn(move || {
             // Wait for compaction to start before performing flush
-            let _ = started_rx.recv();
+            let _ = wait_for_signal_default(&started_rx);
 
             // Write to memtable
             for i in 200..250 {
@@ -184,7 +185,7 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
         let (started_tx4, started_rx4) = channel::<()>();
         let engine_clone = Arc::clone(&engine);
         let compaction_handle = thread::spawn(move || {
-            let _ = start_rx4.recv();
+            let _ = wait_for_signal_default(&start_rx4);
             let _ = started_tx4.send(());
             let _ = engine_clone.compact_all();
         });
@@ -195,7 +196,7 @@ fn should_not_compact_newly_flushed_files_given_compaction_in_progress() {
         let flush_handle = thread::spawn(move || {
             // Wait for compaction to actually begin, then write and flush new data so
             // the flush happens while compaction is in progress.
-            let _ = started_rx4.recv();
+            let _ = wait_for_signal_default(&started_rx4);
             for i in 300..350 {
                 let key = format!("late_key{:03}", i);
                 engine_clone

@@ -7,6 +7,7 @@ use cntryl_midge::{
     MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode,
 };
 use common::test_temp_dir;
+use common::test_helpers::TEST_RECV_TIMEOUT;
 use std::sync::Arc;
 
 // Phase 1 Error Handling & Fault Injection Core Tests
@@ -505,7 +506,7 @@ fn should_pause_writes_given_background_error_until_cleared() {
 
     // Assert - Writer should now complete
     let done_ok = done_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
+        .recv_timeout(TEST_RECV_TIMEOUT)
         .expect("writer should complete");
     assert!(
         done_ok,

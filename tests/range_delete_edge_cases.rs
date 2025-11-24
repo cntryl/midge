@@ -1,5 +1,6 @@
 // Range delete deep edge cases
 mod common;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query, StorageMode};
 use common::*;
@@ -33,10 +34,10 @@ fn should_honor_large_range_deletes_given_many_levels_when_compactions_run_repea
             eng.flush().unwrap();
             let gate = hooks.install_compaction_gate(cntryl_midge::test_hooks::CompactionGatePoint::AfterManifestUpdate);
             eng.compact_level(&cf, 0).unwrap();
-            assert!(gate.wait_until_blocked(std::time::Duration::from_secs(10)), "Compaction did not reach AfterManifestUpdate");
+            assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
             // Release the compaction gate and wait deterministically for compaction to complete
             gate.release();
-            eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+            eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
 
             // Assert: keys in range deleted
             for i in 100..200 {
