@@ -264,9 +264,12 @@ impl WalBatchManager {
         let promise_clone = promise.clone();
         let backend = self.backend.clone();
 
-        // Spawn background thread for upload
+        // Spawn background thread for upload. Guard the entire closure with
+        // `catch_unwind` so a panic inside the upload worker does not unwind
+        // into the test runner. If a panic occurs, complete the promise with
+        // an internal error and log the payload.
         std::thread::spawn(move || {
-            let result = (|| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let key = segment.segment_id();
                 let data = segment.serialize()?;
 
@@ -277,10 +280,20 @@ impl WalBatchManager {
                 limiter.request(data.len() as u64);
 
                 backend.put_blob(&key, bytes::Bytes::from(data))?;
-                Ok(())
-            })();
+                Ok::<(), MidgeError>(())
+            }));
 
-            promise_clone.complete(result);
+            match result {
+                Ok(inner_res) => promise_clone.complete(inner_res),
+                Err(panic_payload) => {
+                    eprintln!("WAL cloud upload worker panicked: {:?}", panic_payload);
+                    // Convert to an internal error so callers see a failure instead
+                    // of letting the panic unwind into the test harness.
+                    promise_clone.complete(Err(MidgeError::internal(
+                        "WAL cloud upload worker panicked".to_string(),
+                    )));
+                }
+            }
         });
 
         // Track this promise for sync() calls

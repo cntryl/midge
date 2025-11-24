@@ -313,20 +313,33 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
             key_range_for_upload.1.map(|k| k.to_vec()),
         );
 
-        // Spawn async upload (non-blocking)
+        // Spawn async upload (non-blocking). Protect the upload worker from
+        // panics so they don't abort the test runner. If test hooks are
+        // configured, record a worker panic event so tests can observe it.
         let cloud_manager_clone = cloud_manager.clone();
         let sst_path_clone = sst_path.clone();
         let sst_id_clone = sst_id.clone();
+        let hooks_clone = config.test_hooks.clone();
 
         std::thread::spawn(move || {
-            if let Err(e) = cloud_manager_clone.upload_sst_async(
-                sst_id_clone,
-                sst_path_clone,
-                sequence_range,
-                key_range,
-                None,
-            ) {
-                tracing::error!("Failed to upload SST to cloud: {}", e);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Err(e) = cloud_manager_clone.upload_sst_async(
+                    sst_id_clone,
+                    sst_path_clone,
+                    sequence_range,
+                    key_range,
+                    None,
+                ) {
+                    tracing::error!("Failed to upload SST to cloud: {}", e);
+                }
+            }));
+
+            if let Err(panic_payload) = r {
+                eprintln!("Cloud upload worker panicked: {:?}", panic_payload);
+                if let Some(ref hooks) = hooks_clone {
+                    hooks.record_worker_panic("cloud-upload");
+                }
+                // Swallow the panic to avoid aborting the test runner.
             }
         });
     }
