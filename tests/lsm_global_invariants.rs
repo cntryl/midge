@@ -2,7 +2,6 @@
 mod common;
 use cntryl_midge::MidgeOptions;
 use common::*;
-use std::time::Duration;
 
 // 1) Ensure that after repeated overlapping writes + compactions the visible state is consistent.
 #[test]
@@ -19,8 +18,8 @@ fn should_maintain_non_overlapping_sst_key_ranges_given_long_random_workload_whe
             let cf = eng.default_column_family();
             populate_multi_level_data(eng, &cf);
 
-            // Act: wait for background compaction to make progress (best-effort)
-            eng.wait_for_compaction(Duration::from_millis(500)).ok();
+            // Act: trigger a synchronous compaction to get deterministic state
+            eng.compact_all().unwrap();
 
             // Assert: verify that reads return the latest values across the keyspace (no visible contradictions)
             for i in 0..100 {
@@ -58,8 +57,8 @@ fn should_keep_manifest_files_in_sync_given_repeated_flush_compact_cycles_when_r
                         eng.put(&cf, k.as_bytes(), b"v").expect("put");
                     }
                     eng.flush().expect("flush");
-                    // Act: wait for compaction to proceed (best-effort)
-                    eng.wait_for_compaction(Duration::from_millis(200)).ok();
+                    // Act: trigger a synchronous compaction to get deterministic state
+                    eng.compact_all().unwrap();
                 },
                 |eng| {
                     // Assert

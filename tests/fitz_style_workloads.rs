@@ -20,8 +20,8 @@ fn should_handle_hot_partition_workload_given_many_appends_to_same_key_when_comp
             .unwrap();
     }
     eng.flush().unwrap();
-    eng.wait_for_compaction(std::time::Duration::from_secs(10))
-        .unwrap();
+    // Ensure compaction settles deterministically (tests care about final correctness)
+    eng.compact_all().unwrap();
 
     // Assert: data correctness (latest value)
     let value = eng.get(&cf, b"hot_key").unwrap();
@@ -108,8 +108,7 @@ fn should_avoid_pathological_write_amplification_given_log_structured_append_onl
             .unwrap();
     }
     eng.flush().unwrap();
-    eng.wait_for_compaction(std::time::Duration::from_secs(10))
-        .unwrap();
+    eng.compact_all().unwrap();
 
     // Assert: data present
     for i in 0..1000 {

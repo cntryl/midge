@@ -5,7 +5,6 @@ mod common;
 
 use cntryl_midge::Query;
 use common::{compaction_test_opts, create_storage_mode, populate_multi_level_data};
-use std::time::Duration;
 
 // ============================================================================
 
@@ -21,7 +20,8 @@ fn should_measure_read_amplification_given_multilevel_scan() {
 
         // Build multi-level data set (helper triggers flushes + compactions)
         populate_multi_level_data(&eng, &cf);
-        eng.wait_for_compaction(Duration::from_secs(3)).ok(); // tolerate no pending work
+        // Trigger synchronous compaction to deterministically settle the test workload
+        eng.compact_all().unwrap();
 
         // Act
         let metrics_before = eng.performance_metrics().sst.total_reads();
@@ -78,7 +78,7 @@ fn should_measure_write_amplification_given_compaction_cascade() {
             }
         }
         eng.flush_cf(&cf).ok();
-        eng.wait_for_compaction(Duration::from_secs(4)).ok();
+        eng.compact_all().unwrap();
 
         let final_compaction_bytes = eng.performance_metrics().compaction.total_bytes_written();
         let final_wal_bytes = eng.performance_metrics().wal.total_bytes_written();
@@ -127,8 +127,8 @@ fn should_measure_space_amplification_given_live_vs_total_data() {
             eng.put(&cf, key.as_bytes(), b"version2").unwrap();
         }
         eng.flush_cf(&cf).expect("flush");
-        // Ensure flush has landed before reads
-        eng.wait_for_compaction(Duration::from_secs(1)).ok();
+        // Ensure flush has landed before reads by compacting all SSTs deterministically
+        eng.compact_all().unwrap();
 
         let total_sst_after_overwrite = eng.metrics().get_total_sst_bytes();
 
@@ -183,7 +183,7 @@ fn should_track_amplification_over_time_given_workload() {
                 eng.put(&cf, key.as_bytes(), b"data").unwrap();
             }
             eng.flush_cf(&cf).unwrap();
-            eng.wait_for_compaction(Duration::from_secs(10)).ok();
+            eng.compact_all().unwrap();
             let end_written = eng.performance_metrics().compaction.total_bytes_written();
             let end_read = eng.performance_metrics().compaction.total_bytes_read();
             let read_delta = end_read - start_read;

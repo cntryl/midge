@@ -5,7 +5,6 @@ use common::{
 };
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 #[test]
 fn should_generate_strictly_increasing_sequence_numbers_given_parallel_writes() {
@@ -159,10 +158,10 @@ fn should_handle_extreme_concurrency_with_high_contention_writes_to_shared_memta
     }
 
     // Wait for background flush/compaction to complete before checking persisted data.
-    eng
-        .wait_for_flush(Duration::from_secs(10))
-        .expect("flush did not complete within timeout");
-    eng.wait_for_compaction(Duration::from_secs(10)).ok();
+    // Ensure any background flushes have completed by forcing a synchronous flush
+    eng.flush().expect("flush did not complete");
+    // Trigger a synchronous compaction to make the test deterministic and avoid flakiness
+    eng.compact_all().unwrap();
 
     // No explicit waits here - high-concurrency test should be robust without
     // forcing background work completion. The more fragile assertions that

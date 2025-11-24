@@ -140,8 +140,8 @@ fn should_maintain_manifest_version_ordering_given_concurrent_compaction_and_flu
         compact_handle.join().ok();
         flush_handle.join().ok();
 
-        // Wait for any pending compaction to complete
-        let _ = eng_arc.wait_for_compaction(std::time::Duration::from_secs(3));
+        // Make compaction deterministic: compact synchronously instead of waiting
+        eng_arc.compact_all().unwrap();
 
         // Assert: engine still consistent
         let got = eng_arc.get(&cf, b"key000").unwrap();
