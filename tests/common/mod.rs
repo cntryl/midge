@@ -182,12 +182,19 @@ where
     G: FnOnce(&MidgeEngine),
 {
     {
+        eprintln!("[HELPER] Opening first engine instance");
         let eng = MidgeEngine::open(opts.clone()).expect("Failed to open engine");
+        eprintln!("[HELPER] First engine opened, calling before_restart");
         before_restart(&eng);
+        eprintln!("[HELPER] before_restart completed, engine will drop now");
     } // Engine drops here
+    eprintln!("[HELPER] First engine dropped successfully");
 
+    eprintln!("[HELPER] Opening second engine instance");
     let eng = MidgeEngine::open(opts).expect("Failed to reopen engine");
+    eprintln!("[HELPER] Second engine opened, calling after_restart");
     after_restart(&eng);
+    eprintln!("[HELPER] after_restart completed, second engine will drop now");
 }
 
 /// Asserts that a get operation returns the expected value.
