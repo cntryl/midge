@@ -1,8 +1,8 @@
 // Range delete deep edge cases
 mod common;
-use common::test_helpers::TEST_GATE_TIMEOUT;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query, StorageMode};
+use common::test_helpers::TEST_GATE_TIMEOUT;
 use common::*;
 
 #[test]
@@ -32,9 +32,14 @@ fn should_honor_large_range_deletes_given_many_levels_when_compactions_run_repea
             eng.flush().unwrap();
             // Run compaction deterministically using hooks
             eng.flush().unwrap();
-            let gate = hooks.install_compaction_gate(cntryl_midge::test_hooks::CompactionGatePoint::AfterManifestUpdate);
+            let gate = hooks.install_compaction_gate(
+                cntryl_midge::test_hooks::CompactionGatePoint::AfterManifestUpdate,
+            );
             eng.compact_level(&cf, 0).unwrap();
-            assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
+            assert!(
+                gate.wait_until_blocked(TEST_GATE_TIMEOUT),
+                "Compaction did not reach AfterManifestUpdate"
+            );
             // Release the compaction gate and wait deterministically for compaction to complete
             gate.release();
             eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
@@ -98,11 +103,18 @@ fn should_not_resurrect_deleted_keys_given_interleaved_puts_and_range_deletes_wh
                 // interleaved writes took effect.
                 let mut seen_rewrites = 0;
                 for i in 50..150 {
-                    if eng.get(&cf, format!("r{:03}", i).as_bytes()).unwrap().is_some() {
+                    if eng
+                        .get(&cf, format!("r{:03}", i).as_bytes())
+                        .unwrap()
+                        .is_some()
+                    {
                         seen_rewrites += 1;
                     }
                 }
-                assert!(seen_rewrites > 0, "At least some rewritten keys should be visible (pre-restart)");
+                assert!(
+                    seen_rewrites > 0,
+                    "At least some rewritten keys should be visible (pre-restart)"
+                );
                 // Keep background compaction disabled; rely on explicit flush/restart to exercise recovery deterministically
             },
             |eng| {
@@ -115,7 +127,11 @@ fn should_not_resurrect_deleted_keys_given_interleaved_puts_and_range_deletes_wh
                 // Ensure that at least some rewritten keys survived recovery
                 let mut seen_rewrites_after = 0;
                 for i in 50..150 {
-                    if eng.get(&cf, format!("r{:03}", i).as_bytes()).unwrap().is_some() {
+                    if eng
+                        .get(&cf, format!("r{:03}", i).as_bytes())
+                        .unwrap()
+                        .is_some()
+                    {
                         seen_rewrites_after += 1;
                     }
                 }

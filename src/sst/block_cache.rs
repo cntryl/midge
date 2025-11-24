@@ -1202,7 +1202,10 @@ mod adaptive_cache_tests {
         }
 
         // Assert
-        assert!(saw_contention, "expected some contention under concurrent access");
+        assert!(
+            saw_contention,
+            "expected some contention under concurrent access"
+        );
     }
 
     #[test]

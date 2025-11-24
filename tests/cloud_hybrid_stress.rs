@@ -160,7 +160,11 @@ fn should_maintain_correctness_under_rapid_cache_churn() {
 
     // Synchronous writes ensure data is already uploaded; assert immediately
     for (key, _) in &test_data {
-        assert!(storage.get_blob(key).is_ok(), "get should succeed for {}", key);
+        assert!(
+            storage.get_blob(key).is_ok(),
+            "get should succeed for {}",
+            key
+        );
     }
 
     // Assert - All data should be retrievable and correct

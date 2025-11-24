@@ -255,7 +255,9 @@ impl MidgeEngine {
                 Some(v) => v,
                 None => return Ok(()),
             };
-            levels.fold((first, first), |(min, max), v| (std::cmp::min(min, v), std::cmp::max(max, v)))
+            levels.fold((first, first), |(min, max), v| {
+                (std::cmp::min(min, v), std::cmp::max(max, v))
+            })
         };
         let target_level = if max_level < 6 {
             max_level + 1

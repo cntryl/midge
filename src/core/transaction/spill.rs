@@ -45,10 +45,15 @@ impl SpillManager {
 
         // Create temporary spill file with unique name using process ID and timestamp
         let pid = std::process::id();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("System time before UNIX_EPOCH")
-            .as_nanos();
+        let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_nanos(),
+            Err(e) => {
+                return Err(MidgeError::internal(format!(
+                    "System time error when creating spill file: {}",
+                    e
+                )));
+            }
+        };
         let spill_path = std::env::temp_dir().join(format!(
             "midge_txn_{}_{}_{:x}_{}.spill",
             self.txn_id,

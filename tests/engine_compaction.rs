@@ -5,12 +5,12 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use cntryl_midge::test_hooks::TestHooks;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 
 mod common;
-use common::test_temp_dir;
 use common::test_helpers::TEST_GATE_TIMEOUT;
+use common::test_temp_dir;
 #[test]
 fn should_compact_all_merge_newest_drop_tombstones() {
     // Arrange: create multiple SSTs with overlapping keys and tombstones

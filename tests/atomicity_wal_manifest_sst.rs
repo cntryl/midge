@@ -62,7 +62,10 @@ fn should_replay_wal_until_manifest_fsynced_not_beyond() {
     // that replay-related invariants are deterministic in the manifest data model.
     use cntryl_midge::core::manifest::Manifest;
     let temp = TempDir::new().unwrap();
-    let m = Manifest { last_persisted_sequence: 1234, ..Default::default() };
+    let m = Manifest {
+        last_persisted_sequence: 1234,
+        ..Default::default()
+    };
 
     // Act
     // When saved and reloaded, the last_persisted_sequence must remain exact
@@ -79,7 +82,10 @@ fn should_resolve_conflict_when_wal_newer_than_manifest_and_sst_missing() {
     // Simulate small manifest vs WAL sequence divergence via the manifest structure
     use cntryl_midge::core::manifest::Manifest;
     let temp = TempDir::new().unwrap();
-    let m = Manifest { last_persisted_sequence: 10, ..Default::default() };
+    let m = Manifest {
+        last_persisted_sequence: 10,
+        ..Default::default()
+    };
     m.save_atomic(temp.path()).unwrap();
 
     // Act

@@ -2,8 +2,8 @@ mod common;
 use cntryl_midge::{
     cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
 };
-use common::{durability_opts, flush_test_opts, test_temp_dir, with_engine_restart};
 use common::test_helpers::TEST_CLOUD_TIMEOUT;
+use common::{durability_opts, flush_test_opts, test_temp_dir, with_engine_restart};
 use std::{sync::Arc, time::Duration};
 
 #[test]
@@ -79,7 +79,9 @@ fn should_complete_pending_compactions_given_shutdown_signal() {
 
 #[test]
 fn should_abort_long_running_uploads_given_shutdown_signal() {
-    eprintln!("[TEST-DEBUG] TEST ENTRY: should_abort_long_running_uploads_given_shutdown_signal start");
+    eprintln!(
+        "[TEST-DEBUG] TEST ENTRY: should_abort_long_running_uploads_given_shutdown_signal start"
+    );
     // Arrange
     let dir = test_temp_dir();
     let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(500)));

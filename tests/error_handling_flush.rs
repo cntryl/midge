@@ -3,8 +3,8 @@ use cntryl_midge::{
     test_hooks::{FlushGatePoint, TestHooks},
     MidgeEngine, MidgeOptions, StorageMode,
 };
-use common::{flush_test_opts, test_temp_dir};
 use common::test_helpers::TEST_GATE_TIMEOUT;
+use common::{flush_test_opts, test_temp_dir};
 
 // Error Handling / Flush Gate Tests
 // Focus: Crash and coordination scenarios during flush manifest update phase.

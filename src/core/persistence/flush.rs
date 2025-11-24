@@ -172,9 +172,10 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
     let sst_seq = crate::core::naming::allocate_sst_seq(cf_id);
 
     // Create SST writer with sequence for deterministic temp file naming
-    let mut writer = config
-        .sst_factory
-        .create_with_seq(config.compression, config.block_size, true, sst_seq)?;
+    let mut writer =
+        config
+            .sst_factory
+            .create_with_seq(config.compression, config.block_size, true, sst_seq)?;
 
     // Add entries with metadata (sequence, tombstone, and expiration)
     for entry in entries {

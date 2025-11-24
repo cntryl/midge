@@ -5,13 +5,13 @@
 
 use bytes::Bytes;
 use cntryl_midge::{ColumnFamilyConfig, MidgeEngine, MidgeOptions, StorageMode};
+use crossbeam::channel;
 use std::sync::Arc;
 use std::thread;
-use crossbeam::channel;
 
 mod common;
-use common::test_temp_dir;
 use common::test_helpers::TEST_RECV_TIMEOUT;
+use common::test_temp_dir;
 
 #[test]
 fn should_create_checkpoint_during_concurrent_writes() {
@@ -46,7 +46,9 @@ fn should_create_checkpoint_during_concurrent_writes() {
 
     // Wait until signaled by the writer that first write was performed.
     let timeout = TEST_RECV_TIMEOUT;
-    let _ = ready_rx.recv_timeout(timeout).expect("Writer did not report first write");
+    let _ = ready_rx
+        .recv_timeout(timeout)
+        .expect("Writer did not report first write");
 
     // Act - Create checkpoint while writes are ongoing
     let cp_dir = dir.path().join("checkpoint");
@@ -157,7 +159,9 @@ fn should_create_consistent_checkpoint_under_high_load() {
 
     // Wait for writer to report first write
     let timeout = TEST_RECV_TIMEOUT;
-    let _ = ready_rx.recv_timeout(timeout).expect("Writer did not report first write");
+    let _ = ready_rx
+        .recv_timeout(timeout)
+        .expect("Writer did not report first write");
 
     // Act - Create checkpoint during load
     let cp_dir = dir.path().join("checkpoint_load");

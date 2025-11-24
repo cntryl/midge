@@ -8,8 +8,8 @@ use cntryl_midge::cloud::backend::StorageBackend;
 use cntryl_midge::{
     cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
 };
-use common::*;
 use common::test_helpers::TEST_CLOUD_TIMEOUT;
+use common::*;
 use std::sync::Arc;
 
 #[test]

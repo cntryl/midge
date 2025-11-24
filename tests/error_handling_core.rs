@@ -6,8 +6,8 @@ use cntryl_midge::{
     test_hooks::{IoBehavior, ManifestBehavior, TestHooks, WalBehavior},
     MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode,
 };
-use common::test_temp_dir;
 use common::test_helpers::TEST_RECV_TIMEOUT;
+use common::test_temp_dir;
 use std::sync::Arc;
 
 // Phase 1 Error Handling & Fault Injection Core Tests

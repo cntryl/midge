@@ -150,7 +150,11 @@ fn should_create_checkpoint_with_multiple_sst_files() {
     // the DB directory contains the expected SST files before copying.
     let sst_dir = dir.path().join("sst");
     let db_sst_files = list_all_files(&sst_dir);
-    assert!(db_sst_files.len() >= 2, "Expected at least 2 SST files to be present before checkpointing; found {:?}", db_sst_files);
+    assert!(
+        db_sst_files.len() >= 2,
+        "Expected at least 2 SST files to be present before checkpointing; found {:?}",
+        db_sst_files
+    );
 
     let cp_dir = dir.path().join("checkpoint");
     // Debug: list SST files present in DB before checkpoint (recursive)
@@ -183,7 +187,12 @@ fn should_create_checkpoint_with_multiple_sst_files() {
     let cp_sst_dir = cp_dir.join("sst");
     assert!(cp_sst_dir.exists());
     let cp_sst_files = list_all_files(&cp_sst_dir);
-    assert!(cp_sst_files.len() >= 2, "Should have at least 2 SST files in checkpoint; db_ssts={:?} cp_ssts={:?}", db_sst_files, cp_sst_files);
+    assert!(
+        cp_sst_files.len() >= 2,
+        "Should have at least 2 SST files in checkpoint; db_ssts={:?} cp_ssts={:?}",
+        db_sst_files,
+        cp_sst_files
+    );
 }
 
 #[test]

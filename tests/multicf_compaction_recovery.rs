@@ -1,10 +1,10 @@
 // Multi-column-family compaction + recovery observable tests
 mod common;
-use common::test_helpers::TEST_GATE_TIMEOUT;
 use cntryl_midge::api::column_family::ColumnFamilyConfig;
+use cntryl_midge::test_hooks::{CompactionGatePoint, TestHooks};
 use cntryl_midge::MidgeOptions;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 use common::*;
-use cntryl_midge::test_hooks::{TestHooks, CompactionGatePoint};
 use std::sync::Arc;
 use std::thread;
 
@@ -53,9 +53,13 @@ fn should_recover_all_column_families_consistently_given_mixed_writes_and_compac
                     }
                     eng.flush().unwrap();
                     // Deterministically trigger compaction and wait via hooks
-                    let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
+                    let gate =
+                        hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
                     eng.compact_level(&cf1, 0).ok();
-                    assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
+                    assert!(
+                        gate.wait_until_blocked(TEST_GATE_TIMEOUT),
+                        "Compaction did not reach AfterManifestUpdate"
+                    );
                     // Release the compaction gate and wait deterministically for compaction to finish
                     gate.release();
                     eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
@@ -104,7 +108,10 @@ fn should_not_cross_contaminate_keys_between_column_families_given_heavy_compact
             // Deterministically trigger compaction and wait via hooks
             let gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
             eng.compact_level(&cf1, 0).ok();
-            assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
+            assert!(
+                gate.wait_until_blocked(TEST_GATE_TIMEOUT),
+                "Compaction did not reach AfterManifestUpdate"
+            );
             // Release the compaction gate and wait deterministically for compaction to finish
             gate.release();
             eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();

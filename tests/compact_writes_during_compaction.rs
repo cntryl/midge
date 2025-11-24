@@ -3,8 +3,8 @@
 
 // Compaction During Concurrent Operations tests - P1 Priority
 use cntryl_midge::MidgeEngine;
-use std::sync::mpsc::channel;
 use common::test_helpers::wait_for_signal_default;
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::thread;
 

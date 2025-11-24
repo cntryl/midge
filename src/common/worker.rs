@@ -18,7 +18,10 @@ where
     std::thread::spawn(move || {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         if let Err(payload) = r {
-            eprintln!("[worker-guard] worker '{}' panicked: {:?}", kind_owned, payload);
+            eprintln!(
+                "[worker-guard] worker '{}' panicked: {:?}",
+                kind_owned, payload
+            );
             if let Some(h) = hooks {
                 h.record_worker_panic(&kind_owned);
             }

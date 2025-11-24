@@ -1,8 +1,8 @@
 mod common;
 use cntryl_midge::test_hooks::{CompactionBehavior, CompactionGatePoint, TestHooks};
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use common::test_temp_dir;
 use common::test_helpers::TEST_GATE_TIMEOUT;
+use common::test_temp_dir;
 
 fn collect_sst_files(dir: &std::path::Path) -> Vec<String> {
     if !dir.exists() {
@@ -76,7 +76,10 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
 
     // Wait for compaction to reach the gate (i.e. manifest was updated and
     // compaction is paused). This waits on the hook, not on wall-clock.
-    assert!(after_gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
+    assert!(
+        after_gate.wait_until_blocked(TEST_GATE_TIMEOUT),
+        "Compaction did not reach AfterManifestUpdate"
+    );
 
     let compaction_started = hooks.compaction_start_count() > compaction_starts_before;
 

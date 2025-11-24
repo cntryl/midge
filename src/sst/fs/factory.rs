@@ -5,8 +5,8 @@ use crate::sst::traits::{SstReaderFactory, SstStateReader};
 
 use super::reader::SstFile;
 use super::writer::FsDynWriter;
-use crate::error::{MidgeError};
 use crate::common::codec::CompressionType;
+use crate::error::MidgeError;
 use crate::sst::traits::SstFactory;
 
 pub struct FsSstReaderFactory {
@@ -223,4 +223,3 @@ impl SstFactory for FsSstFactory {
 // Previously we allowed constructing an ErrorDynWriter fallback; now factory
 // methods return a `MidgeResult` directly, so a separate error writer is
 // unnecessary and has been removed.
-

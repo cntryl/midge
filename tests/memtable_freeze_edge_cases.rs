@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use bytes::Bytes;
-use cntryl_midge::{Query, api::merge_operator::IntegerAddOperator};
+use cntryl_midge::{api::merge_operator::IntegerAddOperator, Query};
 use std::sync::Arc;
 
 #[test]

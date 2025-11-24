@@ -178,7 +178,10 @@ impl StorageBackend for MockCloudBackend {
 
         // Track successful uploads
         let new_count = self.upload_count.fetch_add(1, Ordering::SeqCst) + 1;
-        eprintln!("[DEBUG] MockCloudBackend.put_blob completed for key: {}, total_uploads={}", key, new_count);
+        eprintln!(
+            "[DEBUG] MockCloudBackend.put_blob completed for key: {}, total_uploads={}",
+            key, new_count
+        );
         if Self::is_sst_key(key) {
             self.sst_upload_count.fetch_add(1, Ordering::SeqCst);
         }

@@ -8,8 +8,8 @@ use cntryl_midge::{
     test_hooks::{FlushGatePoint, TestHooks},
     MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode,
 };
-use common::test_temp_dir;
 use common::test_helpers::TEST_GATE_TIMEOUT;
+use common::test_temp_dir;
 
 #[test]
 fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {

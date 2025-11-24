@@ -698,8 +698,8 @@ mod tests {
     #[test]
     fn should_wait_for_manifest_update() {
         // Arrange
-        use std::time::Duration;
         use std::thread;
+        use std::time::Duration;
         let hooks = TestHooks::new();
         let prev = hooks.manifest_update_count();
 

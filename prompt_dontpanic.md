@@ -3,7 +3,7 @@ You are helping me audit the Midge LSM storage engine for ANY code paths that ca
 Goal:
 Midge must never panic in production or background workers. All errors must be returned as Result<T, MidgeError> or surfaced through TestHooks. Only test code may use panic, and even then it must be wrapped with catch_unwind.
 
-Sweep this file (and any related modules it references) for:
+Sweep all files for:
 
 1. unwrap(), expect(), or indexing operations that can panic.
 2. assert!(), debug_assert!(), panic!(), todo!(), unimplemented!(), or unreachable!() that will panic at runtime.

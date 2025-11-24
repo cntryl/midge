@@ -18,8 +18,10 @@ pub const TEST_CLOUD_TIMEOUT: Duration = Duration::from_secs(5);
 /// Returns the received value or panics with a descriptive message on timeout.
 #[allow(dead_code)]
 pub fn wait_for_signal<T>(rx: &Receiver<T>, timeout: Duration) -> T {
-    rx.recv_timeout(timeout)
-        .expect(&format!("Timed out waiting for test signal after {:?}", timeout))
+    rx.recv_timeout(timeout).expect(&format!(
+        "Timed out waiting for test signal after {:?}",
+        timeout
+    ))
 }
 
 /// Convenience wrapper using the default `TEST_RECV_TIMEOUT`.

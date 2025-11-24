@@ -2,8 +2,8 @@
 //!
 //! This module provides utilities for testing cloud storage integration.
 
-use cntryl_midge::cloud::MockCloudBackend;
 use super::test_helpers::TEST_CLOUD_TIMEOUT;
+use cntryl_midge::cloud::MockCloudBackend;
 use cntryl_midge::manifest::Manifest;
 use parking_lot::Mutex;
 use std::fs;

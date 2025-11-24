@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 // using channel-based coordination and yields instead of sleeps
-use std::sync::mpsc::channel;
 use common::test_helpers::wait_for_signal_default;
+use std::sync::mpsc::channel;
 
 mod common;
 use common::{
@@ -132,9 +132,16 @@ fn should_return_correct_value_given_key_being_compacted() {
                 // and return either the old or the new value (both are acceptable
                 // while compaction is in-flight). Final verification below
                 // guarantees the persisted value is the new one.
-                assert!(result.is_some(), "Read should return a value during compaction");
+                assert!(
+                    result.is_some(),
+                    "Read should return a value during compaction"
+                );
                 let val = result.unwrap();
-                assert!(val.as_ref() == b"new_value" || val.as_ref() == b"old_value", "Unexpected value during compaction: {:?}", val);
+                assert!(
+                    val.as_ref() == b"new_value" || val.as_ref() == b"old_value",
+                    "Unexpected value during compaction: {:?}",
+                    val
+                );
                 // yield instead of sleeping to avoid long test wall-clock delays
                 std::thread::yield_now();
             }
@@ -251,18 +258,18 @@ fn should_not_expose_deleted_keys_given_tombstone_compaction_in_progress() {
         let engine_clone = Arc::clone(&engine);
         let cf_clone = cf.clone();
         let read_handle = thread::spawn(move || {
-                for _ in 0..50 {
-                    for i in 10..40 {
-                        let key = format!("key{:03}", i);
-                        // During compaction the read should succeed (no errors).
-                        // Whether a transient read sees a value or none is
-                        // implementation sensitive, so we avoid asserting a
-                        // particular outcome here and instead verify final
-                        // state after compaction completes.
-                        let _ = engine_clone.get(&cf_clone, key.as_bytes()).unwrap();
-                    }
-                    std::thread::yield_now();
+            for _ in 0..50 {
+                for i in 10..40 {
+                    let key = format!("key{:03}", i);
+                    // During compaction the read should succeed (no errors).
+                    // Whether a transient read sees a value or none is
+                    // implementation sensitive, so we avoid asserting a
+                    // particular outcome here and instead verify final
+                    // state after compaction completes.
+                    let _ = engine_clone.get(&cf_clone, key.as_bytes()).unwrap();
                 }
+                std::thread::yield_now();
+            }
         });
 
         read_handle.join().unwrap();
@@ -313,7 +320,9 @@ fn should_maintain_read_consistency_given_compaction_updates_manifest() {
                 for (key, expected_value) in &expected_clone {
                     // Use the snapshot read so this thread observes a consistent
                     // view while compaction runs and we can assert equality.
-                    let result = engine_clone.get_at(&cf_clone_for_thread, key.as_bytes(), &*snapshot_clone).unwrap();
+                    let result = engine_clone
+                        .get_at(&cf_clone_for_thread, key.as_bytes(), &*snapshot_clone)
+                        .unwrap();
                     assert_eq!(result, Some(expected_value.clone()));
                 }
                 std::thread::yield_now();

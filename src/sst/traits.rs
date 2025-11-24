@@ -3,6 +3,7 @@
 //! This module defines generic SST reader/writer traits and re-exports
 //! filesystem-backed adapters from `fs`.
 
+use crate::error::MidgeError;
 use crate::error::MidgeResult;
 use bytes::Bytes;
 
@@ -192,76 +193,97 @@ mod tests {
     use super::*;
 
     fn run_sst_behavior_tests(
-        make_writer: impl Fn() -> Box<dyn DynSstWriter>,
-        make_reader: impl Fn(&std::path::Path) -> Box<dyn SstStateReader>,
-    ) {
+        make_writer: impl Fn() -> MidgeResult<Box<dyn DynSstWriter>>,
+        make_reader: impl Fn(&std::path::Path) -> MidgeResult<Box<dyn SstStateReader>>,
+    ) -> MidgeResult<()> {
         // Build an SST using the provided writer factory
-        let mut w = make_writer();
-        w.add(b"a", b"A").expect("add");
-        w.add(b"b", b"B").expect("add");
-        w.add(b"c", b"C").expect("add");
+        let mut w = make_writer()?;
+        w.add(b"a", b"A")?;
+        w.add(b"b", b"B")?;
+        w.add(b"c", b"C")?;
 
-        let bytes = w.finish_bytes().expect("finish bytes");
+        let bytes = w.finish_bytes()?;
 
         // Write to temp file then open reader via provided reader factory
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp =
+            tempfile::tempdir().map_err(|e| MidgeError::internal(format!("tempdir: {:?}", e)))?;
         let path = tmp.path().join("test.sst");
-        std::fs::write(&path, &bytes).expect("write sst");
+        std::fs::write(&path, &bytes)
+            .map_err(|e| MidgeError::internal(format!("write sst: {:?}", e)))?;
 
-        let r = make_reader(&path);
+        let r = make_reader(&path)?;
 
         // 1) point gets
-        let ga = r.get_state(b"a").expect("get_state");
+        let ga = r.get_state(b"a")?;
         match ga {
-            KeyState::Value(v, _seq, _exp) => assert_eq!(v.as_ref(), b"A"),
-            other => panic!("unexpected state for a: {:?}", other),
+            KeyState::Value(v, _seq, _exp) => {
+                if v.as_ref() != b"A" {
+                    return Err(MidgeError::internal("value mismatch".to_string()));
+                }
+            }
+            other => {
+                return Err(MidgeError::internal(format!(
+                    "unexpected state for a: {:?}",
+                    other
+                )))
+            }
         }
 
-        let gx = r.get_state(b"x").expect("get_state absent");
+        let gx = r.get_state(b"x")?;
         match gx {
             KeyState::Absent => {}
-            other => panic!("unexpected state for x: {:?}", other),
+            other => {
+                return Err(MidgeError::internal(format!(
+                    "unexpected state for x: {:?}",
+                    other
+                )))
+            }
         }
 
         // 2) scan range
-        let all = r.scan_range_state(None, None).expect("scan all");
+        let all = r.scan_range_state(None, None)?;
         let keys: Vec<Vec<u8>> = all.into_iter().map(|(k, _)| k.to_vec()).collect();
-        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        if keys != vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] {
+            return Err(MidgeError::internal("keys mismatch".to_string()));
+        }
+        Ok(())
     }
 
     #[test]
-    fn should_support_mem_reader_behavior() {
+    fn should_support_mem_reader_behavior() -> MidgeResult<()> {
         // Arrange - writer: MemSstFactory -> DynSstWriter
-        let writer_factory = || -> Box<dyn DynSstWriter> {
+        let writer_factory = || -> MidgeResult<Box<dyn DynSstWriter>> {
             let f = crate::sst::mem::MemSstFactory {};
-            f.create(crate::common::codec::CompressionType::None, 4096, false).unwrap()
+            f.create(crate::common::codec::CompressionType::None, 4096, false)
         };
         // reader: MemSstReaderFactory (reads bytes from the path)
-        let reader_factory = |p: &std::path::Path| -> Box<dyn SstStateReader> {
+        let reader_factory = |p: &std::path::Path| -> MidgeResult<Box<dyn SstStateReader>> {
             let fac = crate::sst::mem::MemSstReaderFactory::new(false);
-            fac.open(p).expect("open mem reader")
+            fac.open(p)
         };
 
         // Act
-        run_sst_behavior_tests(writer_factory, reader_factory);
+        run_sst_behavior_tests(writer_factory, reader_factory)?;
         // Assert - run_sst_behavior_tests validates the behavior
+        Ok(())
     }
 
     #[test]
-    fn should_support_fs_reader_behavior() {
+    fn should_support_fs_reader_behavior() -> MidgeResult<()> {
         // Arrange
-        let writer_factory = || -> Box<dyn DynSstWriter> {
+        let writer_factory = || -> MidgeResult<Box<dyn DynSstWriter>> {
             let f = crate::sst::mem::MemSstFactory {};
-            f.create(crate::common::codec::CompressionType::None, 4096, false).unwrap()
+            f.create(crate::common::codec::CompressionType::None, 4096, false)
         };
         // reader: open filesystem-backed SstFile via SstFile::open and box it
-        let reader_factory = |p: &std::path::Path| -> Box<dyn SstStateReader> {
-            Box::new(crate::sst::fs::SstFile::open(p).expect("test SST file should open"))
+        let reader_factory = |p: &std::path::Path| -> MidgeResult<Box<dyn SstStateReader>> {
+            Ok(Box::new(crate::sst::fs::SstFile::open(p)?))
         };
 
         // Act
-        run_sst_behavior_tests(writer_factory, reader_factory);
+        run_sst_behavior_tests(writer_factory, reader_factory)?;
         // Assert - run_sst_behavior_tests validates the behavior
+        Ok(())
     }
 
     // Dummy reader that only implements the base methods; default fallbacks should delegate to them.
@@ -290,42 +312,51 @@ mod tests {
     }
 
     #[test]
-    fn should_forward_get_state_at_to_get_state_when_default_impl() {
+    fn should_forward_get_state_at_to_get_state_when_default_impl() -> MidgeResult<()> {
         // Arrange
         let d = Dummy;
 
         // Act
-        let result1 =
-            SstStateReader::get_state_at(&d, b"a", 0).expect("get_state_at should succeed");
-        let result2 =
-            SstStateReader::get_state_at(&d, b"z", 123).expect("get_state_at should succeed");
+        let result1 = SstStateReader::get_state_at(&d, b"a", 0)?;
+        let result2 = SstStateReader::get_state_at(&d, b"z", 123)?;
 
         // Assert
         match result1 {
-            KeyState::Value(v, 0, _exp) => assert_eq!(v.as_ref(), b"X"),
-            other => panic!("unexpected: {:?}", other),
+            KeyState::Value(v, 0, _exp) => {
+                if v.as_ref() != b"X" {
+                    return Err(MidgeError::internal("value mismatch".to_string()));
+                }
+            }
+            other => return Err(MidgeError::internal(format!("unexpected: {:?}", other))),
         }
         match result2 {
             KeyState::Absent => {}
-            other => panic!("unexpected: {:?}", other),
+            other => return Err(MidgeError::internal(format!("unexpected: {:?}", other))),
         }
+        Ok(())
     }
 
     #[test]
-    fn should_forward_scan_range_state_at_to_scan_range_state_when_default_impl() {
+    fn should_forward_scan_range_state_at_to_scan_range_state_when_default_impl() -> MidgeResult<()>
+    {
         // Arrange
         let d = Dummy;
 
         // Act - Snapshot should not change result since default delegates
-        let rows = SstStateReader::scan_range_state_at(&d, None, None, 42).unwrap();
+        let rows = SstStateReader::scan_range_state_at(&d, None, None, 42)?;
 
         // Assert
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0.as_ref(), b"a");
+        if rows.len() != 1 {
+            return Err(MidgeError::internal("len mismatch".to_string()));
+        }
+        if rows[0].0.as_ref() != b"a" {
+            return Err(MidgeError::internal("key mismatch".to_string()));
+        }
         match rows[0].1 {
             KeyState::Tombstone(0) => {}
-            ref other => panic!("unexpected: {:?}", other),
+            ref other => return Err(MidgeError::internal(format!("unexpected: {:?}", other))),
         }
+        Ok(())
     }
 
     #[test]

@@ -5,8 +5,8 @@
 // Engine integration tests consolidated per repo preference
 // Structure: Arrange // Act // Assert, one behavior per test, behavior-first names
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use cntryl_midge::test_hooks::TestHooks;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::fs;
 
 mod common;
@@ -48,7 +48,10 @@ fn should_rotate_wal_given_small_buffer_when_multiple_puts() {
     // Check for files after flush
 
     // Deterministically assert we had WAL appends and either a WAL file or SST present.
-    assert!(hooks.wal_append_count() > 0, "Expected at least one WAL append");
+    assert!(
+        hooks.wal_append_count() > 0,
+        "Expected at least one WAL append"
+    );
     let wal_has_file = wal_dir.exists()
         && fs::read_dir(&wal_dir)
             .map(|mut it| it.next().is_some())
