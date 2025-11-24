@@ -72,6 +72,33 @@ Below are the tests that include timing-based waits, timeouts, or small sleeps i
   - Occurrence: `Duration::from_millis(1)` used for short waits (already manually converted to a spin/yield loop in test)
   - Suggestion: Keep spin/yield approach; it's deterministic and fast.
   - Priority: Low (done)
+  
+## Standardization pass (recv/gate timeouts) — Nov 24, 2025
+
+I standardized channel and gate duration usage to central test helper constants (`TEST_RECV_TIMEOUT` and `TEST_GATE_TIMEOUT`) and updated a set of deterministic tests to use the helper functions where appropriate. The updates covered the following files (partial list):
+
+- `tests/transaction_isolation.rs` — used `wait_for_signal` helper and `TEST_RECV_TIMEOUT`.
+- `tests/compact_reads_during_compaction.rs` — used `wait_for_signal_default`.
+- `tests/compact_writes_during_compaction.rs` — used `wait_for_signal_default`.
+- `tests/engine_checkpoint_stress.rs` — used `TEST_RECV_TIMEOUT` for `ready_rx` handshake timeouts.
+- `tests/error_handling_core.rs` — centralized success waits to `TEST_RECV_TIMEOUT` while preserving a short 200ms negative assert guard used to verify blocking behavior.
+- `tests/error_handling_flush.rs` — centralized gate wait timeouts to `TEST_GATE_TIMEOUT`.
+- `tests/engine_sst_operations.rs` — replaced manifest & gate wait timeouts with `TEST_GATE_TIMEOUT`.
+- `tests/test_hooks_integration.rs` — replaced gate waits and compaction waits with `TEST_GATE_TIMEOUT` and imported the helper.
+- `tests/snapshot_lifecycle_compaction.rs` — replaced gate & wait_for_compaction timeouts with `TEST_GATE_TIMEOUT`.
+- `tests/range_delete_edge_cases.rs` — replaced gate & wait_for_compaction timeouts with `TEST_GATE_TIMEOUT`.
+- `tests/multicf_compaction_recovery.rs` — replaced gate & wait_for_compaction timeouts with `TEST_GATE_TIMEOUT`.
+- `tests/durability_recovery_edge.rs` — replaced gate wait (BeforeManifestUpdate) with `TEST_GATE_TIMEOUT`.
+- `tests/durability_compaction.rs` — centralized many gate waits and compaction waits to `TEST_GATE_TIMEOUT`.
+- `tests/engine_compaction.rs` — replaced internal `wait_for_manifest_update` Duration::from_secs(5) with `TEST_GATE_TIMEOUT`.
+
+Notes:
+- Negative assertions that verify blocking behavior (`recv_timeout(200ms)`) were preserved as short timeouts to avoid slowing down the tests. Only positive/follow-up waits were standardized to `TEST_RECV_TIMEOUT`.
+- Most calls to `wait_until_blocked(Duration::from_secs(...))`, `wait_for_manifest_update(prev, Duration::from_secs(...))`, and `eng.wait_for_compaction(Duration::from_secs(...))` were standardized to use `TEST_GATE_TIMEOUT` to improve CI consistency.
+
+If you agree, I will next:
+1. Add a short section to `tests/README.md` describing the new standard helper constants and best practices for choosing when to use `wait_for_manifest_update` vs `eng.compact_all()` vs gates for compaction-related tests.
+2. Add a GitHub Action step (if needed) to optionally enforce `TEST_RECV_TIMEOUT`/`TEST_GATE_TIMEOUT` usage via a quick grep or lint.
 
 - `tests/test_hooks_integration.rs`
   - Occurrences: compaction gate and `eng.wait_for_compaction(Duration::from_secs(10))`

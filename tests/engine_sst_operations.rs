@@ -10,6 +10,7 @@ use cntryl_midge::test_hooks::{TestHooks, FlushGatePoint};
 
 mod common;
 use common::test_temp_dir;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 #[test]
 fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
     // Arrange: write a couple keys, then force WAL rotation to flush memtable -> SST
@@ -42,10 +43,10 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         // Let the WAL rotation/background flush worker process the job and reach
         // the gate; do NOT call `eng.flush()` here, which performs a synchronous
         // foreground flush and bypasses the background worker (thus skipping the gate).
-        assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
+        assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "flush did not reach gate");
         gate.release();
         // After releasing the gate, verify the background flush updated the manifest.
-        assert!(hooks.wait_for_manifest_update(prev_manifest_updates, std::time::Duration::from_secs(5)), "expected manifest update after release");
+        assert!(hooks.wait_for_manifest_update(prev_manifest_updates, TEST_GATE_TIMEOUT), "expected manifest update after release");
         // Verify initial SST contains expected values
         assert_eq!(eng.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));
         assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
@@ -89,10 +90,10 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
         batch.put(cf.id(), Bytes::from("zz3"), Bytes::from(big.clone()));
         batch.put(cf.id(), Bytes::from("zz4"), Bytes::from(big.clone()));
         eng.write_batch(&batch).expect("write_batch");
-        assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
+        assert!(gate.wait_until_blocked(TEST_GATE_TIMEOUT), "flush did not reach gate");
         gate.release();
         // Confirm background flush resulted in a manifest update; avoid time-based waits.
-        assert!(hooks.wait_for_manifest_update(prev_manifest_updates, std::time::Duration::from_secs(5)), "expected a manifest update after flush");
+        assert!(hooks.wait_for_manifest_update(prev_manifest_updates, TEST_GATE_TIMEOUT), "expected a manifest update after flush");
         // Verify initial SST contains v1
         let get_k = eng.get(&cf, b"k").unwrap();
         if get_k.is_none() {

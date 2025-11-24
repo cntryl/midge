@@ -209,7 +209,7 @@ fn should_increment_compaction_counters_during_manual_compaction() {
     );
     // Release the compaction gate and wait deterministically for compaction to finish
     after_gate.release();
-    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
     eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
 
     let final_start = hooks.compaction_start_count();

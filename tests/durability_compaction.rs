@@ -2,6 +2,7 @@ mod common;
 use cntryl_midge::test_hooks::{CompactionBehavior, CompactionGatePoint, TestHooks};
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 
 fn collect_sst_files(dir: &std::path::Path) -> Vec<String> {
     if !dir.exists() {
@@ -75,10 +76,7 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
 
     // Wait for compaction to reach the gate (i.e. manifest was updated and
     // compaction is paused). This waits on the hook, not on wall-clock.
-    assert!(
-        after_gate.wait_until_blocked(std::time::Duration::from_secs(10)),
-        "Compaction did not reach AfterManifestUpdate"
-    );
+    assert!(after_gate.wait_until_blocked(TEST_GATE_TIMEOUT), "Compaction did not reach AfterManifestUpdate");
 
     let compaction_started = hooks.compaction_start_count() > compaction_starts_before;
 
@@ -86,7 +84,7 @@ fn should_commit_new_ssts_manifest_together_on_compaction_success() {
     // by observing the compaction completion hook. We avoid sleeping and use
     // a bounded spin (yield) to wait for the logical event.
     after_gate.release();
-    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
 
     drop(eng);
 
@@ -139,7 +137,7 @@ fn should_cleanup_partial_output_given_compaction_failure() {
     // Deterministically trigger compaction and wait for the failure hook.
     eng.flush().expect("flush should succeed");
     eng.compact_level(&cf, 0).expect("compact_level");
-    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
     let compaction_started = hooks.compaction_start_count() > 0;
     let compaction_failed = hooks.compaction_failed_count() > 0;
 
@@ -400,7 +398,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
     // has been updated and the engine is paused immediately after that). This
     // replaces the previous polling loop and eliminates timing assumptions.
     assert!(
-        after_gate.wait_until_blocked(std::time::Duration::from_secs(10)),
+        after_gate.wait_until_blocked(TEST_GATE_TIMEOUT),
         "Compaction did not reach AfterManifestUpdate"
     );
 
@@ -419,7 +417,7 @@ fn should_delete_old_sst_files_only_after_manifest_persisted() {
 
     // Allow compaction to finish and wait deterministically for its completion.
     after_gate.release();
-    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
 
     drop(eng);
 
@@ -485,7 +483,7 @@ fn should_keep_source_ssts_present_until_manifest_persisted() {
     eng.flush().expect("flush should succeed");
 
     assert!(
-        before_gate.wait_until_blocked(std::time::Duration::from_secs(5)),
+        before_gate.wait_until_blocked(TEST_GATE_TIMEOUT),
         "Compaction should reach the BeforeExecution gate"
     );
     let source_files = collect_sst_files(&sst_dir);
@@ -523,7 +521,7 @@ fn should_keep_source_ssts_present_until_manifest_persisted() {
     before_gate.release();
 
     assert!(
-        after_gate.wait_until_blocked(std::time::Duration::from_secs(5)),
+        after_gate.wait_until_blocked(TEST_GATE_TIMEOUT),
         "Compaction should reach the AfterManifestUpdate gate"
     );
 
@@ -537,7 +535,7 @@ fn should_keep_source_ssts_present_until_manifest_persisted() {
     }
 
     after_gate.release();
-    eng.wait_for_compaction(std::time::Duration::from_secs(10)).unwrap();
+    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
 }
 
 #[test]
@@ -571,7 +569,7 @@ fn should_fsync_new_ssts_before_updating_manifest() {
     let after_gate = hooks.install_compaction_gate(CompactionGatePoint::AfterManifestUpdate);
     eng.compact_level(&cf, 0).expect("compact_level");
     assert!(
-        after_gate.wait_until_blocked(std::time::Duration::from_secs(10)),
+        after_gate.wait_until_blocked(TEST_GATE_TIMEOUT),
         "Compaction did not reach AfterManifestUpdate"
     );
     after_gate.release();

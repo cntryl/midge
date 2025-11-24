@@ -9,6 +9,7 @@ use cntryl_midge::{
     MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode,
 };
 use common::test_temp_dir;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 
 #[test]
 fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
@@ -38,7 +39,7 @@ fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
         });
 
         // Wait until the flush task reaches the gate to reliably simulate a crash
-        if !handle.wait_until_blocked(std::time::Duration::from_secs(2)) {
+        if !handle.wait_until_blocked(TEST_GATE_TIMEOUT) {
             // Gate not triggered; skip this run (environment may not hit flush point deterministically)
             return;
         }

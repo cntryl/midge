@@ -10,6 +10,7 @@ use cntryl_midge::test_hooks::TestHooks;
 
 mod common;
 use common::test_temp_dir;
+use common::test_helpers::TEST_GATE_TIMEOUT;
 #[test]
 fn should_compact_all_merge_newest_drop_tombstones() {
     // Arrange: create multiple SSTs with overlapping keys and tombstones
@@ -142,7 +143,7 @@ fn should_background_compact_when_threshold_exceeded() {
         // Wait briefly until the SST/manifest shows the expected files for this iteration
         // Deterministically assert the manifest was updated at least once this iteration
         assert!(
-            hooks.wait_for_manifest_update(manifest_updates, std::time::Duration::from_secs(5)),
+            hooks.wait_for_manifest_update(manifest_updates, TEST_GATE_TIMEOUT),
             "Expected manifest update after flush; prior_updates={}, new_updates={}  iteration={}",
             manifest_updates,
             hooks.manifest_update_count(),
@@ -174,7 +175,7 @@ fn should_background_compact_when_threshold_exceeded() {
 
         // Background compaction runs every 50ms. Wait up to 10 seconds for compaction to run.
         // Use engine's wait_for_compaction helper instead of manual polling.
-        if _eng.wait_for_compaction(std::time::Duration::from_secs(10)).is_err() {
+        if _eng.wait_for_compaction(TEST_GATE_TIMEOUT).is_err() {
             tracing::warn!(
                 "Timeout: compaction did not complete within 10 seconds (manifest may not be reduced)"
             );
