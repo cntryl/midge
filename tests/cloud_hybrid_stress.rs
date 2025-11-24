@@ -216,7 +216,8 @@ fn should_upload_to_cloud_asynchronously_without_blocking_writes() {
     );
 
     // Wait for all uploads to reach the cloud (mock helper)
-    assert!(mock_backend.wait_for_uploads(20, std::time::Duration::from_secs(5)));
+    use common::test_helpers::TEST_CLOUD_TIMEOUT;
+    assert!(mock_backend.wait_for_uploads(20, TEST_CLOUD_TIMEOUT));
 
     // Verify all files are in cloud
     for i in 0..20 {

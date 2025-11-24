@@ -3,6 +3,7 @@
 //! This module provides utilities for testing cloud storage integration.
 
 use cntryl_midge::cloud::MockCloudBackend;
+use super::test_helpers::TEST_CLOUD_TIMEOUT;
 use cntryl_midge::manifest::Manifest;
 use parking_lot::Mutex;
 use std::fs;
@@ -100,5 +101,5 @@ pub fn wait_for_cloud_upload(backend: &MockCloudBackend) -> bool {
     // Prefer the mock backend's structured wait helper which polls with a short sleep
     // interval rather than sleeping blind. Return whether an upload occurred within
     // the provided timeout window.
-    backend.wait_for_uploads(1, std::time::Duration::from_secs(2))
+    backend.wait_for_uploads(1, TEST_CLOUD_TIMEOUT)
 }

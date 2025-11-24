@@ -154,6 +154,8 @@ impl Default for MockCloudBackend {
 impl StorageBackend for MockCloudBackend {
     fn put_blob(&self, key: &str, data: Bytes) -> MidgeResult<()> {
         self.simulate_latency();
+        // Debugging log: print when put_blob is invoked to help identify stuck uploads in tests
+        eprintln!("[DEBUG] MockCloudBackend.put_blob invoked for key: {}", key);
 
         // Check if we should fail this upload
         let current_upload = self.upload_count.load(Ordering::SeqCst);
@@ -175,7 +177,8 @@ impl StorageBackend for MockCloudBackend {
             .insert(key.to_string(), Self::generate_etag());
 
         // Track successful uploads
-        self.upload_count.fetch_add(1, Ordering::SeqCst);
+        let new_count = self.upload_count.fetch_add(1, Ordering::SeqCst) + 1;
+        eprintln!("[DEBUG] MockCloudBackend.put_blob completed for key: {}, total_uploads={}", key, new_count);
         if Self::is_sst_key(key) {
             self.sst_upload_count.fetch_add(1, Ordering::SeqCst);
         }

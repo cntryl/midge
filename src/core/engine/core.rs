@@ -403,11 +403,17 @@ impl MidgeEngine {
 
 impl Drop for MidgeEngine {
     fn drop(&mut self) {
+        // Debugging: indicate we're beginning engine drop
+        eprintln!("[DEBUG] MidgeEngine::drop - start");
         // Flush WAL to ensure all writes are persisted
+        eprintln!("[DEBUG] MidgeEngine::drop - calling wal_coordinator.flush()");
         let _ = self.wal_coordinator.flush();
+        eprintln!("[DEBUG] MidgeEngine::drop - wal_coordinator.flush returned");
 
         // Shutdown VersionManager actor gracefully
+        eprintln!("[DEBUG] MidgeEngine::drop - calling version_manager.shutdown()");
         self.version_manager.shutdown();
+        eprintln!("[DEBUG] MidgeEngine::drop - version_manager.shutdown returned");
 
         // FlushCoordinator will be automatically dropped and shutdown gracefully
 

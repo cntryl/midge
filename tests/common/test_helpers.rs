@@ -10,6 +10,10 @@ pub const TEST_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 #[allow(dead_code)]
 pub const TEST_GATE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Default timeout for cloud upload waits (used with MockCloudBackend helpers)
+#[allow(dead_code)]
+pub const TEST_CLOUD_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Wait for a signal on an `mpsc::Receiver` using a standard test timeout.
 /// Returns the received value or panics with a descriptive message on timeout.
 #[allow(dead_code)]

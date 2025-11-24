@@ -3,6 +3,7 @@ use cntryl_midge::{
     cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
 };
 use common::{durability_opts, flush_test_opts, test_temp_dir, with_engine_restart};
+use common::test_helpers::TEST_CLOUD_TIMEOUT;
 use std::{sync::Arc, time::Duration};
 
 #[test]
@@ -78,6 +79,7 @@ fn should_complete_pending_compactions_given_shutdown_signal() {
 
 #[test]
 fn should_abort_long_running_uploads_given_shutdown_signal() {
+    eprintln!("[TEST-DEBUG] TEST ENTRY: should_abort_long_running_uploads_given_shutdown_signal start");
     // Arrange
     let dir = test_temp_dir();
     let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(500)));
@@ -100,14 +102,22 @@ fn should_abort_long_running_uploads_given_shutdown_signal() {
     with_engine_restart(
         opts,
         |eng| {
+            eprintln!("[TEST-DEBUG] in before_restart closure");
             let cf = eng.default_column_family();
+            eprintln!("[TEST-DEBUG] about to put");
             eng.put(&cf, b"key1", b"value1").expect("put");
+            eprintln!("[TEST-DEBUG] put done");
+            eprintln!("[TEST-DEBUG] about to flush_cf");
             eng.flush_cf(&cf).expect("flush");
+            eprintln!("[TEST-DEBUG] flush_cf done");
+            eprintln!("[TEST-DEBUG] after flush, before wait_for_uploads");
             // Wait deterministically for background uploads to start/complete
             // The mock backend provides a helper to wait for uploads rather than sleeping.
-            assert!(backend.wait_for_uploads(1, Duration::from_secs(2)));
+            assert!(backend.wait_for_uploads(1, TEST_CLOUD_TIMEOUT));
+            eprintln!("[TEST-DEBUG] wait_for_uploads returned");
         },
         |eng| {
+            eprintln!("[TEST-DEBUG] in after_restart closure");
             // Assert - local data should be consistent after long uploads
             let cf = eng.default_column_family();
             let result = eng.get(&cf, b"key1").expect("get");
