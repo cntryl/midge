@@ -23,7 +23,6 @@ fn should_create_checkpoint_when_data_exists() {
     eng.put(&cf, b"k1", b"v1").unwrap();
     eng.put(&cf, b"k2", b"v2").unwrap();
     eng.flush().unwrap();
-    eng.wait_for_flush(std::time::Duration::from_secs(5)).unwrap();
 
     // Act: create checkpoint
     let cp_dir = std::env::temp_dir().join("checkpoint_test");

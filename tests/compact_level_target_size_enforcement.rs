@@ -3,7 +3,6 @@
 
 // Compaction During Concurrent Operations tests - P1 Priority
 use cntryl_midge::{MidgeEngine, MidgeOptions};
-use std::time::Duration;
 
 mod common;
 use common::{compaction_test_opts, create_storage_mode, populate_multi_level_data};
@@ -114,10 +113,6 @@ fn should_respect_level_multiplier_given_cascading_compaction() {
                 engine.put(&cf, key.as_bytes(), b"value").unwrap();
             }
             engine.flush().unwrap();
-            // Wait for flush to complete
-            engine
-                .wait_for_flush(Duration::from_millis(100))
-                .expect("flush should complete");
         }
 
         // Act

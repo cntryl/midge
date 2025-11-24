@@ -501,9 +501,7 @@ fn should_pause_writes_given_background_error_until_cleared() {
 
     // Drain immutable by flushing CF
     let _ = engine.flush_cf(&stall_cf);
-    engine
-        .wait_for_flush(std::time::Duration::from_secs(2))
-        .unwrap();
+    engine.flush().expect("flush should complete");
 
     // Assert - Writer should now complete
     let done_ok = done_rx

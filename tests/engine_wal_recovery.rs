@@ -42,9 +42,8 @@ fn should_rotate_wal_given_small_buffer_when_multiple_puts() {
     // Force a flush so the memtable writes are persisted and any WAL rotation
     // that occurs as part of memtable rollover is guaranteed to have happened.
     // Use deterministic engine APIs rather than polling.
+    // Flush synchronously to ensure memtable writes are persisted.
     eng.flush().unwrap();
-    eng.wait_for_flush(std::time::Duration::from_secs(1))
-        .expect("flush should complete");
 
     // Check for files after flush
 

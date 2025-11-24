@@ -108,9 +108,8 @@ fn should_multi_get_from_ssts_after_flush() {
     let big = vec![b'x'; 128];
     eng.put(&cf, b"key009", big.as_slice()).expect("put");
 
-    // Wait for flush to complete
-    eng.wait_for_flush(std::time::Duration::from_millis(100))
-        .expect("flush should complete");
+    // Wait for flush to complete deterministically
+    eng.flush().expect("flush should complete");
 
     // Act: Read keys that should be in SSTs (from before rotation)
     let keys: Vec<&[u8]> = vec![b"key000", b"key005", b"key009", b"key999"];
@@ -157,9 +156,8 @@ fn should_multi_get_mixed_memtable_sst() {
     let big = vec![b'x'; 128];
     eng.put(&cf, b"oldlarge", big.as_slice()).expect("put");
 
-    // Wait for flush to complete
-    eng.wait_for_flush(std::time::Duration::from_millis(100))
-        .expect("flush should complete");
+    // Wait for flush to complete deterministically
+    eng.flush().expect("flush should complete");
 
     // Write new data to memtable (after rotation)
     eng.put(&cf, b"new1", b"nval1").expect("put");

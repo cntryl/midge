@@ -38,7 +38,7 @@ fn should_read_from_sst_after_reopen_when_memtable_has_no_key() {
         let _ = eng.flush();
         assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
         gate.release();
-        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
+        eng.flush().expect("flush should complete");
         // Verify initial SST contains expected values
         assert_eq!(eng.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")));
         assert_eq!(eng.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")));
@@ -79,7 +79,7 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
         let _ = eng.flush();
         assert!(gate.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
         gate.release();
-        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
+        eng.flush().expect("flush should complete");
         // Verify initial SST contains v1
         assert_eq!(eng.get(&cf, b"k").unwrap(), Some(Bytes::from_static(b"v1")));
         // delete and rotate again to flush tombstone
@@ -90,7 +90,7 @@ fn should_respect_tombstone_from_sst_when_point_lookup() {
         let _ = eng.flush();
         assert!(gate2.wait_until_blocked(std::time::Duration::from_secs(5)), "flush did not reach gate");
         gate2.release();
-        eng.wait_for_flush(std::time::Duration::from_secs(5)).expect("flush should complete");
+        eng.flush().expect("flush should complete");
     }
 
     // Act: reopen
@@ -123,8 +123,7 @@ fn should_merge_memtable_ssts_with_last_write_wins_on_scan() {
         let big = vec![b'v'; 256];
         eng.put(&cf1, b"zz", big.as_slice()).unwrap();
         // Force and deterministically wait for flush
-        eng.wait_for_flush(std::time::Duration::from_millis(100))
-            .expect("flush should complete");
+        eng.flush().expect("flush should complete");
     }
     // Phase 2: reopen with large WAL so overlay remains in memtable
     opts.wal_buffer_size = 1024 * 1024;

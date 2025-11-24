@@ -7,7 +7,6 @@ use bytes::Bytes;
 use cntryl_midge::{ColumnFamilyConfig, MidgeEngine, MidgeOptions, StorageMode};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 use crossbeam::channel;
 
 mod common;
@@ -255,9 +254,6 @@ fn should_checkpoint_after_memtable_flush() {
             .expect("put");
     }
     engine.flush().expect("flush");
-    engine
-        .wait_for_flush(Duration::from_secs(5))
-        .expect("flush");
 
     // Act - Create checkpoint after flush
     let cp_dir = dir.path().join("checkpoint_post_flush");

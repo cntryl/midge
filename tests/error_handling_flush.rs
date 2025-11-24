@@ -119,9 +119,8 @@ fn should_resume_flush_when_flush_gate_released() {
     }
     // Release gate to allow flush to proceed
     handle.release();
-    // Wait for flush completion
-    eng.wait_for_flush(Duration::from_secs(3))
-        .expect("flush completion");
+    // Wait for flush completion deterministically via engine API
+    eng.flush().expect("flush completion");
 
     // Assert - data should be persisted (keys still readable)
     let sample = eng.get(&cf, b"key0000").expect("get sample");
