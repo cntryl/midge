@@ -34,34 +34,12 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
         ..Default::default()
     };
 
-<<<<<<< HEAD
-    eprintln!("[TEST] Starting test - opening first engine");
-    // Act: perform a write and flush under simulated cloud failures, then restart
-=======
     // Act: perform a write and flush under simulated **SST** cloud failures, then restart
->>>>>>> 5373487cb38eafc9be52bb70e82a0bb68e8165cd
     with_engine_restart(
         opts,
         |eng| {
-            eprintln!("[TEST] First engine opened - performing operations");
             let cf = eng.default_column_family();
             eng.put(&cf, b"key1", b"value1").expect("put");
-<<<<<<< HEAD
-            // Flush will attempt to upload SST to cloud and may encounter failures
-            if let Err(e) = eng.flush_cf(&cf) {
-                // With our simulated cloud failure it's acceptable for flush/upload to return an error.
-                eprintln!(
-                    "flush encountered error (expected in simulated failure): {:?}",
-                    e
-                );
-            }
-            // Allow background upload attempts to run using the mock helper to wait for uploads
-            eprintln!("[TEST] Waiting for uploads to complete");
-            assert!(backend.wait_for_uploads(1, TEST_CLOUD_TIMEOUT));
-            // Expect at least one failed upload attempt due to our fail config
-            assert!(backend.upload_failure_count() > 0 || backend.upload_count() == 0);
-            eprintln!("[TEST] First engine operations complete - about to drop");
-=======
 
             // Arm the failure injection **after** engine open to avoid poisoning WAL startup.
             backend.reset_counters();
@@ -82,10 +60,8 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
                 attempts_after > attempts_before,
                 "flush should trigger at least one cloud upload attempt"
             );
->>>>>>> 5373487cb38eafc9be52bb70e82a0bb68e8165cd
         },
         |eng| {
-            eprintln!("[TEST] Second engine opened - verifying data");
             // Assert: data must still be readable after recovery
             // Put backend back into non-failing mode for restart/read.
             backend.reset_counters();
@@ -95,12 +71,10 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
             let result = eng.get(&cf, b"key1").expect("get");
             assert!(
                 result.is_some(),
-                "Data should be present after recovery despite partial/failed cloud uploads"
+                "Data should be present after recovery despite partial/failed cloud uploads",
             );
-            eprintln!("[TEST] Test complete - about to drop second engine");
         },
     );
-    eprintln!("[TEST] Test finished successfully");
 }
 
 #[test]

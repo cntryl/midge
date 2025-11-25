@@ -36,6 +36,7 @@ pub mod manifest;
 pub mod memtable;
 pub mod naming;
 pub mod persistence;
+pub mod runtime;
 pub mod transaction;
 
 /// Common entry metadata used across memtable/flush paths.

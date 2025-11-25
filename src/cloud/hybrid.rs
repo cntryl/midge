@@ -184,6 +184,9 @@ pub struct HybridStorage {
 
     /// Cloud-specific metrics
     metrics: Arc<CloudMetrics>,
+
+    /// Worker thread handles (for clean shutdown)
+    worker_handles: parking_lot::Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
 /// Internal cache state tracking
@@ -234,6 +237,7 @@ impl HybridStorage {
             upload_queue: Arc::new(RwLock::new(VecDeque::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
             metrics: Arc::new(CloudMetrics::default()),
+            worker_handles: parking_lot::Mutex::new(Vec::new()),
         })
     }
 
@@ -554,14 +558,15 @@ impl HybridStorage {
     /// 1. **Upload worker**: Processes queued async uploads to cloud
     /// 2. **Eviction worker**: Periodically checks cache size and evicts LRU files
     ///
-    /// Call this after creating HybridStorage if you want automatic background processing.
+    /// Stores the handles internally for clean shutdown on drop.
     pub fn spawn_background_workers(&self) {
-        self.spawn_upload_worker();
-        self.spawn_eviction_worker();
+        let mut handles = self.worker_handles.lock();
+        handles.push(self.spawn_upload_worker());
+        handles.push(self.spawn_eviction_worker());
     }
 
     /// Spawn background thread to process async uploads.
-    fn spawn_upload_worker(&self) {
+    fn spawn_upload_worker(&self) -> thread::JoinHandle<()> {
         let upload_queue = Arc::clone(&self.upload_queue);
         let cloud_backend = Arc::clone(&self.cloud_backend);
         let shutdown = Arc::clone(&self.shutdown);
@@ -620,11 +625,11 @@ impl HybridStorage {
             }
 
             debug!("Upload worker stopped");
-        });
+        })
     }
 
     /// Spawn background thread to perform periodic cache eviction.
-    fn spawn_eviction_worker(&self) {
+    fn spawn_eviction_worker(&self) -> thread::JoinHandle<()> {
         let cache_state = Arc::clone(&self.cache_state);
         let local_path = self.local_path.clone();
         let max_local_bytes = self.max_local_bytes;
@@ -694,20 +699,38 @@ impl HybridStorage {
             }
 
             debug!("Eviction worker stopped");
-        });
+        })
     }
 
     /// Shutdown background workers gracefully.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        // Give threads time to finish current work
-        thread::sleep(Duration::from_millis(200));
+        
+        // Join all worker threads
+        let mut handles = self.worker_handles.lock();
+        for handle in handles.drain(..) {
+            if let Err(_) = handle.join() {
+                debug!("Worker thread panicked during shutdown");
+            }
+        }
     }
 }
 
 impl Drop for HybridStorage {
     fn drop(&mut self) {
+        eprintln!("[SHUTDOWN] HybridStorage::drop - signaling workers to stop");
         self.shutdown.store(true, Ordering::Relaxed);
+        
+        // Join all worker threads
+        let mut handles = self.worker_handles.lock();
+        for handle in handles.drain(..) {
+            eprintln!("[SHUTDOWN] HybridStorage::drop - joining worker thread");
+            match handle.join() {
+                Ok(_) => eprintln!("[SHUTDOWN] HybridStorage worker joined successfully"),
+                Err(e) => eprintln!("[SHUTDOWN] HybridStorage worker panicked: {:?}", e),
+            }
+        }
+        eprintln!("[SHUTDOWN] HybridStorage::drop - complete");
     }
 }
 
@@ -1055,7 +1078,7 @@ mod tests {
         let hybrid = HybridStorage::new(cache_dir, backend.clone(), 1024 * 1024).unwrap();
 
         // Act
-        hybrid.spawn_background_workers();
+        let _handles = hybrid.spawn_background_workers();
 
         // Write async (queues upload)
         hybrid
