@@ -43,6 +43,7 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
         |eng| {
             let cf = eng.default_column_family();
             eng.put(&cf, b"key1", b"value1").expect("put");
+            let baseline_uploads = backend.upload_count();
             // Flush will attempt to upload SST to cloud and may encounter failures
             if let Err(e) = eng.flush_cf(&cf) {
                 // With our simulated cloud failure it's acceptable for flush/upload to return an error.
@@ -52,7 +53,7 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
                 );
             }
             // Allow background upload attempts to run using the mock helper to wait for uploads
-            assert!(backend.wait_for_uploads(1, TEST_CLOUD_TIMEOUT));
+            assert!(backend.wait_for_uploads(baseline_uploads + 1, TEST_CLOUD_TIMEOUT));
             // Expect at least one failed upload attempt due to our fail config
             assert!(backend.upload_failure_count() > 0 || backend.upload_count() == 0);
         },

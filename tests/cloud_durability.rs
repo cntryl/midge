@@ -95,7 +95,9 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
     }
 
     // Wait for background uploads with timeout (observability)
-    let upload_succeeded = mock_backend.wait_for_uploads(1, Duration::from_millis(500));
+    let baseline_uploads = mock_backend.upload_count();
+    let upload_succeeded =
+        mock_backend.wait_for_uploads(baseline_uploads + 1, Duration::from_millis(500));
     println!(
         "Uploads: {} succeeded, upload flag: {}",
         mock_backend.upload_count(),
@@ -149,7 +151,9 @@ fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_r
     let _ = eng.flush_cf(&cf); // Ignore result
 
     // Wait for background uploads with timeout (observability)
-    let upload_succeeded = mock_backend.wait_for_uploads(1, Duration::from_millis(500));
+    let baseline_uploads = mock_backend.upload_count();
+    let upload_succeeded =
+        mock_backend.wait_for_uploads(baseline_uploads + 1, Duration::from_millis(500));
 
     // Assert
     // Verify data remains accessible
