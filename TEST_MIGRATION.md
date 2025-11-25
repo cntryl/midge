@@ -80,7 +80,7 @@ Prioritized by dependency chain and bug-catching value:
 | 3 | `durability_recovery.rs` | Crash recovery, manifest persistence | ✅ |
 | 4 | `engine_write_batch.rs` | Atomic batches use WAL; common user operation | ✅ |
 | 5 | `engine_snapshots.rs` | Point-in-time reads; needed before transactions | ✅ |
-| 6 | `transaction_basic.rs` | Depends on snapshots; high user-facing value | ⬜ |
+| 6 | `transaction_basic.rs` | Depends on snapshots; high user-facing value | ✅ |
 | 7 | `column_family_lifecycle.rs` | CF create/drop/persist; isolated subsystem | ⬜ |
 | 8 | `column_family_isolation.rs` | Data isolation between CFs | ⬜ |
 | 9 | `compaction_basic.rs` | Space reclamation; can run after data written | ⬜ |
@@ -110,7 +110,8 @@ Prioritized by dependency chain and bug-catching value:
 | `durability_recovery.rs` | ✅ | 14 | LocalDisk | Clean shutdown, crash during flush, manifest failures |
 | `engine_write_batch.rs` | ✅ | 14 | LocalDisk | Atomic batches, ordering, durability, multi-CF |
 | `engine_snapshots.rs` | ✅ | 15 | All 3 | Snapshot reads, MVCC, flush/compaction isolation |
-| (remaining ~30 files) | ⬜ | ~240 | TBD | Not started |
+| `transaction_basic.rs` | ✅ | 18 | LocalDisk | Commit, rollback, isolation, insert, delete_range, durability |
+| (remaining ~29 files) | ⬜ | ~222 | TBD | Not started |
 
 ---
 
