@@ -295,7 +295,7 @@ mod tests {
         fn get_state(&self, key: &[u8]) -> crate::error::MidgeResult<KeyState> {
             use bytes::Bytes;
             if key == b"a" {
-                Ok(KeyState::Value(Bytes::from_static(b"X"), 0, None, _op_type))
+                Ok(KeyState::Value(Bytes::from_static(b"X"), 0, None, 0))
             } else {
                 Ok(KeyState::Absent)
             }

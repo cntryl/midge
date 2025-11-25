@@ -132,10 +132,10 @@ fn apply_record_to_memtable(
                 }
             }
             WalOpKind::Merge => {
-                // Merge operations are stored like Put in the memtable
-                // Resolution happens at read time
+                // Merge operations must be stored with OpType::Merge in the memtable
+                // The merge resolution happens at read time, not write time
                 if let Some(value) = rec.value {
-                    memtable.put_with_seq_and_exp(
+                    memtable.merge_with_seq_and_exp(
                         rec.key.as_ref(),
                         value.as_ref(),
                         rec.seq,

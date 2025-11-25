@@ -397,7 +397,7 @@ mod tests {
             shared_len,
             Some(b"value"),
             42,
-            false,
+            0,
             false,
             None,
         );
@@ -466,7 +466,7 @@ mod tests {
             shared_len,
             Some(value),
             seq,
-            false,
+            0,
             false,
             expiration,
         );
@@ -914,7 +914,7 @@ mod tests {
             shared_len,
             Some(value),
             seq,
-            false,
+            0,
             false,
             expiration,
         );
@@ -926,7 +926,7 @@ mod tests {
                 decoded.shared_len,
                 decoded.value,
                 decoded.sequence,
-                decoded.entry_type == 2,
+                decoded.entry_type,
                 false,
                 decoded.expiration,
             );

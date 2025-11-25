@@ -203,47 +203,115 @@ impl MidgeEngine {
         // Check SST files from newest to oldest (reverse iteration)
         // Iterate SST files from newest to oldest so the most recent version
         // (including tombstones) wins over older versions.
+        // Collect all entries to handle merge operands that may span multiple SST files.
+        // Entry format: (value, seq, expiration, op_type) where op_type: 0=Put, 2=Delete/Tombstone, 3=Merge
+        let mut sst_entries: Vec<(Bytes, u64, Option<u64>, u8)> = Vec::new();
+        let mut found_tombstone: Option<u64> = None;
+
         for file in cf_files.iter() {
             let p = crate::core::naming::sst_path(&self.sst_dir, file.cf_id.into(), file.sst_seq);
             // CloudSstReaderFactory will download from cloud if not in local cache
             if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
-                {
-                    let state_result = sst.get_state(key);
-                    match state_result {
-                        Ok(crate::sst::KeyState::Value(v, seq, expiration, _op_type)) => {
-                            // Check if key is expired
-                            if let Some(exp_ts) = expiration {
-                                let now_millis = timestamp::now_millis();
-                                if exp_ts <= now_millis {
-                                    // Key is expired, treat as deleted
-                                    return Ok(None);
-                                }
-                            }
-                            // Before returning the value, check if any range tombstone
-                            // with a higher sequence covers this key
-                            // Check if any range tombstone with seq >= value's seq covers this key
-                            // Tombstone semantics: a tombstone at sequence T deletes all keys with seq < T
-                            // that fall in its range
-                            let covered_by_tombstone = all_range_tombstones.iter().any(|t| {
-                                key >= t.start.as_slice() && key < t.end.as_slice() && seq < t.seq
-                                // Value written before tombstone
-                            });
-
-                            if covered_by_tombstone {
+                let state_result = sst.get_state(key);
+                match state_result {
+                    Ok(crate::sst::KeyState::Value(v, seq, expiration, op_type)) => {
+                        // Check if key is expired
+                        if let Some(exp_ts) = expiration {
+                            let now_millis = timestamp::now_millis();
+                            if exp_ts <= now_millis {
+                                // Key is expired, treat as deleted - stop looking
                                 return Ok(None);
                             }
-
-                            return Ok(Some(v));
                         }
-                        Ok(crate::sst::KeyState::Tombstone(_seq)) => {
+                        // Check if covered by range tombstone
+                        let covered_by_tombstone = all_range_tombstones.iter().any(|t| {
+                            key >= t.start.as_slice() && key < t.end.as_slice() && seq < t.seq
+                        });
+                        if covered_by_tombstone {
                             return Ok(None);
                         }
-                        Ok(crate::sst::KeyState::Absent) => continue,
-                        Err(_) => continue,
+
+                        // If it's a Put (op_type=0), we can stop - Put terminates merge chain
+                        if op_type == 0 {
+                            // Check if we have any merge operands collected
+                            if sst_entries.iter().any(|(_, _, _, op)| *op == 3) {
+                                // We have merges, add this Put as base and resolve
+                                sst_entries.push((v, seq, expiration, op_type));
+                            } else {
+                                // No merges, just return this Put value
+                                return Ok(Some(v));
+                            }
+                            break;
+                        } else if op_type == 3 {
+                            // Merge operand - collect and continue looking for base/more operands
+                            sst_entries.push((v, seq, expiration, op_type));
+                            // Continue to next SST file to find more operands or base value
+                        } else {
+                            // Unknown op_type, treat as Put
+                            return Ok(Some(v));
+                        }
+                    }
+                    Ok(crate::sst::KeyState::Tombstone(seq)) => {
+                        // Tombstone terminates merge chain - any operands before this are discarded
+                        found_tombstone = Some(seq);
+                        break;
+                    }
+                    Ok(crate::sst::KeyState::Absent) => continue,
+                    Err(_) => continue,
+                }
+            }
+        }
+
+        // If we found a tombstone, the key is deleted
+        if found_tombstone.is_some() {
+            return Ok(None);
+        }
+
+        // If we collected merge operands, resolve them
+        if !sst_entries.is_empty() && sst_entries.iter().any(|(_, _, _, op)| *op == 3) {
+            let ops = self.merge_operators.read();
+            if let Some(merge_op) = ops.get(&cf_id.as_u32()) {
+                // Sort entries by sequence (oldest first for merge resolution)
+                let mut sorted_entries = sst_entries;
+                sorted_entries.sort_by_key(|(_, seq, _, _)| *seq);
+
+                // Collect merge operands and base value (oldest to newest)
+                let mut operands: Vec<Bytes> = Vec::new();
+                let mut base_value: Option<Bytes> = None;
+
+                for (value, _seq, _exp, op_type) in sorted_entries.iter() {
+                    match *op_type {
+                        0 => {
+                            // Put - becomes base value, clear prior operands
+                            base_value = Some(value.clone());
+                            operands.clear();
+                        }
+                        3 => {
+                            // Merge operand
+                            operands.push(value.clone());
+                        }
+                        2 => {
+                            // Delete - clear everything
+                            base_value = None;
+                            operands.clear();
+                        }
+                        _ => {}
                     }
                 }
+
+                if !operands.is_empty() {
+                    let operand_refs: Vec<&[u8]> = operands.iter().map(|b| b.as_ref()).collect();
+                    if let Ok(resolved) = merge_op.merge_many(key, base_value.as_deref(), &operand_refs) {
+                        return Ok(Some(Bytes::from(resolved)));
+                    }
+                } else if let Some(base) = base_value {
+                    return Ok(Some(base));
+                }
             } else {
-                continue;
+                // No merge operator registered, return last value from collected entries
+                if let Some((v, _, _, _)) = sst_entries.last() {
+                    return Ok(Some(v.clone()));
+                }
             }
         }
 

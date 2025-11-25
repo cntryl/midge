@@ -603,10 +603,10 @@ mod tests {
 
         // Add keys in descending sequence order (required for internal mode)
         writer
-            .add_with_meta(b"key1", Some(b"v2"), 20, false, None)
+            .add_with_meta(b"key1", Some(b"v2"), 20, 0, None)
             .unwrap();
         writer
-            .add_with_meta(b"key1", Some(b"v1"), 10, false, None)
+            .add_with_meta(b"key1", Some(b"v1"), 10, 0, None)
             .unwrap();
         let cloud_key = writer.finish_to_cloud("test-001").unwrap();
         let reader = SstCloudReader::open(backend, &cloud_key).unwrap();

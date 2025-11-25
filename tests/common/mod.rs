@@ -164,6 +164,9 @@ pub struct DurabilityTestContext {
     mode: String,
     temp_dir: TempDir,
     cloud_root: Option<PathBuf>,
+    /// Shared cloud backend for CloudBacked mode - reused across reopens to preserve
+    /// in-memory state like the cloud manifest (simulating real cloud persistence).
+    cloud_backend: Option<Arc<MockCloudBackend>>,
 }
 
 #[allow(dead_code)]
@@ -171,15 +174,18 @@ impl DurabilityTestContext {
     /// Create a new durability test context for the given storage mode.
     pub fn new(mode: &str) -> Self {
         let temp_dir = test_temp_dir();
-        let cloud_root = if mode == "CloudBacked" {
-            Some(temp_dir.path().join("cloud"))
+        let (cloud_root, cloud_backend) = if mode == "CloudBacked" {
+            let root = temp_dir.path().join("cloud");
+            let backend = Arc::new(MockCloudBackend::with_root(root.clone()));
+            (Some(root), Some(backend))
         } else {
-            None
+            (None, None)
         };
         Self {
             mode: mode.to_string(),
             temp_dir,
             cloud_root,
+            cloud_backend,
         }
     }
 
@@ -198,8 +204,15 @@ impl DurabilityTestContext {
         self.cloud_root.as_deref()
     }
 
+    /// Get the shared cloud backend (if CloudBacked mode).
+    pub fn cloud_backend(&self) -> Option<Arc<MockCloudBackend>> {
+        self.cloud_backend.clone()
+    }
+
     /// Create a StorageMode that can be used for opening/reopening the engine.
     /// Each call creates a new StorageMode but pointing to the same underlying storage.
+    /// For CloudBacked mode, the same MockCloudBackend instance is reused to preserve
+    /// in-memory state (like the cloud manifest) across engine reopens.
     pub fn create_storage_mode(&self) -> StorageMode {
         match self.mode.as_str() {
             "LocalDisk" => StorageMode::LocalDisk {
@@ -207,9 +220,7 @@ impl DurabilityTestContext {
             },
             "CloudBacked" => StorageMode::CloudBacked {
                 local_cache_path: self.temp_dir.path().to_path_buf(),
-                cloud_backend: Arc::new(MockCloudBackend::with_root(
-                    self.cloud_root.clone().unwrap(),
-                )),
+                cloud_backend: self.cloud_backend.clone().expect("cloud_backend not set"),
                 storage_context: StorageContext::default(),
                 local_wal_sync: true,
                 wal_batch_size: 4 * 1024 * 1024,
