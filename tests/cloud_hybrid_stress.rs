@@ -135,8 +135,9 @@ fn should_maintain_correctness_under_rapid_cache_churn() {
     // Arrange
     let dir = test_temp_dir();
     let mock_backend = Arc::new(MockCloudBackend::new());
+    // Use small cache (10KB) to force evictions with 50 files of 1KB each (50KB total)
     let hybrid = Arc::new(
-        HybridStorage::new(dir.path().to_path_buf(), mock_backend.clone(), 512 * 1024)
+        HybridStorage::new(dir.path().to_path_buf(), mock_backend.clone(), 10 * 1024)
             .expect("failed to create hybrid storage"),
     );
     hybrid.spawn_background_workers();

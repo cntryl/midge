@@ -257,6 +257,9 @@ fn should_allow_clean_shutdown_given_cloud_upload_failures_after_flush_attempts(
 
             let _ = eng.flush_cf(&cf);
 
+            // Wait for async flush to complete before checking upload counts
+            let _ = eng.wait_for_flush(std::time::Duration::from_secs(5));
+
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
             assert!(
                 attempts_after > attempts_before,
@@ -315,6 +318,12 @@ fn should_not_block_puts_when_background_uploads_are_flaky() {
                 eng.put(&cf, &key, &value).expect("put under flaky cloud");
             }
 
+            // Explicitly flush to ensure data is persisted (even if some uploads fail)
+            let _ = eng.flush_cf(&cf);
+
+            // Wait for any pending flushes to complete before checking upload counts
+            let _ = eng.wait_for_flush(std::time::Duration::from_secs(5));
+
             let _attempts = backend.upload_count() + backend.upload_failure_count();
         },
         |eng| {
@@ -368,6 +377,9 @@ fn should_report_upload_attempts_when_manifest_sync_happens_under_fail_after() {
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
 
             let _ = eng.flush_cf(&cf);
+
+            // Wait for async flush to complete before checking upload counts
+            let _ = eng.wait_for_flush(std::time::Duration::from_secs(5));
 
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
             assert!(
