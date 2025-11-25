@@ -8,19 +8,15 @@ use cntryl_midge::cloud::backend::StorageBackend;
 use cntryl_midge::{
     cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
 };
-use common::test_helpers::TEST_CLOUD_TIMEOUT;
 use common::*;
 use std::sync::Arc;
 
 #[test]
 fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifest_was_already_updated(
 ) {
-    // Arrange: open engine with a cloud-backed storage mode and a failing backend
+    // Arrange: open engine with a cloud-backed storage mode and a mock backend
     let dir = test_temp_dir();
     let backend = Arc::new(MockCloudBackend::new());
-
-    // Allow one successful upload then fail subsequent uploads to simulate a partial/failed upload
-    backend.set_fail_upload_after(1);
 
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
@@ -37,29 +33,40 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
         ..Default::default()
     };
 
-    // Act: perform a write and flush under simulated cloud failures, then restart
+    // Act: perform a write and flush under simulated **SST** cloud failures, then restart
     with_engine_restart(
         opts,
         |eng| {
             let cf = eng.default_column_family();
             eng.put(&cf, b"key1", b"value1").expect("put");
-            let baseline_uploads = backend.upload_count();
-            // Flush will attempt to upload SST to cloud and may encounter failures
-            if let Err(e) = eng.flush_cf(&cf) {
-                // With our simulated cloud failure it's acceptable for flush/upload to return an error.
-                eprintln!(
-                    "flush encountered error (expected in simulated failure): {:?}",
-                    e
-                );
-            }
-            // Allow background upload attempts to run using the mock helper to wait for uploads
-            assert!(backend.wait_for_uploads(baseline_uploads + 1, TEST_CLOUD_TIMEOUT));
-            // Expect at least one failed upload attempt due to our fail config
-            assert!(backend.upload_failure_count() > 0 || backend.upload_count() == 0);
+
+            // Arm the failure injection **after** engine open to avoid poisoning WAL startup.
+            backend.reset_counters();
+            // Allow exactly one new successful upload (e.g. first SST/manifest), then fail.
+            backend.set_fail_upload_after(1);
+
+            let attempts_before =
+                backend.upload_count() + backend.upload_failure_count();
+
+            // Flush will attempt to upload SST/manifest to cloud and may encounter failures.
+            let _ = eng.flush_cf(&cf); // error is acceptable under simulated cloud failure
+
+            let attempts_after =
+                backend.upload_count() + backend.upload_failure_count();
+
+            // Assert: at least one upload attempt happened, and at least one failure occurred.
+            assert!(
+                attempts_after > attempts_before,
+                "flush should trigger at least one cloud upload attempt"
+            );
+            assert!(
+                backend.upload_failure_count() > 0,
+                "there should be at least one failed cloud upload under fail-after-1"
+            );
         },
         |eng| {
             // Assert: data must still be readable after recovery
-            // Clear the forced failure so any background retries can succeed
+            // Put backend back into non-failing mode for restart/read.
             backend.reset_counters();
             backend.set_fail_upload_after(usize::MAX);
 
@@ -67,7 +74,7 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
             let result = eng.get(&cf, b"key1").expect("get");
             assert!(
                 result.is_some(),
-                "Data should be present after recovery despite partial cloud upload"
+                "Data should be present after recovery despite partial/failed cloud uploads"
             );
         },
     );

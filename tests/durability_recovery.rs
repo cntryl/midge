@@ -4,7 +4,7 @@ use cntryl_midge::{
     MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode,
 };
 use common::{
-    assert_get_equals, durability_opts, flush_test_opts, test_temp_dir, with_engine_restart,
+    assert_get_equals, durability_opts, flush_test_opts, test_temp_dir, with_engine_restart_timeout,
 };
 
 #[test]
@@ -194,7 +194,7 @@ fn should_rebuild_manifest_up_to_last_fsynced_sequence() {
     };
 
     // Act
-    with_engine_restart(
+    with_engine_restart_timeout(
         opts,
         |eng| {
             let cf = eng.default_column_family();
@@ -227,7 +227,7 @@ fn should_deduplicate_replay_given_partial_flush_in_manifest() {
     let opts = flush_test_opts(dir.path().to_path_buf(), 1024);
 
     // Act
-    with_engine_restart(
+    with_engine_restart_timeout(
         opts,
         |eng| {
             let cf = eng.default_column_family();

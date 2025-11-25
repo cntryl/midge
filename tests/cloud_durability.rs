@@ -57,9 +57,6 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
     let dir = test_temp_dir();
     let mock_backend = Arc::new(MockCloudBackend::new());
 
-    // Configure mock to fail uploads after 1 successful one (allow first upload, fail subsequent)
-    mock_backend.set_fail_upload_after(1);
-
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
             local_cache_path: dir.path().to_path_buf(),
@@ -73,6 +70,11 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
         ..Default::default()
     };
     let eng = MidgeEngine::open(opts).expect("open");
+    // Arm upload failures only after engine startup so WAL/cloud uploader
+    // initialization is not poisoned by fail-after semantics.
+    mock_backend.reset_counters();
+    // Allow exactly one new successful upload, then fail subsequent uploads.
+    mock_backend.set_fail_upload_after(1);
     let cf = eng.default_column_family();
 
     // Act - write data that will trigger SST creation and uploads
@@ -82,42 +84,32 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
     }
     println!("Wrote 10 keys to memtable");
 
-    // Force flush - this may fail if cloud uploads fail, but data should still be available locally
-    let flush_result = eng.flush_cf(&cf);
-    println!("Flush result: {:?}", flush_result);
+    // Force flush - this may hit cloud upload failures but must not hang.
+    let attempts_before =
+        mock_backend.upload_count() + mock_backend.upload_failure_count();
+    let _ = eng.flush_cf(&cf);
+    let attempts_after =
+        mock_backend.upload_count() + mock_backend.upload_failure_count();
 
-    // Check manifest
-    let manifest_path = dir.path().join("manifest.json");
-    if manifest_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-            println!("Manifest after flush:\n{}", content);
-        }
-    }
-
-    // Wait for background uploads with timeout (observability)
-    let baseline_uploads = mock_backend.upload_count();
-    let upload_succeeded =
-        mock_backend.wait_for_uploads(baseline_uploads + 1, Duration::from_millis(500));
-    println!(
-        "Uploads: {} succeeded, upload flag: {}",
-        mock_backend.upload_count(),
-        upload_succeeded
+    assert!(
+        attempts_after > attempts_before,
+        "flush should trigger at least one cloud upload attempt",
+    );
+    assert!(
+        mock_backend.upload_failure_count() > 0,
+        "there should be at least one failed cloud upload under fail-after-1",
     );
 
     // Assert - data should be available despite upload failures
     for i in 0..10 {
         let key = format!("key{:02}", i);
         let result = eng.get(&cf, key.as_bytes()).expect("get");
-        if result.is_none() {
-            println!("MISSING: {} not found!", key);
-        }
         assert!(
             result.is_some(),
             "Data should be available from local cache despite upload failures: key={}",
             key
         );
     }
-    println!("All keys verified successfully");
 }
 
 #[test]

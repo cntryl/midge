@@ -3,7 +3,7 @@ use cntryl_midge::{
     test_hooks::{FsyncBehavior, TestHooks},
     MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode,
 };
-use common::{assert_get_equals, durability_opts, test_temp_dir, with_engine_restart};
+use common::{assert_get_equals, durability_opts, test_temp_dir, with_engine_restart_timeout};
 use std::sync::Arc;
 
 #[test]
@@ -13,7 +13,7 @@ fn should_recover_without_loss_given_crash_after_wal_append_before_fsync() {
     let opts = durability_opts(dir.path().to_path_buf());
 
     // Act - write with fsync enabled, then verify after restart
-    with_engine_restart(
+    with_engine_restart_timeout(
         opts,
         |eng| {
             let cf = eng.default_column_family();
@@ -184,7 +184,7 @@ fn should_replay_all_valid_records_given_multiple_segments_when_recovering() {
     let opts = durability_opts(dir.path().to_path_buf());
 
     // Act
-    with_engine_restart(
+    with_engine_restart_timeout(
         opts,
         |eng| {
             // Act - write enough data to trigger multiple WAL segments
