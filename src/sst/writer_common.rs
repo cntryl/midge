@@ -1,4 +1,4 @@
-//! Common SST writer functionality shared across implementations.
+﻿//! Common SST writer functionality shared across implementations.
 //!
 //! This module extracts the duplicated logic from cloud/mem/fs writers into
 //! reusable components to reduce code duplication and improve maintainability.
@@ -115,13 +115,13 @@ impl WriterState {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         if self.config.use_internal_keys {
-            self.add_entry_internal_key(key, value, seq, tombstone, expiration)
+            self.add_entry_internal_key(key, value, seq, op_type, expiration)
         } else {
-            self.add_entry_plain_key(key, value, seq, tombstone, expiration)
+            self.add_entry_plain_key(key, value, seq, op_type, expiration)
         }
     }
 
@@ -130,9 +130,10 @@ impl WriterState {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        let tombstone = op_type == 2;
         // Key may already be encoded as an internal key (user||seq||kind).
         // Use cache to avoid redundant decode_internal_key() calls.
 
@@ -185,14 +186,14 @@ impl WriterState {
         if self.last_internal_key.is_some() {
             // Key was already encoded as internal key
             self.cur_block
-                .add_with_meta(key, value, seq, tombstone, true, expiration)?;
+                .add_with_meta(key, value, seq, op_type, true, expiration)?;
             self.last_key_in_block = Some(Bytes::copy_from_slice(key));
             self.bloom_builder.add_key(&user_key_bytes);
         } else {
             // Plain user key - encode it
             let ik = crate::common::internal_key::encode_internal_key(key, seq, tombstone);
             self.cur_block
-                .add_with_meta(&ik, value, seq, tombstone, true, expiration)?;
+                .add_with_meta(&ik, value, seq, op_type, true, expiration)?;
             self.last_key_in_block = Some(Bytes::copy_from_slice(&ik));
             self.bloom_builder.add_key(key);
         }
@@ -204,11 +205,11 @@ impl WriterState {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         self.cur_block
-            .add_with_meta(key, value, seq, tombstone, false, expiration)?;
+            .add_with_meta(key, value, seq, op_type, false, expiration)?;
         self.last_key_in_block = Some(Bytes::copy_from_slice(key));
         self.bloom_builder.add_key(key);
         Ok(())
@@ -410,7 +411,7 @@ mod tests {
         let config = WriterConfig::new(100, CompressionType::None);
         let mut state = WriterState::new(config);
         state
-            .add_entry(b"key1", Some(b"value1"), 0, false, None)
+            .add_entry(b"key1", Some(b"value1"), 0, 0, None)
             .unwrap();
 
         // Act - Add another entry that would exceed block size
@@ -427,7 +428,7 @@ mod tests {
         let mut state = WriterState::new(config);
 
         // Act
-        let result = state.add_entry(b"test_key", Some(b"test_value"), 0, false, None);
+        let result = state.add_entry(b"test_key", Some(b"test_value"), 0, 0, None);
 
         // Assert
         assert!(result.is_ok());
@@ -441,7 +442,7 @@ mod tests {
         let mut state = WriterState::new(config);
 
         // Act
-        let result = state.add_entry(b"test_key", Some(b"test_value"), 42, false, None);
+        let result = state.add_entry(b"test_key", Some(b"test_value"), 42, 0, None);
 
         // Assert
         assert!(result.is_ok());
@@ -470,7 +471,7 @@ mod tests {
         let config = WriterConfig::new(4096, CompressionType::None);
         let mut state = WriterState::new(config);
         state
-            .add_entry(b"key", Some(b"value"), 0, false, None)
+            .add_entry(b"key", Some(b"value"), 0, 0, None)
             .unwrap();
 
         // Act

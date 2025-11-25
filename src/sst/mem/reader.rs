@@ -389,7 +389,7 @@ impl SstMemReader {
                         return Ok(if tomb {
                             KeyState::Tombstone(seq)
                         } else if let Some(val) = entry.value {
-                            KeyState::Value(Bytes::copy_from_slice(val), seq, entry.expiration)
+                            KeyState::Value(Bytes::copy_from_slice(val), seq, entry.expiration, entry.entry_type)
                         } else {
                             KeyState::Tombstone(seq)
                         });
@@ -408,6 +408,7 @@ impl SstMemReader {
                                 Bytes::copy_from_slice(val),
                                 entry.sequence,
                                 entry.expiration,
+                                entry.entry_type,
                             )
                         } else {
                             KeyState::Tombstone(entry.sequence)
@@ -476,7 +477,7 @@ impl SstMemReader {
                     let val = value_opt.map(Bytes::copy_from_slice).unwrap_or_default();
                     out.push((
                         Bytes::from(stored_key),
-                        KeyState::Value(val, actual_seq, expiration),
+                        KeyState::Value(val, actual_seq, expiration, entry_type),
                     ));
                 }
             }
@@ -526,7 +527,7 @@ impl SstMemReader {
                             KeyState::Tombstone(actual_seq)
                         } else {
                             let val = value_opt.map(Bytes::copy_from_slice).unwrap_or_default();
-                            KeyState::Value(val, actual_seq, expiration)
+                            KeyState::Value(val, actual_seq, expiration, entry_type)
                         });
                     }
                     // seq >= snapshot_seq: this version is too new, continue searching
@@ -594,7 +595,7 @@ impl SstMemReader {
                         KeyState::Tombstone(actual_seq)
                     } else {
                         let val = value_opt.map(Bytes::copy_from_slice).unwrap_or_default();
-                        KeyState::Value(val, actual_seq, expiration)
+                        KeyState::Value(val, actual_seq, expiration, entry_type)
                     };
                     out.push((Bytes::from(actual_key), state));
                 }

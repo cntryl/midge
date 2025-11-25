@@ -87,7 +87,7 @@ Prioritized by dependency chain and bug-catching value:
 | 10 | `compaction_levels.rs` | Multi-level compaction behavior | ✅ |
 | 11 | `engine_iterators.rs` | Advanced iteration patterns | ✅ |
 | 12 | `engine_delete_range.rs` | Range tombstones are complex | ✅ |
-| 13 | `engine_merge_operators.rs` | Advanced feature, fewer users | ⬜ |
+| 13 | `engine_merge_operators.rs` | Advanced feature, fewer users | ✅ (exposes bug) |
 | 14 | `concurrency_*.rs` | Stress tests; need solid base first | ⬜ |
 | 15 | `stress_*.rs` | Soak/capacity tests last | ⬜ |
 
@@ -116,6 +116,7 @@ Prioritized by dependency chain and bug-catching value:
 | `compaction_levels.rs` | ✅ | 15 | LocalDisk, CloudBacked | L0 sublevels, level size enforcement, cascading, statistics |
 | `engine_iterators.rs` | ✅ | 22 | LocalDisk, CloudBacked | Forward/reverse scans, seek, tombstones, streaming, pagination |
 | `engine_delete_range.rs` | ✅ | 16 | LocalDisk, CloudBacked | Range deletion, recovery, compaction, snapshots, overlapping |
+| `engine_merge_operators.rs` | ✅ | 23 | All 3 (2 fail) | **BUG**: CloudBacked doesn't persist merge operands correctly - returns last operand instead of resolved sum after recovery |
 | (remaining ~25 files) | ⬜ | ~125 | TBD | Not started |
 
 ---
@@ -925,15 +926,15 @@ Maps each legacy file to its target location(s) in the new structure.
 | `durability_wal_truncate_sim.rs` | `durability_wal.rs` | ✅ |
 | `engine_atomics.rs` | `engine_basic.rs` | ✅ |
 | `engine_basic_ops.rs` | `engine_basic.rs` | ✅ |
-| `engine_cf_merge_operators.rs` | `engine_merge_operators.rs` | ⬜ |
+| `engine_cf_merge_operators.rs` | `engine_merge_operators.rs` | ✅ |
 | `engine_checkpoint.rs` | `checkpoint.rs` | ⬜ |
 | `engine_checkpoint_stress.rs` | `checkpoint.rs` | ⬜ |
 | `engine_compaction.rs` | `compaction_basic.rs` | ⬜ |
 | `engine_delete_range.rs` | `engine_delete_range.rs` | ✅ |
 | `engine_delete_range_core.rs` | `engine_delete_range.rs` | ✅ |
 | `engine_iterator_edge.rs` | `engine_iterators.rs` | ✅ |
-| `engine_merge_operator_correctness.rs` | `engine_merge_operators.rs` | ⬜ |
-| `engine_merge_operator_errors.rs` | `engine_merge_operators.rs` | ⬜ |
+| `engine_merge_operator_correctness.rs` | `engine_merge_operators.rs` | ✅ |
+| `engine_merge_operator_errors.rs` | `engine_merge_operators.rs` | ✅ |
 | `engine_multi_get.rs` | `engine_basic.rs` | ✅ |
 | `engine_readonly_mode.rs` | `readonly_mode.rs` | ⬜ |
 | `engine_scans.rs` | `engine_basic.rs` | ✅ |
@@ -955,7 +956,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `memory_mode_no_disk_writes.rs` | `memory_mode.rs` | ⬜ |
 | `memtable_concurrency.rs` | `concurrency_writes.rs` | ⬜ |
 | `memtable_freeze_edge_cases.rs` | `concurrency_writes.rs` | ⬜ |
-| `merge_operator_failure_modes.rs` | `engine_merge_operators.rs` | ⬜ |
+| `merge_operator_failure_modes.rs` | `engine_merge_operators.rs` | ✅ |
 | `metrics_accessors.rs` | `metrics.rs` | ⬜ |
 | `multi_cf_compaction_fairness.rs` | `column_family_isolation.rs` | ⬜ |
 | `multicf_compaction_recovery.rs` | `column_family_isolation.rs` | ⬜ |

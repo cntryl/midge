@@ -1,4 +1,4 @@
-//! Factory implementations for creating cloud-backed SST readers and writers.
+﻿//! Factory implementations for creating cloud-backed SST readers and writers.
 
 use crate::cloud::StorageBackend;
 use crate::error::MidgeResult;
@@ -23,11 +23,11 @@ impl crate::sst::DynSstWriter for CloudDynWriter {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         self.writer
-            .add_with_meta(key, value, seq, tombstone, expiration)
+            .add_with_meta(key, value, seq, op_type, expiration)
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -273,17 +273,17 @@ mod tests {
         let state_x = reader.get_state(b"nonexistent").unwrap();
 
         match state_a {
-            crate::sst::traits::KeyState::Value(v, _, _) => assert_eq!(v, bytes::Bytes::from("A")),
+            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => assert_eq!(v, bytes::Bytes::from("A")),
             _ => panic!("Expected Value for apple"),
         }
 
         match state_b {
-            crate::sst::traits::KeyState::Value(v, _, _) => assert_eq!(v, bytes::Bytes::from("B")),
+            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => assert_eq!(v, bytes::Bytes::from("B")),
             _ => panic!("Expected Value for banana"),
         }
 
         match state_c {
-            crate::sst::traits::KeyState::Value(v, _, _) => assert_eq!(v, bytes::Bytes::from("C")),
+            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => assert_eq!(v, bytes::Bytes::from("C")),
             _ => panic!("Expected Value for cherry"),
         }
 
@@ -293,3 +293,4 @@ mod tests {
         }
     }
 }
+

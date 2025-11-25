@@ -1,4 +1,4 @@
-//! Factory implementations for creating in-memory SST readers and writers.
+﻿//! Factory implementations for creating in-memory SST readers and writers.
 
 use crate::error::MidgeResult;
 use crate::sst::traits::{SstReaderFactory, SstStateReader};
@@ -20,11 +20,11 @@ impl crate::sst::DynSstWriter for MemDynWriter {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         // Delegate to the SstMemWriter logic which correctly handles internal-key layout
-        self.0.add_with_meta(key, value, seq, tombstone, expiration)
+        self.0.add_with_meta(key, value, seq, op_type, expiration)
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -113,13 +113,13 @@ mod tests {
         // Arrange
         let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
         // low-seq visible at snapshots > 5
-        w.add_with_meta(b"a", Some(b"A1"), 5, false, None)
+        w.add_with_meta(b"a", Some(b"A1"), 5, 0, None)
             .expect("add a");
         // high-seq only visible at snapshots > 15
-        w.add_with_meta(b"b", Some(b"B1"), 15, false, None)
+        w.add_with_meta(b"b", Some(b"B1"), 15, 0, None)
             .expect("add b");
         // tombstone visible at snapshots > 10
-        w.add_with_meta(b"c", None, 10, true, None)
+        w.add_with_meta(b"c", None, 10, 2, None)
             .expect("add tombstone c");
 
         // Act
@@ -152,11 +152,11 @@ mod tests {
     fn should_filter_scan_range_by_snapshot_tombstone() {
         // Arrange
         let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
-        w.add_with_meta(b"a", Some(b"A"), 5, false, None)
+        w.add_with_meta(b"a", Some(b"A"), 5, 0, None)
             .expect("add a");
-        w.add_with_meta(b"b", Some(b"B"), 15, false, None)
+        w.add_with_meta(b"b", Some(b"B"), 15, 0, None)
             .expect("add b");
-        w.add_with_meta(b"c", None, 10, true, None)
+        w.add_with_meta(b"c", None, 10, 2, None)
             .expect("add tombstone c");
 
         // Act
@@ -199,7 +199,7 @@ mod tests {
 
         // Assert
         match reader.get_state(b"a").expect("get_state a") {
-            crate::sst::KeyState::Value(v, _seq, None) => assert_eq!(v.as_ref(), b"A"),
+            crate::sst::KeyState::Value(v, _seq, None, _op_type) => assert_eq!(v.as_ref(), b"A"),
             other => panic!("unexpected: {:?}", other),
         }
     }
@@ -212,8 +212,8 @@ mod tests {
             4096,
             true,
         );
-        w.add_with_meta(b"a", Some(b"1"), 1, false, None).unwrap();
-        w.add_with_meta(b"b", Some(b"2"), 2, false, None).unwrap();
+        w.add_with_meta(b"a", Some(b"1"), 1, 0, None).unwrap();
+        w.add_with_meta(b"b", Some(b"2"), 2, 0, None).unwrap();
 
         // Act
         let r = w.finish().unwrap();
@@ -250,10 +250,10 @@ mod tests {
     fn should_scan_range_state_at_with_snapshot() {
         // Arrange
         let mut w = SstMemWriter::new(crate::common::codec::CompressionType::None, 64);
-        w.add_with_meta(b"a", Some(b"A"), 5, false, None).unwrap();
-        w.add_with_meta(b"b", Some(b"B"), 15, false, None).unwrap();
-        w.add_with_meta(b"c", Some(b"C"), 10, false, None).unwrap();
-        w.add_with_meta(b"d", None, 8, true, None).unwrap(); // tombstone
+        w.add_with_meta(b"a", Some(b"A"), 5, 0, None).unwrap();
+        w.add_with_meta(b"b", Some(b"B"), 15, 0, None).unwrap();
+        w.add_with_meta(b"c", Some(b"C"), 10, 0, None).unwrap();
+        w.add_with_meta(b"d", None, 8, 2, None).unwrap(); // tombstone
 
         let reader = w.finish().unwrap();
 
@@ -266,7 +266,7 @@ mod tests {
         // Check first key is 'a' with value
         assert_eq!(rows[0].0.as_ref(), b"a");
         match &rows[0].1 {
-            crate::sst::KeyState::Value(v, _, None) => assert_eq!(v.as_ref(), b"A"),
+            crate::sst::KeyState::Value(v, _, None, _op_type) => assert_eq!(v.as_ref(), b"A"),
             other => panic!("unexpected state for a: {:?}", other),
         }
 
@@ -350,13 +350,13 @@ mod tests {
         let exp1 = Some(1000000000000);
         let exp2 = Some(2000000000000);
 
-        w.add_with_meta(b"key1", Some(b"val1"), 10, false, exp1)
+        w.add_with_meta(b"key1", Some(b"val1"), 10, 0, exp1)
             .unwrap();
-        w.add_with_meta(b"key2", Some(b"val2"), 20, false, exp2)
+        w.add_with_meta(b"key2", Some(b"val2"), 20, 0, exp2)
             .unwrap();
-        w.add_with_meta(b"key3", Some(b"val3"), 30, false, None)
+        w.add_with_meta(b"key3", Some(b"val3"), 30, 0, None)
             .unwrap();
-        w.add_with_meta(b"key4", None, 40, true, None).unwrap();
+        w.add_with_meta(b"key4", None, 40, 2, None).unwrap();
 
         let reader = w.finish().unwrap();
 
@@ -369,7 +369,7 @@ mod tests {
 
         // Assert
         match state1 {
-            crate::sst::KeyState::Value(v, seq, exp) => {
+            crate::sst::KeyState::Value(v, seq, exp, _op_type) => {
                 assert_eq!(v.as_ref(), b"val1");
                 assert_eq!(seq, 10);
                 assert_eq!(exp, exp1, "expiration for key1 should match");
@@ -378,7 +378,7 @@ mod tests {
         }
 
         match state2 {
-            crate::sst::KeyState::Value(v, seq, exp) => {
+            crate::sst::KeyState::Value(v, seq, exp, _op_type) => {
                 assert_eq!(v.as_ref(), b"val2");
                 assert_eq!(seq, 20);
                 assert_eq!(exp, exp2, "expiration for key2 should match");
@@ -387,7 +387,7 @@ mod tests {
         }
 
         match state3 {
-            crate::sst::KeyState::Value(v, seq, exp) => {
+            crate::sst::KeyState::Value(v, seq, exp, _op_type) => {
                 assert_eq!(v.as_ref(), b"val3");
                 assert_eq!(seq, 30);
                 assert_eq!(exp, None, "expiration for key3 should be None");
@@ -415,14 +415,14 @@ mod tests {
         assert_eq!(all_rows.len(), 4);
 
         match &all_rows[0].1 {
-            crate::sst::KeyState::Value(_, _, exp) => {
+            crate::sst::KeyState::Value(_, _, exp, _op_type) => {
                 assert_eq!(*exp, exp1, "scan should preserve key1 expiration");
             }
             other => panic!("unexpected state in scan for key1: {:?}", other),
         }
 
         match &all_rows[1].1 {
-            crate::sst::KeyState::Value(_, _, exp) => {
+            crate::sst::KeyState::Value(_, _, exp, _op_type) => {
                 assert_eq!(*exp, exp2, "scan should preserve key2 expiration");
             }
             other => panic!("unexpected state in scan for key2: {:?}", other),
@@ -487,11 +487,11 @@ mod tests {
         );
 
         // Add first key
-        w.add_with_meta(b"key", Some(b"v1"), 100, false, None)
+        w.add_with_meta(b"key", Some(b"v1"), 100, 0, None)
             .unwrap();
 
         // Act
-        let result = w.add_with_meta(b"key", Some(b"v2"), 100, false, None);
+        let result = w.add_with_meta(b"key", Some(b"v2"), 100, 0, None);
 
         // Assert
         // Duplicate should either be rejected or later one wins
@@ -791,3 +791,4 @@ mod tests {
         assert_eq!(keys, vec![b"a", b"b", b"c"]);
     }
 }
+

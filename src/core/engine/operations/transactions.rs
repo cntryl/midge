@@ -1,4 +1,4 @@
-//! Transaction operations for MidgeEngine
+﻿//! Transaction operations for MidgeEngine
 //!
 //! This module contains transaction commit logic and transaction-aware reads.
 
@@ -477,7 +477,7 @@ impl MidgeEngine {
         key: &[u8],
     ) -> MidgeResult<Option<Bytes>> {
         // If the transaction requests read-committed isolation then don't use
-        // snapshot semantics — allow reading the current latest committed value
+        // snapshot semantics â€” allow reading the current latest committed value
         // and do not record read versions for conflict detection.
         if txn.isolation() == crate::api::IsolationLevel::ReadCommitted {
             // Reads are not tracked for conflict detection under read-committed
@@ -518,7 +518,7 @@ impl MidgeEngine {
                 let sst_path = self.sst_dir.join(sst_name);
                 match self.sst_reader_factory.open(&sst_path) {
                     Ok(reader) => match reader.get_state_at(key, begin_seq) {
-                        Ok(crate::sst::KeyState::Value(v, seq, exp)) => {
+                        Ok(crate::sst::KeyState::Value(v, seq, exp, _op_type)) => {
                             // Check expiration
                             if let Some(exp_ms) = exp {
                                 let now = timestamp::now_millis();
@@ -671,3 +671,4 @@ mod tests {
         assert!(!result.unwrap());
     }
 }
+

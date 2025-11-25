@@ -1,4 +1,4 @@
-//! Read operations for the Midge engine.
+﻿//! Read operations for the Midge engine.
 //!
 //! This module contains all read-related operations including:
 //! - Point reads (get)
@@ -184,7 +184,7 @@ impl MidgeEngine {
 
         // Collect all range tombstones from SSTs for this CF
         // Ensure files are ordered by sequence (newest first) for correct
-        // read semantics — manifest order is not guaranteed.
+        // read semantics â€” manifest order is not guaranteed.
         let mut cf_files = cf_files;
         cf_files.sort_by(|a, b| {
             let a_seq = a.largest_seq.unwrap_or(0);
@@ -210,7 +210,7 @@ impl MidgeEngine {
                 {
                     let state_result = sst.get_state(key);
                     match state_result {
-                        Ok(crate::sst::KeyState::Value(v, seq, expiration)) => {
+                        Ok(crate::sst::KeyState::Value(v, seq, expiration, _op_type)) => {
                             // Check if key is expired
                             if let Some(exp_ts) = expiration {
                                 let now_millis = timestamp::now_millis();
@@ -385,7 +385,7 @@ impl MidgeEngine {
                         .map(|(k, st)| {
                             use crate::sst::KeyState;
                             match st {
-                                KeyState::Value(v, seq, expiration) => {
+                                KeyState::Value(v, seq, expiration, _op_type) => {
                                     // Check if key is expired
                                     if let Some(exp_ts) = expiration {
                                         if exp_ts <= now_millis {
@@ -493,7 +493,7 @@ impl MidgeEngine {
                                     .map(|(u, s, _t)| (Bytes::from(u), s))
                                     .unwrap_or_else(|| (k, 0));
                             match st {
-                                crate::sst::KeyState::Value(v, seq, expiration) => {
+                                crate::sst::KeyState::Value(v, seq, expiration, _op_type) => {
                                     // Check if key is expired
                                     if let Some(exp_ts) = expiration {
                                         if exp_ts <= now_millis {
@@ -595,7 +595,7 @@ impl MidgeEngine {
             // CloudSstReaderFactory will download from cloud if not in local cache
             if let Some(sst) = open_sst_with_retries(&*self.sst_reader_factory, &p) {
                 match sst.get_state_at(key, snap.seq) {
-                    Ok(crate::sst::KeyState::Value(v, _seq, exp)) => {
+                    Ok(crate::sst::KeyState::Value(v, _seq, exp, _op_type)) => {
                         // Check if value is expired
                         if let Some(exp_millis) = exp {
                             if now_millis >= exp_millis {
@@ -715,7 +715,7 @@ impl MidgeEngine {
                         let key_vec = k.to_vec();
                         if !collected.contains_key(&key_vec) {
                             match st {
-                                crate::sst::KeyState::Value(v, _, exp) => {
+                                crate::sst::KeyState::Value(v, _, exp, _op_type) => {
                                     // Check if value is expired
                                     if let Some(exp_millis) = exp {
                                         if now_millis >= exp_millis {
@@ -872,3 +872,4 @@ mod tests {
         assert_eq!(entries[0], (Bytes::from("key1"), Bytes::from("value1")));
     }
 }
+

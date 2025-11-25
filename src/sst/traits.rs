@@ -1,4 +1,4 @@
-//! SST traits and common contracts
+﻿//! SST traits and common contracts
 //!
 //! This module defines generic SST reader/writer traits and re-exports
 //! filesystem-backed adapters from `fs`.
@@ -32,8 +32,8 @@ pub trait SstReader: Send + Sync {
 pub enum KeyState {
     Absent,
     Tombstone(u64),
-    /// Value, sequence number, expiration timestamp (Unix millis)
-    Value(Bytes, u64, Option<u64>),
+    /// Value, sequence number, expiration timestamp (Unix millis), op_type (0=Put, 2=Delete, 3=Merge)
+    Value(Bytes, u64, Option<u64>, u8),
 }
 
 /// Stateful reader contract for SST implementations, exposing tombstones.
@@ -96,17 +96,19 @@ pub use crate::sst::fs::SstFile as SstFsReader;
 /// finishing into raw bytes.
 pub trait DynSstWriter: Send {
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
-    /// Add an entry with explicit sequence, tombstone, and expiration metadata.
+    /// Add an entry with explicit sequence, operation type, and expiration metadata.
+    /// OpType: 0=Put, 1=Insert, 2=Delete, 3=Merge
     /// Default implementation falls back to `add` and ignores metadata.
     fn add_with_meta(
         &mut self,
         key: &[u8],
         value: Option<&[u8]>,
         _seq: u64,
-        tombstone: bool,
+        op_type: u8,
         _expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        if tombstone {
+        let is_tombstone = op_type == 2;
+        if is_tombstone {
             return Ok(());
         }
         match value {
@@ -216,7 +218,7 @@ mod tests {
         // 1) point gets
         let ga = r.get_state(b"a")?;
         match ga {
-            KeyState::Value(v, _seq, _exp) => {
+            KeyState::Value(v, _seq, _exp, _op_type) => {
                 if v.as_ref() != b"A" {
                     return Err(MidgeError::internal("value mismatch".to_string()));
                 }
@@ -293,7 +295,7 @@ mod tests {
         fn get_state(&self, key: &[u8]) -> crate::error::MidgeResult<KeyState> {
             use bytes::Bytes;
             if key == b"a" {
-                Ok(KeyState::Value(Bytes::from_static(b"X"), 0, None))
+                Ok(KeyState::Value(Bytes::from_static(b"X"), 0, None, _op_type))
             } else {
                 Ok(KeyState::Absent)
             }
@@ -322,7 +324,7 @@ mod tests {
 
         // Assert
         match result1 {
-            KeyState::Value(v, 0, _exp) => {
+            KeyState::Value(v, 0, _exp, _op_type) => {
                 if v.as_ref() != b"X" {
                     return Err(MidgeError::internal("value mismatch".to_string()));
                 }
@@ -379,14 +381,14 @@ mod tests {
 
         // Act - Add with tombstone=true should not call add
         writer
-            .add_with_meta(b"a", Some(b"value"), 1, true, None)
+            .add_with_meta(b"a", Some(b"value"), 1, 2, None)
             .unwrap();
         // Add with tombstone=false and Some value should call add
         writer
-            .add_with_meta(b"b", Some(b"value2"), 2, false, None)
+            .add_with_meta(b"b", Some(b"value2"), 2, 0, None)
             .unwrap();
         // Add with None value should not call add
-        writer.add_with_meta(b"c", None, 3, false, None).unwrap();
+        writer.add_with_meta(b"c", None, 3, 0, None).unwrap();
 
         // Assert - Verify only one entry was added (the second call)
         let bytes = writer.finish_bytes().unwrap();
@@ -435,3 +437,4 @@ mod tests {
         assert_eq!(rt2.seq, 42);
     }
 }
+

@@ -207,7 +207,7 @@ impl SstFile {
 
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         match self.get_state(key)? {
-            KeyState::Value(v, _seq, None) => Ok(Some(v)),
+            KeyState::Value(v, _seq, None, _op_type) => Ok(Some(v)),
             _ => Ok(None),
         }
     }
@@ -421,7 +421,7 @@ impl SstFile {
                         if let Some(val) = value_slice {
                             out.push((
                                 Bytes::from(user_key.clone()),
-                                KeyState::Value(Bytes::copy_from_slice(val), seq, expiration),
+                                KeyState::Value(Bytes::copy_from_slice(val), seq, expiration, entry_type),
                             ));
                         }
                     }
@@ -476,7 +476,7 @@ impl SstFile {
                         ) {
                         KeyState::Tombstone(seq)
                     } else if let Some(val) = value_slice {
-                        KeyState::Value(Bytes::copy_from_slice(val), seq, None)
+                        KeyState::Value(Bytes::copy_from_slice(val), seq, None, entry_type)
                     } else {
                         KeyState::Tombstone(seq)
                     };
@@ -657,7 +657,7 @@ impl SstFile {
                 return Ok(if tomb {
                     KeyState::Tombstone(seq)
                 } else if let Some(val) = entry.value {
-                    KeyState::Value(Bytes::copy_from_slice(val), seq, entry.expiration)
+                    KeyState::Value(Bytes::copy_from_slice(val), seq, entry.expiration, entry.entry_type)
                 } else {
                     KeyState::Tombstone(seq)
                 });

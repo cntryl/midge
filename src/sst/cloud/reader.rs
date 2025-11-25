@@ -1,4 +1,4 @@
-//! Cloud-backed SST reader implementation.
+﻿//! Cloud-backed SST reader implementation.
 //!
 //! This reader fetches SST blobs from cloud storage and provides the same
 //! interface as filesystem and in-memory SST readers.
@@ -199,6 +199,7 @@ impl SstStateReader for SstCloudReader {
                         Bytes::copy_from_slice(value_opt.unwrap_or(&[])),
                         actual_seq,
                         expiration,
+                        entry_type,
                     ));
                 }
 
@@ -267,6 +268,7 @@ impl SstStateReader for SstCloudReader {
                         Bytes::copy_from_slice(value_opt.unwrap_or(&[])),
                         actual_seq,
                         expiration,
+                        entry_type,
                     )
                 };
 
@@ -330,6 +332,7 @@ impl SstStateReader for SstCloudReader {
                         Bytes::copy_from_slice(value_opt.unwrap_or(&[])),
                         actual_seq,
                         expiration,
+                        entry_type,
                     ));
                 }
 
@@ -410,6 +413,7 @@ impl SstStateReader for SstCloudReader {
                         Bytes::copy_from_slice(value_opt.unwrap_or(&[])),
                         actual_seq,
                         expiration,
+                        entry_type,
                     )
                 };
 
@@ -434,7 +438,7 @@ impl SstStateReader for SstCloudReader {
 impl crate::sst::SstReader for SstCloudReader {
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         match self.get_state(key)? {
-            KeyState::Value(v, _, _) => Ok(Some(v)),
+            KeyState::Value(v, _, _, _op_type) => Ok(Some(v)),
             _ => Ok(None),
         }
     }
@@ -448,7 +452,7 @@ impl crate::sst::SstReader for SstCloudReader {
         let results = state_results
             .into_iter()
             .filter_map(|(k, state)| match state {
-                KeyState::Value(v, _, _) => Some((k, v)),
+                KeyState::Value(v, _, _, _op_type) => Some((k, v)),
                 _ => None,
             })
             .collect();
@@ -639,3 +643,5 @@ mod tests {
         assert_eq!(r.get(b"key1").unwrap(), Some(Bytes::from("value1")));
     }
 }
+
+

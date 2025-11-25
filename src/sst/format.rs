@@ -1,4 +1,4 @@
-//! Top-level SST format implementation (moved from internal storage)
+﻿//! Top-level SST format implementation (moved from internal storage)
 //!
 //! This is a straight copy of `src/internal/storage/sst_format.rs` moved to a flatter
 //! module: `crate::sst_format`.
@@ -431,7 +431,7 @@ impl DataBlockBuilder {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         internal_on_disk: bool,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
@@ -528,7 +528,7 @@ impl DataBlockBuilder {
             shared_len as u32,
             value,
             seq,
-            tombstone,
+            op_type,
             internal_on_disk,
             expiration,
         );
@@ -571,7 +571,7 @@ impl DataBlockBuilder {
             shared_len as u32,
             Some(value),
             0,
-            false,
+            0, // Put entry
             false,
             None,
         );
@@ -594,7 +594,8 @@ impl DataBlockBuilder {
         tombstone: bool,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        self.add_with_meta(key, value, seq, tombstone, true, expiration)
+        let op_type = if tombstone { 2 } else { 0 };
+        self.add_with_meta(key, value, seq, op_type, true, expiration)
     }
 
     pub fn finish(mut self) -> Bytes {
@@ -1202,7 +1203,7 @@ mod tests {
         let mut builder = DataBlockBuilder::new(16 * 1024);
 
         // Act
-        let result = builder.add_with_meta(b"", Some(b"value"), 100, false, false, None);
+        let result = builder.add_with_meta(b"", Some(b"value"), 100, 0, false, None);
 
         // Assert
         assert!(result.is_err());
@@ -1219,11 +1220,11 @@ mod tests {
         // Arrange
         let mut builder = DataBlockBuilder::new(16 * 1024);
         builder
-            .add_with_meta(b"key2", Some(b"value2"), 100, false, false, None)
+            .add_with_meta(b"key2", Some(b"value2"), 100, 0, false, None)
             .expect("first add should succeed");
 
         // Act
-        let result = builder.add_with_meta(b"key1", Some(b"value1"), 101, false, false, None);
+        let result = builder.add_with_meta(b"key1", Some(b"value1"), 101, 0, false, None);
 
         // Assert
         assert!(result.is_err());
@@ -1243,9 +1244,9 @@ mod tests {
         let mut builder = DataBlockBuilder::new(16 * 1024);
 
         // Act
-        let result1 = builder.add_with_meta(b"a", Some(b"value_a"), 100, false, false, None);
-        let result2 = builder.add_with_meta(b"b", Some(b"value_b"), 101, false, false, None);
-        let result3 = builder.add_with_meta(b"c", Some(b"value_c"), 102, false, false, None);
+        let result1 = builder.add_with_meta(b"a", Some(b"value_a"), 100, 0, false, None);
+        let result2 = builder.add_with_meta(b"b", Some(b"value_b"), 101, 0, false, None);
+        let result3 = builder.add_with_meta(b"c", Some(b"value_c"), 102, 0, false, None);
 
         // Assert
         assert!(result1.is_ok());
@@ -1259,7 +1260,7 @@ mod tests {
         let mut builder = DataBlockBuilder::new(16 * 1024);
 
         // Act
-        let result = builder.add_with_meta(b"deleted_key", None, 200, true, false, None);
+        let result = builder.add_with_meta(b"deleted_key", None, 200, 2, false, None);
 
         // Assert
         assert!(result.is_ok());
@@ -1273,7 +1274,7 @@ mod tests {
 
         // Act
         let result =
-            builder.add_with_meta(b"ttl_key", Some(b"value"), 100, false, false, expiration);
+            builder.add_with_meta(b"ttl_key", Some(b"value"), 100, 0, false, expiration);
 
         // Assert
         assert!(result.is_ok());

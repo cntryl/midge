@@ -1,4 +1,4 @@
-//! In-memory SST writer implementation.
+﻿//! In-memory SST writer implementation.
 
 use crate::common::codec::CompressionType;
 use crate::error::MidgeResult;
@@ -84,7 +84,7 @@ impl crate::sst::SstWriter for SstMemWriter {
 
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         // Delegate to add_with_meta which handles internal-key layout when enabled
-        self.add_with_meta(key, Some(value), 0, false, None)
+        self.add_with_meta(key, Some(value), 0, 0, None)
     }
 
     fn finish(self) -> MidgeResult<Self::Reader> {
@@ -110,7 +110,7 @@ impl SstMemWriter {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         if self.state.should_flush_block(key, value) {
@@ -120,7 +120,7 @@ impl SstMemWriter {
         }
 
         self.state
-            .add_entry(key, value, seq, tombstone, expiration)?;
+            .add_entry(key, value, seq, op_type, expiration)?;
         Ok(())
     }
 

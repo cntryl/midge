@@ -1,4 +1,4 @@
-//! Compaction execution implementation.
+﻿//! Compaction execution implementation.
 //!
 //! This module contains the low-level machinery for executing compaction operations:
 //! - Collecting versions from multiple SST files
@@ -92,7 +92,7 @@ pub(crate) fn collect_compaction_versions(
             // The sequence number is in the KeyState, not in the key itself
             let user_key = raw_key.to_vec();
             let (seq, tombstone, value, expiration) = match state {
-                crate::sst::KeyState::Value(v, seq, exp) => (seq, false, Some(v), exp),
+                crate::sst::KeyState::Value(v, seq, exp, _op_type) => (seq, false, Some(v), exp),
                 crate::sst::KeyState::Tombstone(seq) => (seq, true, None, None),
                 crate::sst::KeyState::Absent => continue,
             };
@@ -428,14 +428,15 @@ pub(crate) fn write_compacted_sst(
             entry.tombstone,
         );
 
+        let op_type = if entry.tombstone { 2 } else { 0 };
         if entry.tombstone {
-            writer.add_with_meta(&internal_key, None, entry.seq, true, entry.expiration)?;
+            writer.add_with_meta(&internal_key, None, entry.seq, op_type, entry.expiration)?;
         } else if let Some(value) = &entry.value {
             writer.add_with_meta(
                 &internal_key,
                 Some(value.as_ref()),
                 entry.seq,
-                false,
+                op_type,
                 entry.expiration,
             )?;
         }
@@ -1095,3 +1096,4 @@ mod tests {
         assert_eq!(result[1].seq, 8);
     }
 }
+

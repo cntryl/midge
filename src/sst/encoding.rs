@@ -1,4 +1,4 @@
-//! SST entry encoding/decoding in TLV format
+﻿//! SST entry encoding/decoding in TLV format
 //!
 //! This module provides the canonical TLV (Tag-Length-Value) encoding and decoding
 //! for SST data block entries. All SST implementations (fs, cloud, mem) use this
@@ -30,14 +30,14 @@ pub struct TlvEntry<'a> {
 /// - KEY_DELTA: Suffix of the key after shared prefix (bytes)
 /// - VALUE: Entry value, optional for tombstones (bytes)
 /// - SEQUENCE: Sequence number, only if !internal_on_disk (u64)
-/// - ENTRY_TYPE: Entry type (0=Put, 1=Insert, 2=Delete), only if !internal_on_disk (u8)
+/// - ENTRY_TYPE: Entry type (0=Put, 1=Insert, 2=Delete, 3=Merge), only if !internal_on_disk (u8)
 /// - EXPIRATION: TTL expiration timestamp, optional (u64)
 pub fn encode(
     key_delta: &[u8],
     shared_len: u32,
     value: Option<&[u8]>,
     seq: u64,
-    tombstone: bool,
+    entry_type: u8,
     internal_on_disk: bool,
     expiration: Option<u64>,
 ) -> Vec<u8> {
@@ -51,7 +51,8 @@ pub fn encode(
     tlv.write_bytes(tags::KEY_DELTA, key_delta);
 
     // Write value (bytes, optional for tombstones)
-    if !tombstone || !user_value.is_empty() {
+    let is_tombstone = entry_type == 2;
+    if !is_tombstone || !user_value.is_empty() {
         tlv.write_bytes(tags::VALUE, user_value);
     }
 
@@ -61,8 +62,7 @@ pub fn encode(
         // Write sequence number (u64)
         tlv.write_u64(tags::SEQUENCE, seq);
 
-        // Write entry type (u8): Put=0, Insert=1, Delete=2
-        let entry_type = if tombstone { 2u8 } else { 0u8 };
+        // Write entry type (u8): Put=0, Insert=1, Delete=2, Merge=3
         tlv.write_u8(tags::ENTRY_TYPE, entry_type);
     }
 
@@ -360,7 +360,7 @@ mod tests {
         let value = b"test_value";
 
         // Act
-        let encoded = encode(key_delta, 0, Some(value), 100, false, false, None);
+        let encoded = encode(key_delta, 0, Some(value), 100, 0, false, None);
 
         // Assert
         assert!(!encoded.is_empty());
@@ -371,7 +371,7 @@ mod tests {
         // Arrange
         let key_delta = b"test_key";
         let value = b"test_value";
-        let encoded = encode(key_delta, 0, Some(value), 100, false, false, None);
+        let encoded = encode(key_delta, 0, Some(value), 100, 0, false, None);
 
         // Act
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
@@ -414,7 +414,7 @@ mod tests {
         let key_delta = b"deleted_key";
 
         // Act
-        let encoded = encode(key_delta, 0, None, 200, true, false, None);
+        let encoded = encode(key_delta, 0, None, 200, 2, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -429,7 +429,7 @@ mod tests {
         let expiration = Some(1698262800000u64);
 
         // Act
-        let encoded = encode(key_delta, 0, Some(b"value"), 100, false, false, expiration);
+        let encoded = encode(key_delta, 0, Some(b"value"), 100, 0, false, expiration);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -442,7 +442,7 @@ mod tests {
         let key_delta = b"internal_key";
 
         // Act
-        let encoded = encode(key_delta, 0, Some(b"value"), 100, false, true, None);
+        let encoded = encode(key_delta, 0, Some(b"value"), 100, 0, true, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -487,7 +487,7 @@ mod tests {
         let key_delta = b"key";
 
         // Act
-        let encoded = encode(key_delta, 0, Some(b""), 100, false, false, None);
+        let encoded = encode(key_delta, 0, Some(b""), 100, 0, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -501,7 +501,7 @@ mod tests {
         let shared_len = 255;
 
         // Act
-        let encoded = encode(key_delta, shared_len, Some(b"val"), 50, false, false, None);
+        let encoded = encode(key_delta, shared_len, Some(b"val"), 50, 0, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -548,9 +548,9 @@ mod tests {
         let mut block_data = Vec::new();
 
         // Add 3 entries
-        let entry1 = encode(b"key1", 0, Some(b"value1"), 1, false, false, None);
-        let entry2 = encode(b"ey2", 1, Some(b"value2"), 2, false, false, None); // shared_len=1 (shares 'k')
-        let entry3 = encode(b"ey3", 1, Some(b"value3"), 3, false, false, None);
+        let entry1 = encode(b"key1", 0, Some(b"value1"), 1, 0, false, None);
+        let entry2 = encode(b"ey2", 1, Some(b"value2"), 2, 0, false, None); // shared_len=1 (shares 'k')
+        let entry3 = encode(b"ey3", 1, Some(b"value3"), 3, 0, false, None);
 
         block_data.extend_from_slice(&entry1);
         block_data.extend_from_slice(&entry2);
@@ -599,9 +599,9 @@ mod tests {
         let mut block_data = Vec::new();
 
         // "apple", "application", "apply" - all share "appl"
-        let entry1 = encode(b"apple", 0, Some(b"v1"), 1, false, false, None);
-        let entry2 = encode(b"ication", 4, Some(b"v2"), 2, false, false, None); // shares "appl"
-        let entry3 = encode(b"y", 4, Some(b"v3"), 3, false, false, None); // shares "appl"
+        let entry1 = encode(b"apple", 0, Some(b"v1"), 1, 0, false, None);
+        let entry2 = encode(b"ication", 4, Some(b"v2"), 2, 0, false, None); // shares "appl"
+        let entry3 = encode(b"y", 4, Some(b"v3"), 3, 0, false, None); // shares "appl"
 
         block_data.extend_from_slice(&entry1);
         block_data.extend_from_slice(&entry2);
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn should_parse_key_at_restart_point() {
         // Arrange
-        let encoded = encode(b"restart_key", 0, Some(b"value"), 100, false, false, None);
+        let encoded = encode(b"restart_key", 0, Some(b"value"), 100, 0, false, None);
 
         // Act
         let key = decode_key_at_offset(&encoded, 0, encoded.len()).expect("parse");
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn should_return_error_given_nonzero_shared_at_restart() {
         // Arrange
-        let encoded = encode(b"key", 5, Some(b"value"), 100, false, false, None);
+        let encoded = encode(b"key", 5, Some(b"value"), 100, 0, false, None);
 
         // Act
         let result = decode_key_at_offset(&encoded, 0, encoded.len());
@@ -759,7 +759,7 @@ mod tests {
         let binary_value = vec![0xCA, 0xFE, 0xBA, 0xBE];
 
         // Act
-        let encoded = encode(&binary_key, 0, Some(&binary_value), 100, false, false, None);
+        let encoded = encode(&binary_key, 0, Some(&binary_value), 100, 0, false, None);
 
         // Assert
         assert!(!encoded.is_empty());
@@ -770,7 +770,7 @@ mod tests {
         // Arrange
         let binary_key = vec![0x00, 0xFF, 0x80, 0x7F, 0xDE, 0xAD];
         let binary_value = vec![0xCA, 0xFE, 0xBA, 0xBE];
-        let encoded = encode(&binary_key, 0, Some(&binary_value), 100, false, false, None);
+        let encoded = encode(&binary_key, 0, Some(&binary_value), 100, 0, false, None);
 
         // Act
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
@@ -787,7 +787,7 @@ mod tests {
 
         for seq in sequences {
             // Act
-            let encoded = encode(b"key", 0, Some(b"value"), seq, false, false, None);
+            let encoded = encode(b"key", 0, Some(b"value"), seq, 0, false, None);
             let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
             // Assert
@@ -800,7 +800,7 @@ mod tests {
         // Arrange
 
         // Act
-        let encoded = encode(b"key", 0, Some(b"value"), 100, false, false, None);
+        let encoded = encode(b"key", 0, Some(b"value"), 100, 0, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -812,7 +812,7 @@ mod tests {
         // Arrange
 
         // Act
-        let encoded = encode(b"key", 0, None, 100, true, false, None);
+        let encoded = encode(b"key", 0, None, 100, 2, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -825,7 +825,7 @@ mod tests {
         let value = b"tombstone_value";
 
         // Act
-        let encoded = encode(b"key", 0, Some(value), 100, true, false, None);
+        let encoded = encode(b"key", 0, Some(value), 100, 2, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -837,8 +837,8 @@ mod tests {
     fn should_return_error_given_invalid_shared_length() {
         // Arrange
         let mut block_data = Vec::new();
-        let entry1 = encode(b"apple", 0, Some(b"v1"), 1, false, false, None);
-        let entry2 = encode(b"key", 100, Some(b"v2"), 2, false, false, None); // Invalid: shared > previous key
+        let entry1 = encode(b"apple", 0, Some(b"v1"), 1, 0, false, None);
+        let entry2 = encode(b"key", 100, Some(b"v2"), 2, 0, false, None); // Invalid: shared > previous key
 
         block_data.extend_from_slice(&entry1);
         block_data.extend_from_slice(&entry2);
@@ -860,7 +860,7 @@ mod tests {
         let large_value = vec![b'X'; 10000];
 
         // Act
-        let encoded = encode(b"key", 0, Some(&large_value), 100, false, false, None);
+        let encoded = encode(b"key", 0, Some(&large_value), 100, 0, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -874,8 +874,8 @@ mod tests {
         let mut block_data = Vec::new();
 
         // Add entries
-        let entry1 = encode(b"a", 0, Some(b"v1"), 1, false, false, None);
-        let entry2 = encode(b"b", 0, Some(b"v2"), 2, false, false, None); // New restart
+        let entry1 = encode(b"a", 0, Some(b"v1"), 1, 0, false, None);
+        let entry2 = encode(b"b", 0, Some(b"v2"), 2, 0, false, None); // New restart
 
         block_data.extend_from_slice(&entry1);
         let restart1_offset = block_data.len();

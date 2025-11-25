@@ -1,4 +1,4 @@
-//! Cloud-backed SST writer implementation.
+﻿//! Cloud-backed SST writer implementation.
 //!
 //! This writer builds SSTs in memory (similar to SstMemWriter) and then
 //! uploads the complete SST blob to cloud storage via the StorageBackend.
@@ -87,7 +87,7 @@ impl SstCloudWriter {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         if self.state.should_flush_block(key, value) {
@@ -97,7 +97,7 @@ impl SstCloudWriter {
         }
 
         self.state
-            .add_entry(key, value, seq, tombstone, expiration)?;
+            .add_entry(key, value, seq, op_type, expiration)?;
         Ok(())
     }
 
@@ -135,7 +135,7 @@ impl crate::sst::SstWriter for SstCloudWriter {
     type Reader = SstCloudReader;
 
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        self.add_with_meta(key, Some(value), 0, false, None)
+        self.add_with_meta(key, Some(value), 0, 0, None)
     }
 
     fn finish(self) -> MidgeResult<Self::Reader> {

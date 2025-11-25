@@ -125,7 +125,7 @@ impl FsDynWriter {
 
 impl crate::sst::DynSstWriter for FsDynWriter {
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        self.add_with_meta(key, Some(value), 0, false, None)
+        self.add_with_meta(key, Some(value), 0, 0, None)
     }
 
     fn add_with_meta(
@@ -133,9 +133,10 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        tombstone: bool,
+        op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        let tombstone = op_type == 2;
         // If adding this entry would exceed block, flush current block to disk
         if self.cur_block.estimated_size() + key.len() + value.unwrap_or(&[]).len() + 16
             > self.block_size
@@ -147,19 +148,19 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         if self.use_internal_keys {
             if let Some((user, _s, _t)) = crate::common::internal_key::decode_internal_key(key) {
                 self.cur_block
-                    .add_with_meta(key, value, seq, tombstone, true, expiration)?;
+                    .add_with_meta(key, value, seq, op_type, true, expiration)?;
                 self.last_key_in_block = Some(user.to_vec());
                 self.bloom_builder.add_key(&user);
             } else {
                 let ik = crate::common::internal_key::encode_internal_key(key, seq, tombstone);
                 self.cur_block
-                    .add_with_meta(&ik, value, seq, tombstone, true, expiration)?;
+                    .add_with_meta(&ik, value, seq, op_type, true, expiration)?;
                 self.last_key_in_block = Some(key.to_vec());
                 self.bloom_builder.add_key(key);
             }
         } else {
             self.cur_block
-                .add_with_meta(&write_key, value, seq, tombstone, false, expiration)?;
+                .add_with_meta(&write_key, value, seq, op_type, false, expiration)?;
             self.last_key_in_block = Some(write_key.clone());
             self.bloom_builder.add_key(&write_key);
         }

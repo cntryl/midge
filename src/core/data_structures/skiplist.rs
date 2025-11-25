@@ -27,6 +27,17 @@ pub enum OpType {
     Delete,
 }
 
+impl OpType {
+    /// Convert OpType to u8 for SST encoding (0=Put, 1=Insert, 2=Delete, 3=Merge)
+    pub fn as_u8(&self) -> u8 {
+        match self {
+            OpType::Put => 0,
+            OpType::Delete => 2,
+            OpType::Merge => 3,
+        }
+    }
+}
+
 /// A version node in the lock-free version chain
 #[derive(Debug)]
 struct VersionNode {

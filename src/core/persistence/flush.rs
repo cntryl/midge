@@ -183,7 +183,7 @@ fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> MidgeResult<(
             &entry.key,
             entry.value.as_deref(),
             entry.sequence,
-            entry.is_tombstone,
+            entry.op_type.as_u8(),
             entry.expiration_millis,
         )?;
     }
@@ -578,7 +578,7 @@ where
             &entry.key,
             v_ref,
             entry.sequence,
-            entry.is_tombstone,
+            entry.op_type.as_u8(),
             entry.expiration_millis,
         )?;
     }
