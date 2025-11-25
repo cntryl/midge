@@ -1,10 +1,11 @@
 mod common;
+
 use cntryl_midge::cloud::mock::MockCloudBackend;
 use cntryl_midge::config::cloud::StorageContext;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
-use std::sync::Arc;
 use std::time::Duration;
+use std::sync::Arc;
 
 #[test]
 fn should_preserve_local_file_given_upload_in_progress_when_crash() {
@@ -38,10 +39,6 @@ fn should_preserve_local_file_given_upload_in_progress_when_crash() {
     let eng = MidgeEngine::open(opts).expect("reopen");
     let cf = eng.default_column_family();
 
-    // Check first key with debug output
-    let result = eng.get(&cf, b"key000").expect("get");
-    println!("First key after restart: {:?}", result.is_some());
-
     for i in 0..10 {
         let result = eng
             .get(&cf, format!("key{:03}", i).as_bytes())
@@ -69,46 +66,55 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
         memtable_size: 1024 * 1024, // Large memtable to avoid auto-flush
         ..Default::default()
     };
+
     let eng = MidgeEngine::open(opts).expect("open");
+    let cf = eng.default_column_family();
+
     // Arm upload failures only after engine startup so WAL/cloud uploader
     // initialization is not poisoned by fail-after semantics.
     mock_backend.reset_counters();
     // Allow exactly one new successful upload, then fail subsequent uploads.
     mock_backend.set_fail_upload_after(1);
-    let cf = eng.default_column_family();
 
-    // Act - write data that will trigger SST creation and uploads
-    for i in 0..10 {
-        eng.put(&cf, format!("key{:02}", i).as_bytes(), b"value")
-            .expect("put");
+    // Act - write data that will trigger multiple SST creations and uploads.
+    // Run multiple small write+flush cycles so we deterministically produce
+    // more than one cloud upload attempt (so fail-after semantics are exercised).
+    for round in 0..3 {
+        for i in 0..10 {
+            eng.put(&cf, format!("r{}-key{:02}", round, i).as_bytes(), b"value")
+                .expect("put");
+        }
+
+        let attempts_before = mock_backend.upload_count() + mock_backend.upload_failure_count();
+
+        // Force flush - this may hit cloud upload failures but must not hang.
+        let _ = eng.flush_cf(&cf); // error is acceptable under simulated failure
+
+        let attempts_after = mock_backend.upload_count() + mock_backend.upload_failure_count();
+
+        assert!(
+            attempts_after > attempts_before,
+            "flush should trigger at least one cloud upload attempt",
+        );
     }
-    println!("Wrote 10 keys to memtable");
 
-    // Force flush - this may hit cloud upload failures but must not hang.
-    let attempts_before =
-        mock_backend.upload_count() + mock_backend.upload_failure_count();
-    let _ = eng.flush_cf(&cf);
-    let attempts_after =
-        mock_backend.upload_count() + mock_backend.upload_failure_count();
-
-    assert!(
-        attempts_after > attempts_before,
-        "flush should trigger at least one cloud upload attempt",
-    );
+    // After multiple flushes under fail-after=1 we should observe at least one failed upload
     assert!(
         mock_backend.upload_failure_count() > 0,
         "there should be at least one failed cloud upload under fail-after-1",
     );
 
     // Assert - data should be available despite upload failures
-    for i in 0..10 {
-        let key = format!("key{:02}", i);
-        let result = eng.get(&cf, key.as_bytes()).expect("get");
-        assert!(
-            result.is_some(),
-            "Data should be available from local cache despite upload failures: key={}",
-            key
-        );
+    for round in 0..3 {
+        for i in 0..10 {
+            let key = format!("r{}-key{:02}", round, i);
+            let result = eng.get(&cf, key.as_bytes()).expect("get");
+            assert!(
+                result.is_some(),
+                "Data should be available from local cache despite upload failures: key={}",
+                key
+            );
+        }
     }
 }
 
@@ -139,16 +145,14 @@ fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_r
             .expect("put");
     }
 
-    // Force flush to create SSTs
-    let _ = eng.flush_cf(&cf); // Ignore result
-
-    // Wait for background uploads with timeout (observability)
+    // Observe baseline upload attempts, then force flush to create SSTs and uploads
     let baseline_uploads = mock_backend.upload_count();
-    let upload_succeeded =
-        mock_backend.wait_for_uploads(baseline_uploads + 1, Duration::from_millis(500));
+    let _ = eng.flush_cf(&cf); // Ignore result; failures are not simulated here
 
-    // Assert
-    // Verify data remains accessible
+    // Give background uploader a bounded window to make progress.
+    let _ = mock_backend.wait_for_uploads(baseline_uploads + 1, Duration::from_millis(500));
+
+    // Assert - data remains accessible regardless of cloud timing
     for i in 0..10 {
         let result = eng
             .get(&cf, format!("key{:02}", i).as_bytes())
@@ -159,9 +163,9 @@ fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_r
         );
     }
 
-    // Verify uploads occurred (demonstrating observability)
+    // Assert - at least one new upload was attempted for manifest/SST sync.
     assert!(
-        upload_succeeded,
+        mock_backend.upload_count() >= baseline_uploads + 1,
         "Should have completed at least one upload for manifest sync"
     );
 }
@@ -236,7 +240,7 @@ fn should_preserve_data_after_large_batch_write_restart() {
 
     drop(eng);
 
-    // Act: Restart and verify all keys
+    // Act: Restart and verify keys
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path },
         ..Default::default()
