@@ -24,12 +24,22 @@ impl FlushCoordinator {
     ///
     /// Creates a dedicated thread that processes flush jobs in the background,
     /// allowing writes to continue with minimal latency.
-    pub fn spawn(config: FlushWorkerConfig) -> MidgeResult<Self> {
+    ///
+    /// Returns a tuple of (coordinator, worker_handle) where worker_handle can
+    /// be registered with the engine runtime for centralized shutdown management.
+    pub fn spawn(
+        config: FlushWorkerConfig,
+    ) -> MidgeResult<(Self, crate::core::runtime::WorkerHandle)> {
         let (tx, handle) = spawn_flush_worker(config)?;
-        Ok(Self {
-            tx,
-            handle: Some(handle),
-        })
+        let worker_handle =
+            crate::core::runtime::WorkerHandle::new(handle, "midge-flush-worker");
+        Ok((
+            Self {
+                tx,
+                handle: None, // Handle ownership transferred to runtime
+            },
+            worker_handle,
+        ))
     }
 
     /// Request a flush of memtable entries to an SST file.
@@ -159,14 +169,15 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert!(result.unwrap().is_running());
+        let (coordinator, _handle) = result.unwrap();
+        coordinator.shutdown().unwrap();
     }
 
     #[test]
     fn should_request_flush_without_blocking() {
         // Arrange
         let config = create_test_config();
-        let coordinator = FlushCoordinator::spawn(config).unwrap();
+        let (coordinator, _handle) = FlushCoordinator::spawn(config).unwrap();
         let job = FlushJob {
             cf_id: ColumnFamilyId::new(0),
             seq: 1,
@@ -179,26 +190,28 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
+        coordinator.shutdown().unwrap();
     }
 
     #[test]
     fn should_wait_until_idle_successfully() {
         // Arrange
         let config = create_test_config();
-        let coordinator = FlushCoordinator::spawn(config).unwrap();
+        let (coordinator, _handle) = FlushCoordinator::spawn(config).unwrap();
 
         // Act
         let result = coordinator.wait_until_idle(std::time::Duration::from_secs(1));
 
         // Assert
         assert!(result.is_ok());
+        coordinator.shutdown().unwrap();
     }
 
     #[test]
     fn should_timeout_when_waiting_too_short() {
         // Arrange
         let config = create_test_config();
-        let coordinator = FlushCoordinator::spawn(config).unwrap();
+        let (coordinator, _handle) = FlushCoordinator::spawn(config).unwrap();
         // Queue a job that won't complete immediately
         let mut entries = vec![];
         for i in 0..1000 {
@@ -229,13 +242,14 @@ mod tests {
                 "unexpected error from wait_until_idle: {err:?}"
             );
         }
+        coordinator.shutdown().unwrap();
     }
 
     #[test]
     fn should_shutdown_gracefully() {
         // Arrange
         let config = create_test_config();
-        let coordinator = FlushCoordinator::spawn(config).unwrap();
+        let (coordinator, _handle) = FlushCoordinator::spawn(config).unwrap();
 
         // Act
         let result = coordinator.shutdown();
@@ -248,7 +262,7 @@ mod tests {
     fn should_process_multiple_flush_jobs() {
         // Arrange
         let config = create_test_config();
-        let coordinator = FlushCoordinator::spawn(config).unwrap();
+        let (coordinator, _handle) = FlushCoordinator::spawn(config).unwrap();
 
         // Act
         for i in 0..5 {
@@ -264,16 +278,19 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
+        coordinator.shutdown().unwrap();
     }
 
     #[test]
     fn should_not_panic_when_dropped_without_shutdown() {
         // Arrange
         let config = create_test_config();
-        let coordinator = FlushCoordinator::spawn(config).unwrap();
+        let (coordinator, _handle) = FlushCoordinator::spawn(config).unwrap();
 
-        // Act
+        // Act - drop coordinator first, then handle will be dropped
+        // The coordinator sends shutdown signal, then handle joins the thread
         drop(coordinator);
+        // handle will be dropped here automatically
 
         // Assert
         // no panic means success

@@ -48,6 +48,8 @@ impl Drop for WorkerHandle {
 ///
 /// Owns worker thread handles and provides deterministic shutdown.
 pub struct EngineRuntime {
+    /// Flush coordinator worker
+    flush_coordinator: Option<WorkerHandle>,
     /// WAL uploader worker (optional - only present in cloud-backed mode)
     wal_uploader: Option<WorkerHandle>,
     /// Compaction worker (optional - may be disabled)
@@ -64,6 +66,7 @@ impl EngineRuntime {
     /// Create a new runtime with the given shutdown channel.
     pub fn new(shutdown_tx: channel::Sender<()>) -> Self {
         Self {
+            flush_coordinator: None,
             wal_uploader: None,
             compaction: None,
             manifest_sync: None,
@@ -75,6 +78,11 @@ impl EngineRuntime {
     /// Register the WAL uploader worker.
     pub fn set_wal_uploader(&mut self, handle: WorkerHandle) {
         self.wal_uploader = Some(handle);
+    }
+
+    /// Register the flush coordinator worker.
+    pub fn set_flush_coordinator(&mut self, handle: WorkerHandle) {
+        self.flush_coordinator = Some(handle);
     }
 
     /// Register the compaction worker.
@@ -94,7 +102,10 @@ impl EngineRuntime {
         // Broadcast shutdown signal
         let _ = self.shutdown_tx.send(());
 
-        // Wait for all workers to exit
+        // Wait for all workers to exit in reverse dependency order
+        if let Some(flush) = self.flush_coordinator.take() {
+            flush.join();
+        }
         if let Some(wal) = self.wal_uploader.take() {
             wal.join();
         }
@@ -107,5 +118,36 @@ impl EngineRuntime {
         for worker in self.hybrid_storage_workers.drain(..) {
             worker.join();
         }
+    }
+}
+
+impl Drop for EngineRuntime {
+    fn drop(&mut self) {
+        eprintln!("[SHUTDOWN] EngineRuntime::drop - broadcasting shutdown signal");
+        // Broadcast shutdown signal (best-effort)
+        let _ = self.shutdown_tx.send(());
+
+        // Wait for all workers to exit
+        if let Some(flush) = self.flush_coordinator.take() {
+            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for flush coordinator");
+            flush.join();
+        }
+        if let Some(wal) = self.wal_uploader.take() {
+            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for WAL uploader");
+            wal.join();
+        }
+        if let Some(compaction) = self.compaction.take() {
+            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for compaction");
+            compaction.join();
+        }
+        if let Some(manifest) = self.manifest_sync.take() {
+            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for manifest sync");
+            manifest.join();
+        }
+        for worker in self.hybrid_storage_workers.drain(..) {
+            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for hybrid storage worker");
+            worker.join();
+        }
+        eprintln!("[SHUTDOWN] EngineRuntime::drop - complete");
     }
 }

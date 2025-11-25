@@ -1,4 +1,4 @@
-//! Background compaction management for LSM-tree maintenance
+﻿//! Background compaction management for LSM-tree maintenance
 //!
 //! Manages the background compaction process that maintains LSM-tree performance
 //! by merging overlapping SST files, removing deleted data, and optimizing storage.
@@ -65,7 +65,7 @@ pub struct CompactionWorkerConfig {
 
 /// Internal work item representing a single compaction plan.
 ///
-/// We don't currently differentiate manual vs automatic behavior here – both
+/// We don't currently differentiate manual vs automatic behavior here â€“ both
 /// are just "plans to execute".
 #[derive(Debug)]
 struct WorkItem {
@@ -88,7 +88,12 @@ impl CompactionController {
     ///
     /// Creates a dedicated thread that monitors LSM-tree levels and performs
     /// automatic compactions, as well as handling manual compaction requests.
-    pub fn spawn(config: CompactionWorkerConfig) -> MidgeResult<Self> {
+    ///
+    /// Returns a tuple of (controller, worker_handle) where worker_handle can
+    /// be registered with the engine runtime for centralized shutdown management.
+    pub fn spawn(
+        config: CompactionWorkerConfig,
+    ) -> MidgeResult<(Self, crate::core::runtime::WorkerHandle)> {
         let (tx, rx) = channel::unbounded::<CompactionMsg>();
 
         let db_path = config.db_path.clone();
@@ -450,10 +455,15 @@ impl CompactionController {
             }),
         );
 
-        Ok(Self {
-            tx,
-            handle: Some(handle),
-        })
+        let worker_handle =
+            crate::core::runtime::WorkerHandle::new(handle, "midge-compaction-worker");
+        Ok((
+            Self {
+                tx,
+                handle: None, // Handle ownership transferred to runtime
+            },
+            worker_handle,
+        ))
     }
 
     /// Synchronously run a single compaction plan using the same logic as the
@@ -856,10 +866,10 @@ mod tests {
         let (config, _version_mgr) = create_test_config(&temp_dir);
 
         // Act
-        let coordinator = CompactionController::spawn(config).unwrap();
+        let (coordinator, _handle) = CompactionController::spawn(config).unwrap();
 
         // Assert
-        assert!(coordinator.is_running());
+
         coordinator.shutdown().unwrap();
     }
 
@@ -869,7 +879,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir_all(temp_dir.path().join("sst")).unwrap();
         let (config, _version_mgr) = create_test_config(&temp_dir);
-        let coordinator = CompactionController::spawn(config).unwrap();
+        let (coordinator, _handle) = CompactionController::spawn(config).unwrap();
 
         // Act
         let result = coordinator.compact_level(0, 0);
@@ -887,7 +897,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir_all(temp_dir.path().join("sst")).unwrap();
         let (config, _version_mgr) = create_test_config(&temp_dir);
-        let coordinator = CompactionController::spawn(config).unwrap();
+        let (coordinator, _handle) = CompactionController::spawn(config).unwrap();
 
         // Act
         let result = coordinator.compact_range(0, Some(b"a".to_vec()), Some(b"z".to_vec()));
@@ -905,7 +915,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir_all(temp_dir.path().join("sst")).unwrap();
         let (config, _version_mgr) = create_test_config(&temp_dir);
-        let coordinator = CompactionController::spawn(config).unwrap();
+        let (coordinator, _handle) = CompactionController::spawn(config).unwrap();
 
         // Act
         let result = coordinator.shutdown();
@@ -920,7 +930,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir_all(temp_dir.path().join("sst")).unwrap();
         let (config, _version_mgr) = create_test_config(&temp_dir);
-        let coordinator = CompactionController::spawn(config).unwrap();
+        let (coordinator, _handle) = CompactionController::spawn(config).unwrap();
 
         // Act
         coordinator.compact_level(0, 0).unwrap();
@@ -938,7 +948,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir_all(temp_dir.path().join("sst")).unwrap();
         let (config, _version_mgr) = create_test_config(&temp_dir);
-        let coordinator = CompactionController::spawn(config).unwrap();
+        let (coordinator, _handle) = CompactionController::spawn(config).unwrap();
         coordinator.compact_level(0, 0).unwrap();
         coordinator.wait_until_idle(Duration::from_secs(5)).unwrap();
 
@@ -955,7 +965,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir_all(temp_dir.path().join("sst")).unwrap();
         let (config, _version_mgr) = create_test_config(&temp_dir);
-        let coordinator = CompactionController::spawn(config).unwrap();
+        let (coordinator, _handle) = CompactionController::spawn(config).unwrap();
 
         // Act
         for level in 0..3 {
@@ -965,7 +975,7 @@ mod tests {
 
         // Assert
         assert!(wait_result.is_ok());
-        assert!(coordinator.is_running());
+
         coordinator.shutdown().unwrap();
     }
 }

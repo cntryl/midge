@@ -88,6 +88,11 @@ pub struct MidgeEngine {
     /// Background error reported by async maintenance (flush/compaction). When set,
     /// write operations should be blocked until cleared to avoid data loss.
     pub(crate) background_error: Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>,
+    /// Centralized runtime for managing all background worker threads.
+    /// Ownership is maintained here for Drop-based cleanup; explicit shutdown
+    /// happens via the Drop trait implementation of EngineRuntime.
+    #[allow(dead_code)]
+    pub(crate) runtime: crate::core::runtime::EngineRuntime,
 }
 
 impl MidgeEngine {
@@ -430,10 +435,11 @@ impl Drop for MidgeEngine {
         self.version_manager.shutdown();
         eprintln!("[SHUTDOWN] MidgeEngine::drop - version_manager.shutdown returned");
 
-        // FlushCoordinator will be automatically dropped and shutdown gracefully
-        // (no explicit action needed, drop order handles it)
+        // Note: Runtime will be dropped after this function returns, which will
+        // broadcast shutdown signal to all background workers and wait for them
+        // to exit gracefully (see EngineRuntime::drop implementation)
 
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - complete");
+        eprintln!("[SHUTDOWN] MidgeEngine::drop - complete (runtime will shutdown next)");
     }
 }
 

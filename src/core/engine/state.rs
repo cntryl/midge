@@ -274,7 +274,7 @@ pub fn open_with_factories(
     // Shared background error container used by background workers to report errors
     let background_error = Arc::new(parking_lot::RwLock::new(None));
 
-    let flush_coordinator = crate::core::engine::factory::setup_flush_coordinator(
+    let (flush_coordinator, flush_handle) = crate::core::engine::factory::setup_flush_coordinator(
         &opts,
         sst_factory_arc.clone(),
         sst_dir.clone(),
@@ -286,7 +286,7 @@ pub fn open_with_factories(
         Some(background_error.clone()),
     )?;
 
-    let compaction_coordinator = crate::core::engine::factory::setup_compaction_coordinator(
+    let (compaction_coordinator, compaction_handle) = match crate::core::engine::factory::setup_compaction_coordinator(
         &opts,
         &db_path,
         sst_dir.clone(),
@@ -297,7 +297,10 @@ pub fn open_with_factories(
         cf_set_arc.clone(),
         version_manager.clone(),
         Some(background_error.clone()),
-    )?;
+    )? {
+        Some((coord, handle)) => (Some(coord), Some(handle)),
+        None => (None, None),
+    };
     let manifest = manifest_cache.get();
 
     // Initialize bloom filter cache and populate from existing SSTs
@@ -341,6 +344,18 @@ pub fn open_with_factories(
     // Create WAL coordinator
     tracing::debug!("creating wal coordinator");
     let wal_coordinator = crate::wal::WalController::new(wal_writer_box, wal_factory_arc);
+
+    // Create centralized runtime for background workers
+    let (shutdown_tx, _shutdown_rx) = crossbeam::channel::unbounded();
+    let mut runtime = crate::core::runtime::EngineRuntime::new(shutdown_tx);
+
+    // Register flush coordinator with runtime
+    runtime.set_flush_coordinator(flush_handle);
+
+    // Register compaction coordinator with runtime if enabled
+    if let Some(handle) = compaction_handle {
+        runtime.set_compaction(handle);
+    }
 
     Ok(MidgeEngine {
         wal_coordinator,
@@ -395,5 +410,6 @@ pub fn open_with_factories(
         version_set: version_set_atomic,
         version_manager,
         background_error: background_error.clone(),
+        runtime,
     })
 }

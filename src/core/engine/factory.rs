@@ -283,6 +283,7 @@ pub(super) fn setup_wal_writer(
 
 /// Setup flush coordinator.
 /// Even in read-only mode, creates a coordinator (though it won't process jobs).
+/// Returns (coordinator, worker_handle) tuple for runtime registration.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_flush_coordinator(
     opts: &crate::MidgeOptions,
@@ -294,7 +295,10 @@ pub(crate) fn setup_flush_coordinator(
     mem_mode: bool,
     manifest_update_callback: Option<Arc<dyn Fn(crate::core::manifest::Manifest) + Send + Sync>>,
     background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
-) -> MidgeResult<crate::core::FlushCoordinator> {
+) -> MidgeResult<(
+    crate::core::FlushCoordinator,
+    crate::core::runtime::WorkerHandle,
+)> {
     let config = FlushWorkerConfig {
         sst_factory: sst_factory_arc,
         sst_dir,
@@ -313,6 +317,7 @@ pub(crate) fn setup_flush_coordinator(
 }
 
 /// Setup compaction coordinator if compaction is enabled and not in read-only mode.
+/// Returns Option<(coordinator, worker_handle)> tuple for runtime registration.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_compaction_coordinator(
     opts: &crate::MidgeOptions,
@@ -325,7 +330,10 @@ pub(crate) fn setup_compaction_coordinator(
     cf_set_arc: Arc<super::column_family::ColumnFamilySet>,
     version_manager: Arc<crate::core::manifest::VersionManager>,
     background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
-) -> MidgeResult<Option<crate::core::CompactionController>> {
+) -> MidgeResult<Option<(
+    crate::core::CompactionController,
+    crate::core::runtime::WorkerHandle,
+)>> {
     if opts.enable_compaction && !opts.read_only {
         // Create CloudSstManager if in cloud-backed mode
         let cloud_sst_manager_c = if let Some(cloud_backend) = opts.storage_mode.cloud_backend() {

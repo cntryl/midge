@@ -89,6 +89,9 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
 
         // Force flush - this may hit cloud upload failures but must not hang.
         let _ = eng.flush_cf(&cf); // error is acceptable under simulated failure
+        
+        // Wait for flush to complete so uploads are processed
+        let _ = eng.wait_for_flush(std::time::Duration::from_secs(5));
 
         let attempts_after = mock_backend.upload_count() + mock_backend.upload_failure_count();
 
