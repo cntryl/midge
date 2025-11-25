@@ -288,6 +288,10 @@ impl MidgeEngine {
             return Ok(());
         }
 
+        // MVCC FIX: We must add the memtable to immutable_memtables BEFORE swapping,
+        // so that reads at snapshots can still find the data during flush.
+        // The immutable_memtables queue keeps data visible until SST is persisted.
+        
         // CRITICAL: Capture the old memtable BEFORE replacing it.
         // Atomic swap ensures no torn state - readers see old or new, never partial.
         let old_arc = column_family
@@ -297,9 +301,30 @@ impl MidgeEngine {
         // Extract memtable from Arc (cheap if refcount is 1, clone if shared)
         let old_memtable = Arc::try_unwrap(old_arc).unwrap_or_else(|arc| (*arc).clone());
 
+        // Add to immutable queue so reads can still see this data during flush
+        {
+            let mut immutables = column_family.immutable_memtables.lock();
+            immutables.push_back(old_memtable.clone());
+            column_family
+                .immutable_count
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+
         // Now flush the old memtable using the frozen memtable path
         // (flush_frozen_memtable already acquires the flush_mutex)
-        self.flush_frozen_memtable(cf, old_memtable)?;
+        let flush_result = self.flush_frozen_memtable(cf, old_memtable);
+
+        // Remove from immutable queue after flush completes (success or failure)
+        // The data is now either in SST (success) or lost (failure)
+        {
+            let mut immutables = column_family.immutable_memtables.lock();
+            immutables.pop_back(); // Remove the one we just added
+            column_family
+                .immutable_count
+                .fetch_sub(1, std::sync::atomic::Ordering::Release);
+        }
+
+        flush_result?;
 
         // Run autotune if enabled
         if let Some(ref autotuner) = self.autotuner {

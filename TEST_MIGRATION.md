@@ -106,9 +106,10 @@ Prioritized by dependency chain and bug-catching value:
 | Target File | Status | Tests | Storage Modes | Notes |
 |-------------|--------|-------|---------------|-------|
 | `engine_basic.rs` | ✅ | 25 | All 3 | Put/Get/Delete, Scans, Insert, CAS, Delete Range |
-| `durability_wal.rs` | ✅ | 10 | LocalDisk | WAL persistence, fsync, rotation, crash recovery |
+| `durability_wal.rs` | ✅ | 10 | LocalDisk, CloudBacked | WAL persistence, fsync, rotation, crash recovery |
 | `durability_recovery.rs` | ✅ | 14 | LocalDisk | Clean shutdown, crash during flush, manifest failures |
-| (remaining ~32 files) | ⬜ | ~269 | TBD | Not started |
+| `engine_write_batch.rs` | ✅ | 14 | LocalDisk | Atomic batches, ordering, durability, multi-CF |
+| (remaining ~31 files) | ⬜ | ~255 | TBD | Not started |
 
 ---
 

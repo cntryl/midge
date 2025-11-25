@@ -528,9 +528,9 @@ impl SstMemReader {
                             let val = value_opt.map(Bytes::copy_from_slice).unwrap_or_default();
                             KeyState::Value(val, actual_seq, expiration)
                         });
-                    } else {
-                        return Ok(KeyState::Absent);
                     }
+                    // seq >= snapshot_seq: this version is too new, continue searching
+                    // for an older version of the same key
                 }
                 if actual_key.as_slice() > key {
                     break;
