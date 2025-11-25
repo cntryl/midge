@@ -222,6 +222,7 @@ pub(super) fn setup_wal_writer(
 
         // Replay any local WAL files that haven't been uploaded yet
         if wal_dir.exists() {
+            // First replay numbered WAL files
             if let Ok(latest_num) = crate::fs::find_latest_numbered_file(wal_dir, "wal") {
                 if latest_num > 0 {
                     let wal_path = crate::fs::numbered_file_path(wal_dir, latest_num, "wal");
@@ -231,6 +232,18 @@ pub(super) fn setup_wal_writer(
                         let replay_max = MidgeEngine::replay_wal_to_cfs(cf_set, &records);
                         max_replay_seq = max_replay_seq.max(replay_max);
                     }
+                }
+            }
+
+            // Also replay the active WAL file if it exists
+            let active_wal_path = wal_dir.join("wal.log");
+            if active_wal_path.exists() {
+                if let Ok(records) = crate::wal::fs::replay_wal_file_with_mode(
+                    &active_wal_path,
+                    opts.wal_recovery_mode,
+                ) {
+                    let replay_max = MidgeEngine::replay_wal_to_cfs(cf_set, &records);
+                    max_replay_seq = max_replay_seq.max(replay_max);
                 }
             }
         }

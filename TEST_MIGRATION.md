@@ -8,6 +8,7 @@ This document tracks the migration and reorganization of integration tests.
 2. **Improve organization** - Group tests by feature, not implementation
 3. **Ensure correctness** - Each test should test exactly what it claims
 4. **Use deterministic patterns** - Test hooks for async/concurrent behavior
+5. **Storage mode coverage** - Test all storage modes where relevant (see below)
 
 ## Migration Process
 
@@ -20,6 +21,44 @@ This document tracks the migration and reorganization of integration tests.
 3. Either migrate the test to the appropriate target file or mark for deletion
 4. Run `cargo test --test {filename}` to verify
 5. Update the migration checklist
+
+## Storage Mode Coverage
+
+Midge supports three storage modes. Tests should cover all relevant modes:
+
+| Mode | Description | When to Test |
+|------|-------------|--------------|
+| `Memory` | In-memory only, no persistence | All CRUD tests (fast path) |
+| `LocalDisk` | Local filesystem with WAL/SST | All tests (primary path) |
+| `CloudBacked` | Cloud storage with local cache | Tests involving SST reads, recovery, cloud sync |
+
+**Pattern**: Use `for mode in all_storage_modes()` loop with `create_storage_mode(mode)` helper.
+
+**When to use which helper**:
+- `all_storage_modes()` → `["Memory", "LocalDisk", "CloudBacked"]` - Most CRUD tests
+- `disk_storage_modes()` → `["LocalDisk", "CloudBacked"]` - Tests requiring SST files or WAL persistence
+- Single mode - Tests specific to one mode (e.g., Memory mode has no filesystem artifacts)
+
+**Example**:
+```rust
+#[test]
+fn should_get_value_given_existing_key_when_put() {
+    for mode in all_storage_modes() {
+        // Arrange
+        let (name, storage_mode, _dir) = create_storage_mode(mode);
+        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let engine = MidgeEngine::open(opts).expect("open");
+        let cf = engine.default_column_family();
+
+        // Act
+        engine.put(&cf, b"key", b"value").expect("put");
+        let result = engine.get(&cf, b"key").expect("get");
+
+        // Assert
+        assert_eq!(result, Some(Bytes::from_static(b"value")), "Failed for {}", name);
+    }
+}
+```
 
 ## Status Legend
 
@@ -37,8 +76,8 @@ Prioritized by dependency chain and bug-catching value:
 | # | Target File | Rationale | Status |
 |---|-------------|-----------|--------|
 | 1 | `engine_basic.rs` | Foundation for everything | ✅ |
-| 2 | `durability_wal.rs` | Critical path - WAL correctness prevents data loss | ⬜ |
-| 3 | `durability_recovery.rs` | Crash recovery, manifest persistence | ⬜ |
+| 2 | `durability_wal.rs` | Critical path - WAL correctness prevents data loss | ✅ |
+| 3 | `durability_recovery.rs` | Crash recovery, manifest persistence | ✅ |
 | 4 | `engine_write_batch.rs` | Atomic batches use WAL; common user operation | ⬜ |
 | 5 | `engine_snapshots.rs` | Point-in-time reads; needed before transactions | ⬜ |
 | 6 | `transaction_basic.rs` | Depends on snapshots; high user-facing value | ⬜ |
@@ -64,10 +103,12 @@ Prioritized by dependency chain and bug-catching value:
 
 # Current Progress
 
-| Target File | Status | Tests | Notes |
-|-------------|--------|-------|-------|
-| `engine_basic.rs` | ✅ | 26 | Put/Get/Delete, Scans, Insert, CAS, Delete Range, Memory Mode |
-| (remaining ~34 files) | ⬜ | ~293 | Not started |
+| Target File | Status | Tests | Storage Modes | Notes |
+|-------------|--------|-------|---------------|-------|
+| `engine_basic.rs` | ✅ | 25 | All 3 | Put/Get/Delete, Scans, Insert, CAS, Delete Range |
+| `durability_wal.rs` | ✅ | 10 | LocalDisk | WAL persistence, fsync, rotation, crash recovery |
+| `durability_recovery.rs` | ✅ | 14 | LocalDisk | Clean shutdown, crash during flush, manifest failures |
+| (remaining ~32 files) | ⬜ | ~269 | TBD | Not started |
 
 ---
 
@@ -77,8 +118,8 @@ The reorganized test suite consolidates 97 legacy files into ~35 focused test fi
 
 ## 1. Core Engine Operations (`engine_*.rs`)
 
-### `engine_basic.rs` ✅ (26 tests)
-Core CRUD operations that every user needs.
+### `engine_basic.rs` ✅ (25 tests) — All storage modes
+Core CRUD operations that every user needs. Tests all 3 storage modes via loop.
 ```
 PUT/GET:
 - should_get_value_given_existing_key_when_put
@@ -118,7 +159,6 @@ DELETE_RANGE:
 
 MEMORY MODE:
 - should_not_create_filesystem_artifacts_when_memory_mode
-- should_function_correctly_given_memory_mode
 ```
 **Source files**: `engine_basic_ops.rs`, `engine_scans.rs`, `engine_multi_get.rs`, `engine_atomics.rs`
 
@@ -327,19 +367,30 @@ Advanced transaction scenarios.
 
 ## 4. Durability & Recovery (`durability_*.rs`)
 
-### `durability_wal.rs` (~8 tests)
+### `durability_wal.rs` ✅ (10 tests)
 WAL durability guarantees.
 ```
-- should_persist_write_after_fsync
-- should_recover_unflushed_writes_from_wal
-- should_replay_wal_in_order
-- should_handle_wal_rotation
-- should_handle_wal_segment_boundaries
-- should_skip_corrupted_wal_tail
-- should_enforce_fsync_mode
-- should_batch_fsyncs_for_performance
+BASIC PERSISTENCE:
+- should_recover_writes_given_unflushed_memtable_when_reopening
+- should_persist_write_given_fsync_enabled_when_crash_occurs
+- should_call_fsync_given_wal_sync_enabled_when_put
+
+WAL ROTATION & SEGMENTS:
+- should_rotate_wal_given_small_buffer_when_writes_exceed_buffer
+- should_replay_all_records_given_multiple_wal_segments_when_recovering
+
+CONCURRENT WRITES:
+- should_recover_all_writes_given_concurrent_puts_when_crash_occurs
+
+CRASH & TRUNCATION:
+- should_handle_gracefully_given_truncated_wal_tail_when_recovering
+- should_not_recover_data_given_truncated_wal_append_when_reopening
+- should_allow_data_loss_given_skipped_fsync_when_crash_occurs
+
+RECOVERY MODE:
+- should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening
 ```
-**Source files**: `durability_wal.rs`, `durability_skip_fsync_recovery.rs`
+**Source files**: `durability_wal.rs`, `durability_skip_fsync_recovery.rs`, `engine_wal_recovery.rs`, `durability_wal_truncate_sim.rs`
 
 ### `durability_recovery.rs` (~10 tests)
 Crash recovery scenarios.
@@ -798,12 +849,12 @@ Maps each legacy file to its target location(s) in the new structure.
 | `config_validation.rs` | `config_validation.rs` | ⬜ |
 | `durability_compaction.rs` | `durability_atomicity.rs` | ⬜ |
 | `durability_engine_truncate_fallback.rs` | `durability_atomicity.rs` | ⬜ |
-| `durability_manifest.rs` | `durability_recovery.rs` | ⬜ |
-| `durability_recovery.rs` | `durability_recovery.rs` | ⬜ |
-| `durability_recovery_edge.rs` | `durability_recovery.rs` | ⬜ |
-| `durability_skip_fsync_recovery.rs` | `durability_wal.rs` | ⬜ |
-| `durability_wal.rs` | `durability_wal.rs` | ⬜ |
-| `durability_wal_truncate_sim.rs` | `durability_atomicity.rs` | ⬜ |
+| `durability_manifest.rs` | `durability_recovery.rs` | ✅ |
+| `durability_recovery.rs` | `durability_recovery.rs` | ✅ |
+| `durability_recovery_edge.rs` | `durability_recovery.rs` | ✅ |
+| `durability_skip_fsync_recovery.rs` | `durability_wal.rs` | ✅ |
+| `durability_wal.rs` | `durability_wal.rs` | ✅ |
+| `durability_wal_truncate_sim.rs` | `durability_wal.rs` | ✅ |
 | `engine_atomics.rs` | `engine_basic.rs` | ✅ |
 | `engine_basic_ops.rs` | `engine_basic.rs` | ✅ |
 | `engine_cf_merge_operators.rs` | `engine_merge_operators.rs` | ⬜ |
@@ -822,7 +873,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `engine_sst_operations.rs` | `engine_basic.rs` | ⬜ |
 | `engine_streaming.rs` | `engine_iterators.rs` | ⬜ |
 | `engine_transactions.rs` | `transaction_basic.rs` | ⬜ |
-| `engine_wal_recovery.rs` | `durability_wal.rs` | ⬜ |
+| `engine_wal_recovery.rs` | `durability_wal.rs` | ✅ |
 | `engine_write_batch_atomicity.rs` | `engine_write_batch.rs` | ⬜ |
 | `engine_write_batch_edge.rs` | `engine_write_batch.rs` | ⬜ |
 | `engine_write_options.rs` | `engine_basic.rs` | ⬜ |

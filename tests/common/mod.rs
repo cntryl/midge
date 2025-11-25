@@ -106,6 +106,120 @@ pub fn durability_opts(db_path: PathBuf) -> MidgeOptions {
     }
 }
 
+/// Create durability-focused options for a given storage mode.
+///
+/// Both `LocalDisk` and `CloudBacked` modes have WAL persistence:
+/// - `LocalDisk`: Standard local WAL
+/// - `CloudBacked`: Local ephemeral WAL + cloud WAL
+///
+/// This helper configures:
+/// - WAL sync enabled
+/// - TolerateCorruptedTail recovery mode
+/// - Compaction disabled (to isolate WAL behavior)
+///
+/// # Examples
+///
+/// ```rust
+/// for mode in disk_storage_modes() {
+///     let (name, storage_mode, _temp_dir) = create_durability_storage_mode(mode);
+///     let opts = MidgeOptions { storage_mode, wal_sync: true, ..Default::default() };
+///     // ... test WAL recovery ...
+/// }
+/// ```
+#[allow(dead_code)]
+pub fn create_durability_storage_mode(mode: &str) -> (String, StorageMode, Option<TempDir>) {
+    match mode {
+        "LocalDisk" => {
+            let temp_dir = test_temp_dir();
+            let storage_mode = StorageMode::LocalDisk {
+                db_path: temp_dir.path().to_path_buf(),
+            };
+            ("LocalDisk".to_string(), storage_mode, Some(temp_dir))
+        }
+        "CloudBacked" => {
+            let temp_dir = test_temp_dir();
+            // Use MockCloudBackend::with_root to ensure cloud data persists in the same temp dir
+            let cloud_root = temp_dir.path().join("cloud");
+            let storage_mode = StorageMode::CloudBacked {
+                local_cache_path: temp_dir.path().to_path_buf(),
+                cloud_backend: Arc::new(MockCloudBackend::with_root(cloud_root)),
+                storage_context: StorageContext::default(),
+                local_wal_sync: true, // Enable local WAL sync for durability tests
+                wal_batch_size: 4 * 1024 * 1024,
+                sst_cache_capacity: 16,
+            };
+            ("CloudBacked".to_string(), storage_mode, Some(temp_dir))
+        }
+        _ => panic!("Unknown storage mode for durability tests: {} (use LocalDisk or CloudBacked)", mode),
+    }
+}
+
+/// Context for durability tests that need to reopen storage.
+///
+/// This struct holds the temp directory and cloud root path so that
+/// storage modes can be recreated for reopen scenarios while preserving
+/// the same underlying storage.
+#[allow(dead_code)]
+pub struct DurabilityTestContext {
+    mode: String,
+    temp_dir: TempDir,
+    cloud_root: Option<PathBuf>,
+}
+
+#[allow(dead_code)]
+impl DurabilityTestContext {
+    /// Create a new durability test context for the given storage mode.
+    pub fn new(mode: &str) -> Self {
+        let temp_dir = test_temp_dir();
+        let cloud_root = if mode == "CloudBacked" {
+            Some(temp_dir.path().join("cloud"))
+        } else {
+            None
+        };
+        Self {
+            mode: mode.to_string(),
+            temp_dir,
+            cloud_root,
+        }
+    }
+
+    /// Get the storage mode name.
+    pub fn name(&self) -> &str {
+        &self.mode
+    }
+
+    /// Get the path to the temporary directory.
+    pub fn temp_dir_path(&self) -> &std::path::Path {
+        self.temp_dir.path()
+    }
+
+    /// Get the cloud root path (if CloudBacked mode).
+    pub fn cloud_root(&self) -> Option<&std::path::Path> {
+        self.cloud_root.as_deref()
+    }
+
+    /// Create a StorageMode that can be used for opening/reopening the engine.
+    /// Each call creates a new StorageMode but pointing to the same underlying storage.
+    pub fn create_storage_mode(&self) -> StorageMode {
+        match self.mode.as_str() {
+            "LocalDisk" => StorageMode::LocalDisk {
+                db_path: self.temp_dir.path().to_path_buf(),
+            },
+            "CloudBacked" => StorageMode::CloudBacked {
+                local_cache_path: self.temp_dir.path().to_path_buf(),
+                cloud_backend: Arc::new(MockCloudBackend::with_root(
+                    self.cloud_root.clone().unwrap(),
+                )),
+                storage_context: StorageContext::default(),
+                local_wal_sync: true,
+                wal_batch_size: 4 * 1024 * 1024,
+                sst_cache_capacity: 16,
+            },
+            _ => panic!("Unknown storage mode: {}", self.mode),
+        }
+    }
+}
+
 /// Create MidgeOptions for flush testing with small memtable
 ///
 /// Configured with:
