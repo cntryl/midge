@@ -84,7 +84,7 @@ Prioritized by dependency chain and bug-catching value:
 | 7 | `column_family_lifecycle.rs` | CF create/drop/persist; isolated subsystem | ✅ |
 | 8 | `column_family_isolation.rs` | Data isolation between CFs | ✅ (merged into #7) |
 | 9 | `compaction_basic.rs` | Space reclamation; can run after data written | ✅ |
-| 10 | `compaction_levels.rs` | Multi-level compaction behavior | ⬜ |
+| 10 | `compaction_levels.rs` | Multi-level compaction behavior | ✅ |
 | 11 | `engine_iterators.rs` | Advanced iteration patterns | ⬜ |
 | 12 | `engine_delete_range.rs` | Range tombstones are complex | ⬜ |
 | 13 | `engine_merge_operators.rs` | Advanced feature, fewer users | ⬜ |
@@ -112,8 +112,9 @@ Prioritized by dependency chain and bug-catching value:
 | `engine_snapshots.rs` | ✅ | 15 | All 3 | Snapshot reads, MVCC, flush/compaction isolation |
 | `transaction_basic.rs` | ✅ | 18 | LocalDisk | Commit, rollback, isolation, insert, delete_range, durability |
 | `column_family_lifecycle.rs` | ✅ | 28 | LocalDisk | Create, drop, list, isolation, persistence, lookup |
-| `compaction_basic.rs` | ✅ | 16 | LocalDisk, CloudBacked | Manual compaction, data correctness, tombstones, snapshots (LocalDisk only), background |
-| (remaining ~28 files) | ⬜ | ~178 | TBD | Not started |
+| `compaction_basic.rs` | ✅ | 16 | LocalDisk, CloudBacked | Manual compaction, data correctness, tombstones, snapshots, background |
+| `compaction_levels.rs` | ✅ | 15 | LocalDisk, CloudBacked | L0 sublevels, level size enforcement, cascading, statistics |
+| (remaining ~27 files) | ⬜ | ~163 | TBD | Not started |
 
 ---
 
@@ -457,15 +458,31 @@ Compaction with concurrent operations.
 ```
 **Source files**: `compact_reads_during_compaction.rs`, `compact_writes_during_compaction.rs`, `concurrent_concurrent_compaction_and_writes.rs`
 
-### `compaction_levels.rs` (~6 tests)
+### `compaction_levels.rs` ✅ (15 tests)
 Level management and organization.
 ```
-- should_organize_l0_into_sublevels
-- should_respect_level_size_targets
-- should_trigger_multi_level_cascade
-- should_handle_max_level_files
-- should_track_level_statistics
-- should_balance_level_sizes
+L0 SUBLEVELS:
+- should_organize_l0_into_sublevels_given_overlapping_files_when_flushing
+- should_compact_oldest_sublevel_first_given_incremental_strategy_when_compacting
+- should_compact_all_sublevels_given_high_file_count_when_aggressive_compaction
+- should_maintain_sublevel_ordering_given_sequential_flushes_when_reading
+
+LEVEL SIZE ENFORCEMENT:
+- should_trigger_compaction_given_level_exceeds_target_size_when_sst_threshold_reached
+- should_compact_largest_file_given_varying_sizes_when_level_too_large
+- should_respect_level_multiplier_given_cascading_compaction_when_levels_fill
+- should_not_exceed_target_size_given_completed_compaction_when_data_consolidated
+
+CASCADING COMPACTION:
+- should_trigger_l2_compaction_given_l1_exceeds_capacity_when_compacting
+- should_propagate_compaction_to_deeper_levels_given_overflow_when_incremental_compaction
+- should_handle_cascading_compaction_to_max_level_given_deep_structure_when_compacting
+- should_not_trigger_cascade_given_sufficient_capacity_when_modest_data
+
+LEVEL STATISTICS:
+- should_report_sst_count_given_multiple_flushes_when_querying_stats
+- should_reduce_sst_count_given_compaction_when_merging_files
+- should_report_total_sst_size_given_data_written_when_querying_stats
 ```
 **Source files**: `compact_l0_sublevel_compaction.rs`, `compact_level_target_size_enforcement.rs`, `compact_multi_level_compaction_cascades.rs`
 
@@ -836,9 +853,9 @@ Maps each legacy file to its target location(s) in the new structure.
 | `compact_compaction_cancellation.rs` | `compaction_errors.rs` | ⬜ |
 | `compact_compaction_error_recovery.rs` | `compaction_errors.rs` | ⬜ |
 | `compact_custom_compaction_filter.rs` | `compaction_filters.rs` | ⬜ |
-| `compact_l0_sublevel_compaction.rs` | `compaction_levels.rs` | ⬜ |
-| `compact_level_target_size_enforcement.rs` | `compaction_levels.rs` | ⬜ |
-| `compact_multi_level_compaction_cascades.rs` | `compaction_levels.rs` | ⬜ |
+| `compact_l0_sublevel_compaction.rs` | `compaction_levels.rs` | ✅ |
+| `compact_level_target_size_enforcement.rs` | `compaction_levels.rs` | ✅ |
+| `compact_multi_level_compaction_cascades.rs` | `compaction_levels.rs` | ✅ |
 | `compact_reads_during_compaction.rs` | `compaction_concurrent.rs` | ⬜ |
 | `compact_ttl_compaction_filter.rs` | `compaction_filters.rs` | ⬜ |
 | `compact_writes_during_compaction.rs` | `compaction_concurrent.rs` | ⬜ |
