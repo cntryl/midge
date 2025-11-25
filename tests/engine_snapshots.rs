@@ -418,28 +418,11 @@ fn should_preserve_snapshot_view_given_flush_when_reading_at_snapshot() {
 
     // Arrange - v1 in memtable, snapshot, then v2
     engine.put(&cf, b"key", b"v1").expect("put");
-    
-    // Debug: check we can read v1 before snapshot
-    eprintln!("[DEBUG] Before snapshot: get = {:?}", engine.get(&cf, b"key"));
-    
     let snapshot = engine.snapshot();
-    eprintln!("[DEBUG] Snapshot seq = {}", snapshot.seq);
-    
-    // Debug: check we can read v1 at snapshot
-    eprintln!("[DEBUG] After snapshot, before v2: get_at = {:?}", engine.get_at(&cf, b"key", &snapshot));
-    
     engine.put(&cf, b"key", b"v2").expect("put v2");
-    
-    // Debug: check we can read v1 at snapshot and v2 current
-    eprintln!("[DEBUG] After v2, before flush: get_at = {:?}, get = {:?}", 
-        engine.get_at(&cf, b"key", &snapshot), engine.get(&cf, b"key"));
     
     // Act - flush both versions to SST
     engine.flush().expect("flush");
-    
-    // Debug: check state after flush
-    eprintln!("[DEBUG] After flush: get_at = {:?}, get = {:?}", 
-        engine.get_at(&cf, b"key", &snapshot), engine.get(&cf, b"key"));
 
     // Assert - snapshot still sees v1 (MVCC guarantee)
     assert_eq!(

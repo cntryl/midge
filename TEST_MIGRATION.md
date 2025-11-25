@@ -78,8 +78,8 @@ Prioritized by dependency chain and bug-catching value:
 | 1 | `engine_basic.rs` | Foundation for everything | ✅ |
 | 2 | `durability_wal.rs` | Critical path - WAL correctness prevents data loss | ✅ |
 | 3 | `durability_recovery.rs` | Crash recovery, manifest persistence | ✅ |
-| 4 | `engine_write_batch.rs` | Atomic batches use WAL; common user operation | ⬜ |
-| 5 | `engine_snapshots.rs` | Point-in-time reads; needed before transactions | ⬜ |
+| 4 | `engine_write_batch.rs` | Atomic batches use WAL; common user operation | ✅ |
+| 5 | `engine_snapshots.rs` | Point-in-time reads; needed before transactions | ✅ |
 | 6 | `transaction_basic.rs` | Depends on snapshots; high user-facing value | ⬜ |
 | 7 | `column_family_lifecycle.rs` | CF create/drop/persist; isolated subsystem | ⬜ |
 | 8 | `column_family_isolation.rs` | Data isolation between CFs | ⬜ |
@@ -109,7 +109,8 @@ Prioritized by dependency chain and bug-catching value:
 | `durability_wal.rs` | ✅ | 10 | LocalDisk, CloudBacked | WAL persistence, fsync, rotation, crash recovery |
 | `durability_recovery.rs` | ✅ | 14 | LocalDisk | Clean shutdown, crash during flush, manifest failures |
 | `engine_write_batch.rs` | ✅ | 14 | LocalDisk | Atomic batches, ordering, durability, multi-CF |
-| (remaining ~31 files) | ⬜ | ~255 | TBD | Not started |
+| `engine_snapshots.rs` | ✅ | 15 | All 3 | Snapshot reads, MVCC, flush/compaction isolation |
+| (remaining ~30 files) | ⬜ | ~240 | TBD | Not started |
 
 ---
 

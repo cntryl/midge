@@ -23,8 +23,9 @@ impl MidgeEngine {
     /// Resolve merge operations in a list of entries from a memtable.
     ///
     /// Groups entries by key, resolves merges using the registered operator for the CF,
-    /// and returns a deduplicated list with resolved values.
-    /// For non-merge keys, returns only the newest version.
+    /// and returns a list with resolved values.
+    /// For merge keys: resolves the merge and outputs a single resolved entry.
+    /// For non-merge keys: keeps ALL versions to support MVCC snapshots.
     fn resolve_merges_in_entries(
         &self,
         cf_id: crate::api::column_family::ColumnFamilyId,
@@ -92,9 +93,10 @@ impl MidgeEngine {
                     }
                 }
             } else {
-                // No merge operands - keep only the newest version (first in group)
-                if let Some(newest) = group.first() {
-                    resolved_entries.push((*newest).clone());
+                // No merge operands - keep ALL versions for MVCC snapshot support
+                // Snapshots need to see older values, so we must persist all versions
+                for entry in group {
+                    resolved_entries.push((*entry).clone());
                 }
             }
         }
