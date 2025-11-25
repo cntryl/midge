@@ -167,6 +167,11 @@ impl crate::wal::WalWriter for CloudWalWriter {
         // Ensure all pending data is uploaded before closing
         self.sync()
     }
+
+    fn shutdown(&self) {
+        // Signal background upload workers to stop retry loops
+        self.batch_manager.shutdown();
+    }
 }
 
 #[cfg(test)]

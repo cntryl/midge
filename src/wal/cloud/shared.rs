@@ -186,6 +186,7 @@ pub struct WalBatchManager {
     current_segment: Arc<Mutex<WalSegment>>,
     sequence_counter: Arc<Mutex<u64>>,
     pending_uploads: Arc<Mutex<Vec<DurabilityPromise>>>,
+    shutdown_signal: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl WalBatchManager {
@@ -209,6 +210,7 @@ impl WalBatchManager {
             current_segment: Arc::new(Mutex::new(WalSegment::empty(0))),
             sequence_counter: Arc::new(Mutex::new(0)),
             pending_uploads: Arc::new(Mutex::new(Vec::new())),
+            shutdown_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -262,6 +264,7 @@ impl WalBatchManager {
     fn upload_segment_async(&self, segment: WalSegment) -> MidgeResult<DurabilityPromise> {
         let promise = DurabilityPromise::new();
         let backend = self.backend.clone();
+        let shutdown_signal = self.shutdown_signal.clone();
 
         // Spawn background thread for upload. Use the guarded spawn helper
         // so panics are captured and the promise can be completed on panic.
@@ -286,7 +289,40 @@ impl WalBatchManager {
                 let limiter = crate::common::rate_limiter::global_rate_limiter();
                 limiter.request(data.len() as u64);
 
-                let _ = backend.put_blob(&key, bytes::Bytes::from(data));
+                // Bounded retry with shutdown checking
+                const MAX_RETRIES: usize = 3;
+                let mut last_error = None;
+                
+                for attempt in 0..MAX_RETRIES {
+                    // Check shutdown signal before each attempt
+                    if shutdown_signal.load(std::sync::atomic::Ordering::Relaxed) {
+                        promise_for_worker.complete(Err(MidgeError::internal(
+                            "WAL upload cancelled due to shutdown".to_string(),
+                        )));
+                        return;
+                    }
+
+                    match backend.put_blob(&key, bytes::Bytes::from(data.clone())) {
+                        Ok(_) => {
+                            // Success! Complete promise and return.
+                            promise_for_worker.complete(Ok(()));
+                            return;
+                        }
+                        Err(e) => {
+                            last_error = Some(e);
+                            if attempt < MAX_RETRIES - 1 {
+                                // Brief backoff before retry (exponential: 10ms, 20ms, 40ms)
+                                let backoff_ms = 10 * (1 << attempt);
+                                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                            }
+                        }
+                    }
+                }
+
+                // All retries exhausted - complete promise with error
+                promise_for_worker.complete(Err(last_error.unwrap_or_else(|| {
+                    MidgeError::internal("WAL upload failed after retries".to_string())
+                })));
             },
             Some(move |_panic_payload| {
                 // Convert a panic into an internal error for the promise so
@@ -333,5 +369,14 @@ impl WalBatchManager {
     /// Get the current sequence number.
     pub fn current_sequence(&self) -> u64 {
         *self.sequence_counter.lock()
+    }
+
+    /// Signal shutdown to all background workers.
+    ///
+    /// This sets the shutdown flag, causing upload workers to exit their retry loops.
+    /// Does NOT wait for workers to complete - caller should use sync() or wait for
+    /// pending promises if coordinated shutdown is required.
+    pub fn shutdown(&self) {
+        self.shutdown_signal.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }

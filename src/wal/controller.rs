@@ -118,6 +118,15 @@ impl WalController {
     pub fn current_pos(&self) -> u64 {
         self.writer.read().current_pos()
     }
+
+    /// Signal shutdown to background workers.
+    ///
+    /// For WAL implementations with background threads (e.g., CloudWalWriter),
+    /// this signals workers to exit retry loops. Must be called before dropping
+    /// to avoid hanging on sync() or close().
+    pub fn shutdown(&self) {
+        self.writer.read().shutdown();
+    }
 }
 
 #[cfg(test)]

@@ -119,6 +119,17 @@ pub trait WalWriter: Send + Sync {
 
     /// Close the WAL writer and release resources.
     fn close(&self) -> MidgeResult<()>;
+
+    /// Signal shutdown to background workers (optional, no-op by default).
+    ///
+    /// For WAL implementations with background upload threads (e.g., CloudWalWriter),
+    /// this signals workers to stop retry loops and exit cleanly. Must be called
+    /// before dropping the writer to avoid hanging on sync() or close().
+    ///
+    /// Default implementation does nothing (suitable for synchronous WAL writers).
+    fn shutdown(&self) {
+        // Default: no-op for synchronous implementations
+    }
 }
 
 /// Reader contract for WAL implementations.
