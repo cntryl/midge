@@ -1,5 +1,4 @@
 use crate::cloud::StorageBackend;
-use crate::common::timestamp;
 use crate::error::{MidgeError, MidgeResult};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -171,9 +170,9 @@ impl CloudSstManager {
         &self,
         sst_id: String,
         path: PathBuf,
-        sequence_range: (u64, u64),
+        _sequence_range: (u64, u64),
         _key_range: (Option<Vec<u8>>, Option<Vec<u8>>),
-        metadata: Option<SstMetadata>,
+        _metadata: Option<SstMetadata>,
     ) -> MidgeResult<()> {
         debug!(
             "Starting async upload of SST {} from path {:?}",
@@ -191,9 +190,11 @@ impl CloudSstManager {
         let sst_id_clone = sst_id.clone();
         std::thread::spawn(move || {
             if let Ok(bytes) = std::fs::read(&path) {
-                let checksum = crc32fast::hash(&bytes) as u64;
+                let _checksum = crc32fast::hash(&bytes) as u64;
                 let key = match &cfg.prefix {
-                    Some(prefix) => format!("{}/sst/{}", prefix.trim_end_matches('/'), sst_id_clone),
+                    Some(prefix) => {
+                        format!("{}/sst/{}", prefix.trim_end_matches('/'), sst_id_clone)
+                    }
                     None => format!("sst/{}", sst_id_clone),
                 };
 
@@ -204,7 +205,10 @@ impl CloudSstManager {
                 let _ = backend.put_blob(&key, Bytes::copy_from_slice(&bytes));
             } else {
                 // Best effort: read errors are simply logged — upload will not be attempted.
-                tracing::warn!("upload_sst_async: failed to read SST file for {}", sst_id_clone);
+                tracing::warn!(
+                    "upload_sst_async: failed to read SST file for {}",
+                    sst_id_clone
+                );
             }
         });
 

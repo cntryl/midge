@@ -4,8 +4,8 @@ use cntryl_midge::cloud::mock::MockCloudBackend;
 use cntryl_midge::config::cloud::StorageContext;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 fn should_preserve_local_file_given_upload_in_progress_when_crash() {
@@ -165,7 +165,7 @@ fn should_reconcile_cloud_manifest_given_remote_drift_when_check_cloud_command_r
 
     // Assert - at least one new upload was attempted for manifest/SST sync.
     assert!(
-        mock_backend.upload_count() >= baseline_uploads + 1,
+        mock_backend.upload_count() > baseline_uploads,
         "Should have completed at least one upload for manifest sync"
     );
 }

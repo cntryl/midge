@@ -114,8 +114,12 @@ impl CompactionController {
 
         let handle = crate::common::worker::spawn_guarded(
             "midge-compaction-worker",
-            config.test_hooks.clone(),move || {
-                tracing::info!(interval_ms = interval.as_millis(), "Compaction worker started");
+            config.test_hooks.clone(),
+            move || {
+                tracing::info!(
+                    interval_ms = interval.as_millis(),
+                    "Compaction worker started"
+                );
                 // Pending work items (manual + automatic).
                 let mut work_queue: VecDeque<WorkItem> = VecDeque::new();
                 // Number of compactions that are queued or in-flight.
@@ -132,12 +136,26 @@ impl CompactionController {
                             tracing::trace!(wait_ms = %tick_start.elapsed().as_millis(), "compaction received message after wait (ms)");
                             // We received a control message. Process the message and
                             // drain any additional messages available to batch work.
-                            if Self::handle_compaction_msg(msg, &db_path, &compactor, &mut work_queue, &mut inflight, &mut barrier_waiters) {
+                            if Self::handle_compaction_msg(
+                                msg,
+                                &db_path,
+                                &compactor,
+                                &mut work_queue,
+                                &mut inflight,
+                                &mut barrier_waiters,
+                            ) {
                                 // Shutdown requested
                                 return;
                             }
                             while let Ok(msg) = rx.try_recv() {
-                                if Self::handle_compaction_msg(msg, &db_path, &compactor, &mut work_queue, &mut inflight, &mut barrier_waiters) {
+                                if Self::handle_compaction_msg(
+                                    msg,
+                                    &db_path,
+                                    &compactor,
+                                    &mut work_queue,
+                                    &mut inflight,
+                                    &mut barrier_waiters,
+                                ) {
                                     return;
                                 }
                             }
@@ -153,9 +171,18 @@ impl CompactionController {
                                     .and_then(|cf| cf.config.clone())
                                     .unwrap_or_default();
                                 if let Some(plan) = compactor.pick_leveled_compaction(
-                                    &manifest.files, 0, default_cf_config.level_size_multiplier, default_cf_config.target_file_size,
+                                    &manifest.files,
+                                    0,
+                                    default_cf_config.level_size_multiplier,
+                                    default_cf_config.target_file_size,
                                 ) {
-                                    tracing::info!(cf_id = plan.cf_id, source_level = plan.source_level, target_level = plan.target_level, input_count = plan.input_files.len(), "automatic compaction plan selected");
+                                    tracing::info!(
+                                        cf_id = plan.cf_id,
+                                        source_level = plan.source_level,
+                                        target_level = plan.target_level,
+                                        input_count = plan.input_files.len(),
+                                        "automatic compaction plan selected"
+                                    );
                                     work_queue.push_back(WorkItem { plan });
                                     inflight += 1;
                                 }
@@ -241,7 +268,7 @@ impl CompactionController {
                         false
                     };
 
-                        let result = (|| -> Result<(), crate::error::MidgeError> {
+                    let result = (|| -> Result<(), crate::error::MidgeError> {
                         if should_fail {
                             return Err(crate::error::MidgeError::internal(
                                 "Compaction failed midway (test hook)",
@@ -268,7 +295,10 @@ impl CompactionController {
                         // Sort, filter tombstones, apply compaction filter, dedupe.
                         super::executor::sort_versions_for_output(&mut versions);
 
-                        let versions = super::executor::filter_versions_with_range_tombstones(&versions, &range_tombs);
+                        let versions = super::executor::filter_versions_with_range_tombstones(
+                            &versions,
+                            &range_tombs,
+                        );
                         let min_snapshot_seq = snapshot_registry.min_active_seq();
                         let (versions_after_filter, _removed) =
                             super::executor::filter_safe_tombstones(&versions, min_snapshot_seq);
@@ -312,7 +342,7 @@ impl CompactionController {
                         let write_res =
                             super::executor::write_compacted_sst(&ctx, &deduped, plan.cf_id)?;
 
-                            if let Some((_path, meta)) = write_res {
+                        if let Some((_path, meta)) = write_res {
                             // Update manifest and version_set atomically via VersionManager.
                             if let Some(ref hooks) = test_hooks {
                                 hooks.maybe_pause_compaction(
@@ -320,7 +350,10 @@ impl CompactionController {
                                 );
                             }
 
-                            let combined = crate::core::manifest::VersionEdit::CombinedAddRemove { add: Box::new(meta.clone()), remove: plan.input_files.clone() };
+                            let combined = crate::core::manifest::VersionEdit::CombinedAddRemove {
+                                add: Box::new(meta.clone()),
+                                remove: plan.input_files.clone(),
+                            };
                             {
                                 let vm_start = std::time::Instant::now();
                                 version_manager.apply_edit_sync(combined)?;
@@ -328,10 +361,18 @@ impl CompactionController {
                             }
                             // Also update the manifest's persisted sequence to reflect the
                             // largest sequence present in the newly written compacted SST.
-                                if let Some(lg) = meta.largest_seq {
-                                let current_seq = Manifest::load_with_retry(&db_path, 5, std::time::Duration::from_millis(10)).unwrap_or_default().last_persisted_sequence;
+                            if let Some(lg) = meta.largest_seq {
+                                let current_seq = Manifest::load_with_retry(
+                                    &db_path,
+                                    5,
+                                    std::time::Duration::from_millis(10),
+                                )
+                                .unwrap_or_default()
+                                .last_persisted_sequence;
                                 let seq_to_set = std::cmp::max(current_seq, lg);
-                                let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence { sequence: seq_to_set };
+                                let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
+                                    sequence: seq_to_set,
+                                };
                                 {
                                     let vm2_start = std::time::Instant::now();
                                     version_manager.apply_edit_sync(seq_edit)?;
@@ -381,7 +422,8 @@ impl CompactionController {
                             }
                             // Set background error indicator if provided
                             if let Some(bg) = &background_error {
-                                *bg.write() = Some(crate::error::MidgeError::internal(e.to_string()));
+                                *bg.write() =
+                                    Some(crate::error::MidgeError::internal(e.to_string()));
                             }
                         }
                     }
@@ -724,8 +766,13 @@ impl Drop for CompactionController {
         if let Some(handle) = self.handle.take() {
             eprintln!("[SHUTDOWN] CompactionController::drop - waiting for worker thread to join");
             match handle.join() {
-                Ok(_) => eprintln!("[SHUTDOWN] CompactionController worker thread joined successfully"),
-                Err(e) => eprintln!("[SHUTDOWN] CompactionController worker thread panicked: {:?}", e),
+                Ok(_) => {
+                    eprintln!("[SHUTDOWN] CompactionController worker thread joined successfully")
+                }
+                Err(e) => eprintln!(
+                    "[SHUTDOWN] CompactionController worker thread panicked: {:?}",
+                    e
+                ),
             }
         }
         eprintln!("[SHUTDOWN] CompactionController::drop - complete");

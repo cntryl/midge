@@ -3,7 +3,6 @@
 //! This module defines generic SST reader/writer traits and re-exports
 //! filesystem-backed adapters from `fs`.
 
-use crate::error::MidgeError;
 use crate::error::MidgeResult;
 use bytes::Bytes;
 
@@ -191,6 +190,7 @@ pub trait SstReaderFactory: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::MidgeError;
 
     fn run_sst_behavior_tests(
         make_writer: impl Fn() -> MidgeResult<Box<dyn DynSstWriter>>,

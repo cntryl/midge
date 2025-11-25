@@ -36,7 +36,7 @@ fn should_serve_reads_given_compaction_in_progress() {
         let started_clone = Arc::clone(&started);
         let compaction_handle = thread::spawn(move || {
             // Wait until main thread signals to begin compaction
-            let _ = wait_for_signal_default(&start_rx);
+            wait_for_signal_default(&start_rx);
             // Notify readers that compaction is beginning
             started_clone.store(true, Ordering::SeqCst);
             let _ = engine_clone.compact_all();
@@ -182,7 +182,7 @@ fn should_handle_scan_given_files_being_merged() {
         });
 
         // Wait until compaction is signalled as started, then perform range scans while compaction runs
-        let _ = wait_for_signal_default(&start_rx_scan);
+        wait_for_signal_default(&start_rx_scan);
         // Perform range scans while compaction runs
         let engine_clone = Arc::clone(&engine);
         let cf_clone = cf.clone();
@@ -321,7 +321,7 @@ fn should_maintain_read_consistency_given_compaction_updates_manifest() {
                     // Use the snapshot read so this thread observes a consistent
                     // view while compaction runs and we can assert equality.
                     let result = engine_clone
-                        .get_at(&cf_clone_for_thread, key.as_bytes(), &*snapshot_clone)
+                        .get_at(&cf_clone_for_thread, key.as_bytes(), &snapshot_clone)
                         .unwrap();
                     assert_eq!(result, Some(expected_value.clone()));
                 }
@@ -335,7 +335,7 @@ fn should_maintain_read_consistency_given_compaction_updates_manifest() {
         // Assert - Values remain consistent after compaction
         for (key, expected_value) in &expected_values {
             // Verify snapshot-read matches the value we recorded before compaction
-            let got = engine.get_at(&cf, key.as_bytes(), &*snapshot).unwrap();
+            let got = engine.get_at(&cf, key.as_bytes(), &snapshot).unwrap();
             assert_eq!(&got, &Some(expected_value.clone()));
         }
     }

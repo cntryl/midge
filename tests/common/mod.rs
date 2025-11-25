@@ -822,7 +822,6 @@ where
 /// ```rust
 /// use std::time::Duration;
 ///
-/// #[test]
 /// fn test_with_timeout() {
 ///     run_with_timeout(
 ///         || {

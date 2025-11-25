@@ -266,7 +266,7 @@ fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested()
         // Signal that the transaction is ready and still uncommitted
         ready_tx.send(()).unwrap();
         // Wait until main thread tells us to finish
-        let _ = wait_for_signal(&done_rx, TEST_RECV_TIMEOUT);
+        wait_for_signal(&done_rx, TEST_RECV_TIMEOUT);
         txn
     });
 

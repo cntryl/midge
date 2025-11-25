@@ -1800,8 +1800,8 @@ mod tests {
     fn should_record_fsync_attempts_with_test_hooks() {
         // Arrange
         let dir = TempDir::new().expect("temp dir");
-        let mut wal = Wal::open_with_mode(dir.path(), WalSyncMode::BatchedSync)
-            .expect("open batched wal");
+        let mut wal =
+            Wal::open_with_mode(dir.path(), WalSyncMode::BatchedSync).expect("open batched wal");
         let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::RecordOnly);
         wal.set_test_hooks(Some(hooks.clone()));
 

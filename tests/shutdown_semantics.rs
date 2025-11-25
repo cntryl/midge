@@ -126,8 +126,15 @@ fn should_abort_long_running_uploads_given_shutdown_signal() {
             let cf = eng.default_column_family();
             let result = eng.get(&cf, b"key1").expect("get");
             assert!(result.is_some(), "Data should survive slow uploads");
-            assert!(backend_clone2.upload_count() > 0, "Uploads should be attempted");
-            assert_eq!(backend_clone2.upload_failure_count(), 0, "Uploads should not fail");
+            assert!(
+                backend_clone2.upload_count() > 0,
+                "Uploads should be attempted"
+            );
+            assert_eq!(
+                backend_clone2.upload_failure_count(),
+                0,
+                "Uploads should not fail"
+            );
         },
     );
 }
@@ -233,7 +240,11 @@ fn should_handle_rapid_shutdown_restart_cycles_without_data_loss_stressed() {
                 for i in 0..50 {
                     let key = format!("cycle{}_key{:02}", cycle_id, i).into_bytes();
                     let result = eng.get(&cf, &key).expect("get after cycle restart");
-                    assert!(result.is_some(), "Key from cycle {} should persist", cycle_id);
+                    assert!(
+                        result.is_some(),
+                        "Key from cycle {} should persist",
+                        cycle_id
+                    );
                 }
 
                 // Verify keys from all previous cycles are still present

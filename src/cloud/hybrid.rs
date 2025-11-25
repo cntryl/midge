@@ -705,7 +705,7 @@ impl HybridStorage {
     /// Shutdown background workers gracefully.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        
+
         // Join all worker threads
         let mut handles = self.worker_handles.lock();
         for handle in handles.drain(..) {
@@ -720,7 +720,7 @@ impl Drop for HybridStorage {
     fn drop(&mut self) {
         eprintln!("[SHUTDOWN] HybridStorage::drop - signaling workers to stop");
         self.shutdown.store(true, Ordering::Relaxed);
-        
+
         // Join all worker threads
         let mut handles = self.worker_handles.lock();
         for handle in handles.drain(..) {

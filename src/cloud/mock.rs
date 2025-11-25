@@ -160,7 +160,6 @@ impl StorageBackend for MockCloudBackend {
         // Attempt to reserve a successful upload slot atomically.
         // This makes the fail-after semantics reliable under concurrency.
         let fail_after = self.fail_upload_after.load(Ordering::SeqCst);
-        let mut reserved = false;
         loop {
             let curr = self.upload_count.load(Ordering::SeqCst);
             if curr >= fail_after {
@@ -176,7 +175,6 @@ impl StorageBackend for MockCloudBackend {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    reserved = true;
                     break;
                 }
                 Err(_) => continue, // retry on race
@@ -191,10 +189,8 @@ impl StorageBackend for MockCloudBackend {
         }
         if let Err(e) = std::fs::write(&path, &data) {
             // writing failed; undo reserved slot and mark a failed upload
-            if reserved {
-                self.upload_count.fetch_sub(1, Ordering::SeqCst);
-                self.upload_failure_count.fetch_add(1, Ordering::SeqCst);
-            }
+            self.upload_count.fetch_sub(1, Ordering::SeqCst);
+            self.upload_failure_count.fetch_add(1, Ordering::SeqCst);
             return Err(e.into());
         }
         self.etags

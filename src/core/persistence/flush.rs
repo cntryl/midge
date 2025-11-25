@@ -490,13 +490,13 @@ pub(crate) fn compute_bounds(
         // invariants are violated; return the safe behavior instead.
         if smallest_key
             .as_ref()
-            .map_or(true, |sk| start.as_slice() < sk.as_slice())
+            .is_none_or(|sk| start.as_slice() < sk.as_slice())
         {
             smallest_key = Some(start.clone());
         }
         if largest_key
             .as_ref()
-            .map_or(true, |lk| end.as_slice() > lk.as_slice())
+            .is_none_or(|lk| end.as_slice() > lk.as_slice())
         {
             largest_key = Some(end.clone());
         }

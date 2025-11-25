@@ -292,7 +292,7 @@ impl WalBatchManager {
                 // Bounded retry with shutdown checking
                 const MAX_RETRIES: usize = 3;
                 let mut last_error = None;
-                
+
                 for attempt in 0..MAX_RETRIES {
                     // Check shutdown signal before each attempt
                     if shutdown_signal.load(std::sync::atomic::Ordering::Relaxed) {
@@ -377,7 +377,8 @@ impl WalBatchManager {
     /// Does NOT wait for workers to complete - caller should use sync() or wait for
     /// pending promises if coordinated shutdown is required.
     pub fn shutdown(&self) {
-        self.shutdown_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shutdown_signal
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

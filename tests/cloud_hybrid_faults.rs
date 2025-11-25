@@ -46,14 +46,12 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
             // Allow exactly one new successful upload (e.g. first SST/manifest), then fail.
             backend.set_fail_upload_after(1);
 
-            let attempts_before =
-                backend.upload_count() + backend.upload_failure_count();
+            let attempts_before = backend.upload_count() + backend.upload_failure_count();
 
             // Flush will attempt to upload SST/manifest to cloud and may encounter failures.
             let _ = eng.flush_cf(&cf); // error is acceptable under simulated cloud failure
 
-            let attempts_after =
-                backend.upload_count() + backend.upload_failure_count();
+            let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             // Assert: at least one upload attempt happened.
             assert!(
@@ -188,21 +186,20 @@ fn should_not_poison_wal_startup_given_fail_upload_after_is_armed_post_open() {
         opts,
         |eng| {
             let cf = eng.default_column_family();
-            eng.put(&cf, b"key-wal", b"value").expect("put before fail-after");
+            eng.put(&cf, b"key-wal", b"value")
+                .expect("put before fail-after");
 
             // Arm failure only after engine and WAL uploader are fully initialized.
             backend.reset_counters();
             backend.set_fail_upload_after(1);
 
-            let attempts_before =
-                backend.upload_count() + backend.upload_failure_count();
+            let attempts_before = backend.upload_count() + backend.upload_failure_count();
 
             // Act: force a flush; this should make progress (attempt uploads) and not hang,
             // even if some cloud uploads fail after the first success.
             let _ = eng.flush_cf(&cf);
 
-            let attempts_after =
-                backend.upload_count() + backend.upload_failure_count();
+            let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             assert!(
                 attempts_after > attempts_before,
@@ -256,13 +253,11 @@ fn should_allow_clean_shutdown_given_cloud_upload_failures_after_flush_attempts(
             backend.reset_counters();
             backend.set_fail_upload_after(1);
 
-            let attempts_before =
-                backend.upload_count() + backend.upload_failure_count();
+            let attempts_before = backend.upload_count() + backend.upload_failure_count();
 
             let _ = eng.flush_cf(&cf);
 
-            let attempts_after =
-                backend.upload_count() + backend.upload_failure_count();
+            let attempts_after = backend.upload_count() + backend.upload_failure_count();
             assert!(
                 attempts_after > attempts_before,
                 "flush under fail-after should still attempt cloud uploads",
@@ -320,8 +315,7 @@ fn should_not_block_puts_when_background_uploads_are_flaky() {
                 eng.put(&cf, &key, &value).expect("put under flaky cloud");
             }
 
-            let _attempts =
-                backend.upload_count() + backend.upload_failure_count();
+            let _attempts = backend.upload_count() + backend.upload_failure_count();
         },
         |eng| {
             backend.reset_counters();
@@ -329,7 +323,9 @@ fn should_not_block_puts_when_background_uploads_are_flaky() {
 
             let cf = eng.default_column_family();
             // Assert: at least some keys are readable; the exact coverage is handled elsewhere.
-            let got = eng.get(&cf, b"k\x00").expect("get one key after flaky puts");
+            let got = eng
+                .get(&cf, b"k\x00")
+                .expect("get one key after flaky puts");
             assert!(
                 got.is_some(),
                 "engine should remain readable after flaky upload activity",
@@ -363,18 +359,17 @@ fn should_report_upload_attempts_when_manifest_sync_happens_under_fail_after() {
         opts,
         |eng| {
             let cf = eng.default_column_family();
-            eng.put(&cf, b"m-key", b"m-val").expect("put before manifest sync");
+            eng.put(&cf, b"m-key", b"m-val")
+                .expect("put before manifest sync");
 
             backend.reset_counters();
             backend.set_fail_upload_after(1);
 
-            let attempts_before =
-                backend.upload_count() + backend.upload_failure_count();
+            let attempts_before = backend.upload_count() + backend.upload_failure_count();
 
             let _ = eng.flush_cf(&cf);
 
-            let attempts_after =
-                backend.upload_count() + backend.upload_failure_count();
+            let attempts_after = backend.upload_count() + backend.upload_failure_count();
             assert!(
                 attempts_after > attempts_before,
                 "manifest-related uploads should still be attempted under fail-after",
@@ -386,7 +381,9 @@ fn should_report_upload_attempts_when_manifest_sync_happens_under_fail_after() {
             backend.set_fail_upload_after(usize::MAX);
 
             let cf = eng.default_column_family();
-            let got = eng.get(&cf, b"m-key").expect("get after manifest fail-after");
+            let got = eng
+                .get(&cf, b"m-key")
+                .expect("get after manifest fail-after");
             assert!(
                 got.is_some(),
                 "data should still be discoverable after manifest uploads under fail-after",

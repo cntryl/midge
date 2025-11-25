@@ -1,8 +1,8 @@
 use crate::error::MidgeResult;
+use crate::wal::WalFile;
 use crate::wal::{WalOpKind, WalPos, WalRecord};
 use parking_lot::Mutex;
 use std::sync::Arc;
-use crate::wal::WalFile;
 
 use super::shared::WalBatchManager;
 
@@ -44,7 +44,12 @@ impl CloudWalWriter {
         manifest: Option<Arc<parking_lot::Mutex<crate::core::manifest::Manifest>>>,
         db_path: Option<std::path::PathBuf>,
     ) -> Self {
-        let batch_manager = Arc::new(WalBatchManager::new(backend.clone(), batch_size, manifest, db_path.clone()));
+        let batch_manager = Arc::new(WalBatchManager::new(
+            backend.clone(),
+            batch_size,
+            manifest,
+            db_path.clone(),
+        ));
 
         // Create optional local WAL writer when db_path is provided so we can
         // immediately persist records to local storage for local WAL sync
@@ -54,7 +59,11 @@ impl CloudWalWriter {
             match WalFile::open(&wal_dir) {
                 Ok(w) => Some(Arc::new(w) as Arc<dyn crate::wal::WalWriter>),
                 Err(e) => {
-                    tracing::warn!("failed to open local wal writer at {}: {}", wal_dir.display(), e);
+                    tracing::warn!(
+                        "failed to open local wal writer at {}: {}",
+                        wal_dir.display(),
+                        e
+                    );
                     None
                 }
             }

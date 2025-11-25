@@ -18,6 +18,8 @@
 //! };
 //! ```
 
+type ManifestUpdateNotifiers = Arc<Mutex<Vec<(usize, crossbeam::channel::Sender<()>)>>>;
+
 use crossbeam::channel;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -218,7 +220,7 @@ pub struct TestHooks {
     /// Optional deterministic gate for coordinating flushes
     flush_gate: Arc<Mutex<Option<Arc<FlushGateState>>>>,
     /// Notifiers for waiting on manifest updates
-    manifest_update_notifiers: Arc<Mutex<Vec<(usize, channel::Sender<()>)>>>,
+    manifest_update_notifiers: ManifestUpdateNotifiers,
     /// Counter for unique manifest notifier ids
     manifest_notifier_id: Arc<AtomicUsize>,
 }

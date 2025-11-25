@@ -105,7 +105,10 @@ impl Drop for FlushCoordinator {
             eprintln!("[SHUTDOWN] FlushCoordinator::drop - waiting for worker thread to join");
             match handle.join() {
                 Ok(_) => eprintln!("[SHUTDOWN] FlushCoordinator worker thread joined successfully"),
-                Err(e) => eprintln!("[SHUTDOWN] FlushCoordinator worker thread panicked: {:?}", e),
+                Err(e) => eprintln!(
+                    "[SHUTDOWN] FlushCoordinator worker thread panicked: {:?}",
+                    e
+                ),
             }
         }
         eprintln!("[SHUTDOWN] FlushCoordinator::drop - complete");
