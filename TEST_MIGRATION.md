@@ -85,7 +85,7 @@ Prioritized by dependency chain and bug-catching value:
 | 8 | `column_family_isolation.rs` | Data isolation between CFs | ✅ (merged into #7) |
 | 9 | `compaction_basic.rs` | Space reclamation; can run after data written | ✅ |
 | 10 | `compaction_levels.rs` | Multi-level compaction behavior | ✅ |
-| 11 | `engine_iterators.rs` | Advanced iteration patterns | ⬜ |
+| 11 | `engine_iterators.rs` | Advanced iteration patterns | ✅ |
 | 12 | `engine_delete_range.rs` | Range tombstones are complex | ⬜ |
 | 13 | `engine_merge_operators.rs` | Advanced feature, fewer users | ⬜ |
 | 14 | `concurrency_*.rs` | Stress tests; need solid base first | ⬜ |
@@ -114,7 +114,8 @@ Prioritized by dependency chain and bug-catching value:
 | `column_family_lifecycle.rs` | ✅ | 28 | LocalDisk | Create, drop, list, isolation, persistence, lookup |
 | `compaction_basic.rs` | ✅ | 16 | LocalDisk, CloudBacked | Manual compaction, data correctness, tombstones, snapshots, background |
 | `compaction_levels.rs` | ✅ | 15 | LocalDisk, CloudBacked | L0 sublevels, level size enforcement, cascading, statistics |
-| (remaining ~27 files) | ⬜ | ~163 | TBD | Not started |
+| `engine_iterators.rs` | ✅ | 22 | LocalDisk, CloudBacked | Forward/reverse scans, seek, tombstones, streaming, pagination |
+| (remaining ~26 files) | ⬜ | ~141 | TBD | Not started |
 
 ---
 
@@ -202,19 +203,44 @@ Point-in-time consistent views.
 ```
 **Source files**: `engine_snapshots.rs`, `snapshot_lifecycle.rs`, `snapshot_lifecycle_compaction.rs`
 
-### `engine_iterators.rs` (~10 tests)
-Iterator behavior and edge cases.
+### `engine_iterators.rs` ✅ (22 tests)
+Iterator behavior, scanning, and streaming operations.
 ```
-- should_iterate_all_keys_in_order
-- should_iterate_in_reverse
-- should_seek_to_key
-- should_seek_for_prev
-- should_handle_iterator_after_compaction
-- should_handle_iterator_across_sst_boundaries
-- should_handle_tombstones_during_iteration
-- should_handle_merge_operands_during_iteration
-- should_support_iterator_refresh
-- should_handle_concurrent_writes_during_iteration
+BASIC ITERATION:
+- should_iterate_all_keys_in_order_given_populated_db_when_scanning
+- should_iterate_in_reverse_given_reverse_query_when_scanning
+- should_limit_results_given_limit_query_when_scanning
+- should_return_empty_given_empty_db_when_scanning
+
+SEEK OPERATIONS:
+- should_return_next_key_given_seek_to_missing_key_when_scanning
+- should_return_empty_given_seek_past_end_when_scanning
+- should_return_empty_given_invalid_range_when_start_greater_than_end
+
+ITERATOR STABILITY:
+- should_continue_safely_given_compaction_when_iterating_with_snapshot
+- should_handle_gracefully_given_sst_removed_when_iterating_with_snapshot
+- should_iterate_consistently_given_data_spans_sst_boundaries_when_scanning
+- should_yield_stable_results_given_flush_in_progress_when_scanning
+
+TOMBSTONE HANDLING:
+- should_skip_deleted_keys_given_tombstones_when_scanning
+- should_respect_range_tombstones_given_delete_range_when_scanning
+- should_return_latest_value_given_interleaved_puts_deletes_when_scanning
+
+STREAMING SCANS:
+- should_match_regular_scan_given_streaming_scan_when_comparing
+- should_respect_limit_given_streaming_scan_when_limited
+- should_apply_tombstones_given_streaming_scan_when_keys_deleted
+- should_handle_concurrent_streaming_scans_when_multiple_threads
+
+PAGINATION:
+- should_paginate_results_given_chunked_queries_when_iterating
+- should_produce_identical_results_given_repeated_scans_when_rewinding
+
+LARGE DATASETS:
+- should_handle_large_scan_given_many_keys_when_iterating
+- should_handle_large_streaming_scan_given_multiple_ssts_when_spanning
 ```
 **Source files**: `engine_iterator_edge.rs`, `iterator_lifecycle.rs`, `iterator_stability_under_pressure.rs`, `engine_streaming.rs`
 
@@ -885,7 +911,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `engine_compaction.rs` | `compaction_basic.rs` | ⬜ |
 | `engine_delete_range.rs` | `engine_delete_range.rs` | ⬜ |
 | `engine_delete_range_core.rs` | `engine_delete_range.rs` | ⬜ |
-| `engine_iterator_edge.rs` | `engine_iterators.rs` | ⬜ |
+| `engine_iterator_edge.rs` | `engine_iterators.rs` | ✅ |
 | `engine_merge_operator_correctness.rs` | `engine_merge_operators.rs` | ⬜ |
 | `engine_merge_operator_errors.rs` | `engine_merge_operators.rs` | ⬜ |
 | `engine_multi_get.rs` | `engine_basic.rs` | ✅ |
@@ -893,7 +919,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `engine_scans.rs` | `engine_basic.rs` | ✅ |
 | `engine_snapshots.rs` | `engine_snapshots.rs` | ⬜ |
 | `engine_sst_operations.rs` | `engine_basic.rs` | ⬜ |
-| `engine_streaming.rs` | `engine_iterators.rs` | ⬜ |
+| `engine_streaming.rs` | `engine_iterators.rs` | ✅ |
 | `engine_transactions.rs` | `transaction_basic.rs` | ⬜ |
 | `engine_wal_recovery.rs` | `durability_wal.rs` | ✅ |
 | `engine_write_batch_atomicity.rs` | `engine_write_batch.rs` | ⬜ |
@@ -902,8 +928,8 @@ Maps each legacy file to its target location(s) in the new structure.
 | `error_handling_core.rs` | `error_handling.rs` | ⬜ |
 | `error_handling_flush.rs` | `error_handling.rs` | ⬜ |
 | `fitz_style_workloads.rs` | `stress_workloads.rs` | ⬜ |
-| `iterator_lifecycle.rs` | `engine_iterators.rs` | ⬜ |
-| `iterator_stability_under_pressure.rs` | `engine_iterators.rs` | ⬜ |
+| `iterator_lifecycle.rs` | `engine_iterators.rs` | ✅ |
+| `iterator_stability_under_pressure.rs` | `engine_iterators.rs` | ✅ |
 | `large_value_stress.rs` | `stress_large_values.rs` | ⬜ |
 | `lsm_global_invariants.rs` | `invariants_lsm.rs` | ⬜ |
 | `memory_mode_no_disk_writes.rs` | `memory_mode.rs` | ⬜ |
