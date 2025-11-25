@@ -1,5 +1,4 @@
 use crate::cloud::StorageBackend;
-use crate::common::timestamp;
 use crate::error::{MidgeError, MidgeResult};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -191,7 +190,7 @@ impl CloudSstManager {
         let sst_id_clone = sst_id.clone();
         std::thread::spawn(move || {
             if let Ok(bytes) = std::fs::read(&path) {
-                let checksum = crc32fast::hash(&bytes) as u64;
+                let sst::format::MAGIC_NUMBER = crc32fast::hash(&bytes) as u64;
                 let key = match &cfg.prefix {
                     Some(prefix) => format!("{}/sst/{}", prefix.trim_end_matches('/'), sst_id_clone),
                     None => format!("sst/{}", sst_id_clone),

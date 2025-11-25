@@ -135,13 +135,11 @@ fn should_maintain_correctness_under_rapid_cache_churn() {
     // Arrange
     let dir = test_temp_dir();
     let mock_backend = Arc::new(MockCloudBackend::new());
-    let cache_size = 1024 * 5; // Very small 5KB cache to force evictions
-
     let hybrid = Arc::new(
         HybridStorage::new(dir.path().to_path_buf(), mock_backend.clone(), 512 * 1024)
             .expect("failed to create hybrid storage"),
     );
-    let _handles = hybrid.spawn_background_workers();
+    hybrid.spawn_background_workers();
 
     let storage = Arc::new(HybridStorageBackend::new(hybrid.clone(), true));
 
@@ -196,7 +194,7 @@ fn should_upload_to_cloud_asynchronously_without_blocking_writes() {
         HybridStorage::new(dir.path().to_path_buf(), mock_backend.clone(), cache_size)
             .expect("failed to create hybrid storage"),
     );
-    let _handles = hybrid.spawn_background_workers();
+    hybrid.spawn_background_workers();
 
     let storage = Arc::new(HybridStorageBackend::new(hybrid.clone(), true));
 
@@ -246,7 +244,7 @@ fn should_recover_from_cache_directory_deletion() {
         HybridStorage::new(dir.path().to_path_buf(), mock_backend.clone(), cache_size)
             .expect("failed to create hybrid storage"),
     );
-    let _handles = hybrid.spawn_background_workers();
+    hybrid.spawn_background_workers();
 
     let storage = Arc::new(HybridStorageBackend::new(hybrid.clone(), true));
 
@@ -282,7 +280,7 @@ fn should_track_cache_metrics_accurately() {
         HybridStorage::new(dir.path().to_path_buf(), mock_backend.clone(), cache_size)
             .expect("failed to create hybrid storage"),
     );
-    let _handles = hybrid.spawn_background_workers();
+    hybrid.spawn_background_workers();
 
     let storage = Arc::new(HybridStorageBackend::new(hybrid.clone(), true));
 

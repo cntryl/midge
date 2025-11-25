@@ -26,7 +26,7 @@ impl WorkerHandle {
     /// Wait for the worker to exit, consuming the handle.
     pub fn join(mut self) {
         if let Some(handle) = self.join.take() {
-            if let Err(_) = handle.join() {
+            if handle.join().is_err() {
                 tracing::warn!("Worker '{}' panicked during shutdown", self.name);
             }
         }
@@ -37,7 +37,7 @@ impl Drop for WorkerHandle {
     fn drop(&mut self) {
         if let Some(handle) = self.join.take() {
             // Best-effort join on drop - don't wait forever
-            if let Err(_) = handle.join() {
+            if handle.join().is_err() {
                 tracing::warn!("Worker '{}' panicked during drop", self.name);
             }
         }

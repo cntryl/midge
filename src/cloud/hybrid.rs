@@ -709,7 +709,7 @@ impl HybridStorage {
         // Join all worker threads
         let mut handles = self.worker_handles.lock();
         for handle in handles.drain(..) {
-            if let Err(_) = handle.join() {
+            if handle.join().is_err() {
                 debug!("Worker thread panicked during shutdown");
             }
         }
@@ -1078,7 +1078,7 @@ mod tests {
         let hybrid = HybridStorage::new(cache_dir, backend.clone(), 1024 * 1024).unwrap();
 
         // Act
-        let _handles = hybrid.spawn_background_workers();
+        hybrid.spawn_background_workers();
 
         // Write async (queues upload)
         hybrid
