@@ -123,7 +123,11 @@ Prioritized by dependency chain and bug-catching value:
 | `concurrency_delete_range.rs` | ✅ | 4 | All 3 | Concurrent delete ranges, overlapping ranges, interleaved operations |
 | `stress_large_values.rs` | ✅ | 11 | All 3 (4 disk-only) | Large value storage, mixed sizes, backpressure, crash recovery, snapshots |
 | `stress_workloads.rs` | ✅ | 11 | All 3 (5 disk-only) | Hot partition, high throughput, TTL patterns, append-only, mixed workloads |
-| (remaining ~18 files) | ⬜ | ~80 | TBD | Not started |
+| `checkpoint.rs` | ✅ | 26 | LocalDisk | Creation, consistency, isolation, multi-CF, concurrent, recovery, error handling |
+| `cloud_durability.rs` | ✅ | 12 | CloudBacked (4 configs) | SST upload, manifest persistence, crash recovery, concurrent writes, restart |
+| `cloud_consistency.rs` | ✅ | 6 | CloudBacked | Listing lag, eventual consistency, checksums, corrupted blobs, sync |
+| `cloud_hybrid.rs` | ✅ | 6 | CloudBacked (hybrid) | Cache eviction, concurrent access, churn, async uploads, recovery, metrics |
+| (remaining ~14 files) | ⬜ | ~45 | TBD | Not started |
 
 ---
 
@@ -893,12 +897,12 @@ Maps each legacy file to its target location(s) in the new structure.
 | `atomicity_wal_manifest_sst.rs` | `durability_atomicity.rs` | ⬜ |
 | `autotune_stability.rs` | `autotune.rs` | ⬜ |
 | `autotune_unit.rs` | `autotune.rs` | ⬜ |
-| `checkpoint_compaction_recovery_triple.rs` | `checkpoint.rs` | ⬜ |
-| `checkpoint_lifecycle.rs` | `checkpoint.rs` | ⬜ |
-| `cloud_consistency_edge_cases.rs` | `cloud_consistency.rs` | ⬜ |
-| `cloud_durability.rs` | `cloud_durability.rs` | ⬜ |
-| `cloud_hybrid_faults.rs` | `cloud_durability.rs`, `cloud_consistency.rs` | ⬜ |
-| `cloud_hybrid_stress.rs` | `cloud_hybrid.rs` | ⬜ |
+| `checkpoint_compaction_recovery_triple.rs` | `checkpoint.rs` | ✅ |
+| `checkpoint_lifecycle.rs` | `checkpoint.rs` | ✅ |
+| `cloud_consistency_edge_cases.rs` | `cloud_consistency.rs` | ✅ |
+| `cloud_durability.rs` | `cloud_durability.rs` | ✅ |
+| `cloud_hybrid_faults.rs` | `cloud_durability.rs`, `cloud_consistency.rs` | ✅ |
+| `cloud_hybrid_stress.rs` | `cloud_hybrid.rs` | ✅ |
 | `cloud_real_providers.rs` | 🗑️ (requires real credentials) | ⬜ |
 | `column_family_isolation.rs` | `column_family_isolation.rs` | ⬜ |
 | `column_family_lifecycle.rs` | `column_family_lifecycle.rs` | ⬜ |
@@ -933,8 +937,8 @@ Maps each legacy file to its target location(s) in the new structure.
 | `engine_atomics.rs` | `engine_basic.rs` | ✅ |
 | `engine_basic_ops.rs` | `engine_basic.rs` | ✅ |
 | `engine_cf_merge_operators.rs` | `engine_merge_operators.rs` | ✅ |
-| `engine_checkpoint.rs` | `checkpoint.rs` | ⬜ |
-| `engine_checkpoint_stress.rs` | `checkpoint.rs` | ⬜ |
+| `engine_checkpoint.rs` | `checkpoint.rs` | ✅ |
+| `engine_checkpoint_stress.rs` | `checkpoint.rs` | ✅ |
 | `engine_compaction.rs` | `compaction_basic.rs` | ⬜ |
 | `engine_delete_range.rs` | `engine_delete_range.rs` | ✅ |
 | `engine_delete_range_core.rs` | `engine_delete_range.rs` | ✅ |

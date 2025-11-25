@@ -375,7 +375,7 @@ fn should_scan_correctly_given_mixed_size_values_when_iterating() {
 
         // Insert values of varying sizes
         eng.put(&cf, b"a_tiny", b"t").expect("put");
-        eng.put(&cf, b"b_small", &vec![b's'; 100]).expect("put");
+        eng.put(&cf, b"b_small", &[b's'; 100]).expect("put");
         eng.put(&cf, b"c_medium", &vec![b'm'; 1024]).expect("put");
         eng.put(&cf, b"d_large", &vec![b'L'; 1024 * 16]).expect("put");
 

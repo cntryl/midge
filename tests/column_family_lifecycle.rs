@@ -468,7 +468,7 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
         |eng| {
             // Assert - data should persist
             let cf = eng.get_column_family("data_cf").expect("get cf");
-            assert_get_equals_cf(&eng, &cf, b"persistent_key", b"persistent_value");
+            assert_get_equals_cf(eng, &cf, b"persistent_key", b"persistent_value");
         },
     );
 }
