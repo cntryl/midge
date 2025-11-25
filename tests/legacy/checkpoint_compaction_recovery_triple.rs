@@ -75,6 +75,7 @@ fn should_apply_wal_replay_correctly_when_checkpoint_excludes_pending_tombstones
             eng.create_checkpoint(&cp_dir).unwrap();
         },
         |eng| {
+            // Assert
             // After restart the WAL replay should return a consistent view
             let cf = eng.default_column_family();
             // Either the delete applied or the checkpoint captured the state: deterministic check is that engine doesn't panic
@@ -84,7 +85,7 @@ fn should_apply_wal_replay_correctly_when_checkpoint_excludes_pending_tombstones
 }
 
 #[test]
-fn should_resolve_conflict_between_checkpoint_and_inflight_compaction_on_restart() {
+fn should_resolve_checkpoint_conflict_given_inflight_compaction_when_restarting() {
     // Arrange
     let (tmp, eng) = new_engine();
     let cf = eng.default_column_family();

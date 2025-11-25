@@ -222,7 +222,7 @@ fn should_not_poison_wal_startup_given_fail_upload_after_is_armed_post_open() {
 
 #[test]
 fn should_allow_clean_shutdown_given_cloud_upload_failures_after_flush_attempts() {
-    // Arrange: cloud-backed engine with a mock backend where uploads may fail
+    // Arrange
     let dir = test_temp_dir();
     let backend = Arc::new(MockCloudBackend::new());
 
@@ -241,6 +241,7 @@ fn should_allow_clean_shutdown_given_cloud_upload_failures_after_flush_attempts(
         ..Default::default()
     };
 
+    // Act
     with_engine_restart(
         opts,
         |eng| {
@@ -344,7 +345,7 @@ fn should_not_block_puts_when_background_uploads_are_flaky() {
 
 #[test]
 fn should_report_upload_attempts_when_manifest_sync_happens_under_fail_after() {
-    // Arrange: engine with cloud-backed manifest writes and fail-after semantics
+    // Arrange
     let dir = test_temp_dir();
     let backend = Arc::new(MockCloudBackend::new());
 
@@ -363,6 +364,7 @@ fn should_report_upload_attempts_when_manifest_sync_happens_under_fail_after() {
         ..Default::default()
     };
 
+    // Act
     with_engine_restart(
         opts,
         |eng| {

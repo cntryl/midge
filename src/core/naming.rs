@@ -277,8 +277,8 @@ mod tests {
     }
 
     #[test]
-    fn initialize_sequences_does_not_lower_wal_seq() {
-        // Arrange: make the in-memory allocator higher than manifest
+    fn should_not_lower_wal_seq_given_higher_allocator_when_initializing_sequences() {
+        // Arrange
         NEXT_WAL_SEQ.store(100, Ordering::Relaxed);
         let manifest = crate::core::manifest::Manifest {
             next_wal_seq: 1,
@@ -288,7 +288,7 @@ mod tests {
         // Act
         initialize_sequences(&manifest);
 
-        // Assert: allocator should not be lowered
+        // Assert
         let nxt = current_next_wal_seq();
         assert!(
             nxt >= 100,
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_sequences_does_not_lower_sst_seq_per_cf() {
+    fn should_not_lower_sst_seq_given_higher_allocator_when_initializing_sequences_per_cf() {
         // Arrange
         NEXT_SST_SEQS.clear();
         NEXT_SST_SEQS.insert(7, AtomicU64::new(200));
@@ -307,7 +307,7 @@ mod tests {
         // Act
         initialize_sequences(&manifest);
 
-        // Assert: per-CF allocator should not be lowered
+        // Assert
         let entry = NEXT_SST_SEQS.get(&7).expect("entry must exist");
         let val = entry.load(Ordering::Relaxed);
         assert!(val >= 200, "SST allocator for CF 7 was lowered");

@@ -47,7 +47,7 @@ fn should_handle_long_lived_snapshots_with_massive_range_tombstones() {
 }
 
 #[test]
-fn should_apply_range_tombstones_across_cf_flush_and_compaction() {
+fn should_apply_range_tombstones_given_cf_flush_when_compacting() {
     // Arrange
     let (tmp, eng) = new_engine();
     let cf = eng.default_column_family();

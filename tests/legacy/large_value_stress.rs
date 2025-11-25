@@ -4,7 +4,7 @@ use common::*;
 use bytes::Bytes;
 
 #[test]
-fn should_flush_memtable_with_mixed_small_and_large_values() {
+fn should_flush_memtable_given_mixed_value_sizes_when_small_with_large_present() {
     // Arrange
     let (tmp, eng) = new_engine();
     let cf = eng.default_column_family();

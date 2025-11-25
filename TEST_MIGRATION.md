@@ -88,7 +88,7 @@ Prioritized by dependency chain and bug-catching value:
 | 11 | `engine_iterators.rs` | Advanced iteration patterns | ✅ |
 | 12 | `engine_delete_range.rs` | Range tombstones are complex | ✅ |
 | 13 | `engine_merge_operators.rs` | Advanced feature, fewer users | ✅ (exposes bug) |
-| 14 | `concurrency_*.rs` | Stress tests; need solid base first | ⬜ |
+| 14 | `concurrency_*.rs` | Stress tests; need solid base first | ✅ |
 | 15 | `stress_*.rs` | Soak/capacity tests last | ⬜ |
 
 **Logic:**
@@ -117,7 +117,11 @@ Prioritized by dependency chain and bug-catching value:
 | `engine_iterators.rs` | ✅ | 22 | LocalDisk, CloudBacked | Forward/reverse scans, seek, tombstones, streaming, pagination |
 | `engine_delete_range.rs` | ✅ | 16 | LocalDisk, CloudBacked | Range deletion, recovery, compaction, snapshots, overlapping |
 | `engine_merge_operators.rs` | ✅ | 23 | All 3 (2 fail) | **BUG**: CloudBacked doesn't persist merge operands correctly - returns last operand instead of resolved sum after recovery |
-| (remaining ~25 files) | ⬜ | ~125 | TBD | Not started |
+| `concurrency_writes.rs` | ✅ | 13 | All 3 | Concurrent puts, sequence allocation, memtable race conditions |
+| `concurrency_flush.rs` | ✅ | 10 | All 3 (4 disk-only) | Flush contention, backpressure, iterator correctness, deadlock prevention |
+| `concurrency_wal.rs` | ✅ | 4 | LocalDisk, CloudBacked | WAL serialization, ordering, rotation during concurrent writes |
+| `concurrency_delete_range.rs` | ✅ | 4 | All 3 | Concurrent delete ranges, overlapping ranges, interleaved operations |
+| (remaining ~20 files) | ⬜ | ~100 | TBD | Not started |
 
 ---
 
@@ -907,14 +911,14 @@ Maps each legacy file to its target location(s) in the new structure.
 | `compact_ttl_compaction_filter.rs` | `compaction_filters.rs` | ⬜ |
 | `compact_writes_during_compaction.rs` | `compaction_concurrent.rs` | ⬜ |
 | `compaction_correctness.rs` | `compaction_basic.rs` | ⬜ |
-| `concurrency_internal_invariants.rs` | `concurrency_flush.rs` | ⬜ |
+| `concurrency_internal_invariants.rs` | `concurrency_flush.rs` | ✅ |
 | `concurrent_concurrent_compaction_and_writes.rs` | `compaction_concurrent.rs` | ⬜ |
-| `concurrent_delete_range_concurrency.rs` | `concurrency_delete_range.rs` | ⬜ |
-| `concurrent_flush_vs_write_contention.rs` | `concurrency_flush.rs` | ⬜ |
-| `concurrent_memtable_race_conditions.rs` | `concurrency_writes.rs` | ⬜ |
-| `concurrent_multi_threaded_write_stress.rs` | `concurrency_writes.rs` | ⬜ |
-| `concurrent_sequence_number_allocation.rs` | `concurrency_writes.rs` | ⬜ |
-| `concurrent_wal_concurrency.rs` | `concurrency_wal.rs` | ⬜ |
+| `concurrent_delete_range_concurrency.rs` | `concurrency_delete_range.rs` | ✅ |
+| `concurrent_flush_vs_write_contention.rs` | `concurrency_flush.rs` | ✅ |
+| `concurrent_memtable_race_conditions.rs` | `concurrency_writes.rs` | ✅ |
+| `concurrent_multi_threaded_write_stress.rs` | `concurrency_writes.rs` | ✅ |
+| `concurrent_sequence_number_allocation.rs` | `concurrency_writes.rs` | ✅ |
+| `concurrent_wal_concurrency.rs` | `concurrency_wal.rs` | ✅ |
 | `config_validation.rs` | `config_validation.rs` | ⬜ |
 | `durability_compaction.rs` | `durability_atomicity.rs` | ⬜ |
 | `durability_engine_truncate_fallback.rs` | `durability_atomicity.rs` | ⬜ |

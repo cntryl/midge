@@ -31,6 +31,7 @@ impl CompactionFilter for CountingFilter {
 #[test]
 fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
     for mode in common::disk_storage_modes() {
+        // Arrange
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // deterministic: use explicit full-rewrite compaction entrypoint; we
@@ -53,15 +54,13 @@ fn should_invoke_filter_for_each_key_given_compaction_with_custom_filter() {
         bulk_put(&eng, &cf, "key_", 50, b"value");
         eng.flush_cf(&cf).expect("flush");
 
-        // deterministic rewriter
+        // Act
         eng.compact_cf_full_rewrite(&cf)
             .expect("forced full rewrite compaction");
 
-        // assert filter actually executed
+        // Assert
         let count = invocation_count.load(Ordering::SeqCst);
         assert!(count > 0, "Expected filter invocations > 0, got {}", count);
-
-        // sanity check key
         assert!(eng.get(&cf, b"key_000").unwrap().is_some());
     }
 }
@@ -95,6 +94,7 @@ impl CompactionFilter for PrefixRemovalFilter {
 #[test]
 fn should_drop_key_given_filter_returns_remove_decision() {
     for mode in common::disk_storage_modes() {
+        // Arrange
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         let opts = cntryl_midge::MidgeOptions {
@@ -111,15 +111,14 @@ fn should_drop_key_given_filter_returns_remove_decision() {
 
         bulk_put(&eng, &cf, "keep_", 10, b"value");
         bulk_put(&eng, &cf, "remove_", 10, b"value");
-
         eng.flush_cf(&cf).expect("flush");
+
+        // Act
         eng.compact_cf_full_rewrite(&cf)
             .expect("forced full rewrite compaction");
 
-        // kept keys
+        // Assert
         assert!(eng.get(&cf, b"keep_000").unwrap().is_some());
-
-        // removed keys
         assert!(eng.get(&cf, b"remove_000").unwrap().is_none());
         assert!(eng.get(&cf, b"remove_005").unwrap().is_none());
     }
@@ -146,6 +145,7 @@ impl CompactionFilter for KeepAllFilter {
 #[test]
 fn should_keep_key_given_filter_returns_keep_decision() {
     for mode in common::disk_storage_modes() {
+        // Arrange
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         let opts = cntryl_midge::MidgeOptions {
@@ -163,9 +163,11 @@ fn should_keep_key_given_filter_returns_keep_decision() {
         bulk_put(&eng, &cf, "key_", 30, b"data");
         eng.flush_cf(&cf).expect("flush");
 
+        // Act
         eng.compact_cf_full_rewrite(&cf)
             .expect("forced full rewrite compaction");
 
+        // Assert
         for i in 0..30 {
             let key = format!("key_{:03}", i);
             let res = eng.get(&cf, key.as_bytes()).expect("get");

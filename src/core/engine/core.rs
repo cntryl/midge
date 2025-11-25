@@ -499,6 +499,7 @@ mod tests {
 
     #[test]
     fn should_build_plan_over_all_cf_files_when_compacting_full_rewrite() {
+        // Arrange
         // Note: earlier versions defined a RecordingController and a nested
         // impl for `crate::core::CompactionController` here — those were
         // unused and caused non-local impl warnings. The test below does

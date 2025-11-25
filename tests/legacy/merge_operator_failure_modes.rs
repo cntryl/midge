@@ -104,7 +104,7 @@ fn should_apply_merge_chain_correctly_during_freeze_plus_wal_rotation() {
         ..Default::default()
     };
 
-    // Act - write merges and ensure data persisted across reopen
+    // Act
     {
         let engine = MidgeEngine::open(opts.clone()).unwrap();
         let cf = engine
@@ -116,7 +116,7 @@ fn should_apply_merge_chain_correctly_during_freeze_plus_wal_rotation() {
         engine.flush_cf(&cf).unwrap();
     }
 
-    // Reopen and check
+    // Assert
     let engine = MidgeEngine::open(opts).unwrap();
     let cf = engine.get_column_family("merge_cf").unwrap();
     let v = engine.get(&cf, b"a").unwrap();

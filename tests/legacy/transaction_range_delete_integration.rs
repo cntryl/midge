@@ -5,7 +5,7 @@ use cntryl_midge::KvTransaction;
 use cntryl_midge::WriteOptions;
 
 #[test]
-fn should_preserve_snapshot_view_across_range_delete_and_compaction() {
+fn should_preserve_snapshot_view_given_range_delete_when_compacting() {
     // Arrange
     let (tmp, eng) = new_engine();
     let cf = eng.default_column_family();
@@ -83,7 +83,7 @@ fn should_recover_after_crash_during_tx_range_delete_spill_rotation() {
 }
 
 #[test]
-fn should_resolve_conflicts_between_tx_write_and_range_tombstone() {
+fn should_resolve_conflicts_given_tx_write_with_range_tombstone_when_committing() {
     // Arrange
     let (tmp, eng) = new_engine();
     let cf = eng.default_column_family();
@@ -94,8 +94,6 @@ fn should_resolve_conflicts_between_tx_write_and_range_tombstone() {
     let mut tx = eng.begin_transaction(&cf).unwrap();
     tx.put(b"shared", b"txn").unwrap();
     tx.delete_range(b"a", b"z").unwrap();
-
-    // Attempt commit
     let commit = eng.commit_transaction(tx, WriteOptions::default());
 
     // Assert

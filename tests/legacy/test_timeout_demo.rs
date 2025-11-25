@@ -9,16 +9,19 @@ use std::time::Duration;
 
 #[test]
 fn should_complete_within_timeout_given_fast_operation() {
-    // Arrange & Act: run a quick operation with 5-second timeout
+    // Arrange
+    let timeout = Duration::from_secs(5);
+
+    // Act
     let result = run_with_timeout(
         || {
             // Simple operation that completes quickly
             let _ = 1 + 1;
         },
-        Duration::from_secs(5),
+        timeout,
     );
 
-    // Assert: should complete successfully
+    // Assert
     assert!(result.is_ok(), "Fast operation should not timeout");
 }
 
@@ -51,16 +54,18 @@ fn should_timeout_given_infinite_loop() {
 
 #[test]
 fn should_detect_panic_as_completion_not_hang() {
-    // Arrange & Act: run a panicking closure
+    // Arrange
+    let timeout = Duration::from_secs(5);
+
+    // Act
     let result = run_with_timeout(
         || {
             panic!("Intentional panic for testing");
         },
-        Duration::from_secs(5),
+        timeout,
     );
 
-    // Assert: panic should be detected as completion (not hang)
-    // The result is Err but indicates panic, not timeout
+    // Assert
     assert!(result.is_err());
     if let Err(msg) = result {
         assert!(
@@ -107,11 +112,13 @@ fn should_timeout_given_hanging_engine_operation() {
 /// Example of wrapping a full test with timeout
 #[test]
 fn should_complete_engine_restart_within_timeout() {
-    run_with_timeout(
-        || {
-            let dir = test_temp_dir();
-            let opts = durability_opts(dir.path().to_path_buf());
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = durability_opts(dir.path().to_path_buf());
 
+    // Act
+    let result = run_with_timeout(
+        || {
             with_engine_restart(
                 opts,
                 |eng| {
@@ -124,6 +131,8 @@ fn should_complete_engine_restart_within_timeout() {
             );
         },
         Duration::from_secs(30),
-    )
-    .expect("Engine restart test should complete within 30 seconds");
+    );
+
+    // Assert
+    result.expect("Engine restart test should complete within 30 seconds");
 }

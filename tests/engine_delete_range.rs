@@ -295,6 +295,7 @@ fn should_apply_delete_range_after_crash_given_flushed_tombstone_when_recovering
         let ctx = DurabilityTestContext::new(mode);
         let name = ctx.name().to_string();
 
+        // Act
         {
             let opts = MidgeOptions {
                 storage_mode: ctx.create_storage_mode(),

@@ -105,7 +105,7 @@ fn should_resolve_freeze_race_during_large_value_insert() {
 }
 
 #[test]
-fn should_support_iterator_across_freeze_and_spill() {
+fn should_support_iterator_given_freeze_with_spill_when_scanning() {
     // Arrange
     let (tmp, eng) = new_engine();
     let cf = eng.default_column_family();
@@ -114,7 +114,7 @@ fn should_support_iterator_across_freeze_and_spill() {
         eng.put(&cf, &[i], format!("v{}", i).as_bytes()).unwrap();
     }
 
-    // Act: scan to validate iterator-like behaviour
+    // Act
     let rows = eng.scan(&cf, Query::new()).expect("scan");
     let count = rows.len();
 

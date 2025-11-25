@@ -1210,9 +1210,12 @@ mod adaptive_cache_tests {
 
     #[test]
     fn should_record_contentions_given_concurrent_access_when_diagnostics_requested() {
+        // Arrange
         // Retry the workload a few times with a fresh cache to avoid rare
         // timing windows where no contention is recorded.
         let mut saw_contentions = false;
+
+        // Act
         for _attempt in 0..3 {
             let cache = Arc::new(AdaptiveBlockCache::new(5_000));
 

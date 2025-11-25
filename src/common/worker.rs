@@ -40,12 +40,14 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn spawn_guarded_calls_on_panic_and_records_hook() {
+    fn should_invoke_panic_hook_given_worker_panic_when_spawn_guarded_used() {
+        // Arrange
         let hooks = crate::common::test_hooks::TestHooks::new();
         let hooks_clone = hooks.clone();
         let called = Arc::new(AtomicBool::new(false));
         let called2 = called.clone();
 
+        // Act
         let handle = spawn_guarded(
             "test-kind",
             Some(hooks_clone),
@@ -54,8 +56,9 @@ mod tests {
                 called2.store(true, Ordering::SeqCst);
             }),
         );
-
         handle.join().unwrap();
+
+        // Assert
         assert!(called.load(Ordering::SeqCst));
         assert!(hooks.worker_panic_count() >= 1);
     }

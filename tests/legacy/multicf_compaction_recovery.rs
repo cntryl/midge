@@ -10,6 +10,7 @@ use common::*;
 fn should_recover_all_column_families_consistently_given_mixed_writes_and_compactions_when_restarting_repeatedly(
 ) {
     for mode in disk_storage_modes() {
+        // Arrange
         let (_name, storage_mode, _tmp) = create_storage_mode(mode);
         let hooks = TestHooks::new();
         let mut opts = compaction_test_opts(storage_mode);
@@ -34,12 +35,12 @@ fn should_recover_all_column_families_consistently_given_mixed_writes_and_compac
             eng.flush().unwrap();
         });
 
+        // Act
         // Perform multiple restart cycles with additional writes and compactions
         for cycle in 0..3 {
             with_engine_restart(
                 opts.clone(),
                 |eng| {
-                    // Arrange: mixed writes into both CFs
                     let cf1 = eng.get_column_family("cf1").expect("get cf1");
                     let cf2 = eng.get_column_family("cf2").expect("get cf2");
 
@@ -63,7 +64,7 @@ fn should_recover_all_column_families_consistently_given_mixed_writes_and_compac
                     eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
                 },
                 |eng| {
-                    // Assert: both CFs should still have data
+                    // Assert
                     let cf1 = eng.get_column_family("cf1").expect("get cf1 post");
                     let cf2 = eng.get_column_family("cf2").expect("get cf2 post");
                     assert!(eng.get(&cf1, b"a000").unwrap().is_some());
@@ -115,12 +116,13 @@ fn should_not_cross_contaminate_keys_between_column_families_given_heavy_compact
             eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
         });
 
+        // Act
         // Restart and validate no cross-contamination
-        // Assert
         with_engine_restart(
             opts.clone(),
             |_| {},
             |eng| {
+                // Assert
                 let cf1 = eng.get_column_family("isolate1").expect("get isolate1");
                 let cf2 = eng.get_column_family("isolate2").expect("get isolate2");
                 let v1 = eng.get(&cf1, b"shared").unwrap().expect("v1 exists");

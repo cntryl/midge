@@ -355,6 +355,7 @@ fn should_iterate_consistently_given_data_spans_sst_boundaries_when_scanning() {
 
 #[test]
 fn should_yield_stable_results_given_flush_in_progress_when_scanning() {
+    // Arrange
     // This test uses a single mode since it involves threading
     let dir = test_temp_dir();
     let opts = MidgeOptions {
@@ -617,6 +618,7 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
 
 #[test]
 fn should_handle_concurrent_streaming_scans_when_multiple_threads() {
+    // Arrange
     // Single mode test since it involves threading
     let dir = test_temp_dir();
     let opts = MidgeOptions {

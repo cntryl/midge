@@ -712,8 +712,11 @@ mod tests {
             hooks_clone.before_manifest_update();
         });
 
-        // Act/Assert: wait_for_manifest_update should succeed before timeout
-        assert!(hooks.wait_for_manifest_update(prev, Duration::from_secs(1)));
+        // Act
+        let result = hooks.wait_for_manifest_update(prev, Duration::from_secs(1));
+
+        // Assert
+        assert!(result);
         handle.join().unwrap();
     }
 
@@ -724,7 +727,10 @@ mod tests {
         let hooks = TestHooks::new();
         let prev = hooks.manifest_update_count();
 
-        // Act/Assert: no manifest update is triggered; wait should timeout
-        assert!(!hooks.wait_for_manifest_update(prev, Duration::from_millis(50)));
+        // Act
+        let result = hooks.wait_for_manifest_update(prev, Duration::from_millis(50));
+
+        // Assert
+        assert!(!result);
     }
 }

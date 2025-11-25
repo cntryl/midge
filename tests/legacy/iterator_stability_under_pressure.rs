@@ -28,7 +28,7 @@ fn should_iterate_consistently_across_sst_boundaries_with_evictions() {
 }
 
 #[test]
-fn should_rewind_correctly_with_tombstones_and_merges() {
+fn should_rewind_correctly_given_tombstones_with_merges_when_rescanning() {
     // Arrange
     let (tmp, eng) = new_engine();
     let cf = eng.default_column_family();
@@ -37,7 +37,7 @@ fn should_rewind_correctly_with_tombstones_and_merges() {
     let _ = eng.merge_cf(&cf, b"a", b"+2");
     eng.delete_range(&cf, b"b", b"c").unwrap();
 
-    // Act: scan twice to emulate rewind/seek semantics
+    // Act
     let first_scan = eng.scan(&cf, Query::new()).expect("scan");
     let second_scan = eng.scan(&cf, Query::new()).expect("scan");
 

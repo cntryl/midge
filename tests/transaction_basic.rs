@@ -558,6 +558,7 @@ fn should_not_persist_uncommitted_transaction_given_crash_when_reopening() {
     let dir = test_temp_dir();
     let db_path = dir.path().to_path_buf();
 
+    // Act
     {
         let opts = MidgeOptions {
             storage_mode: StorageMode::LocalDisk {
@@ -577,7 +578,7 @@ fn should_not_persist_uncommitted_transaction_given_crash_when_reopening() {
         // Engine dropped without commit - simulates crash
     }
 
-    // Reopen and verify
+    // Assert
     {
         let opts = MidgeOptions {
             storage_mode: StorageMode::LocalDisk { db_path },
@@ -586,7 +587,7 @@ fn should_not_persist_uncommitted_transaction_given_crash_when_reopening() {
         let engine = MidgeEngine::open(opts).expect("reopen");
         let cf = engine.default_column_family();
 
-        // Assert - committed data present, uncommitted absent
+        // Committed data present, uncommitted absent
         assert_eq!(
             engine.get(&cf, b"committed").expect("get"),
             Some(Bytes::from_static(b"value"))
