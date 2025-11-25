@@ -51,7 +51,7 @@ fn bench_encode(c: &mut Criterion) {
                 shared as u32,
                 Some(value),
                 1,
-                false,
+                0,
                 false,
                 None,
             ));
@@ -74,7 +74,7 @@ fn bench_decode(c: &mut Criterion) {
     let shared = shared_prefix_len(prev, key);
     let delta = &key[shared..];
 
-    let encoded = encode(delta, shared as u32, Some(b"value"), 1, false, false, None);
+    let encoded = encode(delta, shared as u32, Some(b"value"), 1, 0, false, None);
 
     g.bench_function("decode_small", |b| {
         b.iter(|| {
@@ -129,7 +129,7 @@ fn bench_roundtrip(c: &mut Criterion) {
 
     g.bench_function("roundtrip_small", |b| {
         b.iter(|| {
-            let encoded = encode(delta, shared as u32, Some(value), 1, false, false, None);
+            let encoded = encode(delta, shared as u32, Some(value), 1, 0, false, None);
             let _ = decode(&encoded, 0, encoded.len()).unwrap();
             black_box(encoded);
         });
