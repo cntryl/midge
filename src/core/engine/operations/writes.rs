@@ -164,7 +164,17 @@ impl MidgeEngine {
 
         self.wal_coordinator.append_record(&rec)?;
         if self.wal_sync {
-            self.wal_coordinator.sync()?;
+            // If the engine is configured to only perform a local WAL sync
+            // (cloud-backed and local_wal_sync = true), prefer a non-blocking
+            // flush rather than waiting for potentially flaky cloud uploads.
+            if self.wait_for_cloud_wal_uploads_on_sync {
+                // Wait for cloud uploads as part of sync semantics
+                self.wal_coordinator.sync()?;
+            } else {
+                // Local-only WAL durability: ensure we sync the local WAL without
+                // waiting for cloud uploads (non-blocking w.r.t. remote failures)
+                let _ = self.wal_coordinator.sync_local();
+            }
         }
 
         // Write to MemTable

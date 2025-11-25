@@ -112,11 +112,28 @@ impl WalController {
         writer.sync()
     }
 
+    /// Sync only to local WAL storage (no cloud/upload waits).
+    /// Delegates to writer.sync_local().
+    pub fn sync_local(&self) -> MidgeResult<()> {
+        let writer = self.writer.read();
+
+        writer.sync_local()
+    }
+
     /// Get the current write position in the WAL.
     ///
     /// Note: For AsyncWalWriter, this may not reflect pending writes in the channel.
     pub fn current_pos(&self) -> u64 {
         self.writer.read().current_pos()
+    }
+
+    /// Signal shutdown to background workers.
+    ///
+    /// For WAL implementations with background threads (e.g., CloudWalWriter),
+    /// this signals workers to exit retry loops. Must be called before dropping
+    /// to avoid hanging on sync() or close().
+    pub fn shutdown(&self) {
+        self.writer.read().shutdown();
     }
 }
 

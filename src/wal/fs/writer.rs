@@ -840,7 +840,7 @@ impl crate::wal::WalFactory for FsWalFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wal::WalWriter;
+    use crate::common::test_hooks::{FsyncBehavior, TestHooks};
     use tempfile::TempDir;
 
     #[test]
@@ -1794,5 +1794,25 @@ mod tests {
 
         // Assert
         assert!(wal.current_pos() > pos_before);
+    }
+
+    #[test]
+    fn should_record_fsync_attempts_with_test_hooks() {
+        // Arrange
+        let dir = TempDir::new().expect("temp dir");
+        let mut wal = Wal::open_with_mode(dir.path(), WalSyncMode::BatchedSync)
+            .expect("open batched wal");
+        let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::RecordOnly);
+        wal.set_test_hooks(Some(hooks.clone()));
+
+        wal.append_op(crate::wal::WalOpKind::Put, b"key1", Some(b"value1"))
+            .expect("append before sync");
+
+        // Act
+        let result = wal.sync();
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(hooks.fsync_count() >= 1, "fsync should be recorded once");
     }
 }

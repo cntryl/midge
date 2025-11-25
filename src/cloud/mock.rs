@@ -157,27 +157,53 @@ impl StorageBackend for MockCloudBackend {
         // Debugging log: print when put_blob is invoked to help identify stuck uploads in tests
         eprintln!("[DEBUG] MockCloudBackend.put_blob invoked for key: {}", key);
 
-        // Check if we should fail this upload
-        let current_upload = self.upload_count.load(Ordering::SeqCst);
+        // Attempt to reserve a successful upload slot atomically.
+        // This makes the fail-after semantics reliable under concurrency.
         let fail_after = self.fail_upload_after.load(Ordering::SeqCst);
-
-        if current_upload >= fail_after {
-            self.upload_failure_count.fetch_add(1, Ordering::SeqCst);
-            return Err(MidgeError::cloud_error("Simulated upload failure"));
+        let mut reserved = false;
+        loop {
+            let curr = self.upload_count.load(Ordering::SeqCst);
+            if curr >= fail_after {
+                // No slots left — count this as a failure and return early.
+                self.upload_failure_count.fetch_add(1, Ordering::SeqCst);
+                return Err(MidgeError::cloud_error("Simulated upload failure"));
+            }
+            // try to reserve an upload slot (increment only if unchanged)
+            match self.upload_count.compare_exchange(
+                curr,
+                curr + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    reserved = true;
+                    break;
+                }
+                Err(_) => continue, // retry on race
+            }
         }
 
-        // Perform the upload
+        // Perform the upload (we have reserved a slot). If the write fails,
+        // revert the reservation and count it as a failure.
         let path = self.blob_path(key);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, &data)?;
+        if let Err(e) = std::fs::write(&path, &data) {
+            // writing failed; undo reserved slot and mark a failed upload
+            if reserved {
+                self.upload_count.fetch_sub(1, Ordering::SeqCst);
+                self.upload_failure_count.fetch_add(1, Ordering::SeqCst);
+            }
+            return Err(e.into());
+        }
         self.etags
             .lock()
             .insert(key.to_string(), Self::generate_etag());
 
-        // Track successful uploads
-        let new_count = self.upload_count.fetch_add(1, Ordering::SeqCst) + 1;
+        // At this point the upload succeeded and the slot we reserved already
+        // accounted for this successful upload. Report the post-increment value.
+        let new_count = self.upload_count.load(Ordering::SeqCst);
         eprintln!(
             "[DEBUG] MockCloudBackend.put_blob completed for key: {}, total_uploads={}",
             key, new_count

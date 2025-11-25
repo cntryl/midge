@@ -359,6 +359,10 @@ pub fn open_with_factories(
         sst_reader_factory: sst_reader_factory_arc,
         wal_buffer_size: opts.wal_buffer_size,
         wal_sync: opts.wal_sync,
+        wait_for_cloud_wal_uploads_on_sync: match &opts.storage_mode {
+            crate::StorageMode::CloudBacked { local_wal_sync, .. } => !(*local_wal_sync),
+            _ => true,
+        },
         snapshot_registry: snapshot_registry_arc,
         block_cache: if opts.cache_size_mb > 0 {
             Some(crate::sst::create_basic_cache(

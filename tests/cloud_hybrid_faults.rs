@@ -8,7 +8,6 @@ use cntryl_midge::cloud::backend::StorageBackend;
 use cntryl_midge::{
     cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
 };
-use common::test_helpers::TEST_CLOUD_TIMEOUT;
 use common::*;
 use std::sync::Arc;
 
@@ -16,12 +15,9 @@ use std::sync::Arc;
 #[ignore] // Temporarily ignored due to hanging - investigating shutdown issue
 fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifest_was_already_updated(
 ) {
-    // Arrange: open engine with a cloud-backed storage mode and a failing backend
+    // Arrange: open engine with a cloud-backed storage mode and a mock backend
     let dir = test_temp_dir();
     let backend = Arc::new(MockCloudBackend::new());
-
-    // Allow one successful upload then fail subsequent uploads to simulate a partial/failed upload
-    backend.set_fail_upload_after(1);
 
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
@@ -38,14 +34,19 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
         ..Default::default()
     };
 
+<<<<<<< HEAD
     eprintln!("[TEST] Starting test - opening first engine");
     // Act: perform a write and flush under simulated cloud failures, then restart
+=======
+    // Act: perform a write and flush under simulated **SST** cloud failures, then restart
+>>>>>>> 5373487cb38eafc9be52bb70e82a0bb68e8165cd
     with_engine_restart(
         opts,
         |eng| {
             eprintln!("[TEST] First engine opened - performing operations");
             let cf = eng.default_column_family();
             eng.put(&cf, b"key1", b"value1").expect("put");
+<<<<<<< HEAD
             // Flush will attempt to upload SST to cloud and may encounter failures
             if let Err(e) = eng.flush_cf(&cf) {
                 // With our simulated cloud failure it's acceptable for flush/upload to return an error.
@@ -60,11 +61,33 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
             // Expect at least one failed upload attempt due to our fail config
             assert!(backend.upload_failure_count() > 0 || backend.upload_count() == 0);
             eprintln!("[TEST] First engine operations complete - about to drop");
+=======
+
+            // Arm the failure injection **after** engine open to avoid poisoning WAL startup.
+            backend.reset_counters();
+            // Allow exactly one new successful upload (e.g. first SST/manifest), then fail.
+            backend.set_fail_upload_after(1);
+
+            let attempts_before =
+                backend.upload_count() + backend.upload_failure_count();
+
+            // Flush will attempt to upload SST/manifest to cloud and may encounter failures.
+            let _ = eng.flush_cf(&cf); // error is acceptable under simulated cloud failure
+
+            let attempts_after =
+                backend.upload_count() + backend.upload_failure_count();
+
+            // Assert: at least one upload attempt happened.
+            assert!(
+                attempts_after > attempts_before,
+                "flush should trigger at least one cloud upload attempt"
+            );
+>>>>>>> 5373487cb38eafc9be52bb70e82a0bb68e8165cd
         },
         |eng| {
             eprintln!("[TEST] Second engine opened - verifying data");
             // Assert: data must still be readable after recovery
-            // Clear the forced failure so any background retries can succeed
+            // Put backend back into non-failing mode for restart/read.
             backend.reset_counters();
             backend.set_fail_upload_after(usize::MAX);
 
@@ -72,7 +95,7 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
             let result = eng.get(&cf, b"key1").expect("get");
             assert!(
                 result.is_some(),
-                "Data should be present after recovery despite partial cloud upload"
+                "Data should be present after recovery despite partial/failed cloud uploads"
             );
             eprintln!("[TEST] Test complete - about to drop second engine");
         },
@@ -164,4 +187,236 @@ fn should_fail_fast_leaving_engine_in_safe_state_given_corrupted_cloud_sst_index
     // Assert
     assert_eq!(got, Bytes::from(&b"corrupted-content"[..]));
     // Engine-level behavior when encountering corrupted SSTs is covered by separate engine tests.
+}
+
+#[test]
+fn should_not_poison_wal_startup_given_fail_upload_after_is_armed_post_open() {
+    // Arrange: open an engine with a cloud-backed storage mode and mock backend
+    let dir = test_temp_dir();
+    let backend = Arc::new(MockCloudBackend::new());
+
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::CloudBacked {
+            local_cache_path: dir.path().to_path_buf(),
+            cloud_backend: backend.clone(),
+            storage_context: StorageContext::new("uploader-fail-after"),
+            local_wal_sync: true,
+            wal_batch_size: 1024 * 1024,
+            sst_cache_capacity: 8,
+        },
+        memtable_size: 1024,
+        wal_sync: true,
+        wal_recovery_mode: cntryl_midge::WalRecoveryMode::TolerateCorruptedTail,
+        ..Default::default()
+    };
+
+    with_engine_restart(
+        opts,
+        |eng| {
+            let cf = eng.default_column_family();
+            eng.put(&cf, b"key-wal", b"value").expect("put before fail-after");
+
+            // Arm failure only after engine and WAL uploader are fully initialized.
+            backend.reset_counters();
+            backend.set_fail_upload_after(1);
+
+            let attempts_before =
+                backend.upload_count() + backend.upload_failure_count();
+
+            // Act: force a flush; this should make progress (attempt uploads) and not hang,
+            // even if some cloud uploads fail after the first success.
+            let _ = eng.flush_cf(&cf);
+
+            let attempts_after =
+                backend.upload_count() + backend.upload_failure_count();
+
+            assert!(
+                attempts_after > attempts_before,
+                "flush should trigger at least one cloud upload attempt when fail-after is armed",
+            );
+        },
+        |eng| {
+            // Assert: WAL-backed data should still be recoverable after restart.
+            backend.reset_counters();
+            backend.set_fail_upload_after(usize::MAX);
+
+            let cf = eng.default_column_family();
+            let result = eng.get(&cf, b"key-wal").expect("get after restart");
+            assert!(
+                result.is_some(),
+                "Data written before fail-after should survive WAL/uploader failures",
+            );
+        },
+    );
+}
+
+#[test]
+fn should_allow_clean_shutdown_given_cloud_upload_failures_after_flush_attempts() {
+    // Arrange: cloud-backed engine with a mock backend where uploads may fail
+    let dir = test_temp_dir();
+    let backend = Arc::new(MockCloudBackend::new());
+
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::CloudBacked {
+            local_cache_path: dir.path().to_path_buf(),
+            cloud_backend: backend.clone(),
+            storage_context: StorageContext::new("shutdown-after-fail"),
+            local_wal_sync: true,
+            wal_batch_size: 1024 * 1024,
+            sst_cache_capacity: 8,
+        },
+        memtable_size: 1024,
+        wal_sync: true,
+        wal_recovery_mode: cntryl_midge::WalRecoveryMode::TolerateCorruptedTail,
+        ..Default::default()
+    };
+
+    with_engine_restart(
+        opts,
+        |eng| {
+            let cf = eng.default_column_family();
+            for i in 0..5u8 {
+                eng.put(&cf, &[b'k', i], &[b'v', i]).expect("put");
+            }
+
+            backend.reset_counters();
+            backend.set_fail_upload_after(1);
+
+            let attempts_before =
+                backend.upload_count() + backend.upload_failure_count();
+
+            let _ = eng.flush_cf(&cf);
+
+            let attempts_after =
+                backend.upload_count() + backend.upload_failure_count();
+            assert!(
+                attempts_after > attempts_before,
+                "flush under fail-after should still attempt cloud uploads",
+            );
+        },
+        |eng| {
+            // Assert: engine can restart cleanly and data is readable despite prior failures
+            backend.reset_counters();
+            backend.set_fail_upload_after(usize::MAX);
+
+            let cf = eng.default_column_family();
+            for i in 0..5u8 {
+                let key = [b'k', i];
+                let value = [b'v', i];
+                let got = eng.get(&cf, &key).expect("get after restart");
+                assert!(got.is_some(), "key should survive: {:?}", key);
+                assert_eq!(got.unwrap(), &value[..]);
+            }
+        },
+    );
+}
+
+#[test]
+fn should_not_block_puts_when_background_uploads_are_flaky() {
+    // Arrange: engine in cloud-backed mode with a flakily failing backend
+    let dir = test_temp_dir();
+    let backend = Arc::new(MockCloudBackend::new());
+
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::CloudBacked {
+            local_cache_path: dir.path().to_path_buf(),
+            cloud_backend: backend.clone(),
+            storage_context: StorageContext::new("flaky-puts"),
+            local_wal_sync: true,
+            wal_batch_size: 1024 * 1024,
+            sst_cache_capacity: 8,
+        },
+        memtable_size: 8 * 1024,
+        wal_sync: true,
+        wal_recovery_mode: cntryl_midge::WalRecoveryMode::TolerateCorruptedTail,
+        ..Default::default()
+    };
+
+    with_engine_restart(
+        opts,
+        |eng| {
+            let cf = eng.default_column_family();
+            backend.reset_counters();
+            backend.set_fail_upload_after(1);
+
+            // Act: a burst of puts should complete quickly even if uploads fail later.
+            for i in 0..50u8 {
+                let key = [b'k', i];
+                let value = [b'v', i];
+                eng.put(&cf, &key, &value).expect("put under flaky cloud");
+            }
+
+            let _attempts =
+                backend.upload_count() + backend.upload_failure_count();
+        },
+        |eng| {
+            backend.reset_counters();
+            backend.set_fail_upload_after(usize::MAX);
+
+            let cf = eng.default_column_family();
+            // Assert: at least some keys are readable; the exact coverage is handled elsewhere.
+            let got = eng.get(&cf, b"k\x00").expect("get one key after flaky puts");
+            assert!(
+                got.is_some(),
+                "engine should remain readable after flaky upload activity",
+            );
+        },
+    );
+}
+
+#[test]
+fn should_report_upload_attempts_when_manifest_sync_happens_under_fail_after() {
+    // Arrange: engine with cloud-backed manifest writes and fail-after semantics
+    let dir = test_temp_dir();
+    let backend = Arc::new(MockCloudBackend::new());
+
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::CloudBacked {
+            local_cache_path: dir.path().to_path_buf(),
+            cloud_backend: backend.clone(),
+            storage_context: StorageContext::new("manifest-fail-after"),
+            local_wal_sync: true,
+            wal_batch_size: 1024 * 1024,
+            sst_cache_capacity: 8,
+        },
+        memtable_size: 1024,
+        wal_sync: true,
+        wal_recovery_mode: cntryl_midge::WalRecoveryMode::TolerateCorruptedTail,
+        ..Default::default()
+    };
+
+    with_engine_restart(
+        opts,
+        |eng| {
+            let cf = eng.default_column_family();
+            eng.put(&cf, b"m-key", b"m-val").expect("put before manifest sync");
+
+            backend.reset_counters();
+            backend.set_fail_upload_after(1);
+
+            let attempts_before =
+                backend.upload_count() + backend.upload_failure_count();
+
+            let _ = eng.flush_cf(&cf);
+
+            let attempts_after =
+                backend.upload_count() + backend.upload_failure_count();
+            assert!(
+                attempts_after > attempts_before,
+                "manifest-related uploads should still be attempted under fail-after",
+            );
+        },
+        |eng| {
+            // Assert: manifest and data remain coherent enough for reads
+            backend.reset_counters();
+            backend.set_fail_upload_after(usize::MAX);
+
+            let cf = eng.default_column_family();
+            let got = eng.get(&cf, b"m-key").expect("get after manifest fail-after");
+            assert!(
+                got.is_some(),
+                "data should still be discoverable after manifest uploads under fail-after",
+            );
+        },
+    );
 }

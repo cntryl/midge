@@ -3,7 +3,7 @@ use cntryl_midge::{
     cloud::mock::MockCloudBackend, config::cloud::StorageContext, MidgeOptions, StorageMode,
 };
 use common::test_helpers::TEST_CLOUD_TIMEOUT;
-use common::{durability_opts, flush_test_opts, test_temp_dir, with_engine_restart};
+use common::{durability_opts, flush_test_opts, test_temp_dir, with_engine_restart_timeout};
 use std::{sync::Arc, time::Duration};
 
 #[test]
@@ -13,7 +13,7 @@ fn should_flush_fsync_all_memtables_on_shutdown_signal() {
     let opts = flush_test_opts(dir.path().to_path_buf(), 1024 * 1024); // Large memtable
 
     // Act
-    with_engine_restart(
+    with_engine_restart_timeout(
         opts,
         |eng| {
             let cf = eng.default_column_family();
@@ -50,7 +50,7 @@ fn should_complete_pending_compactions_given_shutdown_signal() {
     };
 
     // Act
-    with_engine_restart(
+    with_engine_restart_timeout(
         opts,
         |eng| {
             let cf = eng.default_column_family();
@@ -101,9 +101,11 @@ fn should_abort_long_running_uploads_given_shutdown_signal() {
     };
 
     // Act
-    with_engine_restart(
+    let backend_clone1 = backend.clone();
+    let backend_clone2 = backend.clone();
+    with_engine_restart_timeout(
         opts,
-        |eng| {
+        move |eng| {
             eprintln!("[TEST-DEBUG] in before_restart closure");
             let cf = eng.default_column_family();
             eprintln!("[TEST-DEBUG] about to put");
@@ -115,17 +117,17 @@ fn should_abort_long_running_uploads_given_shutdown_signal() {
             eprintln!("[TEST-DEBUG] after flush, before wait_for_uploads");
             // Wait deterministically for background uploads to start/complete
             // The mock backend provides a helper to wait for uploads rather than sleeping.
-            assert!(backend.wait_for_uploads(1, TEST_CLOUD_TIMEOUT));
+            assert!(backend_clone1.wait_for_uploads(1, TEST_CLOUD_TIMEOUT));
             eprintln!("[TEST-DEBUG] wait_for_uploads returned");
         },
-        |eng| {
+        move |eng| {
             eprintln!("[TEST-DEBUG] in after_restart closure");
             // Assert - local data should be consistent after long uploads
             let cf = eng.default_column_family();
             let result = eng.get(&cf, b"key1").expect("get");
             assert!(result.is_some(), "Data should survive slow uploads");
-            assert!(backend.upload_count() > 0, "Uploads should be attempted");
-            assert_eq!(backend.upload_failure_count(), 0, "Uploads should not fail");
+            assert!(backend_clone2.upload_count() > 0, "Uploads should be attempted");
+            assert_eq!(backend_clone2.upload_failure_count(), 0, "Uploads should not fail");
         },
     );
 }
@@ -137,7 +139,7 @@ fn should_persist_all_memtables_given_shutdown_signal_when_clean_exit() {
     let opts = flush_test_opts(dir.path().to_path_buf(), 1024 * 1024);
 
     // Act
-    with_engine_restart(
+    with_engine_restart_timeout(
         opts,
         |eng| {
             let cf = eng.default_column_family();
@@ -175,7 +177,7 @@ fn should_reopen_without_recovery_needed_given_clean_shutdown() {
     let opts = durability_opts(dir.path().to_path_buf());
 
     // Act
-    with_engine_restart(
+    with_engine_restart_timeout(
         opts,
         |eng| {
             let cf = eng.default_column_family();
@@ -205,7 +207,6 @@ fn should_handle_rapid_shutdown_restart_cycles_without_data_loss_stressed() {
 
     // Act - perform multiple shutdown/restart cycles
     const RESTART_CYCLES: usize = 5;
-    let mut total_keys_written = 0;
 
     for cycle in 0..RESTART_CYCLES {
         let opts = MidgeOptions {
@@ -213,29 +214,30 @@ fn should_handle_rapid_shutdown_restart_cycles_without_data_loss_stressed() {
             memtable_size: 16384,
             ..base_opts.clone()
         };
+        let cycle_id = cycle;
 
-        with_engine_restart(
+        with_engine_restart_timeout(
             opts,
-            |eng| {
+            move |eng| {
                 let cf = eng.default_column_family();
                 // Write batch of keys in this cycle
                 for i in 0..50 {
-                    let key = format!("cycle{}_key{:02}", cycle, i).into_bytes();
-                    let value = format!("value_{}", total_keys_written + i).into_bytes();
+                    let key = format!("cycle{}_key{:02}", cycle_id, i).into_bytes();
+                    let value = format!("value_cycle{}_key{}", cycle_id, i).into_bytes();
                     eng.put(&cf, &key, &value).expect("put during cycle");
                 }
             },
-            |eng| {
+            move |eng| {
                 // Verify all keys from current cycle are present
                 let cf = eng.default_column_family();
                 for i in 0..50 {
-                    let key = format!("cycle{}_key{:02}", cycle, i).into_bytes();
+                    let key = format!("cycle{}_key{:02}", cycle_id, i).into_bytes();
                     let result = eng.get(&cf, &key).expect("get after cycle restart");
-                    assert!(result.is_some(), "Key from cycle {} should persist", cycle);
+                    assert!(result.is_some(), "Key from cycle {} should persist", cycle_id);
                 }
 
                 // Verify keys from all previous cycles are still present
-                for prev_cycle in 0..cycle {
+                for prev_cycle in 0..cycle_id {
                     let key = format!("cycle{}_key00", prev_cycle).into_bytes();
                     let result = eng.get(&cf, &key).expect("get previous cycle");
                     assert!(
@@ -246,8 +248,6 @@ fn should_handle_rapid_shutdown_restart_cycles_without_data_loss_stressed() {
                 }
             },
         );
-
-        total_keys_written += 50;
     }
 
     // Assert - all cycles completed successfully without data loss

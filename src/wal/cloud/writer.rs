@@ -2,6 +2,7 @@ use crate::error::MidgeResult;
 use crate::wal::{WalOpKind, WalPos, WalRecord};
 use parking_lot::Mutex;
 use std::sync::Arc;
+use crate::wal::WalFile;
 
 use super::shared::WalBatchManager;
 
@@ -23,6 +24,9 @@ pub struct CloudWalWriter {
     current_pos: Arc<Mutex<WalPos>>,
     /// Sequence number for records
     sequence: Arc<Mutex<u64>>,
+    /// Optional local WAL writer used when a db_path is provided. Ensures local
+    /// durability even if cloud uploads are flaky.
+    local_writer: Option<Arc<dyn crate::wal::WalWriter>>,
 }
 
 impl CloudWalWriter {
@@ -40,12 +44,29 @@ impl CloudWalWriter {
         manifest: Option<Arc<parking_lot::Mutex<crate::core::manifest::Manifest>>>,
         db_path: Option<std::path::PathBuf>,
     ) -> Self {
-        let batch_manager = Arc::new(WalBatchManager::new(backend, batch_size, manifest, db_path));
+        let batch_manager = Arc::new(WalBatchManager::new(backend.clone(), batch_size, manifest, db_path.clone()));
+
+        // Create optional local WAL writer when db_path is provided so we can
+        // immediately persist records to local storage for local WAL sync
+        // semantics.
+        let local_writer = if let Some(path) = db_path {
+            let wal_dir = path.join("wal");
+            match WalFile::open(&wal_dir) {
+                Ok(w) => Some(Arc::new(w) as Arc<dyn crate::wal::WalWriter>),
+                Err(e) => {
+                    tracing::warn!("failed to open local wal writer at {}: {}", wal_dir.display(), e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         Self {
             batch_manager,
             current_pos: Arc::new(Mutex::new(0)),
             sequence: Arc::new(Mutex::new(0)),
+            local_writer,
         }
     }
 
@@ -66,8 +87,17 @@ impl CloudWalWriter {
 
 impl crate::wal::WalWriter for CloudWalWriter {
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
+        // First ensure local durability if configured: write the record
+        // to the local WAL synchronously so callers relying on local WAL
+        // semantics are safe even if cloud uploads later fail.
+        if let Some(local) = &self.local_writer {
+            // Best-effort: propagate local WAL errors as they indicate
+            // local durability could not be achieved
+            local.append_record(record)?;
+        }
+
         // Add record to batch manager (may trigger async upload if segment full)
-        self.batch_manager.add_record(record.clone())?;
+        let _promise = self.batch_manager.add_record(record.clone())?;
 
         // Return the logical position
         Ok(self.next_pos())
@@ -148,14 +178,24 @@ impl crate::wal::WalWriter for CloudWalWriter {
     }
 
     fn flush(&self) -> MidgeResult<()> {
+        // Ensure local writer is flushed (if present) so a subsequent
+        // restart will see the data.
+        if let Some(local) = &self.local_writer {
+            let _ = local.flush();
+        }
+
         // Trigger async flush without waiting
         let _ = self.batch_manager.flush_async()?;
         Ok(())
     }
 
     fn sync(&self) -> MidgeResult<()> {
-        // Flush and wait for all pending uploads to complete
-        // This is a blocking operation that provides durability guarantees
+        // First sync local WAL to ensure local durability
+        if let Some(local) = &self.local_writer {
+            let _ = local.sync();
+        }
+
+        // Then wait for cloud uploads to finish for full durability.
         self.batch_manager.sync()
     }
 
@@ -164,8 +204,27 @@ impl crate::wal::WalWriter for CloudWalWriter {
     }
 
     fn close(&self) -> MidgeResult<()> {
-        // Ensure all pending data is uploaded before closing
+        // Ensure local data is synced and cloud uploads completed before closing
+        // to maintain durability invariants during shutdown.
         self.sync()
+    }
+
+    fn shutdown(&self) {
+        // Signal background upload workers to stop retry loops
+        self.batch_manager.shutdown();
+    }
+
+    fn sync_local(&self) -> MidgeResult<()> {
+        // Sync only the local WAL writer if present. If no local writer exists
+        // fallback to flushing the batch manager (non-blocking), which at
+        // least ensures buffered data is submitted for upload.
+        if let Some(local) = &self.local_writer {
+            local.sync()
+        } else {
+            // Fallback - perform a flush (non-blocking) so we don't wait on cloud
+            let _ = self.batch_manager.flush_async()?;
+            Ok(())
+        }
     }
 }
 

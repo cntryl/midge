@@ -114,11 +114,29 @@ pub trait WalWriter: Send + Sync {
     /// Ensure durability to permanent storage (fsync or equivalent).
     fn sync(&self) -> MidgeResult<()>;
 
+    /// Sync only to *local* WAL storage (fsync/local durability) without
+    /// waiting for any external/cloud uploads. Default implementation falls
+    /// back to `sync()` so existing implementations remain compatible.
+    fn sync_local(&self) -> MidgeResult<()> {
+        self.sync()
+    }
+
     /// Current append position in the WAL.
     fn current_pos(&self) -> WalPos;
 
     /// Close the WAL writer and release resources.
     fn close(&self) -> MidgeResult<()>;
+
+    /// Signal shutdown to background workers (optional, no-op by default).
+    ///
+    /// For WAL implementations with background upload threads (e.g., CloudWalWriter),
+    /// this signals workers to stop retry loops and exit cleanly. Must be called
+    /// before dropping the writer to avoid hanging on sync() or close().
+    ///
+    /// Default implementation does nothing (suitable for synchronous WAL writers).
+    fn shutdown(&self) {
+        // Default: no-op for synchronous implementations
+    }
 }
 
 /// Reader contract for WAL implementations.
