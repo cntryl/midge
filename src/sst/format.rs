@@ -584,6 +584,46 @@ impl DataBlockBuilder {
         Ok(())
     }
 
+    /// Add a key-value pair without ordering checks.
+    /// 
+    /// This is used by IndexBlockBuilder when internal key ordering semantics
+    /// are needed, where the caller has already validated ordering.
+    /// 
+    /// # Safety (in terms of data integrity)
+    /// The caller must ensure keys are properly ordered before calling this.
+    pub fn add_unchecked(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+        if key.is_empty() {
+            return Err(MidgeError::InvalidData("Key cannot be empty".into()));
+        }
+
+        let mut shared_len = 0;
+        if self.entries_since_restart < self.restart_interval {
+            shared_len = shared_prefix_len(&self.last_key, key);
+        } else {
+            self.restarts.push(self.buffer.len() as u32);
+            self.entries_since_restart = 0;
+        }
+
+        let key_delta = &key[shared_len..];
+
+        let encoded = crate::sst::encoding::encode(
+            key_delta,
+            shared_len as u32,
+            Some(value),
+            0,
+            0,
+            false,
+            None,
+        );
+
+        self.buffer.extend_from_slice(&encoded);
+
+        self.last_key.clear();
+        self.last_key.extend_from_slice(key);
+        self.entries_since_restart += 1;
+        Ok(())
+    }
+
     /// Convenience wrapper to add an entry where sequence/kind are encoded in the key
     /// and no per-entry meta is written.
     pub fn add_with_meta_internal(
@@ -626,21 +666,60 @@ impl DataBlockBuilder {
     }
 }
 
-/// Index block builder for constructing index blocks
+/// Index block builder for constructing index blocks.
+/// 
+/// When using internal keys, this builder relaxes the ordering check to allow
+/// internal key comparison semantics (user_key ASC, seq DESC) rather than
+/// strict byte ordering.
 pub struct IndexBlockBuilder {
     data_builder: DataBlockBuilder,
+    /// Whether to use internal key comparison semantics for ordering checks
+    use_internal_keys: bool,
+    /// Last key added (for internal key ordering validation)
+    last_key: Vec<u8>,
 }
 
 impl IndexBlockBuilder {
     pub fn new() -> Self {
         Self {
             data_builder: DataBlockBuilder::new(1), // Index blocks don't need restart intervals
+            use_internal_keys: false,
+            last_key: Vec::new(),
+        }
+    }
+
+    /// Create an index block builder with internal key support.
+    pub fn new_with_internal_keys(use_internal_keys: bool) -> Self {
+        Self {
+            data_builder: DataBlockBuilder::new(1),
+            use_internal_keys,
+            last_key: Vec::new(),
         }
     }
 
     pub fn add_index_entry(&mut self, last_key: &[u8], handle: BlockHandle) -> MidgeResult<()> {
         let handle_encoding = handle.encode();
-        self.data_builder.add(last_key, &handle_encoding)
+        
+        if self.use_internal_keys {
+            // For internal keys, use proper internal key comparison
+            // which handles user_key ASC, seq DESC ordering
+            if !self.last_key.is_empty() {
+                let ordering = crate::common::internal_key::compare_internal_keys(&self.last_key, last_key);
+                if ordering != std::cmp::Ordering::Less {
+                    return Err(MidgeError::InvalidData(format!(
+                        "Index key ordering violation: new key {} should be > last key {}",
+                        hex::encode(last_key),
+                        hex::encode(&self.last_key)
+                    )));
+                }
+            }
+            self.last_key.clear();
+            self.last_key.extend_from_slice(last_key);
+            // Bypass DataBlockBuilder's ordering check by directly adding to buffer
+            self.data_builder.add_unchecked(last_key, &handle_encoding)
+        } else {
+            self.data_builder.add(last_key, &handle_encoding)
+        }
     }
 
     pub fn finish(self) -> Bytes {

@@ -89,7 +89,7 @@ Prioritized by dependency chain and bug-catching value:
 | 12 | `engine_delete_range.rs` | Range tombstones are complex | ✅ |
 | 13 | `engine_merge_operators.rs` | Advanced feature, fewer users | ✅ (exposes bug) |
 | 14 | `concurrency_*.rs` | Stress tests; need solid base first | ✅ |
-| 15 | `stress_*.rs` | Soak/capacity tests last | ⬜ |
+| 15 | `stress_*.rs` | Soak/capacity tests last | ✅ |
 
 **Logic:**
 1. **Durability first** - If recovery is broken, nothing else matters
@@ -121,7 +121,9 @@ Prioritized by dependency chain and bug-catching value:
 | `concurrency_flush.rs` | ✅ | 10 | All 3 (4 disk-only) | Flush contention, backpressure, iterator correctness, deadlock prevention |
 | `concurrency_wal.rs` | ✅ | 4 | LocalDisk, CloudBacked | WAL serialization, ordering, rotation during concurrent writes |
 | `concurrency_delete_range.rs` | ✅ | 4 | All 3 | Concurrent delete ranges, overlapping ranges, interleaved operations |
-| (remaining ~20 files) | ⬜ | ~100 | TBD | Not started |
+| `stress_large_values.rs` | ✅ | 11 | All 3 (4 disk-only) | Large value storage, mixed sizes, backpressure, crash recovery, snapshots |
+| `stress_workloads.rs` | ✅ | 11 | All 3 (5 disk-only) | Hot partition, high throughput, TTL patterns, append-only, mixed workloads |
+| (remaining ~18 files) | ⬜ | ~80 | TBD | Not started |
 
 ---
 

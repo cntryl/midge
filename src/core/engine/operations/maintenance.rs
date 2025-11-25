@@ -1082,4 +1082,45 @@ mod tests {
             MidgeError::InvalidConfig { .. }
         ));
     }
+
+    #[test]
+    fn should_flush_1000_rapid_overwrites_to_same_key_without_ordering_violation() {
+        // Arrange
+        // This test reproduces a bug where rapid overwrites to the same key
+        // cause "Key ordering violation" during flush when there are many
+        // versions of the same user key.
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_repro_1000_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk {
+                db_path: temp_dir.clone(),
+            },
+            enable_compaction: false, // Disable to isolate flush behavior
+            ..Default::default()
+        };
+        let engine = MidgeEngine::open(opts).unwrap();
+        let cf = engine.default_column_family();
+
+        // Act - 1000 appends to same key
+        for i in 0..1000 {
+            engine
+                .put(&cf, b"hot_key", format!("append{}", i).as_bytes())
+                .unwrap();
+        }
+        let result = engine.flush();
+
+        // Assert
+        assert!(
+            result.is_ok(),
+            "Flush should succeed with 1000 overwrites: {:?}",
+            result
+        );
+        let value = engine.get(&cf, b"hot_key").unwrap();
+        assert_eq!(value.as_deref(), Some(b"append999".as_ref()));
+
+        // Cleanup
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

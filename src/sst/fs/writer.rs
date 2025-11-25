@@ -61,7 +61,7 @@ impl FsDynWriter {
             cur_block: DataBlockBuilder::new(16),
             last_key_in_block: None,
             offsets: Vec::new(),
-            index: IndexBlockBuilder::new(),
+            index: IndexBlockBuilder::new_with_internal_keys(use_internal),
             bloom_builder: crate::sst::bloom::BloomFilterBuilder::with_bits_per_key(10),
             range_tombstones: Vec::new(),
             offset: 0,
@@ -95,7 +95,7 @@ impl FsDynWriter {
             cur_block: DataBlockBuilder::new(16),
             last_key_in_block: None,
             offsets: Vec::new(),
-            index: IndexBlockBuilder::new(),
+            index: IndexBlockBuilder::new_with_internal_keys(use_internal),
             bloom_builder: crate::sst::bloom::BloomFilterBuilder::with_bits_per_key(10),
             range_tombstones: Vec::new(),
             offset: 0,
@@ -149,13 +149,15 @@ impl crate::sst::DynSstWriter for FsDynWriter {
             if let Some((user, _s, _t)) = crate::common::internal_key::decode_internal_key(key) {
                 self.cur_block
                     .add_with_meta(key, value, seq, op_type, true, expiration)?;
-                self.last_key_in_block = Some(user.to_vec());
+                // Store full internal key (not just user key) for sparse index uniqueness
+                self.last_key_in_block = Some(key.to_vec());
                 self.bloom_builder.add_key(&user);
             } else {
                 let ik = crate::common::internal_key::encode_internal_key(key, seq, tombstone);
                 self.cur_block
                     .add_with_meta(&ik, value, seq, op_type, true, expiration)?;
-                self.last_key_in_block = Some(key.to_vec());
+                // Store encoded internal key for sparse index
+                self.last_key_in_block = Some(ik);
                 self.bloom_builder.add_key(key);
             }
         } else {
