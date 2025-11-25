@@ -86,7 +86,7 @@ Prioritized by dependency chain and bug-catching value:
 | 9 | `compaction_basic.rs` | Space reclamation; can run after data written | ✅ |
 | 10 | `compaction_levels.rs` | Multi-level compaction behavior | ✅ |
 | 11 | `engine_iterators.rs` | Advanced iteration patterns | ✅ |
-| 12 | `engine_delete_range.rs` | Range tombstones are complex | ⬜ |
+| 12 | `engine_delete_range.rs` | Range tombstones are complex | ✅ |
 | 13 | `engine_merge_operators.rs` | Advanced feature, fewer users | ⬜ |
 | 14 | `concurrency_*.rs` | Stress tests; need solid base first | ⬜ |
 | 15 | `stress_*.rs` | Soak/capacity tests last | ⬜ |
@@ -115,7 +115,8 @@ Prioritized by dependency chain and bug-catching value:
 | `compaction_basic.rs` | ✅ | 16 | LocalDisk, CloudBacked | Manual compaction, data correctness, tombstones, snapshots, background |
 | `compaction_levels.rs` | ✅ | 15 | LocalDisk, CloudBacked | L0 sublevels, level size enforcement, cascading, statistics |
 | `engine_iterators.rs` | ✅ | 22 | LocalDisk, CloudBacked | Forward/reverse scans, seek, tombstones, streaming, pagination |
-| (remaining ~26 files) | ⬜ | ~141 | TBD | Not started |
+| `engine_delete_range.rs` | ✅ | 16 | LocalDisk, CloudBacked | Range deletion, recovery, compaction, snapshots, overlapping |
+| (remaining ~25 files) | ⬜ | ~125 | TBD | Not started |
 
 ---
 
@@ -244,21 +245,40 @@ LARGE DATASETS:
 ```
 **Source files**: `engine_iterator_edge.rs`, `iterator_lifecycle.rs`, `iterator_stability_under_pressure.rs`, `engine_streaming.rs`
 
-### `engine_delete_range.rs` (~10 tests)
-Range deletion functionality.
+### `engine_delete_range.rs` ✅ (16 tests)
+Range deletion (range tombstone) functionality.
 ```
-- should_delete_range_of_keys
-- should_hide_deleted_range_in_scans
-- should_hide_deleted_range_in_gets
-- should_persist_delete_range_after_crash
-- should_compact_delete_range_tombstones
-- should_handle_overlapping_delete_ranges
-- should_handle_delete_range_with_snapshot
-- should_handle_interleaved_puts_and_delete_ranges
-- should_handle_delete_range_across_sst_levels
-- should_support_delete_range_in_readonly_mode
+BASIC RANGE DELETION:
+- should_delete_keys_in_range_given_delete_range_when_querying
+- should_delete_keys_across_levels_given_flushed_data_when_delete_range
+- should_handle_empty_range_given_start_equals_end_when_delete_range
+
+SCAN/GET BEHAVIOR:
+- should_hide_deleted_range_in_scan_given_delete_range_when_scanning
+- should_handle_large_range_deletion_given_many_keys_when_deleting
+
+RECOVERY:
+- should_persist_delete_range_given_wal_when_recovering
+- should_recover_range_tombstone_given_no_flush_when_restarting
+- should_apply_delete_range_after_crash_given_flushed_tombstone_when_recovering
+
+COMPACTION:
+- should_apply_range_tombstone_during_compaction_given_flushed_data_when_compacting
+- should_not_resurrect_deleted_keys_given_compaction_when_range_delete_applied
+
+SNAPSHOT ISOLATION:
+- should_preserve_snapshot_view_given_delete_range_after_snapshot_when_reading
+- should_include_deleted_range_in_snapshot_scan_given_delete_after_snapshot_when_scanning
+
+OVERLAPPING/INTERLEAVED:
+- should_merge_overlapping_ranges_given_multiple_delete_ranges_when_deleting
+- should_allow_put_after_delete_range_given_interleaved_ops_when_writing
+- should_apply_memtable_and_sst_tombstones_given_mixed_sources_when_reading
+
+READ-ONLY MODE:
+- should_reject_delete_range_given_read_only_mode_when_attempting
 ```
-**Source files**: `engine_delete_range.rs`, `engine_delete_range_core.rs`, `range_delete_edge_cases.rs`, `range_tombstone_stress.rs`
+**Source files**: `engine_delete_range.rs`, `engine_delete_range_core.rs`, `range_delete_edge_cases.rs`
 
 ### `engine_merge_operators.rs` (~12 tests)
 Merge operator functionality.
@@ -909,8 +929,8 @@ Maps each legacy file to its target location(s) in the new structure.
 | `engine_checkpoint.rs` | `checkpoint.rs` | ⬜ |
 | `engine_checkpoint_stress.rs` | `checkpoint.rs` | ⬜ |
 | `engine_compaction.rs` | `compaction_basic.rs` | ⬜ |
-| `engine_delete_range.rs` | `engine_delete_range.rs` | ⬜ |
-| `engine_delete_range_core.rs` | `engine_delete_range.rs` | ⬜ |
+| `engine_delete_range.rs` | `engine_delete_range.rs` | ✅ |
+| `engine_delete_range_core.rs` | `engine_delete_range.rs` | ✅ |
 | `engine_iterator_edge.rs` | `engine_iterators.rs` | ✅ |
 | `engine_merge_operator_correctness.rs` | `engine_merge_operators.rs` | ⬜ |
 | `engine_merge_operator_errors.rs` | `engine_merge_operators.rs` | ⬜ |
@@ -940,8 +960,8 @@ Maps each legacy file to its target location(s) in the new structure.
 | `multi_cf_compaction_fairness.rs` | `column_family_isolation.rs` | ⬜ |
 | `multicf_compaction_recovery.rs` | `column_family_isolation.rs` | ⬜ |
 | `paranoid_checksum_mode.rs` | `paranoid_mode.rs` | ⬜ |
-| `range_delete_edge_cases.rs` | `engine_delete_range.rs` | ⬜ |
-| `range_tombstone_stress.rs` | `engine_delete_range.rs` | ⬜ |
+| `range_delete_edge_cases.rs` | `engine_delete_range.rs` | ✅ |
+| `range_tombstone_stress.rs` | `engine_delete_range.rs` | ✅ |
 | `read_path_caching.rs` | `cache_read_path.rs` | ⬜ |
 | `shutdown_semantics.rs` | `durability_recovery.rs` | ⬜ |
 | `snapshot_lifecycle.rs` | `engine_snapshots.rs` | ⬜ |
