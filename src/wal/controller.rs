@@ -112,6 +112,14 @@ impl WalController {
         writer.sync()
     }
 
+    /// Sync only to local WAL storage (no cloud/upload waits).
+    /// Delegates to writer.sync_local().
+    pub fn sync_local(&self) -> MidgeResult<()> {
+        let writer = self.writer.read();
+
+        writer.sync_local()
+    }
+
     /// Get the current write position in the WAL.
     ///
     /// Note: For AsyncWalWriter, this may not reflect pending writes in the channel.

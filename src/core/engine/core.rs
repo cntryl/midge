@@ -39,6 +39,11 @@ pub struct MidgeEngine {
     pub(crate) sst_reader_factory: Arc<dyn crate::sst::SstReaderFactory>,
     pub(crate) wal_buffer_size: usize,
     pub(crate) wal_sync: bool,
+    /// Whether engine-level sync() should wait for cloud WAL uploads to complete.
+    /// When running in cloud-backed mode with `local_wal_sync = true` this is
+    /// set to false so `put()`/syncs only provide local durability and do not
+    /// block on cloud upload progress.
+    pub(crate) wait_for_cloud_wal_uploads_on_sync: bool,
     /// Transaction manager for optimistic concurrency control
     pub(crate) txn_manager: crate::core::transaction::TransactionController,
     pub(crate) snapshot_registry: Arc<crate::api::snapshot::SnapshotRegistry>,

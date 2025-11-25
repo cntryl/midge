@@ -114,6 +114,13 @@ pub trait WalWriter: Send + Sync {
     /// Ensure durability to permanent storage (fsync or equivalent).
     fn sync(&self) -> MidgeResult<()>;
 
+    /// Sync only to *local* WAL storage (fsync/local durability) without
+    /// waiting for any external/cloud uploads. Default implementation falls
+    /// back to `sync()` so existing implementations remain compatible.
+    fn sync_local(&self) -> MidgeResult<()> {
+        self.sync()
+    }
+
     /// Current append position in the WAL.
     fn current_pos(&self) -> WalPos;
 
