@@ -12,7 +12,6 @@ use common::*;
 use std::sync::Arc;
 
 #[test]
-#[ignore] // Temporarily ignored due to hanging - investigating shutdown issue
 fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifest_was_already_updated(
 ) {
     // Arrange: open engine with a cloud-backed storage mode and a mock backend
