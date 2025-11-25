@@ -124,13 +124,16 @@ impl SstCloudReader {
                     }
                 }
 
+                // Snapshot isolation: skip entries not visible to snapshot
+                if actual_seq >= snapshot_seq {
+                    continue;
+                }
+
                 if actual_key.as_slice() == key {
-                    // Snapshot isolation: only see writes with seq < snapshot_seq
-                    if actual_seq < snapshot_seq && !tomb {
-                        return Ok(value_opt.map(Bytes::copy_from_slice));
-                    } else {
+                    if tomb {
                         return Ok(None);
                     }
+                    return Ok(value_opt.map(Bytes::copy_from_slice));
                 }
 
                 if actual_key.as_slice() > key {
@@ -314,10 +317,12 @@ impl SstStateReader for SstCloudReader {
                     }
                 }
 
+                // Snapshot isolation: skip entries not visible to snapshot
+                if actual_seq >= snapshot_seq {
+                    continue;
+                }
+
                 if actual_key.as_slice() == key {
-                    if actual_seq > snapshot_seq {
-                        return Ok(KeyState::Absent);
-                    }
                     if tomb {
                         return Ok(KeyState::Tombstone(actual_seq));
                     }

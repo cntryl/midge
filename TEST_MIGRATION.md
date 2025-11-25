@@ -81,9 +81,9 @@ Prioritized by dependency chain and bug-catching value:
 | 4 | `engine_write_batch.rs` | Atomic batches use WAL; common user operation | ✅ |
 | 5 | `engine_snapshots.rs` | Point-in-time reads; needed before transactions | ✅ |
 | 6 | `transaction_basic.rs` | Depends on snapshots; high user-facing value | ✅ |
-| 7 | `column_family_lifecycle.rs` | CF create/drop/persist; isolated subsystem | ⬜ |
-| 8 | `column_family_isolation.rs` | Data isolation between CFs | ⬜ |
-| 9 | `compaction_basic.rs` | Space reclamation; can run after data written | ⬜ |
+| 7 | `column_family_lifecycle.rs` | CF create/drop/persist; isolated subsystem | ✅ |
+| 8 | `column_family_isolation.rs` | Data isolation between CFs | ✅ (merged into #7) |
+| 9 | `compaction_basic.rs` | Space reclamation; can run after data written | ✅ |
 | 10 | `compaction_levels.rs` | Multi-level compaction behavior | ⬜ |
 | 11 | `engine_iterators.rs` | Advanced iteration patterns | ⬜ |
 | 12 | `engine_delete_range.rs` | Range tombstones are complex | ⬜ |
@@ -111,7 +111,9 @@ Prioritized by dependency chain and bug-catching value:
 | `engine_write_batch.rs` | ✅ | 14 | LocalDisk | Atomic batches, ordering, durability, multi-CF |
 | `engine_snapshots.rs` | ✅ | 15 | All 3 | Snapshot reads, MVCC, flush/compaction isolation |
 | `transaction_basic.rs` | ✅ | 18 | LocalDisk | Commit, rollback, isolation, insert, delete_range, durability |
-| (remaining ~29 files) | ⬜ | ~222 | TBD | Not started |
+| `column_family_lifecycle.rs` | ✅ | 28 | LocalDisk | Create, drop, list, isolation, persistence, lookup |
+| `compaction_basic.rs` | ✅ | 16 | LocalDisk, CloudBacked | Manual compaction, data correctness, tombstones, snapshots (LocalDisk only), background |
+| (remaining ~28 files) | ⬜ | ~178 | TBD | Not started |
 
 ---
 
