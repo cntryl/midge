@@ -380,3 +380,89 @@ impl WalBatchManager {
         self.shutdown_signal.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cloud::mock::MockCloudBackend;
+
+    fn make_record(len: usize) -> WalRecord {
+        WalRecord {
+            cf_id: 0,
+            op: crate::wal::WalOpKind::Put,
+            key: bytes::Bytes::from("k"),
+            value: Some(bytes::Bytes::from(vec![0u8; len])),
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        }
+    }
+
+    #[test]
+    fn should_complete_promise_immediately_for_small_record() {
+        // Arrange: batch size larger than single record so no flush/worker
+        let backend = Arc::new(MockCloudBackend::new());
+        let manager = WalBatchManager::new(backend, 1024 * 1024, None, None);
+
+        // Act
+        let promise = manager.add_record(make_record(16)).expect("add_record");
+
+        // Assert: promise is already complete and wait() returns Ok
+        assert!(promise.is_complete());
+        assert!(promise.wait().is_ok());
+    }
+
+    #[test]
+    fn should_eventually_fail_promise_when_upload_retries_exhausted() {
+        // Arrange: small batch size to force immediate flush and background upload
+        let backend = Arc::new(MockCloudBackend::new());
+        backend.reset_counters();
+        // Fail all uploads by setting threshold to 0 (first attempt fails)
+        backend.set_fail_upload_after(0);
+
+        let manager = WalBatchManager::new(backend.clone(), 1, None, None);
+
+        // Act
+        let promise = manager.add_record(make_record(16)).expect("add_record");
+
+        // Assert: promise.wait() should surface an error once retries are exhausted
+        let res = promise.wait();
+        assert!(res.is_err(), "expected upload failure under fail-after=0");
+    }
+
+    #[test]
+    fn should_allow_sync_to_wait_for_pending_uploads() {
+        // Arrange: batch size 1 to trigger upload on each record
+        let backend = Arc::new(MockCloudBackend::new());
+        let manager = WalBatchManager::new(backend.clone(), 1, None, None);
+
+        // Two records should trigger at least one upload worker
+        manager.add_record(make_record(8)).expect("add_record 1");
+        manager.add_record(make_record(8)).expect("add_record 2");
+
+        // Act: sync should block until all uploads complete
+        let res = manager.sync();
+
+        // Assert
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn should_not_start_new_uploads_after_shutdown_is_set() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let manager = WalBatchManager::new(backend.clone(), 1, None, None);
+
+        manager.shutdown();
+
+        // Act: flushing an empty segment after shutdown should be a no-op
+        let promise = manager
+            .flush_current_segment()
+            .expect("flush_current_segment after shutdown");
+
+        // Assert: promise completes successfully
+        assert!(promise.wait().is_ok());
+    }
+}
