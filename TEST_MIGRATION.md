@@ -130,6 +130,7 @@ Prioritized by dependency chain and bug-catching value:
 | `compaction_concurrent.rs` | ✅ | 12 | LocalDisk, CloudBacked | Reads/writes during compaction, snapshot isolation, iterator stability, tombstones |
 | `transaction_isolation.rs` | ✅ | 22 | LocalDisk, CloudBacked | Dirty read/write prevention, snapshot isolation, conflict detection, phantom read prevention |
 | `transaction_conflicts.rs` | ✅ | 21 | LocalDisk, CloudBacked | Write-write conflicts, OCC, lost update prevention, delete range conflicts, high contention |
+| `transaction_deadlock.rs` | ✅ | 11 | LocalDisk, CloudBacked | Circular wait detection, victim selection, livelock prevention, read-write conflicts, recovery |
 | (remaining ~12 files) | ⬜ | ~30 | TBD | Not started |
 
 ---
@@ -414,14 +415,31 @@ DURABILITY:
 ```
 **Source files**: `txn_write_write_conflicts.rs`, `txn_occ_conflict.rs`, `txn_lost_updates.rs`, `txn_optimistic_locking.rs`
 
-### `transaction_deadlock.rs` (~5 tests)
-Deadlock detection and handling.
+### `transaction_deadlock.rs` ✅ (11 tests) — LocalDisk, CloudBacked
+Deadlock detection, victim selection, and read-write conflict handling.
 ```
-- should_detect_two_transaction_deadlock
-- should_detect_multi_transaction_cycle
-- should_abort_victim_on_deadlock
-- should_handle_wait_for_timeout
-- should_clear_wait_edges_on_abort
+CIRCULAR WAIT DETECTION:
+- should_detect_deadlock_given_circular_wait_when_two_transactions
+- should_detect_deadlock_given_three_way_circular_dependency
+
+VICTIM SELECTION:
+- should_abort_victim_transaction_given_deadlock_when_detected
+- should_allow_retry_given_deadlock_victim_when_aborted
+
+LIVELOCK PREVENTION:
+- should_handle_high_concurrency_without_livelock
+
+READ-WRITE CONFLICTS (SSI behavior):
+- should_detect_read_write_conflict_given_concurrent_modification_to_read_key
+- should_allow_read_only_transaction_given_no_conflict_on_read_keys
+
+EDGE CASES:
+- should_handle_self_conflict_given_same_key_multiple_writes
+- should_handle_many_concurrent_transactions_on_disjoint_keys
+
+DURABILITY:
+- should_handle_recovery_after_complex_deadlock_scenario
+- should_persist_winning_transaction_value_after_conflict_and_restart
 ```
 **Source files**: `txn_deadlock_detection.rs`
 
@@ -1008,7 +1026,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `transaction_range_delete_integration.rs` | `transaction_advanced.rs` | ⬜ |
 | `transaction_spill_pressure.rs` | `transaction_spill.rs` | ⬜ |
 | `txn_atomicity.rs` | `transaction_advanced.rs` | ⬜ |
-| `txn_deadlock_detection.rs` | `transaction_deadlock.rs` | ⬜ |
+| `txn_deadlock_detection.rs` | `transaction_deadlock.rs` | ✅ |
 | `txn_durability.rs` | `transaction_basic.rs` | ✅ |
 | `txn_edge_cases.rs` | `transaction_basic.rs` | ✅ |
 | `txn_isolation_levels.rs` | `transaction_isolation.rs` | ✅ |
