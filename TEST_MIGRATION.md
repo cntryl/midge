@@ -128,7 +128,8 @@ Prioritized by dependency chain and bug-catching value:
 | `cloud_consistency.rs` | ✅ | 6 | CloudBacked | Listing lag, eventual consistency, checksums, corrupted blobs, sync |
 | `cloud_hybrid.rs` | ✅ | 6 | CloudBacked (hybrid) | Cache eviction, concurrent access, churn, async uploads, recovery, metrics |
 | `compaction_concurrent.rs` | ✅ | 12 | LocalDisk, CloudBacked | Reads/writes during compaction, snapshot isolation, iterator stability, tombstones |
-| (remaining ~13 files) | ⬜ | ~33 | TBD | Not started |
+| `transaction_isolation.rs` | ✅ | 22 | LocalDisk, CloudBacked | Dirty read/write prevention, snapshot isolation, conflict detection, phantom read prevention |
+| (remaining ~12 files) | ⬜ | ~30 | TBD | Not started |
 
 ---
 
@@ -982,18 +983,18 @@ Maps each legacy file to its target location(s) in the new structure.
 | `test_guidelines_compliance.rs` | `test_infrastructure.rs` | ⬜ |
 | `test_hooks_integration.rs` | `test_infrastructure.rs` | ⬜ |
 | `test_timeout_demo.rs` | 🗑️ (demo only) | ⬜ |
-| `transaction_isolation.rs` | `transaction_isolation.rs` | ⬜ |
+| `transaction_isolation.rs` | `transaction_isolation.rs` | ✅ |
 | `transaction_range_delete_integration.rs` | `transaction_advanced.rs` | ⬜ |
 | `transaction_spill_pressure.rs` | `transaction_spill.rs` | ⬜ |
 | `txn_atomicity.rs` | `transaction_advanced.rs` | ⬜ |
 | `txn_deadlock_detection.rs` | `transaction_deadlock.rs` | ⬜ |
 | `txn_durability.rs` | `transaction_basic.rs` | ✅ |
 | `txn_edge_cases.rs` | `transaction_basic.rs` | ✅ |
-| `txn_isolation_levels.rs` | `transaction_isolation.rs` | ⬜ |
+| `txn_isolation_levels.rs` | `transaction_isolation.rs` | ✅ |
 | `txn_lost_updates.rs` | `transaction_conflicts.rs` | ⬜ |
 | `txn_occ_conflict.rs` | `transaction_conflicts.rs` | ⬜ |
 | `txn_optimistic_locking.rs` | `transaction_conflicts.rs` | ⬜ |
-| `txn_snapshot_isolation_enforcement.rs` | `transaction_isolation.rs` | ⬜ |
+| `txn_snapshot_isolation_enforcement.rs` | `transaction_isolation.rs` | ✅ |
 | `txn_transaction_lifecycle.rs` | `transaction_basic.rs` | ✅ |
 | `txn_transaction_spill_to_disk.rs` | `transaction_spill.rs` | ⬜ |
 | `txn_write_write_conflicts.rs` | `transaction_conflicts.rs` | ⬜ |
