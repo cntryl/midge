@@ -129,6 +129,7 @@ Prioritized by dependency chain and bug-catching value:
 | `cloud_hybrid.rs` | ✅ | 6 | CloudBacked (hybrid) | Cache eviction, concurrent access, churn, async uploads, recovery, metrics |
 | `compaction_concurrent.rs` | ✅ | 12 | LocalDisk, CloudBacked | Reads/writes during compaction, snapshot isolation, iterator stability, tombstones |
 | `transaction_isolation.rs` | ✅ | 22 | LocalDisk, CloudBacked | Dirty read/write prevention, snapshot isolation, conflict detection, phantom read prevention |
+| `transaction_conflicts.rs` | ✅ | 21 | LocalDisk, CloudBacked | Write-write conflicts, OCC, lost update prevention, delete range conflicts, high contention |
 | (remaining ~12 files) | ⬜ | ~30 | TBD | Not started |
 
 ---
@@ -377,19 +378,39 @@ Isolation level guarantees.
 ```
 **Source files**: `txn_isolation_levels.rs`, `transaction_isolation.rs`, `txn_snapshot_isolation_enforcement.rs`
 
-### `transaction_conflicts.rs` (~10 tests)
+### `transaction_conflicts.rs` ✅ (21 tests) — LocalDisk, CloudBacked
 Conflict detection and resolution.
 ```
-- should_detect_write_write_conflict
-- should_detect_read_write_conflict
-- should_abort_on_occ_conflict
-- should_handle_delete_conflicts
-- should_handle_concurrent_cas
-- should_handle_lost_update_scenario
-- should_retry_on_conflict
-- should_handle_high_contention
-- should_handle_conflicts_across_cfs
-- should_report_conflict_details
+WRITE-WRITE CONFLICTS:
+- should_detect_write_write_conflict_given_concurrent_updates_to_same_key
+- should_preserve_first_commit_given_write_conflict_when_second_aborts
+- should_reject_second_committer_on_write_write_conflict
+- should_allow_concurrent_writes_to_different_keys
+- should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commits
+
+READ-WRITE CONFLICTS:
+- should_detect_lost_update_given_cas_pattern_when_value_changed
+- should_abort_second_transaction_given_write_conflict_when_both_commit
+- should_prevent_lost_update_given_read_modify_write_when_concurrent
+- should_commit_transaction_given_no_conflicts
+- should_commit_transaction_given_concurrent_modifications_to_different_keys
+
+OCC/OPTIMISTIC LOCKING:
+- should_commit_new_key_given_clean_transaction
+- should_read_values_within_transaction
+- should_handle_high_concurrency_optimistic_locking
+
+CONCURRENT/STRESS:
+- should_handle_concurrent_read_modify_writes_without_panic
+- should_handle_high_contention_writes_without_panic
+- should_maintain_transaction_isolation_under_stress
+- should_detect_conflict_on_delete_range_given_overlapping_keys
+- should_handle_write_conflict_on_delete_given_concurrent_delete_and_put
+
+DURABILITY:
+- should_persist_lost_update_prevention_after_restart
+- should_recover_conflict_state_after_engine_restart
+- should_maintain_optimistic_locking_under_recovery
 ```
 **Source files**: `txn_write_write_conflicts.rs`, `txn_occ_conflict.rs`, `txn_lost_updates.rs`, `txn_optimistic_locking.rs`
 
@@ -991,13 +1012,13 @@ Maps each legacy file to its target location(s) in the new structure.
 | `txn_durability.rs` | `transaction_basic.rs` | ✅ |
 | `txn_edge_cases.rs` | `transaction_basic.rs` | ✅ |
 | `txn_isolation_levels.rs` | `transaction_isolation.rs` | ✅ |
-| `txn_lost_updates.rs` | `transaction_conflicts.rs` | ⬜ |
-| `txn_occ_conflict.rs` | `transaction_conflicts.rs` | ⬜ |
-| `txn_optimistic_locking.rs` | `transaction_conflicts.rs` | ⬜ |
+| `txn_lost_updates.rs` | `transaction_conflicts.rs` | ✅ |
+| `txn_occ_conflict.rs` | `transaction_conflicts.rs` | ✅ |
+| `txn_optimistic_locking.rs` | `transaction_conflicts.rs` | ✅ |
 | `txn_snapshot_isolation_enforcement.rs` | `transaction_isolation.rs` | ✅ |
 | `txn_transaction_lifecycle.rs` | `transaction_basic.rs` | ✅ |
 | `txn_transaction_spill_to_disk.rs` | `transaction_spill.rs` | ⬜ |
-| `txn_write_write_conflicts.rs` | `transaction_conflicts.rs` | ⬜ |
+| `txn_write_write_conflicts.rs` | `transaction_conflicts.rs` | ✅ |
 | `wal_manifest_divergence.rs` | `durability_recovery.rs` | ⬜ |
 
 ---
