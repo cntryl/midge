@@ -1,4 +1,4 @@
-﻿//! SST traits and common contracts
+//! SST traits and common contracts
 //!
 //! This module defines generic SST reader/writer traits and re-exports
 //! filesystem-backed adapters from `fs`.
@@ -437,4 +437,3 @@ mod tests {
         assert_eq!(rt2.seq, 42);
     }
 }
-

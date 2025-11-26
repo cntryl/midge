@@ -702,7 +702,9 @@ mod tests {
         let entry = &metas[0];
         assert!(entry.key.len() > b"user_key".len());
         // Decode and verify
-        if let Some((user, seq, tomb)) = crate::common::internal_key::decode_internal_key(&entry.key) {
+        if let Some((user, seq, tomb)) =
+            crate::common::internal_key::decode_internal_key(&entry.key)
+        {
             assert_eq!(user.as_slice(), b"user_key");
             assert_eq!(seq, 42);
             assert!(!tomb);

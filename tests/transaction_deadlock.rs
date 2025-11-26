@@ -478,7 +478,8 @@ fn should_handle_many_concurrent_transactions_on_disjoint_keys() {
         // Assert: All should succeed - no conflicts on disjoint keys
         let success_count = results.iter().filter(|r| r.is_ok()).count();
         assert_eq!(
-            success_count, 20,
+            success_count,
+            20,
             "[{}] All transactions on disjoint keys should succeed. \
              Successes: {}, Failures: {:?}",
             name,
@@ -538,7 +539,8 @@ fn should_persist_winning_transaction_value_after_conflict_and_restart() {
         // Assert: Winning value should persist
         let value = engine.get(&cf, b"contested_key").unwrap();
         assert_eq!(
-            value, winning_value,
+            value,
+            winning_value,
             "[{}] Winning transaction value should persist after restart",
             ctx.name()
         );

@@ -1,4 +1,4 @@
-﻿//! Common SST writer functionality shared across implementations.
+//! Common SST writer functionality shared across implementations.
 //!
 //! This module extracts the duplicated logic from cloud/mem/fs writers into
 //! reusable components to reduce code duplication and improve maintainability.
@@ -470,9 +470,7 @@ mod tests {
         // Arrange
         let config = WriterConfig::new(4096, CompressionType::None);
         let mut state = WriterState::new(config);
-        state
-            .add_entry(b"key", Some(b"value"), 0, 0, None)
-            .unwrap();
+        state.add_entry(b"key", Some(b"value"), 0, 0, None).unwrap();
 
         // Act
         let result = state.flush_current_block();

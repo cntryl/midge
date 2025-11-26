@@ -131,6 +131,7 @@ Prioritized by dependency chain and bug-catching value:
 | `transaction_isolation.rs` | ✅ | 22 | LocalDisk, CloudBacked | Dirty read/write prevention, snapshot isolation, conflict detection, phantom read prevention |
 | `transaction_conflicts.rs` | ✅ | 21 | LocalDisk, CloudBacked | Write-write conflicts, OCC, lost update prevention, delete range conflicts, high contention |
 | `transaction_deadlock.rs` | ✅ | 11 | LocalDisk, CloudBacked | Circular wait detection, victim selection, livelock prevention, read-write conflicts, recovery |
+| `transaction_spill.rs` | ✅ | 14 | LocalDisk, CloudBacked + Memory | Large transaction spill-to-disk, data integrity, rollback cleanup, recovery, memory pressure, memory mode verification |
 | (remaining ~12 files) | ⬜ | ~30 | TBD | Not started |
 
 ---
@@ -443,15 +444,36 @@ DURABILITY:
 ```
 **Source files**: `txn_deadlock_detection.rs`
 
-### `transaction_spill.rs` (~6 tests)
-Large transaction memory management.
+### `transaction_spill.rs` ✅ (14 tests) — LocalDisk, CloudBacked + Memory
+Large transaction memory management through spill-to-disk. Memory mode included to verify no disk artifacts.
 ```
-- should_spill_large_transaction_to_disk
-- should_recover_spilled_transaction
-- should_cleanup_spill_files_on_commit
-- should_cleanup_spill_files_on_abort
-- should_handle_memory_pressure
-- should_preserve_data_integrity_after_spill
+LARGE TRANSACTION COMMIT:
+- should_commit_large_transaction_given_many_writes_exceeding_memory_limit
+- should_handle_very_large_transaction_given_multiple_spills
+
+DATA INTEGRITY:
+- should_preserve_data_integrity_given_large_transaction_with_specific_values
+- should_preserve_key_order_given_large_transaction_when_iterating
+
+ROLLBACK:
+- should_rollback_spilled_transaction_given_drop_without_commit
+- should_cleanup_spill_files_given_transaction_rollback
+
+RECOVERY:
+- should_rollback_uncommitted_spill_given_restart_before_commit
+- should_recover_committed_spill_given_restart_after_commit
+
+MEMORY PRESSURE:
+- should_not_starve_foreground_writes_given_background_spill_activity
+- should_handle_concurrent_large_transactions_given_memory_pressure
+
+EDGE CASES:
+- should_handle_transaction_with_tiny_memory_limit
+- should_handle_mixed_small_and_large_values_in_spilled_transaction
+
+MEMORY MODE (no disk):
+- should_not_create_disk_artifacts_given_large_transaction_when_memory_mode
+- should_handle_large_transaction_in_memory_mode_without_spill_files
 ```
 **Source files**: `txn_transaction_spill_to_disk.rs`, `transaction_spill_pressure.rs`
 
@@ -1024,7 +1046,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `test_timeout_demo.rs` | 🗑️ (demo only) | ⬜ |
 | `transaction_isolation.rs` | `transaction_isolation.rs` | ✅ |
 | `transaction_range_delete_integration.rs` | `transaction_advanced.rs` | ⬜ |
-| `transaction_spill_pressure.rs` | `transaction_spill.rs` | ⬜ |
+| `transaction_spill_pressure.rs` | `transaction_spill.rs` | ✅ |
 | `txn_atomicity.rs` | `transaction_advanced.rs` | ⬜ |
 | `txn_deadlock_detection.rs` | `transaction_deadlock.rs` | ✅ |
 | `txn_durability.rs` | `transaction_basic.rs` | ✅ |
@@ -1035,7 +1057,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `txn_optimistic_locking.rs` | `transaction_conflicts.rs` | ✅ |
 | `txn_snapshot_isolation_enforcement.rs` | `transaction_isolation.rs` | ✅ |
 | `txn_transaction_lifecycle.rs` | `transaction_basic.rs` | ✅ |
-| `txn_transaction_spill_to_disk.rs` | `transaction_spill.rs` | ⬜ |
+| `txn_transaction_spill_to_disk.rs` | `transaction_spill.rs` | ✅ |
 | `txn_write_write_conflicts.rs` | `transaction_conflicts.rs` | ✅ |
 | `wal_manifest_divergence.rs` | `durability_recovery.rs` | ⬜ |
 

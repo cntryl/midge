@@ -189,9 +189,20 @@ fn should_recover_large_values_given_crash_after_put_when_reopening() {
 
         for i in 0..10u8 {
             let result = eng2.get(&cf2, &[i]).expect("get");
-            assert!(result.is_some(), "Key {} missing after recovery for {}", i, name);
+            assert!(
+                result.is_some(),
+                "Key {} missing after recovery for {}",
+                i,
+                name
+            );
             let value = result.unwrap();
-            assert_eq!(value.len(), 1024 * 4, "Size mismatch for key {} in {}", i, name);
+            assert_eq!(
+                value.len(),
+                1024 * 4,
+                "Size mismatch for key {} in {}",
+                i,
+                name
+            );
             assert!(
                 value.iter().all(|&b| b == i),
                 "Content mismatch for key {} in {}",
@@ -377,7 +388,8 @@ fn should_scan_correctly_given_mixed_size_values_when_iterating() {
         eng.put(&cf, b"a_tiny", b"t").expect("put");
         eng.put(&cf, b"b_small", &[b's'; 100]).expect("put");
         eng.put(&cf, b"c_medium", &vec![b'm'; 1024]).expect("put");
-        eng.put(&cf, b"d_large", &vec![b'L'; 1024 * 16]).expect("put");
+        eng.put(&cf, b"d_large", &vec![b'L'; 1024 * 16])
+            .expect("put");
 
         // Act
         let results = eng.scan(&cf, Query::new()).expect("scan");

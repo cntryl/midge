@@ -1,4 +1,4 @@
-﻿//! Cloud-backed SST reader implementation.
+//! Cloud-backed SST reader implementation.
 //!
 //! This reader fetches SST blobs from cloud storage and provides the same
 //! interface as filesystem and in-memory SST readers.
@@ -747,6 +747,3 @@ mod tests {
         }
     }
 }
-
-
-

@@ -353,7 +353,8 @@ fn should_handle_default_cf_merge_independently_given_custom_cf_when_merging() {
             .expect("merge default");
 
         eng.put(&custom_cf, b"path", b"root").expect("put custom");
-        eng.merge_cf(&custom_cf, b"path", b"dir").expect("merge custom");
+        eng.merge_cf(&custom_cf, b"path", b"dir")
+            .expect("merge custom");
         eng.merge_cf(&custom_cf, b"path", b"file")
             .expect("merge custom");
 

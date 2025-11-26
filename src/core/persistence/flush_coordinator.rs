@@ -31,8 +31,7 @@ impl FlushCoordinator {
         config: FlushWorkerConfig,
     ) -> MidgeResult<(Self, crate::core::runtime::WorkerHandle)> {
         let (tx, handle) = spawn_flush_worker(config)?;
-        let worker_handle =
-            crate::core::runtime::WorkerHandle::new(handle, "midge-flush-worker");
+        let worker_handle = crate::core::runtime::WorkerHandle::new(handle, "midge-flush-worker");
         Ok((
             Self {
                 tx,

@@ -55,8 +55,18 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
         let cf = eng.default_column_family();
 
         // Assert
-        assert_eq!(eng.get(&cf, b"key_a").unwrap(), Some(Bytes::from_static(b"value_1")), "Failed for {}", ctx.name());
-        assert_eq!(eng.get(&cf, b"key_b").unwrap(), Some(Bytes::from_static(b"value_2")), "Failed for {}", ctx.name());
+        assert_eq!(
+            eng.get(&cf, b"key_a").unwrap(),
+            Some(Bytes::from_static(b"value_1")),
+            "Failed for {}",
+            ctx.name()
+        );
+        assert_eq!(
+            eng.get(&cf, b"key_b").unwrap(),
+            Some(Bytes::from_static(b"value_2")),
+            "Failed for {}",
+            ctx.name()
+        );
     }
 }
 
@@ -92,7 +102,8 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
         assert_eq!(
             eng.get(&cf, b"durable_key").unwrap(),
             Some(Bytes::from_static(b"durable_value")),
-            "Failed for {}", ctx.name()
+            "Failed for {}",
+            ctx.name()
         );
     }
 }
@@ -161,8 +172,14 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
 
     let wal_dir = dir.path().join("wal");
     let sst_dir = dir.path().join("sst");
-    let wal_exists = wal_dir.exists() && fs::read_dir(&wal_dir).map(|mut d| d.next().is_some()).unwrap_or(false);
-    let sst_exists = sst_dir.exists() && fs::read_dir(&sst_dir).map(|mut d| d.next().is_some()).unwrap_or(false);
+    let wal_exists = wal_dir.exists()
+        && fs::read_dir(&wal_dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+    let sst_exists = sst_dir.exists()
+        && fs::read_dir(&sst_dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
 
     assert!(
         wal_exists || sst_exists,
@@ -205,8 +222,15 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
 
         // Assert - all records recovered
         for i in 0..1000 {
-            let result = eng.get(&cf, format!("seg_key_{}", i).as_bytes()).expect("get");
-            assert!(result.is_some(), "Record {} should be recovered for {}", i, ctx.name());
+            let result = eng
+                .get(&cf, format!("seg_key_{}", i).as_bytes())
+                .expect("get");
+            assert!(
+                result.is_some(),
+                "Record {} should be recovered for {}",
+                i,
+                ctx.name()
+            );
         }
     }
 }
@@ -234,8 +258,12 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
                     let eng = Arc::clone(&eng);
                     std::thread::spawn(move || {
                         let cf = eng.default_column_family();
-                        eng.put(&cf, format!("conc_{}", i).as_bytes(), format!("val_{}", i).as_bytes())
-                            .expect("put");
+                        eng.put(
+                            &cf,
+                            format!("conc_{}", i).as_bytes(),
+                            format!("val_{}", i).as_bytes(),
+                        )
+                        .expect("put");
                     })
                 })
                 .collect();
@@ -258,7 +286,12 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
         // Assert
         for i in 0..10 {
             let result = eng.get(&cf, format!("conc_{}", i).as_bytes()).expect("get");
-            assert!(result.is_some(), "Concurrent write {} should be recovered for {}", i, ctx.name());
+            assert!(
+                result.is_some(),
+                "Concurrent write {} should be recovered for {}",
+                i,
+                ctx.name()
+            );
         }
     }
 }
@@ -286,7 +319,8 @@ fn should_handle_gracefully_given_truncated_wal_tail_when_recovering() {
     {
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
-        eng.put(&cf, b"truncated_key", b"truncated_value").expect("put");
+        eng.put(&cf, b"truncated_key", b"truncated_value")
+            .expect("put");
         assert!(hooks.wal_append_count() > 0, "WAL append should occur");
     }
 
@@ -303,7 +337,10 @@ fn should_handle_gracefully_given_truncated_wal_tail_when_recovering() {
     let result = MidgeEngine::open(opts_recovery);
 
     // Assert - recovery succeeds (data may or may not be present)
-    assert!(result.is_ok(), "Recovery should handle truncated WAL gracefully");
+    assert!(
+        result.is_ok(),
+        "Recovery should handle truncated WAL gracefully"
+    );
 }
 
 #[test]
@@ -378,7 +415,10 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
 
     // Assert - data may or may not be present, but engine should be consistent
     let result = eng.get(&cf, b"maybe_lost");
-    assert!(result.is_ok(), "Engine should remain consistent even if data lost");
+    assert!(
+        result.is_ok(),
+        "Engine should remain consistent even if data lost"
+    );
 }
 
 // ============================================================================
@@ -390,7 +430,7 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
     for mode in disk_storage_modes() {
         // Arrange
         let ctx = DurabilityTestContext::new(mode);
-        
+
         // First, write some valid data
         let opts = MidgeOptions {
             storage_mode: ctx.create_storage_mode(),
@@ -418,7 +458,8 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
         assert_eq!(
             eng.get(&cf, b"valid_key").unwrap(),
             Some(Bytes::from_static(b"valid_value")),
-            "Failed for {}", ctx.name()
+            "Failed for {}",
+            ctx.name()
         );
     }
 }

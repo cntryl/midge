@@ -49,7 +49,11 @@ fn should_detect_write_write_conflict_given_concurrent_updates_to_same_key() {
         let second_result = engine.commit_transaction(txn2, WriteOptions::default());
 
         // Assert
-        assert!(first_result.is_ok(), "first transaction should succeed for {}", name);
+        assert!(
+            first_result.is_ok(),
+            "first transaction should succeed for {}",
+            name
+        );
         assert!(
             second_result.is_err(),
             "second transaction should fail on conflict for {}",
@@ -88,7 +92,11 @@ fn should_abort_second_transaction_given_write_conflict_when_both_commit() {
         let loser_result = engine.commit_transaction(loser, WriteOptions::default());
 
         // Assert
-        assert!(winner_result.is_ok(), "winner should commit successfully for {}", name);
+        assert!(
+            winner_result.is_ok(),
+            "winner should commit successfully for {}",
+            name
+        );
         assert!(
             loser_result.is_err(),
             "loser should fail with write-write conflict for {}",
@@ -199,8 +207,16 @@ fn should_handle_write_conflict_on_delete_given_concurrent_delete_and_put() {
         let put_result = engine.commit_transaction(put_txn, WriteOptions::default());
 
         // Assert
-        assert!(delete_result.is_ok(), "delete should commit first for {}", name);
-        assert!(put_result.is_err(), "put should fail due to conflict for {}", name);
+        assert!(
+            delete_result.is_ok(),
+            "delete should commit first for {}",
+            name
+        );
+        assert!(
+            put_result.is_err(),
+            "put should fail due to conflict for {}",
+            name
+        );
         assert_eq!(
             engine.get(&cf, b"key").unwrap(),
             None,
@@ -239,7 +255,11 @@ fn should_detect_conflict_on_delete_range_given_overlapping_keys() {
         let overlap_result = engine.commit_transaction(overlap_txn, WriteOptions::default());
 
         // Assert
-        assert!(range_result.is_ok(), "Range delete should commit for {}", name);
+        assert!(
+            range_result.is_ok(),
+            "Range delete should commit for {}",
+            name
+        );
         assert!(
             overlap_result.is_err(),
             "Overlapping transaction should fail due to range conflict for {}",
@@ -516,7 +536,11 @@ fn should_commit_new_key_given_clean_transaction() {
         let result = engine.commit_transaction(txn, WriteOptions::default());
 
         // Assert - Should commit successfully
-        assert!(result.is_ok(), "Clean transaction should commit for {}", name);
+        assert!(
+            result.is_ok(),
+            "Clean transaction should commit for {}",
+            name
+        );
         assert_eq!(
             engine.get(&cf, b"new_key").expect("get"),
             Some(Bytes::from("new_value")),

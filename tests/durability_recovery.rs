@@ -45,8 +45,14 @@ fn should_recover_from_clean_shutdown_when_reopening() {
     let cf = eng.default_column_family();
 
     // Assert
-    assert_eq!(eng.get(&cf, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
-    assert_eq!(eng.get(&cf, b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+    assert_eq!(
+        eng.get(&cf, b"key1").unwrap(),
+        Some(Bytes::from_static(b"value1"))
+    );
+    assert_eq!(
+        eng.get(&cf, b"key2").unwrap(),
+        Some(Bytes::from_static(b"value2"))
+    );
 }
 
 #[test]
@@ -98,7 +104,8 @@ fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
-        eng.put(&cf, b"mid_flush_key", b"mid_flush_value").expect("put");
+        eng.put(&cf, b"mid_flush_key", b"mid_flush_value")
+            .expect("put");
 
         // Trigger flush but block before manifest update
         std::thread::spawn(move || {
@@ -165,7 +172,10 @@ fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
     let cf = eng.default_column_family();
 
     // Assert - WAL wins (newest data)
-    assert_eq!(eng.get(&cf, b"key").unwrap(), Some(Bytes::from_static(b"new_value")));
+    assert_eq!(
+        eng.get(&cf, b"key").unwrap(),
+        Some(Bytes::from_static(b"new_value"))
+    );
 }
 
 #[test]
@@ -210,7 +220,9 @@ fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
 
     // Assert - data present exactly once
     for i in 0..100 {
-        let result = eng.get(&cf, format!("dup_key_{:04}", i).as_bytes()).expect("get");
+        let result = eng
+            .get(&cf, format!("dup_key_{:04}", i).as_bytes())
+            .expect("get");
         assert!(result.is_some(), "Key {} should exist", i);
     }
 }
@@ -246,7 +258,10 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
     let cf = eng.default_column_family();
 
     // Assert - should see latest value
-    assert_eq!(eng.get(&cf, b"ordered_key").unwrap(), Some(Bytes::from_static(b"v3")));
+    assert_eq!(
+        eng.get(&cf, b"ordered_key").unwrap(),
+        Some(Bytes::from_static(b"v3"))
+    );
 }
 
 // ============================================================================
@@ -284,7 +299,10 @@ fn should_recover_deletes_given_crash_after_delete_when_reopening() {
 
     // Assert
     assert!(eng.get(&cf, b"to_delete").unwrap().is_none());
-    assert_eq!(eng.get(&cf, b"to_keep").unwrap(), Some(Bytes::from_static(b"value")));
+    assert_eq!(
+        eng.get(&cf, b"to_keep").unwrap(),
+        Some(Bytes::from_static(b"value"))
+    );
 }
 
 // ============================================================================
@@ -306,9 +324,21 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
         let cf = eng.default_column_family();
 
         let mut batch = WriteBatch::new();
-        batch.put(cf.id(), Bytes::from_static(b"batch_k1"), Bytes::from_static(b"v1"));
-        batch.put(cf.id(), Bytes::from_static(b"batch_k2"), Bytes::from_static(b"v2"));
-        batch.put(cf.id(), Bytes::from_static(b"batch_k3"), Bytes::from_static(b"v3"));
+        batch.put(
+            cf.id(),
+            Bytes::from_static(b"batch_k1"),
+            Bytes::from_static(b"v1"),
+        );
+        batch.put(
+            cf.id(),
+            Bytes::from_static(b"batch_k2"),
+            Bytes::from_static(b"v2"),
+        );
+        batch.put(
+            cf.id(),
+            Bytes::from_static(b"batch_k3"),
+            Bytes::from_static(b"v3"),
+        );
         eng.write_batch(&batch).expect("write_batch");
     }
 
@@ -323,9 +353,18 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
     let cf = eng.default_column_family();
 
     // Assert - batch should be all-or-nothing
-    assert_eq!(eng.get(&cf, b"batch_k1").unwrap(), Some(Bytes::from_static(b"v1")));
-    assert_eq!(eng.get(&cf, b"batch_k2").unwrap(), Some(Bytes::from_static(b"v2")));
-    assert_eq!(eng.get(&cf, b"batch_k3").unwrap(), Some(Bytes::from_static(b"v3")));
+    assert_eq!(
+        eng.get(&cf, b"batch_k1").unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+    assert_eq!(
+        eng.get(&cf, b"batch_k2").unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
+    assert_eq!(
+        eng.get(&cf, b"batch_k3").unwrap(),
+        Some(Bytes::from_static(b"v3"))
+    );
 }
 
 // ============================================================================
@@ -375,7 +414,9 @@ fn should_recover_from_wal_given_manifest_save_failure_when_reopening() {
 
     // Assert - WAL should have preserved data
     for i in 0..50 {
-        let result = eng.get(&cf, format!("manifest_fail_{:04}", i).as_bytes()).expect("get");
+        let result = eng
+            .get(&cf, format!("manifest_fail_{:04}", i).as_bytes())
+            .expect("get");
         assert!(result.is_some(), "Key {} should be recovered from WAL", i);
     }
 }
@@ -426,7 +467,10 @@ fn should_preserve_consistency_given_crash_before_manifest_update_when_reopening
     let last = eng.get(&cf, b"cons_key_0099").expect("get");
 
     if first.is_some() {
-        assert!(last.is_some(), "If first key exists, all should exist (consistency)");
+        assert!(
+            last.is_some(),
+            "If first key exists, all should exist (consistency)"
+        );
     }
 }
 
@@ -465,7 +509,10 @@ fn should_be_idempotent_given_multiple_recovery_cycles_when_reopening() {
     }
 
     // Assert - same value every time
-    assert!(values.iter().all(|v| *v == values[0]), "Recovery should be idempotent");
+    assert!(
+        values.iter().all(|v| *v == values[0]),
+        "Recovery should be idempotent"
+    );
 }
 
 #[test]
@@ -484,7 +531,8 @@ fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
             &cf,
             format!("cycle_{}", cycle).as_bytes(),
             format!("value_{}", cycle).as_bytes(),
-        ).expect("put");
+        )
+        .expect("put");
 
         // Drop (simulates crash)
     }
@@ -495,7 +543,9 @@ fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
     let cf = eng.default_column_family();
 
     for cycle in 0..5 {
-        let result = eng.get(&cf, format!("cycle_{}", cycle).as_bytes()).expect("get");
+        let result = eng
+            .get(&cf, format!("cycle_{}", cycle).as_bytes())
+            .expect("get");
         assert_eq!(
             result,
             Some(Bytes::from(format!("value_{}", cycle))),
@@ -524,7 +574,8 @@ fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
         let cf = eng.default_column_family();
 
         for i in 0..5 {
-            eng.put(&cf, format!("pre_key_{}", i).as_bytes(), b"value").expect("put");
+            eng.put(&cf, format!("pre_key_{}", i).as_bytes(), b"value")
+                .expect("put");
         }
     }
 
@@ -538,7 +589,8 @@ fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
     let eng = MidgeEngine::open(opts).expect("reopen");
     let cf = eng.default_column_family();
 
-    eng.put(&cf, b"post_recovery_key", b"post_value").expect("put");
+    eng.put(&cf, b"post_recovery_key", b"post_value")
+        .expect("put");
 
     // Assert - new writes work correctly
     assert_eq!(
@@ -548,7 +600,10 @@ fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
 
     // Pre-recovery data still accessible
     for i in 0..5 {
-        assert!(eng.get(&cf, format!("pre_key_{}", i).as_bytes()).unwrap().is_some());
+        assert!(eng
+            .get(&cf, format!("pre_key_{}", i).as_bytes())
+            .unwrap()
+            .is_some());
     }
 }
 
@@ -575,7 +630,8 @@ fn should_skip_corrupted_tail_given_partial_record_when_tolerant_mode() {
         let cf = eng.default_column_family();
 
         eng.put(&cf, b"good_key", b"good_value").expect("put");
-        eng.put(&cf, b"truncated_key", b"truncated_value").expect("put");
+        eng.put(&cf, b"truncated_key", b"truncated_value")
+            .expect("put");
         // Last write will be truncated
     }
 
@@ -593,6 +649,8 @@ fn should_skip_corrupted_tail_given_partial_record_when_tolerant_mode() {
     // Assert - at least good_key should be recovered
     // (truncated_key may or may not be present depending on truncation timing)
     let good = eng.get(&cf, b"good_key").expect("get");
-    assert!(good.is_some() || eng.get(&cf, b"truncated_key").expect("get").is_some(),
-        "At least some data should be recovered");
+    assert!(
+        good.is_some() || eng.get(&cf, b"truncated_key").expect("get").is_some(),
+        "At least some data should be recovered"
+    );
 }

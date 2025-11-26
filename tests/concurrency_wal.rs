@@ -199,7 +199,12 @@ fn should_handle_wal_rotation_given_concurrent_writes_when_15_writers() {
             for i in 0..writes_per_writer {
                 let key = format!("rotate_{}_{}", writer_id, i);
                 let result = engine.get(&cf, key.as_bytes()).unwrap();
-                assert!(result.is_some(), "Key {} should exist for {}", key, ctx.name());
+                assert!(
+                    result.is_some(),
+                    "Key {} should exist for {}",
+                    key,
+                    ctx.name()
+                );
                 assert_eq!(result.unwrap().len(), 1024);
             }
         }

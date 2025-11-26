@@ -61,7 +61,12 @@ fn should_commit_transaction_given_multiple_operations_when_committed() {
             "Failed for {}",
             name
         );
-        assert_eq!(engine.get(&cf, b"key3").expect("get"), None, "Failed for {}", name);
+        assert_eq!(
+            engine.get(&cf, b"key3").expect("get"),
+            None,
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -115,7 +120,11 @@ fn should_succeed_given_read_only_transaction_when_committed() {
         let result = engine.commit_transaction(readonly_txn, WriteOptions::default());
 
         // Assert
-        assert!(result.is_ok(), "Read-only transaction should commit for {}", name);
+        assert!(
+            result.is_ok(),
+            "Read-only transaction should commit for {}",
+            name
+        );
     }
 }
 
@@ -174,9 +183,24 @@ fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
         drop(txn);
 
         // Assert
-        assert_eq!(engine.get(&cf, b"key1").expect("get"), None, "Failed for {}", name);
-        assert_eq!(engine.get(&cf, b"key2").expect("get"), None, "Failed for {}", name);
-        assert_eq!(engine.get(&cf, b"key3").expect("get"), None, "Failed for {}", name);
+        assert_eq!(
+            engine.get(&cf, b"key1").expect("get"),
+            None,
+            "Failed for {}",
+            name
+        );
+        assert_eq!(
+            engine.get(&cf, b"key2").expect("get"),
+            None,
+            "Failed for {}",
+            name
+        );
+        assert_eq!(
+            engine.get(&cf, b"key3").expect("get"),
+            None,
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -365,9 +389,24 @@ fn should_delete_range_given_committed_transaction_when_delete_range() {
             "Failed for {}",
             name
         );
-        assert_eq!(engine.get(&cf, b"key1").expect("get"), None, "Failed for {}", name);
-        assert_eq!(engine.get(&cf, b"key2").expect("get"), None, "Failed for {}", name);
-        assert_eq!(engine.get(&cf, b"key3").expect("get"), None, "Failed for {}", name);
+        assert_eq!(
+            engine.get(&cf, b"key1").expect("get"),
+            None,
+            "Failed for {}",
+            name
+        );
+        assert_eq!(
+            engine.get(&cf, b"key2").expect("get"),
+            None,
+            "Failed for {}",
+            name
+        );
+        assert_eq!(
+            engine.get(&cf, b"key3").expect("get"),
+            None,
+            "Failed for {}",
+            name
+        );
         assert_eq!(
             engine.get(&cf, b"key4").expect("get"),
             Some(Bytes::from("val4")),
@@ -448,24 +487,54 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
         // Assert
         let keys: Vec<_> = results.iter().map(|(k, _)| k.as_ref()).collect();
         assert_eq!(keys.len(), 4, "Failed for {}", name);
-        assert!(keys.contains(&b"committed1".as_ref()), "Failed for {}", name);
-        assert!(!keys.contains(&b"committed2".as_ref()), "Failed for {}", name); // Deleted
-        assert!(keys.contains(&b"committed3".as_ref()), "Failed for {}", name);
-        assert!(keys.contains(&b"uncommitted1".as_ref()), "Failed for {}", name);
-        assert!(keys.contains(&b"uncommitted2".as_ref()), "Failed for {}", name);
+        assert!(
+            keys.contains(&b"committed1".as_ref()),
+            "Failed for {}",
+            name
+        );
+        assert!(
+            !keys.contains(&b"committed2".as_ref()),
+            "Failed for {}",
+            name
+        ); // Deleted
+        assert!(
+            keys.contains(&b"committed3".as_ref()),
+            "Failed for {}",
+            name
+        );
+        assert!(
+            keys.contains(&b"uncommitted1".as_ref()),
+            "Failed for {}",
+            name
+        );
+        assert!(
+            keys.contains(&b"uncommitted2".as_ref()),
+            "Failed for {}",
+            name
+        );
 
         // Verify values
         let committed1_val = results
             .iter()
             .find(|(k, _)| k.as_ref() == b"committed1")
             .map(|(_, v)| v.as_ref());
-        assert_eq!(committed1_val, Some(b"val1".as_ref()), "Failed for {}", name);
+        assert_eq!(
+            committed1_val,
+            Some(b"val1".as_ref()),
+            "Failed for {}",
+            name
+        );
 
         let uncommitted1_val = results
             .iter()
             .find(|(k, _)| k.as_ref() == b"uncommitted1")
             .map(|(_, v)| v.as_ref());
-        assert_eq!(uncommitted1_val, Some(b"new_val".as_ref()), "Failed for {}", name);
+        assert_eq!(
+            uncommitted1_val,
+            Some(b"new_val".as_ref()),
+            "Failed for {}",
+            name
+        );
 
         // Drop without commit - uncommitted changes should not persist
         drop(txn);
@@ -782,7 +851,12 @@ fn should_handle_rapid_transaction_creation_given_many_transactions_when_sequent
             let value = format!("rapid_value_{}", i);
             txn.put(key.as_bytes(), value.as_bytes()).unwrap();
             let result = engine.commit_transaction(txn, WriteOptions::default());
-            assert!(result.is_ok(), "Transaction {} should commit for {}", i, name);
+            assert!(
+                result.is_ok(),
+                "Transaction {} should commit for {}",
+                i,
+                name
+            );
         }
 
         // Assert

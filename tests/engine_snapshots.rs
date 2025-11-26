@@ -37,8 +37,18 @@ fn should_hide_writes_given_snapshot_created_before_write_when_get_at() {
         let current = engine.get(&cf, b"key").expect("get");
 
         // Assert
-        assert_eq!(at_snapshot, Some(Bytes::from_static(b"v1")), "Failed for {}", name);
-        assert_eq!(current, Some(Bytes::from_static(b"v2")), "Failed for {}", name);
+        assert_eq!(
+            at_snapshot,
+            Some(Bytes::from_static(b"v1")),
+            "Failed for {}",
+            name
+        );
+        assert_eq!(
+            current,
+            Some(Bytes::from_static(b"v2")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -63,7 +73,12 @@ fn should_return_none_given_snapshot_before_key_exists_when_get_at() {
 
         // Assert
         assert_eq!(at_snapshot, None, "Failed for {}", name);
-        assert_eq!(current, Some(Bytes::from_static(b"value")), "Failed for {}", name);
+        assert_eq!(
+            current,
+            Some(Bytes::from_static(b"value")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -86,7 +101,12 @@ fn should_see_value_given_snapshot_after_write_when_get_at() {
         let at_snapshot = engine.get_at(&cf, b"key", &snapshot).expect("get_at");
 
         // Assert
-        assert_eq!(at_snapshot, Some(Bytes::from_static(b"value")), "Failed for {}", name);
+        assert_eq!(
+            at_snapshot,
+            Some(Bytes::from_static(b"value")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -111,7 +131,12 @@ fn should_see_deleted_key_given_snapshot_before_delete_when_get_at() {
         let current = engine.get(&cf, b"key").expect("get");
 
         // Assert
-        assert_eq!(at_snapshot, Some(Bytes::from_static(b"value")), "Failed for {}", name);
+        assert_eq!(
+            at_snapshot,
+            Some(Bytes::from_static(b"value")),
+            "Failed for {}",
+            name
+        );
         assert_eq!(current, None, "Failed for {}", name);
     }
 }
@@ -186,7 +211,12 @@ fn should_exclude_keys_written_after_snapshot_when_scan_at() {
 
         // Assert - only k1 visible in snapshot
         assert_eq!(results.len(), 1, "Failed for {}", name);
-        assert_eq!(results[0].0, Bytes::from_static(b"k1"), "Failed for {}", name);
+        assert_eq!(
+            results[0].0,
+            Bytes::from_static(b"k1"),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -227,7 +257,12 @@ fn should_include_deleted_keys_given_snapshot_before_delete_when_scan_at() {
             .expect("scan");
 
         // Assert
-        assert_eq!(at_snapshot.len(), 2, "Snapshot should see both keys for {}", name);
+        assert_eq!(
+            at_snapshot.len(),
+            2,
+            "Snapshot should see both keys for {}",
+            name
+        );
         assert_eq!(current.len(), 1, "Current should see only k2 for {}", name);
     }
 }
@@ -264,10 +299,30 @@ fn should_maintain_separate_views_given_multiple_snapshots_when_reading() {
         let r_current = engine.get(&cf, b"key").expect("get");
 
         // Assert - each snapshot sees correct version
-        assert_eq!(r1, Some(Bytes::from_static(b"v1")), "snap1 failed for {}", name);
-        assert_eq!(r2, Some(Bytes::from_static(b"v2")), "snap2 failed for {}", name);
-        assert_eq!(r3, Some(Bytes::from_static(b"v3")), "snap3 failed for {}", name);
-        assert_eq!(r_current, Some(Bytes::from_static(b"v3")), "current failed for {}", name);
+        assert_eq!(
+            r1,
+            Some(Bytes::from_static(b"v1")),
+            "snap1 failed for {}",
+            name
+        );
+        assert_eq!(
+            r2,
+            Some(Bytes::from_static(b"v2")),
+            "snap2 failed for {}",
+            name
+        );
+        assert_eq!(
+            r3,
+            Some(Bytes::from_static(b"v3")),
+            "snap3 failed for {}",
+            name
+        );
+        assert_eq!(
+            r_current,
+            Some(Bytes::from_static(b"v3")),
+            "current failed for {}",
+            name
+        );
     }
 }
 
@@ -288,7 +343,12 @@ fn should_work_correctly_given_empty_database_when_snapshot_created() {
         engine.put(&cf, b"key", b"value").expect("put");
 
         // Assert - snapshot sees empty, current sees data
-        assert_eq!(engine.get_at(&cf, b"key", &snapshot).unwrap(), None, "Failed for {}", name);
+        assert_eq!(
+            engine.get_at(&cf, b"key", &snapshot).unwrap(),
+            None,
+            "Failed for {}",
+            name
+        );
         assert_eq!(
             engine.get(&cf, b"key").unwrap(),
             Some(Bytes::from_static(b"value")),
@@ -377,7 +437,9 @@ fn should_recover_data_given_crash_with_active_snapshot_when_reopening() {
 
     {
         let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+            storage_mode: StorageMode::LocalDisk {
+                db_path: path.clone(),
+            },
             ..Default::default()
         };
         let engine = MidgeEngine::open(opts).expect("open");
@@ -398,8 +460,14 @@ fn should_recover_data_given_crash_with_active_snapshot_when_reopening() {
     let cf = engine.default_column_family();
 
     // Assert - both keys recovered (snapshots don't persist across crashes)
-    assert_eq!(engine.get(&cf, b"key1").unwrap(), Some(Bytes::from_static(b"val1")));
-    assert_eq!(engine.get(&cf, b"key2").unwrap(), Some(Bytes::from_static(b"val2")));
+    assert_eq!(
+        engine.get(&cf, b"key1").unwrap(),
+        Some(Bytes::from_static(b"val1"))
+    );
+    assert_eq!(
+        engine.get(&cf, b"key2").unwrap(),
+        Some(Bytes::from_static(b"val2"))
+    );
 }
 
 #[test]
@@ -420,7 +488,7 @@ fn should_preserve_snapshot_view_given_flush_when_reading_at_snapshot() {
     engine.put(&cf, b"key", b"v1").expect("put");
     let snapshot = engine.snapshot();
     engine.put(&cf, b"key", b"v2").expect("put v2");
-    
+
     // Act - flush both versions to SST
     engine.flush().expect("flush");
 
@@ -429,7 +497,10 @@ fn should_preserve_snapshot_view_given_flush_when_reading_at_snapshot() {
         engine.get_at(&cf, b"key", &snapshot).unwrap(),
         Some(Bytes::from_static(b"v1"))
     );
-    assert_eq!(engine.get(&cf, b"key").unwrap(), Some(Bytes::from_static(b"v2")));
+    assert_eq!(
+        engine.get(&cf, b"key").unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
 }
 
 #[test]
@@ -456,14 +527,19 @@ fn should_preserve_snapshot_view_given_compaction_when_reading_at_snapshot() {
     engine.flush().expect("flush");
 
     // Act - compact
-    engine.compact_range(&cf, Some(b""), Some(b"~")).expect("compact");
+    engine
+        .compact_range(&cf, Some(b""), Some(b"~"))
+        .expect("compact");
 
     // Assert - snapshot still sees v1
     assert_eq!(
         engine.get_at(&cf, b"key", &snapshot).unwrap(),
         Some(Bytes::from_static(b"v1"))
     );
-    assert_eq!(engine.get(&cf, b"key").unwrap(), Some(Bytes::from_static(b"v2")));
+    assert_eq!(
+        engine.get(&cf, b"key").unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
 }
 
 // ============================================================================
@@ -492,7 +568,9 @@ fn should_preserve_deleted_range_given_snapshot_before_delete_range_when_scan_at
         let snapshot = engine.snapshot();
 
         // Act - delete range after snapshot
-        engine.delete_range(&cf, b"k03", b"k07").expect("delete_range");
+        engine
+            .delete_range(&cf, b"k03", b"k07")
+            .expect("delete_range");
 
         // Assert - snapshot sees all keys, current sees only undeleted
         let at_snapshot = engine
@@ -513,7 +591,12 @@ fn should_preserve_deleted_range_given_snapshot_before_delete_range_when_scan_at
             )
             .expect("scan");
 
-        assert_eq!(at_snapshot.len(), 10, "Snapshot should see all keys for {}", name);
+        assert_eq!(
+            at_snapshot.len(),
+            10,
+            "Snapshot should see all keys for {}",
+            name
+        );
         assert_eq!(current.len(), 6, "Current should see 6 keys for {}", name); // 0,1,2,7,8,9
     }
 }

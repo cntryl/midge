@@ -286,21 +286,22 @@ pub fn open_with_factories(
         Some(background_error.clone()),
     )?;
 
-    let (compaction_coordinator, compaction_handle) = match crate::core::engine::factory::setup_compaction_coordinator(
-        &opts,
-        &db_path,
-        sst_dir.clone(),
-        sst_factory_arc.clone(),
-        sst_reader_factory_arc.clone(),
-        snapshot_registry_arc.clone(),
-        metrics_arc.clone(),
-        cf_set_arc.clone(),
-        version_manager.clone(),
-        Some(background_error.clone()),
-    )? {
-        Some((coord, handle)) => (Some(coord), Some(handle)),
-        None => (None, None),
-    };
+    let (compaction_coordinator, compaction_handle) =
+        match crate::core::engine::factory::setup_compaction_coordinator(
+            &opts,
+            &db_path,
+            sst_dir.clone(),
+            sst_factory_arc.clone(),
+            sst_reader_factory_arc.clone(),
+            snapshot_registry_arc.clone(),
+            metrics_arc.clone(),
+            cf_set_arc.clone(),
+            version_manager.clone(),
+            Some(background_error.clone()),
+        )? {
+            Some((coord, handle)) => (Some(coord), Some(handle)),
+            None => (None, None),
+        };
     let manifest = manifest_cache.get();
 
     // Initialize bloom filter cache and populate from existing SSTs

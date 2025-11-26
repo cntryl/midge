@@ -343,10 +343,12 @@ pub(crate) fn setup_compaction_coordinator(
     cf_set_arc: Arc<super::column_family::ColumnFamilySet>,
     version_manager: Arc<crate::core::manifest::VersionManager>,
     background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
-) -> MidgeResult<Option<(
-    crate::core::CompactionController,
-    crate::core::runtime::WorkerHandle,
-)>> {
+) -> MidgeResult<
+    Option<(
+        crate::core::CompactionController,
+        crate::core::runtime::WorkerHandle,
+    )>,
+> {
     if opts.enable_compaction && !opts.read_only {
         // Create CloudSstManager if in cloud-backed mode
         let cloud_sst_manager_c = if let Some(cloud_backend) = opts.storage_mode.cloud_backend() {

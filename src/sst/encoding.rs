@@ -1,4 +1,4 @@
-﻿//! SST entry encoding/decoding in TLV format
+//! SST entry encoding/decoding in TLV format
 //!
 //! This module provides the canonical TLV (Tag-Length-Value) encoding and decoding
 //! for SST data block entries. All SST implementations (fs, cloud, mem) use this
@@ -392,15 +392,7 @@ mod tests {
         let shared_len = 5;
 
         // Act
-        let encoded = encode(
-            key_delta,
-            shared_len,
-            Some(b"value"),
-            42,
-            0,
-            false,
-            None,
-        );
+        let encoded = encode(key_delta, shared_len, Some(b"value"), 42, 0, false, None);
         let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
 
         // Assert
@@ -987,7 +979,11 @@ mod tests {
         let result = decode(truncated, 0, truncated.len());
 
         // Assert: Should error because KEY_DELTA tag is missing
-        assert!(result.is_err(), "truncated data should return error, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "truncated data should return error, got {:?}",
+            result
+        );
     }
 
     #[test]

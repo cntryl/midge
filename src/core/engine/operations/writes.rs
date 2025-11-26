@@ -858,7 +858,9 @@ mod tests {
 
         // Act: Write multiple keys
         for i in 0..100 {
-            engine.put(&cf, format!("key{}", i).as_bytes(), b"value").unwrap();
+            engine
+                .put(&cf, format!("key{}", i).as_bytes(), b"value")
+                .unwrap();
         }
         engine.flush().unwrap();
 
@@ -905,7 +907,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(found, num_threads * writes_per_thread, "All writes should succeed");
+        assert_eq!(
+            found,
+            num_threads * writes_per_thread,
+            "All writes should succeed"
+        );
     }
 
     #[test]
@@ -916,7 +922,9 @@ mod tests {
 
         // Act: 100 rapid overwrites to same key
         for i in 0..100 {
-            engine.put(&cf, b"hot_key", format!("v{}", i).as_bytes()).unwrap();
+            engine
+                .put(&cf, b"hot_key", format!("v{}", i).as_bytes())
+                .unwrap();
         }
 
         // Assert: Latest value should be visible
@@ -937,8 +945,17 @@ mod tests {
         engine.flush().unwrap();
 
         // Assert: All values should be retrievable
-        assert_eq!(engine.get(&cf, b"a").unwrap().as_deref(), Some(b"first".as_ref()));
-        assert_eq!(engine.get(&cf, b"z").unwrap().as_deref(), Some(b"second".as_ref()));
-        assert_eq!(engine.get(&cf, b"m").unwrap().as_deref(), Some(b"third".as_ref()));
+        assert_eq!(
+            engine.get(&cf, b"a").unwrap().as_deref(),
+            Some(b"first".as_ref())
+        );
+        assert_eq!(
+            engine.get(&cf, b"z").unwrap().as_deref(),
+            Some(b"second".as_ref())
+        );
+        assert_eq!(
+            engine.get(&cf, b"m").unwrap().as_deref(),
+            Some(b"third".as_ref())
+        );
     }
 }

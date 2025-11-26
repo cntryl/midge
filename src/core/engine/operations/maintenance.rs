@@ -293,7 +293,7 @@ impl MidgeEngine {
         // MVCC FIX: We must add the memtable to immutable_memtables BEFORE swapping,
         // so that reads at snapshots can still find the data during flush.
         // The immutable_memtables queue keeps data visible until SST is persisted.
-        
+
         // CRITICAL: Capture the old memtable BEFORE replacing it.
         // Atomic swap ensures no torn state - readers see old or new, never partial.
         let old_arc = column_family
@@ -1146,7 +1146,9 @@ mod tests {
 
         // Act: Write multiple versions
         for i in 0..5 {
-            engine.put(&cf, b"versioned_key", format!("v{}", i).as_bytes()).unwrap();
+            engine
+                .put(&cf, b"versioned_key", format!("v{}", i).as_bytes())
+                .unwrap();
         }
         engine.flush().unwrap();
 
@@ -1185,9 +1187,18 @@ mod tests {
 
         // Assert
         assert!(result.is_ok(), "Flush should succeed: {:?}", result);
-        assert_eq!(engine.get(&cf, b"k1").unwrap().as_deref(), Some(b"v1_updated".as_ref()));
-        assert_eq!(engine.get(&cf, b"k10").unwrap().as_deref(), Some(b"v10".as_ref()));
-        assert_eq!(engine.get(&cf, b"k2").unwrap().as_deref(), Some(b"v2".as_ref()));
+        assert_eq!(
+            engine.get(&cf, b"k1").unwrap().as_deref(),
+            Some(b"v1_updated".as_ref())
+        );
+        assert_eq!(
+            engine.get(&cf, b"k10").unwrap().as_deref(),
+            Some(b"v10".as_ref())
+        );
+        assert_eq!(
+            engine.get(&cf, b"k2").unwrap().as_deref(),
+            Some(b"v2".as_ref())
+        );
 
         // Cleanup
         drop(engine);
@@ -1232,8 +1243,7 @@ mod tests {
     #[test]
     fn should_flush_binary_keys_without_ordering_violation() {
         // Arrange: Binary keys with embedded nulls and high bytes
-        let temp_dir =
-            std::env::temp_dir().join(format!("midge_binary_{}", uuid::Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!("midge_binary_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let opts = MidgeOptions {
             storage_mode: StorageMode::LocalDisk {

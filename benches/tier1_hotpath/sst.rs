@@ -46,15 +46,7 @@ fn bench_encode(c: &mut Criterion) {
 
     g.bench_function("encode_small", |b| {
         b.iter(|| {
-            black_box(encode(
-                delta,
-                shared as u32,
-                Some(value),
-                1,
-                0,
-                false,
-                None,
-            ));
+            black_box(encode(delta, shared as u32, Some(value), 1, 0, false, None));
         });
     });
 

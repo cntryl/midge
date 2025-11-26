@@ -310,14 +310,30 @@ mod tests {
         assert_eq!(roundtrip.files.len(), 3);
 
         // Assert - Active state preserved
-        let active_file = roundtrip.files.iter().find(|f| f.name == "sst_active.blob").unwrap();
-        assert!(matches!(active_file.cloud_state, Some(SstLifecycleState::Active)));
+        let active_file = roundtrip
+            .files
+            .iter()
+            .find(|f| f.name == "sst_active.blob")
+            .unwrap();
+        assert!(matches!(
+            active_file.cloud_state,
+            Some(SstLifecycleState::Active)
+        ));
         assert!(active_file.cloud_state.as_ref().unwrap().is_accessible());
 
         // Assert - Archived state preserved with tier and location
-        let archived_file = roundtrip.files.iter().find(|f| f.name == "sst_archived.blob").unwrap();
+        let archived_file = roundtrip
+            .files
+            .iter()
+            .find(|f| f.name == "sst_archived.blob")
+            .unwrap();
         match &archived_file.cloud_state {
-            Some(SstLifecycleState::Archived { tier, location, checksum, .. }) => {
+            Some(SstLifecycleState::Archived {
+                tier,
+                location,
+                checksum,
+                ..
+            }) => {
                 assert_eq!(*tier, ArchiveTier::Cold);
                 assert_eq!(location, "s3-glacier://bucket/archive/sst_archived.blob");
                 assert_eq!(checksum.as_deref(), Some("abc123"));
@@ -327,9 +343,15 @@ mod tests {
         assert!(!archived_file.cloud_state.as_ref().unwrap().is_accessible());
 
         // Assert - SoftDeleted state preserved with timestamps
-        let deleted_file = roundtrip.files.iter().find(|f| f.name == "sst_deleted.blob").unwrap();
+        let deleted_file = roundtrip
+            .files
+            .iter()
+            .find(|f| f.name == "sst_deleted.blob")
+            .unwrap();
         match &deleted_file.cloud_state {
-            Some(SstLifecycleState::SoftDeleted { grace_period_ends, .. }) => {
+            Some(SstLifecycleState::SoftDeleted {
+                grace_period_ends, ..
+            }) => {
                 // Timestamps should be preserved (within a small tolerance for serialization)
                 assert!(grace_period_ends > &SystemTime::now());
             }

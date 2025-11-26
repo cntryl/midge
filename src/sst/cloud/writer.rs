@@ -1,4 +1,4 @@
-﻿//! Cloud-backed SST writer implementation.
+//! Cloud-backed SST writer implementation.
 //!
 //! This writer builds SSTs in memory (similar to SstMemWriter) and then
 //! uploads the complete SST blob to cloud storage via the StorageBackend.
@@ -96,8 +96,7 @@ impl SstCloudWriter {
             }
         }
 
-        self.state
-            .add_entry(key, value, seq, op_type, expiration)?;
+        self.state.add_entry(key, value, seq, op_type, expiration)?;
         Ok(())
     }
 
@@ -262,8 +261,12 @@ mod tests {
     fn should_handle_empty_sst() {
         // Arrange
         let backend = Arc::new(MockCloudBackend::new());
-        let writer =
-            SstCloudWriter::new(backend.clone(), "sst".to_string(), CompressionType::None, 4096);
+        let writer = SstCloudWriter::new(
+            backend.clone(),
+            "sst".to_string(),
+            CompressionType::None,
+            4096,
+        );
 
         // Act - finish without adding any entries
         let result = writer.finish_bytes();
@@ -304,8 +307,12 @@ mod tests {
     fn should_add_range_tombstones() {
         // Arrange
         let backend = Arc::new(MockCloudBackend::new());
-        let mut writer =
-            SstCloudWriter::new(backend.clone(), "sst".to_string(), CompressionType::None, 4096);
+        let mut writer = SstCloudWriter::new(
+            backend.clone(),
+            "sst".to_string(),
+            CompressionType::None,
+            4096,
+        );
 
         // Act
         writer.add(b"a", b"A").unwrap();
@@ -322,8 +329,12 @@ mod tests {
     fn should_handle_large_values() {
         // Arrange
         let backend = Arc::new(MockCloudBackend::new());
-        let mut writer =
-            SstCloudWriter::new(backend.clone(), "sst".to_string(), CompressionType::Lz4, 4096);
+        let mut writer = SstCloudWriter::new(
+            backend.clone(),
+            "sst".to_string(),
+            CompressionType::Lz4,
+            4096,
+        );
 
         let large_value = vec![b'X'; 100_000]; // 100KB value
 

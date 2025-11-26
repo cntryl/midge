@@ -150,7 +150,10 @@ pub fn create_durability_storage_mode(mode: &str) -> (String, StorageMode, Optio
             };
             ("CloudBacked".to_string(), storage_mode, Some(temp_dir))
         }
-        _ => panic!("Unknown storage mode for durability tests: {} (use LocalDisk or CloudBacked)", mode),
+        _ => panic!(
+            "Unknown storage mode for durability tests: {} (use LocalDisk or CloudBacked)",
+            mode
+        ),
     }
 }
 

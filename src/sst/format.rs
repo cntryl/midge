@@ -1,4 +1,4 @@
-﻿//! Top-level SST format implementation (moved from internal storage)
+//! Top-level SST format implementation (moved from internal storage)
 //!
 //! This is a straight copy of `src/internal/storage/sst_format.rs` moved to a flatter
 //! module: `crate::sst_format`.
@@ -585,10 +585,10 @@ impl DataBlockBuilder {
     }
 
     /// Add a key-value pair without ordering checks.
-    /// 
+    ///
     /// This is used by IndexBlockBuilder when internal key ordering semantics
     /// are needed, where the caller has already validated ordering.
-    /// 
+    ///
     /// # Safety (in terms of data integrity)
     /// The caller must ensure keys are properly ordered before calling this.
     pub fn add_unchecked(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
@@ -667,7 +667,7 @@ impl DataBlockBuilder {
 }
 
 /// Index block builder for constructing index blocks.
-/// 
+///
 /// When using internal keys, this builder relaxes the ordering check to allow
 /// internal key comparison semantics (user_key ASC, seq DESC) rather than
 /// strict byte ordering.
@@ -699,12 +699,13 @@ impl IndexBlockBuilder {
 
     pub fn add_index_entry(&mut self, last_key: &[u8], handle: BlockHandle) -> MidgeResult<()> {
         let handle_encoding = handle.encode();
-        
+
         if self.use_internal_keys {
             // For internal keys, use proper internal key comparison
             // which handles user_key ASC, seq DESC ordering
             if !self.last_key.is_empty() {
-                let ordering = crate::common::internal_key::compare_internal_keys(&self.last_key, last_key);
+                let ordering =
+                    crate::common::internal_key::compare_internal_keys(&self.last_key, last_key);
                 if ordering != std::cmp::Ordering::Less {
                     return Err(MidgeError::InvalidData(format!(
                         "Index key ordering violation: new key {} should be > last key {}",
@@ -1352,8 +1353,7 @@ mod tests {
         let expiration = Some(1698262800000u64); // Unix milliseconds
 
         // Act
-        let result =
-            builder.add_with_meta(b"ttl_key", Some(b"value"), 100, 0, false, expiration);
+        let result = builder.add_with_meta(b"ttl_key", Some(b"value"), 100, 0, false, expiration);
 
         // Assert
         assert!(result.is_ok());
@@ -1480,12 +1480,22 @@ mod tests {
     fn should_allow_internal_keys_ordering_when_internal_keys_enabled() {
         // Arrange - build two internal keys where raw bytes may not be lexicographically
         // ordered the same as internal key comparator (user_key 'k1' vs 'k10')
-        use crate::common::internal_key::encode_internal_key_cf;
         use crate::api::column_family::ColumnFamilyId;
+        use crate::common::internal_key::encode_internal_key_cf;
 
         let cf_id = ColumnFamilyId::new(0);
-        let ik1 = encode_internal_key_cf(cf_id, b"k1", 100, crate::common::internal_key::EntryType::Value);
-        let ik10 = encode_internal_key_cf(cf_id, b"k10", 10, crate::common::internal_key::EntryType::Value);
+        let ik1 = encode_internal_key_cf(
+            cf_id,
+            b"k1",
+            100,
+            crate::common::internal_key::EntryType::Value,
+        );
+        let ik10 = encode_internal_key_cf(
+            cf_id,
+            b"k10",
+            10,
+            crate::common::internal_key::EntryType::Value,
+        );
 
         // Ensure comparator orders them properly
         let cmp = crate::common::internal_key::compare_internal_keys_cf(&ik1, &ik10);
@@ -1564,7 +1574,7 @@ mod tests {
         use crate::common::internal_key::encode_internal_key;
         let ik1 = encode_internal_key(b"aaa", 200, false);
         let ik2 = encode_internal_key(b"aaa", 100, false); // Same user key, lower seq = later
-        let ik3 = encode_internal_key(b"bbb", 50, false);  // Different user key
+        let ik3 = encode_internal_key(b"bbb", 50, false); // Different user key
 
         let mut builder = DataBlockBuilder::new(16 * 1024);
 

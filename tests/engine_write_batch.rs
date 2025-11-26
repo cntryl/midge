@@ -34,17 +34,38 @@ fn should_commit_all_operations_given_batch_when_write_batch() {
     let cf = engine.default_column_family();
 
     let mut batch = WriteBatch::new();
-    batch.put(cf.id(), Bytes::from_static(b"k1"), Bytes::from_static(b"v1"));
-    batch.put(cf.id(), Bytes::from_static(b"k2"), Bytes::from_static(b"v2"));
-    batch.put(cf.id(), Bytes::from_static(b"k3"), Bytes::from_static(b"v3"));
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k1"),
+        Bytes::from_static(b"v1"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k2"),
+        Bytes::from_static(b"v2"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k3"),
+        Bytes::from_static(b"v3"),
+    );
 
     // Act
     engine.write_batch(&batch).expect("write_batch");
 
     // Assert
-    assert_eq!(engine.get(&cf, b"k1").unwrap(), Some(Bytes::from_static(b"v1")));
-    assert_eq!(engine.get(&cf, b"k2").unwrap(), Some(Bytes::from_static(b"v2")));
-    assert_eq!(engine.get(&cf, b"k3").unwrap(), Some(Bytes::from_static(b"v3")));
+    assert_eq!(
+        engine.get(&cf, b"k1").unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+    assert_eq!(
+        engine.get(&cf, b"k2").unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
+    assert_eq!(
+        engine.get(&cf, b"k3").unwrap(),
+        Some(Bytes::from_static(b"v3"))
+    );
 }
 
 #[test]
@@ -61,15 +82,30 @@ fn should_apply_last_value_given_duplicate_keys_when_write_batch() {
     let cf = engine.default_column_family();
 
     let mut batch = WriteBatch::new();
-    batch.put(cf.id(), Bytes::from_static(b"key"), Bytes::from_static(b"v1"));
-    batch.put(cf.id(), Bytes::from_static(b"key"), Bytes::from_static(b"v2"));
-    batch.put(cf.id(), Bytes::from_static(b"key"), Bytes::from_static(b"v3"));
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"key"),
+        Bytes::from_static(b"v1"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"key"),
+        Bytes::from_static(b"v2"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"key"),
+        Bytes::from_static(b"v3"),
+    );
 
     // Act
     engine.write_batch(&batch).expect("write_batch");
 
     // Assert - last write wins
-    assert_eq!(engine.get(&cf, b"key").unwrap(), Some(Bytes::from_static(b"v3")));
+    assert_eq!(
+        engine.get(&cf, b"key").unwrap(),
+        Some(Bytes::from_static(b"v3"))
+    );
 }
 
 #[test]
@@ -106,7 +142,11 @@ fn should_delete_key_given_delete_after_put_when_write_batch() {
     let cf = engine.default_column_family();
 
     let mut batch = WriteBatch::new();
-    batch.put(cf.id(), Bytes::from_static(b"key"), Bytes::from_static(b"value"));
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"key"),
+        Bytes::from_static(b"value"),
+    );
     batch.delete(cf.id(), Bytes::from_static(b"key"));
 
     // Act
@@ -157,13 +197,20 @@ fn should_overwrite_existing_value_given_put_in_batch_when_write_batch() {
     engine.put(&cf, b"key", b"old_value").expect("put");
 
     let mut batch = WriteBatch::new();
-    batch.put(cf.id(), Bytes::from_static(b"key"), Bytes::from_static(b"new_value"));
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"key"),
+        Bytes::from_static(b"new_value"),
+    );
 
     // Act
     engine.write_batch(&batch).expect("write_batch");
 
     // Assert
-    assert_eq!(engine.get(&cf, b"key").unwrap(), Some(Bytes::from_static(b"new_value")));
+    assert_eq!(
+        engine.get(&cf, b"key").unwrap(),
+        Some(Bytes::from_static(b"new_value"))
+    );
 }
 
 // ============================================================================
@@ -184,18 +231,36 @@ fn should_apply_mixed_operations_in_order_when_write_batch() {
     let cf = engine.default_column_family();
 
     let mut batch = WriteBatch::new();
-    batch.put(cf.id(), Bytes::from_static(b"k1"), Bytes::from_static(b"v1"));
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k1"),
+        Bytes::from_static(b"v1"),
+    );
     batch.delete(cf.id(), Bytes::from_static(b"k2"));
-    batch.put(cf.id(), Bytes::from_static(b"k3"), Bytes::from_static(b"v3"));
-    batch.put(cf.id(), Bytes::from_static(b"k1"), Bytes::from_static(b"updated"));
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k3"),
+        Bytes::from_static(b"v3"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k1"),
+        Bytes::from_static(b"updated"),
+    );
 
     // Act
     engine.write_batch(&batch).expect("write_batch");
 
     // Assert
-    assert_eq!(engine.get(&cf, b"k1").unwrap(), Some(Bytes::from_static(b"updated")));
+    assert_eq!(
+        engine.get(&cf, b"k1").unwrap(),
+        Some(Bytes::from_static(b"updated"))
+    );
     assert_eq!(engine.get(&cf, b"k2").unwrap(), None);
-    assert_eq!(engine.get(&cf, b"k3").unwrap(), Some(Bytes::from_static(b"v3")));
+    assert_eq!(
+        engine.get(&cf, b"k3").unwrap(),
+        Some(Bytes::from_static(b"v3"))
+    );
 }
 
 // ============================================================================
@@ -227,8 +292,14 @@ fn should_handle_large_batch_given_many_operations_when_write_batch() {
 
     // Assert
     assert_eq!(batch.len(), 1000);
-    assert_eq!(engine.get(&cf, b"key0000").unwrap(), Some(Bytes::from("value0")));
-    assert_eq!(engine.get(&cf, b"key0999").unwrap(), Some(Bytes::from("value999")));
+    assert_eq!(
+        engine.get(&cf, b"key0000").unwrap(),
+        Some(Bytes::from("value0"))
+    );
+    assert_eq!(
+        engine.get(&cf, b"key0999").unwrap(),
+        Some(Bytes::from("value999"))
+    );
 }
 
 // ============================================================================
@@ -243,15 +314,25 @@ fn should_persist_batch_given_flush_when_reopening() {
 
     {
         let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+            storage_mode: StorageMode::LocalDisk {
+                db_path: path.clone(),
+            },
             ..Default::default()
         };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
         let mut batch = WriteBatch::new();
-        batch.put(cf.id(), Bytes::from_static(b"k1"), Bytes::from_static(b"v1"));
-        batch.put(cf.id(), Bytes::from_static(b"k2"), Bytes::from_static(b"v2"));
+        batch.put(
+            cf.id(),
+            Bytes::from_static(b"k1"),
+            Bytes::from_static(b"v1"),
+        );
+        batch.put(
+            cf.id(),
+            Bytes::from_static(b"k2"),
+            Bytes::from_static(b"v2"),
+        );
         engine.write_batch(&batch).expect("write_batch");
         engine.flush().expect("flush");
     }
@@ -265,8 +346,14 @@ fn should_persist_batch_given_flush_when_reopening() {
     let cf = engine.default_column_family();
 
     // Assert
-    assert_eq!(engine.get(&cf, b"k1").unwrap(), Some(Bytes::from_static(b"v1")));
-    assert_eq!(engine.get(&cf, b"k2").unwrap(), Some(Bytes::from_static(b"v2")));
+    assert_eq!(
+        engine.get(&cf, b"k1").unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+    assert_eq!(
+        engine.get(&cf, b"k2").unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
 }
 
 // ============================================================================
@@ -285,21 +372,46 @@ fn should_write_to_multiple_cfs_given_multi_cf_batch_when_write_batch() {
     };
     let engine = MidgeEngine::open(opts).expect("open");
     let cf_default = engine.default_column_family();
-    let cf1 = engine.create_column_family("cf1", ColumnFamilyConfig::default()).expect("create");
-    let cf2 = engine.create_column_family("cf2", ColumnFamilyConfig::default()).expect("create");
+    let cf1 = engine
+        .create_column_family("cf1", ColumnFamilyConfig::default())
+        .expect("create");
+    let cf2 = engine
+        .create_column_family("cf2", ColumnFamilyConfig::default())
+        .expect("create");
 
     let mut batch = WriteBatch::new();
-    batch.put(cf_default.id(), Bytes::from_static(b"k_default"), Bytes::from_static(b"v_default"));
-    batch.put(cf1.id(), Bytes::from_static(b"k_cf1"), Bytes::from_static(b"v_cf1"));
-    batch.put(cf2.id(), Bytes::from_static(b"k_cf2"), Bytes::from_static(b"v_cf2"));
+    batch.put(
+        cf_default.id(),
+        Bytes::from_static(b"k_default"),
+        Bytes::from_static(b"v_default"),
+    );
+    batch.put(
+        cf1.id(),
+        Bytes::from_static(b"k_cf1"),
+        Bytes::from_static(b"v_cf1"),
+    );
+    batch.put(
+        cf2.id(),
+        Bytes::from_static(b"k_cf2"),
+        Bytes::from_static(b"v_cf2"),
+    );
 
     // Act
     engine.write_batch(&batch).expect("write_batch");
 
     // Assert
-    assert_eq!(engine.get(&cf_default, b"k_default").unwrap(), Some(Bytes::from_static(b"v_default")));
-    assert_eq!(engine.get(&cf1, b"k_cf1").unwrap(), Some(Bytes::from_static(b"v_cf1")));
-    assert_eq!(engine.get(&cf2, b"k_cf2").unwrap(), Some(Bytes::from_static(b"v_cf2")));
+    assert_eq!(
+        engine.get(&cf_default, b"k_default").unwrap(),
+        Some(Bytes::from_static(b"v_default"))
+    );
+    assert_eq!(
+        engine.get(&cf1, b"k_cf1").unwrap(),
+        Some(Bytes::from_static(b"v_cf1"))
+    );
+    assert_eq!(
+        engine.get(&cf2, b"k_cf2").unwrap(),
+        Some(Bytes::from_static(b"v_cf2"))
+    );
 }
 
 #[test]
@@ -314,16 +426,25 @@ fn should_isolate_keys_given_same_key_in_different_cfs_when_write_batch() {
     };
     let engine = MidgeEngine::open(opts).expect("open");
     let cf_default = engine.default_column_family();
-    let cf1 = engine.create_column_family("cf1", ColumnFamilyConfig::default()).expect("create");
+    let cf1 = engine
+        .create_column_family("cf1", ColumnFamilyConfig::default())
+        .expect("create");
 
     let mut batch = WriteBatch::new();
-    batch.put(cf1.id(), Bytes::from_static(b"key"), Bytes::from_static(b"value_cf1"));
+    batch.put(
+        cf1.id(),
+        Bytes::from_static(b"key"),
+        Bytes::from_static(b"value_cf1"),
+    );
 
     // Act
     engine.write_batch(&batch).expect("write_batch");
 
     // Assert - key only in cf1, not in default
-    assert_eq!(engine.get(&cf1, b"key").unwrap(), Some(Bytes::from_static(b"value_cf1")));
+    assert_eq!(
+        engine.get(&cf1, b"key").unwrap(),
+        Some(Bytes::from_static(b"value_cf1"))
+    );
     assert_eq!(engine.get(&cf_default, b"key").unwrap(), None);
 }
 
@@ -370,7 +491,10 @@ fn should_not_interleave_given_concurrent_batches_when_write_batch() {
         for i in 0..100 {
             let key = format!("t{:02}_k{:03}", tid, i);
             let expected = format!("t{:02}_v{:03}", tid, i);
-            assert_eq!(engine.get(&cf, key.as_bytes()).unwrap(), Some(Bytes::from(expected)));
+            assert_eq!(
+                engine.get(&cf, key.as_bytes()).unwrap(),
+                Some(Bytes::from(expected))
+            );
         }
     }
 }
@@ -399,9 +523,21 @@ fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
         let cf = eng.default_column_family();
 
         let mut batch = WriteBatch::new();
-        batch.put(cf.id(), Bytes::from_static(b"atom_k1"), Bytes::from_static(b"v1"));
-        batch.put(cf.id(), Bytes::from_static(b"atom_k2"), Bytes::from_static(b"v2"));
-        batch.put(cf.id(), Bytes::from_static(b"atom_k3"), Bytes::from_static(b"v3"));
+        batch.put(
+            cf.id(),
+            Bytes::from_static(b"atom_k1"),
+            Bytes::from_static(b"v1"),
+        );
+        batch.put(
+            cf.id(),
+            Bytes::from_static(b"atom_k2"),
+            Bytes::from_static(b"v2"),
+        );
+        batch.put(
+            cf.id(),
+            Bytes::from_static(b"atom_k3"),
+            Bytes::from_static(b"v3"),
+        );
         let _ = eng.write_batch(&batch);
     }
 
@@ -423,9 +559,15 @@ fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
 
     // Assert - atomicity: all present or all absent
     if k1.is_some() {
-        assert!(k2.is_some() && k3.is_some(), "Batch must be atomic: all or nothing");
+        assert!(
+            k2.is_some() && k3.is_some(),
+            "Batch must be atomic: all or nothing"
+        );
     } else {
-        assert!(k2.is_none() && k3.is_none(), "Batch must be atomic: all or nothing");
+        assert!(
+            k2.is_none() && k3.is_none(),
+            "Batch must be atomic: all or nothing"
+        );
     }
 }
 
@@ -451,7 +593,11 @@ fn should_be_atomic_given_large_batch_crash_when_recovering() {
         let mut batch = WriteBatch::new();
         for i in 0..100 {
             let key = format!("large_{:03}", i);
-            batch.put(cf.id(), Bytes::from(key.into_bytes()), Bytes::from_static(b"value"));
+            batch.put(
+                cf.id(),
+                Bytes::from(key.into_bytes()),
+                Bytes::from_static(b"value"),
+            );
         }
         let _ = eng.write_batch(&batch);
     }
@@ -472,5 +618,9 @@ fn should_be_atomic_given_large_batch_crash_when_recovering() {
     let last = eng.get(&cf, b"large_099").expect("get");
 
     // Assert - atomicity
-    assert_eq!(first.is_some(), last.is_some(), "Large batch must be atomic");
+    assert_eq!(
+        first.is_some(),
+        last.is_some(),
+        "Large batch must be atomic"
+    );
 }

@@ -389,7 +389,12 @@ impl SstMemReader {
                         return Ok(if tomb {
                             KeyState::Tombstone(seq)
                         } else if let Some(val) = entry.value {
-                            KeyState::Value(Bytes::copy_from_slice(val), seq, entry.expiration, entry.entry_type)
+                            KeyState::Value(
+                                Bytes::copy_from_slice(val),
+                                seq,
+                                entry.expiration,
+                                entry.entry_type,
+                            )
                         } else {
                             KeyState::Tombstone(seq)
                         });

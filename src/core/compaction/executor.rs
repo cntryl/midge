@@ -1,4 +1,4 @@
-﻿//! Compaction execution implementation.
+//! Compaction execution implementation.
 //!
 //! This module contains the low-level machinery for executing compaction operations:
 //! - Collecting versions from multiple SST files
@@ -1096,4 +1096,3 @@ mod tests {
         assert_eq!(result[1].seq, 8);
     }
 }
-

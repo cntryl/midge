@@ -1,4 +1,4 @@
-﻿//! Factory implementations for creating cloud-backed SST readers and writers.
+//! Factory implementations for creating cloud-backed SST readers and writers.
 
 use crate::cloud::StorageBackend;
 use crate::error::MidgeResult;
@@ -273,17 +273,23 @@ mod tests {
         let state_x = reader.get_state(b"nonexistent").unwrap();
 
         match state_a {
-            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => assert_eq!(v, bytes::Bytes::from("A")),
+            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => {
+                assert_eq!(v, bytes::Bytes::from("A"))
+            }
             _ => panic!("Expected Value for apple"),
         }
 
         match state_b {
-            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => assert_eq!(v, bytes::Bytes::from("B")),
+            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => {
+                assert_eq!(v, bytes::Bytes::from("B"))
+            }
             _ => panic!("Expected Value for banana"),
         }
 
         match state_c {
-            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => assert_eq!(v, bytes::Bytes::from("C")),
+            crate::sst::traits::KeyState::Value(v, _, _, _op_type) => {
+                assert_eq!(v, bytes::Bytes::from("C"))
+            }
             _ => panic!("Expected Value for cherry"),
         }
 
@@ -293,4 +299,3 @@ mod tests {
         }
     }
 }
-

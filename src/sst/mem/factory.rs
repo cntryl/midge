@@ -1,4 +1,4 @@
-﻿//! Factory implementations for creating in-memory SST readers and writers.
+//! Factory implementations for creating in-memory SST readers and writers.
 
 use crate::error::MidgeResult;
 use crate::sst::traits::{SstReaderFactory, SstStateReader};
@@ -487,8 +487,7 @@ mod tests {
         );
 
         // Add first key
-        w.add_with_meta(b"key", Some(b"v1"), 100, 0, None)
-            .unwrap();
+        w.add_with_meta(b"key", Some(b"v1"), 100, 0, None).unwrap();
 
         // Act
         let result = w.add_with_meta(b"key", Some(b"v2"), 100, 0, None);
@@ -791,4 +790,3 @@ mod tests {
         assert_eq!(keys, vec![b"a", b"b", b"c"]);
     }
 }
-

@@ -184,8 +184,7 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         // flush remaining block
         s.flush_block_if_needed_inner()?;
 
-
-            // (index and meta blocks are built after flushing the current data block)
+        // (index and meta blocks are built after flushing the current data block)
         // Build index block and other metadata and append to file
         // Index
         for (k, h) in &s.offsets {
@@ -351,8 +350,8 @@ impl crate::sst::DynSstWriter for FsDynWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sst::reader_common::SstMetadata;
     use crate::common::codec::CompressionType;
+    use crate::sst::reader_common::SstMetadata;
 
     #[test]
     fn should_store_internal_index_keys_when_use_internal_keys_true() {
@@ -361,7 +360,7 @@ mod tests {
         let writer_res = FsDynWriter::new_with_seq(
             &tmpdir,
             CompressionType::None,
-            16, // tiny block to cause multiple blocks
+            16,   // tiny block to cause multiple blocks
             true, // use_internal
             1,
             None,
@@ -374,7 +373,9 @@ mod tests {
         for i in 0..50 {
             let k = format!("hot_key_{}", i);
             let v = format!("value{}", i);
-            boxed.add_with_meta(k.as_bytes(), Some(v.as_bytes()), i as u64, 0, None).unwrap();
+            boxed
+                .add_with_meta(k.as_bytes(), Some(v.as_bytes()), i as u64, 0, None)
+                .unwrap();
         }
         // Finish and read bytes
         let bytes = boxed.finish_bytes().unwrap();

@@ -882,7 +882,8 @@ fn should_not_produce_partial_checkpoint_given_stale_manifest_when_creating() {
 }
 
 #[test]
-fn should_apply_wal_replay_correctly_given_checkpoint_excludes_pending_tombstones_when_restarting() {
+fn should_apply_wal_replay_correctly_given_checkpoint_excludes_pending_tombstones_when_restarting()
+{
     // Arrange
     let dir = test_temp_dir();
     let opts = durability_opts(dir.path().to_path_buf());

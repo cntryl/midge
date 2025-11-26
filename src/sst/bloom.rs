@@ -654,11 +654,7 @@ mod tests {
         // Assert
         // Target is ~1%, allow tolerance up to 3% (bloom filters are probabilistic)
         // Zero false positives is also valid (very unlikely but possible)
-        assert!(
-            fpr <= 0.03,
-            "False positive rate {} exceeds 3% bound",
-            fpr
-        );
+        assert!(fpr <= 0.03, "False positive rate {} exceeds 3% bound", fpr);
         // All inserted keys must be found (no false negatives)
         for i in 0..1_000u32 {
             let key = format!("key_{:06}", i);

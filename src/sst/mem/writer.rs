@@ -1,4 +1,4 @@
-﻿//! In-memory SST writer implementation.
+//! In-memory SST writer implementation.
 
 use crate::common::codec::CompressionType;
 use crate::error::MidgeResult;
@@ -119,8 +119,7 @@ impl SstMemWriter {
             }
         }
 
-        self.state
-            .add_entry(key, value, seq, op_type, expiration)?;
+        self.state.add_entry(key, value, seq, op_type, expiration)?;
         Ok(())
     }
 

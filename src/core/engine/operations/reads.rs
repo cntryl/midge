@@ -1,4 +1,4 @@
-﻿//! Read operations for the Midge engine.
+//! Read operations for the Midge engine.
 //!
 //! This module contains all read-related operations including:
 //! - Point reads (get)
@@ -301,7 +301,9 @@ impl MidgeEngine {
 
                 if !operands.is_empty() {
                     let operand_refs: Vec<&[u8]> = operands.iter().map(|b| b.as_ref()).collect();
-                    if let Ok(resolved) = merge_op.merge_many(key, base_value.as_deref(), &operand_refs) {
+                    if let Ok(resolved) =
+                        merge_op.merge_many(key, base_value.as_deref(), &operand_refs)
+                    {
                         return Ok(Some(Bytes::from(resolved)));
                     }
                 } else if let Some(base) = base_value {
@@ -940,4 +942,3 @@ mod tests {
         assert_eq!(entries[0], (Bytes::from("key1"), Bytes::from("value1")));
     }
 }
-

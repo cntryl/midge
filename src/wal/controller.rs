@@ -424,12 +424,8 @@ mod tests {
                 records.len()
             );
             // Verify we have both records
-            let has_pre = records
-                .iter()
-                .any(|r| r.key.as_ref() == b"pre_rotate_key");
-            let has_post = records
-                .iter()
-                .any(|r| r.key.as_ref() == b"post_rotate_key");
+            let has_pre = records.iter().any(|r| r.key.as_ref() == b"pre_rotate_key");
+            let has_post = records.iter().any(|r| r.key.as_ref() == b"post_rotate_key");
             assert!(has_pre, "pre-rotation record should exist");
             assert!(has_post, "post-rotation record should exist");
         }

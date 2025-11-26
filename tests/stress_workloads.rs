@@ -194,7 +194,12 @@ fn should_handle_ttl_pattern_given_bulk_delete_of_old_keys_when_compacting() {
         for i in 0..50 {
             let key = format!("k{:03}", i);
             let value = eng.get(&cf, key.as_bytes()).expect("get");
-            assert!(value.is_none(), "Key {} should be deleted for {}", key, name);
+            assert!(
+                value.is_none(),
+                "Key {} should be deleted for {}",
+                key,
+                name
+            );
         }
         // Assert - remaining keys present
         for i in 50..100 {
@@ -327,7 +332,12 @@ fn should_recover_append_only_data_given_crash_after_bulk_insert_when_reopening(
         for i in 0..500 {
             let key = format!("append{:04}", i);
             let value = eng2.get(&cf2, key.as_bytes()).expect("get");
-            assert!(value.is_some(), "Key {} missing after recovery for {}", key, name);
+            assert!(
+                value.is_some(),
+                "Key {} missing after recovery for {}",
+                key,
+                name
+            );
         }
         drop(eng2);
         eprintln!("✓ {}", name);
@@ -438,7 +448,12 @@ fn should_handle_burst_then_idle_given_writes_followed_by_reads_when_pattern_cha
         for i in 0..500 {
             let key = format!("burst{:04}", i);
             let value = eng.get(&cf, key.as_bytes()).expect("get");
-            assert!(value.is_some(), "Key {} missing during read phase for {}", key, name);
+            assert!(
+                value.is_some(),
+                "Key {} missing during read phase for {}",
+                key,
+                name
+            );
         }
 
         // Assert - all data intact

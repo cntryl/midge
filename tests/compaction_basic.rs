@@ -610,8 +610,20 @@ fn should_compact_cf_independently_given_multiple_cfs_when_compacting_one() {
             let key = format!("key{:02}", i);
             let cf1_val = eng.get(&cf1, key.as_bytes()).expect("get cf1");
             let cf2_val = eng.get(&cf2, key.as_bytes()).expect("get cf2");
-            assert_eq!(cf1_val, Some(Bytes::from("cf1_value")), "cf1 {} {}", name, i);
-            assert_eq!(cf2_val, Some(Bytes::from("cf2_value")), "cf2 {} {}", name, i);
+            assert_eq!(
+                cf1_val,
+                Some(Bytes::from("cf1_value")),
+                "cf1 {} {}",
+                name,
+                i
+            );
+            assert_eq!(
+                cf2_val,
+                Some(Bytes::from("cf2_value")),
+                "cf2 {} {}",
+                name,
+                i
+            );
         }
         eprintln!("✓ {}", name);
     }

@@ -127,7 +127,10 @@ fn should_return_correct_value_given_key_being_compacted_when_reading() {
         let read_handle = thread::spawn(move || {
             for _ in 0..100 {
                 let result = engine_clone.get(&cf, b"target_key").unwrap();
-                assert!(result.is_some(), "Read should return a value during compaction");
+                assert!(
+                    result.is_some(),
+                    "Read should return a value during compaction"
+                );
                 let val = result.unwrap();
                 assert!(
                     val.as_ref() == b"new_value" || val.as_ref() == b"old_value",
@@ -189,7 +192,10 @@ fn should_handle_scan_given_files_being_merged_when_scanning() {
             .start_key(Bytes::from("key000"))
             .end_key(Bytes::from("key099"));
         let results = engine.scan(&cf, query).unwrap();
-        assert!(!results.is_empty(), "Should have keys in range after compaction");
+        assert!(
+            !results.is_empty(),
+            "Should have keys in range after compaction"
+        );
     }
 }
 
@@ -477,7 +483,9 @@ fn should_not_corrupt_newly_flushed_files_given_compaction_in_progress_when_flus
             wait_for_signal_default(&started_rx);
             for i in 300..350 {
                 let key = format!("late_key{:03}", i);
-                engine_clone.put(&cf_clone, key.as_bytes(), b"late_value").unwrap();
+                engine_clone
+                    .put(&cf_clone, key.as_bytes(), b"late_value")
+                    .unwrap();
             }
             engine_clone.flush().unwrap();
         });
@@ -585,7 +593,10 @@ fn should_maintain_iterator_stability_given_compaction_in_progress_when_iteratin
                 .start_key(Bytes::from("key000"))
                 .end_key(Bytes::from("key099"));
             let results = engine.scan_at(&cf, query, &snapshot).unwrap();
-            assert!(!results.is_empty(), "Scan should return results during compaction");
+            assert!(
+                !results.is_empty(),
+                "Scan should return results during compaction"
+            );
             std::thread::yield_now();
         }
 
@@ -596,7 +607,10 @@ fn should_maintain_iterator_stability_given_compaction_in_progress_when_iteratin
             .start_key(Bytes::from("key000"))
             .end_key(Bytes::from("key099"));
         let results = engine.scan_at(&cf, query, &snapshot).unwrap();
-        assert!(!results.is_empty(), "Scan should return results after compaction");
+        assert!(
+            !results.is_empty(),
+            "Scan should return results after compaction"
+        );
     }
 }
 
@@ -633,7 +647,10 @@ fn should_serialize_concurrent_compaction_requests_when_multiple_triggered() {
         for i in 0..100 {
             let key = format!("key{:03}", i);
             let result = engine.get(&cf, key.as_bytes()).unwrap();
-            assert!(result.is_some(), "Key should exist after concurrent compactions");
+            assert!(
+                result.is_some(),
+                "Key should exist after concurrent compactions"
+            );
         }
     }
 }

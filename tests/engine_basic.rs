@@ -19,7 +19,10 @@ fn should_get_value_given_existing_key_when_put() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -28,7 +31,12 @@ fn should_get_value_given_existing_key_when_put() {
         let result = engine.get(&cf, b"key").expect("get");
 
         // Assert
-        assert_eq!(result, Some(Bytes::from_static(b"value")), "Failed for {}", name);
+        assert_eq!(
+            result,
+            Some(Bytes::from_static(b"value")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -37,7 +45,10 @@ fn should_return_none_given_nonexistent_key_when_get() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -54,7 +65,10 @@ fn should_overwrite_value_given_existing_key_when_put() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"key", b"original").expect("put");
@@ -64,7 +78,12 @@ fn should_overwrite_value_given_existing_key_when_put() {
         let result = engine.get(&cf, b"key").expect("get");
 
         // Assert
-        assert_eq!(result, Some(Bytes::from_static(b"updated")), "Failed for {}", name);
+        assert_eq!(
+            result,
+            Some(Bytes::from_static(b"updated")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -73,7 +92,10 @@ fn should_handle_empty_value_when_put() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -91,7 +113,10 @@ fn should_handle_binary_data_when_put() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -103,7 +128,12 @@ fn should_handle_binary_data_when_put() {
         let result = engine.get(&cf, &binary_key).expect("get");
 
         // Assert
-        assert_eq!(result, Some(Bytes::from(binary_value.clone())), "Failed for {}", name);
+        assert_eq!(
+            result,
+            Some(Bytes::from(binary_value.clone())),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -116,7 +146,10 @@ fn should_return_none_given_deleted_key_when_get() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"key", b"value").expect("put");
@@ -135,7 +168,10 @@ fn should_succeed_given_nonexistent_key_when_delete() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -156,7 +192,10 @@ fn should_return_ordered_pairs_given_range_when_scan() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -177,8 +216,14 @@ fn should_return_ordered_pairs_given_range_when_scan() {
 
         // Assert - end key is exclusive
         assert_eq!(results.len(), 2, "Failed for {}", name);
-        assert_eq!(results[0], (Bytes::from_static(b"b"), Bytes::from_static(b"2")));
-        assert_eq!(results[1], (Bytes::from_static(b"c"), Bytes::from_static(b"3")));
+        assert_eq!(
+            results[0],
+            (Bytes::from_static(b"b"), Bytes::from_static(b"2"))
+        );
+        assert_eq!(
+            results[1],
+            (Bytes::from_static(b"c"), Bytes::from_static(b"3"))
+        );
     }
 }
 
@@ -187,12 +232,17 @@ fn should_return_matching_keys_given_prefix_when_scan() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
         engine.put(&cf, b"user:1:name", b"alice").expect("put");
-        engine.put(&cf, b"user:1:email", b"alice@example.com").expect("put");
+        engine
+            .put(&cf, b"user:1:email", b"alice@example.com")
+            .expect("put");
         engine.put(&cf, b"user:2:name", b"bob").expect("put");
 
         // Act
@@ -211,12 +261,17 @@ fn should_respect_limit_given_limit_when_scan() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
         for i in 0..10 {
-            engine.put(&cf, format!("key{:02}", i).as_bytes(), b"v").expect("put");
+            engine
+                .put(&cf, format!("key{:02}", i).as_bytes(), b"v")
+                .expect("put");
         }
 
         // Act
@@ -232,7 +287,10 @@ fn should_return_reverse_order_given_reverse_when_scan() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -245,9 +303,24 @@ fn should_return_reverse_order_given_reverse_when_scan() {
 
         // Assert
         assert_eq!(results.len(), 3, "Failed for {}", name);
-        assert_eq!(results[0].0, Bytes::from_static(b"c"), "Failed for {}", name);
-        assert_eq!(results[1].0, Bytes::from_static(b"b"), "Failed for {}", name);
-        assert_eq!(results[2].0, Bytes::from_static(b"a"), "Failed for {}", name);
+        assert_eq!(
+            results[0].0,
+            Bytes::from_static(b"c"),
+            "Failed for {}",
+            name
+        );
+        assert_eq!(
+            results[1].0,
+            Bytes::from_static(b"b"),
+            "Failed for {}",
+            name
+        );
+        assert_eq!(
+            results[2].0,
+            Bytes::from_static(b"a"),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -256,7 +329,10 @@ fn should_exclude_deleted_keys_when_scan() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -279,7 +355,10 @@ fn should_return_empty_given_no_data_when_scan() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -300,7 +379,10 @@ fn should_insert_value_given_nonexistent_key_when_insert() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -319,7 +401,10 @@ fn should_not_insert_given_existing_key_when_insert() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"key", b"original").expect("put");
@@ -339,16 +424,26 @@ fn should_return_existing_value_given_existing_key_when_insert_with_value() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"key", b"original").expect("put");
 
         // Act
-        let result = engine.insert_with_value(&cf, b"key", b"new").expect("insert");
+        let result = engine
+            .insert_with_value(&cf, b"key", b"new")
+            .expect("insert");
 
         // Assert
-        assert_eq!(result, InsertResult::AlreadyExists(Bytes::from_static(b"original")), "Failed for {}", name);
+        assert_eq!(
+            result,
+            InsertResult::AlreadyExists(Bytes::from_static(b"original")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -357,7 +452,10 @@ fn should_insert_given_deleted_key_when_insert() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"key", b"original").expect("put");
@@ -382,7 +480,10 @@ fn should_swap_value_given_matching_expected_when_cas() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"counter", b"0").expect("put");
@@ -404,7 +505,10 @@ fn should_return_mismatch_given_unexpected_value_when_cas() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"counter", b"5").expect("put");
@@ -416,7 +520,12 @@ fn should_return_mismatch_given_unexpected_value_when_cas() {
         let value = engine.get(&cf, b"counter").expect("get");
 
         // Assert
-        assert_eq!(result, CasResult::Mismatch(Some(Bytes::from_static(b"5"))), "Failed for {}", name);
+        assert_eq!(
+            result,
+            CasResult::Mismatch(Some(Bytes::from_static(b"5"))),
+            "Failed for {}",
+            name
+        );
         assert_eq!(value, Some(Bytes::from_static(b"5"))); // Unchanged
     }
 }
@@ -426,7 +535,10 @@ fn should_insert_given_none_expected_and_missing_key_when_cas() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -447,7 +559,10 @@ fn should_return_mismatch_given_none_expected_and_existing_key_when_cas() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"key", b"exists").expect("put");
@@ -459,7 +574,12 @@ fn should_return_mismatch_given_none_expected_and_existing_key_when_cas() {
         let value = engine.get(&cf, b"key").expect("get");
 
         // Assert
-        assert_eq!(result, CasResult::Mismatch(Some(Bytes::from_static(b"exists"))), "Failed for {}", name);
+        assert_eq!(
+            result,
+            CasResult::Mismatch(Some(Bytes::from_static(b"exists"))),
+            "Failed for {}",
+            name
+        );
         assert_eq!(value, Some(Bytes::from_static(b"exists"))); // Unchanged
     }
 }
@@ -473,7 +593,10 @@ fn should_delete_keys_in_range_when_delete_range() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
 
@@ -486,10 +609,20 @@ fn should_delete_keys_in_range_when_delete_range() {
         engine.delete_range(&cf, b"b", b"d").expect("delete_range");
 
         // Assert
-        assert_eq!(engine.get(&cf, b"a").unwrap(), Some(Bytes::from_static(b"1")), "Failed for {}", name);
+        assert_eq!(
+            engine.get(&cf, b"a").unwrap(),
+            Some(Bytes::from_static(b"1")),
+            "Failed for {}",
+            name
+        );
         assert_eq!(engine.get(&cf, b"b").unwrap(), None, "Failed for {}", name);
         assert_eq!(engine.get(&cf, b"c").unwrap(), None, "Failed for {}", name);
-        assert_eq!(engine.get(&cf, b"d").unwrap(), Some(Bytes::from_static(b"4")), "Failed for {}", name);
+        assert_eq!(
+            engine.get(&cf, b"d").unwrap(),
+            Some(Bytes::from_static(b"4")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -498,16 +631,26 @@ fn should_be_noop_given_empty_range_when_delete_range() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"key", b"value").expect("put");
 
         // Act - empty range (start == end)
-        engine.delete_range(&cf, b"key", b"key").expect("delete_range");
+        engine
+            .delete_range(&cf, b"key", b"key")
+            .expect("delete_range");
 
         // Assert - key still exists
-        assert_eq!(engine.get(&cf, b"key").unwrap(), Some(Bytes::from_static(b"value")), "Failed for {}", name);
+        assert_eq!(
+            engine.get(&cf, b"key").unwrap(),
+            Some(Bytes::from_static(b"value")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -516,7 +659,10 @@ fn should_be_noop_given_inverted_range_when_delete_range() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions { storage_mode, ..Default::default() };
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
         let engine = MidgeEngine::open(opts).expect("open");
         let cf = engine.default_column_family();
         engine.put(&cf, b"b", b"2").expect("put");
@@ -525,7 +671,12 @@ fn should_be_noop_given_inverted_range_when_delete_range() {
         engine.delete_range(&cf, b"z", b"a").expect("delete_range");
 
         // Assert - key still exists
-        assert_eq!(engine.get(&cf, b"b").unwrap(), Some(Bytes::from_static(b"2")), "Failed for {}", name);
+        assert_eq!(
+            engine.get(&cf, b"b").unwrap(),
+            Some(Bytes::from_static(b"2")),
+            "Failed for {}",
+            name
+        );
     }
 }
 

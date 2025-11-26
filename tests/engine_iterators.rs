@@ -178,7 +178,12 @@ fn should_return_next_key_given_seek_to_missing_key_when_scanning() {
 
         // Assert - should return key5 (next available)
         assert_eq!(results.len(), 1, "{}: expected 1 result", name);
-        assert_eq!(results[0].0, Bytes::from("key5"), "{}: should find key5", name);
+        assert_eq!(
+            results[0].0,
+            Bytes::from("key5"),
+            "{}: should find key5",
+            name
+        );
         drop(eng);
         eprintln!("✓ {}", name);
     }
@@ -275,7 +280,8 @@ fn should_continue_safely_given_compaction_when_iterating_with_snapshot() {
             .start_key(Bytes::from("key000"))
             .end_key(Bytes::from("key100"));
         let snapshot = eng.snapshot();
-        eng.compact_range(&cf, Some(b""), Some(b"~")).expect("compact");
+        eng.compact_range(&cf, Some(b""), Some(b"~"))
+            .expect("compact");
 
         let results = eng.scan_at(&cf, query, &snapshot).expect("scan_at");
 
@@ -306,7 +312,8 @@ fn should_handle_gracefully_given_sst_removed_when_iterating_with_snapshot() {
 
         // Act - create snapshot, then compact (removes old SSTs)
         let snapshot = eng.snapshot();
-        eng.compact_range(&cf, Some(b""), Some(b"~")).expect("compact");
+        eng.compact_range(&cf, Some(b""), Some(b"~"))
+            .expect("compact");
 
         let results = eng
             .scan_at(
@@ -339,7 +346,8 @@ fn should_iterate_consistently_given_data_spans_sst_boundaries_when_scanning() {
         let cf = eng.default_column_family();
 
         for i in 0..50u8 {
-            eng.put(&cf, &[i], format!("v{}", i).as_bytes()).expect("put");
+            eng.put(&cf, &[i], format!("v{}", i).as_bytes())
+                .expect("put");
         }
         eng.flush().expect("flush");
 
@@ -368,7 +376,8 @@ fn should_yield_stable_results_given_flush_in_progress_when_scanning() {
     let cf = eng.default_column_family();
 
     for i in 0..30u8 {
-        eng.put(&cf, &[i], format!("v{}", i).as_bytes()).expect("put");
+        eng.put(&cf, &[i], format!("v{}", i).as_bytes())
+            .expect("put");
     }
 
     // Act - flush and scan concurrently
@@ -449,7 +458,8 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
         }
 
         // Act - delete range
-        eng.delete_range(&cf, b"key03", b"key07").expect("delete_range");
+        eng.delete_range(&cf, b"key03", b"key07")
+            .expect("delete_range");
 
         let results = eng
             .scan(

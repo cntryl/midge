@@ -421,7 +421,12 @@ impl SstFile {
                         if let Some(val) = value_slice {
                             out.push((
                                 Bytes::from(user_key.clone()),
-                                KeyState::Value(Bytes::copy_from_slice(val), seq, expiration, entry_type),
+                                KeyState::Value(
+                                    Bytes::copy_from_slice(val),
+                                    seq,
+                                    expiration,
+                                    entry_type,
+                                ),
                             ));
                         }
                     }
@@ -657,7 +662,12 @@ impl SstFile {
                 return Ok(if tomb {
                     KeyState::Tombstone(seq)
                 } else if let Some(val) = entry.value {
-                    KeyState::Value(Bytes::copy_from_slice(val), seq, entry.expiration, entry.entry_type)
+                    KeyState::Value(
+                        Bytes::copy_from_slice(val),
+                        seq,
+                        entry.expiration,
+                        entry.entry_type,
+                    )
                 } else {
                     KeyState::Tombstone(seq)
                 });

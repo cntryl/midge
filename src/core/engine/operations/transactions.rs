@@ -1,4 +1,4 @@
-﻿//! Transaction operations for MidgeEngine
+//! Transaction operations for MidgeEngine
 //!
 //! This module contains transaction commit logic and transaction-aware reads.
 
@@ -671,4 +671,3 @@ mod tests {
         assert!(!result.unwrap());
     }
 }
-

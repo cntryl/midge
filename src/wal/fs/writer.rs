@@ -1860,7 +1860,10 @@ mod tests {
         assert_eq!(r.txn_id, Some(9999));
         assert_eq!(r.expiration, Some(1700000000));
         assert_eq!(r.key.as_ref(), b"full_key");
-        assert_eq!(r.value.as_ref().map(|v| v.as_ref()), Some(&b"full_value"[..]));
+        assert_eq!(
+            r.value.as_ref().map(|v| v.as_ref()),
+            Some(&b"full_value"[..])
+        );
         assert!(matches!(r.op, crate::wal::WalOpKind::Put));
     }
 

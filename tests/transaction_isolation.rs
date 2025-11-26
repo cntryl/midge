@@ -16,8 +16,8 @@ mod common;
 
 use bytes::Bytes;
 use cntryl_midge::{IsolationLevel, KvTransaction, MidgeEngine, MidgeOptions, Query, WriteOptions};
-use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
 use common::test_helpers::{wait_for_signal, wait_for_signal_default, TEST_RECV_TIMEOUT};
+use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
 use std::sync::Arc;
 
 // ============================================================================
@@ -130,9 +130,8 @@ fn should_prevent_dirty_reads_given_concurrent_uncommitted_changes_when_tested()
         // Reader thread attempts to read while transaction is open
         let eng_reader = Arc::clone(&engine);
         let cf_reader = cf.clone();
-        let reader_result = std::thread::spawn(move || {
-            eng_reader.get(&cf_reader, b"dirty_read_key").expect("get")
-        });
+        let reader_result =
+            std::thread::spawn(move || eng_reader.get(&cf_reader, b"dirty_read_key").expect("get"));
 
         let read_value = reader_result.join().expect("reader panicked");
         let _ = done_tx.send(());
@@ -250,7 +249,12 @@ fn should_see_own_writes_given_transaction_when_get_after_put() {
         let local_read = writing_txn.get(b"key").expect("get");
 
         // Assert
-        assert_eq!(local_read, Some(Bytes::from("my_value")), "Failed for {}", name);
+        assert_eq!(
+            local_read,
+            Some(Bytes::from("my_value")),
+            "Failed for {}",
+            name
+        );
     }
 }
 
@@ -307,7 +311,12 @@ fn should_read_at_begin_sequence_given_transaction_when_using_transaction_get() 
         let second_value = txn.get(b"key").expect("get");
 
         // Assert
-        assert_eq!(begin_value, Some(Bytes::from("initial")), "Failed for {}", name);
+        assert_eq!(
+            begin_value,
+            Some(Bytes::from("initial")),
+            "Failed for {}",
+            name
+        );
         assert_eq!(
             second_value,
             Some(Bytes::from("initial")),
@@ -372,7 +381,12 @@ fn should_return_old_value_given_snapshot_created_before_write() {
 
         // Assert - snapshot should see old value and engine should see new value
         let snap_val = snap.get(&engine, &cf, b"key1").expect("get at snapshot");
-        assert_eq!(snap_val.as_deref(), Some(&b"original"[..]), "Failed for {}", name);
+        assert_eq!(
+            snap_val.as_deref(),
+            Some(&b"original"[..]),
+            "Failed for {}",
+            name
+        );
 
         let current_val = engine.get(&cf, b"key1").expect("get");
         assert_eq!(
@@ -488,7 +502,11 @@ fn should_track_reads_given_transaction_get_when_validating_conflicts() {
         let result = engine.commit_transaction(txn1, WriteOptions::default());
 
         // Assert
-        assert!(result.is_err(), "Should detect read-write conflict for {}", name);
+        assert!(
+            result.is_err(),
+            "Should detect read-write conflict for {}",
+            name
+        );
     }
 }
 
@@ -763,14 +781,12 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stress_t
 
                         // Each transaction writes 5 keys
                         for key_offset in 0..5 {
-                            let key = format!(
-                                "isolation_key_{}_{}_{}", thread_id, txn_num, key_offset
-                            )
-                            .into_bytes();
-                            let value = format!(
-                                "isolation_value_{}_{}_{}", thread_id, txn_num, key_offset
-                            )
-                            .into_bytes();
+                            let key =
+                                format!("isolation_key_{}_{}_{}", thread_id, txn_num, key_offset)
+                                    .into_bytes();
+                            let value =
+                                format!("isolation_value_{}_{}_{}", thread_id, txn_num, key_offset)
+                                    .into_bytes();
                             txn.put(&key, &value).expect("put in txn");
                         }
 

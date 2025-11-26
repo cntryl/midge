@@ -271,11 +271,7 @@ fn should_preserve_iterator_correctness_given_concurrent_writes_when_memtable_fr
         writer_handle.join().ok();
 
         // Assert: iteration completed without issues
-        assert!(
-            count >= 10,
-            "at least initial keys iterated for {}",
-            name
-        );
+        assert!(count >= 10, "at least initial keys iterated for {}", name);
         drop(eng_arc);
     }
 }
