@@ -110,7 +110,7 @@ Prioritized by dependency chain and bug-catching value:
 | `durability_recovery.rs` | ✅ | 14 | LocalDisk | Clean shutdown, crash during flush, manifest failures |
 | `engine_write_batch.rs` | ✅ | 14 | LocalDisk | Atomic batches, ordering, durability, multi-CF |
 | `engine_snapshots.rs` | ✅ | 15 | All 3 | Snapshot reads, MVCC, flush/compaction isolation |
-| `transaction_basic.rs` | ✅ | 18 | LocalDisk | Commit, rollback, isolation, insert, delete_range, durability |
+| `transaction_basic.rs` | ✅ | 21 | LocalDisk, CloudBacked | Commit, rollback, isolation, insert, delete_range, durability, timeouts, concurrent |
 | `column_family_lifecycle.rs` | ✅ | 28 | LocalDisk | Create, drop, list, isolation, persistence, lookup |
 | `compaction_basic.rs` | ✅ | 16 | LocalDisk, CloudBacked | Manual compaction, data correctness, tombstones, snapshots, background |
 | `compaction_levels.rs` | ✅ | 15 | LocalDisk, CloudBacked | L0 sublevels, level size enforcement, cascading, statistics |
@@ -127,7 +127,8 @@ Prioritized by dependency chain and bug-catching value:
 | `cloud_durability.rs` | ✅ | 12 | CloudBacked (4 configs) | SST upload, manifest persistence, crash recovery, concurrent writes, restart |
 | `cloud_consistency.rs` | ✅ | 6 | CloudBacked | Listing lag, eventual consistency, checksums, corrupted blobs, sync |
 | `cloud_hybrid.rs` | ✅ | 6 | CloudBacked (hybrid) | Cache eviction, concurrent access, churn, async uploads, recovery, metrics |
-| (remaining ~14 files) | ⬜ | ~45 | TBD | Not started |
+| `compaction_concurrent.rs` | ✅ | 12 | LocalDisk, CloudBacked | Reads/writes during compaction, snapshot isolation, iterator stability, tombstones |
+| (remaining ~13 files) | ⬜ | ~33 | TBD | Not started |
 
 ---
 
@@ -913,12 +914,12 @@ Maps each legacy file to its target location(s) in the new structure.
 | `compact_l0_sublevel_compaction.rs` | `compaction_levels.rs` | ✅ |
 | `compact_level_target_size_enforcement.rs` | `compaction_levels.rs` | ✅ |
 | `compact_multi_level_compaction_cascades.rs` | `compaction_levels.rs` | ✅ |
-| `compact_reads_during_compaction.rs` | `compaction_concurrent.rs` | ⬜ |
+| `compact_reads_during_compaction.rs` | `compaction_concurrent.rs` | ✅ |
 | `compact_ttl_compaction_filter.rs` | `compaction_filters.rs` | ⬜ |
-| `compact_writes_during_compaction.rs` | `compaction_concurrent.rs` | ⬜ |
+| `compact_writes_during_compaction.rs` | `compaction_concurrent.rs` | ✅ |
 | `compaction_correctness.rs` | `compaction_basic.rs` | ⬜ |
 | `concurrency_internal_invariants.rs` | `concurrency_flush.rs` | ✅ |
-| `concurrent_concurrent_compaction_and_writes.rs` | `compaction_concurrent.rs` | ⬜ |
+| `concurrent_concurrent_compaction_and_writes.rs` | `compaction_concurrent.rs` | ✅ |
 | `concurrent_delete_range_concurrency.rs` | `concurrency_delete_range.rs` | ✅ |
 | `concurrent_flush_vs_write_contention.rs` | `concurrency_flush.rs` | ✅ |
 | `concurrent_memtable_race_conditions.rs` | `concurrency_writes.rs` | ✅ |
@@ -951,7 +952,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `engine_snapshots.rs` | `engine_snapshots.rs` | ⬜ |
 | `engine_sst_operations.rs` | `engine_basic.rs` | ⬜ |
 | `engine_streaming.rs` | `engine_iterators.rs` | ✅ |
-| `engine_transactions.rs` | `transaction_basic.rs` | ⬜ |
+| `engine_transactions.rs` | `transaction_basic.rs` | ✅ |
 | `engine_wal_recovery.rs` | `durability_wal.rs` | ✅ |
 | `engine_write_batch_atomicity.rs` | `engine_write_batch.rs` | ⬜ |
 | `engine_write_batch_edge.rs` | `engine_write_batch.rs` | ⬜ |
@@ -986,14 +987,14 @@ Maps each legacy file to its target location(s) in the new structure.
 | `transaction_spill_pressure.rs` | `transaction_spill.rs` | ⬜ |
 | `txn_atomicity.rs` | `transaction_advanced.rs` | ⬜ |
 | `txn_deadlock_detection.rs` | `transaction_deadlock.rs` | ⬜ |
-| `txn_durability.rs` | `transaction_basic.rs` | ⬜ |
-| `txn_edge_cases.rs` | `transaction_advanced.rs` | ⬜ |
+| `txn_durability.rs` | `transaction_basic.rs` | ✅ |
+| `txn_edge_cases.rs` | `transaction_basic.rs` | ✅ |
 | `txn_isolation_levels.rs` | `transaction_isolation.rs` | ⬜ |
 | `txn_lost_updates.rs` | `transaction_conflicts.rs` | ⬜ |
 | `txn_occ_conflict.rs` | `transaction_conflicts.rs` | ⬜ |
 | `txn_optimistic_locking.rs` | `transaction_conflicts.rs` | ⬜ |
 | `txn_snapshot_isolation_enforcement.rs` | `transaction_isolation.rs` | ⬜ |
-| `txn_transaction_lifecycle.rs` | `transaction_basic.rs` | ⬜ |
+| `txn_transaction_lifecycle.rs` | `transaction_basic.rs` | ✅ |
 | `txn_transaction_spill_to_disk.rs` | `transaction_spill.rs` | ⬜ |
 | `txn_write_write_conflicts.rs` | `transaction_conflicts.rs` | ⬜ |
 | `wal_manifest_divergence.rs` | `durability_recovery.rs` | ⬜ |
