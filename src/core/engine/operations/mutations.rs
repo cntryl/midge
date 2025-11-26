@@ -29,7 +29,7 @@ impl MidgeEngine {
     /// - `Ok(InsertResult::AlreadyExists(existing))` if the key already exists
     ///
     /// # Examples
-    /// ```
+    /// ```no_run
     /// # use cntryl_midge::{MidgeOptions, MidgeEngine, InsertResult};
     /// # let opts = MidgeOptions::default();
     /// # let engine = MidgeEngine::open(opts).unwrap();

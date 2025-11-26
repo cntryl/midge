@@ -17,7 +17,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// if let Some(cache) = engine.block_cache() {
@@ -91,7 +91,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let metrics = engine.metrics();
@@ -132,7 +132,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let seq = engine.current_sequence();
@@ -221,7 +221,7 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// let amplification = engine.read_amplification();

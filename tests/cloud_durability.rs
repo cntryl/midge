@@ -65,7 +65,13 @@ fn should_upload_sst_to_cloud_given_flush_when_cloud_backed() {
         // Arrange
         let dir = test_temp_dir();
         let mock_backend = Arc::new(MockCloudBackend::new());
-        let opts = cloud_storage_opts(dir.path(), mock_backend.clone(), "test", local_wal_sync, sst_cache);
+        let opts = cloud_storage_opts(
+            dir.path(),
+            mock_backend.clone(),
+            "test",
+            local_wal_sync,
+            sst_cache,
+        );
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
@@ -147,7 +153,13 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
         // Arrange
         let dir = test_temp_dir();
         let mock_backend = Arc::new(MockCloudBackend::new());
-        let opts = cloud_storage_opts(dir.path(), mock_backend.clone(), "test", local_wal_sync, sst_cache);
+        let opts = cloud_storage_opts(
+            dir.path(),
+            mock_backend.clone(),
+            "test",
+            local_wal_sync,
+            sst_cache,
+        );
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
@@ -155,15 +167,16 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
         mock_backend.set_fail_upload_after(1);
 
         // Act
+        let mut attempts_before = mock_backend.upload_count() + mock_backend.upload_failure_count();
         for round in 0..3 {
             for i in 0..10 {
                 eng.put(&cf, format!("r{}-key{:02}", round, i).as_bytes(), b"value")
                     .expect("put");
             }
 
-            let attempts_before = mock_backend.upload_count() + mock_backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
+
             let attempts_after = mock_backend.upload_count() + mock_backend.upload_failure_count();
 
             assert!(
@@ -171,9 +184,16 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
                 "flush should trigger at least one cloud upload attempt (config: {})",
                 config_name
             );
+            attempts_before = attempts_after;
         }
 
         // Assert
+        let total_attempts = mock_backend.upload_count() + mock_backend.upload_failure_count();
+        assert!(
+            total_attempts > 0,
+            "there should be at least one cloud upload attempt after 3 flushes (config: {})",
+            config_name
+        );
         assert!(
             mock_backend.upload_failure_count() > 0,
             "there should be at least one failed cloud upload under fail-after-1 (config: {})",
@@ -187,7 +207,8 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
                 assert!(
                     result.is_some(),
                     "Data should be available despite upload failures: key={} (config: {})",
-                    key, config_name
+                    key,
+                    config_name
                 );
             }
         }
