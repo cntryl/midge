@@ -132,6 +132,7 @@ Prioritized by dependency chain and bug-catching value:
 | `transaction_conflicts.rs` | ✅ | 21 | LocalDisk, CloudBacked | Write-write conflicts, OCC, lost update prevention, delete range conflicts, high contention |
 | `transaction_deadlock.rs` | ✅ | 11 | LocalDisk, CloudBacked | Circular wait detection, victim selection, livelock prevention, read-write conflicts, recovery |
 | `transaction_spill.rs` | ✅ | 14 | LocalDisk, CloudBacked + Memory | Large transaction spill-to-disk, data integrity, rollback cleanup, recovery, memory pressure, memory mode verification |
+| `transaction_advanced.rs` | ✅ | 16 | LocalDisk, CloudBacked | Edge cases, atomicity, delete range integration, durability, sequential transactions |
 | (remaining ~12 files) | ⬜ | ~30 | TBD | Not started |
 
 ---
@@ -477,15 +478,34 @@ MEMORY MODE (no disk):
 ```
 **Source files**: `txn_transaction_spill_to_disk.rs`, `transaction_spill_pressure.rs`
 
-### `transaction_advanced.rs` (~6 tests)
-Advanced transaction scenarios.
+### `transaction_advanced.rs` ✅ (16 tests) — LocalDisk, CloudBacked
+Advanced transaction scenarios including edge cases, atomicity, and delete range integration.
 ```
-- should_handle_delete_range_in_transaction
-- should_handle_merge_in_transaction
-- should_scan_within_transaction
-- should_handle_cf_operations_in_transaction
-- should_handle_nested_reads
-- should_handle_rapid_transaction_creation
+EDGE CASES:
+- should_commit_empty_transaction_given_no_operations
+- should_commit_read_only_transaction_given_no_writes
+- should_read_own_writes_given_nested_gets_within_transaction
+- should_handle_rapid_transaction_creation_and_commit
+
+ATOMICITY:
+- should_commit_all_or_nothing_given_multi_key_transaction
+- should_be_atomic_given_transaction_with_100_operations
+- should_rollback_all_writes_given_transaction_dropped
+- should_not_expose_partial_writes_given_concurrent_reader
+- should_maintain_atomicity_under_concurrent_commits
+
+DELETE RANGE INTEGRATION:
+- should_preserve_snapshot_view_given_range_delete_after_snapshot
+- should_abort_transaction_safely_given_delete_range_in_transaction
+- should_recover_after_abort_given_transaction_with_delete_range
+
+DURABILITY:
+- should_persist_atomic_transactions_after_restart
+- should_not_persist_uncommitted_transaction_after_restart
+
+SEQUENTIAL TRANSACTIONS:
+- should_handle_multiple_sequential_transactions_on_different_keys
+- should_detect_write_conflict_given_sequential_updates_to_same_key
 ```
 **Source files**: `txn_edge_cases.rs`, `txn_atomicity.rs`, `transaction_range_delete_integration.rs`
 
@@ -1045,12 +1065,13 @@ Maps each legacy file to its target location(s) in the new structure.
 | `test_hooks_integration.rs` | `test_infrastructure.rs` | ⬜ |
 | `test_timeout_demo.rs` | 🗑️ (demo only) | ⬜ |
 | `transaction_isolation.rs` | `transaction_isolation.rs` | ✅ |
-| `transaction_range_delete_integration.rs` | `transaction_advanced.rs` | ⬜ |
+| `transaction_range_delete_integration.rs` | `transaction_advanced.rs` | ✅ |
 | `transaction_spill_pressure.rs` | `transaction_spill.rs` | ✅ |
-| `txn_atomicity.rs` | `transaction_advanced.rs` | ⬜ |
+| `txn_atomicity.rs` | `transaction_advanced.rs` | ✅ |
 | `txn_deadlock_detection.rs` | `transaction_deadlock.rs` | ✅ |
 | `txn_durability.rs` | `transaction_basic.rs` | ✅ |
 | `txn_edge_cases.rs` | `transaction_basic.rs` | ✅ |
+| `txn_edge_cases.rs` | `transaction_advanced.rs` | ✅ |
 | `txn_isolation_levels.rs` | `transaction_isolation.rs` | ✅ |
 | `txn_lost_updates.rs` | `transaction_conflicts.rs` | ✅ |
 | `txn_occ_conflict.rs` | `transaction_conflicts.rs` | ✅ |
