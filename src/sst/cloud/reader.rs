@@ -642,6 +642,111 @@ mod tests {
         let r = reader.unwrap();
         assert_eq!(r.get(b"key1").unwrap(), Some(Bytes::from("value1")));
     }
+
+    #[test]
+    fn should_return_error_when_cloud_key_not_found() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+
+        // Act - try to open non-existent cloud key
+        let result = SstCloudReader::open(backend, "sst/nonexistent.sst");
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_when_data_corrupted() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+
+        // Put corrupted data in cloud
+        let corrupted_data = vec![0xDE, 0xAD, 0xBE, 0xEF]; // Invalid SST data
+        backend
+            .put_blob("sst/corrupted.sst", Bytes::from(corrupted_data))
+            .unwrap();
+
+        // Act
+        let result = SstCloudReader::open(backend, "sst/corrupted.sst");
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_handle_range_tombstones_in_cloud_sst() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let mut writer = crate::sst::cloud::SstCloudWriter::new_with_internal(
+            backend.clone(),
+            "sst".to_string(),
+            crate::common::codec::CompressionType::None,
+            4096,
+            true,
+        );
+
+        // Add some keys
+        writer.add_with_meta(b"a", Some(b"A"), 10, 0, None).unwrap();
+        writer.add_with_meta(b"b", Some(b"B"), 10, 0, None).unwrap();
+        writer.add_with_meta(b"c", Some(b"C"), 10, 0, None).unwrap();
+
+        // Add range tombstone covering b
+        writer.add_range_tombstone(b"b", b"c", 20);
+
+        let cloud_key = writer.finish_to_cloud("test-rt").unwrap();
+        let reader = SstCloudReader::open(backend, &cloud_key).unwrap();
+
+        // Act
+        let a_result = reader.get_at(b"a", 30);
+        let b_result = reader.get_at(b"b", 30);
+        let c_result = reader.get_at(b"c", 30);
+
+        // Assert
+        assert!(a_result.is_ok());
+        assert!(a_result.unwrap().is_some()); // a not covered
+
+        assert!(b_result.is_ok());
+        assert!(b_result.unwrap().is_none()); // b covered by tombstone
+
+        assert!(c_result.is_ok());
+        assert!(c_result.unwrap().is_some()); // c not covered (end exclusive)
+    }
+
+    #[test]
+    fn should_roundtrip_many_keys_with_compression() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let mut writer = crate::sst::cloud::SstCloudWriter::new(
+            backend.clone(),
+            "sst".to_string(),
+            crate::common::codec::CompressionType::Lz4,
+            4096,
+        );
+
+        // Add many keys to trigger multiple blocks
+        for i in 0..100 {
+            let key = format!("key_{:05}", i);
+            let value = format!("value_{:05}", i);
+            writer.add(key.as_bytes(), value.as_bytes()).unwrap();
+        }
+
+        let cloud_key = writer.finish_to_cloud("test-many").unwrap();
+        let reader = SstCloudReader::open(backend, &cloud_key).unwrap();
+
+        // Act & Assert - verify all keys can be read back
+        for i in 0..100 {
+            let key = format!("key_{:05}", i);
+            let expected_value = format!("value_{:05}", i);
+            let result = reader.get(key.as_bytes()).unwrap();
+            assert_eq!(
+                result,
+                Some(Bytes::from(expected_value)),
+                "mismatch at key {}",
+                key
+            );
+        }
+    }
 }
+
 
 

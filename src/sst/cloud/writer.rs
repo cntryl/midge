@@ -156,6 +156,7 @@ impl SstCloudWriter {
 mod tests {
     use super::*;
     use crate::cloud::MockCloudBackend;
+    use crate::sst::SstReader; // Import trait for get() method
 
     #[test]
     fn should_create_cloud_writer_successfully() {
@@ -230,5 +231,111 @@ mod tests {
         // Verify blob exists in cloud
         let blob = backend.get_blob(&cloud_key);
         assert!(blob.is_ok());
+    }
+
+    #[test]
+    fn should_create_writer_with_bloom_filter() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let mut writer = SstCloudWriter::new_with_bloom(
+            backend.clone(),
+            "sst".to_string(),
+            CompressionType::None,
+            4096,
+            false,
+            10, // bits per key
+        );
+
+        // Act
+        writer.add(b"key1", b"value1").unwrap();
+        writer.add(b"key2", b"value2").unwrap();
+        let cloud_key = writer.finish_to_cloud("bloom-test").unwrap();
+
+        // Assert - verify we can open and read back
+        let reader =
+            crate::sst::cloud::reader::SstCloudReader::open(backend.clone(), &cloud_key).unwrap();
+        assert_eq!(reader.get(b"key1").unwrap(), Some(Bytes::from("value1")));
+        assert_eq!(reader.get(b"nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn should_handle_empty_sst() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let writer =
+            SstCloudWriter::new(backend.clone(), "sst".to_string(), CompressionType::None, 4096);
+
+        // Act - finish without adding any entries
+        let result = writer.finish_bytes();
+
+        // Assert - empty SST should still produce valid bytes
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert!(bytes.len() >= 48); // At least footer
+    }
+
+    #[test]
+    fn should_write_with_internal_keys() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let mut writer = SstCloudWriter::new_with_internal(
+            backend.clone(),
+            "sst".to_string(),
+            CompressionType::None,
+            4096,
+            true,
+        );
+
+        // Act - add entries with internal key semantics (descending seq for same user key)
+        writer
+            .add_with_meta(b"key1", Some(b"v2"), 20, 0, None)
+            .unwrap();
+        writer
+            .add_with_meta(b"key1", Some(b"v1"), 10, 0, None)
+            .unwrap();
+        let cloud_key = writer.finish_to_cloud("internal-test").unwrap();
+
+        // Assert - verify upload succeeded
+        let blob = backend.get_blob(&cloud_key);
+        assert!(blob.is_ok());
+    }
+
+    #[test]
+    fn should_add_range_tombstones() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let mut writer =
+            SstCloudWriter::new(backend.clone(), "sst".to_string(), CompressionType::None, 4096);
+
+        // Act
+        writer.add(b"a", b"A").unwrap();
+        writer.add(b"b", b"B").unwrap();
+        writer.add(b"c", b"C").unwrap();
+        writer.add_range_tombstone(b"b", b"c", 100);
+        let result = writer.finish_bytes();
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_handle_large_values() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let mut writer =
+            SstCloudWriter::new(backend.clone(), "sst".to_string(), CompressionType::Lz4, 4096);
+
+        let large_value = vec![b'X'; 100_000]; // 100KB value
+
+        // Act
+        writer.add(b"large_key", &large_value).unwrap();
+        let cloud_key = writer.finish_to_cloud("large-test").unwrap();
+
+        // Assert - verify roundtrip
+        let reader =
+            crate::sst::cloud::reader::SstCloudReader::open(backend.clone(), &cloud_key).unwrap();
+        let result = reader.get(b"large_key").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 100_000);
     }
 }

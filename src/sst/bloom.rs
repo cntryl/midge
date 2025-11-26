@@ -628,4 +628,87 @@ mod tests {
         assert!(f.may_contain(b"x"));
         assert!(f.may_contain(b"y"));
     }
+
+    #[test]
+    fn should_bloom_filter_false_positive_rate_with_bounds() {
+        // Arrange
+        // Build a bloom filter with 1000 keys, target ~1% FPR (using 10 bits/key)
+        let mut builder = BloomFilterBuilder::with_expected_keys(1_000, 10);
+        for i in 0..1_000u32 {
+            let key = format!("key_{:06}", i);
+            builder.add_key(key.as_bytes());
+        }
+        let filter = builder.finish();
+
+        // Act
+        // Query 10,000 non-existent keys (offset range to avoid true positives)
+        let mut false_positives = 0;
+        for i in 100_000..110_000u32 {
+            let key = format!("key_{:06}", i);
+            if filter.may_contain(key.as_bytes()) {
+                false_positives += 1;
+            }
+        }
+        let fpr = false_positives as f64 / 10_000.0;
+
+        // Assert
+        // Target is ~1%, allow tolerance up to 3% (bloom filters are probabilistic)
+        // Zero false positives is also valid (very unlikely but possible)
+        assert!(
+            fpr <= 0.03,
+            "False positive rate {} exceeds 3% bound",
+            fpr
+        );
+        // All inserted keys must be found (no false negatives)
+        for i in 0..1_000u32 {
+            let key = format!("key_{:06}", i);
+            assert!(
+                filter.may_contain(key.as_bytes()),
+                "Key {} not found (false negative!)",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn should_encode_decode_bloom_filter_block() {
+        // Arrange
+        let mut builder = BloomFilterBuilder::with_expected_keys(500, 10);
+        for i in 0..500u32 {
+            let key = format!("bloom_test_key_{:08}", i);
+            builder.add_key(key.as_bytes());
+        }
+        let original = builder.finish();
+
+        // Act
+        let encoded = original.encode();
+        let decoded = BloomFilter::decode_block(&encoded).expect("decode should succeed");
+
+        // Assert
+        // Verify structural properties match
+        assert_eq!(decoded.bit_count(), original.bit_count());
+        assert_eq!(decoded.hash_count(), original.hash_count());
+        assert_eq!(decoded.keys_count(), original.keys_count());
+
+        // All originally inserted keys should be found in decoded filter
+        for i in 0..500u32 {
+            let key = format!("bloom_test_key_{:08}", i);
+            assert!(
+                decoded.may_contain(key.as_bytes()),
+                "Key {} not found after decode",
+                i
+            );
+        }
+
+        // Non-existent keys should behave the same in both filters
+        for i in 1000..1100u32 {
+            let key = format!("bloom_test_key_{:08}", i);
+            assert_eq!(
+                original.may_contain(key.as_bytes()),
+                decoded.may_contain(key.as_bytes()),
+                "Mismatch for non-existent key {}",
+                i
+            );
+        }
+    }
 }

@@ -240,4 +240,169 @@ mod tests {
         assert_eq!(deserialized.cloud_location.unwrap(), "s3://bucket/file.sst");
         assert_eq!(deserialized.cloud_checksum.unwrap(), 0xABCD);
     }
+
+    #[test]
+    fn should_manifest_roundtrip_and_validate_archival_state() {
+        // Arrange
+        use crate::sst::cloud::{ArchiveTier, SstLifecycleState};
+        use std::time::{Duration, SystemTime};
+
+        let archived_at = SystemTime::now();
+        let deleted_at = SystemTime::now() - Duration::from_secs(3600);
+        let grace_end = SystemTime::now() + Duration::from_secs(86400);
+
+        let mut manifest = Manifest {
+            last_persisted_sequence: 1000,
+            next_wal_seq: 500,
+            ..Default::default()
+        };
+        manifest.ssts = vec![
+            "sst_active.blob".to_string(),
+            "sst_archived.blob".to_string(),
+            "sst_deleted.blob".to_string(),
+        ];
+
+        // Add file with Active state
+        manifest.files.push(FileMeta {
+            name: "sst_active.blob".to_string(),
+            level: 0,
+            size_bytes: 1024,
+            cloud_state: Some(SstLifecycleState::Active),
+            cloud_location: Some("s3://bucket/sst_active.blob".to_string()),
+            ..Default::default()
+        });
+
+        // Add file with Archived state (cold tier)
+        manifest.files.push(FileMeta {
+            name: "sst_archived.blob".to_string(),
+            level: 1,
+            size_bytes: 2048,
+            cloud_state: Some(SstLifecycleState::Archived {
+                tier: ArchiveTier::Cold,
+                archived_at,
+                location: "s3-glacier://bucket/archive/sst_archived.blob".to_string(),
+                checksum: Some("abc123".to_string()),
+            }),
+            cloud_location: Some("s3-glacier://bucket/archive/sst_archived.blob".to_string()),
+            ..Default::default()
+        });
+
+        // Add file with SoftDeleted state
+        manifest.files.push(FileMeta {
+            name: "sst_deleted.blob".to_string(),
+            level: 2,
+            size_bytes: 512,
+            cloud_state: Some(SstLifecycleState::SoftDeleted {
+                deleted_at,
+                grace_period_ends: grace_end,
+            }),
+            ..Default::default()
+        });
+
+        // Act - serialize to JSON and back
+        let json = serde_json::to_string_pretty(&manifest).expect("serialize");
+        let roundtrip: Manifest = serde_json::from_str(&json).expect("deserialize");
+
+        // Assert - scalar fields
+        assert_eq!(roundtrip.last_persisted_sequence, 1000);
+        assert_eq!(roundtrip.next_wal_seq, 500);
+        assert_eq!(roundtrip.ssts.len(), 3);
+        assert_eq!(roundtrip.files.len(), 3);
+
+        // Assert - Active state preserved
+        let active_file = roundtrip.files.iter().find(|f| f.name == "sst_active.blob").unwrap();
+        assert!(matches!(active_file.cloud_state, Some(SstLifecycleState::Active)));
+        assert!(active_file.cloud_state.as_ref().unwrap().is_accessible());
+
+        // Assert - Archived state preserved with tier and location
+        let archived_file = roundtrip.files.iter().find(|f| f.name == "sst_archived.blob").unwrap();
+        match &archived_file.cloud_state {
+            Some(SstLifecycleState::Archived { tier, location, checksum, .. }) => {
+                assert_eq!(*tier, ArchiveTier::Cold);
+                assert_eq!(location, "s3-glacier://bucket/archive/sst_archived.blob");
+                assert_eq!(checksum.as_deref(), Some("abc123"));
+            }
+            _ => panic!("Expected Archived state"),
+        }
+        assert!(!archived_file.cloud_state.as_ref().unwrap().is_accessible());
+
+        // Assert - SoftDeleted state preserved with timestamps
+        let deleted_file = roundtrip.files.iter().find(|f| f.name == "sst_deleted.blob").unwrap();
+        match &deleted_file.cloud_state {
+            Some(SstLifecycleState::SoftDeleted { grace_period_ends, .. }) => {
+                // Timestamps should be preserved (within a small tolerance for serialization)
+                assert!(grace_period_ends > &SystemTime::now());
+            }
+            _ => panic!("Expected SoftDeleted state"),
+        }
+    }
+
+    #[test]
+    fn should_roundtrip_all_archive_tiers() {
+        // Arrange
+        use crate::sst::cloud::{ArchiveTier, SstLifecycleState};
+
+        let tiers = [
+            ArchiveTier::Hot,
+            ArchiveTier::Warm,
+            ArchiveTier::Cold,
+            ArchiveTier::Glacier,
+            ArchiveTier::InfrequentAccess,
+        ];
+
+        for (i, tier) in tiers.iter().enumerate() {
+            let file = FileMeta {
+                name: format!("tier_test_{}.blob", i),
+                level: 0,
+                size_bytes: 1024,
+                cloud_state: Some(SstLifecycleState::Archived {
+                    tier: tier.clone(),
+                    archived_at: std::time::SystemTime::now(),
+                    location: format!("s3://bucket/tier_{}.blob", i),
+                    checksum: None,
+                }),
+                ..Default::default()
+            };
+
+            // Act
+            let json = serde_json::to_string(&file).expect("serialize");
+            let roundtrip: FileMeta = serde_json::from_str(&json).expect("deserialize");
+
+            // Assert
+            match &roundtrip.cloud_state {
+                Some(SstLifecycleState::Archived { tier: rt_tier, .. }) => {
+                    assert_eq!(rt_tier, tier, "Tier mismatch for {:?}", tier);
+                }
+                _ => panic!("Expected Archived state for tier {:?}", tier),
+            }
+        }
+    }
+
+    #[test]
+    fn should_preserve_tombstone_counts_in_roundtrip() {
+        // Arrange
+        let file = FileMeta {
+            name: "tombstone_test.blob".to_string(),
+            level: 1,
+            size_bytes: 4096,
+            point_tombstone_count: 50,
+            range_tombstone_count: 10,
+            total_entries: 200,
+            ..Default::default()
+        };
+
+        // Act
+        let json = serde_json::to_string(&file).expect("serialize");
+        let roundtrip: FileMeta = serde_json::from_str(&json).expect("deserialize");
+
+        // Assert
+        assert_eq!(roundtrip.point_tombstone_count, 50);
+        assert_eq!(roundtrip.range_tombstone_count, 10);
+        assert_eq!(roundtrip.total_entries, 200);
+        assert_eq!(roundtrip.total_tombstones(), 60);
+
+        // 30% tombstone density
+        let density = roundtrip.tombstone_density();
+        assert!((density - 30.0).abs() < 0.01);
+    }
 }
