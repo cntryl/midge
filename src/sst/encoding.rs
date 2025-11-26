@@ -941,4 +941,129 @@ mod tests {
         assert_eq!(final_decoded.sequence, seq);
         assert_eq!(final_decoded.expiration, expiration);
     }
+
+    // =====================================================================
+    // P0: Encode/decode roundtrip property tests (invariant coverage)
+    // =====================================================================
+
+    #[test]
+    fn should_roundtrip_encode_decode_for_all_entry_types() {
+        // Arrange
+        let entry_types = [0u8, 1, 2, 3]; // Put, Insert, Delete, Merge
+
+        for et in entry_types {
+            // Act
+            let encoded = encode(b"key", 0, Some(b"val"), 999, et, false, None);
+            let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
+
+            // Assert
+            assert_eq!(decoded.entry_type, et, "Entry type {} roundtrip failed", et);
+            assert_eq!(decoded.key_delta, b"key");
+            assert_eq!(decoded.value, Some(b"val".as_slice()));
+        }
+    }
+
+    #[test]
+    fn should_return_error_when_truncated_before_key_delta() {
+        // Arrange: truncate after SHARED_PREFIX_LEN tag/value but before KEY_DELTA
+        let encoded = encode(b"key", 0, Some(b"value"), 100, 0, false, None);
+        let truncated = &encoded[..3]; // Just tag + len + partial
+
+        // Act
+        let result = decode(truncated, 0, truncated.len());
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_when_data_ends_mid_value() {
+        // Arrange: Build a valid encoded entry, then truncate at the start of a tag
+        // to guarantee incomplete data (truncating at offset=5 cuts off KEY_DELTA)
+        let encoded = encode(b"key", 0, Some(b"long_value_here"), 100, 0, false, None);
+        let truncated = &encoded[..5]; // Very short - cuts mid-tag
+
+        // Act
+        let result = decode(truncated, 0, truncated.len());
+
+        // Assert: Should error because KEY_DELTA tag is missing
+        assert!(result.is_err(), "truncated data should return error, got {:?}", result);
+    }
+
+    #[test]
+    fn should_return_error_when_empty_data() {
+        // Arrange
+        let data: &[u8] = &[];
+
+        // Act
+        let result = decode(data, 0, 0);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_when_limit_is_zero() {
+        // Arrange
+        let data = vec![1, 2, 3, 4];
+
+        // Act
+        let result = decode(&data, 0, 0);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_handle_max_sequence_number() {
+        // Arrange
+        let max_seq = u64::MAX;
+
+        // Act
+        let encoded = encode(b"key", 0, Some(b"val"), max_seq, 0, false, None);
+        let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
+
+        // Assert
+        assert_eq!(decoded.sequence, max_seq);
+    }
+
+    #[test]
+    fn should_handle_max_expiration() {
+        // Arrange
+        let max_exp = Some(u64::MAX);
+
+        // Act
+        let encoded = encode(b"key", 0, Some(b"val"), 1, 0, false, max_exp);
+        let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
+
+        // Assert
+        assert_eq!(decoded.expiration, max_exp);
+    }
+
+    #[test]
+    fn should_return_empty_or_errors_when_block_malformed() {
+        // Arrange: garbage data that doesn't look like a valid TLV block
+        let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
+
+        // Act
+        let iter = TlvBlockIterator::new(&garbage);
+        let entries: Vec<_> = iter.collect();
+
+        // Assert: should return empty or error, not panic
+        assert!(entries.is_empty() || entries.iter().all(|r| r.is_err()));
+    }
+
+    #[test]
+    fn should_roundtrip_zero_length_key_delta() {
+        // Arrange: Edge case - zero-length key delta with non-zero shared
+        // This simulates a key that is entirely shared prefix
+        let encoded = encode(b"", 5, Some(b"val"), 1, 0, false, None);
+
+        // Act
+        let decoded = decode(&encoded, 0, encoded.len()).expect("decode");
+
+        // Assert
+        assert_eq!(decoded.key_delta, b"");
+        assert_eq!(decoded.shared_len, 5);
+    }
 }

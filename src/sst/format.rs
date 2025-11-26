@@ -1475,4 +1475,182 @@ mod tests {
         assert!(result2.is_ok());
         assert!(result3.is_ok());
     }
+
+    #[test]
+    fn should_allow_internal_keys_ordering_when_internal_keys_enabled() {
+        // Arrange - build two internal keys where raw bytes may not be lexicographically
+        // ordered the same as internal key comparator (user_key 'k1' vs 'k10')
+        use crate::common::internal_key::encode_internal_key_cf;
+        use crate::api::column_family::ColumnFamilyId;
+
+        let cf_id = ColumnFamilyId::new(0);
+        let ik1 = encode_internal_key_cf(cf_id, b"k1", 100, crate::common::internal_key::EntryType::Value);
+        let ik10 = encode_internal_key_cf(cf_id, b"k10", 10, crate::common::internal_key::EntryType::Value);
+
+        // Ensure comparator orders them properly
+        let cmp = crate::common::internal_key::compare_internal_keys_cf(&ik1, &ik10);
+        assert_eq!(cmp, std::cmp::Ordering::Less);
+
+        // Index builder with internal key mode enabled
+        let mut builder = IndexBlockBuilder::new_with_internal_keys(true);
+        let handle1 = BlockHandle::new(1000, 200);
+        let handle2 = BlockHandle::new(2000, 300);
+
+        // Act
+        let r1 = builder.add_index_entry(&ik1, handle1);
+        let r2 = builder.add_index_entry(&ik10, handle2);
+
+        // Assert - both succeed (internal comparator is used)
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+    }
+
+    // =====================================================================
+    // P0: DataBlockBuilder ordering invariant tests
+    // =====================================================================
+
+    #[test]
+    fn should_reject_duplicate_keys_when_adding() {
+        // Arrange
+        let mut builder = DataBlockBuilder::new(16 * 1024);
+        builder.add(b"same_key", b"value1").expect("first add");
+
+        // Act
+        let result = builder.add(b"same_key", b"value2");
+
+        // Assert: Duplicate key should be rejected as ordering violation
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("ordering violation") || err_msg.contains("Ordering"));
+    }
+
+    #[test]
+    fn should_allow_add_unchecked_to_bypass_ordering_validation() {
+        // Arrange: add_unchecked is intended for index builder paths where
+        // the caller has already validated ordering
+        let mut builder = DataBlockBuilder::new(16 * 1024);
+        builder.add(b"zzz", b"value1").expect("first add");
+
+        // Act: add_unchecked should bypass ordering checks
+        let _ = builder.add_unchecked(b"aaa", b"value2");
+
+        // Assert: Builder should still finish (caller takes responsibility)
+        let data = builder.finish();
+        assert!(!data.is_empty());
+    }
+
+    #[test]
+    fn should_reject_out_of_order_internal_keys_when_internal_format() {
+        // Arrange: Two internal keys where second comes before first in internal ordering
+        use crate::common::internal_key::encode_internal_key;
+        let ik_later = encode_internal_key(b"user_key", 100, false);
+        let ik_earlier = encode_internal_key(b"user_key", 200, false); // Higher seq = earlier in order
+
+        let mut builder = DataBlockBuilder::new(16 * 1024);
+        builder
+            .add_with_meta(&ik_later, Some(b"v1"), 100, 0, true, None)
+            .expect("first add");
+
+        // Act: Adding earlier seq (which sorts after in internal order) should fail
+        let result = builder.add_with_meta(&ik_earlier, Some(b"v2"), 200, 0, true, None);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_accept_properly_ordered_internal_keys_when_internal_format() {
+        // Arrange: Internal keys in proper order (user_key asc, seq desc)
+        use crate::common::internal_key::encode_internal_key;
+        let ik1 = encode_internal_key(b"aaa", 200, false);
+        let ik2 = encode_internal_key(b"aaa", 100, false); // Same user key, lower seq = later
+        let ik3 = encode_internal_key(b"bbb", 50, false);  // Different user key
+
+        let mut builder = DataBlockBuilder::new(16 * 1024);
+
+        // Act
+        let r1 = builder.add_with_meta(&ik1, Some(b"v1"), 200, 0, true, None);
+        let r2 = builder.add_with_meta(&ik2, Some(b"v2"), 100, 0, true, None);
+        let r3 = builder.add_with_meta(&ik3, Some(b"v3"), 50, 0, true, None);
+
+        // Assert
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+        assert!(r3.is_ok());
+    }
+
+    #[test]
+    fn should_produce_decodable_block_from_data_block_builder() {
+        // Arrange
+        let mut builder = DataBlockBuilder::new(16 * 1024);
+        builder.add(b"apple", b"red").unwrap();
+        builder.add(b"banana", b"yellow").unwrap();
+        builder.add(b"cherry", b"red").unwrap();
+
+        // Act
+        let block_data = builder.finish();
+
+        // Assert: Should be parseable by TlvBlockIterator
+        let iter = crate::sst::encoding::TlvBlockIterator::new(&block_data);
+        let entries: Vec<_> = iter.collect();
+        assert_eq!(entries.len(), 3);
+        let (k1, _, _, _, _) = entries[0].as_ref().unwrap();
+        assert_eq!(k1, b"apple");
+    }
+
+    // =====================================================================
+    // P0: IndexBlockBuilder internal-key ordering tests
+    // =====================================================================
+
+    #[test]
+    fn should_store_block_handles_in_index() {
+        // Arrange
+        let mut builder = IndexBlockBuilder::new();
+        let h1 = BlockHandle::new(0, 100);
+        let h2 = BlockHandle::new(100, 200);
+
+        // Act
+        builder.add_index_entry(b"block1_last", h1).unwrap();
+        builder.add_index_entry(b"block2_last", h2).unwrap();
+        let index_data = builder.finish();
+
+        // Assert: Should decode via SparseIndex
+        let sparse = crate::sst::sparse_index::SparseIndex::decode(&index_data).unwrap();
+        assert_eq!(sparse.entries().len(), 2);
+        assert_eq!(sparse.entries()[0].block_handle.offset, 0);
+        assert_eq!(sparse.entries()[1].block_handle.offset, 100);
+    }
+
+    #[test]
+    fn should_reject_out_of_order_index_keys_in_default_mode() {
+        // Arrange
+        let mut builder = IndexBlockBuilder::new();
+        builder
+            .add_index_entry(b"z_block", BlockHandle::new(0, 100))
+            .unwrap();
+
+        // Act
+        let result = builder.add_index_entry(b"a_block", BlockHandle::new(100, 100));
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_use_internal_key_comparator_when_internal_keys_enabled() {
+        // Arrange: Internal keys with same user key but different sequences
+        use crate::common::internal_key::encode_internal_key;
+        let ik1 = encode_internal_key(b"hot_key", 1000, false);
+        let ik2 = encode_internal_key(b"hot_key", 500, false); // Lower seq = later in order
+
+        let mut builder = IndexBlockBuilder::new_with_internal_keys(true);
+
+        // Act
+        let r1 = builder.add_index_entry(&ik1, BlockHandle::new(0, 100));
+        let r2 = builder.add_index_entry(&ik2, BlockHandle::new(100, 100));
+
+        // Assert: Both should succeed (internal comparator respects seq ordering)
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+    }
 }

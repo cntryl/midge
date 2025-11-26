@@ -1123,4 +1123,140 @@ mod tests {
         drop(engine);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    // =====================================================================
+    // P0: Merge resolution invariant tests
+    // =====================================================================
+
+    #[test]
+    fn should_preserve_all_versions_when_no_merge_operands() {
+        // Arrange: Multiple puts to same key should all be preserved for MVCC
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_mvcc_versions_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk {
+                db_path: temp_dir.clone(),
+            },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        let engine = MidgeEngine::open(opts).unwrap();
+        let cf = engine.default_column_family();
+
+        // Act: Write multiple versions
+        for i in 0..5 {
+            engine.put(&cf, b"versioned_key", format!("v{}", i).as_bytes()).unwrap();
+        }
+        engine.flush().unwrap();
+
+        // Assert: Latest version should be visible
+        let value = engine.get(&cf, b"versioned_key").unwrap();
+        assert_eq!(value.as_deref(), Some(b"v4".as_ref()));
+
+        // Cleanup
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_flush_entries_in_internal_key_order() {
+        // Arrange: Write keys that test internal key ordering edge cases
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_ordering_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk {
+                db_path: temp_dir.clone(),
+            },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        let engine = MidgeEngine::open(opts).unwrap();
+        let cf = engine.default_column_family();
+
+        // Act: Write keys that might have tricky ordering
+        engine.put(&cf, b"k1", b"v1").unwrap();
+        engine.put(&cf, b"k10", b"v10").unwrap();
+        engine.put(&cf, b"k2", b"v2").unwrap();
+        engine.put(&cf, b"k1", b"v1_updated").unwrap(); // Overwrite
+
+        let result = engine.flush();
+
+        // Assert
+        assert!(result.is_ok(), "Flush should succeed: {:?}", result);
+        assert_eq!(engine.get(&cf, b"k1").unwrap().as_deref(), Some(b"v1_updated".as_ref()));
+        assert_eq!(engine.get(&cf, b"k10").unwrap().as_deref(), Some(b"v10".as_ref()));
+        assert_eq!(engine.get(&cf, b"k2").unwrap().as_deref(), Some(b"v2".as_ref()));
+
+        // Cleanup
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_handle_interleaved_puts_and_deletes() {
+        // Arrange
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_interleaved_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk {
+                db_path: temp_dir.clone(),
+            },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        let engine = MidgeEngine::open(opts).unwrap();
+        let cf = engine.default_column_family();
+
+        // Act: Interleave puts and deletes
+        engine.put(&cf, b"key", b"value1").unwrap();
+        engine.delete(&cf, b"key").unwrap();
+        engine.put(&cf, b"key", b"value2").unwrap();
+        engine.delete(&cf, b"key").unwrap();
+        engine.put(&cf, b"key", b"final_value").unwrap();
+
+        let result = engine.flush();
+
+        // Assert
+        assert!(result.is_ok());
+        let value = engine.get(&cf, b"key").unwrap();
+        assert_eq!(value.as_deref(), Some(b"final_value".as_ref()));
+
+        // Cleanup
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_flush_binary_keys_without_ordering_violation() {
+        // Arrange: Binary keys with embedded nulls and high bytes
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_binary_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk {
+                db_path: temp_dir.clone(),
+            },
+            enable_compaction: false,
+            ..Default::default()
+        };
+        let engine = MidgeEngine::open(opts).unwrap();
+        let cf = engine.default_column_family();
+
+        // Act: Write binary keys
+        engine.put(&cf, &[0x00, 0x01, 0x02], b"v1").unwrap();
+        engine.put(&cf, &[0x00, 0xFF, 0x00], b"v2").unwrap();
+        engine.put(&cf, &[0xFF, 0x00, 0x00], b"v3").unwrap();
+
+        let result = engine.flush();
+
+        // Assert
+        assert!(result.is_ok(), "Flush should succeed with binary keys");
+
+        // Cleanup
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

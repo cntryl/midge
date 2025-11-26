@@ -1797,6 +1797,74 @@ mod tests {
     }
 
     #[test]
+    fn should_preserve_sequence_numbers_exactly_after_replay() {
+        // Arrange
+        let dir = TempDir::new().expect("temp dir");
+        let mut wal = Wal::open(dir.path()).expect("open");
+
+        // Write records with specific sequence numbers
+        let test_sequences = [42u64, 100, 999, u64::MAX - 1];
+        for &seq in &test_sequences {
+            let rec = WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from(format!("key_{}", seq)),
+                Some(bytes::Bytes::from(format!("val_{}", seq))),
+                seq,
+            );
+            wal.append(&rec).expect("append");
+        }
+        wal.sync().expect("sync");
+
+        // Act
+        let replayed = wal.replay().expect("replay");
+
+        // Assert - sequence numbers must be identical
+        assert_eq!(replayed.len(), test_sequences.len());
+        for (i, record) in replayed.iter().enumerate() {
+            assert_eq!(
+                record.seq, test_sequences[i],
+                "sequence mismatch at index {}: expected {}, got {}",
+                i, test_sequences[i], record.seq
+            );
+        }
+    }
+
+    #[test]
+    fn should_preserve_all_record_fields_after_replay() {
+        // Arrange
+        let dir = TempDir::new().expect("temp dir");
+        let mut wal = Wal::open(dir.path()).expect("open");
+
+        // Create a record with all optional fields populated
+        let mut rec = WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"full_key"),
+            Some(bytes::Bytes::from_static(b"full_value")),
+            12345,
+        );
+        rec.cf_id = 7;
+        rec.txn_id = Some(9999);
+        rec.expiration = Some(1700000000);
+
+        wal.append(&rec).expect("append");
+        wal.sync().expect("sync");
+
+        // Act
+        let replayed = wal.replay().expect("replay");
+
+        // Assert - all fields preserved
+        assert_eq!(replayed.len(), 1);
+        let r = &replayed[0];
+        assert_eq!(r.seq, 12345);
+        assert_eq!(r.cf_id, 7);
+        assert_eq!(r.txn_id, Some(9999));
+        assert_eq!(r.expiration, Some(1700000000));
+        assert_eq!(r.key.as_ref(), b"full_key");
+        assert_eq!(r.value.as_ref().map(|v| v.as_ref()), Some(&b"full_value"[..]));
+        assert!(matches!(r.op, crate::wal::WalOpKind::Put));
+    }
+
+    #[test]
     fn should_record_fsync_attempts_with_test_hooks() {
         // Arrange
         let dir = TempDir::new().expect("temp dir");

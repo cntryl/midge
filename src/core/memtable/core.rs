@@ -632,4 +632,114 @@ mod tests {
         // Assert
         assert_eq!(rows.len(), 0);
     }
+
+    // =====================================================================
+    // P0: Drain ordering invariant tests
+    // =====================================================================
+
+    #[test]
+    fn should_drain_all_versions_for_same_key() {
+        // Arrange: Write multiple versions of the same key
+        let mt = MemTable::new();
+        mt.put_with_seq(b"key", b"v1", 10);
+        mt.put_with_seq(b"key", b"v2", 20);
+        mt.put_with_seq(b"key", b"v3", 30);
+
+        // Act
+        let metas = mt.drain_with_meta_internal();
+
+        // Assert: All 3 versions should be returned
+        assert_eq!(metas.len(), 3);
+    }
+
+    #[test]
+    fn should_return_versions_in_sequence_descending_order_within_key() {
+        // Arrange: Write versions in sequence order (how writes normally happen)
+        // Note: The skiplist stores versions in insertion order (most recent insert first),
+        // which matches sequence order when sequences are allocated monotonically.
+        let mt = MemTable::new();
+        mt.put_with_seq(b"key", b"old", 5);
+        mt.put_with_seq(b"key", b"mid", 50);
+        mt.put_with_seq(b"key", b"new", 100);
+
+        // Act
+        let metas = mt.drain_with_meta_internal();
+
+        // Assert: Versions are returned in insertion order (most recent insert first)
+        // which corresponds to newest sequence first when sequences are allocated in order
+        let seqs: Vec<u64> = metas.iter().map(|m| m.sequence).collect();
+        assert_eq!(seqs, vec![100, 50, 5], "Versions should be newest-first");
+    }
+
+    #[test]
+    fn should_preserve_tombstone_in_drain_with_meta() {
+        // Arrange
+        let mt = MemTable::new();
+        mt.put_with_seq(b"key", b"value", 10);
+        mt.delete_with_seq(b"key", 20);
+
+        // Act
+        let metas = mt.drain_with_meta_internal();
+
+        // Assert: Should have both the value and the tombstone
+        assert_eq!(metas.len(), 2);
+        let tombstone = metas.iter().find(|m| m.is_tombstone);
+        assert!(tombstone.is_some());
+        assert_eq!(tombstone.unwrap().sequence, 20);
+    }
+
+    #[test]
+    fn should_encode_internal_keys_correctly_in_drain() {
+        // Arrange
+        let mt = MemTable::new();
+        mt.put_with_seq(b"user_key", b"value", 42);
+
+        // Act
+        let metas = mt.drain_with_meta_internal();
+
+        // Assert: Internal key should be longer than user key (has seq + type suffix)
+        assert_eq!(metas.len(), 1);
+        let entry = &metas[0];
+        assert!(entry.key.len() > b"user_key".len());
+        // Decode and verify
+        if let Some((user, seq, tomb)) = crate::common::internal_key::decode_internal_key(&entry.key) {
+            assert_eq!(user.as_slice(), b"user_key");
+            assert_eq!(seq, 42);
+            assert!(!tomb);
+        } else {
+            panic!("Failed to decode internal key");
+        }
+    }
+
+    #[test]
+    fn should_handle_interleaved_puts_and_deletes_in_drain() {
+        // Arrange
+        let mt = MemTable::new();
+        mt.put_with_seq(b"a", b"v1", 1);
+        mt.delete_with_seq(b"a", 2);
+        mt.put_with_seq(b"a", b"v3", 3);
+        mt.put_with_seq(b"b", b"vb", 4);
+
+        // Act
+        let metas = mt.drain_with_meta_internal();
+
+        // Assert: Should have all 4 entries
+        assert_eq!(metas.len(), 4);
+    }
+
+    #[test]
+    fn should_reset_size_after_drain() {
+        // Arrange
+        let mt = MemTable::new();
+        mt.put(b"key1", b"value1");
+        mt.put(b"key2", b"value2");
+        assert!(mt.size_bytes() > 0);
+
+        // Act
+        let _ = mt.drain();
+
+        // Assert
+        assert_eq!(mt.size_bytes(), 0);
+        assert!(mt.is_empty());
+    }
 }

@@ -39,11 +39,8 @@ impl SstMetadata {
         let footer_start = raw.len() - 48;
         let footer = Footer::decode(&raw[footer_start..])?;
 
-        // Read and decode index block
-        let idx_off = footer.index_handle.offset as usize;
-        let idx_size = footer.index_handle.size as usize;
-        let idx_raw = &raw[idx_off..idx_off + idx_size];
-
+        // Read and decode index block with bounds checking
+        let idx_raw = safe_slice(raw, &footer.index_handle, "index block")?;
         let idx_block = Block::decode(idx_raw, BlockType::Index)?;
 
         let sparse_index = SparseIndex::decode(&idx_block.data)?;
@@ -54,24 +51,17 @@ impl SstMetadata {
         let mut use_internal = false;
 
         if footer.meta_index_handle.size > 0 {
-            let meta_off = footer.meta_index_handle.offset as usize;
-            let meta_size = footer.meta_index_handle.size as usize;
-            let meta_raw = &raw[meta_off..meta_off + meta_size];
-
+            let meta_raw = safe_slice(raw, &footer.meta_index_handle, "meta index block")?;
             let meta_block = Block::decode(meta_raw, BlockType::MetaIndex)?;
 
             if let Some(bh) = find_bloom_filter_handle(&meta_block.data)? {
-                let off = bh.offset as usize;
-                let sz = bh.size as usize;
-                let bloom_raw = &raw[off..off + sz];
+                let bloom_raw = safe_slice(raw, &bh, "bloom filter block")?;
                 let bloom_block = Block::decode(bloom_raw, BlockType::Filter)?;
                 bloom_filter = Some(BloomFilter::decode_block(&bloom_block.data)?);
             }
 
             if let Some(bh) = find_range_tombstones_handle(&meta_block.data)? {
-                let off = bh.offset as usize;
-                let sz = bh.size as usize;
-                let tomb_raw = &raw[off..off + sz];
+                let tomb_raw = safe_slice(raw, &bh, "range tombstones block")?;
                 let tomb_block = Block::decode(tomb_raw, BlockType::Filter)?;
                 range_tombstones = decode_range_tombstones(&tomb_block.data)?;
             }
@@ -93,6 +83,26 @@ impl SstMetadata {
             use_internal_keys: use_internal,
         })
     }
+}
+
+/// Safely slice raw bytes using a BlockHandle, returning an error if out of bounds.
+#[inline]
+fn safe_slice<'a>(raw: &'a [u8], handle: &BlockHandle, context: &str) -> MidgeResult<&'a [u8]> {
+    let off = handle.offset as usize;
+    let sz = handle.size as usize;
+    let end = off.checked_add(sz).ok_or_else(|| {
+        crate::error::MidgeError::InvalidData(format!("{} handle offset+size overflow", context))
+    })?;
+    if end > raw.len() {
+        return Err(crate::error::MidgeError::InvalidData(format!(
+            "{} handle [{}, {}) exceeds file size {}",
+            context,
+            off,
+            end,
+            raw.len()
+        )));
+    }
+    Ok(&raw[off..end])
 }
 
 /// Find bloom filter block handle in meta index
@@ -1422,5 +1432,135 @@ mod tests {
         assert!(result.bloom_filter.is_none());
         assert!(result.range_tombstones.is_empty());
         assert!(!result.use_internal_keys);
+    }
+
+    // --- SstMetadata::from_bytes error path tests ---
+
+    #[test]
+    fn should_return_error_when_bytes_empty() {
+        // Arrange
+        let data: Vec<u8> = vec![];
+
+        // Act
+        let result = SstMetadata::from_bytes(&data);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_when_footer_magic_invalid() {
+        // Arrange - create data with correct size but invalid magic number
+        let mut data = vec![0u8; 100];
+        // Footer is last 48 bytes; magic is last 8 bytes
+        // Set some invalid magic
+        data[92..100].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
+
+        // Act
+        let result = SstMetadata::from_bytes(&data);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_when_index_offset_beyond_file_size() {
+        // Arrange - create a valid-looking footer but with out-of-bounds index offset
+        let mut data = vec![0u8; 100];
+
+        // Build footer with index handle pointing beyond file size
+        let footer = Footer::new(
+            BlockHandle {
+                offset: 1000000, // Way beyond the file
+                size: 50,
+            },
+            BlockHandle { offset: 0, size: 0 },
+        );
+        let encoded_footer = footer.encode();
+        let start = data.len() - encoded_footer.len();
+        data[start..].copy_from_slice(&encoded_footer);
+
+        // Act
+        let result = SstMetadata::from_bytes(&data);
+
+        // Assert - should return error, not panic
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("exceeds file size") || err_msg.contains("index block"),
+            "error should mention bounds issue: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn should_return_error_when_index_handle_overflows() {
+        // Arrange - create a footer with offset+size that overflows usize
+        let mut data = vec![0u8; 100];
+
+        let footer = Footer::new(
+            BlockHandle {
+                offset: u64::MAX - 10,
+                size: 100, // offset + size would overflow
+            },
+            BlockHandle { offset: 0, size: 0 },
+        );
+        let encoded_footer = footer.encode();
+        let start = data.len() - encoded_footer.len();
+        data[start..].copy_from_slice(&encoded_footer);
+
+        // Act
+        let result = SstMetadata::from_bytes(&data);
+
+        // Assert - should return error about overflow, not panic
+        assert!(result.is_err());
+    }
+
+    // --- read_data_block_from_bytes_paranoid tests ---
+
+    #[test]
+    fn should_decode_block_when_paranoid_false_and_valid_data() {
+        // Arrange
+        let mut builder = DataBlockBuilder::new(1);
+        builder.add(b"key", b"value").unwrap();
+        let data = builder.finish();
+        let encoded = Block::new(data, BlockType::Data, CompressionType::None)
+            .encode()
+            .unwrap();
+
+        // Act
+        let result = read_data_block_from_bytes_paranoid(&encoded, false);
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_decode_block_when_paranoid_true_and_valid_checksum() {
+        // Arrange
+        let mut builder = DataBlockBuilder::new(1);
+        builder.add(b"test_key", b"test_value").unwrap();
+        let data = builder.finish();
+        let encoded = Block::new(data, BlockType::Data, CompressionType::None)
+            .encode()
+            .unwrap();
+
+        // Act - paranoid=true should verify checksum
+        let result = read_data_block_from_bytes_paranoid(&encoded, true);
+
+        // Assert - valid data should pass paranoid check
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_return_error_when_data_empty() {
+        // Arrange
+        let data: Vec<u8> = vec![];
+
+        // Act
+        let result = read_data_block_from_bytes(&data);
+
+        // Assert
+        assert!(result.is_err());
     }
 }

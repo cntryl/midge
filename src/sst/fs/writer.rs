@@ -184,6 +184,8 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         // flush remaining block
         s.flush_block_if_needed_inner()?;
 
+
+            // (index and meta blocks are built after flushing the current data block)
         // Build index block and other metadata and append to file
         // Index
         for (k, h) in &s.offsets {
@@ -343,5 +345,51 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sst::reader_common::SstMetadata;
+    use crate::common::codec::CompressionType;
+
+    #[test]
+    fn should_store_internal_index_keys_when_use_internal_keys_true() {
+        // Arrange - create writer with tiny block size to force block splits
+        let tmpdir = std::env::temp_dir();
+        let writer_res = FsDynWriter::new_with_seq(
+            &tmpdir,
+            CompressionType::None,
+            16, // tiny block to cause multiple blocks
+            true, // use_internal
+            1,
+            None,
+        );
+        assert!(writer_res.is_ok());
+        let writer = writer_res.unwrap();
+        // Add entries with internal-key space
+        let mut boxed = Box::new(writer) as Box<dyn crate::sst::DynSstWriter>;
+        // Write many entries to exceed block size multiple times
+        for i in 0..50 {
+            let k = format!("hot_key_{}", i);
+            let v = format!("value{}", i);
+            boxed.add_with_meta(k.as_bytes(), Some(v.as_bytes()), i as u64, 0, None).unwrap();
+        }
+        // Finish and read bytes
+        let bytes = boxed.finish_bytes().unwrap();
+        // Create metadata from bytes and examine the sparse index entries
+        let metadata = SstMetadata::from_bytes(&bytes).expect("metadata");
+        let entries = metadata.sparse_index.entries();
+        assert!(!entries.is_empty(), "index entries must exist");
+        // Find if any index entry appears to be an internal key (length >= 9 from encoding)
+        let mut found_internal = false;
+        for e in entries {
+            if crate::common::internal_key::decode_internal_key(e.key.as_ref()).is_some() {
+                found_internal = true;
+                break;
+            }
+        }
+        assert!(found_internal, "index entries should be internal keys");
     }
 }

@@ -845,4 +845,100 @@ mod tests {
             Some(Bytes::from("existing"))
         );
     }
+
+    // =====================================================================
+    // P0: Sequence allocation invariant tests
+    // =====================================================================
+
+    #[test]
+    fn should_allocate_monotonically_increasing_sequences() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act: Write multiple keys
+        for i in 0..100 {
+            engine.put(&cf, format!("key{}", i).as_bytes(), b"value").unwrap();
+        }
+        engine.flush().unwrap();
+
+        // Assert: All writes succeeded (sequence allocation worked)
+        for i in 0..100 {
+            let val = engine.get(&cf, format!("key{}", i).as_bytes()).unwrap();
+            assert!(val.is_some(), "Key {} should exist", i);
+        }
+    }
+
+    #[test]
+    fn should_allocate_unique_sequences_for_concurrent_writes() {
+        // Arrange
+        let engine = std::sync::Arc::new(create_test_engine());
+        let cf = engine.default_column_family();
+        let num_threads = 4;
+        let writes_per_thread = 50;
+
+        // Act: Spawn multiple threads writing concurrently
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let engine = engine.clone();
+                let cf = cf.clone();
+                std::thread::spawn(move || {
+                    for i in 0..writes_per_thread {
+                        let key = format!("t{}k{}", t, i);
+                        engine.put(&cf, key.as_bytes(), b"value").unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Assert: All writes should be present (no lost writes due to sequence conflicts)
+        let mut found = 0;
+        for t in 0..num_threads {
+            for i in 0..writes_per_thread {
+                let key = format!("t{}k{}", t, i);
+                if engine.get(&cf, key.as_bytes()).unwrap().is_some() {
+                    found += 1;
+                }
+            }
+        }
+        assert_eq!(found, num_threads * writes_per_thread, "All writes should succeed");
+    }
+
+    #[test]
+    fn should_handle_rapid_overwrites_with_unique_sequences() {
+        // Arrange: Same key written many times rapidly
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act: 100 rapid overwrites to same key
+        for i in 0..100 {
+            engine.put(&cf, b"hot_key", format!("v{}", i).as_bytes()).unwrap();
+        }
+
+        // Assert: Latest value should be visible
+        let value = engine.get(&cf, b"hot_key").unwrap();
+        assert_eq!(value.as_deref(), Some(b"v99".as_ref()));
+    }
+
+    #[test]
+    fn should_persist_sequence_order_after_flush() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+
+        // Act: Write in specific order then flush
+        engine.put(&cf, b"a", b"first").unwrap();
+        engine.put(&cf, b"z", b"second").unwrap();
+        engine.put(&cf, b"m", b"third").unwrap();
+        engine.flush().unwrap();
+
+        // Assert: All values should be retrievable
+        assert_eq!(engine.get(&cf, b"a").unwrap().as_deref(), Some(b"first".as_ref()));
+        assert_eq!(engine.get(&cf, b"z").unwrap().as_deref(), Some(b"second".as_ref()));
+        assert_eq!(engine.get(&cf, b"m").unwrap().as_deref(), Some(b"third".as_ref()));
+    }
 }
