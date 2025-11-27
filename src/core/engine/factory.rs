@@ -213,11 +213,12 @@ pub(super) fn setup_wal_writer(
         };
 
         let manifest_arc = Arc::new(parking_lot::Mutex::new(manifest.clone()));
-        let cloud_wal = crate::wal::cloud::CloudWalWriter::new(
+        let cloud_wal = crate::wal::cloud::CloudWalWriter::with_test_hooks(
             cloud_backend,
             wal_batch_size,
             Some(manifest_arc),
             Some(db_path.to_path_buf()),
+            opts.test_hooks.clone(),
         );
 
         // Replay any local WAL files that haven't been uploaded yet

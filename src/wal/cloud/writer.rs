@@ -1,3 +1,4 @@
+use crate::common::test_hooks::TestHooks;
 use crate::error::MidgeResult;
 use crate::wal::WalFile;
 use crate::wal::{WalOpKind, WalPos, WalRecord};
@@ -27,6 +28,8 @@ pub struct CloudWalWriter {
     /// Optional local WAL writer used when a db_path is provided. Ensures local
     /// durability even if cloud uploads are flaky.
     local_writer: Option<Arc<dyn crate::wal::WalWriter>>,
+    /// Optional test hooks for fault injection and instrumentation
+    test_hooks: Option<TestHooks>,
 }
 
 impl CloudWalWriter {
@@ -44,6 +47,25 @@ impl CloudWalWriter {
         manifest: Option<Arc<parking_lot::Mutex<crate::core::manifest::Manifest>>>,
         db_path: Option<std::path::PathBuf>,
     ) -> Self {
+        Self::with_test_hooks(backend, batch_size, manifest, db_path, None)
+    }
+
+    /// Create a new cloud WAL writer with optional test hooks.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - Cloud storage backend
+    /// * `batch_size` - Maximum segment size in bytes before auto-flush (16-64 MB recommended)
+    /// * `manifest` - Optional manifest for tracking uploads
+    /// * `db_path` - Optional database path for local staging
+    /// * `test_hooks` - Optional test hooks for fault injection and instrumentation
+    pub fn with_test_hooks(
+        backend: Arc<dyn super::shared::CloudStorageBackend>,
+        batch_size: usize,
+        manifest: Option<Arc<parking_lot::Mutex<crate::core::manifest::Manifest>>>,
+        db_path: Option<std::path::PathBuf>,
+        test_hooks: Option<TestHooks>,
+    ) -> Self {
         let batch_manager = Arc::new(WalBatchManager::new(
             backend.clone(),
             batch_size,
@@ -53,11 +75,14 @@ impl CloudWalWriter {
 
         // Create optional local WAL writer when db_path is provided so we can
         // immediately persist records to local storage for local WAL sync
-        // semantics.
+        // semantics. Pass test hooks to the local writer for instrumentation.
         let local_writer = if let Some(path) = db_path {
             let wal_dir = path.join("wal");
             match WalFile::open(&wal_dir) {
-                Ok(w) => Some(Arc::new(w) as Arc<dyn crate::wal::WalWriter>),
+                Ok(mut w) => {
+                    w.test_hooks = test_hooks.clone();
+                    Some(Arc::new(w) as Arc<dyn crate::wal::WalWriter>)
+                }
                 Err(e) => {
                     tracing::warn!(
                         "failed to open local wal writer at {}: {}",
@@ -76,6 +101,7 @@ impl CloudWalWriter {
             current_pos: Arc::new(Mutex::new(0)),
             sequence: Arc::new(Mutex::new(0)),
             local_writer,
+            test_hooks,
         }
     }
 
@@ -96,9 +122,17 @@ impl CloudWalWriter {
 
 impl crate::wal::WalWriter for CloudWalWriter {
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
+        // Call test hook before WAL append (for instrumentation when no local writer)
+        if self.local_writer.is_none() {
+            if let Some(hooks) = &self.test_hooks {
+                hooks.before_wal_append();
+            }
+        }
+
         // First ensure local durability if configured: write the record
         // to the local WAL synchronously so callers relying on local WAL
         // semantics are safe even if cloud uploads later fail.
+        // Note: The local writer has its own test hooks and will call before_wal_append.
         if let Some(local) = &self.local_writer {
             // Best-effort: propagate local WAL errors as they indicate
             // local durability could not be achieved
