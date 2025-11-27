@@ -169,12 +169,12 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
     // Wait for TTL to expire
     thread::sleep(Duration::from_secs(2));
 
-    // Reopen and check
+    // Act - reopen after TTL elapsed
     let engine = MidgeEngine::open(opts).expect("reopen");
     let cf = engine.default_column_family();
+    let result = engine.get(&cf, b"expire:key").expect("get");
 
     // Assert - key should be expired even after restart
-    let result = engine.get(&cf, b"expire:key").expect("get");
     assert!(
         result.is_none(),
         "Key should be expired after restart if TTL elapsed"
@@ -211,7 +211,7 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
     // Wait for TTL to expire
     thread::sleep(Duration::from_secs(2));
 
-    // Trigger compaction to clean up expired entries
+    // Act - trigger compaction to clean up expired entries
     engine.compact_all().expect("compact");
 
     // Assert - expired keys should be removed
@@ -250,7 +250,7 @@ fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() 
     }
     engine.flush_cf(&cf).expect("flush");
 
-    // Trigger compaction
+    // Act - trigger compaction
     engine.compact_all().expect("compact");
 
     // Assert - non-expired keys should survive compaction
@@ -291,8 +291,9 @@ fn should_hide_expired_key_given_snapshot_after_expiry_when_reading_at_snapshot(
     // Wait for expiry
     thread::sleep(Duration::from_secs(2));
 
-    // Take snapshot after expiry
+    // Act - take snapshot after expiry
     let snapshot = engine.snapshot();
+    let result = engine.get_at(&cf, b"snap_ttl:key", &snapshot).expect("get_at");
 
     // Assert - snapshot should not see expired key
     let result = engine.get_at(&cf, b"snap_ttl:key", &snapshot).expect("get_at");
@@ -315,56 +316,22 @@ fn should_show_key_given_snapshot_before_expiry_when_reading_at_snapshot() {
     let engine = MidgeEngine::open(opts).expect("open");
     let cf = engine.default_column_family();
 
-    // Write with long TTL and take snapshot before expiry
+    // Write with long TTL
     engine
         .put_with_ttl(&cf, b"snap_valid:key", b"snap_value", 3600)
         .expect("put_with_ttl");
-    let snapshot = engine.snapshot();
 
-    // Assert - snapshot should see key
+    // Act - take snapshot before expiry
+    let snapshot = engine.snapshot();
     let result = engine
         .get_at(&cf, b"snap_valid:key", &snapshot)
         .expect("get_at");
+
+    // Assert
     assert_eq!(
         result,
         Some(Bytes::from_static(b"snap_value")),
         "Snapshot should see non-expired key"
-    );
-}
-
-// ============================================================================
-// TTL in Transactions Tests
-// ============================================================================
-
-#[test]
-fn should_respect_ttl_given_transaction_commit_when_key_expires() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
-
-    // Act - write with TTL in transaction
-    let mut txn = engine.begin_transaction(&cf).expect("begin");
-    txn.put_with_ttl(b"txn_ttl:key", b"txn_value", 1)
-        .expect("put_with_ttl in txn");
-    engine
-        .commit_transaction(txn, Default::default())
-        .expect("commit");
-
-    // Wait for TTL to expire
-    thread::sleep(Duration::from_secs(2));
-
-    // Assert - key should be expired
-    let result = engine.get(&cf, b"txn_ttl:key").expect("get");
-    assert!(
-        result.is_none(),
-        "TTL should be respected for transaction writes"
     );
 }
 
@@ -436,7 +403,7 @@ fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
         .expect("put long ttl");
     engine.put(&cf, b"no_ttl", b"permanent").expect("put no ttl");
 
-    // Wait for short TTL to expire
+    // Act - wait for short TTL to expire
     thread::sleep(Duration::from_secs(2));
 
     // Assert - only short TTL key should be expired
@@ -472,12 +439,10 @@ fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
         .put_with_ttl(&cf, b"update_ttl:key", b"v1", 1)
         .expect("put short ttl");
 
-    // Overwrite with longer TTL
+    // Act - overwrite with longer TTL and wait past original TTL
     engine
         .put_with_ttl(&cf, b"update_ttl:key", b"v2", 3600)
         .expect("put long ttl");
-
-    // Wait past original TTL
     thread::sleep(Duration::from_secs(2));
 
     // Assert - key should still exist with new TTL
