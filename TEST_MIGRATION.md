@@ -7,7 +7,7 @@ This document tracks the migration and reorganization of integration tests.
 1. **Eliminate duplication** - Consolidate overlapping tests
 2. **Improve organization** - Group tests by feature, not implementation
 3. **Ensure correctness** - Each test should test exactly what it claims
-4. **Use deterministic patterns** - Test hooks for async/concurrent behavior
+4. **Use deterministic patterns** - Test hooks for async/concurrent behavio
 5. **Storage mode coverage** - Test all storage modes where relevant (see below)
 
 ## Migration Process
