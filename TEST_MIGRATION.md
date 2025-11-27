@@ -138,7 +138,9 @@ Prioritized by dependency chain and bug-catching value:
 | `metrics.rs` | ✅ | 9 | All 3 (2 disk-only) | Sequence tracking, memory usage, SST stats, amplification, performance metrics |
 | `readonly_mode.rs` | ✅ | 7 | LocalDisk, CloudBacked, Memory | Write rejection, read operations, delete/insert rejection in read-only mode |
 | `memory_mode.rs` | ✅ | 2 | Memory | No filesystem artifacts, column family isolation in memory |
-| (remaining ~6 files) | ⬜ | ~18 | TBD | Not started |
+| `compaction_filters.rs` | ✅ | 7 | LocalDisk, CloudBacked | TTL filters, custom filters, filter invocation, data preservation/removal |
+| `compaction_errors.rs` | ✅ | 8 | LocalDisk, CloudBacked | Compaction cancellation, error recovery, manifest consistency, resource cleanup |
+| (remaining ~4 files) | ⬜ | ~14 | TBD | Not started |
 
 ---
 
@@ -995,14 +997,14 @@ Maps each legacy file to its target location(s) in the new structure.
 | `column_family_isolation.rs` | `column_family_isolation.rs` | ⬜ |
 | `column_family_lifecycle.rs` | `column_family_lifecycle.rs` | ⬜ |
 | `compact_amplification_measurement.rs` | `compaction_metrics.rs` | ⬜ |
-| `compact_compaction_cancellation.rs` | `compaction_errors.rs` | ⬜ |
-| `compact_compaction_error_recovery.rs` | `compaction_errors.rs` | ⬜ |
-| `compact_custom_compaction_filter.rs` | `compaction_filters.rs` | ⬜ |
+| `compact_compaction_cancellation.rs` | `compaction_errors.rs` | ✅ |
+| `compact_compaction_error_recovery.rs` | `compaction_errors.rs` | ✅ |
+| `compact_custom_compaction_filter.rs` | `compaction_filters.rs` | ✅ |
 | `compact_l0_sublevel_compaction.rs` | `compaction_levels.rs` | ✅ |
 | `compact_level_target_size_enforcement.rs` | `compaction_levels.rs` | ✅ |
 | `compact_multi_level_compaction_cascades.rs` | `compaction_levels.rs` | ✅ |
 | `compact_reads_during_compaction.rs` | `compaction_concurrent.rs` | ✅ |
-| `compact_ttl_compaction_filter.rs` | `compaction_filters.rs` | ⬜ |
+| `compact_ttl_compaction_filter.rs` | `compaction_filters.rs` | ✅ |
 | `compact_writes_during_compaction.rs` | `compaction_concurrent.rs` | ✅ |
 | `compaction_correctness.rs` | `compaction_basic.rs` | ⬜ |
 | `concurrency_internal_invariants.rs` | `concurrency_flush.rs` | ✅ |
