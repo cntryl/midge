@@ -137,7 +137,8 @@ Prioritized by dependency chain and bug-catching value:
 | `config_validation.rs` | ✅ | 6 | LocalDisk | Config bounds validation, concurrent validation, stress stability, persistence |
 | `metrics.rs` | ✅ | 9 | All 3 (2 disk-only) | Sequence tracking, memory usage, SST stats, amplification, performance metrics |
 | `readonly_mode.rs` | ✅ | 7 | LocalDisk, CloudBacked, Memory | Write rejection, read operations, delete/insert rejection in read-only mode |
-| (remaining ~7 files) | ⬜ | ~20 | TBD | Not started |
+| `memory_mode.rs` | ✅ | 2 | Memory | No filesystem artifacts, column family isolation in memory |
+| (remaining ~6 files) | ⬜ | ~18 | TBD | Not started |
 
 ---
 
@@ -1050,7 +1051,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `iterator_stability_under_pressure.rs` | `engine_iterators.rs` | ✅ |
 | `large_value_stress.rs` | `stress_large_values.rs` | ⬜ |
 | `lsm_global_invariants.rs` | `invariants_lsm.rs` | ⬜ |
-| `memory_mode_no_disk_writes.rs` | `memory_mode.rs` | ⬜ |
+| `memory_mode_no_disk_writes.rs` | `memory_mode.rs` | ✅ |
 | `memtable_concurrency.rs` | `concurrency_writes.rs` | ⬜ |
 | `memtable_freeze_edge_cases.rs` | `concurrency_writes.rs` | ⬜ |
 | `merge_operator_failure_modes.rs` | `engine_merge_operators.rs` | ✅ |
