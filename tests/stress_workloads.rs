@@ -438,13 +438,13 @@ fn should_handle_burst_then_idle_given_writes_followed_by_reads_when_pattern_cha
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
-        // Act - burst phase
+        // Act - burst write phase followed by read verification
         for i in 0..500 {
             eng.put(&cf, format!("burst{:04}", i).as_bytes(), b"v")
                 .expect("put");
         }
 
-        // Act - idle/read phase
+        // Verify all reads succeed after burst
         for i in 0..500 {
             let key = format!("burst{:04}", i);
             let value = eng.get(&cf, key.as_bytes()).expect("get");

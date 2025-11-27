@@ -451,11 +451,11 @@ fn should_allow_commit_given_read_key_modified_by_other_when_using_put() {
         let cf = engine.default_column_family();
         engine.put(&cf, b"rw_key", b"initial").expect("put");
 
-        // Act - start a transaction and read key
+        // Start txn_a and read key
         let mut txn_a = engine.begin_transaction(&cf).expect("begin");
         let _ = txn_a.get(b"rw_key").expect("get");
 
-        // Another transaction updates and commits the same key
+        // Another transaction updates and commits the same key (setup for conflict scenario)
         let mut txn_b = engine.begin_transaction(&cf).expect("begin");
         txn_b.put(b"rw_key", b"updated").expect("put");
         assert!(engine
@@ -575,20 +575,20 @@ fn should_allow_commit_under_read_committed_when_other_commits() {
         let cf = engine.default_column_family();
         engine.put(&cf, b"rw_key", b"initial").expect("put");
 
-        // Act - start txn with ReadCommitted isolation and read key
+        // Start txn with ReadCommitted isolation and read key
         let mut txn_a = engine
             .begin_transaction_with_options(&cf, None, 1024 * 1024, IsolationLevel::ReadCommitted)
             .expect("begin");
         let _ = txn_a.get(b"rw_key").expect("get");
 
-        // Another transaction updates and commits
+        // Another transaction updates and commits (setup for concurrent modification scenario)
         let mut txn_b = engine.begin_transaction(&cf).expect("begin");
         txn_b.put(b"rw_key", b"updated").expect("put");
         assert!(engine
             .commit_transaction(txn_b, WriteOptions::default())
             .is_ok());
 
-        // Act - txn_a tries to commit and should NOT be treated as conflicting
+        // Act - txn_a tries to commit (should NOT be treated as conflicting)
         txn_a.put(b"some_key", b"value").expect("put");
         let res = engine.commit_transaction(txn_a, WriteOptions::default());
 

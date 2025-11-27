@@ -936,11 +936,10 @@ mod tests {
         let hybrid = HybridStorage::new(cache_dir.clone(), backend.clone(), 1024 * 1024).unwrap();
         let data = Bytes::from("cloud data");
 
-        // Act - Write directly to cloud (bypassing hybrid)
+        // Write directly to cloud (bypassing hybrid) - setup for cache miss scenario
         backend.put_blob("cloud_only.dat", data.clone()).unwrap();
 
-        // Act
-        // Read through hybrid (should fetch from cloud)
+        // Act - Read through hybrid (should fetch from cloud)
         let retrieved = hybrid.read("cloud_only.dat").unwrap();
 
         // Assert

@@ -247,7 +247,7 @@ mod tests {
         let backend = Arc::new(MockCloudBackend::new());
         let write_factory = CloudSstFactory::new(backend.clone(), "sst".to_string());
 
-        // Act
+        // Write data
         let mut writer = write_factory
             .create(crate::common::codec::CompressionType::None, 4096, false)
             .unwrap();
@@ -262,7 +262,7 @@ mod tests {
             .put_blob(cloud_key, bytes::Bytes::from(bytes))
             .unwrap();
 
-        // Act - Read
+        // Act - Read back through cloud reader
         let read_factory = CloudSstReaderFactory::new(backend);
         let reader = read_factory.open(std::path::Path::new(cloud_key)).unwrap();
 

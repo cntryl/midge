@@ -388,10 +388,8 @@ mod tests {
         fm.mark_for_deletion(file1.clone(), 5);
         fm.mark_for_deletion(file2.clone(), 5);
 
-        // Act
+        // Initial deletion attempt (before grace period)
         let deleted = fm.execute_pending_deletions(Duration::from_secs(1));
-
-        // Assert
         assert_eq!(deleted, 0);
         assert!(file1.exists());
         assert!(file2.exists());
@@ -407,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn should_track_open_files_given_open_and_close_when_counted() {
+    fn should_track_single_open_file_given_open_when_counted() {
         // Arrange
         let fm = FileManager::with_limits(0, 3);
 
@@ -417,29 +415,64 @@ mod tests {
         // Assert
         let stats = fm.stats();
         assert_eq!(stats.open_file_count, 1);
+    }
 
-        // Act - Open more files
+    #[test]
+    fn should_track_multiple_open_files_given_multiple_opens_when_counted() {
+        // Arrange
+        let fm = FileManager::with_limits(0, 3);
+        let _h1 = fm.track_open().unwrap();
+
+        // Act
         let _h2 = fm.track_open().unwrap();
         let _h3 = fm.track_open().unwrap();
 
         // Assert
         let stats = fm.stats();
         assert_eq!(stats.open_file_count, 3);
+    }
 
-        // Act - Should fail - at limit
+    #[test]
+    fn should_fail_open_given_at_limit_when_track_open_called() {
+        // Arrange
+        let fm = FileManager::with_limits(0, 3);
+        let _h1 = fm.track_open().unwrap();
+        let _h2 = fm.track_open().unwrap();
+        let _h3 = fm.track_open().unwrap();
+
+        // Act
         let result = fm.track_open();
 
         // Assert
         assert!(result.is_err());
+    }
 
-        // Act - Drop a handle
-        drop(_h1);
+    #[test]
+    fn should_decrease_count_given_handle_dropped_when_counted() {
+        // Arrange
+        let fm = FileManager::with_limits(0, 3);
+        let h1 = fm.track_open().unwrap();
+        let _h2 = fm.track_open().unwrap();
+        let _h3 = fm.track_open().unwrap();
+
+        // Act
+        drop(h1);
 
         // Assert
         let stats = fm.stats();
         assert_eq!(stats.open_file_count, 2);
+    }
 
-        // Act - Now should succeed
+    #[test]
+    fn should_allow_new_open_given_handle_dropped_when_at_limit() {
+        // Arrange
+        let fm = FileManager::with_limits(0, 3);
+        let h1 = fm.track_open().unwrap();
+        let _h2 = fm.track_open().unwrap();
+        let _h3 = fm.track_open().unwrap();
+        drop(h1); // Free up a slot
+
+        // Act
         let _h4 = fm.track_open().unwrap();
 
         // Assert
@@ -469,13 +502,13 @@ mod tests {
         let fm = FileManager::new();
         fm.register_file(Path::new("file1.sst"), 3000).unwrap();
 
-        // Act - Set quota lower than current usage
+        // Set quota lower than current usage but allow some room
         fm.set_max_total_bytes(5000);
 
-        // Assert - Can still register within quota
+        // Register within quota (setup)
         fm.register_file(Path::new("file2.sst"), 1000).unwrap();
 
-        // Act - But not beyond
+        // Act - Try to register beyond new limit
         let result = fm.register_file(Path::new("file3.sst"), 2000);
 
         // Assert

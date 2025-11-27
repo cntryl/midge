@@ -57,11 +57,30 @@ pub fn test_single_test(
 ) -> TestResult {
     let test_start = line_num - 1;
 
-    // Find test end (next #[test] or end of file)
+    // Find test end by tracking brace depth (function body ends at matching close brace)
     let mut test_end = lines.len() - 1;
-    for (i, line) in lines.iter().enumerate().skip(test_start + 2) {
-        if line.trim_start().starts_with("#[test]") {
-            test_end = i - 1;
+    let mut brace_depth = 0;
+    let mut found_open_brace = false;
+
+    for (i, line) in lines.iter().enumerate().skip(test_start) {
+        // Count braces (simplified: doesn't handle strings/comments, but good enough for tests)
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    brace_depth += 1;
+                    found_open_brace = true;
+                }
+                '}' => {
+                    brace_depth -= 1;
+                    if found_open_brace && brace_depth == 0 {
+                        test_end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if found_open_brace && brace_depth == 0 {
             break;
         }
     }
@@ -103,8 +122,8 @@ pub fn test_single_test(
     }
 
     // Check 3: Multiple Act sections (indicates multi-behavior)
-    // Only count actual Act comment lines, not string literals containing "Act"
-    let act_count_re = Regex::new(r"^\s*//\s*Act\s*$").unwrap();
+    // Count lines that start with "// Act" (with optional description after)
+    let act_count_re = Regex::new(r"^\s*//\s*Act(\s|$)").unwrap();
     let test_lines_vec: Vec<&str> = test_body.lines().collect();
     let mut act_count = 0;
     let mut in_string = false;
