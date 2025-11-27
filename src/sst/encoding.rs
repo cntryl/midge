@@ -194,7 +194,12 @@ impl<'a> TlvBlockIterator<'a> {
             data[data.len() - 2],
             data[data.len() - 1],
         ]) as usize;
-        let restarts_start = data.len() - 4 - n * 4;
+
+        // Check for overflow: restarts_start = data.len() - 4 - n * 4
+        // This can underflow if n * 4 > data.len() - 4
+        let restart_bytes = n.saturating_mul(4);
+        let restarts_start = (data.len() - 4).saturating_sub(restart_bytes);
+
         // Version marker is before restart array
         let limit = restarts_start.saturating_sub(1);
 

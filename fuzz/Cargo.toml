@@ -1,0 +1,61 @@
+[package]
+name = "cntryl-midge-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.cntryl-midge]
+path = ".."
+
+# ============================================================================
+# Fuzz Targets
+# ============================================================================
+
+[[bin]]
+name = "fuzz_tlv_reader"
+path = "fuzz_targets/fuzz_tlv_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_wal_decode"
+path = "fuzz_targets/fuzz_wal_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sst_metadata"
+path = "fuzz_targets/fuzz_sst_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_block_decode"
+path = "fuzz_targets/fuzz_block_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bloom_filter"
+path = "fuzz_targets/fuzz_bloom_filter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_internal_key"
+path = "fuzz_targets/fuzz_internal_key.rs"
+test = false
+doc = false
+bench = false
+
