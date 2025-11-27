@@ -140,7 +140,11 @@ Prioritized by dependency chain and bug-catching value:
 | `memory_mode.rs` | ✅ | 2 | Memory | No filesystem artifacts, column family isolation in memory |
 | `compaction_filters.rs` | ✅ | 7 | LocalDisk, CloudBacked | TTL filters, custom filters, filter invocation, data preservation/removal |
 | `compaction_errors.rs` | ✅ | 8 | LocalDisk, CloudBacked | Compaction cancellation, error recovery, manifest consistency, resource cleanup |
-| (remaining ~4 files) | ⬜ | ~14 | TBD | Not started |
+| `durability_atomicity.rs` | ✅ | 11 | LocalDisk | SST/manifest atomicity, compaction atomicity, WAL truncate fallback |
+| `compaction_metrics.rs` | ✅ | 4 | LocalDisk, CloudBacked | Read/write/space amplification measurement, tracking over time |
+| `cache_read_path.rs` | ✅ | 6 | LocalDisk | LRU cache behavior, bloom filters, concurrent cache access |
+| `paranoid_mode.rs` | ✅ | 4 | LocalDisk | Paranoid checksum verification, compressed blocks, default off |
+| `cloud_real_providers.rs` | ✅ | 10 | AWS/Azure/GCP | Real cloud provider tests (ignored by default, requires credentials) |
 
 ---
 
@@ -984,7 +988,7 @@ Maps each legacy file to its target location(s) in the new structure.
 |-------------|----------------|--------|
 | `admin_concurrency.rs` | `admin_operations.rs` | ⬜ |
 | `api_kvstore_adapter.rs` | `api_kvstore.rs` | ⬜ |
-| `atomicity_wal_manifest_sst.rs` | `durability_atomicity.rs` | ⬜ |
+| `atomicity_wal_manifest_sst.rs` | `durability_atomicity.rs` | ✅ |
 | `autotune_stability.rs` | `autotune.rs` | ✅ |
 | `autotune_unit.rs` | `autotune.rs` | ✅ |
 | `checkpoint_compaction_recovery_triple.rs` | `checkpoint.rs` | ✅ |
@@ -993,10 +997,10 @@ Maps each legacy file to its target location(s) in the new structure.
 | `cloud_durability.rs` | `cloud_durability.rs` | ✅ |
 | `cloud_hybrid_faults.rs` | `cloud_durability.rs`, `cloud_consistency.rs` | ✅ |
 | `cloud_hybrid_stress.rs` | `cloud_hybrid.rs` | ✅ |
-| `cloud_real_providers.rs` | 🗑️ (requires real credentials) | ⬜ |
+| `cloud_real_providers.rs` | `cloud_real_providers.rs` | ✅ (ignored tests) |
 | `column_family_isolation.rs` | `column_family_isolation.rs` | ⬜ |
 | `column_family_lifecycle.rs` | `column_family_lifecycle.rs` | ⬜ |
-| `compact_amplification_measurement.rs` | `compaction_metrics.rs` | ⬜ |
+| `compact_amplification_measurement.rs` | `compaction_metrics.rs` | ✅ |
 | `compact_compaction_cancellation.rs` | `compaction_errors.rs` | ✅ |
 | `compact_compaction_error_recovery.rs` | `compaction_errors.rs` | ✅ |
 | `compact_custom_compaction_filter.rs` | `compaction_filters.rs` | ✅ |
@@ -1016,8 +1020,8 @@ Maps each legacy file to its target location(s) in the new structure.
 | `concurrent_sequence_number_allocation.rs` | `concurrency_writes.rs` | ✅ |
 | `concurrent_wal_concurrency.rs` | `concurrency_wal.rs` | ✅ |
 | `config_validation.rs` | `config_validation.rs` | ⬜ |
-| `durability_compaction.rs` | `durability_atomicity.rs` | ⬜ |
-| `durability_engine_truncate_fallback.rs` | `durability_atomicity.rs` | ⬜ |
+| `durability_compaction.rs` | `durability_atomicity.rs` | ✅ |
+| `durability_engine_truncate_fallback.rs` | `durability_atomicity.rs` | ✅ |
 | `durability_manifest.rs` | `durability_recovery.rs` | ✅ |
 | `durability_recovery.rs` | `durability_recovery.rs` | ✅ |
 | `durability_recovery_edge.rs` | `durability_recovery.rs` | ✅ |
@@ -1060,10 +1064,10 @@ Maps each legacy file to its target location(s) in the new structure.
 | `metrics_accessors.rs` | `metrics.rs` | ⬜ |
 | `multi_cf_compaction_fairness.rs` | `column_family_isolation.rs` | ⬜ |
 | `multicf_compaction_recovery.rs` | `column_family_isolation.rs` | ⬜ |
-| `paranoid_checksum_mode.rs` | `paranoid_mode.rs` | ⬜ |
+| `paranoid_checksum_mode.rs` | `paranoid_mode.rs` | ✅ |
 | `range_delete_edge_cases.rs` | `engine_delete_range.rs` | ✅ |
 | `range_tombstone_stress.rs` | `engine_delete_range.rs` | ✅ |
-| `read_path_caching.rs` | `cache_read_path.rs` | ⬜ |
+| `read_path_caching.rs` | `cache_read_path.rs` | ✅ |
 | `shutdown_semantics.rs` | `durability_recovery.rs` | ⬜ |
 | `snapshot_lifecycle.rs` | `engine_snapshots.rs` | ⬜ |
 | `snapshot_lifecycle_compaction.rs` | `engine_snapshots.rs` | ⬜ |
