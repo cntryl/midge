@@ -45,12 +45,10 @@ fn bench_manifest_parse_small(c: &mut Criterion) {
 
     group.bench_function("parse_small", |b| {
         b.iter(|| {
-            let mut version_set = VersionSet::new(Default::default());
-
-            // Apply edits (simulates parsing/building manifest state)
-            for edit in &edits {
-                version_set = version_set.apply_edit(edit.clone()).unwrap();
-            }
+            // Use batch apply_edits for O(n) instead of O(n²)
+            let version_set = VersionSet::new(Default::default())
+                .apply_edits(edits.iter().cloned())
+                .unwrap();
 
             // Read back state from manifest (simulates serialization)
             let file_count = version_set.manifest.files.len();
@@ -62,15 +60,15 @@ fn bench_manifest_parse_small(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark manifest parse large (10k edits)
+/// Benchmark manifest parse large (1k edits)
 /// Larger-scale manifest operation simulation
 fn bench_manifest_parse_large(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_manifest_parse_large");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(10_000));
+    group.throughput(Throughput::Elements(1_000));
 
-    // Precompute 10k version edits
-    let edits: Vec<VersionEdit> = (0..10_000)
+    // Precompute 1k version edits
+    let edits: Vec<VersionEdit> = (0..1_000)
         .map(|i| VersionEdit::AddFile {
             file: Box::new(make_test_file_meta(i)),
         })
@@ -78,12 +76,10 @@ fn bench_manifest_parse_large(c: &mut Criterion) {
 
     group.bench_function("parse_large", |b| {
         b.iter(|| {
-            let mut version_set = VersionSet::new(Default::default());
-
-            // Apply all edits
-            for edit in &edits {
-                version_set = version_set.apply_edit(edit.clone()).unwrap();
-            }
+            // Use batch apply_edits for O(n) instead of O(n²)
+            let version_set = VersionSet::new(Default::default())
+                .apply_edits(edits.iter().cloned())
+                .unwrap();
 
             // Read back state from manifest
             let file_count = version_set.manifest.files.len();

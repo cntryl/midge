@@ -9,6 +9,7 @@ use crate::api::column_family::ColumnFamilyConfig;
 pub struct Manifest {
     pub last_persisted_sequence: u64,
     pub ssts: Vec<String>,
+    /// SST file metadata
     #[serde(default)]
     pub files: Vec<FileMeta>,
     /// Column families in this database. Maps CF ID to (name, config).

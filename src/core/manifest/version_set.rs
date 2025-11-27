@@ -34,30 +34,47 @@ impl VersionSet {
     /// This creates a clone with the edit applied.
     pub fn apply_edit(&self, edit: VersionEdit) -> MidgeResult<Self> {
         let mut new_manifest = self.manifest.clone();
-
-        match edit {
-            VersionEdit::AddFile { file } => {
-                new_manifest.files.push(*file.clone());
-                new_manifest.ssts.push(file.name.clone());
-            }
-            VersionEdit::RemoveFiles { names } => {
-                new_manifest.files.retain(|f| !names.contains(&f.name));
-                new_manifest.ssts.retain(|s| !names.contains(s));
-            }
-            VersionEdit::UpdateSequence { sequence } => {
-                new_manifest.last_persisted_sequence = sequence;
-            }
-            VersionEdit::CombinedAddRemove { add, remove } => {
-                new_manifest.files.push(*add.clone());
-                new_manifest.ssts.push(add.name.clone());
-                new_manifest.files.retain(|f| !remove.contains(&f.name));
-                new_manifest.ssts.retain(|s| !remove.contains(s));
-            }
-        }
-
+        Self::apply_edit_to_manifest(&mut new_manifest, edit);
         Ok(Self {
             manifest: new_manifest,
         })
+    }
+
+    /// Apply multiple edits in a single clone operation.
+    /// Much more efficient than calling apply_edit repeatedly (O(n) vs O(n²)).
+    pub fn apply_edits(&self, edits: impl IntoIterator<Item = VersionEdit>) -> MidgeResult<Self> {
+        let mut new_manifest = self.manifest.clone();
+        for edit in edits {
+            Self::apply_edit_to_manifest(&mut new_manifest, edit);
+        }
+        Ok(Self {
+            manifest: new_manifest,
+        })
+    }
+
+    /// Apply a single edit to a manifest in place (no cloning).
+    fn apply_edit_to_manifest(manifest: &mut Manifest, edit: VersionEdit) {
+        match edit {
+            VersionEdit::AddFile { file } => {
+                let name = file.name.clone();
+                manifest.files.push(*file);
+                manifest.ssts.push(name);
+            }
+            VersionEdit::RemoveFiles { names } => {
+                manifest.files.retain(|f| !names.contains(&f.name));
+                manifest.ssts.retain(|s| !names.contains(s));
+            }
+            VersionEdit::UpdateSequence { sequence } => {
+                manifest.last_persisted_sequence = sequence;
+            }
+            VersionEdit::CombinedAddRemove { add, remove } => {
+                let name = add.name.clone();
+                manifest.files.push(*add);
+                manifest.ssts.push(name);
+                manifest.files.retain(|f| !remove.contains(&f.name));
+                manifest.ssts.retain(|s| !remove.contains(s));
+            }
+        }
     }
 }
 
@@ -207,5 +224,42 @@ mod tests {
 
         // Assert
         assert_eq!(new_version.manifest.last_persisted_sequence, 100);
+    }
+
+    #[test]
+    fn should_apply_multiple_edits_in_batch() {
+        // Arrange
+        let manifest = Manifest::default();
+        let version = VersionSet::new(manifest);
+
+        let edits = vec![
+            VersionEdit::AddFile {
+                file: Box::new(FileMeta {
+                    name: "test1.sst".to_string(),
+                    level: 0,
+                    size_bytes: 1024,
+                    ..Default::default()
+                }),
+            },
+            VersionEdit::AddFile {
+                file: Box::new(FileMeta {
+                    name: "test2.sst".to_string(),
+                    level: 1,
+                    size_bytes: 2048,
+                    ..Default::default()
+                }),
+            },
+            VersionEdit::UpdateSequence { sequence: 42 },
+        ];
+
+        // Act
+        let new_version = version.apply_edits(edits).unwrap();
+
+        // Assert
+        assert_eq!(new_version.manifest.files.len(), 2);
+        assert_eq!(new_version.manifest.ssts.len(), 2);
+        assert_eq!(new_version.manifest.files[0].name, "test1.sst");
+        assert_eq!(new_version.manifest.files[1].name, "test2.sst");
+        assert_eq!(new_version.manifest.last_persisted_sequence, 42);
     }
 }
