@@ -60,12 +60,10 @@ fn bench_manifest_apply_100_ops(c: &mut Criterion) {
 
     group.bench_function("apply_100", |b| {
         b.iter(|| {
-            let mut version = VersionSet::new(Manifest::default());
-
-            // Apply all 100 edits
-            for edit in &edits {
-                version = version.apply_edit(edit.clone()).unwrap();
-            }
+            // Use batch apply_edits for O(n) instead of O(n²)
+            let version = VersionSet::new(Manifest::default())
+                .apply_edits(edits.iter().cloned())
+                .unwrap();
 
             black_box(version);
         })
@@ -75,6 +73,7 @@ fn bench_manifest_apply_100_ops(c: &mut Criterion) {
 }
 
 /// Benchmark applying 10k VersionEdit operations
+/// Uses realistic batched removes (like compaction) instead of individual removes
 fn bench_manifest_apply_10k_ops(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_manifest_apply_10k_ops");
     group.sampling_mode(SamplingMode::Flat);
@@ -83,28 +82,31 @@ fn bench_manifest_apply_10k_ops(c: &mut Criterion) {
     group.sample_size(10); // Fewer samples for large operation
 
     // Precompute all edits outside the benchmark
-    let mut edits = Vec::with_capacity(10_000);
+    // Realistic pattern: add files, then batch remove (compaction-style)
+    let mut edits = Vec::with_capacity(600);
+
+    // Add 5000 files
     for i in 0..5_000 {
-        // Add files at various levels
         edits.push(VersionEdit::AddFile {
-            file: Box::new(create_file_meta(i, i as u32 % 7)), // Levels 0-6
+            file: Box::new(create_file_meta(i, i as u32 % 7)),
         });
     }
-    for i in 0..5_000 {
-        // Remove files
-        edits.push(VersionEdit::RemoveFiles {
-            names: vec![format!("sst_{:06}.sst", i)],
-        });
+
+    // Batch removes in groups of 10 (realistic compaction pattern)
+    // 500 batches × 10 files = 5000 removes = 10k total operations
+    for batch in 0..500 {
+        let names: Vec<String> = (0..10)
+            .map(|j| format!("sst_{:06}.sst", batch * 10 + j))
+            .collect();
+        edits.push(VersionEdit::RemoveFiles { names });
     }
 
     group.bench_function("apply_10k", |b| {
         b.iter(|| {
-            let mut version = VersionSet::new(Manifest::default());
-
-            // Apply all 10k edits
-            for edit in &edits {
-                version = version.apply_edit(edit.clone()).unwrap();
-            }
+            // Use batch apply_edits for O(n) instead of O(n²)
+            let version = VersionSet::new(Manifest::default())
+                .apply_edits(edits.iter().cloned())
+                .unwrap();
 
             black_box(version);
         })

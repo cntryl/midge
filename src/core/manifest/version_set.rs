@@ -7,6 +7,7 @@
 //! SST readers are opened on-demand using the manifest metadata.
 
 use arc_swap::ArcSwap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::core::manifest::types::{FileMeta, Manifest};
@@ -61,8 +62,15 @@ impl VersionSet {
                 manifest.ssts.push(name);
             }
             VersionEdit::RemoveFiles { names } => {
-                manifest.files.retain(|f| !names.contains(&f.name));
-                manifest.ssts.retain(|s| !names.contains(s));
+                // For small remove sets, linear search is faster than HashSet overhead
+                if names.len() <= 4 {
+                    manifest.files.retain(|f| !names.contains(&f.name));
+                    manifest.ssts.retain(|s| !names.contains(s));
+                } else {
+                    let names_set: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+                    manifest.files.retain(|f| !names_set.contains(f.name.as_str()));
+                    manifest.ssts.retain(|s| !names_set.contains(s.as_str()));
+                }
             }
             VersionEdit::UpdateSequence { sequence } => {
                 manifest.last_persisted_sequence = sequence;
@@ -71,8 +79,15 @@ impl VersionSet {
                 let name = add.name.clone();
                 manifest.files.push(*add);
                 manifest.ssts.push(name);
-                manifest.files.retain(|f| !remove.contains(&f.name));
-                manifest.ssts.retain(|s| !remove.contains(s));
+                // For small remove sets, linear search is faster than HashSet overhead
+                if remove.len() <= 4 {
+                    manifest.files.retain(|f| !remove.contains(&f.name));
+                    manifest.ssts.retain(|s| !remove.contains(s));
+                } else {
+                    let remove_set: HashSet<&str> = remove.iter().map(|s| s.as_str()).collect();
+                    manifest.files.retain(|f| !remove_set.contains(f.name.as_str()));
+                    manifest.ssts.retain(|s| !remove_set.contains(s.as_str()));
+                }
             }
         }
     }
