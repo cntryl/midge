@@ -126,9 +126,8 @@ pub(crate) fn spawn_flush_worker(
             }));
 
             if let Err(panic_payload) = panic_result {
-                // Log the panic payload for diagnostics
-                eprintln!("Background flush worker panicked: {:?}", panic_payload);
                 // Convert to test hook event if provided
+                let _ = panic_payload; // silence unused warning when test_hooks is None
                 if let Some(ref hooks) = config.test_hooks {
                     hooks.record_worker_panic("flush");
                 }

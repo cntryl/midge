@@ -123,31 +123,24 @@ impl EngineRuntime {
 
 impl Drop for EngineRuntime {
     fn drop(&mut self) {
-        eprintln!("[SHUTDOWN] EngineRuntime::drop - broadcasting shutdown signal");
         // Broadcast shutdown signal (best-effort)
         let _ = self.shutdown_tx.send(());
 
         // Wait for all workers to exit
         if let Some(flush) = self.flush_coordinator.take() {
-            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for flush coordinator");
             flush.join();
         }
         if let Some(wal) = self.wal_uploader.take() {
-            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for WAL uploader");
             wal.join();
         }
         if let Some(compaction) = self.compaction.take() {
-            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for compaction");
             compaction.join();
         }
         if let Some(manifest) = self.manifest_sync.take() {
-            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for manifest sync");
             manifest.join();
         }
         for worker in self.hybrid_storage_workers.drain(..) {
-            eprintln!("[SHUTDOWN] EngineRuntime::drop - waiting for hybrid storage worker");
             worker.join();
         }
-        eprintln!("[SHUTDOWN] EngineRuntime::drop - complete");
     }
 }

@@ -544,8 +544,8 @@ impl TestHooks {
     /// assert expected failure modes without letting a panic unwind into the
     /// test runner.
     pub fn record_worker_panic(&self, kind: &str) {
+        let _ = kind; // used for counting only
         self.worker_panic_count.fetch_add(1, Ordering::SeqCst);
-        eprintln!("[TEST-HOOK] worker panic recorded (kind={})", kind);
     }
 
     /// Get the number of worker panics recorded via `record_worker_panic`.

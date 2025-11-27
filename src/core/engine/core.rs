@@ -415,31 +415,20 @@ impl MidgeEngine {
 
 impl Drop for MidgeEngine {
     fn drop(&mut self) {
-        // Debugging: indicate we're beginning engine drop
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - start");
-
         // Signal WAL background workers to shutdown (CloudWalWriter retry loops)
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - calling wal_coordinator.shutdown()");
         self.wal_coordinator.shutdown();
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - wal_coordinator.shutdown returned");
 
         // Flush WAL to ensure all writes are persisted
         // Note: flush() may fail if cloud uploads are failing, but shutdown signal
         // ensures we don't hang forever in retry loops
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - calling wal_coordinator.flush()");
         let _ = self.wal_coordinator.flush();
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - wal_coordinator.flush returned");
 
         // Shutdown VersionManager actor gracefully
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - calling version_manager.shutdown()");
         self.version_manager.shutdown();
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - version_manager.shutdown returned");
 
         // Note: Runtime will be dropped after this function returns, which will
         // broadcast shutdown signal to all background workers and wait for them
         // to exit gracefully (see EngineRuntime::drop implementation)
-
-        eprintln!("[SHUTDOWN] MidgeEngine::drop - complete (runtime will shutdown next)");
     }
 }
 
