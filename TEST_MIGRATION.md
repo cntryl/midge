@@ -129,11 +129,15 @@ Prioritized by dependency chain and bug-catching value:
 | `cloud_hybrid.rs` | ✅ | 6 | CloudBacked (hybrid) | Cache eviction, concurrent access, churn, async uploads, recovery, metrics |
 | `compaction_concurrent.rs` | ✅ | 12 | LocalDisk, CloudBacked | Reads/writes during compaction, snapshot isolation, iterator stability, tombstones |
 | `transaction_isolation.rs` | ✅ | 22 | LocalDisk, CloudBacked | Dirty read/write prevention, snapshot isolation, conflict detection, phantom read prevention |
-| `transaction_conflicts.rs` | ✅ | 21 | LocalDisk, CloudBacked | Write-write conflicts, OCC, lost update prevention, delete range conflicts, high contention |
-| `transaction_deadlock.rs` | ✅ | 11 | LocalDisk, CloudBacked | Circular wait detection, victim selection, livelock prevention, read-write conflicts, recovery |
+| `transaction_conflicts.rs` | ✅ | 26 | LocalDisk, CloudBacked | LWW semantics, INSERT conflicts, CAS conflicts, delete range LWW, high contention |
+| `transaction_deadlock.rs` | ✅ | 11 | LocalDisk, CloudBacked | INSERT conflict detection, PUT LWW semantics, concurrent transactions, recovery |
 | `transaction_spill.rs` | ✅ | 14 | LocalDisk, CloudBacked + Memory | Large transaction spill-to-disk, data integrity, rollback cleanup, recovery, memory pressure, memory mode verification |
-| `transaction_advanced.rs` | ✅ | 16 | LocalDisk, CloudBacked | Edge cases, atomicity, delete range integration, durability, sequential transactions |
-| (remaining ~12 files) | ⬜ | ~30 | TBD | Not started |
+| `transaction_advanced.rs` | ✅ | 19 | LocalDisk, CloudBacked | Edge cases, atomicity, delete range integration, durability, sequential transactions |
+| `error_handling.rs` | ✅ | 17 | LocalDisk | WAL/manifest corruption, disk full, SST corruption, background errors, crash during flush |
+| `config_validation.rs` | ✅ | 6 | LocalDisk | Config bounds validation, concurrent validation, stress stability, persistence |
+| `metrics.rs` | ✅ | 9 | All 3 (2 disk-only) | Sequence tracking, memory usage, SST stats, amplification, performance metrics |
+| `readonly_mode.rs` | ✅ | 7 | LocalDisk, CloudBacked, Memory | Write rejection, read operations, delete/insert rejection in read-only mode |
+| (remaining ~7 files) | ⬜ | ~20 | TBD | Not started |
 
 ---
 
@@ -1039,8 +1043,8 @@ Maps each legacy file to its target location(s) in the new structure.
 | `engine_write_batch_atomicity.rs` | `engine_write_batch.rs` | ⬜ |
 | `engine_write_batch_edge.rs` | `engine_write_batch.rs` | ⬜ |
 | `engine_write_options.rs` | `engine_basic.rs` | ⬜ |
-| `error_handling_core.rs` | `error_handling.rs` | ⬜ |
-| `error_handling_flush.rs` | `error_handling.rs` | ⬜ |
+| `error_handling_core.rs` | `error_handling.rs` | ✅ |
+| `error_handling_flush.rs` | `error_handling.rs` | ✅ |
 | `fitz_style_workloads.rs` | `stress_workloads.rs` | ⬜ |
 | `iterator_lifecycle.rs` | `engine_iterators.rs` | ✅ |
 | `iterator_stability_under_pressure.rs` | `engine_iterators.rs` | ✅ |
