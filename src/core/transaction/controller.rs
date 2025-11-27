@@ -24,6 +24,7 @@ type CommittedTxnInfo = HashMap<u64, (u64, HashSet<Key>, HashSet<(u32, Bytes, By
 
 #[derive(Clone)]
 struct TxnInfo {
+    #[allow(dead_code)] // Used for snapshot isolation validation
     begin_seq: u64,
     write_set: HashSet<Key>,
     write_ranges: HashSet<(u32, Bytes, Bytes)>,
@@ -202,6 +203,7 @@ impl TransactionController {
 
     // --- Private helpers ---
 
+    #[allow(dead_code)] // Reserved for pessimistic conflict detection
     fn has_commit_conflict(txn: &TxnInfo, committed: &CommittedTxnInfo, id: u64) -> bool {
         committed
             .iter()
@@ -253,6 +255,7 @@ impl TransactionController {
         false
     }
 
+    #[allow(dead_code)] // Reserved for serializable isolation level
     fn has_read_conflict(txn: &TxnInfo, committed: &CommittedTxnInfo) -> bool {
         txn.read_versions.iter().any(|(key, ver)| {
             committed
@@ -261,6 +264,7 @@ impl TransactionController {
         })
     }
 
+    #[allow(dead_code)] // Reserved for range-based conflict detection
     fn has_commit_range_conflict(txn: &TxnInfo, committed: &CommittedTxnInfo, id: u64) -> bool {
         committed.iter().any(|(&seq, (cid, _, ranges))| {
             seq >= txn.begin_seq
