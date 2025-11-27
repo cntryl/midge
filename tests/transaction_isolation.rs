@@ -541,11 +541,7 @@ fn should_allow_concurrent_puts_to_same_key_given_lww_semantics() {
         let commit1 = engine.commit_transaction(txn1, WriteOptions::default());
         let commit2 = engine.commit_transaction(txn2, WriteOptions::default());
 
-        assert!(
-            commit1.is_ok(),
-            "First PUT should succeed for {}",
-            name
-        );
+        assert!(commit1.is_ok(), "First PUT should succeed for {}", name);
         assert!(
             commit2.is_ok(),
             "Second PUT should also succeed (LWW) for {}",

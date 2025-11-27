@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_interleaved_puts_and_deletes_in_drain() {
+    fn should_handle_interleaved_put_delete_operations_in_drain() {
         // Arrange
         let mt = MemTable::new();
         mt.put_with_seq(b"a", b"v1", 1);

@@ -122,7 +122,7 @@ fn should_read_own_writes_given_nested_gets_within_transaction() {
 }
 
 #[test]
-fn should_handle_rapid_transaction_creation_and_commit() {
+fn should_handle_rapid_transaction_operations() {
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -398,9 +398,7 @@ fn should_preserve_snapshot_view_given_range_delete_after_snapshot() {
         let cf = engine.default_column_family();
 
         for i in 0..20u8 {
-            engine
-                .put(&cf, &[i], format!("v{}", i).as_bytes())
-                .unwrap();
+            engine.put(&cf, &[i], format!("v{}", i).as_bytes()).unwrap();
         }
 
         let snap = engine.snapshot();
@@ -674,6 +672,7 @@ fn should_allow_sequential_puts_to_same_key_without_conflict() {
         // Second transaction overwrites the key with put (should succeed!)
         let mut txn2 = engine.begin_transaction(&cf).expect("begin");
         txn2.put(b"put_key", b"second").unwrap();
+        // Act
         let result = engine.commit_transaction(txn2, WriteOptions::default());
 
         // Assert - put should succeed (last writer wins)
@@ -775,6 +774,7 @@ fn should_conflict_on_insert_given_key_already_exists() {
         // Second transaction tries to insert same key (should fail!)
         let mut txn2 = engine.begin_transaction(&cf).expect("begin");
         txn2.insert(b"insert_key", b"second").unwrap();
+        // Act
         let result = engine.commit_transaction(txn2, WriteOptions::default());
 
         // Assert - insert should fail (key exists)
@@ -833,4 +833,3 @@ fn should_conflict_on_concurrent_inserts_to_same_key() {
         );
     }
 }
-

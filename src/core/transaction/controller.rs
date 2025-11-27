@@ -80,10 +80,7 @@ impl TransactionController {
     ) -> Result<(), String> {
         let inner = self.inner.read();
         // Verify transaction exists
-        let _txn_info = inner
-            .active
-            .get(&txn_id)
-            .ok_or("Transaction not found")?;
+        let _txn_info = inner.active.get(&txn_id).ok_or("Transaction not found")?;
 
         // LWW (Last-Write-Wins) semantics for PUT/DELETE operations:
         // - No write-write conflict detection: concurrent writes to the same key are allowed
@@ -473,7 +470,10 @@ mod tests {
 
         // Assert - both commits succeed with LWW
         assert!(result1.is_ok(), "First commit should succeed");
-        assert!(result2.is_ok(), "Second commit should also succeed with LWW");
+        assert!(
+            result2.is_ok(),
+            "Second commit should also succeed with LWW"
+        );
     }
 
     #[test]
@@ -580,7 +580,10 @@ mod tests {
 
         // Assert - LWW doesn't track reads for PUT conflict detection
         // Read-only transactions always succeed (they don't modify anything)
-        assert!(result.is_ok(), "Read-only transactions should always succeed");
+        assert!(
+            result.is_ok(),
+            "Read-only transactions should always succeed"
+        );
     }
 
     // =========================================================================
@@ -741,7 +744,10 @@ mod tests {
         let result = tm.check_for_deadlock();
 
         // Assert - with LWW, no wait edges means no deadlock possible
-        assert!(result.is_none(), "LWW: concurrent writes don't create deadlocks");
+        assert!(
+            result.is_none(),
+            "LWW: concurrent writes don't create deadlocks"
+        );
     }
 
     #[test]

@@ -118,7 +118,7 @@ fn should_reject_put_given_read_only_mode_when_write_attempted() {
 
 #[test]
 fn should_reject_insert_given_read_only_mode_when_memory_mode() {
-    // This test uses Memory mode to verify read-only flag works even without persistence
+    // Arrange - This test uses Memory mode to verify read-only flag works even without persistence
     let opts_ro = MidgeOptions {
         storage_mode: StorageMode::Memory,
         read_only: true,

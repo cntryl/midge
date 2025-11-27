@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn should_manifest_roundtrip_and_validate_archival_state() {
+    fn should_manifest_roundtrip_with_archival_state_validation() {
         // Arrange
         use crate::sst::cloud::{ArchiveTier, SstLifecycleState};
         use std::time::{Duration, SystemTime};

@@ -369,7 +369,7 @@ mod tests {
         let writer = writer_res.unwrap();
         // Add entries with internal-key space
         let mut boxed = Box::new(writer) as Box<dyn crate::sst::DynSstWriter>;
-        // Write many entries to exceed block size multiple times
+        // Act - Write many entries to exceed block size multiple times
         for i in 0..50 {
             let k = format!("hot_key_{}", i);
             let v = format!("value{}", i);
@@ -382,6 +382,7 @@ mod tests {
         // Create metadata from bytes and examine the sparse index entries
         let metadata = SstMetadata::from_bytes(&bytes).expect("metadata");
         let entries = metadata.sparse_index.entries();
+        // Assert
         assert!(!entries.is_empty(), "index entries must exist");
         // Find if any index entry appears to be an internal key (length >= 9 from encoding)
         let mut found_internal = false;

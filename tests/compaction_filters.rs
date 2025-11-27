@@ -17,7 +17,9 @@ mod common;
 
 use cntryl_midge::compaction::{CompactionFilter, CompactionVersion, FilterDecision};
 use cntryl_midge::{test_hooks::TestHooks, MidgeEngine};
-use common::{assert_get_equals, bulk_put, compaction_test_opts, create_storage_mode, disk_storage_modes};
+use common::{
+    assert_get_equals, bulk_put, compaction_test_opts, create_storage_mode, disk_storage_modes,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

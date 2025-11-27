@@ -442,7 +442,7 @@ mod tests {
         let writer = factory.create_writer(&wal_dir).unwrap();
         let coordinator = WalController::new(writer, factory.clone());
 
-        // Write multiple records, rotate, then write more
+        // Act - Write multiple records, rotate, then write more
         for i in 0..5 {
             let record = crate::wal::WalRecord {
                 cf_id: 0,

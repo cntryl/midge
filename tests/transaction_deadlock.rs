@@ -1,9 +1,9 @@
 //! Transaction Concurrency Tests (INSERT Conflict Detection)
 //!
 //! Tests for INSERT conflict detection under concurrent transactions.
-//! 
+//!
 //! # Conflict Model
-//! 
+//!
 //! Midge uses selective conflict detection:
 //! - PUT/DELETE: Last-write-wins (LWW), no conflict detection
 //! - INSERT: Conflict if key already exists at commit time
@@ -168,11 +168,16 @@ fn should_succeed_insert_retry_given_key_never_existed() {
         let result = engine.commit_transaction(txn, WriteOptions::default());
         assert!(result.is_ok(), "[{}] First INSERT should succeed", name);
 
-        // Second INSERT to same key should fail because key exists
+        // Act - Second INSERT to same key should fail because key exists
         let mut txn2 = engine.begin_transaction(&cf).expect("begin txn2");
         txn2.insert(b"retry_key", b"value2").unwrap();
         let result2 = engine.commit_transaction(txn2, WriteOptions::default());
-        assert!(result2.is_err(), "[{}] Second INSERT should fail - key exists", name);
+        // Assert
+        assert!(
+            result2.is_err(),
+            "[{}] Second INSERT should fail - key exists",
+            name
+        );
 
         // INSERT to a different (fresh) key should succeed
         let mut fresh_txn = engine.begin_transaction(&cf).expect("begin fresh");

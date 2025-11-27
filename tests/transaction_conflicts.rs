@@ -200,7 +200,7 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
 // ============================================================================
 
 #[test]
-fn should_allow_concurrent_delete_and_put_given_lww_semantics() {
+fn should_allow_concurrent_delete_put_operations_given_lww_semantics() {
     // DELETE is just a tombstone - it uses LWW like PUT
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -225,11 +225,7 @@ fn should_allow_concurrent_delete_and_put_given_lww_semantics() {
         let put_result = engine.commit_transaction(put_txn, WriteOptions::default());
 
         // Assert - BOTH should succeed (LWW), last committed wins
-        assert!(
-            delete_result.is_ok(),
-            "delete should commit for {}",
-            name
-        );
+        assert!(delete_result.is_ok(), "delete should commit for {}", name);
         assert!(
             put_result.is_ok(),
             "put should also commit (LWW) for {}",
@@ -332,11 +328,7 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
         let range_result = engine.commit_transaction(range_txn, WriteOptions::default());
 
         // Assert - BOTH succeed with LWW, last committed (delete_range) wins
-        assert!(
-            put_result.is_ok(),
-            "PUT should commit for {}",
-            name
-        );
+        assert!(put_result.is_ok(), "PUT should commit for {}", name);
         assert!(
             range_result.is_ok(),
             "delete_range should also succeed (LWW) for {}",
@@ -421,7 +413,7 @@ fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
 }
 
 #[test]
-fn should_allow_delete_range_and_delete_given_lww_semantics() {
+fn should_allow_delete_range_delete_operations_given_lww_semantics() {
     // delete_range and point delete on overlapping key - both succeed
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);

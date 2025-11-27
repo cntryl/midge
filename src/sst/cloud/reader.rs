@@ -733,11 +733,12 @@ mod tests {
         let cloud_key = writer.finish_to_cloud("test-many").unwrap();
         let reader = SstCloudReader::open(backend, &cloud_key).unwrap();
 
-        // Act & Assert - verify all keys can be read back
+        // Act - verify all keys can be read back
         for i in 0..100 {
             let key = format!("key_{:05}", i);
             let expected_value = format!("value_{:05}", i);
             let result = reader.get(key.as_bytes()).unwrap();
+            // Assert
             assert_eq!(
                 result,
                 Some(Bytes::from(expected_value)),

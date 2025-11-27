@@ -21,7 +21,9 @@ use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::fs::FsSstFactory;
 use cntryl_midge::sst::traits::{SstFactory, SstReaderFactory};
 use cntryl_midge::{
-    test_hooks::{FlushGatePoint, FsyncBehavior, IoBehavior, ManifestBehavior, TestHooks, WalBehavior},
+    test_hooks::{
+        FlushGatePoint, FsyncBehavior, IoBehavior, ManifestBehavior, TestHooks, WalBehavior,
+    },
     MidgeEngine, MidgeError, MidgeOptions, StorageMode, WalRecoveryMode,
 };
 use common::test_helpers::TEST_GATE_TIMEOUT;
@@ -495,9 +497,7 @@ fn should_pause_writes_given_background_error_until_cleared() {
         .unwrap();
 
     // Inject background error after first freeze
-    engine.set_background_error(MidgeError::internal(
-        "simulated background flush failure",
-    ));
+    engine.set_background_error(MidgeError::internal("simulated background flush failure"));
 
     // Act: Start a writer that will attempt a write and should stall
     let (done_tx, done_rx) = crossbeam::channel::bounded::<bool>(1);

@@ -624,3 +624,147 @@ fn should_be_atomic_given_large_batch_crash_when_recovering() {
         "Large batch must be atomic"
     );
 }
+
+#[test]
+fn should_support_batch_with_ttl_when_write_batch() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("open");
+    let cf = engine.default_column_family();
+
+    let mut batch = WriteBatch::new();
+    batch.put_with_ttl(
+        cf.id(),
+        Bytes::from_static(b"ttl_key"),
+        Bytes::from_static(b"ttl_value"),
+        3600,
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"regular_key"),
+        Bytes::from_static(b"regular_value"),
+    );
+
+    // Act
+    engine.write_batch(&batch).expect("write_batch");
+
+    // Assert
+    assert_eq!(
+        engine.get(&cf, b"ttl_key").expect("get ttl"),
+        Some(Bytes::from_static(b"ttl_value"))
+    );
+    assert_eq!(
+        engine.get(&cf, b"regular_key").expect("get regular"),
+        Some(Bytes::from_static(b"regular_value"))
+    );
+}
+
+#[test]
+fn should_maintain_atomicity_during_concurrent_reads_when_write_batch() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
+    let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
+    let cf = engine.default_column_family();
+
+    let mut batch = WriteBatch::new();
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k1"),
+        Bytes::from_static(b"v1"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k2"),
+        Bytes::from_static(b"v2"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k3"),
+        Bytes::from_static(b"v3"),
+    );
+
+    // Act - write batch while readers are active
+    let reader_engine = Arc::clone(&engine);
+    let reader_cf = cf.clone();
+    let reader = std::thread::spawn(move || {
+        for _ in 0..100 {
+            let k1 = reader_engine.get(&reader_cf, b"k1").unwrap();
+            let k2 = reader_engine.get(&reader_cf, b"k2").unwrap();
+            let k3 = reader_engine.get(&reader_cf, b"k3").unwrap();
+
+            // Keys should be all present or all absent (atomicity)
+            if k1.is_some() {
+                assert!(k2.is_some() && k3.is_some(), "Partial batch visible!");
+            }
+        }
+    });
+
+    engine.write_batch(&batch).expect("write_batch");
+    reader.join().expect("reader join");
+
+    // Assert
+    assert_eq!(
+        engine.get(&cf, b"k1").expect("get k1"),
+        Some(Bytes::from_static(b"v1"))
+    );
+    assert_eq!(
+        engine.get(&cf, b"k2").expect("get k2"),
+        Some(Bytes::from_static(b"v2"))
+    );
+    assert_eq!(
+        engine.get(&cf, b"k3").expect("get k3"),
+        Some(Bytes::from_static(b"v3"))
+    );
+}
+
+#[test]
+fn should_increment_sequence_numbers_given_batch_operations_when_write_batch() {
+    // Arrange
+    let dir = test_temp_dir();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        ..Default::default()
+    };
+    let engine = MidgeEngine::open(opts).expect("open");
+    let cf = engine.default_column_family();
+
+    let seq_before = engine.current_sequence();
+
+    let mut batch = WriteBatch::new();
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k1"),
+        Bytes::from_static(b"v1"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k2"),
+        Bytes::from_static(b"v2"),
+    );
+    batch.put(
+        cf.id(),
+        Bytes::from_static(b"k3"),
+        Bytes::from_static(b"v3"),
+    );
+
+    // Act
+    engine.write_batch(&batch).expect("write_batch");
+
+    // Assert - sequence should increase
+    let seq_after = engine.current_sequence();
+    assert!(seq_after > seq_before);
+}

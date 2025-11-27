@@ -42,7 +42,7 @@ fn should_enforce_test_naming_convention() {
             violations.len()
         ));
         eprintln!("{}", msg); // Print warning instead of panicking
-        // panic!("{}", msg); // Commented out to allow migration completion
+                              // panic!("{}", msg); // Commented out to allow migration completion
     }
 }
 
@@ -91,7 +91,7 @@ fn should_enforce_aaa_structure() {
         msg.push_str("  }\n");
 
         eprintln!("{}", msg); // Print warning instead of panicking
-        // panic!("{}", msg); // Commented out to allow migration completion
+                              // panic!("{}", msg); // Commented out to allow migration completion
     }
 }
 
@@ -139,7 +139,7 @@ fn should_enforce_single_behavior_per_test() {
         msg.push_str("  fn should_download_uploaded_file() { ... }\n");
 
         eprintln!("{}", msg); // Print warning instead of panicking
-        // panic!("{}", msg); // Commented out to allow migration completion
+                              // panic!("{}", msg); // Commented out to allow migration completion
     }
 }
 

@@ -985,8 +985,8 @@ Maps each legacy file to its target location(s) in the new structure.
 | `admin_concurrency.rs` | `admin_operations.rs` | ⬜ |
 | `api_kvstore_adapter.rs` | `api_kvstore.rs` | ⬜ |
 | `atomicity_wal_manifest_sst.rs` | `durability_atomicity.rs` | ⬜ |
-| `autotune_stability.rs` | `autotune.rs` | ⬜ |
-| `autotune_unit.rs` | `autotune.rs` | ⬜ |
+| `autotune_stability.rs` | `autotune.rs` | ✅ |
+| `autotune_unit.rs` | `autotune.rs` | ✅ |
 | `checkpoint_compaction_recovery_triple.rs` | `checkpoint.rs` | ✅ |
 | `checkpoint_lifecycle.rs` | `checkpoint.rs` | ✅ |
 | `cloud_consistency_edge_cases.rs` | `cloud_consistency.rs` | ✅ |
@@ -1036,15 +1036,15 @@ Maps each legacy file to its target location(s) in the new structure.
 | `engine_merge_operator_correctness.rs` | `engine_merge_operators.rs` | ✅ |
 | `engine_merge_operator_errors.rs` | `engine_merge_operators.rs` | ✅ |
 | `engine_multi_get.rs` | `engine_basic.rs` | ✅ |
-| `engine_readonly_mode.rs` | `readonly_mode.rs` | ⬜ |
+| `engine_readonly_mode.rs` | `readonly_mode.rs` | ✅ |
 | `engine_scans.rs` | `engine_basic.rs` | ✅ |
 | `engine_snapshots.rs` | `engine_snapshots.rs` | ⬜ |
 | `engine_sst_operations.rs` | `engine_basic.rs` | ⬜ |
 | `engine_streaming.rs` | `engine_iterators.rs` | ✅ |
 | `engine_transactions.rs` | `transaction_basic.rs` | ✅ |
 | `engine_wal_recovery.rs` | `durability_wal.rs` | ✅ |
-| `engine_write_batch_atomicity.rs` | `engine_write_batch.rs` | ⬜ |
-| `engine_write_batch_edge.rs` | `engine_write_batch.rs` | ⬜ |
+| `engine_write_batch_atomicity.rs` | `engine_write_batch.rs` | ✅ |
+| `engine_write_batch_edge.rs` | `engine_write_batch.rs` | ✅ |
 | `engine_write_options.rs` | `engine_basic.rs` | ⬜ |
 | `error_handling_core.rs` | `error_handling.rs` | ✅ |
 | `error_handling_flush.rs` | `error_handling.rs` | ✅ |
@@ -1052,7 +1052,7 @@ Maps each legacy file to its target location(s) in the new structure.
 | `iterator_lifecycle.rs` | `engine_iterators.rs` | ✅ |
 | `iterator_stability_under_pressure.rs` | `engine_iterators.rs` | ✅ |
 | `large_value_stress.rs` | `stress_large_values.rs` | ⬜ |
-| `lsm_global_invariants.rs` | `invariants_lsm.rs` | ⬜ |
+| `lsm_global_invariants.rs` | `invariants_lsm.rs` | ✅ |
 | `memory_mode_no_disk_writes.rs` | `memory_mode.rs` | ✅ |
 | `memtable_concurrency.rs` | `concurrency_writes.rs` | ⬜ |
 | `memtable_freeze_edge_cases.rs` | `concurrency_writes.rs` | ⬜ |
@@ -1068,8 +1068,8 @@ Maps each legacy file to its target location(s) in the new structure.
 | `snapshot_lifecycle.rs` | `engine_snapshots.rs` | ⬜ |
 | `snapshot_lifecycle_compaction.rs` | `engine_snapshots.rs` | ⬜ |
 | `sst_key_encoding_bug.rs` | 🗑️ (regression test, consider keeping) | ⬜ |
-| `test_guidelines_compliance.rs` | `test_infrastructure.rs` | ⬜ |
-| `test_hooks_integration.rs` | `test_infrastructure.rs` | ⬜ |
+| `test_guidelines_compliance.rs` | `test_infrastructure.rs` | ✅ |
+| `test_hooks_integration.rs` | `test_infrastructure.rs` | ✅ |
 | `test_timeout_demo.rs` | 🗑️ (demo only) | ⬜ |
 | `transaction_isolation.rs` | `transaction_isolation.rs` | ✅ |
 | `transaction_range_delete_integration.rs` | `transaction_advanced.rs` | ✅ |

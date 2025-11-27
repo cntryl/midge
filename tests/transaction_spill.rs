@@ -180,7 +180,7 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
         // Act - Add keys that should be in sorted order
         for i in 0..1000 {
             large_txn
-                .put(format!("sorted_{:06}", i).as_bytes(), &vec![i as u8; 100])
+                .put(format!("sorted_{:06}", i).as_bytes(), &[i as u8; 100])
                 .expect("put");
         }
 
@@ -557,7 +557,7 @@ fn should_handle_transaction_with_tiny_memory_limit() {
 }
 
 #[test]
-fn should_handle_mixed_small_and_large_values_in_spilled_transaction() {
+fn should_handle_mixed_value_sizes_in_spilled_transaction() {
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -675,7 +675,7 @@ fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
 
 #[test]
 fn should_handle_large_transaction_in_memory_mode_without_spill_files() {
-    // Memory mode handles large transactions entirely in memory
+    // Arrange - Memory mode handles large transactions entirely in memory
     let opts = MidgeOptions {
         storage_mode: cntryl_midge::StorageMode::Memory,
         ..Default::default()

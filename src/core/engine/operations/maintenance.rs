@@ -1206,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_interleaved_puts_and_deletes() {
+    fn should_handle_interleaved_put_delete_operations() {
         // Arrange
         let temp_dir =
             std::env::temp_dir().join(format!("midge_interleaved_{}", uuid::Uuid::new_v4()));
