@@ -1,13 +1,25 @@
 //! Transaction Conflict Tests
 //!
-//! These tests verify transaction conflict detection and resolution:
-//! - Write-write conflict detection
-//! - Optimistic concurrency control (OCC)
-//! - Lost update prevention
-//! - CAS (Compare-And-Swap) conflict handling
-//! - Delete and delete_range conflict detection
-//! - High-contention scenarios
-//! - Conflict state persistence across restarts
+//! These tests verify transaction conflict detection and resolution.
+//!
+//! # Conflict Detection Model
+//!
+//! Midge uses a selective conflict detection model:
+//!
+//! | Operation | Conflict Detection | Semantics |
+//! |-----------|-------------------|------------|
+//! | PUT       | None (LWW)        | Last-write-wins, unconditional |
+//! | DELETE    | None (LWW)        | Last-write-wins (tombstone) |
+//! | INSERT    | At commit         | Fails if key exists |
+//! | CAS       | At commit         | Fails if value changed since snapshot |
+//!
+//! # Test Categories
+//!
+//! - **PUT/DELETE LWW**: Concurrent puts/deletes succeed (last writer wins)
+//! - **INSERT conflicts**: Concurrent inserts to same key - exactly one succeeds
+//! - **CAS conflicts**: CAS fails if value changed since read
+//! - **High-contention**: Stress tests for concurrent operations
+//! - **Durability**: Conflict state persistence across restarts
 //!
 //! # Storage Mode Coverage
 //! - Uses `disk_storage_modes()` (LocalDisk, CloudBacked) since transactions require WAL durability
@@ -21,11 +33,12 @@ use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
 use std::sync::Arc;
 
 // ============================================================================
-// WRITE-WRITE CONFLICT DETECTION
+// PUT/DELETE: LAST-WRITE-WINS (NO CONFLICTS)
 // ============================================================================
 
 #[test]
-fn should_detect_write_write_conflict_given_concurrent_updates_to_same_key() {
+fn should_allow_concurrent_puts_to_same_key_given_lww_semantics() {
+    // PUT is unconditional - both transactions should succeed, last writer wins
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -48,28 +61,30 @@ fn should_detect_write_write_conflict_given_concurrent_updates_to_same_key() {
         let first_result = engine.commit_transaction(txn1, WriteOptions::default());
         let second_result = engine.commit_transaction(txn2, WriteOptions::default());
 
-        // Assert
+        // Assert - BOTH should succeed (PUT uses last-write-wins)
         assert!(
             first_result.is_ok(),
             "first transaction should succeed for {}",
             name
         );
         assert!(
-            second_result.is_err(),
-            "second transaction should fail on conflict for {}",
+            second_result.is_ok(),
+            "second transaction should also succeed (LWW) for {}",
             name
         );
+        // Last committed wins
         assert_eq!(
             engine.get(&cf, b"key").expect("get"),
-            Some(Bytes::from("v1")),
-            "Failed for {}",
+            Some(Bytes::from("v2")),
+            "Last writer (txn2) should win for {}",
             name
         );
     }
 }
 
 #[test]
-fn should_abort_second_transaction_given_write_conflict_when_both_commit() {
+fn should_allow_both_puts_to_succeed_given_concurrent_writes_when_lww() {
+    // PUT uses last-write-wins - there are no "winners" or "losers", both succeed
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -81,38 +96,40 @@ fn should_abort_second_transaction_given_write_conflict_when_both_commit() {
         let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
         let cf = engine.default_column_family();
 
-        let mut winner = engine.begin_transaction(&cf).unwrap();
-        let mut loser = engine.begin_transaction(&cf).unwrap();
+        let mut first = engine.begin_transaction(&cf).unwrap();
+        let mut second = engine.begin_transaction(&cf).unwrap();
 
-        winner.put(b"conflict_key", b"txn1_value").unwrap();
-        loser.put(b"conflict_key", b"txn2_value").unwrap();
+        first.put(b"conflict_key", b"txn1_value").unwrap();
+        second.put(b"conflict_key", b"txn2_value").unwrap();
 
         // Act
-        let winner_result = engine.commit_transaction(winner, WriteOptions::default());
-        let loser_result = engine.commit_transaction(loser, WriteOptions::default());
+        let first_result = engine.commit_transaction(first, WriteOptions::default());
+        let second_result = engine.commit_transaction(second, WriteOptions::default());
 
-        // Assert
+        // Assert - BOTH succeed with LWW
         assert!(
-            winner_result.is_ok(),
-            "winner should commit successfully for {}",
+            first_result.is_ok(),
+            "first should commit successfully for {}",
             name
         );
         assert!(
-            loser_result.is_err(),
-            "loser should fail with write-write conflict for {}",
+            second_result.is_ok(),
+            "second should also commit (LWW) for {}",
             name
         );
+        // Last committed transaction wins
         assert_eq!(
             engine.get(&cf, b"conflict_key").expect("get"),
-            Some(Bytes::from("txn1_value")),
-            "Failed for {}",
+            Some(Bytes::from("txn2_value")),
+            "Last writer should win for {}",
             name
         );
     }
 }
 
 #[test]
-fn should_reject_second_committer_on_write_write_conflict() {
+fn should_accept_both_committers_given_concurrent_puts_when_lww() {
+    // PUT has no conflict detection - both should succeed
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -134,10 +151,10 @@ fn should_reject_second_committer_on_write_write_conflict() {
         let first_result = engine.commit_transaction(first_txn, WriteOptions::default());
         let second_result = engine.commit_transaction(second_txn, WriteOptions::default());
 
-        // Assert
+        // Assert - BOTH succeed (LWW semantics)
         assert!(
-            first_result.is_ok() && second_result.is_err(),
-            "Expected first commit to succeed and second to fail with conflict for {}",
+            first_result.is_ok() && second_result.is_ok(),
+            "Both commits should succeed with LWW for {}",
             name
         );
     }
@@ -179,11 +196,12 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
 }
 
 // ============================================================================
-// DELETE CONFLICT DETECTION
+// DELETE: LAST-WRITE-WINS (NO CONFLICTS WITH PUT)
 // ============================================================================
 
 #[test]
-fn should_handle_write_conflict_on_delete_given_concurrent_delete_and_put() {
+fn should_allow_concurrent_delete_and_put_given_lww_semantics() {
+    // DELETE is just a tombstone - it uses LWW like PUT
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -206,28 +224,30 @@ fn should_handle_write_conflict_on_delete_given_concurrent_delete_and_put() {
         let delete_result = engine.commit_transaction(delete_txn, WriteOptions::default());
         let put_result = engine.commit_transaction(put_txn, WriteOptions::default());
 
-        // Assert
+        // Assert - BOTH should succeed (LWW), last committed wins
         assert!(
             delete_result.is_ok(),
-            "delete should commit first for {}",
+            "delete should commit for {}",
             name
         );
         assert!(
-            put_result.is_err(),
-            "put should fail due to conflict for {}",
+            put_result.is_ok(),
+            "put should also commit (LWW) for {}",
             name
         );
+        // Last committed (put) wins
         assert_eq!(
             engine.get(&cf, b"key").unwrap(),
-            None,
-            "Key should be deleted for {}",
+            Some(Bytes::from("updated")),
+            "Last writer (put) should win for {}",
             name
         );
     }
 }
 
 #[test]
-fn should_detect_conflict_on_delete_range_given_overlapping_keys() {
+fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
+    // delete_range uses LWW - a subsequent put should succeed
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -254,26 +274,288 @@ fn should_detect_conflict_on_delete_range_given_overlapping_keys() {
         let range_result = engine.commit_transaction(range_txn, WriteOptions::default());
         let overlap_result = engine.commit_transaction(overlap_txn, WriteOptions::default());
 
-        // Assert
+        // Assert - BOTH succeed with LWW, last committed wins
         assert!(
             range_result.is_ok(),
             "Range delete should commit for {}",
             name
         );
         assert!(
-            overlap_result.is_err(),
-            "Overlapping transaction should fail due to range conflict for {}",
+            overlap_result.is_ok(),
+            "Overlapping put should also succeed (LWW) for {}",
+            name
+        );
+        // Last committed (put to key5) wins - key5 should exist
+        assert_eq!(
+            engine.get(&cf, b"key5").unwrap(),
+            Some(Bytes::from("new_value")),
+            "Last writer (put to key5) should win for {}",
+            name
+        );
+        // Other keys in range should be deleted
+        assert_eq!(
+            engine.get(&cf, b"key4").unwrap(),
+            None,
+            "key4 should be deleted for {}",
+            name
+        );
+    }
+}
+
+#[test]
+fn should_allow_put_then_delete_range_given_lww_semantics() {
+    // PUT followed by delete_range on overlapping key - both succeed with LWW
+    for mode in disk_storage_modes() {
+        let (name, storage_mode, _dir) = create_storage_mode(mode);
+
+        // Arrange
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
+        let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
+        let cf = engine.default_column_family();
+
+        for i in 0..10 {
+            let key = format!("key{i}");
+            engine.put(&cf, key.as_bytes(), b"val").unwrap();
+        }
+
+        let mut put_txn = engine.begin_transaction(&cf).unwrap();
+        put_txn.put(b"key5", b"updated").unwrap();
+
+        let mut range_txn = engine.begin_transaction(&cf).unwrap();
+        range_txn.delete_range(b"key3", b"key7").unwrap();
+
+        // Act - PUT commits first, then delete_range
+        let put_result = engine.commit_transaction(put_txn, WriteOptions::default());
+        let range_result = engine.commit_transaction(range_txn, WriteOptions::default());
+
+        // Assert - BOTH succeed with LWW, last committed (delete_range) wins
+        assert!(
+            put_result.is_ok(),
+            "PUT should commit for {}",
+            name
+        );
+        assert!(
+            range_result.is_ok(),
+            "delete_range should also succeed (LWW) for {}",
+            name
+        );
+        // Last committed (delete_range) wins - key5 should be deleted
+        assert_eq!(
+            engine.get(&cf, b"key5").unwrap(),
+            None,
+            "Last writer (delete_range) should win - key5 deleted for {}",
+            name
+        );
+    }
+}
+
+#[test]
+fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
+    // Two concurrent delete_range operations - both should succeed with LWW
+    for mode in disk_storage_modes() {
+        let (name, storage_mode, _dir) = create_storage_mode(mode);
+
+        // Arrange
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
+        let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
+        let cf = engine.default_column_family();
+
+        for i in 0..20 {
+            let key = format!("key{:02}", i);
+            engine.put(&cf, key.as_bytes(), b"val").unwrap();
+        }
+
+        let mut range_txn1 = engine.begin_transaction(&cf).unwrap();
+        range_txn1.delete_range(b"key05", b"key10").unwrap();
+
+        let mut range_txn2 = engine.begin_transaction(&cf).unwrap();
+        range_txn2.delete_range(b"key08", b"key15").unwrap();
+
+        // Act - both delete_ranges commit
+        let result1 = engine.commit_transaction(range_txn1, WriteOptions::default());
+        let result2 = engine.commit_transaction(range_txn2, WriteOptions::default());
+
+        // Assert - BOTH succeed with LWW
+        assert!(
+            result1.is_ok(),
+            "First delete_range should commit for {}",
+            name
+        );
+        assert!(
+            result2.is_ok(),
+            "Second delete_range should also commit (LWW) for {}",
+            name
+        );
+        // Combined effect: keys 05-14 should be deleted (union of both ranges)
+        assert_eq!(
+            engine.get(&cf, b"key04").unwrap(),
+            Some(Bytes::from("val")),
+            "key04 outside both ranges for {}",
+            name
+        );
+        assert_eq!(
+            engine.get(&cf, b"key07").unwrap(),
+            None,
+            "key07 in first range for {}",
+            name
+        );
+        assert_eq!(
+            engine.get(&cf, b"key12").unwrap(),
+            None,
+            "key12 in second range for {}",
+            name
+        );
+        assert_eq!(
+            engine.get(&cf, b"key15").unwrap(),
+            Some(Bytes::from("val")),
+            "key15 outside both ranges for {}",
+            name
+        );
+    }
+}
+
+#[test]
+fn should_allow_delete_range_and_delete_given_lww_semantics() {
+    // delete_range and point delete on overlapping key - both succeed
+    for mode in disk_storage_modes() {
+        let (name, storage_mode, _dir) = create_storage_mode(mode);
+
+        // Arrange
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
+        let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
+        let cf = engine.default_column_family();
+
+        for i in 0..10 {
+            let key = format!("key{i}");
+            engine.put(&cf, key.as_bytes(), b"val").unwrap();
+        }
+
+        let mut range_txn = engine.begin_transaction(&cf).unwrap();
+        range_txn.delete_range(b"key3", b"key7").unwrap();
+
+        let mut delete_txn = engine.begin_transaction(&cf).unwrap();
+        delete_txn.delete(b"key5").unwrap();
+
+        // Act
+        let range_result = engine.commit_transaction(range_txn, WriteOptions::default());
+        let delete_result = engine.commit_transaction(delete_txn, WriteOptions::default());
+
+        // Assert - BOTH succeed (both delete key5, end result is the same)
+        assert!(
+            range_result.is_ok(),
+            "delete_range should commit for {}",
+            name
+        );
+        assert!(
+            delete_result.is_ok(),
+            "point delete should also commit (LWW) for {}",
+            name
+        );
+        // key5 is deleted by both operations
+        assert_eq!(
+            engine.get(&cf, b"key5").unwrap(),
+            None,
+            "key5 should be deleted for {}",
             name
         );
     }
 }
 
 // ============================================================================
-// LOST UPDATE PREVENTION
+// INSERT: CONFLICT DETECTION (KEY MUST NOT EXIST)
 // ============================================================================
 
 #[test]
-fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
+fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first() {
+    // INSERT is conditional - key must NOT exist. Only one concurrent insert succeeds.
+    for mode in disk_storage_modes() {
+        let (name, storage_mode, _dir) = create_storage_mode(mode);
+
+        // Arrange
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
+        let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
+        let cf = engine.default_column_family();
+
+        let mut txn1 = engine.begin_transaction(&cf).unwrap();
+        let mut txn2 = engine.begin_transaction(&cf).unwrap();
+
+        txn1.insert(b"insert_key", b"value1").unwrap();
+        txn2.insert(b"insert_key", b"value2").unwrap();
+
+        // Act
+        let result1 = engine.commit_transaction(txn1, WriteOptions::default());
+        let result2 = engine.commit_transaction(txn2, WriteOptions::default());
+
+        // Assert - exactly one should succeed
+        let success_count = [&result1, &result2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            success_count, 1,
+            "Exactly one concurrent insert should succeed for {}: result1={:?}, result2={:?}",
+            name, result1, result2
+        );
+    }
+}
+
+#[test]
+fn should_conflict_on_insert_given_key_already_exists_when_committed() {
+    // INSERT fails at commit if key exists
+    for mode in disk_storage_modes() {
+        let (name, storage_mode, _dir) = create_storage_mode(mode);
+
+        // Arrange
+        let opts = MidgeOptions {
+            storage_mode,
+            ..Default::default()
+        };
+        let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
+        let cf = engine.default_column_family();
+
+        // Pre-existing key
+        engine.put(&cf, b"existing", b"original").unwrap();
+
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+        txn.insert(b"existing", b"new_value").unwrap();
+
+        // Act
+        let result = engine.commit_transaction(txn, WriteOptions::default());
+
+        // Assert - should fail because key exists
+        assert!(
+            result.is_err(),
+            "Insert should fail when key already exists for {}",
+            name
+        );
+        // Original value preserved
+        assert_eq!(
+            engine.get(&cf, b"existing").unwrap(),
+            Some(Bytes::from("original")),
+            "Original value should be preserved for {}",
+            name
+        );
+    }
+}
+
+// ============================================================================
+// CAS: CONFLICT DETECTION (VALUE MUST MATCH)
+// ============================================================================
+
+#[test]
+fn should_allow_lost_update_given_put_read_modify_write_when_concurrent() {
+    // PUT uses LWW - it does NOT prevent lost updates!
+    // This test documents that read-modify-write with PUT will lose updates.
+    // Use CAS if you need lost update prevention.
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -319,14 +601,15 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
         // Act
         let result = engine.commit_transaction(second_increment_txn, WriteOptions::default());
 
-        // Assert - With read tracking and snapshot isolation, lost update is PREVENTED
+        // Assert - With LWW, BOTH commits succeed and the second overwrites the first!
+        // This is a LOST UPDATE - the counter goes 0->1->1 instead of 0->1->2
         assert!(
-            result.is_err(),
-            "Should detect read-write conflict and prevent lost update for {}",
+            result.is_ok(),
+            "PUT uses LWW - second commit should succeed for {}",
             name
         );
 
-        // Final value is 1 (only first increment succeeded)
+        // Final value is 1 (second transaction overwrote first with same value)
         let final_val = engine.get(&cf, b"counter").expect("get final");
         let final_count: i32 = String::from_utf8(final_val.unwrap().to_vec())
             .unwrap()
@@ -334,7 +617,7 @@ fn should_prevent_lost_update_given_read_modify_write_when_concurrent() {
             .unwrap();
         assert_eq!(
             final_count, 1,
-            "Only first transaction should have committed for {}",
+            "Both incremented from 0 to 1 - lost update with LWW for {}",
             name
         );
     }

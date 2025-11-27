@@ -1,14 +1,22 @@
-//! Transaction Deadlock Detection Tests
+//! Transaction Concurrency Tests (INSERT Conflict Detection)
 //!
-//! Tests for deadlock detection and resolution in concurrent transactions.
-//! Covers circular wait detection, victim selection, and recovery scenarios.
+//! Tests for INSERT conflict detection under concurrent transactions.
+//! 
+//! # Conflict Model
+//! 
+//! Midge uses selective conflict detection:
+//! - PUT/DELETE: Last-write-wins (LWW), no conflict detection
+//! - INSERT: Conflict if key already exists at commit time
+//! - CAS: Conflict if value changed since snapshot
+//!
+//! These tests verify INSERT conflict behavior since INSERT is the operation
+//! that has conflict detection semantics similar to traditional locking.
 //!
 //! # Test Categories
 //!
-//! - **Circular Wait Detection**: Detecting two-way and multi-way deadlocks
-//! - **Victim Selection**: Choosing and aborting deadlock victims
-//! - **Recovery**: Retry after deadlock, recovery after complex scenarios
-//! - **Livelock Prevention**: Ensuring progress under high concurrency
+//! - **INSERT Conflicts**: Testing concurrent inserts to same key
+//! - **PUT LWW**: Verifying concurrent PUTs all succeed
+//! - **Mixed Operations**: Combining INSERT and PUT behaviors
 //!
 //! # Storage Mode Coverage
 //!
@@ -22,11 +30,12 @@ mod common;
 use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
 
 // ============================================================================
-// Circular Wait Detection
+// INSERT Conflict Detection (one wins, one fails)
 // ============================================================================
 
 #[test]
-fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
+fn should_allow_only_one_insert_given_concurrent_inserts_to_same_key() {
+    // INSERT has conflict detection - only one concurrent insert to same key succeeds
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -37,18 +46,12 @@ fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
         let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
         let cf = engine.default_column_family();
 
-        engine.put(&cf, b"k1", b"v1").expect("put");
-        engine.put(&cf, b"k2", b"v2").expect("put");
-
         let mut txn1 = engine.begin_transaction(&cf).expect("begin txn1");
         let mut txn2 = engine.begin_transaction(&cf).expect("begin txn2");
 
-        // Create circular dependency: txn1 -> k1 -> k2, txn2 -> k2 -> k1
-        txn1.put(b"k1", b"txn1_k1").unwrap();
-        txn2.put(b"k2", b"txn2_k2").unwrap();
-
-        txn1.put(b"k2", b"txn1_k2").unwrap();
-        txn2.put(b"k1", b"txn2_k1").unwrap();
+        // Both try to INSERT same key (key doesn't exist yet)
+        txn1.insert(b"k1", b"txn1_k1").unwrap();
+        txn2.insert(b"k1", b"txn2_k1").unwrap();
 
         // Act
         let result1 = engine.commit_transaction(txn1, WriteOptions::default());
@@ -57,8 +60,7 @@ fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
         // Assert - exactly one transaction should succeed
         assert!(
             (result1.is_ok() && result2.is_err()) || (result1.is_err() && result2.is_ok()),
-            "[{}] Exactly one transaction should succeed, the other should fail due to conflict. \
-             result1={:?}, result2={:?}",
+            "[{}] Exactly one INSERT should succeed. result1={:?}, result2={:?}",
             name,
             result1,
             result2
@@ -67,7 +69,8 @@ fn should_detect_deadlock_given_circular_wait_when_two_transactions() {
 }
 
 #[test]
-fn should_detect_deadlock_given_three_way_circular_dependency() {
+fn should_allow_only_subset_given_three_concurrent_inserts_to_same_key() {
+    // With INSERT, only one of multiple concurrent inserts to the same key succeeds
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -82,46 +85,37 @@ fn should_detect_deadlock_given_three_way_circular_dependency() {
         let mut txn2 = engine.begin_transaction(&cf).expect("begin txn2");
         let mut txn3 = engine.begin_transaction(&cf).expect("begin txn3");
 
-        // Each transaction owns one resource and wants another's
-        txn1.put(b"r1", b"t1").unwrap();
-        txn2.put(b"r2", b"t2").unwrap();
-        txn3.put(b"r3", b"t3").unwrap();
-
-        // Create circular: t1 wants r2, t2 wants r3, t3 wants r1
-        txn1.put(b"r2", b"t1_r2").unwrap();
-        txn2.put(b"r3", b"t2_r3").unwrap();
-        txn3.put(b"r1", b"t3_r1").unwrap();
+        // All three try to INSERT same key
+        txn1.insert(b"shared_key", b"t1").unwrap();
+        txn2.insert(b"shared_key", b"t2").unwrap();
+        txn3.insert(b"shared_key", b"t3").unwrap();
 
         // Act
         let result1 = engine.commit_transaction(txn1, WriteOptions::default());
         let result2 = engine.commit_transaction(txn2, WriteOptions::default());
         let result3 = engine.commit_transaction(txn3, WriteOptions::default());
 
-        // Assert - at least one should fail, but not all
+        // Assert - exactly one should succeed (first to commit)
         let success_count = [&result1, &result2, &result3]
             .iter()
             .filter(|r| r.is_ok())
             .count();
 
-        assert!(
-            (1..3).contains(&success_count),
-            "[{}] At least one transaction should succeed, but not all three. \
-             success_count={}, results=[{:?}, {:?}, {:?}]",
-            name,
-            success_count,
-            result1,
-            result2,
-            result3
+        assert_eq!(
+            success_count, 1,
+            "[{}] Exactly one INSERT should succeed. results=[{:?}, {:?}, {:?}]",
+            name, result1, result2, result3
         );
     }
 }
 
 // ============================================================================
-// Victim Selection and Abort
+// INSERT Conflict Scenarios
 // ============================================================================
 
 #[test]
-fn should_abort_victim_transaction_given_deadlock_when_detected() {
+fn should_fail_second_insert_given_concurrent_inserts_to_overlapping_keys() {
+    // INSERT conflict detection applies per-key
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -135,22 +129,19 @@ fn should_abort_victim_transaction_given_deadlock_when_detected() {
         let mut txn1 = engine.begin_transaction(&cf).expect("begin txn1");
         let mut txn2 = engine.begin_transaction(&cf).expect("begin txn2");
 
-        // Create conflict scenario
-        txn1.put(b"resource_a", b"txn1").unwrap();
-        txn2.put(b"resource_b", b"txn2").unwrap();
-
-        txn1.put(b"resource_b", b"txn1_b").unwrap();
-        txn2.put(b"resource_a", b"txn2_a").unwrap();
+        // txn1 inserts key_a, txn2 inserts key_a and key_b
+        txn1.insert(b"key_a", b"txn1").unwrap();
+        txn2.insert(b"key_a", b"txn2").unwrap();
+        txn2.insert(b"key_b", b"txn2_b").unwrap();
 
         // Act
         let result1 = engine.commit_transaction(txn1, WriteOptions::default());
         let result2 = engine.commit_transaction(txn2, WriteOptions::default());
 
-        // Assert - one should be aborted as victim
+        // Assert - exactly one should succeed for key_a
         assert!(
             (result1.is_ok() && result2.is_err()) || (result1.is_err() && result2.is_ok()),
-            "[{}] One transaction should be chosen as victim and aborted. \
-             result1={:?}, result2={:?}",
+            "[{}] One INSERT should fail due to key_a conflict. result1={:?}, result2={:?}",
             name,
             result1,
             result2
@@ -159,7 +150,8 @@ fn should_abort_victim_transaction_given_deadlock_when_detected() {
 }
 
 #[test]
-fn should_allow_retry_given_deadlock_victim_when_aborted() {
+fn should_succeed_insert_retry_given_key_never_existed() {
+    // INSERT should succeed on a fresh key that was never created
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -170,34 +162,37 @@ fn should_allow_retry_given_deadlock_victim_when_aborted() {
         let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
         let cf = engine.default_column_family();
 
+        // First INSERT succeeds on a fresh key
         let mut txn = engine.begin_transaction(&cf).expect("begin txn");
-        txn.put(b"key", b"value").unwrap();
-
-        // Act
+        txn.insert(b"retry_key", b"value").unwrap();
         let result = engine.commit_transaction(txn, WriteOptions::default());
+        assert!(result.is_ok(), "[{}] First INSERT should succeed", name);
 
-        // Assert - even if first attempt fails, retry should succeed
-        if result.is_err() {
-            let mut retry_txn = engine.begin_transaction(&cf).expect("begin retry txn");
-            retry_txn.put(b"key", b"retry_value").unwrap();
-            let retry_result = engine.commit_transaction(retry_txn, WriteOptions::default());
-            assert!(
-                retry_result.is_ok(),
-                "[{}] Retry should succeed after abort",
-                name
-            );
-        } else {
-            assert!(result.is_ok(), "[{}] First attempt succeeded", name);
-        }
+        // Second INSERT to same key should fail because key exists
+        let mut txn2 = engine.begin_transaction(&cf).expect("begin txn2");
+        txn2.insert(b"retry_key", b"value2").unwrap();
+        let result2 = engine.commit_transaction(txn2, WriteOptions::default());
+        assert!(result2.is_err(), "[{}] Second INSERT should fail - key exists", name);
+
+        // INSERT to a different (fresh) key should succeed
+        let mut fresh_txn = engine.begin_transaction(&cf).expect("begin fresh");
+        fresh_txn.insert(b"fresh_key", b"fresh_value").unwrap();
+        let fresh_result = engine.commit_transaction(fresh_txn, WriteOptions::default());
+        assert!(
+            fresh_result.is_ok(),
+            "[{}] INSERT to fresh key should succeed",
+            name
+        );
     }
 }
 
 // ============================================================================
-// Livelock Prevention
+// PUT LWW - All Succeed
 // ============================================================================
 
 #[test]
-fn should_handle_high_concurrency_without_livelock() {
+fn should_allow_all_concurrent_puts_given_lww_semantics() {
+    // PUT uses LWW - all concurrent PUTs should succeed, last writer wins
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -214,16 +209,17 @@ fn should_handle_high_concurrency_without_livelock() {
             engine.put(&cf, key.as_bytes(), b"initial").unwrap();
         }
 
-        // Act: Spawn multiple threads with potential for circular waits
+        // Act: Spawn multiple threads writing to overlapping keys (LWW allows all)
         let handles: Vec<_> = (0..10)
             .map(|thread_id| {
                 let eng = engine.clone();
                 let cf_clone = cf.clone();
                 std::thread::spawn(move || {
+                    let mut success_count = 0;
                     for iteration in 0..5 {
                         let mut txn = eng.begin_transaction(&cf_clone).unwrap();
 
-                        // Each thread writes to multiple keys in different order
+                        // Each thread writes to multiple keys
                         let key1 = format!("resource_{}", (thread_id + iteration) % 10);
                         let key2 = format!("resource_{}", (thread_id + iteration + 1) % 10);
 
@@ -238,24 +234,37 @@ fn should_handle_high_concurrency_without_livelock() {
                         )
                         .unwrap();
 
-                        let _ = eng.commit_transaction(txn, WriteOptions::default());
+                        // With LWW, ALL commits should succeed
+                        if eng.commit_transaction(txn, WriteOptions::default()).is_ok() {
+                            success_count += 1;
+                        }
                     }
+                    success_count
                 })
             })
             .collect();
 
-        for handle in handles {
-            handle.join().expect("Thread panicked");
-        }
+        let total_successes: usize = handles
+            .into_iter()
+            .map(|h| h.join().expect("Thread panicked"))
+            .sum();
 
-        // Assert: No livelock - engine responds to queries
+        // Assert: With LWW, ALL 50 commits (10 threads × 5 iterations) should succeed
+        assert_eq!(
+            total_successes, 50,
+            "[{}] All PUT commits should succeed with LWW",
+            name
+        );
+
+        // All keys should still be readable
         for i in 0..10 {
             let key = format!("resource_{}", i);
             let result = engine.get(&cf, key.as_bytes());
             assert!(
-                result.is_ok(),
-                "[{}] Engine should remain responsive after high concurrency",
-                name
+                result.is_ok() && result.unwrap().is_some(),
+                "[{}] Key {} should exist after concurrent PUTs",
+                name,
+                key
             );
         }
     }
@@ -363,10 +372,10 @@ fn should_handle_self_conflict_given_same_key_multiple_writes() {
 }
 
 #[test]
-fn should_detect_read_write_conflict_given_concurrent_modification_to_read_key() {
-    // Real-world behavior: Snapshot Isolation with read tracking detects when
-    // a transaction's read set is modified by another committed transaction.
-    // This is the correct SSI behavior - prevents phantom reads and lost updates.
+fn should_allow_read_txn_to_commit_given_read_key_modified_when_lww() {
+    // With LWW, reading a key does NOT create a conflict when it's modified by another transaction.
+    // PUT uses last-write-wins - there's no read tracking for PUT operations.
+    // Only INSERT and CAS have conflict detection.
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -379,7 +388,7 @@ fn should_detect_read_write_conflict_given_concurrent_modification_to_read_key()
 
         engine.put(&cf, b"key", b"initial").unwrap();
 
-        // Start read transaction and read the key (this tracks the read)
+        // Start transaction and read the key
         let mut read_txn = engine.begin_transaction(&cf).expect("begin read txn");
         let _value = read_txn.get(b"key");
 
@@ -389,16 +398,15 @@ fn should_detect_read_write_conflict_given_concurrent_modification_to_read_key()
         let write_result = engine.commit_transaction(write_txn, WriteOptions::default());
         assert!(write_result.is_ok(), "[{}] Write should succeed", name);
 
-        // Act: Try to commit the read transaction (even without writes)
+        // Act: Try to commit the read transaction (no writes)
         let read_result = engine.commit_transaction(read_txn, WriteOptions::default());
 
-        // Assert: Should fail - the key we read was modified
-        // This is correct SSI behavior: read set was invalidated
+        // Assert: Should succeed - LWW doesn't track reads for PUT operations
         assert!(
-            read_result.is_err(),
-            "[{}] Read transaction should fail when its read key was modified by committed transaction. \
-             This is correct SSI behavior preventing stale-read-based decisions.",
-            name
+            read_result.is_ok(),
+            "[{}] Read-only transaction should succeed with LWW - no read tracking for PUT: {:?}",
+            name,
+            read_result
         );
     }
 }
@@ -490,12 +498,12 @@ fn should_handle_many_concurrent_transactions_on_disjoint_keys() {
 }
 
 #[test]
-fn should_persist_winning_transaction_value_after_conflict_and_restart() {
+fn should_persist_last_committed_value_given_concurrent_puts_when_lww() {
+    // With LWW, both concurrent PUTs succeed. The last committed value persists.
     for mode in disk_storage_modes() {
         // Arrange
         let ctx = DurabilityTestContext::new(mode);
 
-        let winning_value: Option<Bytes>;
         {
             let opts = MidgeOptions {
                 storage_mode: ctx.create_storage_mode(),
@@ -506,29 +514,30 @@ fn should_persist_winning_transaction_value_after_conflict_and_restart() {
 
             engine.put(&cf, b"contested_key", b"initial").unwrap();
 
-            // Create conflicting transactions
+            // Create concurrent transactions with PUT
             let mut txn1 = engine.begin_transaction(&cf).unwrap();
             let mut txn2 = engine.begin_transaction(&cf).unwrap();
 
-            txn1.put(b"contested_key", b"txn1_wins").unwrap();
-            txn2.put(b"contested_key", b"txn2_wins").unwrap();
+            txn1.put(b"contested_key", b"txn1_value").unwrap();
+            txn2.put(b"contested_key", b"txn2_value").unwrap();
 
-            // Act: Commit both - one will win
+            // Act: Commit both - with LWW, BOTH should succeed
             let result1 = engine.commit_transaction(txn1, WriteOptions::default());
             let result2 = engine.commit_transaction(txn2, WriteOptions::default());
 
-            // Determine winner
-            winning_value = if result1.is_ok() {
-                Some(Bytes::from_static(b"txn1_wins"))
-            } else if result2.is_ok() {
-                Some(Bytes::from_static(b"txn2_wins"))
-            } else {
-                // Both failed? Use initial
-                Some(Bytes::from_static(b"initial"))
-            };
+            assert!(
+                result1.is_ok(),
+                "[{}] First PUT should succeed with LWW",
+                ctx.name()
+            );
+            assert!(
+                result2.is_ok(),
+                "[{}] Second PUT should also succeed with LWW",
+                ctx.name()
+            );
         }
 
-        // Restart and verify
+        // Restart and verify - last committed value (txn2) should persist
         let opts = MidgeOptions {
             storage_mode: ctx.create_storage_mode(),
             ..Default::default()
@@ -536,12 +545,12 @@ fn should_persist_winning_transaction_value_after_conflict_and_restart() {
         let engine = MidgeEngine::open(opts).expect("reopen");
         let cf = engine.default_column_family();
 
-        // Assert: Winning value should persist
+        // Assert: Last committed value (txn2) should persist
         let value = engine.get(&cf, b"contested_key").unwrap();
         assert_eq!(
             value,
-            winning_value,
-            "[{}] Winning transaction value should persist after restart",
+            Some(Bytes::from_static(b"txn2_value")),
+            "[{}] Last committed PUT value should persist after restart",
             ctx.name()
         );
     }

@@ -646,14 +646,9 @@ fn should_handle_multiple_sequential_transactions_on_different_keys() {
 
 #[test]
 fn should_allow_sequential_puts_to_same_key_without_conflict() {
-    // BUG: This test exposes incorrect behavior in Midge.
-    //
-    // Real-world expectation: `put` is an unconditional write with "last writer wins"
-    // semantics. Sequential transactions that both `put` to the same key should NOT
-    // conflict - the second commit should simply overwrite the first.
-    //
-    // Current Midge behavior: Incorrectly treats `put` like a conditional write
-    // and raises TransactionConflict when it shouldn't.
+    // PUT uses Last-Write-Wins (LWW) semantics - no conflict detection.
+    // Sequential transactions that both `put` to the same key should NOT conflict.
+    // The second commit simply overwrites the first.
     //
     // Contrast with:
     // - `insert` (insert-if-not-exists): SHOULD conflict if key already exists
@@ -684,8 +679,8 @@ fn should_allow_sequential_puts_to_same_key_without_conflict() {
         // Assert - put should succeed (last writer wins)
         assert!(
             result.is_ok(),
-            "[{}] BUG: Sequential puts should NOT conflict. \
-             Put is unconditional 'last writer wins'. Got: {:?}",
+            "[{}] Sequential puts should NOT conflict. \
+             Put uses LWW semantics. Got: {:?}",
             name,
             result
         );
@@ -702,11 +697,8 @@ fn should_allow_sequential_puts_to_same_key_without_conflict() {
 
 #[test]
 fn should_allow_concurrent_puts_to_same_key_with_last_writer_wins() {
-    // BUG: This test exposes incorrect behavior in Midge.
-    //
-    // Real-world expectation: When two transactions concurrently `put` to the
+    // PUT uses Last-Write-Wins (LWW) - when two transactions concurrently `put` to the
     // same key, BOTH should succeed. The final value is whichever committed last.
-    // This is standard "last writer wins" semantics for unconditional writes.
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -739,8 +731,7 @@ fn should_allow_concurrent_puts_to_same_key_with_last_writer_wins() {
         );
         assert!(
             result2.is_ok(),
-            "[{}] BUG: Second put commit should also succeed (last writer wins). \
-             Put is unconditional - no conflict detection. Got: {:?}",
+            "[{}] Second put commit should also succeed (LWW). Got: {:?}",
             name,
             result2
         );

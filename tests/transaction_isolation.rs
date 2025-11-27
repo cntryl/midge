@@ -432,11 +432,13 @@ fn should_provide_consistent_view_given_multiple_reads_when_snapshot_isolated() 
 }
 
 // ============================================================================
-// READ-WRITE CONFLICT DETECTION
+// READ-WRITE BEHAVIOR WITH LWW
 // ============================================================================
 
 #[test]
-fn should_detect_read_write_conflict_under_snapshot() {
+fn should_allow_commit_given_read_key_modified_by_other_when_using_put() {
+    // PUT uses LWW - reading a key doesn't create a conflict when someone else modifies it
+    // Only INSERT and CAS have commit-time conflict detection
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -449,32 +451,34 @@ fn should_detect_read_write_conflict_under_snapshot() {
         let cf = engine.default_column_family();
         engine.put(&cf, b"rw_key", b"initial").expect("put");
 
-        // Act - start a transaction with default Snapshot isolation and read key
+        // Act - start a transaction and read key
         let mut txn_a = engine.begin_transaction(&cf).expect("begin");
         let _ = txn_a.get(b"rw_key").expect("get");
 
-        // Another transaction updates and commits
+        // Another transaction updates and commits the same key
         let mut txn_b = engine.begin_transaction(&cf).expect("begin");
         txn_b.put(b"rw_key", b"updated").expect("put");
         assert!(engine
             .commit_transaction(txn_b, WriteOptions::default())
             .is_ok());
 
-        // Act - now txn_a tries to commit a write, should conflict due to read-write
+        // Act - txn_a commits a PUT to a different key (not CAS, not INSERT)
         txn_a.put(b"some_key", b"value").expect("put");
         let res = engine.commit_transaction(txn_a, WriteOptions::default());
 
-        // Assert
+        // Assert - PUT doesn't track reads, so this should succeed
         assert!(
-            res.is_err(),
-            "Snapshot isolation should detect read-write conflict for {}",
+            res.is_ok(),
+            "PUT-based transaction should commit even if read key was modified (LWW) for {}",
             name
         );
     }
 }
 
 #[test]
-fn should_track_reads_given_transaction_get_when_validating_conflicts() {
+fn should_allow_put_commit_given_read_key_modified_when_no_read_tracking() {
+    // PUT with LWW semantics does NOT track reads for conflict detection
+    // Only INSERT (key must not exist) and CAS (value must match) have conflict detection
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -491,27 +495,29 @@ fn should_track_reads_given_transaction_get_when_validating_conflicts() {
         let mut txn1 = engine.begin_transaction(&cf).expect("begin_transaction");
         let _ = txn1.get(b"key").expect("get");
 
-        // Act
+        // Act - another transaction modifies the read key
         let mut txn2 = engine.begin_transaction(&cf).expect("begin_transaction");
         txn2.put(b"key", b"v2").unwrap();
         engine
             .commit_transaction(txn2, WriteOptions::default())
             .expect("commit");
 
+        // txn1 writes to a different key using PUT
         txn1.put(b"other_key", b"value").unwrap();
         let result = engine.commit_transaction(txn1, WriteOptions::default());
 
-        // Assert
+        // Assert - PUT doesn't track reads, so should succeed
         assert!(
-            result.is_err(),
-            "Should detect read-write conflict for {}",
+            result.is_ok(),
+            "PUT should succeed - no read tracking with LWW for {}",
             name
         );
     }
 }
 
 #[test]
-fn should_detect_conflict_given_concurrent_updates_to_same_key_when_commit() {
+fn should_allow_concurrent_puts_to_same_key_given_lww_semantics() {
+    // PUT uses last-write-wins - both commits should succeed
     for mode in disk_storage_modes() {
         let (name, storage_mode, _dir) = create_storage_mode(mode);
 
@@ -524,21 +530,32 @@ fn should_detect_conflict_given_concurrent_updates_to_same_key_when_commit() {
         let cf = engine.default_column_family();
         engine.put(&cf, b"conflict_key", b"initial").expect("put");
 
-        // Act - two transactions updating same key
+        // Act - two transactions updating same key with PUT
         let mut txn1 = engine.begin_transaction(&cf).expect("begin txn1");
         let mut txn2 = engine.begin_transaction(&cf).expect("begin txn2");
 
         txn1.put(b"conflict_key", b"txn1_value").expect("put txn1");
         txn2.put(b"conflict_key", b"txn2_value").expect("put txn2");
 
-        // Assert - at least one commit should succeed, other may fail
+        // Assert - BOTH should succeed with LWW, last committed wins
         let commit1 = engine.commit_transaction(txn1, WriteOptions::default());
         let commit2 = engine.commit_transaction(txn2, WriteOptions::default());
 
-        // At least one should succeed (optimistic concurrency control)
         assert!(
-            commit1.is_ok() || commit2.is_ok(),
-            "At least one transaction should commit successfully for {}",
+            commit1.is_ok(),
+            "First PUT should succeed for {}",
+            name
+        );
+        assert!(
+            commit2.is_ok(),
+            "Second PUT should also succeed (LWW) for {}",
+            name
+        );
+        // Last committed wins
+        assert_eq!(
+            engine.get(&cf, b"conflict_key").expect("get"),
+            Some(Bytes::from("txn2_value")),
+            "Last committed PUT should win for {}",
             name
         );
     }

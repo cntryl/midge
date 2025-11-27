@@ -75,36 +75,24 @@ impl TransactionController {
         commit_seq: u64,
         write_set: &HashSet<Key>,
         write_ranges: &HashSet<(u32, Bytes, Bytes)>,
-        read_set: &HashSet<Key>,
-        read_versions: &HashMap<Key, u64>,
+        _read_set: &HashSet<Key>,
+        _read_versions: &HashMap<Key, u64>,
     ) -> Result<(), String> {
         let inner = self.inner.read();
-        // Create a temporary TxnInfo with the actual conflict sets
-        let txn_info = TxnInfo {
-            begin_seq: inner
-                .active
-                .get(&txn_id)
-                .ok_or("Transaction not found")?
-                .begin_seq,
-            write_set: write_set.clone(),
-            write_ranges: write_ranges.clone(),
-            read_set: read_set.clone(),
-            read_versions: read_versions.clone(),
-        };
+        // Verify transaction exists
+        let _txn_info = inner
+            .active
+            .get(&txn_id)
+            .ok_or("Transaction not found")?;
 
-        // OCC: Detect conflicts only with committed transactions
-        // Do NOT check active transactions - that would be pessimistic locking
-        // In OCC, transactions can overlap during execution and conflicts are detected only at commit time
-
-        if Self::has_commit_conflict(&txn_info, &inner.committed, txn_id) {
-            return Err("Write-write conflict with committed transaction".into());
-        }
-        if Self::has_commit_range_conflict(&txn_info, &inner.committed, txn_id) {
-            return Err("Write-range conflict with committed transaction".into());
-        }
-        if Self::has_read_conflict(&txn_info, &inner.committed) {
-            return Err("Read-write conflict detected".into());
-        }
+        // LWW (Last-Write-Wins) semantics for PUT/DELETE operations:
+        // - No write-write conflict detection: concurrent writes to the same key are allowed
+        // - No read-write conflict detection: reads don't block writes
+        // - The transaction with the later commit sequence wins
+        //
+        // Note: INSERT and CAS operations use separate conflict detection at a higher layer.
+        // INSERT checks if key exists at commit time.
+        // CAS checks if value matches expected at commit time.
 
         // Now update the committed state
         drop(inner);
@@ -143,23 +131,19 @@ impl TransactionController {
 
     pub fn update_wait_for_graph(&self, txn_id: u64) -> Result<(), String> {
         let mut inner = self.inner.write();
-        let txn = inner
+        let _txn = inner
             .active
             .get(&txn_id)
             .ok_or("Transaction not found")?
             .clone();
-        let mut waits = HashSet::new();
 
-        for (other_id, other) in &inner.active {
-            if *other_id == txn_id {
-                continue;
-            }
-            if !txn.write_set.is_disjoint(&other.write_set)
-                || txn.read_set.iter().any(|k| other.write_set.contains(k))
-            {
-                waits.insert(*other_id);
-            }
-        }
+        // LWW semantics: PUT/DELETE operations don't create wait edges.
+        // Concurrent writes are allowed and resolved by commit order (last-write-wins).
+        // Reads don't block writes either.
+        //
+        // Wait edges are only created for INSERT conflicts (checked separately).
+        // With LWW, there are no deadlocks from standard write operations.
+        let waits = HashSet::new();
 
         inner.wait_for.insert(txn_id, waits);
         Ok(())
@@ -439,8 +423,10 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn should_allow_concurrent_writes_to_same_key_in_active_transactions() {
+    fn should_allow_concurrent_writes_to_same_key_with_lww() {
         // Arrange
+        // LWW semantics: PUT operations use last-write-wins, no conflict detection.
+        // Both transactions writing to the same key should succeed.
         let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("x"));
@@ -474,9 +460,8 @@ mod tests {
             &HashSet::new(),
             &HashMap::new(),
         );
-        assert!(result1.is_ok(), "First commit should succeed");
 
-        // Second transaction should fail because txn1 is now committed
+        // LWW: Second transaction also succeeds - the later commit wins
         let result2 = tm.try_commit(
             2,
             6,
@@ -486,14 +471,16 @@ mod tests {
             &HashMap::new(),
         );
 
-        // Assert
-        assert!(result2.is_err());
-        assert!(result2.unwrap_err().contains("Write-write conflict"));
+        // Assert - both commits succeed with LWW
+        assert!(result1.is_ok(), "First commit should succeed");
+        assert!(result2.is_ok(), "Second commit should also succeed with LWW");
     }
 
     #[test]
-    fn should_detect_write_write_conflict_with_committed_transaction() {
+    fn should_allow_write_after_committed_write_with_lww() {
         // Arrange
+        // LWW semantics: A transaction that started before another committed
+        // can still commit successfully. The later commit wins.
         let tm = TransactionController::new();
         let mut ws = HashSet::new();
         ws.insert(k("shared"));
@@ -515,6 +502,7 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
+        // Txn 2 started at seq 15, before txn 1 committed at seq 20
         tm.begin(
             2,
             15,
@@ -535,14 +523,16 @@ mod tests {
             &HashMap::new(),
         );
 
-        // Assert
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Write-write conflict"));
+        // Assert - LWW allows this, txn 2's value wins
+        assert!(result.is_ok(), "LWW allows writes after committed writes");
     }
 
     #[test]
-    fn should_detect_read_write_conflict_given_key_modified_after_read() {
+    fn should_allow_read_only_transaction_despite_concurrent_write() {
         // Arrange
+        // LWW semantics: Read-only transactions don't track reads for conflict
+        // detection purposes. A read-only txn can commit even if another txn
+        // modified a key it read. The read-only txn sees the snapshot it started with.
         let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("data"));
@@ -565,6 +555,7 @@ mod tests {
         )
         .unwrap();
 
+        // Txn 2 is read-only and read "data" at version 15 (before txn1 committed)
         let mut reads = HashMap::new();
         reads.insert(k("data"), 15);
         tm.begin(
@@ -587,9 +578,9 @@ mod tests {
             &reads,
         );
 
-        // Assert
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Read-write conflict"));
+        // Assert - LWW doesn't track reads for PUT conflict detection
+        // Read-only transactions always succeed (they don't modify anything)
+        assert!(result.is_ok(), "Read-only transactions should always succeed");
     }
 
     // =========================================================================
@@ -635,8 +626,10 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn should_add_wait_for_edge_given_write_conflict() {
+    fn should_not_add_wait_for_edge_for_write_with_lww() {
         // Arrange
+        // LWW semantics: PUT operations don't create conflicts, so no wait edges.
+        // This test documents that with LWW, concurrent writes don't block.
         let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("shared"));
@@ -650,15 +643,20 @@ mod tests {
         // Act
         tm.update_wait_for_graph(2).unwrap();
 
-        // Assert
+        // Assert - with LWW, no wait edges for writes
         let inner = tm.inner.read();
-        let waits = inner.wait_for.get(&2).unwrap();
-        assert!(waits.contains(&1));
+        let waits = inner.wait_for.get(&2);
+        assert!(
+            waits.is_none() || waits.unwrap().is_empty(),
+            "LWW: no wait edges for concurrent writes"
+        );
     }
 
     #[test]
-    fn should_add_wait_for_edge_given_read_write_conflict() {
+    fn should_not_add_wait_for_edge_for_read_write_with_lww() {
         // Arrange
+        // LWW semantics: Reads don't create conflicts with writes.
+        // A transaction reading a key doesn't wait for writers.
         let tm = TransactionController::new();
         let mut ws1 = HashSet::new();
         ws1.insert(k("data"));
@@ -672,30 +670,40 @@ mod tests {
         // Act
         tm.update_wait_for_graph(2).unwrap();
 
-        // Assert
+        // Assert - with LWW, readers don't wait for writers
         let inner = tm.inner.read();
-        let waits = inner.wait_for.get(&2).unwrap();
-        assert!(waits.contains(&1));
+        let waits = inner.wait_for.get(&2);
+        assert!(
+            waits.is_none() || waits.unwrap().is_empty(),
+            "LWW: readers don't wait for writers"
+        );
     }
 
     #[test]
     fn should_clear_wait_for_edges_given_abort() {
         // Arrange
+        // Even with LWW, abort should clean up any wait-for state.
+        // This test uses INSERT semantics which DO create wait edges.
         let tm = TransactionController::new();
+        // Use different keys to avoid LWW - simulate INSERT conflicts
         let mut ws1 = HashSet::new();
-        ws1.insert(k("shared"));
+        ws1.insert(k("insert_key"));
         let mut ws2 = HashSet::new();
-        ws2.insert(k("shared"));
+        ws2.insert(k("other_key"));
         tm.begin(1, 1, ws1, HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
         tm.begin(2, 1, ws2, HashSet::new(), HashSet::new(), HashMap::new())
             .unwrap();
-        tm.update_wait_for_graph(2).unwrap();
+        // Manually add a wait edge to test cleanup
+        {
+            let mut inner = tm.inner.write();
+            inner.wait_for.entry(2).or_default().insert(1);
+        }
 
         // Act
         tm.abort(2);
 
-        // Assert
+        // Assert - abort clears any wait-for entries
         let inner = tm.inner.read();
         assert!(!inner.wait_for.contains_key(&2));
     }
@@ -705,8 +713,10 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn should_detect_two_transaction_cycle() {
+    fn should_not_detect_deadlock_with_lww_writes() {
         // Arrange
+        // LWW semantics: PUT operations don't create wait edges, so no deadlocks.
+        // This test documents that concurrent writes don't deadlock with LWW.
         let tm = TransactionController::new();
 
         let mut ws1 = HashSet::new();
@@ -730,16 +740,15 @@ mod tests {
         // Act
         let result = tm.check_for_deadlock();
 
-        // Assert
-        assert!(result.is_some());
-        let (victim, cycle) = result.unwrap();
-        assert!(victim == 1 || victim == 2);
-        assert!(cycle.len() >= 2);
+        // Assert - with LWW, no wait edges means no deadlock possible
+        assert!(result.is_none(), "LWW: concurrent writes don't create deadlocks");
     }
 
     #[test]
-    fn should_detect_three_transaction_cycle() {
+    fn should_not_detect_deadlock_with_three_lww_transactions() {
         // Arrange
+        // LWW semantics: Even with three transactions in a potential cycle pattern,
+        // LWW doesn't create wait edges for writes, so no deadlock.
         let tm = TransactionController::new();
 
         let (a, b, c) = (k("A"), k("B"), k("C"));
@@ -765,11 +774,8 @@ mod tests {
         // Act
         let result = tm.check_for_deadlock();
 
-        // Assert
-        assert!(result.is_some());
-        let (victim, cycle) = result.unwrap();
-        assert!(victim == 1 || victim == 2 || victim == 3);
-        assert!(cycle.len() >= 2);
+        // Assert - with LWW, no deadlocks from write conflicts
+        assert!(result.is_none(), "LWW: no deadlocks from concurrent writes");
     }
 
     #[test]
