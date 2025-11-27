@@ -81,6 +81,10 @@ impl RestoreEngine {
         for sst_info in &info.sst_files {
             let src = backup_path.join(&sst_info.name);
             let dest = sst_dir.join(&sst_info.name);
+            // Ensure parent directory exists (SST names include CF subdirectory)
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             std::fs::copy(&src, &dest)?;
         }
 

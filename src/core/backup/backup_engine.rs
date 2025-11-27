@@ -91,6 +91,10 @@ impl BackupEngine {
                 }
 
                 let dest_path = backup_path.join(&file_meta.name);
+                // Ensure parent directory exists (SST names include CF subdirectory)
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 std::fs::copy(&sst_path, &dest_path)?;
             }
 
@@ -185,6 +189,10 @@ impl BackupEngine {
 
                     // Copy file to backup
                     let dest_path = backup_path.join(&file_meta.name);
+                    // Ensure parent directory exists (SST names include CF subdirectory)
+                    if let Some(parent) = dest_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
                     std::fs::copy(&sst_path, &dest_path)?;
 
                     total_size += size_bytes;
