@@ -549,16 +549,47 @@ pub fn decode_varint32(data: &[u8]) -> MidgeResult<(u32, usize)> {
 
 #[inline(always)]
 pub fn decode_varint64(data: &[u8]) -> MidgeResult<(u64, usize)> {
-    let mut res = 0u64;
-    let mut shift = 0u32;
-    let mut i = 0usize;
-    // Max 10 bytes for u64
-    while i < 10 {
-        if i >= data.len() {
-            return Err(MidgeError::Corruption {
-                message: "varint64 truncated".into(),
-            });
-        }
+    // Unrolled decode - avoids loop overhead for common small values
+    // Most sequence numbers fit in 1-3 bytes
+    if data.is_empty() {
+        return Err(MidgeError::Corruption {
+            message: "varint64 truncated".into(),
+        });
+    }
+
+    let b0 = data[0];
+    if b0 & 0x80 == 0 {
+        return Ok((b0 as u64, 1));
+    }
+
+    if data.len() < 2 {
+        return Err(MidgeError::Corruption {
+            message: "varint64 truncated".into(),
+        });
+    }
+    let b1 = data[1];
+    if b1 & 0x80 == 0 {
+        let val = ((b0 & 0x7F) as u64) | ((b1 as u64) << 7);
+        return Ok((val, 2));
+    }
+
+    if data.len() < 3 {
+        return Err(MidgeError::Corruption {
+            message: "varint64 truncated".into(),
+        });
+    }
+    let b2 = data[2];
+    if b2 & 0x80 == 0 {
+        let val = ((b0 & 0x7F) as u64) | (((b1 & 0x7F) as u64) << 7) | ((b2 as u64) << 14);
+        return Ok((val, 3));
+    }
+
+    // Fall back to loop for larger values (rare in practice)
+    let mut res = ((b0 & 0x7F) as u64) | (((b1 & 0x7F) as u64) << 7) | (((b2 & 0x7F) as u64) << 14);
+    let mut shift = 21u32;
+    let mut i = 3usize;
+
+    while i < 10 && i < data.len() {
         let b = data[i];
         res |= ((b & 0x7F) as u64) << shift;
         i += 1;
@@ -567,9 +598,16 @@ pub fn decode_varint64(data: &[u8]) -> MidgeResult<(u64, usize)> {
         }
         shift += 7;
     }
-    Err(MidgeError::Corruption {
-        message: "varint64 overflow".into(),
-    })
+
+    if i >= 10 {
+        Err(MidgeError::Corruption {
+            message: "varint64 overflow".into(),
+        })
+    } else {
+        Err(MidgeError::Corruption {
+            message: "varint64 truncated".into(),
+        })
+    }
 }
 
 #[inline(always)]
@@ -585,26 +623,20 @@ pub fn parse_u8(v: &[u8]) -> MidgeResult<u8> {
 
 #[inline(always)]
 pub fn parse_u32(v: &[u8]) -> MidgeResult<u32> {
-    if v.len() != 4 {
-        return Err(MidgeError::Corruption {
+    v.try_into()
+        .map(u32::from_be_bytes)
+        .map_err(|_| MidgeError::Corruption {
             message: "expected 4 bytes".into(),
-        });
-    }
-    let mut arr = [0u8; 4];
-    arr.copy_from_slice(v);
-    Ok(u32::from_be_bytes(arr))
+        })
 }
 
 #[inline(always)]
 pub fn parse_u64(v: &[u8]) -> MidgeResult<u64> {
-    if v.len() != 8 {
-        return Err(MidgeError::Corruption {
+    v.try_into()
+        .map(u64::from_be_bytes)
+        .map_err(|_| MidgeError::Corruption {
             message: "expected 8 bytes".into(),
-        });
-    }
-    let mut arr = [0u8; 8];
-    arr.copy_from_slice(v);
-    Ok(u64::from_be_bytes(arr))
+        })
 }
 #[inline(always)]
 pub fn parse_varint32_from_slice(v: &[u8]) -> MidgeResult<u32> {

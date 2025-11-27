@@ -9,7 +9,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::wal::encoding::{decode, encode};
+use cntryl_midge::wal::encoding::{decode, decode_borrowed, encode};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
@@ -110,9 +110,37 @@ fn bench_wal_header_scan_only(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark zero-copy decode vs allocating decode
+fn bench_wal_zero_copy_vs_alloc(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hotpath_wal_zero_copy");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
+    group.measurement_time(std::time::Duration::from_millis(200));
+
+    let encoded = make_encoded_frame(64, 1024);
+
+    // Allocating decode (current default)
+    group.bench_function("decode_allocating", |b| {
+        b.iter(|| {
+            let record = decode(&encoded).expect("decode failed");
+            black_box(record);
+        })
+    });
+
+    // Zero-copy decode (no allocation)
+    group.bench_function("decode_borrowed", |b| {
+        b.iter(|| {
+            let record = decode_borrowed(&encoded).expect("decode failed");
+            black_box(record);
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = wal_frame_parse_group;
     config = criterion_config();
-    targets = bench_wal_frame_parse_small, bench_wal_frame_parse_medium, bench_wal_frame_parse_large, bench_wal_header_scan_only
+    targets = bench_wal_frame_parse_small, bench_wal_frame_parse_medium, bench_wal_frame_parse_large, bench_wal_header_scan_only, bench_wal_zero_copy_vs_alloc
 }
 criterion_main!(wal_frame_parse_group);
