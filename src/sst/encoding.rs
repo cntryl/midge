@@ -115,16 +115,7 @@ pub fn decode<'a>(data: &'a [u8], offset: usize, limit: usize) -> MidgeResult<Tl
             }
             tags::SEQUENCE => {
                 if tag_data.len() >= 8 {
-                    sequence = u64::from_be_bytes([
-                        tag_data[0],
-                        tag_data[1],
-                        tag_data[2],
-                        tag_data[3],
-                        tag_data[4],
-                        tag_data[5],
-                        tag_data[6],
-                        tag_data[7],
-                    ]);
+                    sequence = u64::from_be_bytes(tag_data[..8].try_into().unwrap());
                 }
             }
             tags::ENTRY_TYPE => {
@@ -134,16 +125,7 @@ pub fn decode<'a>(data: &'a [u8], offset: usize, limit: usize) -> MidgeResult<Tl
             }
             tags::EXPIRATION => {
                 if tag_data.len() >= 8 {
-                    expiration = Some(u64::from_be_bytes([
-                        tag_data[0],
-                        tag_data[1],
-                        tag_data[2],
-                        tag_data[3],
-                        tag_data[4],
-                        tag_data[5],
-                        tag_data[6],
-                        tag_data[7],
-                    ]));
+                    expiration = Some(u64::from_be_bytes(tag_data[..8].try_into().unwrap()));
                 }
             }
             _ => {}
