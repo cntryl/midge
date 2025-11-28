@@ -11,7 +11,7 @@
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
 
 use cntryl_midge::common::tlv::{
@@ -25,6 +25,7 @@ use std::hint::black_box;
 
 fn bench_varint32_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_tlv_varint32_encode");
+    group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
 
     // Small values (< 128) - single byte encoding, common for key lengths

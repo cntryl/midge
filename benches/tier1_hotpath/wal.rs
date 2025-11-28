@@ -14,7 +14,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
 
 use cntryl_midge::wal::encode_pipeline::{EncodeConfig, WalEncoder};
@@ -29,6 +29,7 @@ use std::hint::black_box;
 /// Benchmark WAL record encoding (TLV format) with different sizes.
 fn bench_wal_encode_record(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_wal_encode");
+    group.sampling_mode(SamplingMode::Flat);
 
     let small_key = Bytes::from_static(b"key");
     let small_value = Bytes::from_static(b"value");
