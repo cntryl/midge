@@ -524,16 +524,47 @@ pub fn encode_varint64(buf: &mut Vec<u8>, mut v: u64) {
 
 #[inline]
 pub fn decode_varint32(data: &[u8]) -> MidgeResult<(u32, usize)> {
-    let mut res = 0u32;
-    let mut shift = 0u32;
-    let mut i = 0usize;
-    // Max 5 bytes for u32
-    while i < 5 {
-        if i >= data.len() {
-            return Err(MidgeError::Corruption {
-                message: "varint32 truncated".into(),
-            });
-        }
+    // Unrolled decode - avoids loop overhead for common small values
+    // Most lengths/tags fit in 1-2 bytes
+    if data.is_empty() {
+        return Err(MidgeError::Corruption {
+            message: "varint32 truncated".into(),
+        });
+    }
+
+    let b0 = data[0];
+    if b0 & 0x80 == 0 {
+        return Ok((b0 as u32, 1));
+    }
+
+    if data.len() < 2 {
+        return Err(MidgeError::Corruption {
+            message: "varint32 truncated".into(),
+        });
+    }
+    let b1 = data[1];
+    if b1 & 0x80 == 0 {
+        let val = ((b0 & 0x7F) as u32) | ((b1 as u32) << 7);
+        return Ok((val, 2));
+    }
+
+    if data.len() < 3 {
+        return Err(MidgeError::Corruption {
+            message: "varint32 truncated".into(),
+        });
+    }
+    let b2 = data[2];
+    if b2 & 0x80 == 0 {
+        let val = ((b0 & 0x7F) as u32) | (((b1 & 0x7F) as u32) << 7) | ((b2 as u32) << 14);
+        return Ok((val, 3));
+    }
+
+    // Fall back to loop for larger values (rare: >2M)
+    let mut res = ((b0 & 0x7F) as u32) | (((b1 & 0x7F) as u32) << 7) | (((b2 & 0x7F) as u32) << 14);
+    let mut shift = 21u32;
+    let mut i = 3usize;
+
+    while i < 5 && i < data.len() {
         let b = data[i];
         res |= ((b & 0x7F) as u32) << shift;
         i += 1;
@@ -542,9 +573,16 @@ pub fn decode_varint32(data: &[u8]) -> MidgeResult<(u32, usize)> {
         }
         shift += 7;
     }
-    Err(MidgeError::Corruption {
-        message: "varint32 overflow".into(),
-    })
+
+    if i >= 5 {
+        Err(MidgeError::Corruption {
+            message: "varint32 overflow".into(),
+        })
+    } else {
+        Err(MidgeError::Corruption {
+            message: "varint32 truncated".into(),
+        })
+    }
 }
 
 #[inline]

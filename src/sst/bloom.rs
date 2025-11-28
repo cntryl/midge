@@ -1,17 +1,21 @@
-//! Bloom filter implementation with optimized performance
+//! Bloom filter implementation tuned for hotpath performance.
 //!
-//! - Raw byte storage (SIMD-friendly, LSB-first bits)
-//! - Double hashing via xxh3_64_with_seed (no hasher allocations)
-//! - Inlined hot paths with debug-checked unsafe for bounds
-//! - Compact header: [ver | k | m | n | bits]
-//! - Power-of-2 bit_count for fast modulo via bitwise AND
+//! Design goals:
+//! - Safe Rust (only `unsafe` for bounds-checked bit ops).
+//! - Blocked layout: bits grouped into fixed-size blocks for cache locality.
+//! - Single 64-bit hash per key, with cheap double hashing.
+//! - Power-of-two block counts for fast masking when possible.
+//! - Encoding format unchanged: [ver:u8 | k:u32le | m:u32le | n:u32le | bitset].
 //!
-//! Encoding: [ version:u8=1 | hash_count:u32le | bit_count:u32le | keys_count:u32le | bitset ]
+//! Blocked layout:
+//! - Bitset is conceptually split into 256-byte (2048-bit) blocks.
+//! - For a given key, all probes land in a single block.
+//! - This massively improves cache behavior for queries and builds.
 
 use crate::error::{MidgeError, MidgeResult};
 use bytes::{Bytes, BytesMut};
 use std::cmp;
-use xxhash_rust::xxh3::xxh3_128;
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 /// Public filter abstraction used by SST and storage layers.
 pub trait Filter {
@@ -21,17 +25,23 @@ pub trait Filter {
         Self: Sized;
 }
 
-/// Bloom filter using raw byte storage and double hashing for optimal performance.
+/// Bloom filter using raw byte storage and blocked layout.
 #[derive(Debug, PartialEq, Clone)]
 pub struct BloomFilter {
     /// Raw byte array for bit storage (LSB-first per byte).
     bytes: Vec<u8>,
-    /// Total number of bits (<= bytes.len()*8).
+    /// Total number of bits (<= bytes.len() * 8).
     bit_count: u32,
     /// Number of hash functions (k).
     hash_count: u32,
     /// Number of keys inserted (n).
     keys_count: u32,
+    /// Number of logical blocks (for blocked layout).
+    block_count: u32,
+    /// Mask for block index when block_count is power of two; otherwise 0.
+    block_mask: u32,
+    /// Whether this filter can use blocked layout safely.
+    blocked: bool,
 }
 
 // Encoding format constants.
@@ -42,23 +52,48 @@ const BLOOM_HEADER_LEN: usize = 1 + 4 + 4 + 4;
 const LN2: f64 = std::f64::consts::LN_2;
 const LN2_SQ: f64 = LN2 * LN2;
 
+// Blocked layout constants.
+const BLOCK_BYTES: usize = 256;
+const BLOCK_BITS: u32 = (BLOCK_BYTES * 8) as u32; // 2048
+const BLOCK_BITS_MASK: u32 = BLOCK_BITS - 1;
+
+// Hash seed for xxh3 (single 64-bit hash per key).
+const HASH_SEED: u64 = 0x9E37_79B1_85EB_CA87;
+
 impl BloomFilter {
     /// Create a new bloom filter for an expected number of keys and a target false-positive rate.
     #[inline]
     pub fn new(num_keys: usize, false_positive_rate: f64) -> Self {
         let bits_per_key = Self::calculate_bits_per_key(false_positive_rate);
-        // Minimum 64 bits to avoid degenerate tiny filters
-        let bit_count_raw = cmp::max(num_keys.saturating_mul(bits_per_key), 64);
-        // Round up to next power of 2 for fast modulo via bitwise AND
-        let bit_count = bit_count_raw.next_power_of_two() as u32;
+        let min_bits = cmp::max(num_keys.saturating_mul(bits_per_key), 64);
+
+        // Round up to a whole number of blocks, then to at least one block.
+        let mut blocks = (min_bits as u32).div_ceil(BLOCK_BITS).max(1);
+
+        // Prefer a power-of-two block count for fast masking.
+        if !blocks.is_power_of_two() {
+            blocks = blocks.next_power_of_two();
+        }
+
+        let bit_count = blocks * BLOCK_BITS;
+        let byte_count = (bit_count as usize).div_ceil(8);
         let hash_count = Self::calculate_hash_count(bits_per_key);
-        let byte_count = bit_count.div_ceil(8) as usize;
+
+        let block_count = blocks;
+        let block_mask = if block_count.is_power_of_two() {
+            block_count - 1
+        } else {
+            0
+        };
 
         Self {
             bytes: vec![0u8; byte_count],
             bit_count,
             hash_count,
             keys_count: 0,
+            block_count,
+            block_mask,
+            blocked: true,
         }
     }
 
@@ -71,12 +106,12 @@ impl BloomFilter {
             ));
         }
         let bit_count = (data.len() * 8) as u32;
-        Ok(Self {
-            bytes: data.to_vec(),
+        Ok(Self::from_parts(
+            data.to_vec(),
             bit_count,
-            hash_count: cmp::max(hash_count, 1),
+            hash_count,
             keys_count,
-        })
+        ))
     }
 
     /// Create bloom filter from existing data with specific bit count.
@@ -98,57 +133,167 @@ impl BloomFilter {
                 "Bloom filter data incomplete".into(),
             ));
         }
-        Ok(Self {
-            bytes: data[..required_bytes].to_vec(),
-            bit_count: bit_count as u32,
+        Ok(Self::from_parts(
+            data[..required_bytes].to_vec(),
+            bit_count as u32,
+            hash_count,
+            keys_count,
+        ))
+    }
+
+    /// Shared constructor for all paths that know the bytes and bit_count.
+    #[inline]
+    fn from_parts(bytes: Vec<u8>, bit_count: u32, hash_count: u32, keys_count: u32) -> Self {
+        let (block_count, block_mask, blocked) = Self::compute_block_layout(bit_count);
+
+        Self {
+            bytes,
+            bit_count,
             hash_count: cmp::max(hash_count, 1),
             keys_count,
-        })
+            block_count,
+            block_mask,
+            blocked,
+        }
+    }
+
+    /// Compute block layout from bit_count, deciding whether blocked mode is safe.
+    ///
+    /// Blocked mode requires:
+    /// - bit_count >= BLOCK_BITS
+    /// - bit_count is a multiple of BLOCK_BITS
+    #[inline]
+    fn compute_block_layout(bit_count: u32) -> (u32, u32, bool) {
+        if bit_count >= BLOCK_BITS && bit_count.is_multiple_of(BLOCK_BITS) {
+            let block_count = bit_count / BLOCK_BITS;
+            let block_mask = if block_count.is_power_of_two() {
+                block_count - 1
+            } else {
+                0
+            };
+            (block_count, block_mask, true)
+        } else {
+            // Legacy / small filters fall back to linear layout.
+            (0, 0, false)
+        }
     }
 
     /// Add a key to the bloom filter (hot path).
     #[inline]
     pub fn add(&mut self, key: &[u8]) {
-        let (h1, h2) = self.double_hash(key);
-        let m = self.bit_count;
-        // Use bitwise AND instead of modulo when m is power of 2 (always true after new())
-        let mask = m.wrapping_sub(1);
-        // Fast path set-bit loop with debug-checked bounds.
-        for i in 0..self.hash_count {
-            let bit_index = (h1.wrapping_add(i.wrapping_mul(h2)) & mask) as usize;
+        if self.bytes.is_empty() || self.bit_count == 0 {
+            return;
+        }
+
+        let (h_base, h_step) = Self::double_hash(key);
+
+        if self.blocked {
+            self.add_blocked(h_base, h_step);
+        } else {
+            self.add_linear(h_base, h_step);
+        }
+
+        self.keys_count = self.keys_count.saturating_add(1);
+    }
+
+    #[inline]
+    fn add_blocked(&mut self, h_base: u64, h_step: u32) {
+        debug_assert!(self.blocked);
+        debug_assert!(self.block_count > 0);
+
+        let block_index = Self::block_index(h_base, self.block_count, self.block_mask) as usize;
+        let base_bit = (block_index as u32 * BLOCK_BITS) as usize;
+
+        let mut h = h_base as u32;
+        for _ in 0..self.hash_count {
+            h = h.wrapping_add(h_step);
+            let bit_in_block = (h & BLOCK_BITS_MASK) as usize;
+            let bit_index = base_bit + bit_in_block;
             Self::set_bit(&mut self.bytes, bit_index);
         }
-        self.keys_count = self.keys_count.saturating_add(1);
+    }
+
+    #[inline]
+    fn add_linear(&mut self, h_base: u64, h_step: u32) {
+        let m = self.bit_count;
+        let mask = m.wrapping_sub(1);
+        let use_mask = m & mask == 0; // power-of-two bit_count
+
+        let mut h = h_base as u32;
+        for _ in 0..self.hash_count {
+            h = h.wrapping_add(h_step);
+            let bit_index = if use_mask {
+                (h & mask) as usize
+            } else {
+                (h % m) as usize
+            };
+            Self::set_bit(&mut self.bytes, bit_index);
+        }
     }
 
     /// Check if a key might be in the filter (hot path).
     ///
-    /// Optimized with:
-    /// - Early exit on first missing bit (most common case for absent keys)
-    /// - Bitwise AND masking when bit_count is power of 2
+    /// - Single hash per key.
+    /// - All probes stay within one block when blocked layout is enabled.
+    /// - Early exit on the first missing bit.
     #[inline]
     pub fn may_contain(&self, key: &[u8]) -> bool {
-        let (h1, h2) = self.double_hash(key);
-        let m = self.bit_count;
+        if self.bytes.is_empty() || self.bit_count == 0 {
+            return false;
+        }
 
-        // Fast path: if m is power of 2, use bitwise AND instead of modulo
-        let is_pow2 = m.is_power_of_two();
-        let mask = m.wrapping_sub(1);
+        let (h_base, h_step) = Self::double_hash(key);
 
-        for i in 0..self.hash_count {
-            let hash = h1.wrapping_add(i.wrapping_mul(h2));
-            let bit_index = if is_pow2 {
-                (hash & mask) as usize
-            } else {
-                (hash % m) as usize
-            };
+        if self.blocked {
+            self.may_contain_blocked(h_base, h_step)
+        } else {
+            self.may_contain_linear(h_base, h_step)
+        }
+    }
 
+    #[inline]
+    fn may_contain_blocked(&self, h_base: u64, h_step: u32) -> bool {
+        debug_assert!(self.blocked);
+        debug_assert!(self.block_count > 0);
+
+        let block_index = Self::block_index(h_base, self.block_count, self.block_mask) as usize;
+        let base_bit = (block_index as u32 * BLOCK_BITS) as usize;
+
+        let mut h = h_base as u32;
+        for _ in 0..self.hash_count {
+            h = h.wrapping_add(h_step);
+            let bit_in_block = (h & BLOCK_BITS_MASK) as usize;
+            let bit_index = base_bit + bit_in_block;
             if !Self::test_bit(&self.bytes, bit_index) {
-                return false; // Definitely not present
+                return false;
             }
         }
-        true // Might be present (with FPR)
+
+        true
     }
+
+    #[inline]
+    fn may_contain_linear(&self, h_base: u64, h_step: u32) -> bool {
+        let m = self.bit_count;
+        let mask = m.wrapping_sub(1);
+        let use_mask = m & mask == 0;
+
+        let mut h = h_base as u32;
+        for _ in 0..self.hash_count {
+            h = h.wrapping_add(h_step);
+            let bit_index = if use_mask {
+                (h & mask) as usize
+            } else {
+                (h % m) as usize
+            };
+            if !Self::test_bit(&self.bytes, bit_index) {
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Encode to bytes with metadata header.
     /// Layout: [version(1) | k(u32le) | m(u32le) | n(u32le) | bitset]
     #[inline]
@@ -185,12 +330,8 @@ impl BloomFilter {
             return Err(MidgeError::InvalidData("Bloom bitset incomplete".into()));
         }
 
-        Ok(Self {
-            bytes: bits_bytes[..required_bytes].to_vec(),
-            bit_count,
-            hash_count: cmp::max(hash_count, 1),
-            keys_count,
-        })
+        let bytes = bits_bytes[..required_bytes].to_vec();
+        Ok(Self::from_parts(bytes, bit_count, hash_count, keys_count))
     }
 
     /// Number of hash functions `k`.
@@ -233,21 +374,32 @@ impl BloomFilter {
     #[inline]
     fn calculate_hash_count(bits_per_key: usize) -> u32 {
         let k = (bits_per_key as f64 * LN2).round();
-        // Cap at 10: Beyond this, the cost of hashing outweighs FPR gains
-        // RocksDB uses 5-6 probes in blocked filters for similar reasons
         k.clamp(1.0, 10.0) as u32
     }
 
-    /// Double hashing: h(i) = h1 + i*h2 mod m.
-    /// Uses xxh3 128-bit hash split into two 32-bit parts (single hash call).
-    #[inline]
-    fn double_hash(&self, key: &[u8]) -> (u32, u32) {
-        // Single 128-bit hash is faster than two 64-bit hashes with different seeds
-        let h128 = xxh3_128(key);
-        let h1 = h128 as u32;
-        let mut h2 = (h128 >> 64) as u32;
-        h2 |= 1; // ensure odd to improve coverage
-        (h1, h2)
+    /// Single 64-bit hash + cheap derivation:
+    /// - h_base: base hash (also used for block selection)
+    /// - h_step: odd 32-bit increment used for double hashing
+    #[inline(always)]
+    fn double_hash(key: &[u8]) -> (u64, u32) {
+        let h = xxh3_64_with_seed(key, HASH_SEED);
+        let mut step = (h.rotate_right(17) as u32) | 1; // ensure odd
+                                                        // Avoid pathological very small step values.
+        if step == 1 {
+            step = 3;
+        }
+        (h, step)
+    }
+
+    /// Compute block index from hash value and block layout.
+    #[inline(always)]
+    fn block_index(h: u64, block_count: u32, block_mask: u32) -> u32 {
+        if block_mask != 0 {
+            (h as u32) & block_mask
+        } else {
+            // Non power-of-two fallback (rare for new filters).
+            (h % block_count as u64) as u32
+        }
     }
 
     #[inline]
@@ -293,19 +445,16 @@ impl BloomFilterBuilder {
     ///
     /// Common values:
     /// - 10 bits/key ≈ 1% false positive rate
-    /// - 14 bits/key ≈ 0.1% false positive rate  
+    /// - 14 bits/key ≈ 0.1% false positive rate
     /// - 20 bits/key ≈ 0.001% false positive rate
     #[inline]
     pub fn with_bits_per_key(bits_per_key: u32) -> Self {
-        // Approximate false positive rate from bits per key
-        // fpr ≈ (0.6185)^(bits_per_key)
-        // For simplicity, use a lookup table for common values
         let false_positive_rate = match bits_per_key {
-            0..=5 => 0.10, // Very high FPR for low bits
+            0..=5 => 0.10,
             6..=8 => 0.05,
-            9..=11 => 0.01,   // ~10 bits/key
-            12..=15 => 0.001, // ~14 bits/key
-            _ => 0.0001,      // 20+ bits/key
+            9..=11 => 0.01,
+            12..=15 => 0.001,
+            _ => 0.0001,
         };
         Self::new(false_positive_rate)
     }
@@ -326,7 +475,6 @@ impl BloomFilterBuilder {
     }
 
     /// Add a key directly to the bloom filter (streaming mode).
-    /// This does NOT store the key - it immediately hashes and updates the bit array.
     #[inline]
     pub fn add_key(&mut self, key: &[u8]) {
         self.filter.add(key);
@@ -381,27 +529,24 @@ mod tests {
         let f = BloomFilter::new(100, 0.01);
 
         // Act
-        let (h1a, h2a) = f.double_hash(b"test_key_a");
-        let (h1b, h2b) = f.double_hash(b"test_key_b");
+        let (h1a, s1a) = BloomFilter::double_hash(b"test_key_a");
+        let (h1b, s1b) = BloomFilter::double_hash(b"test_key_b");
 
         // Assert
         assert_ne!(h1a, h1b);
-        assert_ne!(h2a, h2b);
-        assert_eq!(h2a & 1, 1);
-        assert_eq!(h2b & 1, 1);
+        assert_ne!(s1a, s1b);
+        assert_eq!(s1a & 1, 1);
+        assert_eq!(s1b & 1, 1);
     }
 
     #[test]
     fn should_perform_raw_byte_operations_correctly() {
-        // Arrange
         let mut f = BloomFilter::new(10, 0.01);
 
-        // Act
         f.add(b"key1");
         f.add(b"key2");
         f.add(b"key3");
 
-        // Assert
         assert!(f.may_contain(b"key1"));
         assert!(f.may_contain(b"key2"));
         assert!(f.may_contain(b"key3"));
@@ -410,167 +555,112 @@ mod tests {
 
     #[test]
     fn should_report_may_contain_for_added_key() {
-        // Arrange
         let mut f = BloomFilter::new(10, 0.01);
         let key = b"hello";
 
-        // Act
         f.add(key);
 
-        // Assert
         assert!(f.may_contain(key));
     }
 
     #[test]
     fn should_return_false_for_absent_key_most_of_the_time() {
-        // Arrange
         let mut f = BloomFilter::new(10, 0.01);
         f.add(b"a");
         f.add(b"b");
 
-        // Act
         let got = f.may_contain(b"z");
 
-        // Assert
         assert!(!got, "absent key should usually be reported absent");
     }
 
     #[test]
     fn should_reject_empty_data_when_decoding() {
-        // Arrange
         let data: &[u8] = &[];
-
-        // Act
         let res = BloomFilter::from_bytes(data, 3, 0);
-
-        // Assert
         assert!(res.is_err());
     }
 
     #[test]
     fn should_roundtrip_encoded_filter_with_decode_block() {
-        // Arrange
         let mut f = BloomFilter::new(8, 0.01);
         f.add(b"k1");
         f.add(b"k2");
 
-        // Act
         let enc = f.encode();
         let other = BloomFilter::decode_block(&enc).unwrap();
 
-        // Assert
         assert!(other.may_contain(b"k1"));
         assert!(other.may_contain(b"k2"));
     }
 
     #[test]
     fn should_be_empty_initially() {
-        // Arrange
         let b = BloomFilterBuilder::new(0.02);
-
-        // Act
-        let is_empty = b.is_empty();
-        let count = b.keys_count();
-
-        // Assert
-        assert!(is_empty);
-        assert_eq!(count, 0);
+        assert!(b.is_empty());
+        assert_eq!(b.keys_count(), 0);
     }
 
     #[test]
     fn should_finish_with_minimum_size() {
-        // Arrange
         let b = BloomFilterBuilder::new(0.02);
-
-        // Act
         let f = b.finish();
-
-        // Assert
         assert!(f.bit_count() >= 64);
     }
 
     #[test]
     fn should_build_filter_from_keys() {
-        // Arrange
         let keys: Vec<(Bytes, usize)> = vec![(Bytes::from("kA"), 1), (Bytes::from("kB"), 1)];
-
-        // Act
         let f = BloomFilter::build(&keys);
-
-        // Assert
         assert_eq!(f.keys_count(), 2);
     }
 
     #[test]
     fn should_contain_keys_after_build() {
-        // Arrange
         let keys: Vec<(Bytes, usize)> = vec![(Bytes::from("kA"), 1), (Bytes::from("kB"), 1)];
-
-        // Act
         let f = BloomFilter::build(&keys);
-
-        // Assert
         assert!(f.may_contain(b"kA"));
         assert!(f.may_contain(b"kB"));
     }
 
     #[test]
     fn should_have_hash_count_after_build() {
-        // Arrange
         let keys: Vec<(Bytes, usize)> = vec![(Bytes::from("kA"), 1), (Bytes::from("kB"), 1)];
-
-        // Act
         let f = BloomFilter::build(&keys);
-
-        // Assert
         assert!(f.hash_count() >= 1);
     }
 
     #[test]
     fn should_reject_empty_data_when_decoding_with_bit_count() {
-        // Arrange
         let data: &[u8] = &[];
-
-        // Act
         let res = BloomFilter::from_bytes_with_bit_count(data, 16, 3, 0);
-
-        // Assert
         assert!(res.is_err());
     }
 
     #[test]
     fn should_roundtrip_with_from_bytes_ok_path() {
-        // Arrange
         let mut f = BloomFilter::new(5, 0.02);
         f.add(b"alpha");
         f.add(b"beta");
 
-        // Act
         let enc = f.encode();
         let g = BloomFilter::decode_block(&enc).unwrap();
 
-        // Assert
         assert!(g.may_contain(b"alpha"));
         assert!(g.may_contain(b"beta"));
     }
 
     #[test]
     fn should_encode_length_match_ceiled_bit_count_over_8() {
-        // Arrange
         let f = BloomFilter::new(3, 0.20);
         let bit_count = f.bit_count();
-
-        // Act
         let enc = f.encode();
-
-        // Assert
         let expected_len = 1 + 4 + 4 + 4 + bit_count.div_ceil(8);
         assert_eq!(enc.len(), expected_len);
     }
 
     #[test]
     fn should_decode_small_bit_count_without_panic() {
-        // Arrange
         let mut raw = Vec::new();
         raw.push(BLOOM_FMT_VERSION);
         raw.extend_from_slice(&3u32.to_le_bytes());
@@ -578,16 +668,12 @@ mod tests {
         raw.extend_from_slice(&0u32.to_le_bytes());
         raw.push(0u8);
 
-        // Act
         let bf = BloomFilter::decode_block(&raw);
-
-        // Assert
         assert!(bf.is_ok());
     }
 
     #[test]
     fn should_report_absent_for_small_bit_count_filter() {
-        // Arrange
         let mut raw = Vec::new();
         raw.push(BLOOM_FMT_VERSION);
         raw.extend_from_slice(&3u32.to_le_bytes());
@@ -596,46 +682,35 @@ mod tests {
         raw.push(0u8);
         let bf = BloomFilter::decode_block(&raw).unwrap();
 
-        // Act
         let contains = bf.may_contain(b"anything");
-
-        // Assert
         assert!(!contains);
     }
 
     #[test]
     fn should_preserve_keys_count_after_finish() {
-        // Arrange
         let mut b = BloomFilterBuilder::new(0.05);
         b.add_key(b"x");
         b.add_key(b"y");
         let expected = b.keys_count();
 
-        // Act
         let f = b.finish();
-
-        // Assert
         assert_eq!(f.keys_count() as usize, expected);
     }
 
     #[test]
     fn should_contain_added_keys_after_finish() {
-        // Arrange
         let mut b = BloomFilterBuilder::new(0.05);
         b.add_key(b"x");
         b.add_key(b"y");
 
-        // Act
         let f = b.finish();
 
-        // Assert
         assert!(f.may_contain(b"x"));
         assert!(f.may_contain(b"y"));
     }
 
     #[test]
     fn should_bloom_filter_false_positive_rate_with_bounds() {
-        // Arrange
         // Build a bloom filter with 1000 keys, target ~1% FPR (using 10 bits/key)
         let mut builder = BloomFilterBuilder::with_expected_keys(1_000, 10);
         for i in 0..1_000u32 {
@@ -644,7 +719,6 @@ mod tests {
         }
         let filter = builder.finish();
 
-        // Act
         // Query 10,000 non-existent keys (offset range to avoid true positives)
         let mut false_positives = 0;
         for i in 100_000..110_000u32 {
@@ -655,10 +729,9 @@ mod tests {
         }
         let fpr = false_positives as f64 / 10_000.0;
 
-        // Assert
-        // Target is ~1%, allow tolerance up to 3% (bloom filters are probabilistic)
-        // Zero false positives is also valid (very unlikely but possible)
+        // Target is ~1%, allow tolerance up to 3%
         assert!(fpr <= 0.03, "False positive rate {} exceeds 3% bound", fpr);
+
         // All inserted keys must be found (no false negatives)
         for i in 0..1_000u32 {
             let key = format!("key_{:06}", i);
@@ -672,7 +745,6 @@ mod tests {
 
     #[test]
     fn should_encode_decode_bloom_filter_block() {
-        // Arrange
         let mut builder = BloomFilterBuilder::with_expected_keys(500, 10);
         for i in 0..500u32 {
             let key = format!("bloom_test_key_{:08}", i);
@@ -680,17 +752,13 @@ mod tests {
         }
         let original = builder.finish();
 
-        // Act
         let encoded = original.encode();
         let decoded = BloomFilter::decode_block(&encoded).expect("decode should succeed");
 
-        // Assert
-        // Verify structural properties match
         assert_eq!(decoded.bit_count(), original.bit_count());
         assert_eq!(decoded.hash_count(), original.hash_count());
         assert_eq!(decoded.keys_count(), original.keys_count());
 
-        // All originally inserted keys should be found in decoded filter
         for i in 0..500u32 {
             let key = format!("bloom_test_key_{:08}", i);
             assert!(
@@ -700,7 +768,6 @@ mod tests {
             );
         }
 
-        // Non-existent keys should behave the same in both filters
         for i in 1000..1100u32 {
             let key = format!("bloom_test_key_{:08}", i);
             assert_eq!(
