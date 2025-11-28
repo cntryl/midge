@@ -1,9 +1,9 @@
-//! Tier 2 — Advanced Engine Feature Benchmarks
+//! Tier 3 — Advanced Engine Feature Benchmarks
 //!
-//! **Target Runtime:** < 3 seconds total
-//! **Run Frequency:** Daily CI
+//! **Target Runtime:** ~30-60 seconds
+//! **Run Frequency:** Nightly CI
 //!
-//! Covers advanced engine features:
+//! Covers advanced engine features with full engine setup:
 //! - TTL expiration operations
 //! - Column family scaling
 //! - Large value handling (>100KB)
@@ -57,7 +57,7 @@ fn precompute_kv(n: usize, value_base: usize) -> (Vec<Bytes>, Vec<Bytes>) {
 // ============================================================================
 
 fn bench_ttl(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_ttl");
+    let mut group = c.benchmark_group("system_ttl");
 
     let (keys, vals) = precompute_kv(500, 80);
     group.bench_function("put_with_ttl", |b| {
@@ -109,7 +109,7 @@ fn bench_ttl(c: &mut Criterion) {
 
 /// Benchmark multi-column family operations to measure CF routing overhead
 fn bench_column_family_scaling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_cf_scaling");
+    let mut group = c.benchmark_group("system_cf_scaling");
 
     for &cf_count in &[1, 4, 8, 16] {
         group.bench_with_input(
@@ -150,7 +150,7 @@ fn bench_column_family_scaling(c: &mut Criterion) {
 
 /// Benchmark operations with large values (1MB+) to test buffer handling
 fn bench_large_values(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_large_values");
+    let mut group = c.benchmark_group("system_large_values");
 
     for &value_size in &[64 * 1024, 512 * 1024, 1024 * 1024] {
         group.bench_with_input(
@@ -199,7 +199,7 @@ fn bench_large_values(c: &mut Criterion) {
 
 /// Benchmark delete-heavy scenarios to measure tombstone overhead
 fn bench_delete_heavy(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_delete_heavy");
+    let mut group = c.benchmark_group("system_delete_heavy");
 
     group.bench_function("delete_50pct", |b| {
         b.iter_batched(

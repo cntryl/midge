@@ -44,14 +44,12 @@ fn bench_manifest_replay_100k_entries(c: &mut Criterion) {
 
     group.bench_function("replay_100k", |b| {
         b.iter(|| {
-            let mut version_set = VersionSet::new(Default::default());
+            let version_set = VersionSet::new(Default::default());
 
-            // Apply all 100k edits sequentially
-            for edit in &edits {
-                version_set = version_set.apply_edit(edit.clone()).unwrap();
-            }
+            // Apply all 100k edits using batch API (O(n) instead of O(n²))
+            let final_version = version_set.apply_edits(edits.iter().cloned()).unwrap();
 
-            black_box(version_set);
+            black_box(final_version);
         })
     });
 

@@ -57,7 +57,7 @@ fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
 // ============================================================================
 
 fn bench_concurrent_puts(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_concurrent_puts");
+    let mut group = c.benchmark_group("system_concurrent_puts");
 
     let max_threads = 16;
     let n_ops = 5_000;
@@ -111,7 +111,7 @@ fn bench_concurrent_puts(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_mixed_read_write(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_read_write_contention");
+    let mut group = c.benchmark_group("system_read_write_contention");
 
     // Precompute data to avoid allocations in hot path
     let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
@@ -177,7 +177,7 @@ fn bench_mixed_read_write(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_compaction_pressure(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_compaction_pressure");
+    let mut group = c.benchmark_group("system_compaction_pressure");
 
     // Precompute data
     let compaction_keys: Vec<_> = (0..25_000).map(make_key).collect();
@@ -217,7 +217,7 @@ fn bench_compaction_pressure(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_concurrent_deletes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_concurrent_deletes");
+    let mut group = c.benchmark_group("system_concurrent_deletes");
 
     // Precompute data
     let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
@@ -276,7 +276,7 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
 
 /// Benchmark concurrent writes across multiple column families
 fn bench_concurrent_multi_cf(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_concurrent_multi_cf");
+    let mut group = c.benchmark_group("system_concurrent_multi_cf");
 
     // Precompute for max pairs=8, 8*2*2500=40000
     let multi_cf_keys: Vec<_> = (0..40_000).map(make_key).collect();

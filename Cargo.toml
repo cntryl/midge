@@ -227,26 +227,6 @@ harness = false
 
 # Tier 2 — Subsystem
 [[bench]]
-name = "subsystem_engine_basic"
-path = "benches/tier2_subsystem/engine_basic.rs"
-harness = false
-
-[[bench]]
-name = "subsystem_engine_advanced"
-path = "benches/tier2_subsystem/engine_advanced.rs"
-harness = false
-
-[[bench]]
-name = "subsystem_concurrency_stress"
-path = "benches/tier2_subsystem/concurrency_stress.rs"
-harness = false
-
-[[bench]]
-name = "subsystem_isolation_mvcc"
-path = "benches/tier2_subsystem/isolation_mvcc.rs"
-harness = false
-
-[[bench]]
 name = "subsystem_storage"
 path = "benches/tier2_subsystem/storage.rs"
 harness = false
@@ -316,10 +296,75 @@ name = "subsystem_wal_segment_rollover"
 path = "benches/tier2_subsystem/wal_segment_rollover.rs"
 harness = false
 
+[[bench]]
+name = "subsystem_wal_io"
+path = "benches/tier2_subsystem/wal_io.rs"
+harness = false
+
 # Tier 3 — System
 [[bench]]
 name = "system_compaction"
 path = "benches/tier3_system/compaction.rs"
+harness = false
+
+[[bench]]
+name = "system_isolation_mvcc"
+path = "benches/tier3_system/isolation_mvcc.rs"
+harness = false
+
+[[bench]]
+name = "system_concurrency_stress"
+path = "benches/tier3_system/concurrency_stress.rs"
+harness = false
+
+[[bench]]
+name = "system_engine_basic"
+path = "benches/tier3_system/engine_basic.rs"
+harness = false
+
+[[bench]]
+name = "system_engine_advanced"
+path = "benches/tier3_system/engine_advanced.rs"
+harness = false
+
+[[bench]]
+name = "system_contention_heavy"
+path = "benches/tier3_system/contention_heavy.rs"
+harness = false
+
+[[bench]]
+name = "system_durability_modes"
+path = "benches/tier3_system/durability_modes.rs"
+harness = false
+
+[[bench]]
+name = "system_lsm"
+path = "benches/tier3_system/lsm.rs"
+harness = false
+
+[[bench]]
+name = "system_recovery"
+path = "benches/tier3_system/recovery.rs"
+harness = false
+
+[[bench]]
+name = "system_scan_l0_only"
+path = "benches/tier3_system/scan_l0_only.rs"
+harness = false
+
+[[bench]]
+name = "system_scan_multi_level"
+path = "benches/tier3_system/scan_multi_level.rs"
+harness = false
+
+[[bench]]
+name = "system_startup_large"
+path = "benches/tier3_system/startup_large.rs"
+harness = false
+
+[[bench]]
+name = "system_startup_wal"
+path = "benches/tier3_system/startup_wal.rs"
 harness = false
 
 [[bench]]
@@ -350,46 +395,6 @@ harness = false
 [[bench]]
 name = "ycsb_workload_f"
 path = "benches/tier4_integration/ycsb_workload_f.rs"
-harness = false
-
-[[bench]]
-name = "system_recovery"
-path = "benches/tier3_system/recovery.rs"
-harness = false
-
-[[bench]]
-name = "system_durability_modes"
-path = "benches/tier3_system/durability_modes.rs"
-harness = false
-
-[[bench]]
-name = "system_lsm"
-path = "benches/tier3_system/lsm.rs"
-harness = false
-
-[[bench]]
-name = "system_scan_l0_only"
-path = "benches/tier3_system/scan_l0_only.rs"
-harness = false
-
-[[bench]]
-name = "system_scan_multi_level"
-path = "benches/tier3_system/scan_multi_level.rs"
-harness = false
-
-[[bench]]
-name = "system_contention_heavy"
-path = "benches/tier3_system/contention_heavy.rs"
-harness = false
-
-[[bench]]
-name = "system_startup_large"
-path = "benches/tier3_system/startup_large.rs"
-harness = false
-
-[[bench]]
-name = "system_startup_wal"
-path = "benches/tier3_system/startup_wal.rs"
 harness = false
 
 # Tier 5 — Soak

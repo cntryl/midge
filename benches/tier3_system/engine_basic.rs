@@ -1,9 +1,9 @@
-//! Tier 1-2 — Basic Engine Benchmarks
+//! Tier 3 — Basic Engine Benchmarks
 //!
-//! **Target Runtime:** < 2 seconds total
-//! **Run Frequency:** CI / Pre-commit
+//! **Target Runtime:** ~60-120 seconds
+//! **Run Frequency:** Nightly CI
 //!
-//! Covers fundamental engine operations:
+//! Covers fundamental engine operations with full engine setup:
 //! - CRUD operations (put/get/delete, random vs sequential)
 //! - Write strategies (sync modes, batch sizes)
 //! - Memory mode performance
@@ -62,7 +62,7 @@ fn precompute_kv(n: usize, value_base: usize) -> (Vec<Bytes>, Vec<Bytes>) {
 // ============================================================================
 
 fn bench_put_variants(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_put_variants");
+    let mut group = c.benchmark_group("system_put_variants");
     // Treat each benchmark invocation as N element operations so Criterion
     // reports ns/op and ops/sec. Use a shorter measurement window for
     // quick CI microbenchmarks; switch to CRITERION_FULL=1 for full mode.
@@ -118,7 +118,7 @@ fn bench_put_variants(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_concurrent_cf_scaling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_concurrent_cf_scaling");
+    let mut group = c.benchmark_group("system_concurrent_cf_scaling");
 
     // thread counts to test
     let thread_counts = [2usize, 4, 8usize];
@@ -199,16 +199,8 @@ fn bench_concurrent_cf_scaling(c: &mut Criterion) {
                     // measure write amplification after workload
                     let wa_after = engine.write_amplification();
 
-                    // Print a brief summary for this iteration so CI logs capture it.
-                    println!(
-                        "concurrent_cf scaling: threads={} ops={} elapsed_ms={:.3} p99_us={} wa_before={:.2}x wa_after={:.2}x",
-                        threads,
-                        threads * ops_per_thread,
-                        elapsed.as_secs_f64() * 1000.0,
-                        p99,
-                        wa_before,
-                        wa_after
-                    );
+                    // Silence unused variable warnings
+                    let _ = (p99, wa_before, wa_after);
                 }
 
                 total_elapsed
@@ -224,7 +216,7 @@ fn bench_concurrent_cf_scaling(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_get_hit_miss(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_get");
+    let mut group = c.benchmark_group("system_get");
     group.measurement_time(Duration::from_millis(200));
     group.sample_size(30);
 
@@ -263,7 +255,7 @@ fn bench_get_hit_miss(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_delete(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_delete");
+    let mut group = c.benchmark_group("system_delete");
     group.measurement_time(Duration::from_millis(200));
     group.sample_size(30);
 
@@ -296,7 +288,7 @@ fn bench_delete(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_write_modes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_write_modes");
+    let mut group = c.benchmark_group("system_write_modes");
     group.measurement_time(Duration::from_millis(200));
     group.sample_size(30);
 
@@ -350,7 +342,7 @@ fn bench_write_modes(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_memory_mode(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_memory_mode");
+    let mut group = c.benchmark_group("system_memory_mode");
     group.measurement_time(Duration::from_millis(200));
     group.sample_size(30);
 
@@ -385,7 +377,7 @@ fn bench_memory_mode(c: &mut Criterion) {
 // Full-stack end-to-end throughput
 // ============================================================================
 fn bench_full_stack_throughput(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_end_to_end");
+    let mut group = c.benchmark_group("system_end_to_end");
     let cf_counts = [1usize, 4, 8, 16];
     let n_ops = 10_000usize;
 

@@ -59,7 +59,7 @@ fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
 // ============================================================================
 
 fn bench_single_thread_baseline(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_baseline_single_thread");
+    let mut group = c.benchmark_group("system_baseline_single_thread");
 
     let (keys_put, vals_put) = precompute_kv(1000, 128);
     group.bench_function("baseline_seq_puts_128b", |b| {
@@ -98,7 +98,7 @@ fn bench_single_thread_baseline(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_concurrent_puts_latency(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_concurrent_puts_latency");
+    let mut group = c.benchmark_group("system_concurrent_puts_latency");
     group.sample_size(50);
 
     for &threads in &[1, 2, 4, 8] {
@@ -153,7 +153,7 @@ fn bench_concurrent_puts_latency(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_contention_breakdown(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_contention_breakdown");
+    let mut group = c.benchmark_group("system_contention_breakdown");
 
     group.bench_function("writers_only_4threads", |b| {
         b.iter_batched(
@@ -260,7 +260,7 @@ fn bench_contention_breakdown(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_compaction_amplification(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_compaction_amplification");
+    let mut group = c.benchmark_group("system_compaction_amplification");
 
     group.bench_function("write_amplification_ratio", |b| {
         b.iter_batched(
@@ -292,7 +292,7 @@ fn bench_compaction_amplification(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_reads_during_compaction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_compaction_interference");
+    let mut group = c.benchmark_group("system_compaction_interference");
 
     group.bench_function("read_latency_during_compaction", |b| {
         b.iter_batched(
@@ -364,7 +364,7 @@ fn bench_reads_during_compaction(c: &mut Criterion) {
 
 /// Benchmark snapshot creation and isolation under concurrent writes
 fn bench_snapshot_stress(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_snapshot_stress");
+    let mut group = c.benchmark_group("system_snapshot_stress");
 
     group.bench_function("concurrent_snapshots_with_writes", |b| {
         b.iter_batched(
@@ -431,7 +431,7 @@ fn bench_snapshot_stress(c: &mut Criterion) {
 
 /// Benchmark transaction isolation across concurrent writers
 fn bench_transaction_isolation(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_transaction_isolation");
+    let mut group = c.benchmark_group("system_transaction_isolation");
 
     group.bench_function("concurrent_tx_isolation", |b| {
         b.iter_batched(
@@ -474,7 +474,7 @@ fn bench_transaction_isolation(c: &mut Criterion) {
 
 /// Benchmark snapshot behavior during active compaction
 fn bench_snapshots_during_compaction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_snapshots_compaction");
+    let mut group = c.benchmark_group("system_snapshots_compaction");
 
     group.bench_function("snapshot_reads_during_compaction", |b| {
         b.iter_batched(
