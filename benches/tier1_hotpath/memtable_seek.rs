@@ -31,24 +31,26 @@ fn bench_memtable_get_point_lookup(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.measurement_time(std::time::Duration::from_millis(200));
 
+    // Pre-compute all keys outside benchmark
+    let keys: Vec<Bytes> = (0..1000).map(make_key).collect();
+    let values: Vec<Bytes> = (0..1000).map(make_value).collect();
+
     let memtable = MemTable::new();
     // Pre-populate
     for i in 0..1000 {
-        memtable.put(make_key(i).as_ref(), make_value(i).as_ref());
+        memtable.put(keys[i].as_ref(), values[i].as_ref());
     }
 
+    // Pre-compute lookup keys
+    let hit_key = keys[500].clone();
+    let miss_key = make_key(2000);
+
     group.bench_function("point_lookup_hit", |b| {
-        b.iter(|| {
-            let result = memtable.get(make_key(500).as_ref());
-            black_box(result);
-        })
+        b.iter(|| black_box(memtable.get(black_box(hit_key.as_ref()))))
     });
 
     group.bench_function("point_lookup_miss", |b| {
-        b.iter(|| {
-            let result = memtable.get(make_key(2000).as_ref()); // Not present
-            black_box(result);
-        })
+        b.iter(|| black_box(memtable.get(black_box(miss_key.as_ref()))))
     });
 
     group.finish();
@@ -69,10 +71,7 @@ fn bench_memtable_get_latest_version(c: &mut Criterion) {
     }
 
     group.bench_function("get_latest_version", |b| {
-        b.iter(|| {
-            let result = memtable.get(key.as_ref());
-            black_box(result);
-        })
+        b.iter(|| black_box(memtable.get(black_box(key.as_ref()))))
     });
 
     group.finish();
@@ -86,15 +85,20 @@ fn bench_memtable_seek_forward_32steps(c: &mut Criterion) {
     group.throughput(Throughput::Elements(32));
     group.measurement_time(std::time::Duration::from_millis(200));
 
+    let keys: Vec<Bytes> = (0..100).map(make_key).collect();
+    let values: Vec<Bytes> = (0..100).map(make_value).collect();
+
     let memtable = MemTable::new();
     // Pre-populate sequential keys
     for i in 0..100 {
-        memtable.put(make_key(i).as_ref(), make_value(i).as_ref());
+        memtable.put(keys[i].as_ref(), values[i].as_ref());
     }
+
+    // Pre-compute start key
+    let start_key = keys[10].clone();
 
     group.bench_function("seek_forward_32", |b| {
         b.iter(|| {
-            let start_key = make_key(10);
             let all_keys = memtable.get_all_keys();
 
             // Filter keys >= start_key and take 32
@@ -105,7 +109,7 @@ fn bench_memtable_seek_forward_32steps(c: &mut Criterion) {
                 .cloned()
                 .collect();
 
-            black_box(results);
+            black_box(results)
         })
     });
 
@@ -120,15 +124,20 @@ fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
     group.throughput(Throughput::Elements(32));
     group.measurement_time(std::time::Duration::from_millis(200));
 
+    let keys: Vec<Bytes> = (0..100).map(make_key).collect();
+    let values: Vec<Bytes> = (0..100).map(make_value).collect();
+
     let memtable = MemTable::new();
     // Pre-populate sequential keys
     for i in 0..100 {
-        memtable.put(make_key(i).as_ref(), make_value(i).as_ref());
+        memtable.put(keys[i].as_ref(), values[i].as_ref());
     }
+
+    // Pre-compute start key
+    let start_key = keys[50].clone();
 
     group.bench_function("seek_reverse_32", |b| {
         b.iter(|| {
-            let start_key = make_key(50);
             let all_keys = memtable.get_all_keys();
 
             // Filter keys <= start_key, reverse, and take 32
@@ -140,7 +149,7 @@ fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
             results.reverse();
             results.truncate(32);
 
-            black_box(results);
+            black_box(results)
         })
     });
 

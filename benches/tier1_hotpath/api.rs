@@ -91,6 +91,9 @@ fn bench_batch_put(c: &mut Criterion) {
 }
 
 /// Benchmark single get operations (hot path for reads)
+///
+/// This benchmarks reads from the memtable (in-memory), which is the fastest
+/// read path. SST reads are benchmarked separately in tier2.
 fn bench_single_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_single_get");
     group.sampling_mode(SamplingMode::Flat);
@@ -100,38 +103,43 @@ fn bench_single_get(c: &mut Criterion) {
     let cf = engine.default_column_family();
 
     // Precompute keys and values
-    let num_keys = 10_000;
+    let num_keys = 1_000;
     let (keys, vals) = make_fixed_kv(num_keys);
 
-    // Pre-populate with data
+    // Pre-populate with data (NO flush - keep in memtable for hot path)
     for i in 0..num_keys {
         engine.put(&cf, &keys[i], &vals[i]).unwrap();
     }
-    engine.flush().unwrap();
+    // Note: intentionally NOT flushing to keep data in memtable
 
-    // Hit rate benchmark - cycle through keys
+    // Hit rate benchmark - cycle through keys (all in memtable)
     let mut counter = 0;
-    group.bench_function("single_get_hit", |b| {
+    group.bench_function("single_get_hit_memtable", |b| {
         b.iter(|| {
             let idx = counter % num_keys;
             counter += 1;
-            let result = engine.get(&cf, &keys[idx]).unwrap();
-            black_box(result);
+            let result = engine.get(&cf, black_box(&keys[idx]));
+            black_box(result)
         })
     });
 
     // Miss rate benchmark - use keys not in the populated set
+    // Pre-generate miss keys to avoid allocation in hot path
+    let miss_keys: Vec<Bytes> = (0..num_keys)
+        .map(|i| {
+            let mut key = [0u8; 16];
+            key[8..16].copy_from_slice(&((i + num_keys * 2) as u64).to_be_bytes());
+            Bytes::copy_from_slice(&key)
+        })
+        .collect();
+
     let mut miss_counter = 0;
     group.bench_function("single_get_miss", |b| {
         b.iter(|| {
             let idx = miss_counter % num_keys;
             miss_counter += 1;
-            // Use miss_keys which are the same as keys, but since we didn't insert them with different values? Wait, no.
-            // To make miss, I need different keys. Let's offset by num_keys.
-            let mut miss_key = [0u8; 16];
-            miss_key[8..16].copy_from_slice(&((idx + num_keys) as u64).to_be_bytes());
-            let result = engine.get(&cf, &miss_key[..]).unwrap();
-            black_box(result);
+            let result = engine.get(&cf, black_box(&miss_keys[idx]));
+            black_box(result)
         })
     });
 
