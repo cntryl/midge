@@ -1,9 +1,11 @@
-//! Tier 1 — Hot Path Storage Benchmarks (A++ Optimized)
+//! Tier 1 — Hot Path Data Structure Benchmarks
+//!
+//! Covers core in-memory data structures:
+//! • SkipList (sequential, random insertion)
+//! • MemTable (sequential, random, reads)
+//! • LZ4 compression/decompression
 //!
 //! • Zero allocations inside measured loop
-//! • No thread spawn inside measured loop
-//! • SkipList/MemTable hot-path isolation
-//! • Compression + decompression
 //! • Flat sampling mode
 //!
 //! Runtime target: < 1 second
@@ -21,9 +23,7 @@ use criterion_helper::criterion_config;
 use cntryl_midge::common::codec::{Compressor, Lz4Codec};
 use cntryl_midge::core::memtable::MemTable;
 use cntryl_midge::core::skiplist::SkipList;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier};
-use std::{hint::black_box, thread};
+use std::hint::black_box;
 
 // =============================================================================
 // Helpers: Precompute Data
@@ -112,72 +112,8 @@ fn bench_skiplist_random(c: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// SkipList — Concurrent (no thread spawn per iter)
-// =============================================================================
-
-fn bench_skiplist_concurrent(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_skiplist_concurrent");
-    group.sampling_mode(SamplingMode::Flat);
-
-    const THREADS: usize = 4;
-    const OPS: usize = 500;
-
-    // Precompute thread-specific K/V batches
-    let mut kvs = Vec::new();
-    for t in 0..THREADS {
-        let (keys, vals) = make_fixed_kv(OPS);
-        kvs.push((t, keys, vals));
-    }
-
-    group.bench_function("4_threads_500_ops", |b| {
-        // Reusable barrier + threads
-        let barrier = Arc::new(Barrier::new(THREADS + 1));
-        let sl = Arc::new(SkipList::new());
-        let exit_signal = Arc::new(AtomicBool::new(false));
-
-        let mut handles = Vec::new();
-        for (_tid, keys, vals) in kvs.clone() {
-            let sl_clone = sl.clone();
-            let barrier_clone = barrier.clone();
-            let exit_clone = exit_signal.clone();
-
-            handles.push(thread::spawn(move || loop {
-                // wait for instruction
-                barrier_clone.wait();
-
-                // Exit signal check
-                if exit_clone.load(Ordering::Acquire) {
-                    return;
-                }
-
-                // do 500 ops
-                for i in 0..OPS {
-                    sl_clone.upsert(keys[i].clone(), Some(vals[i].clone()), i as u64);
-                }
-
-                barrier_clone.wait();
-            }));
-        }
-
-        b.iter(|| {
-            // Signal threads to run
-            barrier.wait();
-            // Wait for them to finish
-            barrier.wait();
-            black_box(&sl)
-        });
-
-        // clean shutdown
-        exit_signal.store(true, Ordering::Release);
-        barrier.wait();
-        for h in handles {
-            let _ = h.join();
-        }
-    });
-
-    group.finish();
-}
+// Note: Concurrent skiplist benchmark moved to tier2_subsystem/storage.rs
+// Thread-based benchmarks belong in tier2 even with barrier-based thread reuse.
 
 // =============================================================================
 // MemTable — Sequential / Random / Concurrent
@@ -283,15 +219,14 @@ fn bench_compression_lz4(c: &mut Criterion) {
 // =============================================================================
 
 criterion_group! {
-    name = tier1_hotpath_storage;
+    name = tier1_hotpath_data_structures;
     config = criterion_config();
     targets =
         bench_skiplist_sequential,
         bench_skiplist_random,
-        bench_skiplist_concurrent,
         bench_memtable_sequential,
         bench_memtable_random,
         bench_memtable_read,
         bench_compression_lz4
 }
-criterion_main!(tier1_hotpath_storage);
+criterion_main!(tier1_hotpath_data_structures);

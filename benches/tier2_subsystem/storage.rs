@@ -11,6 +11,7 @@
 //! - SST full file build (in-mem)
 //! - WriteBatch apply → MemTable
 //! - MergeIterator over N sst blocks
+//! - Concurrent SkipList access
 //!
 //! Runtime target: < 2–3 seconds
 //! Run frequency: nightly + on performance-critical PRs
@@ -25,11 +26,15 @@ use criterion_helper::criterion_config;
 use cntryl_midge::{
     api::{column_family::ColumnFamilyId, write_batch::WriteBatch},
     core::data_structures::merge_iterator::{IteratorSource, MergingIterator, VecSource},
+    core::skiplist::SkipList,
     wal::mem::WalMem,
     wal::{traits::WalWriter, WalOpKind, WalRecord},
 };
 
 use std::hint::black_box;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 // ============================================================================
 // Helpers
@@ -286,6 +291,73 @@ fn bench_merge_iterator(c: &mut Criterion) {
 }
 
 // ============================================================================
+// SkipList — Concurrent (moved from tier1)
+// ============================================================================
+
+fn bench_skiplist_concurrent(c: &mut Criterion) {
+    let mut g = c.benchmark_group("subsystem_skiplist_concurrent");
+    g.sampling_mode(SamplingMode::Flat);
+
+    const THREADS: usize = 4;
+    const OPS: usize = 500;
+
+    // Precompute thread-specific K/V batches
+    let mut kvs = Vec::new();
+    for _t in 0..THREADS {
+        let (keys, vals) = fixed_kv(OPS);
+        kvs.push((keys, vals));
+    }
+
+    g.bench_function("4_threads_500_ops", |b| {
+        // Reusable barrier + threads
+        let barrier = Arc::new(Barrier::new(THREADS + 1));
+        let sl = Arc::new(SkipList::new());
+        let exit_signal = Arc::new(AtomicBool::new(false));
+
+        let mut handles = Vec::new();
+        for (keys, vals) in kvs.clone() {
+            let sl_clone = sl.clone();
+            let barrier_clone = barrier.clone();
+            let exit_clone = exit_signal.clone();
+
+            handles.push(thread::spawn(move || loop {
+                // wait for instruction
+                barrier_clone.wait();
+
+                // Exit signal check
+                if exit_clone.load(Ordering::Acquire) {
+                    return;
+                }
+
+                // do 500 ops
+                for i in 0..OPS {
+                    sl_clone.upsert(keys[i].clone(), Some(vals[i].clone()), i as u64);
+                }
+
+                barrier_clone.wait();
+            }));
+        }
+
+        b.iter(|| {
+            // Signal threads to run
+            barrier.wait();
+            // Wait for them to finish
+            barrier.wait();
+            black_box(&sl)
+        });
+
+        // clean shutdown
+        exit_signal.store(true, Ordering::Release);
+        barrier.wait();
+        for h in handles {
+            let _ = h.join();
+        }
+    });
+
+    g.finish();
+}
+
+// ============================================================================
 // Criterion Entry Point
 // ============================================================================
 
@@ -298,7 +370,8 @@ criterion_group! {
         // bench_block_decode,   // TODO: Fix Block::decode and get method
         // bench_sst_file,       // TODO: Fix SstFileBuilder
         bench_writebatch_apply,
-        bench_merge_iterator
+        bench_merge_iterator,
+        bench_skiplist_concurrent
 }
 
 criterion_main!(tier2_subsystem_storage);

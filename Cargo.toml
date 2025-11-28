@@ -193,8 +193,8 @@ path = "benches/tier1_hotpath/sst.rs"
 harness = false
 
 [[bench]]
-name = "tier1_hotpath_storage"
-path = "benches/tier1_hotpath/storage.rs"
+name = "tier1_hotpath_data_structures"
+path = "benches/tier1_hotpath/data_structures.rs"
 harness = false
 
 [[bench]]
