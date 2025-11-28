@@ -13,7 +13,7 @@ use bytes::Bytes;
 use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::mem::SstMemWriter;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 /// Pre-generate keys and values as Bytes (required by SstMemWriter API)
@@ -93,7 +93,7 @@ fn bench_flush_sst_build_large_values(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_flush;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets = bench_flush_sst_build_small, bench_flush_sst_build_medium, bench_flush_sst_build_large_values
 }
 criterion_main!(tier2_subsystem_flush);

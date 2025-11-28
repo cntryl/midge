@@ -16,7 +16,7 @@ mod criterion_helper;
 use bytes::Bytes;
 use cntryl_midge::core::memtable::MemTable;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 /// Pre-compute a key (deterministic, no allocation in hot path)
@@ -109,7 +109,7 @@ fn bench_memtable_seq_insert(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_memtable_insert;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets = bench_memtable_put_single, bench_memtable_seq_insert
 }
 criterion_main!(tier1_hotpath_memtable_insert);

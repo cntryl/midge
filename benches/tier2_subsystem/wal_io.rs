@@ -15,7 +15,7 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use tempfile::tempdir;
 
 use cntryl_midge::fs::{io as fs_io, write_vectored};
@@ -273,7 +273,7 @@ fn bench_wal_io_platform(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_wal_io;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets =
         bench_wal_append_individual,
         bench_wal_append_batch,

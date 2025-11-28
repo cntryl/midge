@@ -19,7 +19,7 @@ mod ycsb_common;
 
 use cntryl_midge::{MidgeEngine, WriteBatch};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use hdrhistogram::Histogram;
 
 use rand::rngs::StdRng;
@@ -267,7 +267,7 @@ fn bench_workload_d(c: &mut Criterion) {
 
 criterion_group! {
     name = tier4_integration_ycsb_workload_d;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier4Integration);
     targets = bench_workload_d
 }
 criterion_main!(tier4_integration_ycsb_workload_d);

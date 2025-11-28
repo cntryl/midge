@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::fs;
 use std::hint::black_box;
 use tempfile::TempDir;
@@ -88,7 +88,7 @@ fn measure_wal_size(db_path: &std::path::Path) -> u64 {
 
 criterion_group! {
     name = tier6_capacity_wal_growth_large;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier6Capacity);
     targets = bench_wal_growth_large
 }
 criterion_main!(tier6_capacity_wal_growth_large);

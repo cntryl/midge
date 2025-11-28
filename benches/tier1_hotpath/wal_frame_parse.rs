@@ -12,7 +12,7 @@ use bytes::Bytes;
 use cntryl_midge::wal::encoding::{decode, decode_borrowed, encode};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 /// Create a WAL record with specified key/value sizes
@@ -140,7 +140,7 @@ fn bench_wal_zero_copy_vs_alloc(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_wal_frame_parse;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets = bench_wal_frame_parse_small, bench_wal_frame_parse_medium, bench_wal_frame_parse_large, bench_wal_header_scan_only, bench_wal_zero_copy_vs_alloc
 }
 criterion_main!(tier1_hotpath_wal_frame_parse);

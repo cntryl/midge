@@ -18,7 +18,7 @@ mod ycsb_common;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
@@ -342,7 +342,7 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_durability_modes;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_durability_async_wal,
         bench_durability_wal_sync_every,

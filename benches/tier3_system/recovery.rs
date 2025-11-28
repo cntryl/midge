@@ -15,7 +15,7 @@ mod criterion_helper;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use std::path::Path;
 use std::time::Instant;
@@ -314,7 +314,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_recovery;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_recovery_throughput,
         bench_recovery_with_wal_sync,

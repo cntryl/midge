@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -288,7 +288,7 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_contention_heavy;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets = bench_engine_heavy_write_contention, bench_engine_heavy_read_contention, bench_engine_mixed_contention
 }
 criterion_main!(tier3_system_contention_heavy);

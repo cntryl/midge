@@ -11,7 +11,7 @@ mod criterion_helper;
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::hint::black_box;
@@ -112,7 +112,8 @@ fn bench_compact_all(c: &mut Criterion) {
             |b, &size| {
                 b.iter_batched(
                     || {
-                        let engine = setup_db_with_data(&format!("compact_{}", size), &keys, &values);
+                        let engine =
+                            setup_db_with_data(&format!("compact_{}", size), &keys, &values);
                         engine.flush().unwrap();
                         engine
                     },
@@ -131,7 +132,7 @@ fn bench_compact_all(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_compaction;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets = bench_flush, bench_compact_all
 }
 criterion_main!(tier3_system_compaction);

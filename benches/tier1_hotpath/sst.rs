@@ -14,7 +14,7 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::encoding::{decode, encode, TlvBlockIterator};
@@ -162,7 +162,7 @@ fn bench_writer_tiny(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 criterion_group! {
     name = tier1_hotpath_sst;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets =
         bench_encode,
         bench_decode,

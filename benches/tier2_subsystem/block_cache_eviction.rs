@@ -9,7 +9,7 @@
 mod criterion_helper;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 use cntryl_midge::sst::block_cache::BlockType;
@@ -119,7 +119,7 @@ fn bench_block_cache_lru_eviction_10k(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_block_cache_eviction;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets = bench_block_cache_lru_eviction_1k, bench_block_cache_lru_eviction_10k
 }
 criterion_main!(tier2_subsystem_block_cache_eviction);

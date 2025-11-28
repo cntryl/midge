@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use tempfile::TempDir;
 
@@ -104,7 +104,7 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_scan_l0_only;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets = bench_scan_l0_direct
 }
 criterion_main!(tier3_system_scan_l0_only);

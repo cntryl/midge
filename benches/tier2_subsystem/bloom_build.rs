@@ -12,7 +12,7 @@ mod criterion_helper;
 
 use cntryl_midge::sst::bloom::BloomFilterBuilder;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 /// Pre-generate keys as raw bytes (no Bytes wrapper overhead in benchmark)
@@ -88,7 +88,7 @@ fn bench_bloom_build_1m_keys(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_bloom_build;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets = bench_bloom_build_10k_keys, bench_bloom_build_100k_keys, bench_bloom_build_1m_keys
 }
 criterion_main!(tier2_subsystem_bloom_build);

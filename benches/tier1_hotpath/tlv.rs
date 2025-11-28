@@ -12,7 +12,7 @@
 mod criterion_helper;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::common::tlv::{
     decode_varint32, decode_varint64, encode_varint32, encode_varint64, tags, TlvReader, TlvWriter,
@@ -363,7 +363,7 @@ fn bench_tlv_roundtrip(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_tlv;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets =
         bench_varint32_encode,
         bench_varint64_encode,

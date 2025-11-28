@@ -17,7 +17,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
@@ -174,7 +174,7 @@ fn bench_single_put(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_api;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets = bench_batch_put, bench_single_get, bench_single_put
 }
 criterion_main!(tier1_hotpath_api);

@@ -13,7 +13,7 @@ mod criterion_helper;
 use bytes::Bytes;
 use cntryl_midge::core::memtable::MemTable;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 fn make_key(i: usize) -> Bytes {
@@ -158,7 +158,7 @@ fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_memtable_seek;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets = bench_memtable_get_point_lookup, bench_memtable_get_latest_version, bench_memtable_seek_forward_32steps, bench_memtable_seek_reverse_32steps
 }
 criterion_main!(tier1_hotpath_memtable_seek);

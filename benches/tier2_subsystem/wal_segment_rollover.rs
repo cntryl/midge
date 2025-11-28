@@ -9,7 +9,7 @@
 mod criterion_helper;
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -90,7 +90,7 @@ fn bench_wal_rollover_large_segments(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_wal_segment_rollover;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets = bench_wal_rollover_small_segments, bench_wal_rollover_large_segments
 }
 criterion_main!(tier2_subsystem_wal_segment_rollover);

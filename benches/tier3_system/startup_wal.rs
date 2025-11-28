@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use tempfile::TempDir;
 
@@ -110,7 +110,7 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_startup_wal;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets = bench_engine_startup_from_wal
 }
 criterion_main!(tier3_system_startup_wal);

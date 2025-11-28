@@ -13,7 +13,7 @@ mod criterion_helper;
 use bytes::Bytes;
 use cntryl_midge::sst::bloom::BloomFilterBuilder;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 /// Benchmark bloom filter containment check (hit vs miss)
@@ -120,7 +120,7 @@ fn bench_bloom_compute_hashes(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_bloom;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets = bench_bloom_maybe_contains, bench_bloom_batch_lookups, bench_bloom_compute_hashes
 }
 criterion_main!(tier1_hotpath_bloom);

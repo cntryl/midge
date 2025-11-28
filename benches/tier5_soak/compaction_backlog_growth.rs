@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use tempfile::TempDir;
 
@@ -69,7 +69,7 @@ fn bench_compaction_backlog_growth(c: &mut Criterion) {
 
 criterion_group! {
     name = tier5_soak_compaction_backlog_growth;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier5Soak);
     targets = bench_compaction_backlog_growth
 }
 criterion_main!(tier5_soak_compaction_backlog_growth);

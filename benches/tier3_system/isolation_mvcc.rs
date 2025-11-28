@@ -17,7 +17,7 @@ mod criterion_helper;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -545,7 +545,7 @@ fn bench_snapshots_during_compaction(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_isolation_mvcc;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_single_thread_baseline,
         bench_concurrent_puts_latency,

@@ -13,7 +13,7 @@ use cntryl_midge::sst::{create_basic_cache, BlockKey, CacheBlockType, CachedBloc
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 fn make_block_key(file_num: usize, offset: u64) -> BlockKey {
@@ -186,7 +186,7 @@ fn bench_cache_eviction(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_cache;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets = bench_cache_insert, bench_cache_get_hit, bench_cache_get_miss, bench_cache_eviction
 }
 criterion_main!(tier1_hotpath_cache);

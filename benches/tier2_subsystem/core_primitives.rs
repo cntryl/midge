@@ -15,7 +15,7 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::{
     api::{column_family::ColumnFamilyId, write_batch::WriteBatch},
@@ -226,7 +226,7 @@ fn bench_skiplist_concurrent(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_core_primitives;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets =
         bench_wal_write,
         bench_writebatch_apply,

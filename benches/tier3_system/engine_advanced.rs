@@ -14,7 +14,7 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::hint::black_box;
@@ -262,7 +262,7 @@ fn bench_delete_heavy(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_engine_advanced;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_ttl,
         bench_column_family_scaling,

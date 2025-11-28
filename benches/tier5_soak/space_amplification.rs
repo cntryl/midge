@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use tempfile::TempDir;
 
@@ -102,7 +102,7 @@ fn estimate_disk_usage(path: &std::path::Path) -> u64 {
 
 criterion_group! {
     name = tier5_soak_space_amplification;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier5Soak);
     targets = bench_space_amplification
 }
 criterion_main!(tier5_soak_space_amplification);

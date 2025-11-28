@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::encoding::TlvBlockIterator;
@@ -170,7 +170,7 @@ fn bench_sst_writer_compression(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_sst;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets =
         bench_sst_iterator_full,
         bench_sst_full_decode,

@@ -9,7 +9,7 @@
 mod criterion_helper;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 use cntryl_midge::core::manifest::{FileMeta, VersionEdit, VersionSet};
@@ -58,7 +58,7 @@ fn bench_manifest_replay_100k_entries(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_manifest_large_history;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets = bench_manifest_replay_100k_entries
 }
 criterion_main!(tier2_subsystem_manifest_large_history);

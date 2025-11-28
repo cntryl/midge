@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use tempfile::TempDir;
 
@@ -82,7 +82,7 @@ fn bench_cold_start_large(c: &mut Criterion) {
 
 criterion_group! {
     name = tier6_capacity_cold_start_large;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier6Capacity);
     targets = bench_cold_start_large
 }
 criterion_main!(tier6_capacity_cold_start_large);

@@ -10,7 +10,7 @@ mod criterion_helper;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use tempfile::TempDir;
 
@@ -57,7 +57,7 @@ fn bench_large_dataset_insert(c: &mut Criterion) {
 
 criterion_group! {
     name = tier6_capacity_large_dataset_insert;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier6Capacity);
     targets = bench_large_dataset_insert
 }
 criterion_main!(tier6_capacity_large_dataset_insert);

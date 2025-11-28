@@ -17,7 +17,7 @@ use bytes::Bytes;
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::wal::encode_pipeline::{EncodeConfig, WalEncoder};
 use cntryl_midge::wal::encoding::{decode, encode, encode_delete, encode_put_simple};
@@ -299,7 +299,7 @@ fn bench_wal_batch_encode(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_wal;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets =
         bench_wal_encode_record,
         bench_wal_decode_record,

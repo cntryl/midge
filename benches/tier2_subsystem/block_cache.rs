@@ -12,7 +12,7 @@
 mod criterion_helper;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 use cntryl_midge::sst::block_cache::BlockType;
@@ -178,7 +178,7 @@ fn bench_block_cache_hotset_rotation(c: &mut Criterion) {
 
 criterion_group! {
     name = tier2_subsystem_block_cache;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
     targets = bench_block_cache_eviction_scan, bench_block_cache_fill_then_hit, bench_block_cache_hotset_rotation
 }
 criterion_main!(tier2_subsystem_block_cache);

@@ -13,7 +13,7 @@ mod criterion_helper;
 
 use cntryl_midge::sst::BloomFilter;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use std::hint::black_box;
 
@@ -128,7 +128,7 @@ fn bench_bloom_false_positive_rates(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_index;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets = bench_bloom_build, bench_bloom_query, bench_bloom_false_positive_rates
 }
 criterion_main!(tier1_hotpath_index);

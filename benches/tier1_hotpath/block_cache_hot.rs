@@ -16,7 +16,7 @@ use cntryl_midge::sst::block_cache::{
     create_basic_cache, create_hot_cache, BlockKey, BlockType, CachedBlock,
 };
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 /// Pre-allocated block data to avoid allocation in benchmark setup.
@@ -214,7 +214,7 @@ fn bench_hot_tier_comparison(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_block_cache_hot;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets = bench_block_cache_get_hot, bench_block_cache_insert_hot, bench_block_cache_hit_ratio_fast, bench_hot_tier_comparison
 }
 criterion_main!(tier1_hotpath_block_cache_hot);

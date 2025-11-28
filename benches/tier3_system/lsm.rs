@@ -17,7 +17,7 @@ mod criterion_helper;
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use rand::Rng;
 use std::hint::black_box;
 use std::path::Path;
@@ -288,7 +288,7 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_lsm;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_system_wal_write,
         bench_system_flush_reopen_read,

@@ -18,7 +18,7 @@ use bytes::Bytes;
 use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::common::codec::{Compressor, Lz4Codec};
 use cntryl_midge::core::memtable::MemTable;
@@ -220,7 +220,7 @@ fn bench_compression_lz4(c: &mut Criterion) {
 
 criterion_group! {
     name = tier1_hotpath_data_structures;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets =
         bench_skiplist_sequential,
         bench_skiplist_random,

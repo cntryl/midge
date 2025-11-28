@@ -18,7 +18,7 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
@@ -359,7 +359,7 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_concurrency_stress;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_concurrent_puts,
         bench_mixed_read_write,

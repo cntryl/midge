@@ -13,7 +13,7 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
-use criterion_helper::criterion_config;
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use hdrhistogram::Histogram;
 use std::sync::Arc;
 use std::thread;
@@ -452,7 +452,7 @@ fn bench_full_stack_throughput(c: &mut Criterion) {
 
 criterion_group! {
     name = tier3_system_engine_basic;
-    config = criterion_config();
+    config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_put_variants,
         bench_get_hit_miss,

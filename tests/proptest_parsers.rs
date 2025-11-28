@@ -6,7 +6,6 @@
 //!
 //! Run with: `cargo test --test proptest_parsers`
 
-use bytes::Bytes;
 use proptest::prelude::*;
 
 use cntryl_midge::common::internal_key::{
