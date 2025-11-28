@@ -75,8 +75,35 @@ fn make_kv_pairs(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
         key.extend_from_slice(&(i as u64).to_be_bytes());
         key.extend_from_slice(b":profile");
 
-        // value: {"id":123,"name":"User123"}
-        let value = format!("{{\"id\":{},\"name\":\"User{}\"}}", i, i).into_bytes();
+        // value: {"id":123,"name":"User123"} - build without format! allocation
+        let mut value = Vec::with_capacity(40);
+        value.extend_from_slice(b"{\"id\":");
+        // Append i as decimal
+        if i == 0 {
+            value.push(b'0');
+        } else {
+            let start = value.len();
+            let mut n = i;
+            while n > 0 {
+                value.push(b'0' + (n % 10) as u8);
+                n /= 10;
+            }
+            value[start..].reverse();
+        }
+        value.extend_from_slice(b",\"name\":\"User");
+        // Append i again
+        if i == 0 {
+            value.push(b'0');
+        } else {
+            let start = value.len();
+            let mut n = i;
+            while n > 0 {
+                value.push(b'0' + (n % 10) as u8);
+                n /= 10;
+            }
+            value[start..].reverse();
+        }
+        value.extend_from_slice(b"\"}");
 
         out.push((key, value));
     }

@@ -26,6 +26,36 @@ fn setup_l0_only_db() -> (MidgeEngine, TempDir) {
     (MidgeEngine::open(opts).unwrap(), tmp)
 }
 
+/// Pre-generate keys without format! allocations
+fn make_key(i: usize) -> Vec<u8> {
+    let mut key = vec![0u8; 14];
+    key[..4].copy_from_slice(b"key_");
+    let mut n = i;
+    for j in (4..14).rev() {
+        key[j] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    key
+}
+
+/// Pre-generate values without format! allocations
+fn make_value(i: usize) -> Vec<u8> {
+    let mut val = Vec::with_capacity(16);
+    val.extend_from_slice(b"value_");
+    if i == 0 {
+        val.push(b'0');
+    } else {
+        let start = val.len();
+        let mut n = i;
+        while n > 0 {
+            val.push(b'0' + (n % 10) as u8);
+            n /= 10;
+        }
+        val[start..].reverse();
+    }
+    val
+}
+
 /// Benchmark scanning L0 SSTs (10k keys spread across multiple L0 files)
 fn bench_scan_l0_direct(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_scan_l0_direct");
@@ -34,29 +64,39 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(5));
     group.sample_size(10);
 
+    // Pre-compute keys and values outside the benchmark loop
+    let keys: Vec<Vec<u8>> = (0..10_000).map(make_key).collect();
+    let values: Vec<Vec<u8>> = (0..2000).map(make_value).collect();
+
     group.bench_function("scan_l0_10k_keys", |b| {
-        b.iter(|| {
-            let (engine, _tmp) = setup_l0_only_db();
-            let cf = engine.default_column_family();
+        b.iter_batched(
+            || {
+                let (engine, tmp) = setup_l0_only_db();
+                let cf = engine.default_column_family();
 
-            // Populate and flush multiple times to create multiple L0 files
-            for batch in 0..5 {
-                for i in 0..2000 {
-                    let key = format!("key_{:010}", batch * 2000 + i);
-                    let val = format!("value_{}", i);
-                    engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
+                // Populate and flush multiple times to create multiple L0 files
+                for batch in 0..5 {
+                    for i in 0..2000 {
+                        let idx = batch * 2000 + i;
+                        engine.put(&cf, &keys[idx], &values[i]).unwrap();
+                    }
+                    engine.flush().unwrap(); // Creates L0 SST
                 }
-                engine.flush().unwrap(); // Creates L0 SST
-            }
 
-            // Now scan the entire range (all L0 files)
-            let query = Query::new()
-                .start_key("key_0000000000".as_bytes().into())
-                .end_key("key_9999999999".as_bytes().into());
+                (engine, tmp)
+            },
+            |(engine, _tmp)| {
+                // Now scan the entire range (all L0 files)
+                let cf = engine.default_column_family();
+                let query = Query::new()
+                    .start_key("key_0000000000".as_bytes().into())
+                    .end_key("key_9999999999".as_bytes().into());
 
-            let results = engine.scan(&cf, query).unwrap();
-            black_box(results.len());
-        })
+                let results = engine.scan(&cf, query).unwrap();
+                black_box(results.len());
+            },
+            criterion::BatchSize::LargeInput,
+        )
     });
 
     group.finish();

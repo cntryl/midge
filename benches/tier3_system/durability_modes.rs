@@ -17,7 +17,7 @@ mod ycsb_common;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
 use criterion_helper::criterion_config;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -33,15 +33,45 @@ use ycsb_common::*;
 const OPS_PER_THREAD: usize = 5_000;
 const RECORD_COUNT: usize = 25_000;
 
+/// Pre-generate values outside the benchmark to avoid format! allocations
+fn pregen_workload_values(count: usize, seed: u64) -> Vec<Bytes> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    (0..count)
+        .map(|i| {
+            // Simple value: key_id + random bytes (no format! allocation)
+            let mut buf = Vec::with_capacity(32);
+            buf.extend_from_slice(b"value_");
+            // Append key_id as decimal
+            if i == 0 {
+                buf.push(b'0');
+            } else {
+                let start = buf.len();
+                let mut n = i;
+                while n > 0 {
+                    buf.push(b'0' + (n % 10) as u8);
+                    n /= 10;
+                }
+                buf[start..].reverse();
+            }
+            buf.push(b'_');
+            // Append random bytes
+            let r = rng.random::<u64>();
+            let start = buf.len();
+            let mut n = r;
+            while n > 0 {
+                buf.push(b'0' + (n % 10) as u8);
+                n /= 10;
+            }
+            buf[start..].reverse();
+            Bytes::from(buf)
+        })
+        .collect()
+}
+
 fn load_data(engine: &MidgeEngine, count: usize) {
     let keys = (0..count).map(generate_key).collect::<Vec<_>>();
     let values = pregen_values(count, 42);
     load_data_batched(engine, &keys, &values, BATCH_SIZE);
-}
-
-fn generate_value(key_id: usize, random: u64) -> Bytes {
-    // Simple value generation: key_id + random
-    Bytes::from(format!("value_{}_{}", key_id, random))
 }
 
 // ============================================================================
@@ -66,22 +96,21 @@ fn setup_db_with_wal_sync(db_name: &str, wal_sync: bool) -> MidgeEngine {
 }
 
 /// Workload A variant: 50% read, 50% write
-fn run_workload_a_variant(engine: &MidgeEngine, operations: usize) {
+/// Uses pre-computed keys and values to avoid allocations
+fn run_workload_a_variant(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], operations: usize) {
     let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(12345);
-    let zipfian = ZipfianGenerator::new(RECORD_COUNT, 0.99);
+    let zipfian = ZipfianGenerator::new(keys.len(), 0.99);
 
-    for _ in 0..operations {
+    for i in 0..operations {
         let key_id = zipfian.next(&mut rng);
-        let key = generate_key(key_id);
 
         if rng.random_bool(0.5) {
             // Read operation
-            let _ = black_box(engine.get(&cf, &key));
+            let _ = black_box(engine.get(&cf, &keys[key_id]));
         } else {
-            // Write operation
-            let value = generate_value(key_id, rng.random());
-            let _ = engine.put(&cf, &key, &value);
+            // Write operation - use rotating value index
+            let _ = engine.put(&cf, &keys[key_id], &values[i % values.len()]);
         }
     }
 }
@@ -93,13 +122,18 @@ fn run_workload_a_variant(engine: &MidgeEngine, operations: usize) {
 /// Async WAL: Baseline - no fsync, writes buffered
 fn bench_durability_async_wal(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability_async_wal");
+    group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
+
+    // Pre-compute keys and values outside benchmark
+    let keys: Vec<Bytes> = (0..RECORD_COUNT).map(generate_key).collect();
+    let values = pregen_workload_values(OPS_PER_THREAD, 12345);
 
     group.bench_function("50_50_workload", |b| {
         b.iter_batched(
             || setup_db_with_wal_sync("async_baseline", false),
             |engine| {
-                run_workload_a_variant(&engine, OPS_PER_THREAD);
+                run_workload_a_variant(&engine, &keys, &values, OPS_PER_THREAD);
                 black_box(());
             },
             criterion::BatchSize::SmallInput,
@@ -112,14 +146,19 @@ fn bench_durability_async_wal(c: &mut Criterion) {
 /// Sync WAL: Every write is flushed to disk (slowest, safest)
 fn bench_durability_wal_sync_every(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability_wal_sync_every");
+    group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
     group.sample_size(10); // Fewer samples since it's slow
+
+    // Pre-compute keys and values outside benchmark
+    let keys: Vec<Bytes> = (0..RECORD_COUNT).map(generate_key).collect();
+    let values = pregen_workload_values(OPS_PER_THREAD, 12346);
 
     group.bench_function("50_50_workload", |b| {
         b.iter_batched(
             || setup_db_with_wal_sync("sync_every", true),
             |engine| {
-                run_workload_a_variant(&engine, OPS_PER_THREAD);
+                run_workload_a_variant(&engine, &keys, &values, OPS_PER_THREAD);
                 black_box(());
             },
             criterion::BatchSize::SmallInput,
@@ -136,16 +175,26 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
 /// Compare durability modes under concurrent load (4 threads)
 fn bench_durability_concurrent(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability_concurrent");
+    group.sampling_mode(SamplingMode::Flat);
+
+    // Pre-compute keys and values outside benchmark
+    let keys: Arc<Vec<Bytes>> = Arc::new((0..RECORD_COUNT).map(generate_key).collect());
+    let values: Arc<Vec<Bytes>> = Arc::new(pregen_workload_values(OPS_PER_THREAD, 12347));
 
     for (mode_name, wal_sync) in &[("async", false), ("sync_every", true)] {
         let total_ops = 4 * OPS_PER_THREAD;
         group.throughput(Throughput::Elements(total_ops as u64));
         group.sample_size(if *wal_sync { 5 } else { 20 });
 
+        let keys = Arc::clone(&keys);
+        let values = Arc::clone(&values);
+
         group.bench_with_input(
             BenchmarkId::from_parameter(*mode_name),
             mode_name,
             |b, &mode_name| {
+                let keys = Arc::clone(&keys);
+                let values = Arc::clone(&values);
                 b.iter_batched(
                     || {
                         setup_db_with_wal_sync(
@@ -155,12 +204,16 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                     },
                     |engine| {
                         let engine = Arc::new(engine);
+                        let keys = Arc::clone(&keys);
+                        let values = Arc::clone(&values);
 
                         thread::scope(|scope| {
                             for _ in 0..4 {
                                 let e = Arc::clone(&engine);
+                                let keys = Arc::clone(&keys);
+                                let values = Arc::clone(&values);
                                 scope.spawn(move || {
-                                    run_workload_a_variant(&e, OPS_PER_THREAD);
+                                    run_workload_a_variant(&e, &keys, &values, OPS_PER_THREAD);
                                 });
                             }
                         });
@@ -181,29 +234,32 @@ fn bench_durability_concurrent(c: &mut Criterion) {
 // ============================================================================
 
 /// 95% read, 5% write - durability should have smaller impact on reads
-fn run_workload_b_variant(engine: &MidgeEngine, operations: usize) {
+fn run_workload_b_variant(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], operations: usize) {
     let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(54321);
-    let zipfian = ZipfianGenerator::new(RECORD_COUNT, 0.99);
+    let zipfian = ZipfianGenerator::new(keys.len(), 0.99);
 
-    for _ in 0..operations {
+    for i in 0..operations {
         let key_id = zipfian.next(&mut rng);
-        let key = generate_key(key_id);
 
         if rng.random::<f64>() < 0.95 {
             // Read operation
-            let _ = black_box(engine.get(&cf, &key));
+            let _ = black_box(engine.get(&cf, &keys[key_id]));
         } else {
-            // Write operation
-            let value = generate_value(key_id, rng.random());
-            let _ = engine.put(&cf, &key, &value);
+            // Write operation - use rotating value index
+            let _ = engine.put(&cf, &keys[key_id], &values[i % values.len()]);
         }
     }
 }
 
 fn bench_durability_read_heavy(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability_read_heavy");
+    group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
+
+    // Pre-compute keys and values outside benchmark
+    let keys: Vec<Bytes> = (0..RECORD_COUNT).map(generate_key).collect();
+    let values = pregen_workload_values(OPS_PER_THREAD, 54321);
 
     for (mode_name, wal_sync) in &[("async", false), ("sync_every", true)] {
         group.sample_size(if *wal_sync { 10 } else { 20 });
@@ -220,7 +276,7 @@ fn bench_durability_read_heavy(c: &mut Criterion) {
                         )
                     },
                     |engine| {
-                        run_workload_b_variant(&engine, OPS_PER_THREAD);
+                        run_workload_b_variant(&engine, &keys, &values, OPS_PER_THREAD);
                         black_box(());
                     },
                     criterion::BatchSize::SmallInput,
@@ -237,20 +293,25 @@ fn bench_durability_read_heavy(c: &mut Criterion) {
 // ============================================================================
 
 /// 100% write workload - durability impact is maximum
-fn run_write_heavy_workload(engine: &MidgeEngine, operations: usize) {
+fn run_write_heavy_workload(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], operations: usize) {
     let cf = engine.default_column_family();
-    let mut rng = StdRng::seed_from_u64(99999);
 
     for i in 0..operations {
-        let key = generate_key(RECORD_COUNT + i);
-        let value = generate_value(i, rng.random());
-        let _ = engine.put(&cf, &key, &value);
+        // Write new keys (beyond RECORD_COUNT range) with pre-computed values
+        let key_idx = (RECORD_COUNT + i) % keys.len();
+        let _ = engine.put(&cf, &keys[key_idx], &values[i % values.len()]);
     }
 }
 
 fn bench_durability_write_heavy(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability_write_heavy");
+    group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
+
+    // Pre-compute keys and values outside benchmark
+    // Need keys beyond RECORD_COUNT for write-heavy workload
+    let keys: Vec<Bytes> = (0..RECORD_COUNT + OPS_PER_THREAD).map(generate_key).collect();
+    let values = pregen_workload_values(OPS_PER_THREAD, 99999);
 
     for (mode_name, wal_sync) in &[("async", false), ("sync_every", true)] {
         group.sample_size(if *wal_sync { 5 } else { 20 });
@@ -267,7 +328,7 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
                         )
                     },
                     |engine| {
-                        run_write_heavy_workload(&engine, OPS_PER_THREAD);
+                        run_write_heavy_workload(&engine, &keys, &values, OPS_PER_THREAD);
                         black_box(());
                     },
                     criterion::BatchSize::SmallInput,

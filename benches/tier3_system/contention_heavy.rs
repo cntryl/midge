@@ -16,6 +16,55 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::TempDir;
 
+/// Pre-generate keys with format "key_{:06}"
+fn make_key(i: usize) -> Vec<u8> {
+    let mut key = vec![0u8; 10];
+    key[..4].copy_from_slice(b"key_");
+    let mut n = i;
+    for j in (4..10).rev() {
+        key[j] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    key
+}
+
+/// Pre-generate keys with format "t{:02}_key_{:06}"
+fn make_thread_key(tid: usize, i: usize) -> Vec<u8> {
+    let mut key = vec![0u8; 15];
+    key[0] = b't';
+    key[1] = b'0' + (tid / 10) as u8;
+    key[2] = b'0' + (tid % 10) as u8;
+    key[3] = b'_';
+    key[4..8].copy_from_slice(b"key_");
+    let mut n = i;
+    for j in (8..14).rev() {
+        key[j] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    key[14] = 0; // null terminator not needed but keeping length consistent
+    key.truncate(14);
+    key
+}
+
+/// Pre-generate value with format "value_{}"
+fn make_value(i: usize) -> Vec<u8> {
+    let mut val = Vec::with_capacity(16);
+    val.extend_from_slice(b"value_");
+    // Append i as decimal string
+    if i == 0 {
+        val.push(b'0');
+    } else {
+        let mut n = i;
+        let start = val.len();
+        while n > 0 {
+            val.push(b'0' + (n % 10) as u8);
+            n /= 10;
+        }
+        val[start..].reverse();
+    }
+    val
+}
+
 fn setup_db(name: &str) -> (MidgeEngine, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let path = tmp.path().join(name);
@@ -36,7 +85,18 @@ fn bench_engine_heavy_write_contention(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(3));
     group.sample_size(10);
 
+    // Pre-compute all keys and values outside the benchmark loop
+    // 16 threads * 1000 ops = 16000 key/value pairs
+    let keys: Vec<Vec<Vec<u8>>> = (0..16)
+        .map(|tid| (0..1000).map(|i| make_thread_key(tid, i)).collect())
+        .collect();
+    let values: Vec<Vec<u8>> = (0..1000).map(make_value).collect();
+    let keys = Arc::new(keys);
+    let values = Arc::new(values);
+
     group.bench_function("write_16_threads", |b| {
+        let keys = Arc::clone(&keys);
+        let values = Arc::clone(&values);
         b.iter(|| {
             let (engine, _tmp) = setup_db("write_contention");
             let engine = Arc::new(engine);
@@ -48,14 +108,14 @@ fn bench_engine_heavy_write_contention(c: &mut Criterion) {
                 let engine_clone = Arc::clone(&engine);
                 let cf_clone = cf.clone();
                 let barrier_clone = Arc::clone(&barrier);
+                let keys = Arc::clone(&keys);
+                let values = Arc::clone(&values);
 
                 handles.push(thread::spawn(move || {
                     barrier_clone.wait(); // Sync start
                     for i in 0..1000 {
-                        let key = format!("t{:02}_key_{:06}", tid, i);
-                        let val = format!("value_{}", i);
                         engine_clone
-                            .put(&cf_clone, key.as_bytes(), val.as_bytes())
+                            .put(&cf_clone, &keys[tid][i], &values[i])
                             .unwrap();
                     }
                 }));
@@ -80,16 +140,22 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(3));
     group.sample_size(10);
 
+    // Pre-compute keys and values outside the benchmark loop
+    let keys: Vec<Vec<u8>> = (0..2000).map(make_key).collect();
+    let values: Vec<Vec<u8>> = (0..2000).map(make_value).collect();
+    let keys = Arc::new(keys);
+    let values = Arc::new(values);
+
     group.bench_function("read_16_threads", |b| {
+        let keys = Arc::clone(&keys);
+        let values = Arc::clone(&values);
         b.iter(|| {
             let (engine, _tmp) = setup_db("read_contention");
             let cf = engine.default_column_family();
 
-            // Pre-populate with data
+            // Pre-populate with data (using precomputed keys/values)
             for i in 0..2000 {
-                let key = format!("key_{:06}", i);
-                let val = format!("value_{}", i);
-                engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
+                engine.put(&cf, &keys[i], &values[i]).unwrap();
             }
             engine.flush().unwrap();
 
@@ -101,12 +167,12 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
                 let engine_clone = Arc::clone(&engine);
                 let cf_clone = cf.clone();
                 let barrier_clone = Arc::clone(&barrier);
+                let keys = Arc::clone(&keys);
 
                 handles.push(thread::spawn(move || {
                     barrier_clone.wait();
                     for i in 0..2000 {
-                        let key = format!("key_{:06}", i);
-                        let _ = engine_clone.get(&cf_clone, key.as_bytes());
+                        let _ = engine_clone.get(&cf_clone, &keys[i]);
                     }
                 }));
             }
@@ -130,15 +196,56 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(3));
     group.sample_size(10);
 
+    // Pre-compute keys and values outside the benchmark loop
+    let keys: Vec<Vec<u8>> = (0..1500).map(make_key).collect();
+    // Pre-compute thread-specific values "t{}_v{}"
+    let thread_values: Vec<Vec<Vec<u8>>> = (0..16)
+        .map(|tid| {
+            (0..1500)
+                .map(|i| {
+                    let mut val = Vec::with_capacity(16);
+                    val.push(b't');
+                    if tid == 0 {
+                        val.push(b'0');
+                    } else {
+                        let mut n = tid;
+                        let start = val.len();
+                        while n > 0 {
+                            val.push(b'0' + (n % 10) as u8);
+                            n /= 10;
+                        }
+                        val[start..].reverse();
+                    }
+                    val.extend_from_slice(b"_v");
+                    if i == 0 {
+                        val.push(b'0');
+                    } else {
+                        let mut n = i;
+                        let start = val.len();
+                        while n > 0 {
+                            val.push(b'0' + (n % 10) as u8);
+                            n /= 10;
+                        }
+                        val[start..].reverse();
+                    }
+                    val
+                })
+                .collect()
+        })
+        .collect();
+    let keys = Arc::new(keys);
+    let thread_values = Arc::new(thread_values);
+
     group.bench_function("mixed_16_threads", |b| {
+        let keys = Arc::clone(&keys);
+        let thread_values = Arc::clone(&thread_values);
         b.iter(|| {
             let (engine, _tmp) = setup_db("mixed_contention");
             let cf = engine.default_column_family();
 
-            // Pre-populate
+            // Pre-populate (using precomputed keys)
             for i in 0..1500 {
-                let key = format!("key_{:06}", i);
-                engine.put(&cf, key.as_bytes(), b"init_value").unwrap();
+                engine.put(&cf, &keys[i], b"init_value").unwrap();
             }
 
             let engine = Arc::new(engine);
@@ -149,21 +256,20 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
                 let engine_clone = Arc::clone(&engine);
                 let cf_clone = cf.clone();
                 let barrier_clone = Arc::clone(&barrier);
+                let keys = Arc::clone(&keys);
+                let thread_values = Arc::clone(&thread_values);
 
                 handles.push(thread::spawn(move || {
                     barrier_clone.wait();
                     for i in 0..1500 {
                         if (tid + i) % 2 == 0 {
                             // Write
-                            let key = format!("key_{:06}", i);
-                            let val = format!("t{}_v{}", tid, i);
                             engine_clone
-                                .put(&cf_clone, key.as_bytes(), val.as_bytes())
+                                .put(&cf_clone, &keys[i], &thread_values[tid][i])
                                 .unwrap();
                         } else {
                             // Read
-                            let key = format!("key_{:06}", i);
-                            let _ = engine_clone.get(&cf_clone, key.as_bytes());
+                            let _ = engine_clone.get(&cf_clone, &keys[i]);
                         }
                     }
                 }));

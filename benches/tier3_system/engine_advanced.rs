@@ -13,7 +13,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode};
 use criterion_helper::criterion_config;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
@@ -34,7 +34,15 @@ fn setup_db(name: &str, enable_wal_sync: bool) -> MidgeEngine {
 }
 
 fn make_key(i: usize) -> Bytes {
-    Bytes::from(format!("key_{:010}", i))
+    // Fixed-size key using direct byte manipulation (no format! allocations)
+    let mut key = vec![0u8; 14];
+    key[..4].copy_from_slice(b"key_");
+    let mut n = i;
+    for j in (4..14).rev() {
+        key[j] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    Bytes::from(key)
 }
 fn make_value(i: usize, base: usize) -> Bytes {
     // introduce slight variance in size
@@ -58,6 +66,7 @@ fn precompute_kv(n: usize, value_base: usize) -> (Vec<Bytes>, Vec<Bytes>) {
 
 fn bench_ttl(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_ttl");
+    group.sampling_mode(SamplingMode::Flat);
 
     let (keys, vals) = precompute_kv(500, 80);
     group.bench_function("put_with_ttl", |b| {
@@ -110,6 +119,7 @@ fn bench_ttl(c: &mut Criterion) {
 /// Benchmark multi-column family operations to measure CF routing overhead
 fn bench_column_family_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_cf_scaling");
+    group.sampling_mode(SamplingMode::Flat);
 
     for &cf_count in &[1, 4, 8, 16] {
         group.bench_with_input(
@@ -151,6 +161,7 @@ fn bench_column_family_scaling(c: &mut Criterion) {
 /// Benchmark operations with large values (1MB+) to test buffer handling
 fn bench_large_values(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_large_values");
+    group.sampling_mode(SamplingMode::Flat);
 
     for &value_size in &[64 * 1024, 512 * 1024, 1024 * 1024] {
         group.bench_with_input(
@@ -200,6 +211,7 @@ fn bench_large_values(c: &mut Criterion) {
 /// Benchmark delete-heavy scenarios to measure tombstone overhead
 fn bench_delete_heavy(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_delete_heavy");
+    group.sampling_mode(SamplingMode::Flat);
 
     group.bench_function("delete_50pct", |b| {
         b.iter_batched(

@@ -15,7 +15,9 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{
+    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -23,7 +25,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn make_key(i: usize) -> Bytes {
-    Bytes::from(format!("key_{:010}", i))
+    // Fixed-size key using direct byte manipulation (no format! allocations)
+    let mut key = vec![0u8; 14];
+    key[..4].copy_from_slice(b"key_");
+    // Write i as 10-digit decimal directly
+    let mut n = i;
+    for j in (4..14).rev() {
+        key[j] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    Bytes::from(key)
 }
 fn make_value(size: usize) -> Bytes {
     Bytes::from(vec![b'x'; size])
@@ -58,6 +69,7 @@ fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
 
 fn bench_concurrent_puts(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_concurrent_puts");
+    group.sampling_mode(SamplingMode::Flat);
 
     let max_threads = 16;
     let n_ops = 5_000;
@@ -67,6 +79,8 @@ fn bench_concurrent_puts(c: &mut Criterion) {
     let vals = Arc::new(vals);
 
     for &threads in &[1, 2, 4, 8, 16] {
+        let ops_per_iter = threads * n_ops;
+        group.throughput(Throughput::Elements(ops_per_iter as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(threads),
             &threads,
@@ -112,6 +126,7 @@ fn bench_concurrent_puts(c: &mut Criterion) {
 
 fn bench_mixed_read_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_read_write_contention");
+    group.sampling_mode(SamplingMode::Flat);
 
     // Precompute data to avoid allocations in hot path
     let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
@@ -178,6 +193,7 @@ fn bench_mixed_read_write(c: &mut Criterion) {
 
 fn bench_compaction_pressure(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_compaction_pressure");
+    group.sampling_mode(SamplingMode::Flat);
 
     // Precompute data
     let compaction_keys: Vec<_> = (0..25_000).map(make_key).collect();
@@ -218,6 +234,7 @@ fn bench_compaction_pressure(c: &mut Criterion) {
 
 fn bench_concurrent_deletes(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_concurrent_deletes");
+    group.sampling_mode(SamplingMode::Flat);
 
     // Precompute data
     let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
@@ -277,6 +294,7 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
 /// Benchmark concurrent writes across multiple column families
 fn bench_concurrent_multi_cf(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_concurrent_multi_cf");
+    group.sampling_mode(SamplingMode::Flat);
 
     // Precompute for max pairs=8, 8*2*2500=40000
     let multi_cf_keys: Vec<_> = (0..40_000).map(make_key).collect();

@@ -39,7 +39,15 @@ fn setup_db(name: &str, enable_wal_sync: bool) -> MidgeEngine {
 }
 
 fn make_key(i: usize) -> Bytes {
-    Bytes::from(format!("key_{:010}", i))
+    // Fixed-size key using direct byte manipulation (no format! allocations)
+    let mut key = vec![0u8; 14];
+    key[..4].copy_from_slice(b"key_");
+    let mut n = i;
+    for j in (4..14).rev() {
+        key[j] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    Bytes::from(key)
 }
 fn make_value(i: usize, base: usize) -> Bytes {
     // introduce slight variance in size
