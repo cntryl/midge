@@ -11,7 +11,7 @@
 use crate::error::{MidgeError, MidgeResult};
 use bytes::{Bytes, BytesMut};
 use std::cmp;
-use xxhash_rust::xxh3::xxh3_64_with_seed;
+use xxhash_rust::xxh3::xxh3_128;
 
 /// Public filter abstraction used by SST and storage layers.
 pub trait Filter {
@@ -111,9 +111,11 @@ impl BloomFilter {
     pub fn add(&mut self, key: &[u8]) {
         let (h1, h2) = self.double_hash(key);
         let m = self.bit_count;
+        // Use bitwise AND instead of modulo when m is power of 2 (always true after new())
+        let mask = m.wrapping_sub(1);
         // Fast path set-bit loop with debug-checked bounds.
         for i in 0..self.hash_count {
-            let bit_index = (h1.wrapping_add(i.wrapping_mul(h2)) % m) as usize;
+            let bit_index = (h1.wrapping_add(i.wrapping_mul(h2)) & mask) as usize;
             Self::set_bit(&mut self.bytes, bit_index);
         }
         self.keys_count = self.keys_count.saturating_add(1);
@@ -237,11 +239,13 @@ impl BloomFilter {
     }
 
     /// Double hashing: h(i) = h1 + i*h2 mod m.
-    /// Uses xxh3 64-bit with independent seeds (no hasher allocation).
+    /// Uses xxh3 128-bit hash split into two 32-bit parts (single hash call).
     #[inline(always)]
     fn double_hash(&self, key: &[u8]) -> (u32, u32) {
-        let h1 = xxh3_64_with_seed(key, 0) as u32;
-        let mut h2 = xxh3_64_with_seed(key, 0x9E37_79B9) as u32; // golden-ratio-ish seed
+        // Single 128-bit hash is faster than two 64-bit hashes with different seeds
+        let h128 = xxh3_128(key);
+        let h1 = h128 as u32;
+        let mut h2 = (h128 >> 64) as u32;
         h2 |= 1; // ensure odd to improve coverage
         (h1, h2)
     }

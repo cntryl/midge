@@ -23,7 +23,9 @@ fn make_keys(prefix: &str, n: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Benchmark bloom filter construction
+/// Benchmark bloom filter add operations (hot path during SST build).
+/// 
+/// Separates allocation from insertion to measure pure add() throughput.
 fn bench_bloom_build(c: &mut Criterion) {
     let mut g = c.benchmark_group("hotpath_bloom_build");
     g.sampling_mode(SamplingMode::Flat);
@@ -31,14 +33,16 @@ fn bench_bloom_build(c: &mut Criterion) {
     for &n in &[1_000, 10_000] {
         let keys = make_keys("k", n);
         g.throughput(Throughput::Elements(n as u64));
+        
+        // Pre-allocate filter outside benchmark loop - we're measuring add() throughput
         g.bench_function(format!("{}_keys", n), |b| {
             b.iter_batched(
-                || (BloomFilter::new(n, 0.01), &keys),
-                |(mut f, keys)| {
+                || BloomFilter::new(n, 0.01),
+                |mut f| {
                     for k in keys.iter() {
-                        f.add(k);
+                        f.add(black_box(k));
                     }
-                    black_box(f);
+                    black_box(f)
                 },
                 BatchSize::SmallInput,
             )
