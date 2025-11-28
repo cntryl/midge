@@ -240,7 +240,7 @@ impl BloomFilter {
 
     /// Double hashing: h(i) = h1 + i*h2 mod m.
     /// Uses xxh3 128-bit hash split into two 32-bit parts (single hash call).
-    #[inline(always)]
+    #[inline]
     fn double_hash(&self, key: &[u8]) -> (u32, u32) {
         // Single 128-bit hash is faster than two 64-bit hashes with different seeds
         let h128 = xxh3_128(key);
