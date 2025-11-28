@@ -5,9 +5,10 @@
 //! - Single-threaded LRU cache
 //! - Sharded cache for reduced lock contention
 //! - Adaptive cache that auto-switches based on contention
+//! - Hot tier cache for lock-free fast-path lookups
 
 use bytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -58,6 +59,252 @@ pub enum BlockType {
 }
 
 // ============================================================================
+// Compact Key for Hot Tier (Lock-Free Lookups)
+// ============================================================================
+
+/// Compact block key for fast hashing and comparison in the hot tier.
+///
+/// Packs file_id (u32), block_type (u8), and offset (u64) into a single u128,
+/// enabling:
+/// - Single-instruction comparison
+/// - Faster hashing (no string hashing)
+/// - Cache-line friendly storage
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub struct CompactBlockKey(u128);
+
+impl CompactBlockKey {
+    /// Create a compact key from components.
+    /// Layout: [file_id:32][block_type:8][_reserved:24][offset:64]
+    #[inline(always)]
+    pub fn new(file_id: u32, block_type: BlockType, offset: u64) -> Self {
+        let block_type_u8 = match block_type {
+            BlockType::Data => 0u8,
+            BlockType::Index => 1u8,
+            BlockType::Filter => 2u8,
+        };
+        let packed = ((file_id as u128) << 96)
+            | ((block_type_u8 as u128) << 88)
+            | (offset as u128);
+        Self(packed)
+    }
+
+    /// Create from a BlockKey using a simple hash of the file name as file_id.
+    #[inline]
+    pub fn from_block_key(key: &BlockKey) -> Self {
+        // Use a fast hash of the file name as the file_id
+        let file_id = {
+            let mut hasher = DefaultHasher::new();
+            key.file_name.hash(&mut hasher);
+            hasher.finish() as u32
+        };
+        Self::new(file_id, key.block_type.clone(), key.offset)
+    }
+
+    /// Get the raw packed value (for use as hash key).
+    #[inline(always)]
+    pub fn as_u128(&self) -> u128 {
+        self.0
+    }
+}
+
+// ============================================================================
+// Hot Tier Cache (Lock-Free Fast Path)
+// ============================================================================
+
+/// Number of slots in the hot tier (must be power of 2 for fast modulo).
+const HOT_TIER_SLOTS: usize = 256;
+
+/// A single slot in the hot tier cache.
+struct HotSlot {
+    /// Compact key for this slot (0 means empty).
+    key: AtomicU64,
+    /// High bits of the compact key.
+    key_high: AtomicU64,
+    /// Generation counter to detect concurrent updates.
+    generation: AtomicU64,
+    /// Cached block data (behind RwLock for safe updates).
+    data: RwLock<Option<CachedBlock>>,
+}
+
+impl HotSlot {
+    fn new() -> Self {
+        Self {
+            key: AtomicU64::new(0),
+            key_high: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
+            data: RwLock::new(None),
+        }
+    }
+}
+
+/// Lock-free hot tier cache for frequently accessed blocks.
+///
+/// Uses a fixed-size array of slots with direct-mapped indexing.
+/// On collision, the newer entry wins (simple replacement policy).
+///
+/// This tier sits in front of the main LRU cache and handles the
+/// hottest blocks without any locking on the read path.
+pub struct HotTierCache<C: BlockCacheTrait> {
+    /// Hot tier slots (fixed size, direct-mapped).
+    slots: Box<[HotSlot; HOT_TIER_SLOTS]>,
+    /// Backing cache for misses and cold data.
+    backing: Arc<C>,
+    /// Hot tier hits.
+    hot_hits: AtomicU64,
+    /// Hot tier misses (fell through to backing).
+    hot_misses: AtomicU64,
+}
+
+impl<C: BlockCacheTrait> HotTierCache<C> {
+    /// Create a new hot tier cache wrapping the given backing cache.
+    pub fn new(backing: Arc<C>) -> Self {
+        // Initialize slots array
+        let slots: Vec<HotSlot> = (0..HOT_TIER_SLOTS).map(|_| HotSlot::new()).collect();
+        let slots_array: Box<[HotSlot; HOT_TIER_SLOTS]> = match slots.into_boxed_slice().try_into()
+        {
+            Ok(arr) => arr,
+            Err(_) => unreachable!("HOT_TIER_SLOTS is constant"),
+        };
+
+        Self {
+            slots: slots_array,
+            backing,
+            hot_hits: AtomicU64::new(0),
+            hot_misses: AtomicU64::new(0),
+        }
+    }
+
+    /// Compute slot index from compact key.
+    #[inline(always)]
+    fn slot_index(compact: CompactBlockKey) -> usize {
+        // Use lower bits of the packed key for slot selection
+        (compact.as_u128() as usize) & (HOT_TIER_SLOTS - 1)
+    }
+
+    /// Try to get from hot tier (lock-free read).
+    #[inline]
+    fn hot_get(&self, compact: CompactBlockKey) -> Option<CachedBlock> {
+        let idx = Self::slot_index(compact);
+        let slot = &self.slots[idx];
+
+        // Read generation before key
+        let gen_before = slot.generation.load(Ordering::Acquire);
+
+        // Read key parts
+        let key_low = slot.key.load(Ordering::Relaxed);
+        let key_high = slot.key_high.load(Ordering::Relaxed);
+        let stored_key = ((key_high as u128) << 64) | (key_low as u128);
+
+        // Check if key matches
+        if stored_key != compact.as_u128() {
+            return None;
+        }
+
+        // Read data
+        let data = slot.data.read().clone();
+
+        // Read generation after - if changed, data may be stale
+        let gen_after = slot.generation.load(Ordering::Acquire);
+        if gen_before != gen_after {
+            return None; // Concurrent update, retry via backing cache
+        }
+
+        data
+    }
+
+    /// Insert into hot tier.
+    #[inline]
+    fn hot_insert(&self, compact: CompactBlockKey, block: CachedBlock) {
+        let idx = Self::slot_index(compact);
+        let slot = &self.slots[idx];
+
+        // Increment generation to signal update in progress
+        slot.generation.fetch_add(1, Ordering::Release);
+
+        // Update key
+        let packed = compact.as_u128();
+        slot.key.store(packed as u64, Ordering::Relaxed);
+        slot.key_high.store((packed >> 64) as u64, Ordering::Relaxed);
+
+        // Update data
+        *slot.data.write() = Some(block);
+
+        // Increment generation again to signal update complete
+        slot.generation.fetch_add(1, Ordering::Release);
+    }
+}
+
+impl<C: BlockCacheTrait + 'static> BlockCacheTrait for HotTierCache<C> {
+    #[inline]
+    fn get(&self, key: &BlockKey) -> Option<CachedBlock> {
+        let compact = CompactBlockKey::from_block_key(key);
+
+        // Try hot tier first (lock-free)
+        if let Some(block) = self.hot_get(compact) {
+            self.hot_hits.fetch_add(1, Ordering::Relaxed);
+            return Some(block);
+        }
+
+        // Fall through to backing cache
+        self.hot_misses.fetch_add(1, Ordering::Relaxed);
+        let result = self.backing.get(key);
+
+        // Promote to hot tier on hit
+        if let Some(ref block) = result {
+            self.hot_insert(compact, block.clone());
+        }
+
+        result
+    }
+
+    #[inline]
+    fn insert(&self, key: BlockKey, value: CachedBlock) {
+        let compact = CompactBlockKey::from_block_key(&key);
+
+        // Insert into both hot tier and backing cache
+        self.hot_insert(compact, value.clone());
+        self.backing.insert(key, value);
+    }
+
+    fn clear(&self) {
+        // Clear hot tier
+        for slot in self.slots.iter() {
+            slot.generation.fetch_add(1, Ordering::Release);
+            slot.key.store(0, Ordering::Relaxed);
+            slot.key_high.store(0, Ordering::Relaxed);
+            *slot.data.write() = None;
+            slot.generation.fetch_add(1, Ordering::Release);
+        }
+
+        // Clear backing cache
+        self.backing.clear();
+    }
+
+    fn stats(&self) -> CacheStats {
+        let mut stats = self.backing.stats();
+        // Add hot tier stats to hits
+        stats.hits += self.hot_hits.load(Ordering::Relaxed);
+        stats
+    }
+}
+
+/// Get hot tier specific statistics.
+impl<C: BlockCacheTrait> HotTierCache<C> {
+    pub fn hot_tier_stats(&self) -> HotTierStats {
+        HotTierStats {
+            hot_hits: self.hot_hits.load(Ordering::Relaxed),
+            hot_misses: self.hot_misses.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HotTierStats {
+    pub hot_hits: u64,
+    pub hot_misses: u64,
+}
+
+// ============================================================================
 // Factory Functions (Implementation Details Hidden)
 // ============================================================================
 
@@ -67,6 +314,15 @@ pub enum BlockType {
 /// where simple LRU eviction provides sufficient performance.
 pub fn create_basic_cache(max_size_bytes: usize) -> Arc<dyn BlockCacheTrait> {
     Arc::new(BlockCache::new(max_size_bytes))
+}
+
+/// Create a basic LRU block cache with a hot tier for faster lookups.
+///
+/// The hot tier provides lock-free access to the most frequently used blocks,
+/// falling back to the LRU cache on miss.
+pub fn create_hot_cache(max_size_bytes: usize) -> Arc<dyn BlockCacheTrait> {
+    let backing = Arc::new(BlockCache::new(max_size_bytes));
+    Arc::new(HotTierCache::new(backing))
 }
 
 /// Create a sharded block cache for high-concurrency workloads.

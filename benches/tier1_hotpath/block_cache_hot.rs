@@ -6,12 +6,15 @@
 //! Covers critical block cache hot paths:
 //! - Hot cache lookups and insertions
 //! - Hit ratio calculations
+//! - Hot tier cache lock-free fast path
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::block_cache::{create_basic_cache, BlockKey, BlockType, CachedBlock};
+use cntryl_midge::sst::block_cache::{
+    create_basic_cache, create_hot_cache, BlockKey, BlockType, CachedBlock,
+};
 use criterion::{criterion_group, criterion_main, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
@@ -141,9 +144,95 @@ fn bench_block_cache_hit_ratio_fast(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark comparing basic cache vs hot tier cache for hot data lookups.
+///
+/// This demonstrates the benefit of the lock-free hot tier for frequently
+/// accessed blocks.
+fn bench_hot_tier_comparison(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hotpath_hot_tier_comparison");
+    group.measurement_time(std::time::Duration::from_millis(200));
+
+    // Setup: create both cache types with same data
+    let basic_cache = create_basic_cache(10 * 1024 * 1024);
+    let hot_cache = create_hot_cache(10 * 1024 * 1024);
+
+    // Pre-populate with data - use static file name to avoid String allocation in hot path
+    static FILE_NAME: &str = "test.sst";
+    for i in 0..1000 {
+        let key = BlockKey {
+            file_name: FILE_NAME.to_string(),
+            block_type: BlockType::Data,
+            offset: i,
+        };
+        let block = CachedBlock {
+            data: make_block_data(4096),
+        };
+        basic_cache.insert(key.clone(), block.clone());
+        hot_cache.insert(key, block);
+    }
+
+    // Warm up the hot tier by accessing all keys once
+    for i in 0..1000 {
+        let key = BlockKey {
+            file_name: FILE_NAME.to_string(),
+            block_type: BlockType::Data,
+            offset: i,
+        };
+        let _ = hot_cache.get(&key);
+    }
+
+    // Precompute the hot key (avoid allocation in benchmark loop)
+    let hot_key = BlockKey {
+        file_name: FILE_NAME.to_string(),
+        block_type: BlockType::Data,
+        offset: 42,
+    };
+
+    group.bench_function("basic_cache_get_hot", |b| {
+        b.iter(|| {
+            let result = basic_cache.get(&hot_key);
+            black_box(result);
+        })
+    });
+
+    group.bench_function("hot_tier_cache_get_hot", |b| {
+        b.iter(|| {
+            let result = hot_cache.get(&hot_key);
+            black_box(result);
+        })
+    });
+
+    // Also benchmark a batch of lookups to amortize overhead
+    let hot_keys: Vec<BlockKey> = (0..100)
+        .map(|i| BlockKey {
+            file_name: FILE_NAME.to_string(),
+            block_type: BlockType::Data,
+            offset: i,
+        })
+        .collect();
+
+    group.bench_function("basic_cache_get_100_hot", |b| {
+        b.iter(|| {
+            for key in &hot_keys {
+                black_box(basic_cache.get(key));
+            }
+        })
+    });
+
+    group.bench_function("hot_tier_cache_get_100_hot", |b| {
+        b.iter(|| {
+            for key in &hot_keys {
+                black_box(hot_cache.get(key));
+            }
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = tier1_hotpath_block_cache_hot;
     config = criterion_config();
-    targets = bench_block_cache_get_hot, bench_block_cache_insert_hot, bench_block_cache_hit_ratio_fast
+    targets = bench_block_cache_get_hot, bench_block_cache_insert_hot, bench_block_cache_hit_ratio_fast, bench_hot_tier_comparison
 }
 criterion_main!(tier1_hotpath_block_cache_hot);

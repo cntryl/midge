@@ -34,8 +34,9 @@ pub mod traits;
 pub mod writer_common;
 
 pub use block_cache::{
-    create_adaptive_cache, create_basic_cache, create_sharded_cache, AdaptiveCacheStats,
-    BlockCacheTrait, BlockKey, BlockType as CacheBlockType, CacheStats, CachedBlock,
+    create_adaptive_cache, create_basic_cache, create_hot_cache, create_sharded_cache,
+    AdaptiveCacheStats, BlockCacheTrait, BlockKey, BlockType as CacheBlockType, CacheStats,
+    CachedBlock, CompactBlockKey, HotTierCache, HotTierStats,
 };
 pub use bloom::{BloomFilter, BloomFilterBuilder, Filter};
 pub use cloud::{
