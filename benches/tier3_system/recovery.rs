@@ -305,7 +305,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = system_recovery;
+    name = tier3_system_recovery;
     config = criterion_config();
     targets =
         bench_recovery_throughput,
@@ -313,4 +313,4 @@ criterion_group! {
         bench_recovery_with_l0_data,
         bench_recovery_speed_comparison
 }
-criterion_main!(system_recovery);
+criterion_main!(tier3_system_recovery);

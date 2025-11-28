@@ -435,7 +435,7 @@ fn bench_full_stack_throughput(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = subsystem_engine_basic;
+    name = tier3_system_engine_basic;
     config = criterion_config();
     targets =
         bench_put_variants,
@@ -447,4 +447,4 @@ criterion_group! {
         ,
         bench_concurrent_cf_scaling
 }
-criterion_main!(subsystem_engine_basic);
+criterion_main!(tier3_system_engine_basic);

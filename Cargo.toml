@@ -153,62 +153,62 @@ path = "testutils/validate_tests.rs"
 # =============================================================================
 
 [[bench]]
-name = "hotpath_api"
+name = "tier1_hotpath_api"
 path = "benches/tier1_hotpath/api.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_bloom"
+name = "tier1_hotpath_bloom"
 path = "benches/tier1_hotpath/bloom.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_block_cache_hot"
+name = "tier1_hotpath_block_cache_hot"
 path = "benches/tier1_hotpath/block_cache_hot.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_cache"
+name = "tier1_hotpath_cache"
 path = "benches/tier1_hotpath/cache.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_index"
+name = "tier1_hotpath_index"
 path = "benches/tier1_hotpath/index.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_memtable_insert"
+name = "tier1_hotpath_memtable_insert"
 path = "benches/tier1_hotpath/memtable_insert.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_memtable_seek"
+name = "tier1_hotpath_memtable_seek"
 path = "benches/tier1_hotpath/memtable_seek.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_sst"
+name = "tier1_hotpath_sst"
 path = "benches/tier1_hotpath/sst.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_storage"
+name = "tier1_hotpath_storage"
 path = "benches/tier1_hotpath/storage.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_tlv"
+name = "tier1_hotpath_tlv"
 path = "benches/tier1_hotpath/tlv.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_wal"
+name = "tier1_hotpath_wal"
 path = "benches/tier1_hotpath/wal.rs"
 harness = false
 
 [[bench]]
-name = "hotpath_wal_frame_parse"
+name = "tier1_hotpath_wal_frame_parse"
 path = "benches/tier1_hotpath/wal_frame_parse.rs"
 harness = false
 
@@ -217,77 +217,77 @@ harness = false
 # =============================================================================
 
 [[bench]]
-name = "subsystem_block_cache"
+name = "tier2_subsystem_block_cache"
 path = "benches/tier2_subsystem/block_cache.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_block_cache_eviction"
+name = "tier2_subsystem_block_cache_eviction"
 path = "benches/tier2_subsystem/block_cache_eviction.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_bloom_build"
+name = "tier2_subsystem_bloom_build"
 path = "benches/tier2_subsystem/bloom_build.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_bloom_false_positive_rate"
+name = "tier2_subsystem_bloom_false_positive_rate"
 path = "benches/tier2_subsystem/bloom_false_positive_rate.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_flush"
+name = "tier2_subsystem_flush"
 path = "benches/tier2_subsystem/flush.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_manifest_apply"
+name = "tier2_subsystem_manifest_apply"
 path = "benches/tier2_subsystem/manifest_apply.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_manifest_large_history"
+name = "tier2_subsystem_manifest_large_history"
 path = "benches/tier2_subsystem/manifest_large_history.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_manifest_parse"
+name = "tier2_subsystem_manifest_parse"
 path = "benches/tier2_subsystem/manifest_parse.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_memtable_full"
+name = "tier2_subsystem_memtable_full"
 path = "benches/tier2_subsystem/memtable_full.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_memtable_rotate"
+name = "tier2_subsystem_memtable_rotate"
 path = "benches/tier2_subsystem/memtable_rotate.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_sst"
+name = "tier2_subsystem_sst"
 path = "benches/tier2_subsystem/sst.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_storage"
+name = "tier2_subsystem_storage"
 path = "benches/tier2_subsystem/storage.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_wal_io"
+name = "tier2_subsystem_wal_io"
 path = "benches/tier2_subsystem/wal_io.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_wal_replay"
+name = "tier2_subsystem_wal_replay"
 path = "benches/tier2_subsystem/wal_replay.rs"
 harness = false
 
 [[bench]]
-name = "subsystem_wal_segment_rollover"
+name = "tier2_subsystem_wal_segment_rollover"
 path = "benches/tier2_subsystem/wal_segment_rollover.rs"
 harness = false
 
@@ -296,67 +296,67 @@ harness = false
 # =============================================================================
 
 [[bench]]
-name = "system_compaction"
+name = "tier3_system_compaction"
 path = "benches/tier3_system/compaction.rs"
 harness = false
 
 [[bench]]
-name = "system_concurrency_stress"
+name = "tier3_system_concurrency_stress"
 path = "benches/tier3_system/concurrency_stress.rs"
 harness = false
 
 [[bench]]
-name = "system_contention_heavy"
+name = "tier3_system_contention_heavy"
 path = "benches/tier3_system/contention_heavy.rs"
 harness = false
 
 [[bench]]
-name = "system_durability_modes"
+name = "tier3_system_durability_modes"
 path = "benches/tier3_system/durability_modes.rs"
 harness = false
 
 [[bench]]
-name = "system_engine_advanced"
+name = "tier3_system_engine_advanced"
 path = "benches/tier3_system/engine_advanced.rs"
 harness = false
 
 [[bench]]
-name = "system_engine_basic"
+name = "tier3_system_engine_basic"
 path = "benches/tier3_system/engine_basic.rs"
 harness = false
 
 [[bench]]
-name = "system_isolation_mvcc"
+name = "tier3_system_isolation_mvcc"
 path = "benches/tier3_system/isolation_mvcc.rs"
 harness = false
 
 [[bench]]
-name = "system_lsm"
+name = "tier3_system_lsm"
 path = "benches/tier3_system/lsm.rs"
 harness = false
 
 [[bench]]
-name = "system_recovery"
+name = "tier3_system_recovery"
 path = "benches/tier3_system/recovery.rs"
 harness = false
 
 [[bench]]
-name = "system_scan_l0_only"
+name = "tier3_system_scan_l0_only"
 path = "benches/tier3_system/scan_l0_only.rs"
 harness = false
 
 [[bench]]
-name = "system_scan_multi_level"
+name = "tier3_system_scan_multi_level"
 path = "benches/tier3_system/scan_multi_level.rs"
 harness = false
 
 [[bench]]
-name = "system_startup_large"
+name = "tier3_system_startup_large"
 path = "benches/tier3_system/startup_large.rs"
 harness = false
 
 [[bench]]
-name = "system_startup_wal"
+name = "tier3_system_startup_wal"
 path = "benches/tier3_system/startup_wal.rs"
 harness = false
 
@@ -365,32 +365,32 @@ harness = false
 # =============================================================================
 
 [[bench]]
-name = "ycsb_workload_a"
+name = "tier4_integration_ycsb_workload_a"
 path = "benches/tier4_integration/ycsb_workload_a.rs"
 harness = false
 
 [[bench]]
-name = "ycsb_workload_b"
+name = "tier4_integration_ycsb_workload_b"
 path = "benches/tier4_integration/ycsb_workload_b.rs"
 harness = false
 
 [[bench]]
-name = "ycsb_workload_c"
+name = "tier4_integration_ycsb_workload_c"
 path = "benches/tier4_integration/ycsb_workload_c.rs"
 harness = false
 
 [[bench]]
-name = "ycsb_workload_d"
+name = "tier4_integration_ycsb_workload_d"
 path = "benches/tier4_integration/ycsb_workload_d.rs"
 harness = false
 
 [[bench]]
-name = "ycsb_workload_e"
+name = "tier4_integration_ycsb_workload_e"
 path = "benches/tier4_integration/ycsb_workload_e.rs"
 harness = false
 
 [[bench]]
-name = "ycsb_workload_f"
+name = "tier4_integration_ycsb_workload_f"
 path = "benches/tier4_integration/ycsb_workload_f.rs"
 harness = false
 
@@ -399,17 +399,17 @@ harness = false
 # =============================================================================
 
 [[bench]]
-name = "soak_compaction_backlog_growth"
+name = "tier5_soak_compaction_backlog_growth"
 path = "benches/tier5_soak/compaction_backlog_growth.rs"
 harness = false
 
 [[bench]]
-name = "soak_level_drift"
+name = "tier5_soak_level_drift"
 path = "benches/tier5_soak/level_drift.rs"
 harness = false
 
 [[bench]]
-name = "soak_space_amplification"
+name = "tier5_soak_space_amplification"
 path = "benches/tier5_soak/space_amplification.rs"
 harness = false
 
@@ -418,22 +418,22 @@ harness = false
 # =============================================================================
 
 [[bench]]
-name = "capacity_cold_start_large"
+name = "tier6_capacity_cold_start_large"
 path = "benches/tier6_capacity/cold_start_large.rs"
 harness = false
 
 [[bench]]
-name = "capacity_large_dataset_compaction"
+name = "tier6_capacity_large_dataset_compaction"
 path = "benches/tier6_capacity/large_dataset_compaction.rs"
 harness = false
 
 [[bench]]
-name = "capacity_large_dataset_insert"
+name = "tier6_capacity_large_dataset_insert"
 path = "benches/tier6_capacity/large_dataset_insert.rs"
 harness = false
 
 [[bench]]
-name = "capacity_wal_growth_large"
+name = "tier6_capacity_wal_growth_large"
 path = "benches/tier6_capacity/wal_growth_large.rs"
 harness = false
 

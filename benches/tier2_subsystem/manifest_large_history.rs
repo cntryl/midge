@@ -57,8 +57,8 @@ fn bench_manifest_replay_100k_entries(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = manifest_large_history_group;
+    name = tier2_subsystem_manifest_large_history;
     config = criterion_config();
     targets = bench_manifest_replay_100k_entries
 }
-criterion_main!(manifest_large_history_group);
+criterion_main!(tier2_subsystem_manifest_large_history);

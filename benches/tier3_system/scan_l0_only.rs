@@ -63,8 +63,8 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = scan_l0_only_group;
+    name = tier3_system_scan_l0_only;
     config = criterion_config();
     targets = bench_scan_l0_direct
 }
-criterion_main!(scan_l0_only_group);
+criterion_main!(tier3_system_scan_l0_only);

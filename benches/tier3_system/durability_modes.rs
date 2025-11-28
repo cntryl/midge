@@ -280,7 +280,7 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = durability_modes;
+    name = tier3_system_durability_modes;
     config = criterion_config();
     targets =
         bench_durability_async_wal,
@@ -289,4 +289,4 @@ criterion_group! {
         bench_durability_read_heavy,
         bench_durability_write_heavy
 }
-criterion_main!(durability_modes);
+criterion_main!(tier3_system_durability_modes);

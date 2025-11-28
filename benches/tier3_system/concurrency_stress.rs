@@ -340,7 +340,7 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = subsystem_concurrency_stress;
+    name = tier3_system_concurrency_stress;
     config = criterion_config();
     targets =
         bench_concurrent_puts,
@@ -349,4 +349,4 @@ criterion_group! {
         bench_concurrent_deletes,
         bench_concurrent_multi_cf
 }
-criterion_main!(subsystem_concurrency_stress);
+criterion_main!(tier3_system_concurrency_stress);

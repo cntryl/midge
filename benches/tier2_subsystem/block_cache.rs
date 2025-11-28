@@ -146,8 +146,8 @@ fn bench_block_cache_hotset_rotation(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = block_cache_group;
+    name = tier2_subsystem_block_cache;
     config = criterion_config();
     targets = bench_block_cache_eviction_scan, bench_block_cache_fill_then_hit, bench_block_cache_hotset_rotation
 }
-criterion_main!(block_cache_group);
+criterion_main!(tier2_subsystem_block_cache);

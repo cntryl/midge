@@ -68,8 +68,8 @@ fn bench_compaction_backlog_growth(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = compaction_backlog_growth_group;
+    name = tier5_soak_compaction_backlog_growth;
     config = criterion_config();
     targets = bench_compaction_backlog_growth
 }
-criterion_main!(compaction_backlog_growth_group);
+criterion_main!(tier5_soak_compaction_backlog_growth);

@@ -63,8 +63,8 @@ fn bench_memtable_rotate_large(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = memtable_rotate_group;
+    name = tier2_subsystem_memtable_rotate;
     config = criterion_config();
     targets = bench_memtable_rotate_small, bench_memtable_rotate_large
 }
-criterion_main!(memtable_rotate_group);
+criterion_main!(tier2_subsystem_memtable_rotate);

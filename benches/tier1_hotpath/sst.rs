@@ -161,7 +161,7 @@ fn bench_writer_tiny(c: &mut Criterion) {
 // Criterion registration
 // ---------------------------------------------------------------------------
 criterion_group! {
-    name = hotpath_sst;
+    name = tier1_hotpath_sst;
     config = criterion_config();
     targets =
         bench_encode,
@@ -170,4 +170,4 @@ criterion_group! {
         bench_roundtrip,
         bench_writer_tiny
 }
-criterion_main!(hotpath_sst);
+criterion_main!(tier1_hotpath_sst);

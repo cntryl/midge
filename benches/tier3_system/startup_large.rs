@@ -71,8 +71,8 @@ fn bench_engine_startup_100k_sst_files(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = startup_large_group;
+    name = tier3_system_startup_large;
     config = criterion_config();
     targets = bench_engine_startup_100k_sst_files
 }
-criterion_main!(startup_large_group);
+criterion_main!(tier3_system_startup_large);

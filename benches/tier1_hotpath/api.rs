@@ -165,8 +165,8 @@ fn bench_single_put(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = hotpath_api;
+    name = tier1_hotpath_api;
     config = criterion_config();
     targets = bench_batch_put, bench_single_get, bench_single_put
 }
-criterion_main!(hotpath_api);
+criterion_main!(tier1_hotpath_api);

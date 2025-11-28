@@ -96,8 +96,8 @@ fn bench_block_cache_lru_eviction_10k(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = block_cache_eviction_group;
+    name = tier2_subsystem_block_cache_eviction;
     config = criterion_config();
     targets = bench_block_cache_lru_eviction_1k, bench_block_cache_lru_eviction_10k
 }
-criterion_main!(block_cache_eviction_group);
+criterion_main!(tier2_subsystem_block_cache_eviction);

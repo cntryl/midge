@@ -67,8 +67,8 @@ fn bench_wal_rollover_large_segments(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = wal_segment_rollover_group;
+    name = tier2_subsystem_wal_segment_rollover;
     config = criterion_config();
     targets = bench_wal_rollover_small_segments, bench_wal_rollover_large_segments
 }
-criterion_main!(wal_segment_rollover_group);
+criterion_main!(tier2_subsystem_wal_segment_rollover);

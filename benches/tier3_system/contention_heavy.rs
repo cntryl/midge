@@ -181,8 +181,8 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = contention_heavy_group;
+    name = tier3_system_contention_heavy;
     config = criterion_config();
     targets = bench_engine_heavy_write_contention, bench_engine_heavy_read_contention, bench_engine_mixed_contention
 }
-criterion_main!(contention_heavy_group);
+criterion_main!(tier3_system_contention_heavy);

@@ -148,8 +148,8 @@ fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = memtable_seek_group;
+    name = tier1_hotpath_memtable_seek;
     config = criterion_config();
     targets = bench_memtable_get_point_lookup, bench_memtable_get_latest_version, bench_memtable_seek_forward_32steps, bench_memtable_seek_reverse_32steps
 }
-criterion_main!(memtable_seek_group);
+criterion_main!(tier1_hotpath_memtable_seek);

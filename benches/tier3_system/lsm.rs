@@ -260,7 +260,7 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 criterion_group! {
-    name = system_lsm;
+    name = tier3_system_lsm;
     config = criterion_config();
     targets =
         bench_system_wal_write,
@@ -269,4 +269,4 @@ criterion_group! {
         bench_system_mixed_workload
 }
 
-criterion_main!(system_lsm);
+criterion_main!(tier3_system_lsm);

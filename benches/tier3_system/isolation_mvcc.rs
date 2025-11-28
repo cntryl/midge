@@ -536,7 +536,7 @@ fn bench_snapshots_during_compaction(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = subsystem_isolation_mvcc;
+    name = tier3_system_isolation_mvcc;
     config = criterion_config();
     targets =
         bench_single_thread_baseline,
@@ -548,4 +548,4 @@ criterion_group! {
         bench_transaction_isolation,
         bench_snapshots_during_compaction
 }
-criterion_main!(subsystem_isolation_mvcc);
+criterion_main!(tier3_system_isolation_mvcc);

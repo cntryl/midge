@@ -116,8 +116,8 @@ fn bench_manifest_apply_10k_ops(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = manifest_apply_group;
+    name = tier2_subsystem_manifest_apply;
     config = criterion_config();
     targets = bench_manifest_apply_100_ops, bench_manifest_apply_10k_ops
 }
-criterion_main!(manifest_apply_group);
+criterion_main!(tier2_subsystem_manifest_apply);

@@ -88,8 +88,8 @@ fn bench_compact_all(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = system_compaction;
+    name = tier3_system_compaction;
     config = criterion_config();
     targets = bench_flush, bench_compact_all
 }
-criterion_main!(system_compaction);
+criterion_main!(tier3_system_compaction);

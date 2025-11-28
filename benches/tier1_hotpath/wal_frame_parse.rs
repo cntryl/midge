@@ -139,8 +139,8 @@ fn bench_wal_zero_copy_vs_alloc(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = wal_frame_parse_group;
+    name = tier1_hotpath_wal_frame_parse;
     config = criterion_config();
     targets = bench_wal_frame_parse_small, bench_wal_frame_parse_medium, bench_wal_frame_parse_large, bench_wal_header_scan_only, bench_wal_zero_copy_vs_alloc
 }
-criterion_main!(wal_frame_parse_group);
+criterion_main!(tier1_hotpath_wal_frame_parse);

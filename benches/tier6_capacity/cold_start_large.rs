@@ -81,8 +81,8 @@ fn bench_cold_start_large(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = cold_start_large_group;
+    name = tier6_capacity_cold_start_large;
     config = criterion_config();
     targets = bench_cold_start_large
 }
-criterion_main!(cold_start_large_group);
+criterion_main!(tier6_capacity_cold_start_large);

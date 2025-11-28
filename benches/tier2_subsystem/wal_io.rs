@@ -253,7 +253,7 @@ fn bench_wal_io_platform(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = wal_io_group;
+    name = tier2_subsystem_wal_io;
     config = criterion_config();
     targets =
         bench_wal_append_individual,
@@ -262,4 +262,4 @@ criterion_group! {
         bench_wal_io_preencoded,
         bench_wal_io_platform
 }
-criterion_main!(wal_io_group);
+criterion_main!(tier2_subsystem_wal_io);

@@ -123,8 +123,8 @@ fn bench_bloom_false_positive_rates(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = hotpath_index;
+    name = tier1_hotpath_index;
     config = criterion_config();
     targets = bench_bloom_build, bench_bloom_query, bench_bloom_false_positive_rates
 }
-criterion_main!(hotpath_index);
+criterion_main!(tier1_hotpath_index);

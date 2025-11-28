@@ -99,8 +99,8 @@ fn bench_bloom_filter_hot_check(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = bloom_group;
+    name = tier1_hotpath_bloom;
     config = criterion_config();
     targets = bench_bloom_maybe_contains, bench_bloom_compute_hashes, bench_bloom_filter_hot_check
 }
-criterion_main!(bloom_group);
+criterion_main!(tier1_hotpath_bloom);

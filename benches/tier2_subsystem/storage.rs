@@ -290,7 +290,7 @@ fn bench_merge_iterator(c: &mut Criterion) {
 // ============================================================================
 
 criterion_group! {
-    name = subsystem_storage;
+    name = tier2_subsystem_storage;
     config = criterion_config();
     targets =
         bench_wal_write,
@@ -301,4 +301,4 @@ criterion_group! {
         bench_merge_iterator
 }
 
-criterion_main!(subsystem_storage);
+criterion_main!(tier2_subsystem_storage);

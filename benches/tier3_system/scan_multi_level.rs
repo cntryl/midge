@@ -69,8 +69,8 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = scan_multi_level_group;
+    name = tier3_system_scan_multi_level;
     config = criterion_config();
     targets = bench_scan_multi_level_range
 }
-criterion_main!(scan_multi_level_group);
+criterion_main!(tier3_system_scan_multi_level);

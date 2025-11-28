@@ -276,7 +276,7 @@ fn bench_wal_batch_encode(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = hotpath_wal;
+    name = tier1_hotpath_wal;
     config = criterion_config();
     targets =
         bench_wal_encode_record,
@@ -286,4 +286,4 @@ criterion_group! {
         bench_wal_encode_put_fast_path,
         bench_wal_batch_encode
 }
-criterion_main!(hotpath_wal);
+criterion_main!(tier1_hotpath_wal);

@@ -361,7 +361,7 @@ fn bench_tlv_roundtrip(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = hotpath_tlv;
+    name = tier1_hotpath_tlv;
     config = criterion_config();
     targets =
         bench_varint32_encode,
@@ -372,4 +372,4 @@ criterion_group! {
         bench_tlv_reader,
         bench_tlv_roundtrip
 }
-criterion_main!(hotpath_tlv);
+criterion_main!(tier1_hotpath_tlv);

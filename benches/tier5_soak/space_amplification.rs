@@ -101,8 +101,8 @@ fn estimate_disk_usage(path: &std::path::Path) -> u64 {
 }
 
 criterion_group! {
-    name = space_amplification_group;
+    name = tier5_soak_space_amplification;
     config = criterion_config();
     targets = bench_space_amplification
 }
-criterion_main!(space_amplification_group);
+criterion_main!(tier5_soak_space_amplification);

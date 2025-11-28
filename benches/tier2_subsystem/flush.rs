@@ -100,8 +100,8 @@ fn bench_flush_sst_build_large_values(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = flush_group;
+    name = tier2_subsystem_flush;
     config = criterion_config();
     targets = bench_flush_sst_build_small, bench_flush_sst_build_medium, bench_flush_sst_build_large_values
 }
-criterion_main!(flush_group);
+criterion_main!(tier2_subsystem_flush);

@@ -87,8 +87,8 @@ fn measure_wal_size(db_path: &std::path::Path) -> u64 {
 }
 
 criterion_group! {
-    name = wal_growth_large_group;
+    name = tier6_capacity_wal_growth_large;
     config = criterion_config();
     targets = bench_wal_growth_large
 }
-criterion_main!(wal_growth_large_group);
+criterion_main!(tier6_capacity_wal_growth_large);

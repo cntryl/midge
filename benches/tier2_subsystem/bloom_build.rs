@@ -68,8 +68,8 @@ fn bench_bloom_build_100k_keys(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = bloom_build_group;
+    name = tier2_subsystem_bloom_build;
     config = criterion_config();
     targets = bench_bloom_build_10k_keys, bench_bloom_build_100k_keys
 }
-criterion_main!(bloom_build_group);
+criterion_main!(tier2_subsystem_bloom_build);

@@ -107,8 +107,8 @@ fn bench_memtable_seq_insert(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = memtable_insert_group;
+    name = tier1_hotpath_memtable_insert;
     config = criterion_config();
     targets = bench_memtable_put_key_small, bench_memtable_put_key_medium, bench_memtable_put_key_large, bench_memtable_seq_insert
 }
-criterion_main!(memtable_insert_group);
+criterion_main!(tier1_hotpath_memtable_insert);

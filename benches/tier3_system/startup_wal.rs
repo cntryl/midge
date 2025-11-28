@@ -71,8 +71,8 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = startup_wal_group;
+    name = tier3_system_startup_wal;
     config = criterion_config();
     targets = bench_engine_startup_from_wal
 }
-criterion_main!(startup_wal_group);
+criterion_main!(tier3_system_startup_wal);

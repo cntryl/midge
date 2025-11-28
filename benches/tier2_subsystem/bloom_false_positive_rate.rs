@@ -91,8 +91,8 @@ fn bench_bloom_false_positive_rate_large(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = bloom_false_positive_rate_group;
+    name = tier2_subsystem_bloom_false_positive_rate;
     config = criterion_config();
     targets = bench_bloom_false_positive_rate_small, bench_bloom_false_positive_rate_large
 }
-criterion_main!(bloom_false_positive_rate_group);
+criterion_main!(tier2_subsystem_bloom_false_positive_rate);

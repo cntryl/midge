@@ -87,8 +87,8 @@ fn bench_level_drift(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = level_drift_group;
+    name = tier5_soak_level_drift;
     config = criterion_config();
     targets = bench_level_drift
 }
-criterion_main!(level_drift_group);
+criterion_main!(tier5_soak_level_drift);

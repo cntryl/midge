@@ -142,8 +142,8 @@ fn bench_block_cache_hit_ratio_fast(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = block_cache_hot_group;
+    name = tier1_hotpath_block_cache_hot;
     config = criterion_config();
     targets = bench_block_cache_get_hot, bench_block_cache_insert_hot, bench_block_cache_hit_ratio_fast
 }
-criterion_main!(block_cache_hot_group);
+criterion_main!(tier1_hotpath_block_cache_hot);

@@ -169,7 +169,7 @@ fn bench_sst_writer_compression(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 criterion_group! {
-    name = subsystem_sst;
+    name = tier2_subsystem_sst;
     config = criterion_config();
     targets =
         bench_sst_iterator_full,
@@ -178,4 +178,4 @@ criterion_group! {
         bench_sst_writer_compression
 }
 
-criterion_main!(subsystem_sst);
+criterion_main!(tier2_subsystem_sst);

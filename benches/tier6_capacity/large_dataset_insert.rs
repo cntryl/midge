@@ -56,8 +56,8 @@ fn bench_large_dataset_insert(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = large_dataset_insert_group;
+    name = tier6_capacity_large_dataset_insert;
     config = criterion_config();
     targets = bench_large_dataset_insert
 }
-criterion_main!(large_dataset_insert_group);
+criterion_main!(tier6_capacity_large_dataset_insert);

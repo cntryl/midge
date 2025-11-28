@@ -72,8 +72,8 @@ fn bench_memtable_full_eviction_trigger(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = memtable_full_group;
+    name = tier2_subsystem_memtable_full;
     config = criterion_config();
     targets = bench_memtable_full_scan, bench_memtable_full_eviction_trigger
 }
-criterion_main!(memtable_full_group);
+criterion_main!(tier2_subsystem_memtable_full);

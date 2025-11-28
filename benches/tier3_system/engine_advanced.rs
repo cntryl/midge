@@ -249,7 +249,7 @@ fn bench_delete_heavy(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = subsystem_engine_advanced;
+    name = tier3_system_engine_advanced;
     config = criterion_config();
     targets =
         bench_ttl,
@@ -257,4 +257,4 @@ criterion_group! {
         bench_large_values,
         bench_delete_heavy
 }
-criterion_main!(subsystem_engine_advanced);
+criterion_main!(tier3_system_engine_advanced);

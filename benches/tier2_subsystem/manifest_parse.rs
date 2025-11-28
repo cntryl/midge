@@ -92,8 +92,8 @@ fn bench_manifest_parse_large(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = manifest_parse_group;
+    name = tier2_subsystem_manifest_parse;
     config = criterion_config();
     targets = bench_manifest_parse_small, bench_manifest_parse_large
 }
-criterion_main!(manifest_parse_group);
+criterion_main!(tier2_subsystem_manifest_parse);

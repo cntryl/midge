@@ -63,8 +63,8 @@ fn bench_large_dataset_compaction(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = large_dataset_compaction_group;
+    name = tier6_capacity_large_dataset_compaction;
     config = criterion_config();
     targets = bench_large_dataset_compaction
 }
-criterion_main!(large_dataset_compaction_group);
+criterion_main!(tier6_capacity_large_dataset_compaction);

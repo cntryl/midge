@@ -283,7 +283,7 @@ fn bench_compression_lz4(c: &mut Criterion) {
 // =============================================================================
 
 criterion_group! {
-    name = hotpath_storage;
+    name = tier1_hotpath_storage;
     config = criterion_config();
     targets =
         bench_skiplist_sequential,
@@ -294,4 +294,4 @@ criterion_group! {
         bench_memtable_read,
         bench_compression_lz4
 }
-criterion_main!(hotpath_storage);
+criterion_main!(tier1_hotpath_storage);

@@ -235,8 +235,8 @@ fn bench_cache_concurrent_access(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = hotpath_cache;
+    name = tier1_hotpath_cache;
     config = criterion_config();
     targets = bench_cache_insert, bench_cache_get_hit, bench_cache_get_miss, bench_cache_eviction, bench_cache_concurrent_access
 }
-criterion_main!(hotpath_cache);
+criterion_main!(tier1_hotpath_cache);

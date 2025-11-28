@@ -239,8 +239,8 @@ fn bench_workload_e(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = ycsb_workload_e;
+    name = tier4_integration_ycsb_workload_e;
     config = criterion_config();
     targets = bench_workload_e
 }
-criterion_main!(ycsb_workload_e);
+criterion_main!(tier4_integration_ycsb_workload_e);

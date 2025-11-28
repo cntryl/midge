@@ -130,8 +130,8 @@ fn bench_wal_replay_corrupted_tail(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = wal_replay_group;
+    name = tier2_subsystem_wal_replay;
     config = criterion_config();
     targets = bench_wal_replay_small_file, bench_wal_replay_large_file, bench_wal_replay_corrupted_tail
 }
-criterion_main!(wal_replay_group);
+criterion_main!(tier2_subsystem_wal_replay);
