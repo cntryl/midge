@@ -31,9 +31,7 @@ fn bench_flush_sst_build_small(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1_000));
 
     // Pre-generate keys and values
-    let entries: Vec<_> = (0..1_000)
-        .map(|i| (make_key(i), make_value(128)))
-        .collect();
+    let entries: Vec<_> = (0..1_000).map(|i| (make_key(i), make_value(128))).collect();
 
     group.bench_function("sst_build_1k", |b| {
         b.iter(|| {

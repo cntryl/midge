@@ -14,7 +14,9 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::criterion_config;
 
 use cntryl_midge::wal::encode_pipeline::{EncodeConfig, WalEncoder};
@@ -58,12 +60,7 @@ fn bench_wal_encode_record(c: &mut Criterion) {
         ),
         (
             "delete",
-            WalRecord::new(
-                WalOpKind::Delete,
-                delete_key.clone(),
-                None,
-                1,
-            ),
+            WalRecord::new(WalOpKind::Delete, delete_key.clone(), None, 1),
         ),
     ];
 

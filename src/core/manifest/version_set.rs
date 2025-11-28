@@ -68,7 +68,9 @@ impl VersionSet {
                     manifest.ssts.retain(|s| !names.contains(s));
                 } else {
                     let names_set: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
-                    manifest.files.retain(|f| !names_set.contains(f.name.as_str()));
+                    manifest
+                        .files
+                        .retain(|f| !names_set.contains(f.name.as_str()));
                     manifest.ssts.retain(|s| !names_set.contains(s.as_str()));
                 }
             }
@@ -85,7 +87,9 @@ impl VersionSet {
                     manifest.ssts.retain(|s| !remove.contains(s));
                 } else {
                     let remove_set: HashSet<&str> = remove.iter().map(|s| s.as_str()).collect();
-                    manifest.files.retain(|f| !remove_set.contains(f.name.as_str()));
+                    manifest
+                        .files
+                        .retain(|f| !remove_set.contains(f.name.as_str()));
                     manifest.ssts.retain(|s| !remove_set.contains(s.as_str()));
                 }
             }

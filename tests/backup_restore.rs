@@ -16,7 +16,9 @@
 
 mod common;
 
-use cntryl_midge::backup::{BackupEngine, BackupOptions, BackupType, RestoreEngine, RestoreOptions};
+use cntryl_midge::backup::{
+    BackupEngine, BackupOptions, BackupType, RestoreEngine, RestoreOptions,
+};
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use common::test_temp_dir;
 use std::sync::Arc;
@@ -59,7 +61,10 @@ fn should_create_full_backup_given_active_database_when_requested() {
     // Assert
     assert_eq!(backup_info.backup_id, 1);
     assert_eq!(backup_info.backup_type, BackupType::Full);
-    assert!(backup_info.size_bytes > 0, "Backup should have non-zero size");
+    assert!(
+        backup_info.size_bytes > 0,
+        "Backup should have non-zero size"
+    );
     assert!(
         !backup_info.sst_files.is_empty(),
         "Backup should contain SST files"
@@ -557,11 +562,7 @@ fn should_list_all_backups_given_multiple_backups_when_listing() {
     for batch in 0..3 {
         for i in 0..20 {
             engine
-                .put(
-                    &cf,
-                    format!("batch{}_key{}", batch, i).as_bytes(),
-                    b"value",
-                )
+                .put(&cf, format!("batch{}_key{}", batch, i).as_bytes(), b"value")
                 .expect("put");
         }
         engine.flush_cf(&cf).expect("flush");

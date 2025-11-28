@@ -75,16 +75,14 @@ pub struct CompactBlockKey(u128);
 impl CompactBlockKey {
     /// Create a compact key from components.
     /// Layout: [file_id:32][block_type:8][_reserved:24][offset:64]
-    #[inline(always)]
+    #[inline]
     pub fn new(file_id: u32, block_type: BlockType, offset: u64) -> Self {
         let block_type_u8 = match block_type {
             BlockType::Data => 0u8,
             BlockType::Index => 1u8,
             BlockType::Filter => 2u8,
         };
-        let packed = ((file_id as u128) << 96)
-            | ((block_type_u8 as u128) << 88)
-            | (offset as u128);
+        let packed = ((file_id as u128) << 96) | ((block_type_u8 as u128) << 88) | (offset as u128);
         Self(packed)
     }
 
@@ -101,7 +99,7 @@ impl CompactBlockKey {
     }
 
     /// Get the raw packed value (for use as hash key).
-    #[inline(always)]
+    #[inline]
     pub fn as_u128(&self) -> u128 {
         self.0
     }
@@ -175,7 +173,7 @@ impl<C: BlockCacheTrait> HotTierCache<C> {
     }
 
     /// Compute slot index from compact key.
-    #[inline(always)]
+    #[inline]
     fn slot_index(compact: CompactBlockKey) -> usize {
         // Use lower bits of the packed key for slot selection
         (compact.as_u128() as usize) & (HOT_TIER_SLOTS - 1)
@@ -224,7 +222,8 @@ impl<C: BlockCacheTrait> HotTierCache<C> {
         // Update key
         let packed = compact.as_u128();
         slot.key.store(packed as u64, Ordering::Relaxed);
-        slot.key_high.store((packed >> 64) as u64, Ordering::Relaxed);
+        slot.key_high
+            .store((packed >> 64) as u64, Ordering::Relaxed);
 
         // Update data
         *slot.data.write() = Some(block);
@@ -528,7 +527,7 @@ impl BlockCacheTrait for BlockCache {
 
 impl LruCacheInner {
     /// Move a node to the front of the list (most recently used)
-    #[inline(always)]
+    #[inline]
     fn move_to_front(&mut self, node_idx: usize) {
         if Some(node_idx) == self.head {
             return; // Already at front

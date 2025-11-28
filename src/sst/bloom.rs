@@ -107,7 +107,7 @@ impl BloomFilter {
     }
 
     /// Add a key to the bloom filter (hot path).
-    #[inline(always)]
+    #[inline]
     pub fn add(&mut self, key: &[u8]) {
         let (h1, h2) = self.double_hash(key);
         let m = self.bit_count;
@@ -126,7 +126,7 @@ impl BloomFilter {
     /// Optimized with:
     /// - Early exit on first missing bit (most common case for absent keys)
     /// - Bitwise AND masking when bit_count is power of 2
-    #[inline(always)]
+    #[inline]
     pub fn may_contain(&self, key: &[u8]) -> bool {
         let (h1, h2) = self.double_hash(key);
         let m = self.bit_count;
@@ -194,19 +194,19 @@ impl BloomFilter {
     }
 
     /// Number of hash functions `k`.
-    #[inline(always)]
+    #[inline]
     pub fn hash_count(&self) -> u32 {
         self.hash_count
     }
 
     /// Number of keys inserted `n`.
-    #[inline(always)]
+    #[inline]
     pub fn keys_count(&self) -> u32 {
         self.keys_count
     }
 
     /// Total number of bits `m`.
-    #[inline(always)]
+    #[inline]
     pub fn bit_count(&self) -> usize {
         self.bit_count as usize
     }
@@ -221,7 +221,7 @@ impl BloomFilter {
     }
 
     /// Optimal bits/key for target FPR: m/n ≈ -ln(p) / (ln2^2).
-    #[inline(always)]
+    #[inline]
     fn calculate_bits_per_key(false_positive_rate: f64) -> usize {
         let p = false_positive_rate.clamp(1e-9, 0.5); // clamp to sane range
         let bits_per_key = -p.ln() / LN2_SQ;
@@ -230,7 +230,7 @@ impl BloomFilter {
 
     /// Optimal number of hashes: k ≈ (m/n) * ln2.
     /// Capped at 10 for diminishing returns beyond that point.
-    #[inline(always)]
+    #[inline]
     fn calculate_hash_count(bits_per_key: usize) -> u32 {
         let k = (bits_per_key as f64 * LN2).round();
         // Cap at 10: Beyond this, the cost of hashing outweighs FPR gains
@@ -250,7 +250,7 @@ impl BloomFilter {
         (h1, h2)
     }
 
-    #[inline(always)]
+    #[inline]
     fn set_bit(bytes: &mut [u8], bit_index: usize) {
         let byte_index = bit_index >> 3;
         let bit_offset = bit_index & 7;
@@ -262,7 +262,7 @@ impl BloomFilter {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     fn test_bit(bytes: &[u8], bit_index: usize) -> bool {
         let byte_index = bit_index >> 3;
         let bit_offset = bit_index & 7;
@@ -351,7 +351,7 @@ impl BloomFilterBuilder {
 
 // Implement the public Filter abstraction for the BloomFilter.
 impl Filter for BloomFilter {
-    #[inline(always)]
+    #[inline]
     fn may_contain(&self, key: &bytes::Bytes) -> bool {
         self.may_contain(key.as_ref())
     }

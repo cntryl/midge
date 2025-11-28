@@ -190,7 +190,7 @@ pub fn encode_put_simple(cf_id: u32, seq: u64, key: &[u8], value: &[u8]) -> Vec<
 ///
 /// Automatically compresses values >= COMPRESSION_THRESHOLD using LZ4.
 /// Only stores compressed version if it's actually smaller than the original.
-#[inline(always)]
+#[inline]
 fn write_value_with_compression(tlv: &mut TlvWriter, value: &[u8]) -> MidgeResult<()> {
     // Fast path: small values don't get compressed
     if value.len() < COMPRESSION_THRESHOLD {

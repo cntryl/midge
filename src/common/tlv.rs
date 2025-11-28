@@ -28,7 +28,7 @@ pub enum WireType {
 }
 
 impl WireType {
-    #[inline(always)]
+    #[inline]
     pub fn from_tag(tag: u8) -> Option<Self> {
         match tag >> 4 {
             0 => Some(WireType::U8),
@@ -42,14 +42,14 @@ impl WireType {
     }
 
     /// Returns the high-nibble tag prefix for this wire type.
-    #[inline(always)]
+    #[inline]
     pub const fn to_tag_prefix(self) -> u8 {
         (self as u8) << 4
     }
 }
 
 /// Compose a tag from wire type and a 4-bit field id.
-#[inline(always)]
+#[inline]
 pub const fn make_tag(wire: WireType, id: u8) -> u8 {
     wire.to_tag_prefix() | (id & 0x0F)
 }
@@ -161,42 +161,42 @@ impl TlvWriter {
         Self::with_capacity(48 + key_len + value_len)
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn write_u8(&mut self, tag: u8, value: u8) {
         self.buffer.extend_from_slice(&[tag, value]);
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn write_u16(&mut self, tag: u8, value: u16) {
         self.buffer.push(tag);
         self.buffer.extend_from_slice(&value.to_be_bytes());
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn write_u32(&mut self, tag: u8, value: u32) {
         self.buffer.push(tag);
         self.buffer.extend_from_slice(&value.to_be_bytes());
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn write_u64(&mut self, tag: u8, value: u64) {
         self.buffer.push(tag);
         self.buffer.extend_from_slice(&value.to_be_bytes());
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn write_varint(&mut self, tag: u8, value: u64) {
         self.buffer.push(tag);
         encode_varint64(&mut self.buffer, value);
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn write_varint32(&mut self, tag: u8, value: u32) {
         self.buffer.push(tag);
         encode_varint32(&mut self.buffer, value);
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn write_bytes(&mut self, tag: u8, data: &[u8]) {
         self.buffer.push(tag);
         encode_varint32(&mut self.buffer, data.len() as u32);
@@ -211,24 +211,24 @@ impl TlvWriter {
     ///
     /// # Safety
     /// Reader must know the expected length to decode this field correctly.
-    #[inline(always)]
+    #[inline]
     pub fn write_bytes_inline(&mut self, tag: u8, data: &[u8]) {
         debug_assert!(data.len() <= 8, "inline bytes must be <= 8 bytes");
         self.buffer.push(tag);
         self.buffer.extend_from_slice(data);
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         &self.buffer
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn finish(self) -> Vec<u8> {
         self.buffer
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn clear(&mut self) {
         self.buffer.clear();
     }
@@ -339,7 +339,7 @@ impl<'a> TlvReader<'a> {
         self.try_next().unwrap_or_default()
     }
 
-    #[inline(always)]
+    #[inline]
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let end = self.cursor.checked_add(n)?;
         if end > self.data.len() {
@@ -485,12 +485,12 @@ impl<'a> TlvReader<'a> {
         None
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn reset(&mut self) {
         self.cursor = 0;
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn position(&self) -> usize {
         self.cursor
     }
@@ -504,7 +504,7 @@ impl<'a> Iterator for TlvReader<'a> {
     }
 }
 
-#[inline(always)]
+#[inline]
 pub fn encode_varint32(buf: &mut Vec<u8>, mut v: u32) {
     while v >= 0x80 {
         buf.push((v as u8) | 0x80);
@@ -513,7 +513,7 @@ pub fn encode_varint32(buf: &mut Vec<u8>, mut v: u32) {
     buf.push(v as u8);
 }
 
-#[inline(always)]
+#[inline]
 pub fn encode_varint64(buf: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
         buf.push((v as u8) | 0x80);
@@ -522,7 +522,7 @@ pub fn encode_varint64(buf: &mut Vec<u8>, mut v: u64) {
     buf.push(v as u8);
 }
 
-#[inline(always)]
+#[inline]
 pub fn decode_varint32(data: &[u8]) -> MidgeResult<(u32, usize)> {
     let mut res = 0u32;
     let mut shift = 0u32;
@@ -547,7 +547,7 @@ pub fn decode_varint32(data: &[u8]) -> MidgeResult<(u32, usize)> {
     })
 }
 
-#[inline(always)]
+#[inline]
 pub fn decode_varint64(data: &[u8]) -> MidgeResult<(u64, usize)> {
     // Unrolled decode - avoids loop overhead for common small values
     // Most sequence numbers fit in 1-3 bytes
@@ -610,7 +610,7 @@ pub fn decode_varint64(data: &[u8]) -> MidgeResult<(u64, usize)> {
     }
 }
 
-#[inline(always)]
+#[inline]
 pub fn parse_u8(v: &[u8]) -> MidgeResult<u8> {
     if v.len() == 1 {
         Ok(v[0])
@@ -621,7 +621,7 @@ pub fn parse_u8(v: &[u8]) -> MidgeResult<u8> {
     }
 }
 
-#[inline(always)]
+#[inline]
 pub fn parse_u32(v: &[u8]) -> MidgeResult<u32> {
     v.try_into()
         .map(u32::from_be_bytes)
@@ -630,7 +630,7 @@ pub fn parse_u32(v: &[u8]) -> MidgeResult<u32> {
         })
 }
 
-#[inline(always)]
+#[inline]
 pub fn parse_u64(v: &[u8]) -> MidgeResult<u64> {
     v.try_into()
         .map(u64::from_be_bytes)
@@ -638,7 +638,7 @@ pub fn parse_u64(v: &[u8]) -> MidgeResult<u64> {
             message: "expected 8 bytes".into(),
         })
 }
-#[inline(always)]
+#[inline]
 pub fn parse_varint32_from_slice(v: &[u8]) -> MidgeResult<u32> {
     Ok(decode_varint32(v)?.0)
 }

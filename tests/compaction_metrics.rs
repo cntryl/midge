@@ -6,7 +6,9 @@
 mod common;
 
 use cntryl_midge::Query;
-use common::{compaction_test_opts, create_storage_mode, disk_storage_modes, populate_multi_level_data};
+use common::{
+    compaction_test_opts, create_storage_mode, disk_storage_modes, populate_multi_level_data,
+};
 
 // ============================================================================
 // READ AMPLIFICATION

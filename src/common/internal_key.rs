@@ -10,7 +10,7 @@ pub enum EntryType {
 }
 
 impl EntryType {
-    #[inline(always)]
+    #[inline]
     pub fn from_u8(val: u8) -> Option<Self> {
         match val {
             0 => Some(EntryType::Value),
@@ -31,7 +31,7 @@ impl EntryType {
 /// 4. kind (ascending) - values before tombstones
 ///
 /// This ensures column families never overlap in sorted order.
-#[inline(always)]
+#[inline]
 #[allow(clippy::uninit_vec)] // Performance: pre-allocate then fill with copy_from_slice
 pub fn encode_internal_key_cf(
     cf_id: ColumnFamilyId,
@@ -68,7 +68,7 @@ pub fn encode_internal_key_cf(
 
 /// Decode internal key with column family ID.
 /// Returns (cf_id, user_key, sequence, entry_type).
-#[inline(always)]
+#[inline]
 pub fn decode_internal_key_cf(ikey: &[u8]) -> Option<(ColumnFamilyId, Vec<u8>, u64, EntryType)> {
     if ikey.len() < 13 {
         // 4 (cf_id) + 9 (seq + type) = minimum 13 bytes
@@ -106,7 +106,7 @@ pub fn decode_internal_key_cf(ikey: &[u8]) -> Option<(ColumnFamilyId, Vec<u8>, u
 /// Returns Ordering for use in sorting/comparison.
 ///
 /// Order: cf_id (asc) -> user_key (lex) -> seq (desc) -> type (asc)
-#[inline(always)]
+#[inline]
 pub fn compare_internal_keys_cf(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
@@ -170,7 +170,7 @@ pub fn compare_internal_keys_cf(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 /// Returns Ordering for use in sorting/comparison.
 ///
 /// Order: user_key (lex) -> seq (desc) -> type (asc)
-#[inline(always)]
+#[inline]
 pub fn compare_internal_keys(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
@@ -227,7 +227,7 @@ pub fn compare_internal_keys(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 ///
 /// These functions are kept for backward compatibility during migration.
 /// New code should use the _cf variants above.
-#[inline(always)]
+#[inline]
 pub fn encode_internal_key(user_key: &[u8], seq: u64, tombstone: bool) -> Vec<u8> {
     encode_internal_key_typed(
         user_key,
@@ -240,7 +240,7 @@ pub fn encode_internal_key(user_key: &[u8], seq: u64, tombstone: bool) -> Vec<u8
     )
 }
 
-#[inline(always)]
+#[inline]
 #[allow(clippy::uninit_vec)] // Performance: pre-allocate then fill with copy_from_slice
 pub fn encode_internal_key_typed(user_key: &[u8], seq: u64, entry_type: EntryType) -> Vec<u8> {
     let total_len = user_key.len() + 9;
@@ -265,7 +265,7 @@ pub fn encode_internal_key_typed(user_key: &[u8], seq: u64, entry_type: EntryTyp
     out
 }
 
-#[inline(always)]
+#[inline]
 pub fn decode_internal_key(ikey: &[u8]) -> Option<(Vec<u8>, u64, bool)> {
     if ikey.len() < 9 {
         return None;
@@ -290,7 +290,7 @@ pub fn decode_internal_key(ikey: &[u8]) -> Option<(Vec<u8>, u64, bool)> {
     Some((user, seq, kind))
 }
 
-#[inline(always)]
+#[inline]
 pub fn decode_internal_key_typed(ikey: &[u8]) -> Option<(Vec<u8>, u64, EntryType)> {
     if ikey.len() < 9 {
         return None;

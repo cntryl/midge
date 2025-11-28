@@ -374,7 +374,9 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
 
     // After compaction completes, data should be preserved
     for i in 0..100 {
-        let result = eng.get(&cf, format!("key{:04}", i).as_bytes()).expect("get");
+        let result = eng
+            .get(&cf, format!("key{:04}", i).as_bytes())
+            .expect("get");
         assert!(result.is_some(), "Key {} should exist after compaction", i);
     }
 }

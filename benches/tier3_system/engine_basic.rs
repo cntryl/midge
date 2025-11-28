@@ -129,83 +129,91 @@ fn bench_concurrent_cf_scaling(c: &mut Criterion) {
     for &threads in &thread_counts {
         group.throughput(Throughput::Elements((threads * ops_per_thread) as u64));
 
-        group.bench_with_input(BenchmarkId::from_parameter(threads), &threads, |b, &threads| {
-            b.iter_custom(|iters| {
-                // We'll run `iters` internal iterations; each iteration spawns `threads`
-                // threads and each thread performs `ops_per_thread` writes.
-                let mut total_elapsed = Duration::ZERO;
+        group.bench_with_input(
+            BenchmarkId::from_parameter(threads),
+            &threads,
+            |b, &threads| {
+                b.iter_custom(|iters| {
+                    // We'll run `iters` internal iterations; each iteration spawns `threads`
+                    // threads and each thread performs `ops_per_thread` writes.
+                    let mut total_elapsed = Duration::ZERO;
 
-                for _ in 0..iters {
-                    // fresh engine per iteration for isolation
-                    let engine = Arc::new(setup_db(&format!("concurrent_{}", threads), true));
+                    for _ in 0..iters {
+                        // fresh engine per iteration for isolation
+                        let engine = Arc::new(setup_db(&format!("concurrent_{}", threads), true));
 
-                    // create column families (one per thread)
-                    let mut cfs = vec![engine.default_column_family()];
-                    for i in 1..threads {
-                        let name = format!("bench_cf_{}", i);
-                        let cf = engine.create_column_family(&name, ColumnFamilyConfig::default()).unwrap();
-                        cfs.push(cf);
+                        // create column families (one per thread)
+                        let mut cfs = vec![engine.default_column_family()];
+                        for i in 1..threads {
+                            let name = format!("bench_cf_{}", i);
+                            let cf = engine
+                                .create_column_family(&name, ColumnFamilyConfig::default())
+                                .unwrap();
+                            cfs.push(cf);
+                        }
+
+                        // prepare keys and values for each thread to avoid shared allocations during timing
+                        let kv_pairs: Vec<Vec<(Bytes, Bytes)>> = (0..threads)
+                            .map(|t| {
+                                (0..ops_per_thread)
+                                    .map(|i| {
+                                        let idx = i + t * ops_per_thread;
+                                        (make_key(idx), make_value(0, 128))
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+
+                        // capture baseline write amplification
+                        let wa_before = engine.write_amplification();
+
+                        let start = Instant::now();
+
+                        // per-thread histograms
+                        let mut thread_handles = Vec::with_capacity(threads);
+                        for t in 0..threads {
+                            let engine = Arc::clone(&engine);
+                            let cf = cfs[t].clone();
+                            let thread_kvs = kv_pairs[t].clone();
+
+                            thread_handles.push(thread::spawn(move || {
+                                let mut hist =
+                                    Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
+                                for (k, v) in thread_kvs.iter() {
+                                    let before = Instant::now();
+                                    engine.put(&cf, k, v).unwrap();
+                                    let us = before.elapsed().as_micros() as u64;
+                                    let _ = hist.record(us);
+                                }
+                                hist
+                            }));
+                        }
+
+                        // collect and merge histograms
+                        let mut merged =
+                            Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
+                        for handle in thread_handles {
+                            let h = handle.join().expect("thread join");
+                            merged.add(&h).unwrap();
+                        }
+
+                        let elapsed = start.elapsed();
+                        total_elapsed += elapsed;
+
+                        // compute 99th percentile (microseconds)
+                        let p99 = merged.value_at_percentile(99.0);
+
+                        // measure write amplification after workload
+                        let wa_after = engine.write_amplification();
+
+                        // Silence unused variable warnings
+                        let _ = (p99, wa_before, wa_after);
                     }
 
-                    // prepare keys and values for each thread to avoid shared allocations during timing
-                    let kv_pairs: Vec<Vec<(Bytes, Bytes)>> = (0..threads)
-                        .map(|t| {
-                            (0..ops_per_thread)
-                                .map(|i| {
-                                    let idx = i + t * ops_per_thread;
-                                    (make_key(idx), make_value(0, 128))
-                                })
-                                .collect()
-                        })
-                        .collect();
-
-                    // capture baseline write amplification
-                    let wa_before = engine.write_amplification();
-
-                    let start = Instant::now();
-
-                    // per-thread histograms
-                    let mut thread_handles = Vec::with_capacity(threads);
-                    for t in 0..threads {
-                        let engine = Arc::clone(&engine);
-                        let cf = cfs[t].clone();
-                        let thread_kvs = kv_pairs[t].clone();
-
-                        thread_handles.push(thread::spawn(move || {
-                            let mut hist = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
-                            for (k, v) in thread_kvs.iter() {
-                                let before = Instant::now();
-                                engine.put(&cf, k, v).unwrap();
-                                let us = before.elapsed().as_micros() as u64;
-                                let _ = hist.record(us);
-                            }
-                            hist
-                        }));
-                    }
-
-                    // collect and merge histograms
-                    let mut merged = Histogram::<u64>::new_with_bounds(1, 10_000_000, 3).unwrap();
-                    for handle in thread_handles {
-                        let h = handle.join().expect("thread join");
-                        merged.add(&h).unwrap();
-                    }
-
-                    let elapsed = start.elapsed();
-                    total_elapsed += elapsed;
-
-                    // compute 99th percentile (microseconds)
-                    let p99 = merged.value_at_percentile(99.0);
-
-                    // measure write amplification after workload
-                    let wa_after = engine.write_amplification();
-
-                    // Silence unused variable warnings
-                    let _ = (p99, wa_before, wa_after);
-                }
-
-                total_elapsed
-            });
-        });
+                    total_elapsed
+                });
+            },
+        );
     }
 
     group.finish();

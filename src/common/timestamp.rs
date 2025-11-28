@@ -97,7 +97,7 @@ impl Clock {
     /// Fast path when offset is known to be zero (common case).
     ///
     /// Saves one atomic load and saturating_add when NTP offset hasn't been applied.
-    #[inline(always)]
+    #[inline]
     fn now_millis_fast(&self) -> u64 {
         let elapsed = self.start_instant.elapsed();
         (self.start_time_millis + elapsed.as_millis() as i64).max(0) as u64

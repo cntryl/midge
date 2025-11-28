@@ -125,7 +125,7 @@ impl StreamingBodyEncoder {
 
     // Helper: encode varint32 into local small buffer and push to dst,
     // updating crc via crc32c::crc32c_append.
-    #[inline(always)]
+    #[inline]
     fn write_varint32_and_update_crc(dst: &mut Vec<u8>, crc: &mut u32, mut v: u32) {
         // varint32 fits in at most 5 bytes
         let mut tmp = [0u8; 5];
@@ -142,14 +142,14 @@ impl StreamingBodyEncoder {
         dst.extend_from_slice(&tmp[..i]);
     }
 
-    #[inline(always)]
+    #[inline]
     fn write_u8_and_update_crc(dst: &mut Vec<u8>, crc: &mut u32, tag: u8, val: u8) {
         let buf = [tag, val];
         *crc = crc32c::crc32c_append(*crc, &buf);
         dst.extend_from_slice(&buf);
     }
 
-    #[inline(always)]
+    #[inline]
     fn write_u32_be_and_update_crc(dst: &mut Vec<u8>, crc: &mut u32, tag: u8, val: u32) {
         let mut buf = [0u8; 5];
         buf[0] = tag;
@@ -158,7 +158,7 @@ impl StreamingBodyEncoder {
         dst.extend_from_slice(&buf);
     }
 
-    #[inline(always)]
+    #[inline]
     fn write_u64_be_and_update_crc(dst: &mut Vec<u8>, crc: &mut u32, tag: u8, val: u64) {
         let mut buf = [0u8; 9];
         buf[0] = tag;
@@ -167,7 +167,7 @@ impl StreamingBodyEncoder {
         dst.extend_from_slice(&buf);
     }
 
-    #[inline(always)]
+    #[inline]
     fn write_bytes_and_update_crc(dst: &mut Vec<u8>, crc: &mut u32, tag: u8, data: &[u8]) {
         // tag
         *crc = crc32c::crc32c_append(*crc, &[tag]);

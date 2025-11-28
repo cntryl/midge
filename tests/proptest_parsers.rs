@@ -10,8 +10,7 @@ use bytes::Bytes;
 use proptest::prelude::*;
 
 use cntryl_midge::common::internal_key::{
-    decode_internal_key, decode_internal_key_typed, encode_internal_key_typed,
-    EntryType,
+    decode_internal_key, decode_internal_key_typed, encode_internal_key_typed, EntryType,
 };
 use cntryl_midge::common::tlv::{decode_varint32, decode_varint64, TlvReader};
 use cntryl_midge::sst::{Block, BlockType, BloomFilter, SparseIndex};

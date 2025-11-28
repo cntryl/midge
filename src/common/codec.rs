@@ -41,12 +41,12 @@ impl NoopCodec {
 }
 
 impl Compressor for NoopCodec {
-    #[inline(always)]
+    #[inline]
     fn compress(&self, input: &[u8]) -> anyhow::Result<Vec<u8>> {
         Ok(input.to_vec())
     }
 
-    #[inline(always)]
+    #[inline]
     fn decompress(&self, input: &[u8]) -> anyhow::Result<Vec<u8>> {
         Ok(input.to_vec())
     }

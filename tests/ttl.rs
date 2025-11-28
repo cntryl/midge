@@ -293,10 +293,14 @@ fn should_hide_expired_key_given_snapshot_after_expiry_when_reading_at_snapshot(
 
     // Act - take snapshot after expiry
     let snapshot = engine.snapshot();
-    let result = engine.get_at(&cf, b"snap_ttl:key", &snapshot).expect("get_at");
+    let result = engine
+        .get_at(&cf, b"snap_ttl:key", &snapshot)
+        .expect("get_at");
 
     // Assert - snapshot should not see expired key
-    let result = engine.get_at(&cf, b"snap_ttl:key", &snapshot).expect("get_at");
+    let result = engine
+        .get_at(&cf, b"snap_ttl:key", &snapshot)
+        .expect("get_at");
     assert!(
         result.is_none(),
         "Snapshot taken after expiry should not see expired key"
@@ -401,7 +405,9 @@ fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
     engine
         .put_with_ttl(&cf, b"long_ttl", b"expires_later", 3600)
         .expect("put long ttl");
-    engine.put(&cf, b"no_ttl", b"permanent").expect("put no ttl");
+    engine
+        .put(&cf, b"no_ttl", b"permanent")
+        .expect("put no ttl");
 
     // Act - wait for short TTL to expire
     thread::sleep(Duration::from_secs(2));

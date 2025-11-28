@@ -95,9 +95,8 @@ fn bench_wal_append_batch(c: &mut Criterion) {
                 let tmp = tempdir().expect("tempdir");
                 let dir = tmp.path();
 
-                let writer =
-                    cntryl_midge::wal::fs::Wal::open_with_mode(dir, WalSyncMode::NoSync)
-                        .expect("open WAL");
+                let writer = cntryl_midge::wal::fs::Wal::open_with_mode(dir, WalSyncMode::NoSync)
+                    .expect("open WAL");
 
                 let records: Vec<WalRecord> = (0..size)
                     .map(|i| {
@@ -137,9 +136,8 @@ fn bench_wal_io_seq_throughput(c: &mut Criterion) {
             let tmp = tempdir().expect("tempdir");
             let dir = tmp.path();
 
-            let mut writer =
-                cntryl_midge::wal::fs::Wal::open_with_mode(dir, WalSyncMode::NoSync)
-                    .expect("open WAL");
+            let mut writer = cntryl_midge::wal::fs::Wal::open_with_mode(dir, WalSyncMode::NoSync)
+                .expect("open WAL");
 
             let record = WalRecord::new(
                 WalOpKind::Put,

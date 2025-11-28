@@ -225,7 +225,7 @@ impl RateLimiter {
     }
 
     /// Get current time in microseconds
-    #[inline(always)]
+    #[inline]
     fn now_micros() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

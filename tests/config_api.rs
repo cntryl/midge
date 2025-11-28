@@ -47,9 +47,15 @@ fn should_set_goal_given_latency_when_optimizing_for_p99() {
     assert_eq!(config.goal(), Goal::Latency);
     let plan = config.plan();
     // Latency mode should use smaller block sizes for faster reads
-    assert!(plan.block_size <= 16 * 1024, "block size should be small for latency");
+    assert!(
+        plan.block_size <= 16 * 1024,
+        "block size should be small for latency"
+    );
     // Latency mode should have more aggressive bloom filters
-    assert!(plan.bloom_bits_per_key >= 10, "bloom bits should be high for latency");
+    assert!(
+        plan.bloom_bits_per_key >= 10,
+        "bloom bits should be high for latency"
+    );
 }
 
 #[test]
@@ -68,7 +74,10 @@ fn should_set_goal_given_throughput_when_optimizing_for_bulk_writes() {
     assert_eq!(config.goal(), Goal::Throughput);
     let plan = config.plan();
     // Throughput mode should use larger block sizes
-    assert!(plan.block_size >= 32 * 1024, "block size should be large for throughput");
+    assert!(
+        plan.block_size >= 32 * 1024,
+        "block size should be large for throughput"
+    );
     // Throughput mode should have larger memtables
     assert!(
         plan.memtable_size >= 64 * 1024 * 1024,
@@ -95,7 +104,10 @@ fn should_set_goal_given_cost_when_minimizing_resources() {
     // Check relative allocation is lower (depends on implementation)
     assert!(plan.block_cache_size > 0, "some cache should be allocated");
     // Cost mode should have lower compaction concurrency
-    assert!(plan.compaction_concurrency <= 2, "compaction threads should be minimal");
+    assert!(
+        plan.compaction_concurrency <= 2,
+        "compaction threads should be minimal"
+    );
 }
 
 // =============================================================================
@@ -242,7 +254,10 @@ fn should_optimize_params_given_read_mostly_profile_when_configured() {
     assert_eq!(config.workload_profile(), WorkloadProfile::ReadMostly);
     let plan = config.plan();
     // Read-mostly should prioritize cache and bloom filters
-    assert!(plan.bloom_bits_per_key > 0, "bloom filter should be enabled");
+    assert!(
+        plan.bloom_bits_per_key > 0,
+        "bloom filter should be enabled"
+    );
 }
 
 #[test]
@@ -280,10 +295,7 @@ fn should_require_cloud_config_given_cloud_mode_when_not_off() {
         .build();
 
     // Assert
-    assert!(
-        result.is_err(),
-        "cloud mode Cache requires cloud config"
-    );
+    assert!(result.is_err(), "cloud mode Cache requires cloud config");
 }
 
 #[test]

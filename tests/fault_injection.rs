@@ -33,10 +33,7 @@ use std::sync::Arc;
 // Helper: Create options with test hooks for each storage mode
 // ============================================================================
 
-fn opts_with_hooks_local_disk(
-    dir: &tempfile::TempDir,
-    hooks: TestHooks,
-) -> MidgeOptions {
+fn opts_with_hooks_local_disk(dir: &tempfile::TempDir, hooks: TestHooks) -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
             db_path: dir.path().to_path_buf(),
@@ -122,211 +119,230 @@ macro_rules! test_all_modes {
 // Fsync Failure Tests (Simulated Power Loss)
 // ============================================================================
 
-test_persistent_modes!(should_survive_recovery_given_skip_fsync_when_reopening, |ctx: &DurabilityTestContext, mode: &str| {
-    // Arrange
-    let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::Skip);
+test_persistent_modes!(
+    should_survive_recovery_given_skip_fsync_when_reopening,
+    |ctx: &DurabilityTestContext, mode: &str| {
+        // Arrange
+        let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::Skip);
 
-    let mut opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        test_hooks: Some(hooks.clone()),
-        ..Default::default()
-    };
+        let mut opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            test_hooks: Some(hooks.clone()),
+            ..Default::default()
+        };
 
-    {
-        let eng = MidgeEngine::open(opts.clone()).expect("open");
-        let cf = eng.default_column_family();
-        eng.put(&cf, b"unfsynced_key", b"unfsynced_value")
-            .expect("put");
-        // Drop without flush - fsync was skipped, simulating crash
-    }
-
-    // Act - reopen without hooks (normal recovery)
-    opts.test_hooks = None;
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
-    let _result = eng.get(&cf, b"unfsynced_key").expect("get");
-
-    // Assert - recovery succeeded (data presence depends on OS buffering)
-    assert!(hooks.fsync_count() == 0, "{}: fsync should have been skipped", mode);
-});
-
-test_all_modes!(should_track_fsync_count_given_record_only_fsync_when_writing, |mode: &str| {
-    // Arrange
-    let dir = test_temp_dir();
-    let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::RecordOnly);
-
-    let opts = match mode {
-        "Memory" => opts_with_hooks_memory(hooks.clone()),
-        "LocalDisk" => opts_with_hooks_local_disk(&dir, hooks.clone()),
-        "CloudBacked" => {
-            let backend = Arc::new(MockCloudBackend::with_root(dir.path().join("cloud")));
-            opts_with_hooks_cloud_backed(&dir, backend, hooks.clone())
+        {
+            let eng = MidgeEngine::open(opts.clone()).expect("open");
+            let cf = eng.default_column_family();
+            eng.put(&cf, b"unfsynced_key", b"unfsynced_value")
+                .expect("put");
+            // Drop without flush - fsync was skipped, simulating crash
         }
-        _ => panic!("Unknown mode: {}", mode),
-    };
 
-    // Act
-    let eng = MidgeEngine::open(opts).expect("open");
-    let cf = eng.default_column_family();
-    for i in 0..10 {
-        eng.put(&cf, format!("key_{}", i).as_bytes(), b"value")
-            .expect("put");
-    }
-    if mode != "Memory" {
-        eng.flush().expect("flush");
-    }
-    let fsync_count = hooks.fsync_count();
+        // Act - reopen without hooks (normal recovery)
+        opts.test_hooks = None;
+        let eng = MidgeEngine::open(opts).expect("reopen");
+        let cf = eng.default_column_family();
+        let _result = eng.get(&cf, b"unfsynced_key").expect("get");
 
-    // Assert - fsync count depends on storage mode
-    if mode == "Memory" {
-        // Memory mode may or may not track fsyncs
-        let _ = fsync_count;
-    } else {
+        // Assert - recovery succeeded (data presence depends on OS buffering)
         assert!(
-            fsync_count > 0,
-            "{}: expected fsync calls to be recorded, got {}",
-            mode,
-            fsync_count
+            hooks.fsync_count() == 0,
+            "{}: fsync should have been skipped",
+            mode
         );
     }
-});
+);
+
+test_all_modes!(
+    should_track_fsync_count_given_record_only_fsync_when_writing,
+    |mode: &str| {
+        // Arrange
+        let dir = test_temp_dir();
+        let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::RecordOnly);
+
+        let opts = match mode {
+            "Memory" => opts_with_hooks_memory(hooks.clone()),
+            "LocalDisk" => opts_with_hooks_local_disk(&dir, hooks.clone()),
+            "CloudBacked" => {
+                let backend = Arc::new(MockCloudBackend::with_root(dir.path().join("cloud")));
+                opts_with_hooks_cloud_backed(&dir, backend, hooks.clone())
+            }
+            _ => panic!("Unknown mode: {}", mode),
+        };
+
+        // Act
+        let eng = MidgeEngine::open(opts).expect("open");
+        let cf = eng.default_column_family();
+        for i in 0..10 {
+            eng.put(&cf, format!("key_{}", i).as_bytes(), b"value")
+                .expect("put");
+        }
+        if mode != "Memory" {
+            eng.flush().expect("flush");
+        }
+        let fsync_count = hooks.fsync_count();
+
+        // Assert - fsync count depends on storage mode
+        if mode == "Memory" {
+            // Memory mode may or may not track fsyncs
+            let _ = fsync_count;
+        } else {
+            assert!(
+                fsync_count > 0,
+                "{}: expected fsync calls to be recorded, got {}",
+                mode,
+                fsync_count
+            );
+        }
+    }
+);
 
 // ============================================================================
 // WAL Torn Write Tests
 // ============================================================================
 
-test_persistent_modes!(should_recover_to_last_valid_record_given_truncated_wal_when_reopening, |ctx: &DurabilityTestContext, mode: &str| {
-    // Arrange
-    let hooks = TestHooks::new().with_wal_behavior(WalBehavior::TruncateAfterWrite);
+test_persistent_modes!(
+    should_recover_to_last_valid_record_given_truncated_wal_when_reopening,
+    |ctx: &DurabilityTestContext, mode: &str| {
+        // Arrange
+        let hooks = TestHooks::new().with_wal_behavior(WalBehavior::TruncateAfterWrite);
 
-    let mut opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        test_hooks: Some(hooks),
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        ..Default::default()
-    };
+        let mut opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            test_hooks: Some(hooks),
+            wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
+            ..Default::default()
+        };
 
-    {
-        let eng = MidgeEngine::open(opts.clone()).expect("open");
+        {
+            let eng = MidgeEngine::open(opts.clone()).expect("open");
+            let cf = eng.default_column_family();
+
+            // Write several keys - some may be truncated
+            eng.put(&cf, b"wal_key_1", b"value1").expect("put 1");
+            eng.put(&cf, b"wal_key_2", b"value2").expect("put 2");
+            eng.put(&cf, b"wal_key_3", b"value3").expect("put 3");
+        }
+
+        // Act - reopen with corruption tolerance
+        opts.test_hooks = None;
+        let eng = MidgeEngine::open(opts).expect("reopen");
         let cf = eng.default_column_family();
 
-        // Write several keys - some may be truncated
-        eng.put(&cf, b"wal_key_1", b"value1").expect("put 1");
-        eng.put(&cf, b"wal_key_2", b"value2").expect("put 2");
-        eng.put(&cf, b"wal_key_3", b"value3").expect("put 3");
+        // Assert - recovery should succeed
+        let result1 = eng.get(&cf, b"wal_key_1").expect("get");
+        let result2 = eng.get(&cf, b"wal_key_2").expect("get");
+        // Due to truncation, we may or may not have all keys - key assertion is recovery succeeded
+        assert!(
+            result1.is_some() || result2.is_some(),
+            "{}: at least some data should be recovered",
+            mode
+        );
     }
-
-    // Act - reopen with corruption tolerance
-    opts.test_hooks = None;
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
-
-    // Assert - recovery should succeed
-    let result1 = eng.get(&cf, b"wal_key_1").expect("get");
-    let result2 = eng.get(&cf, b"wal_key_2").expect("get");
-    // Due to truncation, we may or may not have all keys - key assertion is recovery succeeded
-    assert!(
-        result1.is_some() || result2.is_some(),
-        "{}: at least some data should be recovered",
-        mode
-    );
-});
+);
 
 // ============================================================================
 // Manifest Failure Tests
 // ============================================================================
 
-test_persistent_modes!(should_fail_gracefully_given_manifest_save_failure_when_flushing, |ctx: &DurabilityTestContext, mode: &str| {
-    // Arrange
-    let hooks = TestHooks::new().with_manifest_behavior(ManifestBehavior::FailSave);
+test_persistent_modes!(
+    should_fail_gracefully_given_manifest_save_failure_when_flushing,
+    |ctx: &DurabilityTestContext, mode: &str| {
+        // Arrange
+        let hooks = TestHooks::new().with_manifest_behavior(ManifestBehavior::FailSave);
 
-    let opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        test_hooks: Some(hooks),
-        ..Default::default()
-    };
+        let opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            test_hooks: Some(hooks),
+            ..Default::default()
+        };
 
-    let eng = MidgeEngine::open(opts).expect("open");
-    let cf = eng.default_column_family();
+        let eng = MidgeEngine::open(opts).expect("open");
+        let cf = eng.default_column_family();
 
-    // Act - put data and attempt flush
-    eng.put(&cf, b"manifest_key", b"manifest_value")
-        .expect("put");
-    let flush_result = eng.flush();
+        // Act - put data and attempt flush
+        eng.put(&cf, b"manifest_key", b"manifest_value")
+            .expect("put");
+        let flush_result = eng.flush();
 
-    // Assert - flush should fail but not panic
-    assert!(
-        flush_result.is_err(),
-        "{}: flush should fail when manifest save fails",
-        mode
-    );
-});
+        // Assert - flush should fail but not panic
+        assert!(
+            flush_result.is_err(),
+            "{}: flush should fail when manifest save fails",
+            mode
+        );
+    }
+);
 
 // ============================================================================
 // Compaction Failure Tests
 // ============================================================================
 
-test_persistent_modes!(should_recover_given_compaction_failure_midway_when_reopening, |ctx: &DurabilityTestContext, mode: &str| {
-    // Arrange - first create some data to compact
-    let setup_opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        enable_compaction: false, // Manual compaction
-        memtable_size: 1024,      // Small memtable to force multiple flushes
-        ..Default::default()
-    };
+test_persistent_modes!(
+    should_recover_given_compaction_failure_midway_when_reopening,
+    |ctx: &DurabilityTestContext, mode: &str| {
+        // Arrange - first create some data to compact
+        let setup_opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            enable_compaction: false, // Manual compaction
+            memtable_size: 1024,      // Small memtable to force multiple flushes
+            ..Default::default()
+        };
 
-    {
-        let eng = MidgeEngine::open(setup_opts).expect("open");
+        {
+            let eng = MidgeEngine::open(setup_opts).expect("open");
+            let cf = eng.default_column_family();
+
+            // Create multiple SST files
+            for batch in 0..5 {
+                for i in 0..100 {
+                    eng.put(
+                        &cf,
+                        format!("compact_key_{}_{:04}", batch, i).as_bytes(),
+                        format!("value_{}", batch).as_bytes(),
+                    )
+                    .expect("put");
+                }
+                eng.flush().expect("flush");
+            }
+        }
+
+        // Now try to compact with failure injection
+        let hooks = TestHooks::new().with_compaction_behavior(CompactionBehavior::FailMidway);
+        let compact_opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            test_hooks: Some(hooks),
+            enable_compaction: false,
+            ..Default::default()
+        };
+
+        {
+            let eng = MidgeEngine::open(compact_opts).expect("open for compaction");
+            let _ = eng.compact_all(); // May fail
+        }
+
+        // Act - reopen without fault injection
+        let recovery_opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            ..Default::default()
+        };
+        let eng = MidgeEngine::open(recovery_opts).expect("reopen");
         let cf = eng.default_column_family();
 
-        // Create multiple SST files
+        // Assert - all original data should still be readable
         for batch in 0..5 {
-            for i in 0..100 {
-                eng.put(
-                    &cf,
-                    format!("compact_key_{}_{:04}", batch, i).as_bytes(),
-                    format!("value_{}", batch).as_bytes(),
-                )
-                .expect("put");
-            }
-            eng.flush().expect("flush");
+            let key = format!("compact_key_{}_{:04}", batch, 50);
+            let result = eng.get(&cf, key.as_bytes()).expect("get");
+            assert!(
+                result.is_some(),
+                "{}: key {} should be present after failed compaction",
+                mode,
+                key
+            );
         }
     }
-
-    // Now try to compact with failure injection
-    let hooks = TestHooks::new().with_compaction_behavior(CompactionBehavior::FailMidway);
-    let compact_opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        test_hooks: Some(hooks),
-        enable_compaction: false,
-        ..Default::default()
-    };
-
-    {
-        let eng = MidgeEngine::open(compact_opts).expect("open for compaction");
-        let _ = eng.compact_all(); // May fail
-    }
-
-    // Act - reopen without fault injection
-    let recovery_opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(recovery_opts).expect("reopen");
-    let cf = eng.default_column_family();
-
-    // Assert - all original data should still be readable
-    for batch in 0..5 {
-        let key = format!("compact_key_{}_{:04}", batch, 50);
-        let result = eng.get(&cf, key.as_bytes()).expect("get");
-        assert!(
-            result.is_some(),
-            "{}: key {} should be present after failed compaction",
-            mode,
-            key
-        );
-    }
-});
+);
 
 // ============================================================================
 // I/O Error Tests (Note: IoBehavior is checked during fsync, not writes)
@@ -353,7 +369,10 @@ fn should_return_error_given_enospc_when_syncing_local_disk() {
     let result = eng.flush();
 
     // Assert - flush should fail with error, not panic
-    assert!(result.is_err(), "flush should fail with ENOSPC during fsync");
+    assert!(
+        result.is_err(),
+        "flush should fail with ENOSPC during fsync"
+    );
 }
 
 #[test]
@@ -381,182 +400,198 @@ fn should_return_error_given_eio_when_syncing_local_disk() {
 // Multi-Fault Scenario Tests
 // ============================================================================
 
-test_persistent_modes!(should_recover_given_crash_during_compaction_with_pending_wal_when_reopening, |ctx: &DurabilityTestContext, mode: &str| {
-    // Arrange - complex scenario: crash during compaction with unsynced WAL
-    let setup_opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        enable_compaction: false,
-        memtable_size: 2048,
-        ..Default::default()
-    };
+test_persistent_modes!(
+    should_recover_given_crash_during_compaction_with_pending_wal_when_reopening,
+    |ctx: &DurabilityTestContext, mode: &str| {
+        // Arrange - complex scenario: crash during compaction with unsynced WAL
+        let setup_opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            enable_compaction: false,
+            memtable_size: 2048,
+            ..Default::default()
+        };
 
-    {
-        let eng = MidgeEngine::open(setup_opts).expect("open");
+        {
+            let eng = MidgeEngine::open(setup_opts).expect("open");
+            let cf = eng.default_column_family();
+
+            // Create flushed data
+            for i in 0..50 {
+                eng.put(
+                    &cf,
+                    format!("flushed_{:04}", i).as_bytes(),
+                    b"flushed_value",
+                )
+                .expect("put");
+            }
+            eng.flush().expect("flush");
+        }
+
+        // Now write more data and simulate crash during compaction
+        let hooks = TestHooks::new()
+            .with_fsync_behavior(FsyncBehavior::Skip)
+            .with_compaction_behavior(CompactionBehavior::CrashBeforeFsync);
+
+        let crash_opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            test_hooks: Some(hooks),
+            enable_compaction: false,
+            ..Default::default()
+        };
+
+        {
+            let eng = MidgeEngine::open(crash_opts).expect("open");
+            let cf = eng.default_column_family();
+
+            // Write unsynced data
+            for i in 0..20 {
+                eng.put(
+                    &cf,
+                    format!("unsynced_{:04}", i).as_bytes(),
+                    b"unsynced_value",
+                )
+                .expect("put");
+            }
+
+            // Attempt compaction (will "crash")
+            let _ = eng.compact_all();
+        }
+
+        // Act - recover
+        let recovery_opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
+            ..Default::default()
+        };
+        let eng = MidgeEngine::open(recovery_opts).expect("reopen");
         let cf = eng.default_column_family();
 
-        // Create flushed data
+        // Assert - flushed data should definitely be present
         for i in 0..50 {
-            eng.put(&cf, format!("flushed_{:04}", i).as_bytes(), b"flushed_value")
-                .expect("put");
+            let key = format!("flushed_{:04}", i);
+            let result = eng.get(&cf, key.as_bytes()).expect("get");
+            assert!(
+                result.is_some(),
+                "{}: flushed key {} should survive crash",
+                mode,
+                key
+            );
         }
-        eng.flush().expect("flush");
     }
-
-    // Now write more data and simulate crash during compaction
-    let hooks = TestHooks::new()
-        .with_fsync_behavior(FsyncBehavior::Skip)
-        .with_compaction_behavior(CompactionBehavior::CrashBeforeFsync);
-
-    let crash_opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        test_hooks: Some(hooks),
-        enable_compaction: false,
-        ..Default::default()
-    };
-
-    {
-        let eng = MidgeEngine::open(crash_opts).expect("open");
-        let cf = eng.default_column_family();
-
-        // Write unsynced data
-        for i in 0..20 {
-            eng.put(&cf, format!("unsynced_{:04}", i).as_bytes(), b"unsynced_value")
-                .expect("put");
-        }
-
-        // Attempt compaction (will "crash")
-        let _ = eng.compact_all();
-    }
-
-    // Act - recover
-    let recovery_opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(recovery_opts).expect("reopen");
-    let cf = eng.default_column_family();
-
-    // Assert - flushed data should definitely be present
-    for i in 0..50 {
-        let key = format!("flushed_{:04}", i);
-        let result = eng.get(&cf, key.as_bytes()).expect("get");
-        assert!(
-            result.is_some(),
-            "{}: flushed key {} should survive crash",
-            mode,
-            key
-        );
-    }
-});
+);
 
 // ============================================================================
 // Instrumentation Verification Tests
 // ============================================================================
 
-test_all_modes!(should_count_operations_given_instrumented_hooks_when_performing_writes, |mode: &str| {
-    // Arrange
-    let dir = test_temp_dir();
-    let hooks = TestHooks::new();
+test_all_modes!(
+    should_count_operations_given_instrumented_hooks_when_performing_writes,
+    |mode: &str| {
+        // Arrange
+        let dir = test_temp_dir();
+        let hooks = TestHooks::new();
 
-    let opts = match mode {
-        "Memory" => opts_with_hooks_memory(hooks.clone()),
-        "LocalDisk" => opts_with_hooks_local_disk(&dir, hooks.clone()),
-        "CloudBacked" => {
-            let backend = Arc::new(MockCloudBackend::with_root(dir.path().join("cloud")));
-            opts_with_hooks_cloud_backed(&dir, backend, hooks.clone())
-        }
-        _ => panic!("Unknown mode: {}", mode),
-    };
+        let opts = match mode {
+            "Memory" => opts_with_hooks_memory(hooks.clone()),
+            "LocalDisk" => opts_with_hooks_local_disk(&dir, hooks.clone()),
+            "CloudBacked" => {
+                let backend = Arc::new(MockCloudBackend::with_root(dir.path().join("cloud")));
+                opts_with_hooks_cloud_backed(&dir, backend, hooks.clone())
+            }
+            _ => panic!("Unknown mode: {}", mode),
+        };
 
-    // Act
-    let eng = MidgeEngine::open(opts).expect("open");
-    let cf = eng.default_column_family();
+        // Act
+        let eng = MidgeEngine::open(opts).expect("open");
+        let cf = eng.default_column_family();
 
-    for i in 0..100 {
-        eng.put(&cf, format!("count_key_{}", i).as_bytes(), b"value")
-            .expect("put");
-    }
-    if mode != "Memory" {
-        eng.flush().expect("flush");
-    }
-
-    let wal_count = hooks.wal_append_count();
-    let manifest_count = hooks.manifest_update_count();
-
-    // Assert
-    assert!(
-        wal_count >= 100,
-        "{}: expected at least 100 WAL appends, got {}",
-        mode,
-        wal_count
-    );
-    if mode != "Memory" {
-        assert!(
-            manifest_count >= 1,
-            "{}: expected at least 1 manifest update, got {}",
-            mode,
-            manifest_count
-        );
-    }
-});
-
-test_persistent_modes!(should_track_compaction_lifecycle_given_instrumented_hooks_when_compacting, |ctx: &DurabilityTestContext, mode: &str| {
-    // Arrange
-    let hooks = TestHooks::new();
-
-    let opts = MidgeOptions {
-        storage_mode: ctx.create_storage_mode(),
-        test_hooks: Some(hooks.clone()),
-        enable_compaction: false,
-        memtable_size: 1024,
-        ..Default::default()
-    };
-
-    let eng = MidgeEngine::open(opts).expect("open");
-    let cf = eng.default_column_family();
-
-    // Create multiple SST files with enough data to trigger actual compaction
-    for batch in 0..5 {
         for i in 0..100 {
-            eng.put(
-                &cf,
-                format!("lifecycle_{}_{}", batch, i).as_bytes(),
-                format!("value_{}", batch).as_bytes(),
-            )
-            .expect("put");
+            eng.put(&cf, format!("count_key_{}", i).as_bytes(), b"value")
+                .expect("put");
         }
-        eng.flush().expect("flush");
-    }
+        if mode != "Memory" {
+            eng.flush().expect("flush");
+        }
 
-    // Act
-    eng.compact_all().expect("compact");
+        let wal_count = hooks.wal_append_count();
+        let manifest_count = hooks.manifest_update_count();
 
-    let start_count = hooks.compaction_start_count();
-    let complete_count = hooks.compaction_complete_count();
-    let failed_count = hooks.compaction_failed_count();
-
-    // Assert - compaction hooks may or may not fire depending on whether
-    // the compaction scheduler decided compaction was needed
-    // The main assertion is that no failures occurred
-    assert_eq!(
-        failed_count, 0,
-        "{}: expected no compaction failures, got {}",
-        mode,
-        failed_count
-    );
-
-    // If compaction started, it should have completed
-    if start_count > 0 {
+        // Assert
         assert!(
-            complete_count >= 1,
-            "{}: compaction started ({}) but didn't complete ({})",
+            wal_count >= 100,
+            "{}: expected at least 100 WAL appends, got {}",
             mode,
-            start_count,
-            complete_count
+            wal_count
         );
+        if mode != "Memory" {
+            assert!(
+                manifest_count >= 1,
+                "{}: expected at least 1 manifest update, got {}",
+                mode,
+                manifest_count
+            );
+        }
     }
-});
+);
+
+test_persistent_modes!(
+    should_track_compaction_lifecycle_given_instrumented_hooks_when_compacting,
+    |ctx: &DurabilityTestContext, mode: &str| {
+        // Arrange
+        let hooks = TestHooks::new();
+
+        let opts = MidgeOptions {
+            storage_mode: ctx.create_storage_mode(),
+            test_hooks: Some(hooks.clone()),
+            enable_compaction: false,
+            memtable_size: 1024,
+            ..Default::default()
+        };
+
+        let eng = MidgeEngine::open(opts).expect("open");
+        let cf = eng.default_column_family();
+
+        // Create multiple SST files with enough data to trigger actual compaction
+        for batch in 0..5 {
+            for i in 0..100 {
+                eng.put(
+                    &cf,
+                    format!("lifecycle_{}_{}", batch, i).as_bytes(),
+                    format!("value_{}", batch).as_bytes(),
+                )
+                .expect("put");
+            }
+            eng.flush().expect("flush");
+        }
+
+        // Act
+        eng.compact_all().expect("compact");
+
+        let start_count = hooks.compaction_start_count();
+        let complete_count = hooks.compaction_complete_count();
+        let failed_count = hooks.compaction_failed_count();
+
+        // Assert - compaction hooks may or may not fire depending on whether
+        // the compaction scheduler decided compaction was needed
+        // The main assertion is that no failures occurred
+        assert_eq!(
+            failed_count, 0,
+            "{}: expected no compaction failures, got {}",
+            mode, failed_count
+        );
+
+        // If compaction started, it should have completed
+        if start_count > 0 {
+            assert!(
+                complete_count >= 1,
+                "{}: compaction started ({}) but didn't complete ({})",
+                mode,
+                start_count,
+                complete_count
+            );
+        }
+    }
+);
 
 // ============================================================================
 // Cloud-Specific Fault Injection Tests

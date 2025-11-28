@@ -3,11 +3,11 @@
 //! These tests verify the LRU block cache behavior including basic operations,
 //! sharded caching, adaptive caching, and eviction policies.
 
-use cntryl_midge::sst::{
-    create_adaptive_cache, create_basic_cache, create_sharded_cache, BlockKey,
-    CacheBlockType, CachedBlock,
-};
 use bytes::Bytes;
+use cntryl_midge::sst::{
+    create_adaptive_cache, create_basic_cache, create_sharded_cache, BlockKey, CacheBlockType,
+    CachedBlock,
+};
 use std::sync::Arc;
 use std::thread;
 
@@ -91,14 +91,8 @@ fn should_distinguish_block_types_given_same_file_and_offset_when_caching() {
     cache.insert(filter_key.clone(), filter_block);
 
     // Assert - each block type stored separately
-    assert_eq!(
-        cache.get(&data_key).unwrap().data.as_ref(),
-        b"data block"
-    );
-    assert_eq!(
-        cache.get(&index_key).unwrap().data.as_ref(),
-        b"index block"
-    );
+    assert_eq!(cache.get(&data_key).unwrap().data.as_ref(), b"data block");
+    assert_eq!(cache.get(&index_key).unwrap().data.as_ref(), b"index block");
     assert_eq!(
         cache.get(&filter_key).unwrap().data.as_ref(),
         b"filter block"
@@ -261,7 +255,11 @@ fn should_handle_concurrent_access_given_multiple_threads_when_using_sharded_cac
             block_type: CacheBlockType::Data,
             offset: 0,
         };
-        assert!(cache.get(&key).is_some(), "thread {} entry 0 should exist", t);
+        assert!(
+            cache.get(&key).is_some(),
+            "thread {} entry 0 should exist",
+            t
+        );
     }
 }
 
@@ -368,7 +366,10 @@ fn should_evict_lru_entries_given_capacity_exceeded_when_inserting() {
     // but the cache should have evicted some entries
     let stats = cache.stats();
     // With 100 * 500 = 50KB of data into 10KB cache, evictions must occur
-    assert!(stats.size_bytes <= 15_000, "cache should respect size limit");
+    assert!(
+        stats.size_bytes <= 15_000,
+        "cache should respect size limit"
+    );
 }
 
 #[test]

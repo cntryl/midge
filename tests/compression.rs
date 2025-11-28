@@ -52,7 +52,8 @@ fn should_roundtrip_data_given_lz4_compression_when_compressing_text() {
 fn should_roundtrip_data_given_zstd_level1_when_compressing_text() {
     // Arrange
     let codec = ZstdCodec::level_1();
-    let original = b"Zstd level 1 is fast. Fast compression is useful. Useful for warm data layers.";
+    let original =
+        b"Zstd level 1 is fast. Fast compression is useful. Useful for warm data layers.";
 
     // Act
     let compressed = codec.compress(original).expect("compress");
@@ -80,7 +81,8 @@ fn should_roundtrip_data_given_zstd_level3_when_compressing_text() {
 fn should_roundtrip_data_given_zstd_level5_when_compressing_text() {
     // Arrange
     let codec = ZstdCodec::level_5();
-    let original = b"Zstd level 5 is intended for cold data where compression ratio matters more than speed.";
+    let original =
+        b"Zstd level 5 is intended for cold data where compression ratio matters more than speed.";
 
     // Act
     let compressed = codec.compress(original).expect("compress");
@@ -140,9 +142,7 @@ fn should_handle_large_data_given_multi_mb_input_when_using_lz4() {
     // Arrange
     let codec = Lz4Codec::new();
     // 2 MB of somewhat compressible data
-    let original: Vec<u8> = (0..2 * 1024 * 1024)
-        .map(|i| (i % 256) as u8)
-        .collect();
+    let original: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
 
     // Act
     let compressed = codec.compress(&original).expect("compress");
@@ -191,8 +191,13 @@ fn should_read_compressed_data_given_lz4_compression_when_flushed_to_sst() {
     // Write enough data to trigger flush
     for i in 0..5000 {
         let key = format!("key_{:06}", i);
-        let value = format!("value_for_key_{:06}_with_some_extra_padding_to_make_it_longer", i);
-        engine.put(&cf, key.as_bytes(), value.as_bytes()).expect("put");
+        let value = format!(
+            "value_for_key_{:06}_with_some_extra_padding_to_make_it_longer",
+            i
+        );
+        engine
+            .put(&cf, key.as_bytes(), value.as_bytes())
+            .expect("put");
     }
     engine.flush().expect("flush");
 
@@ -200,10 +205,16 @@ fn should_read_compressed_data_given_lz4_compression_when_flushed_to_sst() {
     let mut read_count = 0;
     for i in 0..5000 {
         let key = format!("key_{:06}", i);
-        let expected = format!("value_for_key_{:06}_with_some_extra_padding_to_make_it_longer", i);
+        let expected = format!(
+            "value_for_key_{:06}_with_some_extra_padding_to_make_it_longer",
+            i
+        );
 
         // Assert
-        let value = engine.get(&cf, key.as_bytes()).expect("get").expect("value exists");
+        let value = engine
+            .get(&cf, key.as_bytes())
+            .expect("get")
+            .expect("value exists");
         assert_eq!(value.as_ref(), expected.as_bytes());
         read_count += 1;
     }
@@ -229,7 +240,9 @@ fn should_persist_compression_setting_given_reopen_when_using_same_options() {
         for i in 0..1000 {
             let key = format!("persist_key_{:04}", i);
             let value = format!("persist_value_{:04}", i);
-            engine.put(&cf, key.as_bytes(), value.as_bytes()).expect("put");
+            engine
+                .put(&cf, key.as_bytes(), value.as_bytes())
+                .expect("put");
         }
         engine.flush().expect("flush");
     }
@@ -249,7 +262,10 @@ fn should_persist_compression_setting_given_reopen_when_using_same_options() {
     for i in 0..1000 {
         let key = format!("persist_key_{:04}", i);
         let expected = format!("persist_value_{:04}", i);
-        let value = engine.get(&cf, key.as_bytes()).expect("get").expect("exists");
+        let value = engine
+            .get(&cf, key.as_bytes())
+            .expect("get")
+            .expect("exists");
         assert_eq!(value.as_ref(), expected.as_bytes());
     }
 }

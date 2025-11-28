@@ -163,7 +163,7 @@ impl SkipList {
         })
     }
 
-    #[inline(always)]
+    #[inline]
     fn cmp_key(a: &[u8], b: &[u8]) -> Ordering {
         a.cmp(b)
     }

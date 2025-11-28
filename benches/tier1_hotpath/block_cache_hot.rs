@@ -46,18 +46,19 @@ fn bench_block_cache_get_hot(c: &mut Criterion) {
 
     // Pre-populate with hot data (setup outside benchmark loop)
     for i in 0..1000 {
-        cache.insert(make_block_key(i), CachedBlock {
-            data: make_block_data(4096),
-        });
+        cache.insert(
+            make_block_key(i),
+            CachedBlock {
+                data: make_block_data(4096),
+            },
+        );
     }
 
     // Precompute hot key (no allocation in hot path)
     let hot_key = make_block_key(42);
 
     group.bench_function("get_hot_4k_block", |b| {
-        b.iter(|| {
-            black_box(cache.get(black_box(&hot_key)))
-        })
+        b.iter(|| black_box(cache.get(black_box(&hot_key))))
     });
 
     group.finish();
@@ -77,9 +78,12 @@ fn bench_block_cache_insert_hot(c: &mut Criterion) {
 
     // Pre-populate to simulate realistic warm cache state
     for i in 0..100 {
-        cache.insert(make_block_key(i), CachedBlock {
-            data: make_block_data(4096),
-        });
+        cache.insert(
+            make_block_key(i),
+            CachedBlock {
+                data: make_block_data(4096),
+            },
+        );
     }
 
     // Pre-create block data outside hot loop (avoid allocation in measurement)
@@ -116,9 +120,12 @@ fn bench_block_cache_hit_ratio_fast(c: &mut Criterion) {
 
     // Pre-populate cache
     for i in 0..100 {
-        cache.insert(make_block_key(i), CachedBlock {
-            data: make_block_data(1024),
-        });
+        cache.insert(
+            make_block_key(i),
+            CachedBlock {
+                data: make_block_data(1024),
+            },
+        );
     }
 
     // Precompute keys for accesses (all hits)

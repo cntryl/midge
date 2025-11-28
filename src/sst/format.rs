@@ -756,7 +756,7 @@ pub fn encode_varint64(buf: &mut Vec<u8>, mut value: u64) {
     buf.push(value as u8);
 }
 
-#[inline(always)]
+#[inline]
 pub fn decode_varint32(data: &[u8]) -> MidgeResult<(u32, usize)> {
     let mut result = 0u32;
     let mut shift = 0;
@@ -782,7 +782,7 @@ pub fn decode_varint32(data: &[u8]) -> MidgeResult<(u32, usize)> {
     Err(MidgeError::InvalidData("Incomplete varint32".into()))
 }
 
-#[inline(always)]
+#[inline]
 pub fn decode_varint64(data: &[u8]) -> MidgeResult<(u64, usize)> {
     let mut result = 0u64;
     let mut shift = 0;
@@ -810,7 +810,7 @@ pub fn decode_varint64(data: &[u8]) -> MidgeResult<(u64, usize)> {
 
 /// Find the length of the shared prefix between two byte slices.
 /// Optimized with 8-byte word-aligned comparison for long prefixes.
-#[inline(always)]
+#[inline]
 fn shared_prefix_len(a: &[u8], b: &[u8]) -> usize {
     let min_len = a.len().min(b.len());
     let mut i = 0;
