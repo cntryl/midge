@@ -4,8 +4,10 @@
 //! **Run Frequency:** Every PR (CI gate)
 //!
 //! Covers critical API hot paths:
-//! - Batch writes (put/delete/upsert)
-//! - Multi-get (batched point lookups)
+//! - Batch writes (put/delete) - memtable operations only
+//! - Single put/get operations
+//!
+//! Note: Heavy I/O operations (flush, scan) are in tier2/tier3.
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -162,172 +164,9 @@ fn bench_single_put(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark batch delete operations
-fn bench_batch_delete(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_batch_delete");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let engine = setup_db("batch_delete");
-    let cf = engine.default_column_family();
-    let cf_id = cf.id();
-
-    // Precompute keys and values for population
-    let num_keys = 100_000;
-    let (keys, vals) = make_fixed_kv(num_keys);
-
-    // Pre-populate with data to delete
-    for i in 0..num_keys {
-        engine.put(&cf, &keys[i], &vals[i]).unwrap();
-    }
-    engine.flush().unwrap();
-
-    let mut offset = 0;
-    for &batch_size in &[100, 1_000] {
-        group.throughput(Throughput::Elements(batch_size as u64));
-
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            &batch_size,
-            |b, &size| {
-                b.iter_batched(
-                    || {
-                        let mut batch = WriteBatch::new();
-                        for i in 0..size {
-                            let idx = (offset + i) % num_keys;
-                            batch.delete(cf_id, keys[idx].clone());
-                        }
-                        offset = (offset + size) % num_keys;
-                        batch
-                    },
-                    |batch| {
-                        engine.write_batch(&batch).unwrap();
-                        black_box(());
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-    }
-
-    group.finish();
-}
-
-/// Benchmark mixed batch operations (put + delete)
-fn bench_batch_mixed(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_batch_mixed");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let engine = setup_db("batch_mixed");
-    let cf = engine.default_column_family();
-    let cf_id = cf.id();
-
-    // Precompute keys and values for population
-    let num_keys = 50_000;
-    let (keys, vals) = make_fixed_kv(num_keys);
-
-    // Pre-populate with some data
-    for i in 0..num_keys {
-        engine.put(&cf, &keys[i], &vals[i]).unwrap();
-    }
-    engine.flush().unwrap();
-
-    let mut offset = 0;
-    for &batch_size in &[100, 1_000] {
-        // Precompute keys for this batch size
-        let (batch_keys, batch_vals) = make_fixed_kv(batch_size);
-        group.throughput(Throughput::Elements(batch_size as u64));
-
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            &batch_size,
-            |b, &size| {
-                b.iter_batched(
-                    || {
-                        let mut batch = WriteBatch::new();
-                        for i in 0..size {
-                            if i % 2 == 0 {
-                                // Put new data
-                                let idx = (offset + i) % batch_keys.len();
-                                batch.put(cf_id, batch_keys[idx].clone(), batch_vals[idx].clone());
-                            } else {
-                                // Delete existing data
-                                let idx = (i / 2) % keys.len();
-                                batch.delete(cf_id, keys[idx].clone());
-                            }
-                        }
-                        offset = (offset + size) % batch_keys.len();
-                        batch
-                    },
-                    |batch| {
-                        engine.write_batch(&batch).unwrap();
-                        black_box(());
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-    }
-
-    group.finish();
-}
-
-/// Benchmark range scan operations
-fn bench_range_scan(c: &mut Criterion) {
-    use cntryl_midge::Query;
-
-    let mut group = c.benchmark_group("hotpath_range_scan");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let engine = setup_db("range_scan");
-    let cf = engine.default_column_family();
-
-    // Precompute keys and values for population
-    let num_keys = 10_000;
-    let (keys, vals) = make_fixed_kv(num_keys);
-
-    // Pre-populate with ordered keys
-    for i in 0..num_keys {
-        engine.put(&cf, &keys[i], &vals[i]).unwrap();
-    }
-    engine.flush().unwrap();
-
-    // Precompute start and end keys for scans
-    let start_key_100 = keys[0].clone();
-    let end_key_100 = keys[99].clone(); // key for 99
-
-    let start_key_1000 = keys[0].clone();
-    let end_key_1000 = keys[999].clone(); // key for 999
-
-    // Scan 100 keys
-    group.throughput(Throughput::Elements(100));
-    group.bench_function("scan_100_keys", |b| {
-        b.iter(|| {
-            let query = Query::new()
-                .start_key(start_key_100.clone())
-                .end_key(end_key_100.clone());
-            let results = engine.scan(&cf, query).unwrap();
-            black_box(results.len());
-        })
-    });
-
-    // Scan 1000 keys
-    group.throughput(Throughput::Elements(1000));
-    group.bench_function("scan_1000_keys", |b| {
-        b.iter(|| {
-            let query = Query::new()
-                .start_key(start_key_1000.clone())
-                .end_key(end_key_1000.clone());
-            let results = engine.scan(&cf, query).unwrap();
-            black_box(results.len());
-        })
-    });
-
-    group.finish();
-}
-
 criterion_group! {
     name = hotpath_api;
     config = criterion_config();
-    targets = bench_batch_put, bench_single_get, bench_single_put, bench_batch_delete, bench_batch_mixed, bench_range_scan
+    targets = bench_batch_put, bench_single_get, bench_single_put
 }
 criterion_main!(hotpath_api);
