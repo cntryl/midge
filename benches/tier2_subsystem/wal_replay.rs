@@ -3,7 +3,7 @@
 //! **Target Runtime:** < 2 seconds total
 //! **Run Frequency:** CI / Pre-commit
 //!
-//! Covers WAL replay operations
+//! Covers WAL replay operations (applying WAL records to memtable)
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -16,18 +16,13 @@ use std::hint::black_box;
 use cntryl_midge::core::memtable::MemTable;
 use cntryl_midge::wal::{WalOpKind, WalRecord};
 
-/// Benchmark WAL replay small file
-fn bench_wal_replay_small_file(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_wal_replay_small_file");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1_000));
-
-    // Pre-create 1k WAL records
-    let records: Vec<WalRecord> = (0..1_000)
+/// Pre-generate WAL records (Bytes are ref-counted, so cloning is cheap)
+fn make_wal_records(count: usize) -> Vec<WalRecord> {
+    (0..count)
         .map(|i| WalRecord {
             op: WalOpKind::Put,
-            key: Bytes::from(format!("key_{:03}", i)),
-            value: Some(Bytes::from(format!("value_{:03}", i))),
+            key: Bytes::from(format!("key_{:010}", i)),
+            value: Some(Bytes::from(format!("value_{:010}", i))),
             seq: i as u64,
             cf_id: 0,
             expiration: None,
@@ -35,94 +30,72 @@ fn bench_wal_replay_small_file(c: &mut Criterion) {
             txn_id: None,
             compression: None,
         })
-        .collect();
+        .collect()
+}
+
+/// Benchmark WAL replay small file (1k records)
+fn bench_wal_replay_small_file(c: &mut Criterion) {
+    let records = make_wal_records(1_000);
+
+    let mut group = c.benchmark_group("subsystem_wal_replay_small_file");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1_000));
 
     group.bench_function("replay_small", |b| {
         b.iter(|| {
             let memtable = MemTable::new();
+            // Clone is cheap since Bytes uses Arc internally
             memtable.load_from_wal(records.clone()).unwrap();
-            black_box(memtable);
+            black_box(memtable)
         })
     });
 
     group.finish();
 }
 
-/// Benchmark WAL replay large file
+/// Benchmark WAL replay large file (100k records)
 fn bench_wal_replay_large_file(c: &mut Criterion) {
+    let records = make_wal_records(100_000);
+
     let mut group = c.benchmark_group("subsystem_wal_replay_large_file");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(100_000));
-
-    // Pre-create 100k WAL records
-    let records: Vec<WalRecord> = (0..100_000)
-        .map(|i| WalRecord {
-            op: WalOpKind::Put,
-            key: Bytes::from(format!("key_{:05}", i)),
-            value: Some(Bytes::from(format!("value_{:05}", i))),
-            seq: i as u64,
-            cf_id: 0,
-            expiration: None,
-            range_end: None,
-            txn_id: None,
-            compression: None,
-        })
-        .collect();
+    group.sample_size(10); // Fewer samples for long benchmark
 
     group.bench_function("replay_large", |b| {
         b.iter(|| {
             let memtable = MemTable::new();
             memtable.load_from_wal(records.clone()).unwrap();
-            black_box(memtable);
+            black_box(memtable)
         })
     });
 
     group.finish();
 }
 
-/// Benchmark WAL replay corrupted tail
-fn bench_wal_replay_corrupted_tail(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subsystem_wal_replay_corrupted_tail");
+/// Benchmark WAL replay with early termination (simulates corruption detection)
+fn bench_wal_replay_early_terminate(c: &mut Criterion) {
+    let records = make_wal_records(1_000);
+
+    let mut group = c.benchmark_group("subsystem_wal_replay_early_terminate");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1_000));
+    group.throughput(Throughput::Elements(99)); // Stop at record 99
 
-    // Pre-create 1k valid WAL records
-    let records: Vec<WalRecord> = (0..1_000)
-        .map(|i| WalRecord {
-            op: WalOpKind::Put,
-            key: Bytes::from(format!("key_{:03}", i)),
-            value: Some(Bytes::from(format!("value_{:03}", i))),
-            seq: i as u64,
-            cf_id: 0,
-            expiration: None,
-            range_end: None,
-            txn_id: None,
-            compression: None,
-        })
-        .collect();
-
-    group.bench_function("replay_corrupted", |b| {
+    group.bench_function("replay_partial", |b| {
         b.iter(|| {
             let memtable = MemTable::new();
 
-            // Simulate replay with corruption detection
-            // In practice, this would involve trying to decode records and handling errors
-            let mut valid_count = 0;
+            // Simulate replay with early termination at record 99
+            let mut count = 0u32;
             for record in &records {
-                // Simulate corruption check (e.g., checksum validation)
-                let is_corrupted = record.seq % 100 == 99; // Simulate 1% corruption rate
-
-                if !is_corrupted {
-                    // Only replay valid records
-                    memtable.put(&record.key, record.value.as_ref().unwrap());
-                    valid_count += 1;
-                } else {
-                    // Handle corruption (in real implementation, this would log/truncate)
-                    break; // Stop at first corruption
+                if record.seq == 99 {
+                    break; // Stop at "corrupt" record
                 }
+                memtable.put(&record.key, record.value.as_ref().unwrap());
+                count += 1;
             }
 
-            black_box((memtable, valid_count));
+            black_box((memtable, count))
         })
     });
 
@@ -132,6 +105,6 @@ fn bench_wal_replay_corrupted_tail(c: &mut Criterion) {
 criterion_group! {
     name = tier2_subsystem_wal_replay;
     config = criterion_config();
-    targets = bench_wal_replay_small_file, bench_wal_replay_large_file, bench_wal_replay_corrupted_tail
+    targets = bench_wal_replay_small_file, bench_wal_replay_large_file, bench_wal_replay_early_terminate
 }
 criterion_main!(tier2_subsystem_wal_replay);

@@ -1,16 +1,10 @@
-//! Tier 2 — Subsystem Storage Benchmarks (A++ Optimized)
+//! Tier 2 — Core Primitives Benchmarks
 //!
-//! Covers the core I/O and encoding subsystems under Midge without
-//! involving compaction or full-engine coordination.
+//! Covers foundational data structures and coordination primitives:
 //!
-//! Benchmarks:
-//! - WAL write (buffered + fsync)
-//! - SST block builder (encode + compress)
-//! - SST block decode + search
-//! - SST index build
-//! - SST full file build (in-mem)
-//! - WriteBatch apply → MemTable
-//! - MergeIterator over N sst blocks
+//! - WAL write (buffered via in-memory WAL)
+//! - WriteBatch creation
+//! - MergeIterator over N sources
 //! - Concurrent SkipList access
 //!
 //! Runtime target: < 2–3 seconds
@@ -79,8 +73,6 @@ fn bench_wal_write(c: &mut Criterion) {
         })
         .collect();
 
-    // Temp wal file (not used in in-memory benchmark)
-
     g.bench_function("buffered_write", |b| {
         b.iter(|| {
             let wal = WalMem::new();
@@ -93,140 +85,11 @@ fn bench_wal_write(c: &mut Criterion) {
         });
     });
 
-    g.bench_function("fsync_every", |b| {
-        b.iter(|| {
-            let wal = WalMem::new();
-
-            for rec in &records {
-                wal.append_record(rec).unwrap();
-            }
-
-            black_box(&wal);
-        });
-    });
-
     g.finish();
 }
 
 // ============================================================================
-// Block Builder Benchmarks
-// ============================================================================
-
-// TODO: Fix block builder benchmark - BlockOptions doesn't exist
-/*
-fn bench_block_builder(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subsystem_block_builder");
-    g.sampling_mode(SamplingMode::Flat);
-
-    const N: usize = 5000;
-    let (keys, vals) = fixed_kv(N);
-    let codec = Lz4Codec::new();
-
-    let opts = BlockOptions {
-        restart_interval: 16,
-        compression: Some(Arc::new(codec.clone())),
-    };
-
-    g.bench_function("build_block_5k", |b| {
-        b.iter(|| {
-            let mut builder = BlockBuilder::new(&opts);
-            for i in 0..N {
-                builder.add(&keys[i], &vals[i], i as u64).unwrap();
-            }
-            let encoded = builder.finish();
-            black_box(encoded);
-        });
-    });
-
-    g.finish();
-}
-*/
-
-// ============================================================================
-// Block Decode + Search Benchmarks
-// ============================================================================
-
-// TODO: Fix block decode benchmark - Block::decode needs block_type, no get method
-/*
-fn bench_block_decode(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subsystem_block_decode");
-    g.sampling_mode(SamplingMode::Flat);
-
-    const N: usize = 5000;
-    let (keys, vals) = fixed_kv(N);
-    let codec = Lz4Codec::new();
-    let opts = BlockOptions {
-        restart_interval: 16,
-        compression: Some(Arc::new(codec.clone())),
-    };
-
-    // Prebuild a block
-    let encoded = {
-        let mut bld = BlockBuilder::new(&opts);
-        for i in 0..N {
-            bld.add(&keys[i], &vals[i], i as u64).unwrap();
-        }
-        bld.finish()
-    };
-
-    g.bench_function("decode_block", |b| {
-        b.iter(|| {
-            let block = Block::decode(&encoded).unwrap();
-            black_box(block);
-        });
-    });
-
-    // Also benchmark point search
-    let block = Block::decode(&encoded).unwrap();
-
-    g.bench_function("search_block", |b| {
-        b.iter(|| {
-            let key = &keys[2000];
-            let _ = block.get(key);
-            black_box(key);
-        });
-    });
-
-    g.finish();
-}
-*/
-
-// ============================================================================
-// SST File Build (In-Memory) Benchmarks
-// ============================================================================
-
-// TODO: Fix SST file benchmark - SstFileBuilder not found
-/*
-fn bench_sst_file(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subsystem_sst_build");
-    g.sampling_mode(SamplingMode::Flat);
-
-    const N: usize = 5000;
-    let (keys, vals) = fixed_kv(N);
-
-    let codec = Lz4Codec::new();
-    let block_opts = BlockOptions {
-        restart_interval: 16,
-        compression: Some(Arc::new(codec.clone())),
-    };
-
-    g.bench_function("build_sst_inmemory", |b| {
-        b.iter(|| {
-            let mut builder = SstFileBuilder::new(block_opts.clone());
-            for i in 0..N {
-                builder.add(&keys[i], &vals[i], i as u64).unwrap();
-            }
-            let file = builder.finish();
-            black_box(file);
-        });
-    });
-
-    g.finish();
-}
-*/
-
-// ============================================================================
-// WriteBatch → MemTable Benchmarks
+// WriteBatch Creation Benchmarks
 // ============================================================================
 
 fn bench_writebatch_apply(c: &mut Criterion) {
@@ -362,16 +225,13 @@ fn bench_skiplist_concurrent(c: &mut Criterion) {
 // ============================================================================
 
 criterion_group! {
-    name = tier2_subsystem_storage;
+    name = tier2_subsystem_core_primitives;
     config = criterion_config();
     targets =
         bench_wal_write,
-        // bench_block_builder,  // TODO: Fix BlockOptions
-        // bench_block_decode,   // TODO: Fix Block::decode and get method
-        // bench_sst_file,       // TODO: Fix SstFileBuilder
         bench_writebatch_apply,
         bench_merge_iterator,
         bench_skiplist_concurrent
 }
 
-criterion_main!(tier2_subsystem_storage);
+criterion_main!(tier2_subsystem_core_primitives);

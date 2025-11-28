@@ -6,6 +6,7 @@
 //! Covers block cache subsystem operations:
 //! - Eviction scanning and filling
 //! - Hit ratio calculations
+//! - Hot set rotation patterns
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -17,22 +18,53 @@ use std::hint::black_box;
 use cntryl_midge::sst::block_cache::BlockType;
 use cntryl_midge::sst::{create_basic_cache, BlockKey, CachedBlock};
 
-fn make_block_key(file_idx: usize, block_idx: usize) -> BlockKey {
-    BlockKey {
-        file_name: format!("file_{}.sst", file_idx),
-        block_type: BlockType::Data,
-        offset: (block_idx * 4096) as u64,
+/// Pre-computed block keys to avoid allocation in benchmarks.
+struct PrecomputedKeys {
+    keys: Vec<BlockKey>,
+}
+
+impl PrecomputedKeys {
+    fn new(file_count: usize, blocks_per_file: usize) -> Self {
+        let mut keys = Vec::with_capacity(file_count * blocks_per_file);
+        for file_idx in 0..file_count {
+            let file_name = format!("file_{}.sst", file_idx);
+            for block_idx in 0..blocks_per_file {
+                keys.push(BlockKey {
+                    file_name: file_name.clone(),
+                    block_type: BlockType::Data,
+                    offset: (block_idx * 4096) as u64,
+                });
+            }
+        }
+        Self { keys }
+    }
+
+    #[inline]
+    fn get(&self, file_idx: usize, block_idx: usize, blocks_per_file: usize) -> &BlockKey {
+        &self.keys[file_idx * blocks_per_file + block_idx]
+    }
+
+    #[inline]
+    fn get_linear(&self, idx: usize) -> &BlockKey {
+        &self.keys[idx]
     }
 }
 
-fn make_cached_block(size: usize) -> CachedBlock {
+/// Pre-allocated block data to avoid allocation in benchmarks.
+fn make_cached_block_static() -> CachedBlock {
+    // Use static data - Bytes::from_static is zero-copy
+    static BLOCK_DATA: [u8; 4096] = [0xAB; 4096];
     CachedBlock {
-        data: bytes::Bytes::from(vec![0xAB; size]),
+        data: bytes::Bytes::from_static(&BLOCK_DATA),
     }
 }
 
 /// Benchmark block cache eviction scanning
 fn bench_block_cache_eviction_scan(c: &mut Criterion) {
+    // Pre-compute keys outside the benchmark
+    let keys = PrecomputedKeys::new(1, 1000);
+    let block = make_cached_block_static();
+
     let mut group = c.benchmark_group("subsystem_block_cache_eviction_scan");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1000));
@@ -40,25 +72,22 @@ fn bench_block_cache_eviction_scan(c: &mut Criterion) {
     group.bench_function("scan_1k_entries", |b| {
         b.iter_batched(
             || {
-                let cache = create_basic_cache(1024 * 1024); // 1MB cache
-                                                             // Fill cache
+                let cache = create_basic_cache(5 * 1024 * 1024); // 5MB to hold all 1000 x 4KB blocks
+                                                                 // Fill cache with pre-computed keys
                 for i in 0..1000 {
-                    let key = make_block_key(0, i);
-                    let block = make_cached_block(4096);
-                    cache.insert(key, block);
+                    cache.insert(keys.get_linear(i).clone(), block.clone());
                 }
                 cache
             },
             |cache| {
                 // Scan all entries (simulating eviction scan)
-                let mut count = 0;
+                let mut count = 0u32;
                 for i in 0..1000 {
-                    let key = make_block_key(0, i);
-                    if cache.get(&key).is_some() {
+                    if cache.get(keys.get_linear(i)).is_some() {
                         count += 1;
                     }
                 }
-                black_box(count);
+                black_box(count)
             },
             criterion::BatchSize::SmallInput,
         )
@@ -69,6 +98,10 @@ fn bench_block_cache_eviction_scan(c: &mut Criterion) {
 
 /// Benchmark filling cache then hitting
 fn bench_block_cache_fill_then_hit(c: &mut Criterion) {
+    // Pre-compute keys for 2 files, 1000 blocks each
+    let keys = PrecomputedKeys::new(2, 1000);
+    let block = make_cached_block_static();
+
     let mut group = c.benchmark_group("subsystem_block_cache_fill_then_hit");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1000));
@@ -77,28 +110,25 @@ fn bench_block_cache_fill_then_hit(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let cache = create_basic_cache(1024 * 1024); // 1MB cache
-                                                             // Fill with initial data
+                                                             // Fill with initial 100 blocks from file 0
                 for i in 0..100 {
-                    let key = make_block_key(0, i);
-                    let block = make_cached_block(4096);
-                    cache.insert(key, block);
+                    cache.insert(keys.get(0, i, 1000).clone(), block.clone());
                 }
                 cache
             },
             |cache| {
                 // Hit existing entries and add new ones (causing evictions)
-                let mut hits = 0;
+                let mut hits = 0u32;
                 for i in 0..1000 {
-                    let key = make_block_key(0, i % 150); // Mix of hits and new entries
-                    if cache.get(&key).is_some() {
+                    let key = keys.get(0, i % 150, 1000);
+                    if cache.get(key).is_some() {
                         hits += 1;
                     } else {
-                        let new_key = make_block_key(1, i);
-                        let block = make_cached_block(4096);
-                        cache.insert(new_key, block);
+                        // Insert from file 1 to avoid key collision
+                        cache.insert(keys.get(1, i, 1000).clone(), block.clone());
                     }
                 }
-                black_box(hits);
+                black_box(hits)
             },
             criterion::BatchSize::SmallInput,
         )
@@ -109,19 +139,21 @@ fn bench_block_cache_fill_then_hit(c: &mut Criterion) {
 
 /// Benchmark hot set rotation
 fn bench_block_cache_hotset_rotation(c: &mut Criterion) {
+    // Pre-compute keys: need indices 0..74 for the rotation pattern
+    let keys = PrecomputedKeys::new(1, 100);
+    let block = make_cached_block_static();
+
     let mut group = c.benchmark_group("subsystem_block_cache_hotset_rotation");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(500));
+    group.throughput(Throughput::Elements(500)); // 10 rounds * 50 ops
 
     group.bench_function("rotate_hotset_50_entries", |b| {
         b.iter_batched(
             || {
                 let cache = create_basic_cache(1024 * 1024); // 1MB cache
-                                                             // Establish hot set
+                                                             // Establish initial hot set (indices 0..49)
                 for i in 0..50 {
-                    let key = make_block_key(0, i);
-                    let block = make_cached_block(4096);
-                    cache.insert(key, block);
+                    cache.insert(keys.get_linear(i).clone(), block.clone());
                 }
                 cache
             },
@@ -129,14 +161,13 @@ fn bench_block_cache_hotset_rotation(c: &mut Criterion) {
                 // Rotate hot set - access some, evict others
                 for round in 0..10 {
                     for i in 0..50 {
-                        let key = make_block_key(0, (i + round) % 75); // Rotate through 75 possible keys
-                        if cache.get(&key).is_none() {
-                            let block = make_cached_block(4096);
-                            cache.insert(key, block);
+                        let key = keys.get_linear((i + round) % 75);
+                        if cache.get(key).is_none() {
+                            cache.insert(key.clone(), block.clone());
                         }
                     }
                 }
-                black_box(cache.stats().entry_count);
+                black_box(cache.stats().entry_count)
             },
             criterion::BatchSize::SmallInput,
         )

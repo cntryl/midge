@@ -15,48 +15,68 @@ use std::hint::black_box;
 use cntryl_midge::sst::block_cache::BlockType;
 use cntryl_midge::sst::{create_basic_cache, BlockKey, CachedBlock};
 
-fn make_block_key(file_idx: usize, block_idx: usize) -> BlockKey {
-    BlockKey {
-        file_name: format!("file_{}.sst", file_idx),
-        block_type: BlockType::Data,
-        offset: (block_idx * 4096) as u64,
+/// Pre-computed block keys to avoid allocation in benchmarks.
+struct PrecomputedKeys {
+    keys: Vec<BlockKey>,
+}
+
+impl PrecomputedKeys {
+    fn new(count: usize) -> Self {
+        let file_name = "file_0.sst".to_string();
+        let keys = (0..count)
+            .map(|i| BlockKey {
+                file_name: file_name.clone(),
+                block_type: BlockType::Data,
+                offset: (i * 4096) as u64,
+            })
+            .collect();
+        Self { keys }
+    }
+
+    #[inline]
+    fn get(&self, idx: usize) -> &BlockKey {
+        &self.keys[idx]
     }
 }
 
-fn make_cached_block(size: usize) -> CachedBlock {
+/// Pre-allocated block data to avoid allocation in benchmarks.
+fn make_cached_block_static() -> CachedBlock {
+    static BLOCK_DATA: [u8; 4096] = [0xAB; 4096];
     CachedBlock {
-        data: bytes::Bytes::from(vec![0xAB; size]),
+        data: bytes::Bytes::from_static(&BLOCK_DATA),
     }
 }
 
 /// Benchmark LRU eviction with 1k entries
 /// Fills cache to capacity, then continues inserting to trigger evictions
 fn bench_block_cache_lru_eviction_1k(c: &mut Criterion) {
+    // Pre-compute all keys needed (1125 total: 125 initial + 1000 evictions)
+    let keys = PrecomputedKeys::new(1125);
+    let block = make_cached_block_static();
+
     let mut group = c.benchmark_group("subsystem_block_cache_lru_eviction_1k");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1000));
+    group.throughput(Throughput::Elements(1000)); // Measuring the 1k eviction inserts
 
     group.bench_function("evict_1k", |b| {
-        b.iter(|| {
-            // 512KB cache = ~125 blocks of 4KB each
-            let cache = create_basic_cache(512 * 1024);
-
-            // Fill cache to capacity (125 blocks)
-            for i in 0..125 {
-                let key = make_block_key(0, i);
-                let block = make_cached_block(4096);
-                cache.insert(key, block);
-            }
-
-            // Insert 1k more blocks, triggering evictions
-            for i in 125..1125 {
-                let key = make_block_key(0, i);
-                let block = make_cached_block(4096);
-                cache.insert(key, block);
-            }
-
-            black_box(cache);
-        })
+        b.iter_batched(
+            || {
+                // Setup: create cache and fill to capacity (125 blocks in 512KB)
+                let cache = create_basic_cache(512 * 1024);
+                for i in 0..125 {
+                    cache.insert(keys.get(i).clone(), block.clone());
+                }
+                cache
+            },
+            |cache| {
+                // Measure: insert 1k more blocks, triggering evictions
+                for i in 125..1125 {
+                    cache.insert(keys.get(i).clone(), block.clone());
+                }
+                black_box(cache)
+            },
+            criterion::BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -65,31 +85,33 @@ fn bench_block_cache_lru_eviction_1k(c: &mut Criterion) {
 /// Benchmark LRU eviction with 10k entries
 /// Larger-scale eviction stress test
 fn bench_block_cache_lru_eviction_10k(c: &mut Criterion) {
+    // Pre-compute all keys needed (10500 total: 500 initial + 10000 evictions)
+    let keys = PrecomputedKeys::new(10_500);
+    let block = make_cached_block_static();
+
     let mut group = c.benchmark_group("subsystem_block_cache_lru_eviction_10k");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(10_000));
+    group.throughput(Throughput::Elements(10_000)); // Measuring the 10k eviction inserts
 
     group.bench_function("evict_10k", |b| {
-        b.iter(|| {
-            // 2MB cache = ~500 blocks of 4KB each
-            let cache = create_basic_cache(2 * 1024 * 1024);
-
-            // Fill cache to capacity
-            for i in 0..500 {
-                let key = make_block_key(0, i);
-                let block = make_cached_block(4096);
-                cache.insert(key, block);
-            }
-
-            // Insert 10k more blocks, heavy eviction pressure
-            for i in 500..10_500 {
-                let key = make_block_key(0, i);
-                let block = make_cached_block(4096);
-                cache.insert(key, block);
-            }
-
-            black_box(cache);
-        })
+        b.iter_batched(
+            || {
+                // Setup: create cache and fill to capacity (500 blocks in 2MB)
+                let cache = create_basic_cache(2 * 1024 * 1024);
+                for i in 0..500 {
+                    cache.insert(keys.get(i).clone(), block.clone());
+                }
+                cache
+            },
+            |cache| {
+                // Measure: insert 10k more blocks, heavy eviction pressure
+                for i in 500..10_500 {
+                    cache.insert(keys.get(i).clone(), block.clone());
+                }
+                black_box(cache)
+            },
+            criterion::BatchSize::SmallInput,
+        )
     });
 
     group.finish();

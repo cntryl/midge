@@ -163,33 +163,39 @@ fn bench_wal_io_seq_throughput(c: &mut Criterion) {
 
 /// Benchmark raw I/O using pre-encoded WAL fragments
 fn bench_wal_io_preencoded(c: &mut Criterion) {
+    use criterion::BatchSize;
     let mut group = c.benchmark_group("subsystem_wal_io_preencoded");
 
     group.throughput(Throughput::Bytes(1024));
 
+    // Pre-encode outside the benchmark
+    let encoder = WalEncoder::with_defaults().expect("encoder");
+    let rec = WalRecord::new(
+        WalOpKind::Put,
+        Bytes::from_static(b"k"),
+        Some(Bytes::from(vec![0u8; 1024])),
+        1,
+    );
+    let frag = encoder.encode_one(&rec).expect("encode");
+
     group.bench_function("preencoded_append_nosync", |b| {
-        // Pre-encode outside the benchmark
-        let encoder = WalEncoder::with_defaults().expect("encoder");
-        let rec = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"k"),
-            Some(Bytes::from(vec![0u8; 1024])),
-            1,
-        );
-        let frag = encoder.encode_one(&rec).expect("encode");
-
-        b.iter(|| {
-            let tmp = tempdir().expect("tempdir");
-            let path = tmp.path().join("raw_wal_test.wal");
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .expect("open file");
-
-            write_vectored(&mut file, &[&frag.header, &frag.body]).expect("write_vectored");
-            black_box(&file);
-        })
+        b.iter_batched(
+            || {
+                let tmp = tempdir().expect("tempdir");
+                let path = tmp.path().join("raw_wal_test.wal");
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .expect("open file");
+                (tmp, file)
+            },
+            |(_tmp, mut file)| {
+                write_vectored(&mut file, &[&frag.header, &frag.body]).expect("write_vectored");
+                black_box(&file);
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -201,6 +207,7 @@ fn bench_wal_io_preencoded(c: &mut Criterion) {
 
 /// Compare fallback writev vs io_uring-backed writev
 fn bench_wal_io_platform(c: &mut Criterion) {
+    use criterion::BatchSize;
     let mut group = c.benchmark_group("subsystem_wal_io_platform");
 
     let size = 1024usize;
@@ -216,35 +223,49 @@ fn bench_wal_io_platform(c: &mut Criterion) {
     );
     let frag = encoder.encode_one(&rec).expect("encode");
 
-    group.bench_function("fallback_writev", |b| {
-        b.iter(|| {
-            let tmp = tempdir().expect("tempdir");
-            let path = tmp.path().join("raw_wal_cmp.wal");
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .expect("open");
+    // Clone frag data for the second benchmark since we need to use it in both closures
+    let frag_header = frag.header.clone();
+    let frag_body = frag.body.clone();
 
-            fs_io::write_vectored_fallback(&mut file, &[&frag.header, &frag.body])
-                .expect("fallback write");
-            black_box(&file);
-        })
+    group.bench_function("fallback_writev", |b| {
+        b.iter_batched(
+            || {
+                let tmp = tempdir().expect("tempdir");
+                let path = tmp.path().join("raw_wal_cmp.wal");
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .expect("open");
+                (tmp, file)
+            },
+            |(_tmp, mut file)| {
+                fs_io::write_vectored_fallback(&mut file, &[&frag.header, &frag.body])
+                    .expect("fallback write");
+                black_box(&file);
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.bench_function("dispatch_writev", |b| {
-        b.iter(|| {
-            let tmp = tempdir().expect("tempdir");
-            let path = tmp.path().join("raw_wal_cmp.wal");
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .expect("open");
-
-            write_vectored(&mut file, &[&frag.header, &frag.body]).expect("write");
-            black_box(&file);
-        })
+        b.iter_batched(
+            || {
+                let tmp = tempdir().expect("tempdir");
+                let path = tmp.path().join("raw_wal_cmp.wal");
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .expect("open");
+                (tmp, file)
+            },
+            |(_tmp, mut file)| {
+                write_vectored(&mut file, &[&frag_header, &frag_body]).expect("write");
+                black_box(&file);
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();

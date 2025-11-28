@@ -16,22 +16,25 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
-fn make_key(i: usize) -> Bytes {
-    Bytes::from(format!("key_{:010}", i))
-}
-
-fn make_value(size: usize) -> Bytes {
-    Bytes::from(vec![b'v'; size])
+/// Pre-generate keys and values as Bytes (required by SstMemWriter API)
+fn make_entries(count: usize, value_size: usize) -> Vec<(Bytes, Bytes)> {
+    // Pre-allocate value to share across all entries (Bytes is ref-counted)
+    let value = Bytes::from(vec![b'v'; value_size]);
+    (0..count)
+        .map(|i| {
+            let key = Bytes::from(format!("key_{:010}", i));
+            (key, value.clone())
+        })
+        .collect()
 }
 
 /// Benchmark SST building (1k entries)
 fn bench_flush_sst_build_small(c: &mut Criterion) {
+    let entries = make_entries(1_000, 128);
+
     let mut group = c.benchmark_group("subsystem_flush_sst_build_small");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1_000));
-
-    // Pre-generate keys and values
-    let entries: Vec<_> = (0..1_000).map(|i| (make_key(i), make_value(128))).collect();
 
     group.bench_function("sst_build_1k", |b| {
         b.iter(|| {
@@ -39,8 +42,7 @@ fn bench_flush_sst_build_small(c: &mut Criterion) {
             for (key, value) in &entries {
                 writer.add(key, value).unwrap();
             }
-            let reader = writer.finish().unwrap();
-            black_box(reader);
+            black_box(writer.finish().unwrap())
         })
     });
 
@@ -49,14 +51,11 @@ fn bench_flush_sst_build_small(c: &mut Criterion) {
 
 /// Benchmark SST building (10k entries)
 fn bench_flush_sst_build_medium(c: &mut Criterion) {
+    let entries = make_entries(10_000, 128);
+
     let mut group = c.benchmark_group("subsystem_flush_sst_build_medium");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(10_000));
-
-    // Pre-generate keys and values
-    let entries: Vec<_> = (0..10_000)
-        .map(|i| (make_key(i), make_value(128)))
-        .collect();
 
     group.bench_function("sst_build_10k", |b| {
         b.iter(|| {
@@ -64,8 +63,7 @@ fn bench_flush_sst_build_medium(c: &mut Criterion) {
             for (key, value) in &entries {
                 writer.add(key, value).unwrap();
             }
-            let reader = writer.finish().unwrap();
-            black_box(reader);
+            black_box(writer.finish().unwrap())
         })
     });
 
@@ -74,14 +72,11 @@ fn bench_flush_sst_build_medium(c: &mut Criterion) {
 
 /// Benchmark SST building with large values (1k entries × 1KB values)
 fn bench_flush_sst_build_large_values(c: &mut Criterion) {
+    let entries = make_entries(1_000, 1024);
+
     let mut group = c.benchmark_group("subsystem_flush_sst_build_large_values");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Bytes(1_000 * 1024)); // 1MB total
-
-    // Pre-generate keys and large values
-    let entries: Vec<_> = (0..1_000)
-        .map(|i| (make_key(i), make_value(1024)))
-        .collect();
 
     group.bench_function("sst_build_large_values", |b| {
         b.iter(|| {
@@ -89,8 +84,7 @@ fn bench_flush_sst_build_large_values(c: &mut Criterion) {
             for (key, value) in &entries {
                 writer.add(key, value).unwrap();
             }
-            let reader = writer.finish().unwrap();
-            black_box(reader);
+            black_box(writer.finish().unwrap())
         })
     });
 

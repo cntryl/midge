@@ -3,7 +3,7 @@
 //! **Target Runtime:** < 2 seconds total
 //! **Run Frequency:** CI / Pre-commit
 //!
-//! Measures actual false positive rates for bloom filters
+//! Measures query throughput and actual false positive rates for bloom filters
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -14,80 +14,107 @@ use std::hint::black_box;
 
 use cntryl_midge::sst::bloom::BloomFilterBuilder;
 
+/// Pre-generate keys as raw bytes
+fn make_test_keys(start: usize, count: usize) -> Vec<Vec<u8>> {
+    (start..start + count)
+        .map(|i| format!("key_{:010}", i).into_bytes())
+        .collect()
+}
+
 /// Benchmark bloom false positive rate for small filter (1k keys)
 /// Measures FPR by querying non-existent keys
 fn bench_bloom_false_positive_rate_small(c: &mut Criterion) {
+    // Pre-generate all keys
+    let insert_keys = make_test_keys(0, 1_000);
+    let query_keys = make_test_keys(100_000, 10_000);
+
+    // Build the filter once (outside benchmark)
+    let mut builder = BloomFilterBuilder::with_expected_keys(1_000, 10); // 10 bits/key ~1% FPR
+    for key in &insert_keys {
+        builder.add_key(key);
+    }
+    let filter = builder.finish();
+
     let mut group = c.benchmark_group("subsystem_bloom_false_positive_rate_small");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(10_000));
 
-    group.bench_function("fpp_small", |b| {
+    group.bench_function("query_10k_absent", |b| {
         b.iter(|| {
-            // Build bloom filter with 1k keys, target FPR ~1%
-            let mut builder = BloomFilterBuilder::with_expected_keys(1_000, 100);
-
-            // Insert 1k keys
-            for i in 0..1_000 {
-                let key = format!("key_{:06}", i);
-                builder.add_key(key.as_bytes());
-            }
-
-            let filter = builder.finish();
-
-            // Query 10k non-existent keys (offset range to avoid true positives)
-            let mut false_positives = 0;
-            for i in 100_000..110_000 {
-                let key = format!("key_{:06}", i);
-                if filter.may_contain(key.as_bytes()) {
+            // Query 10k non-existent keys
+            let mut false_positives = 0u32;
+            for key in &query_keys {
+                if filter.may_contain(key) {
                     false_positives += 1;
                 }
             }
-
-            // Calculate FPR
-            let fpr = false_positives as f64 / 10_000.0;
-            black_box(fpr);
+            black_box(false_positives)
         })
     });
 
     group.finish();
+
+    // Report actual FPR after benchmark (informational)
+    let mut fps = 0;
+    for key in &query_keys {
+        if filter.may_contain(key) {
+            fps += 1;
+        }
+    }
+    println!(
+        "Small filter FPR: {:.4}% ({} / {})",
+        fps as f64 / query_keys.len() as f64 * 100.0,
+        fps,
+        query_keys.len()
+    );
 }
 
 /// Benchmark bloom false positive rate for large filter (100k keys)
-/// Larger scale FPR measurement with lower target rate
+/// Larger scale FPR measurement
 fn bench_bloom_false_positive_rate_large(c: &mut Criterion) {
+    // Pre-generate all keys
+    let insert_keys = make_test_keys(0, 100_000);
+    let query_keys = make_test_keys(1_000_000, 50_000);
+
+    // Build the filter once
+    let mut builder = BloomFilterBuilder::with_expected_keys(100_000, 10); // 10 bits/key
+    for key in &insert_keys {
+        builder.add_key(key);
+    }
+    let filter = builder.finish();
+
     let mut group = c.benchmark_group("subsystem_bloom_false_positive_rate_large");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(50_000));
 
-    group.bench_function("fpp_large", |b| {
+    group.bench_function("query_50k_absent", |b| {
         b.iter(|| {
-            // Build bloom filter with 100k keys, target FPR ~0.1%
-            let mut builder = BloomFilterBuilder::with_expected_keys(100_000, 1000);
-
-            // Insert 100k keys
-            for i in 0..100_000 {
-                let key = format!("key_{:06}", i);
-                builder.add_key(key.as_bytes());
-            }
-
-            let filter = builder.finish();
-
             // Query 50k non-existent keys
-            let mut false_positives = 0;
-            for i in 1_000_000..1_050_000 {
-                let key = format!("key_{:06}", i);
-                if filter.may_contain(key.as_bytes()) {
+            let mut false_positives = 0u32;
+            for key in &query_keys {
+                if filter.may_contain(key) {
                     false_positives += 1;
                 }
             }
-
-            // Calculate FPR
-            let fpr = false_positives as f64 / 50_000.0;
-            black_box(fpr);
+            black_box(false_positives)
         })
     });
 
     group.finish();
+
+    // Report actual FPR
+    let mut fps = 0;
+    for key in &query_keys {
+        if filter.may_contain(key) {
+            fps += 1;
+        }
+    }
+    println!(
+        "Large filter FPR: {:.4}% ({} / {})",
+        fps as f64 / query_keys.len() as f64 * 100.0,
+        fps,
+        query_keys.len()
+    );
 }
 
 criterion_group! {

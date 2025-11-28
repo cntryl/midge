@@ -272,8 +272,8 @@ path = "benches/tier2_subsystem/sst.rs"
 harness = false
 
 [[bench]]
-name = "tier2_subsystem_storage"
-path = "benches/tier2_subsystem/storage.rs"
+name = "tier2_subsystem_core_primitives"
+path = "benches/tier2_subsystem/core_primitives.rs"
 harness = false
 
 [[bench]]
