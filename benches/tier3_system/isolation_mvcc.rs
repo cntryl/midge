@@ -173,10 +173,9 @@ fn bench_contention_breakdown(c: &mut Criterion) {
                 let cf = engine.default_column_family();
 
                 thread::scope(|scope| {
-                    for tid in 0..num_threads {
+                    for thread_kv in &all_kv {
                         let e = Arc::clone(&engine);
                         let cf = cf.clone();
-                        let thread_kv = &all_kv[tid];
                         scope.spawn(move || {
                             for (k, v) in thread_kv.iter() {
                                 e.put(&cf, k, v).unwrap();
@@ -258,10 +257,9 @@ fn bench_contention_breakdown(c: &mut Criterion) {
 
                 thread::scope(|scope| {
                     // Writers
-                    for tid in 0..num_threads {
+                    for thread_kv in &writer_kv {
                         let e = Arc::clone(&engine);
                         let cf = cf.clone();
-                        let thread_kv = &writer_kv[tid];
                         scope.spawn(move || {
                             for (k, v) in thread_kv.iter() {
                                 e.put(&cf, k, v).unwrap();
@@ -340,10 +338,9 @@ fn bench_snapshot_stress(c: &mut Criterion) {
 
                 thread::scope(|scope| {
                     // Writer threads
-                    for tid in 0..2 {
+                    for thread_kv in &writer_kv {
                         let e = Arc::clone(&engine);
                         let cf_clone = cf.clone();
-                        let thread_kv = &writer_kv[tid];
                         scope.spawn(move || {
                             for (k, v) in thread_kv.iter() {
                                 e.put(&cf_clone, k, v).unwrap();
@@ -413,11 +410,10 @@ fn bench_transaction_isolation(c: &mut Criterion) {
                 let tx_success = Arc::new(AtomicUsize::new(0));
 
                 thread::scope(|scope| {
-                    for tid in 0..num_threads {
+                    for thread_kv in &all_kv {
                         let e = Arc::clone(&engine);
                         let cf_clone = cf.clone();
                         let counter = Arc::clone(&tx_success);
-                        let thread_kv = &all_kv[tid];
 
                         scope.spawn(move || {
                             for (k, v) in thread_kv.iter() {

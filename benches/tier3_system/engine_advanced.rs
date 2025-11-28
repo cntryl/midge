@@ -303,16 +303,16 @@ fn bench_delete_heavy(c: &mut Criterion) {
             || {
                 let engine = setup_db("delete_heavy_90", false);
                 let cf = engine.default_column_family();
-                for i in 0..num_keys {
-                    engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                for (key, val) in keys.iter().zip(vals.iter()) {
+                    engine.put(&cf, key, val).unwrap();
                 }
                 engine
             },
             |engine| {
                 let cf = engine.default_column_family();
                 // Delete 90% of keys
-                for i in 0..delete_90_count {
-                    engine.delete(&cf, &keys[i]).unwrap();
+                for key in keys.iter().take(delete_90_count) {
+                    engine.delete(&cf, key).unwrap();
                 }
                 engine // prevent Drop during timing
             },

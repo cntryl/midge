@@ -231,7 +231,7 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                                 let keys = Arc::clone(&keys);
                                 let values = Arc::clone(&values);
                                 scope.spawn(move || {
-                                    run_workload_a_variant(&*e, &keys, &values, OPS_PER_THREAD);
+                                    run_workload_a_variant(&e, &keys, &values, OPS_PER_THREAD);
                                 });
                             }
                         });

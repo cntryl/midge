@@ -1,68 +1,89 @@
 //! Tier 3 — Startup WAL replay bench
 //!
-//! **Target Runtime:** ~2 minutes
-//! **Run Frequency:** Nightly / release builds
+//! **Target Runtime:** ~30-60 seconds
+//! **Run Frequency:** Nightly CI / Perf Baselines
 //!
 //! Covers engine startup with WAL replay
+//!
+//! ## Design Notes
+//!
+//! - Returns engine from timed closures to exclude teardown from timing
+//! - Precomputes all keys/values outside hot loops
+//! - Uses unique paths to avoid cross-iteration interference
+//! - Throughput measured in bytes
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
+use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use tempfile::TempDir;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Pre-generate keys without format! allocations
-fn make_key(i: usize) -> Vec<u8> {
-    let mut key = vec![0u8; 14];
+/// Global counter for unique benchmark directory names
+static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Key size in bytes
+const KEY_SIZE: usize = 14;
+/// Value size in bytes  
+const VALUE_SIZE: usize = 128;
+/// Bytes per operation
+const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
+
+/// Generate unique path for benchmark database
+fn unique_bench_path(prefix: &str) -> PathBuf {
+    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("midge_bench_startup_wal_{}_{}_{}", prefix, pid, counter))
+}
+
+#[inline]
+fn make_key(i: usize) -> Bytes {
+    let mut key = vec![0u8; KEY_SIZE];
     key[..4].copy_from_slice(b"key_");
     let mut n = i;
-    for j in (4..14).rev() {
+    for j in (4..KEY_SIZE).rev() {
         key[j] = b'0' + (n % 10) as u8;
         n /= 10;
     }
-    key
+    Bytes::from(key)
 }
 
-/// Pre-generate values without format! allocations
-fn make_value(i: usize) -> Vec<u8> {
-    let mut val = Vec::with_capacity(16);
-    val.extend_from_slice(b"value_");
-    if i == 0 {
-        val.push(b'0');
-    } else {
-        let start = val.len();
-        let mut n = i;
-        while n > 0 {
-            val.push(b'0' + (n % 10) as u8);
-            n /= 10;
-        }
-        val[start..].reverse();
+#[inline]
+fn make_value_fixed(size: usize) -> Bytes {
+    Bytes::from(vec![b'x'; size])
+}
+
+fn precompute_kv(n: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
+    let mut keys = Vec::with_capacity(n);
+    let mut vals = Vec::with_capacity(n);
+    for i in 0..n {
+        keys.push(make_key(i));
+        vals.push(make_value_fixed(value_size));
     }
-    val
+    (keys, vals)
 }
 
 /// Benchmark engine startup with WAL replay (50k operations)
 fn bench_engine_startup_from_wal(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_engine_startup_from_wal");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(50_000)); // 50k WAL ops replayed
-    group.measurement_time(std::time::Duration::from_secs(5));
-    group.sample_size(10);
 
-    // Pre-compute keys and values outside the benchmark loop
-    let keys: Vec<Vec<u8>> = (0..50_000).map(make_key).collect();
-    let values: Vec<Vec<u8>> = (0..50_000).map(make_value).collect();
+    let num_ops = 50_000usize;
+    let (keys, vals) = precompute_kv(num_ops, VALUE_SIZE);
+    let bytes_total = (num_ops as u64) * BYTES_PER_OP;
 
+    group.throughput(Throughput::Bytes(bytes_total));
     group.bench_function("replay_50k_wal_ops", |b| {
         b.iter_batched(
             || {
-                let tmp = TempDir::new().expect("tempdir");
-                let path = tmp.path().join("startup_wal");
+                let path = unique_bench_path("wal_replay");
+                let _ = std::fs::remove_dir_all(&path);
 
-                // Phase 1: Create WAL with 50k operations WITHOUT flushing
+                // Create WAL with 50k operations WITHOUT flushing
                 {
                     let opts = MidgeOptions {
                         storage_mode: StorageMode::LocalDisk {
@@ -70,38 +91,39 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
                         },
                         memtable_size: 100 * 1024 * 1024, // Large memtable = no auto flush
                         enable_compaction: false,
-                        wal_sync: false, // Faster WAL writes for setup
+                        wal_sync: false,
                         ..Default::default()
                     };
                     let engine = MidgeEngine::open(opts).unwrap();
                     let cf = engine.default_column_family();
 
-                    // Write 50k ops to WAL without flushing
-                    for i in 0..50_000 {
-                        engine.put(&cf, &keys[i], &values[i]).unwrap();
+                    // Write ops to WAL without flushing
+                    for i in 0..num_ops {
+                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
                     }
                     // DO NOT flush - keep data only in WAL
-                    // Engine closes, WAL persisted
                 }
 
-                (path, tmp)
+                path
             },
-            |(path, _tmp)| {
-                // Phase 2: Measure startup time (WAL replay into memtable)
+            |path| {
+                // Measure startup time (WAL replay into memtable)
                 let opts = MidgeOptions {
                     storage_mode: StorageMode::LocalDisk { db_path: path },
                     memtable_size: 100 * 1024 * 1024,
                     enable_compaction: false,
+                    wal_sync: false,
                     ..Default::default()
                 };
                 let engine = MidgeEngine::open(opts).unwrap();
 
                 // Verify data was recovered from WAL
                 let cf = engine.default_column_family();
-                let result = engine.get(&cf, b"key_0000025000").unwrap();
-                black_box(result);
+                black_box(engine.get(&cf, &keys[25_000]).unwrap());
+
+                engine // prevent Drop during timing
             },
-            criterion::BatchSize::LargeInput,
+            BatchSize::LargeInput,
         )
     });
 
