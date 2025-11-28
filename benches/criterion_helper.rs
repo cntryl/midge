@@ -11,7 +11,7 @@ pub fn criterion_config() -> Criterion {
     // Single, solid default: quick enough for local/CI use, but
     // with enough samples to give stable-ish numbers for hotpaths.
     Criterion::default()
-        .sample_size(25)
+        .sample_size(20)
         .measurement_time(Duration::from_millis(700))
         .warm_up_time(Duration::from_millis(300))
         .confidence_level(0.95)

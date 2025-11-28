@@ -30,13 +30,19 @@ use std::hint::black_box;
 fn bench_wal_encode_record(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_wal_encode");
 
-    let test_cases = vec![
+    let small_key = Bytes::from_static(b"key");
+    let small_value = Bytes::from_static(b"value");
+    let medium_key: Bytes = Bytes::from_static(&[0u8; 64]);
+    let medium_value: Bytes = Bytes::from_static(&[0u8; 256]);
+    let delete_key = Bytes::from_static(b"deleted_key");
+
+    let test_cases = [
         (
             "small_put",
             WalRecord::new(
                 WalOpKind::Put,
-                Bytes::from_static(b"key"),
-                Some(Bytes::from_static(b"value")),
+                small_key.clone(),
+                Some(small_value.clone()),
                 1,
             ),
         ),
@@ -44,8 +50,8 @@ fn bench_wal_encode_record(c: &mut Criterion) {
             "medium_put",
             WalRecord::new(
                 WalOpKind::Put,
-                Bytes::copy_from_slice(&[0u8; 64]),
-                Some(Bytes::copy_from_slice(&[0u8; 256])),
+                medium_key.clone(),
+                Some(medium_value.clone()),
                 1,
             ),
         ),
@@ -53,7 +59,7 @@ fn bench_wal_encode_record(c: &mut Criterion) {
             "delete",
             WalRecord::new(
                 WalOpKind::Delete,
-                Bytes::from_static(b"deleted_key"),
+                delete_key.clone(),
                 None,
                 1,
             ),
@@ -75,13 +81,19 @@ fn bench_wal_encode_record(c: &mut Criterion) {
 fn bench_wal_decode_record(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_wal_decode");
 
-    let test_cases = vec![
+    let small_key = Bytes::from_static(b"key");
+    let small_value = Bytes::from_static(b"value");
+    let medium_key: Bytes = Bytes::from_static(&[0u8; 64]);
+    let medium_value: Bytes = Bytes::from_static(&[0u8; 256]);
+    let delete_key = Bytes::from_static(b"deleted_key");
+
+    let test_cases = [
         (
             "small_put",
             encode(&WalRecord::new(
                 WalOpKind::Put,
-                Bytes::from_static(b"key"),
-                Some(Bytes::from_static(b"value")),
+                small_key.clone(),
+                Some(small_value.clone()),
                 1,
             ))
             .unwrap(),
@@ -90,8 +102,8 @@ fn bench_wal_decode_record(c: &mut Criterion) {
             "medium_put",
             encode(&WalRecord::new(
                 WalOpKind::Put,
-                Bytes::copy_from_slice(&[0u8; 64]),
-                Some(Bytes::copy_from_slice(&[0u8; 256])),
+                medium_key.clone(),
+                Some(medium_value.clone()),
                 1,
             ))
             .unwrap(),
@@ -100,7 +112,7 @@ fn bench_wal_decode_record(c: &mut Criterion) {
             "delete",
             encode(&WalRecord::new(
                 WalOpKind::Delete,
-                Bytes::from_static(b"deleted_key"),
+                delete_key.clone(),
                 None,
                 1,
             ))
@@ -123,13 +135,18 @@ fn bench_wal_decode_record(c: &mut Criterion) {
 fn bench_wal_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_wal_roundtrip");
 
-    let test_cases = vec![
+    let small_key = Bytes::from_static(b"key");
+    let small_value = Bytes::from_static(b"value");
+    let medium_key: Bytes = Bytes::from_static(&[0u8; 64]);
+    let medium_value: Bytes = Bytes::from_static(&[0u8; 256]);
+
+    let test_cases = [
         (
             "small",
             WalRecord::new(
                 WalOpKind::Put,
-                Bytes::from_static(b"key"),
-                Some(Bytes::from_static(b"value")),
+                small_key.clone(),
+                Some(small_value.clone()),
                 1,
             ),
         ),
@@ -137,8 +154,8 @@ fn bench_wal_roundtrip(c: &mut Criterion) {
             "medium",
             WalRecord::new(
                 WalOpKind::Put,
-                Bytes::copy_from_slice(&[0u8; 64]),
-                Some(Bytes::copy_from_slice(&[0u8; 256])),
+                medium_key.clone(),
+                Some(medium_value.clone()),
                 1,
             ),
         ),
@@ -188,10 +205,17 @@ fn bench_wal_encode_delete_fast_path(c: &mut Criterion) {
 fn bench_wal_encode_put_fast_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_wal_encode_put");
 
-    let test_cases = vec![
-        ("tiny", b"k" as &[u8], b"v" as &[u8]),
-        ("small", b"test_key", b"test_value"),
-        ("medium", &[0u8; 32], &[0u8; 128]),
+    let tiny_key: &[u8] = b"k";
+    let tiny_value: &[u8] = b"v";
+    let small_key: &[u8] = b"test_key";
+    let small_value: &[u8] = b"test_value";
+    let medium_key: &[u8] = &[0u8; 32];
+    let medium_value: &[u8] = &[0u8; 128];
+
+    let test_cases = [
+        ("tiny", tiny_key, tiny_value),
+        ("small", small_key, small_value),
+        ("medium", medium_key, medium_value),
     ];
 
     group.throughput(Throughput::Elements(1));

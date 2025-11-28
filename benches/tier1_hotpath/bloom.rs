@@ -15,25 +15,23 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use criterion_helper::criterion_config;
 use std::hint::black_box;
 
-fn make_test_key(i: usize) -> Bytes {
-    Bytes::from(format!("key_{:010}", i))
-}
-
 /// Benchmark bloom filter containment check
 fn bench_bloom_maybe_contains(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_bloom_maybe_contains");
     group.measurement_time(std::time::Duration::from_millis(200));
 
     let mut builder = BloomFilterBuilder::with_bits_per_key(10);
-    // Pre-populate with some keys
-    for i in 0..100 {
-        builder.add_key(&make_test_key(i));
+    let keys: Vec<Bytes> = (0..100)
+        .map(|i| Bytes::from(format!("key_{:010}", i)))
+        .collect();
+    for key in &keys {
+        builder.add_key(key);
     }
     let filter = builder.finish();
 
     // Precompute keys
-    let hit_key = make_test_key(42);
-    let miss_key = make_test_key(1000);
+    let hit_key = keys[42].clone();
+    let miss_key = Bytes::from_static(b"key_00001000");
 
     group.bench_function("maybe_contains_hit", |b| {
         b.iter(|| {
@@ -58,13 +56,16 @@ fn bench_bloom_compute_hashes(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_millis(200));
 
     let mut builder = BloomFilterBuilder::with_bits_per_key(10);
-    for i in 0..100 {
-        builder.add_key(&make_test_key(i));
+    let keys: Vec<Bytes> = (0..100)
+        .map(|i| Bytes::from(format!("key_{:010}", i)))
+        .collect();
+    for key in &keys {
+        builder.add_key(key);
     }
     let filter = builder.finish();
 
     // Precompute miss key
-    let miss_key = make_test_key(1000);
+    let miss_key = Bytes::from_static(b"key_00001000");
 
     group.bench_function("compute_hashes_via_miss", |b| {
         b.iter(|| {
@@ -82,11 +83,12 @@ fn bench_bloom_filter_hot_check(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_millis(200));
 
     let mut builder = BloomFilterBuilder::with_bits_per_key(10);
-    builder.add_key(&make_test_key(42));
+    let hit_key = Bytes::from_static(b"key_00000042");
+    builder.add_key(&hit_key);
     let filter = builder.finish();
 
     // Precompute hit key
-    let hit_key = make_test_key(42);
+    let hit_key = hit_key.clone();
 
     group.bench_function("hot_check_hit", |b| {
         b.iter(|| {
