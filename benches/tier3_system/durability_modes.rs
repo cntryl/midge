@@ -22,6 +22,8 @@ use criterion_helper::{criterion_config_for_tier, BenchTier};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use ycsb_common::*;
@@ -32,6 +34,9 @@ use ycsb_common::*;
 
 const OPS_PER_THREAD: usize = 5_000;
 const RECORD_COUNT: usize = 25_000;
+
+/// Global counter for unique benchmark directory names
+static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Pre-generate values outside the benchmark to avoid format! allocations
 fn pregen_workload_values(count: usize, seed: u64) -> Vec<Bytes> {
@@ -78,21 +83,32 @@ fn load_data(engine: &MidgeEngine, count: usize) {
 // Database Setup - Durability Modes
 // ============================================================================
 
-fn setup_db_with_wal_sync(db_name: &str, wal_sync: bool) -> MidgeEngine {
-    let path = std::env::temp_dir().join(format!("midge_durability_{}", db_name));
+/// Generate unique path for benchmark database
+fn unique_bench_path(prefix: &str) -> PathBuf {
+    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("midge_durability_{}_{}_{}", prefix, pid, counter))
+}
+
+fn setup_db_with_wal_sync(db_name: &str, wal_sync: bool) -> (MidgeEngine, PathBuf) {
+    let path = unique_bench_path(db_name);
     let _ = std::fs::remove_dir_all(&path);
 
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path },
+        storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
         memtable_size: 8 * 1024 * 1024,
         enable_compaction: false,
         wal_sync,
         ..Default::default()
     };
 
-    let engine = MidgeEngine::open(opts).unwrap();
+    let engine = MidgeEngine::open(opts).expect("failed to open engine");
     load_data(&engine, RECORD_COUNT);
-    engine
+    (engine, path)
+}
+
+fn cleanup_path(path: PathBuf) {
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 /// Workload A variant: 50% read, 50% write
@@ -132,8 +148,9 @@ fn bench_durability_async_wal(c: &mut Criterion) {
     group.bench_function("50_50_workload", |b| {
         b.iter_batched(
             || setup_db_with_wal_sync("async_baseline", false),
-            |engine| {
+            |(engine, path)| {
                 run_workload_a_variant(&engine, &keys, &values, OPS_PER_THREAD);
+                cleanup_path(path);
                 black_box(());
             },
             criterion::BatchSize::SmallInput,
@@ -157,8 +174,9 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
     group.bench_function("50_50_workload", |b| {
         b.iter_batched(
             || setup_db_with_wal_sync("sync_every", true),
-            |engine| {
+            |(engine, path)| {
                 run_workload_a_variant(&engine, &keys, &values, OPS_PER_THREAD);
+                cleanup_path(path);
                 black_box(());
             },
             criterion::BatchSize::SmallInput,
@@ -202,7 +220,7 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                             mode_name == "sync_every",
                         )
                     },
-                    |engine| {
+                    |(engine, path)| {
                         let engine = Arc::new(engine);
                         let keys = Arc::clone(&keys);
                         let values = Arc::clone(&values);
@@ -213,11 +231,12 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                                 let keys = Arc::clone(&keys);
                                 let values = Arc::clone(&values);
                                 scope.spawn(move || {
-                                    run_workload_a_variant(&e, &keys, &values, OPS_PER_THREAD);
+                                    run_workload_a_variant(&*e, &keys, &values, OPS_PER_THREAD);
                                 });
                             }
                         });
 
+                        cleanup_path(path);
                         black_box(());
                     },
                     criterion::BatchSize::SmallInput,
@@ -275,8 +294,9 @@ fn bench_durability_read_heavy(c: &mut Criterion) {
                             mode_name == "sync_every",
                         )
                     },
-                    |engine| {
+                    |(engine, path)| {
                         run_workload_b_variant(&engine, &keys, &values, OPS_PER_THREAD);
+                        cleanup_path(path);
                         black_box(());
                     },
                     criterion::BatchSize::SmallInput,
@@ -327,8 +347,9 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
                             mode_name == "sync_every",
                         )
                     },
-                    |engine| {
+                    |(engine, path)| {
                         run_write_heavy_workload(&engine, &keys, &values, OPS_PER_THREAD);
+                        cleanup_path(path);
                         black_box(());
                     },
                     criterion::BatchSize::SmallInput,

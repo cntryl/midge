@@ -1,6 +1,6 @@
 //! Tier 3 — Concurrency Stress & Compaction Benchmarks
 //!
-//! **Target Runtime:** ~10 seconds
+//! **Target Runtime:** ~10 seconds per benchmark
 //! **Run Frequency:** Nightly CI / Perf Baselines
 //!
 //! Focus areas:
@@ -20,22 +20,32 @@ use criterion::{
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
+/// Global counter for unique benchmark directory names
+static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Key size in bytes (14 = "key_" + 10 digit number)
+const KEY_SIZE: usize = 14;
+
+#[inline]
 fn make_key(i: usize) -> Bytes {
     // Fixed-size key using direct byte manipulation (no format! allocations)
-    let mut key = vec![0u8; 14];
+    let mut key = vec![0u8; KEY_SIZE];
     key[..4].copy_from_slice(b"key_");
     // Write i as 10-digit decimal directly
     let mut n = i;
-    for j in (4..14).rev() {
+    for j in (4..KEY_SIZE).rev() {
         key[j] = b'0' + (n % 10) as u8;
         n /= 10;
     }
     Bytes::from(key)
 }
+
+#[inline]
 fn make_value(size: usize) -> Bytes {
     Bytes::from(vec![b'x'; size])
 }
@@ -50,17 +60,58 @@ fn precompute_kv(n: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     (keys, vals)
 }
 
-fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
-    let path = std::env::temp_dir().join(format!("midge_bench_t3_stress_{}", name));
+/// Generate unique path for benchmark to avoid cross-iteration interference
+fn unique_bench_path(prefix: &str) -> PathBuf {
+    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("midge_bench_t3_stress_{}_{}_{}", prefix, pid, counter))
+}
+
+/// Wrapper to ensure cleanup on drop
+struct BenchDb {
+    engine: MidgeEngine,
+    path: PathBuf,
+}
+
+impl BenchDb {
+    fn new(prefix: &str, compaction: bool) -> Self {
+        let path = unique_bench_path(prefix);
+        let _ = std::fs::remove_dir_all(&path);
+        let opts = MidgeOptions {
+            storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+            memtable_size: 4 * 1024 * 1024,
+            enable_compaction: compaction,
+            wal_sync: false, // Disable WAL sync for raw throughput measurement
+            ..Default::default()
+        };
+        let engine = MidgeEngine::open(opts).expect("failed to open engine");
+        Self { engine, path }
+    }
+}
+
+impl Drop for BenchDb {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Create db for Arc usage (returns engine and path for cleanup)
+fn setup_db_arc(prefix: &str, compaction: bool) -> (Arc<MidgeEngine>, PathBuf) {
+    let path = unique_bench_path(prefix);
     let _ = std::fs::remove_dir_all(&path);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path },
+        storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
         memtable_size: 4 * 1024 * 1024,
         enable_compaction: compaction,
-        wal_sync: true,
+        wal_sync: false,
         ..Default::default()
     };
-    MidgeEngine::open(opts).unwrap()
+    let engine = MidgeEngine::open(opts).expect("failed to open engine");
+    (Arc::new(engine), path)
+}
+
+fn cleanup_path(path: PathBuf) {
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 // ============================================================================
@@ -73,25 +124,26 @@ fn bench_concurrent_puts(c: &mut Criterion) {
 
     let max_threads = 16;
     let n_ops = 5_000;
+    let value_size = 128;
     let total_ops = max_threads * n_ops;
-    let (keys, vals) = precompute_kv(total_ops, 128);
+    let (keys, vals) = precompute_kv(total_ops, value_size);
     let keys = Arc::new(keys);
     let vals = Arc::new(vals);
 
     for &threads in &[1, 2, 4, 8, 16] {
         let ops_per_iter = threads * n_ops;
-        group.throughput(Throughput::Elements(ops_per_iter as u64));
+        let bytes_per_iter = ops_per_iter * (KEY_SIZE + value_size);
+        group.throughput(Throughput::Bytes(bytes_per_iter as u64));
         group.bench_with_input(
-            BenchmarkId::from_parameter(threads),
+            BenchmarkId::from_parameter(format!("{}threads", threads)),
             &threads,
             |b, &tcount| {
+                let keys = Arc::clone(&keys);
+                let vals = Arc::clone(&vals);
                 b.iter_batched(
-                    || Arc::new(setup_db(&format!("concurrent_{}", tcount), false)),
-                    |engine| {
+                    || setup_db_arc("concurrent", false),
+                    |(engine, path)| {
                         let cf = engine.default_column_family();
-                        let keys = Arc::clone(&keys);
-                        let vals = Arc::clone(&vals);
-                        let start = Instant::now();
                         thread::scope(|scope| {
                             for tid in 0..tcount {
                                 let engine = Arc::clone(&engine);
@@ -109,7 +161,8 @@ fn bench_concurrent_puts(c: &mut Criterion) {
                                 });
                             }
                         });
-                        black_box(start.elapsed());
+                        cleanup_path(path);
+                        black_box(());
                     },
                     BatchSize::SmallInput,
                 )
@@ -138,22 +191,30 @@ fn bench_mixed_read_write(c: &mut Criterion) {
     let reader_keys: Vec<_> = (0..10_000).step_by(3).map(make_key).collect();
     let reader_keys = Arc::new(reader_keys);
 
+    // Calculate throughput: 4 writers * 1000 ops + 4 readers * ~3333 ops
+    let total_ops = 4 * 1_000 + 4 * reader_keys.len();
+    group.throughput(Throughput::Elements(total_ops as u64));
+
     group.bench_function("4w4r_threads", |b| {
+        let writer_keys = Arc::clone(&writer_keys);
+        let writer_vals = Arc::clone(&writer_vals);
+        let reader_keys = Arc::clone(&reader_keys);
+        
         b.iter_batched(
-            || Arc::new(setup_db("mixed", false)),
-            |engine| {
+            || setup_db_arc("mixed", false),
+            |(engine, path)| {
                 let cf = engine.default_column_family();
                 let writer_keys = Arc::clone(&writer_keys);
                 let writer_vals = Arc::clone(&writer_vals);
                 let reader_keys = Arc::clone(&reader_keys);
-                // prefill
+                
+                // Prefill (outside timed section ideally, but we measure full scenario)
                 for i in 0..10_000 {
-                    engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
+                    engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).expect("prefill failed");
                 }
 
-                let engine_r = Arc::clone(&engine);
                 thread::scope(|scope| {
-                    // writers
+                    // Writers
                     for t in 0..4 {
                         let e = Arc::clone(&engine);
                         let cf = cf.clone();
@@ -162,22 +223,23 @@ fn bench_mixed_read_write(c: &mut Criterion) {
                         scope.spawn(move || {
                             for i in 0..1_000 {
                                 let idx = t * 1_000 + i;
-                                e.put(&cf, &writer_keys[idx], &writer_vals[idx]).unwrap();
+                                e.put(&cf, &writer_keys[idx], &writer_vals[idx]).expect("write failed");
                             }
                         });
                     }
-                    // readers
+                    // Readers
                     for _ in 0..4 {
-                        let e = Arc::clone(&engine_r);
+                        let e = Arc::clone(&engine);
                         let cf = cf.clone();
                         let reader_keys = Arc::clone(&reader_keys);
                         scope.spawn(move || {
                             for j in 0..reader_keys.len() {
-                                let _ = e.get(&cf, &reader_keys[j]).unwrap();
+                                let _ = e.get(&cf, &reader_keys[j]);
                             }
                         });
                     }
                 });
+                cleanup_path(path);
                 black_box(());
             },
             BatchSize::SmallInput,
@@ -200,26 +262,30 @@ fn bench_compaction_pressure(c: &mut Criterion) {
     let compaction_vals: Vec<_> = (0..25_000).map(|_| make_value(256)).collect();
     let verify_keys: Vec<_> = (0..1_000).step_by(50).map(make_key).collect();
 
+    let total_bytes = 25_000 * (KEY_SIZE + 256);
+    group.throughput(Throughput::Bytes(total_bytes as u64));
+
     group.bench_function("steady_write_with_compaction", |b| {
         b.iter_batched(
-            || setup_db("compacting", true),
-            |engine| {
-                let cf = engine.default_column_family();
+            || BenchDb::new("compacting", true),
+            |db| {
+                let cf = db.engine.default_column_family();
                 for round in 0..5 {
                     for i in 0..5_000 {
                         let idx = round * 5_000 + i;
-                        engine
+                        db.engine
                             .put(&cf, &compaction_keys[idx], &compaction_vals[idx])
-                            .unwrap();
+                            .expect("write failed");
                     }
-                    // brief pause to let background compaction catch up
-                    thread::sleep(Duration::from_millis(50));
+                    // Small yield to allow compaction progress (avoid blocking the whole benchmark)
+                    std::thread::yield_now();
                 }
                 // Verify a few reads during/after compaction
                 for key in &verify_keys {
-                    let _ = engine.get(&cf, key).unwrap();
+                    let _ = db.engine.get(&cf, key);
                 }
                 black_box(());
+                // BenchDb cleanup happens on drop
             },
             BatchSize::SmallInput,
         )
@@ -243,25 +309,25 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
     let delete_keys = Arc::new(delete_keys);
 
     for &threads in &[2, 4, 8] {
+        group.throughput(Throughput::Elements(10_000));
         group.bench_with_input(
-            BenchmarkId::from_parameter(threads),
+            BenchmarkId::from_parameter(format!("{}threads", threads)),
             &threads,
             |b, &tcount| {
+                let delete_keys = Arc::clone(&delete_keys);
                 b.iter_batched(
                     || {
-                        let engine =
-                            Arc::new(setup_db(&format!("delete_concurrent_{}", tcount), false));
+                        let (engine, path) = setup_db_arc("delete_concurrent", false);
                         let cf = engine.default_column_family();
                         // Prefill with 10k keys
                         for i in 0..10_000 {
-                            engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
+                            engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).expect("prefill failed");
                         }
-                        engine
+                        (engine, path)
                     },
-                    |engine| {
+                    |(engine, path)| {
                         let cf = engine.default_column_family();
                         let delete_keys = Arc::clone(&delete_keys);
-                        let start = Instant::now();
                         thread::scope(|scope| {
                             for tid in 0..tcount {
                                 let engine = Arc::clone(&engine);
@@ -276,7 +342,8 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
                                 });
                             }
                         });
-                        black_box(start.elapsed());
+                        cleanup_path(path);
+                        black_box(());
                     },
                     BatchSize::SmallInput,
                 )
@@ -297,32 +364,37 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
 
     // Precompute for max pairs=8, 8*2*2500=40000
+    let value_size = 150;
     let multi_cf_keys: Vec<_> = (0..40_000).map(make_key).collect();
-    let multi_cf_vals: Vec<_> = (0..40_000).map(|_| make_value(150)).collect();
+    let multi_cf_vals: Vec<_> = (0..40_000).map(|_| make_value(value_size)).collect();
     let multi_cf_keys = Arc::new(multi_cf_keys);
     let multi_cf_vals = Arc::new(multi_cf_vals);
 
     for &thread_pairs in &[2, 4, 8] {
+        let ops_per_iter = thread_pairs * 2 * 2_500; // pairs * threads_per_cf * ops_per_thread
+        let bytes_per_iter = ops_per_iter * (KEY_SIZE + value_size);
+        group.throughput(Throughput::Bytes(bytes_per_iter as u64));
         group.bench_with_input(
-            BenchmarkId::from_parameter(thread_pairs),
+            BenchmarkId::from_parameter(format!("{}cfs", thread_pairs)),
             &thread_pairs,
             |b, &pairs| {
+                let multi_cf_keys = Arc::clone(&multi_cf_keys);
+                let multi_cf_vals = Arc::clone(&multi_cf_vals);
                 b.iter_batched(
                     || {
-                        let engine = Arc::new(setup_db(&format!("multi_cf_{}", pairs), false));
+                        let (engine, path) = setup_db_arc("multi_cf", false);
                         // Create N column families
                         for i in 1..pairs {
                             engine
                                 .create_column_family(&format!("cf{}", i), Default::default())
                                 .ok();
                         }
-                        engine
+                        (engine, path)
                     },
-                    |engine| {
+                    |(engine, path)| {
                         let cf_list = engine.list_column_families();
                         let multi_cf_keys = Arc::clone(&multi_cf_keys);
                         let multi_cf_vals = Arc::clone(&multi_cf_vals);
-                        let start = Instant::now();
                         thread::scope(|scope| {
                             // 2 threads per CF
                             for (cf_idx, cf) in cf_list.iter().enumerate().take(pairs) {
@@ -340,13 +412,14 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
                                                     &multi_cf_keys[base + i],
                                                     &multi_cf_vals[base + i],
                                                 )
-                                                .unwrap();
+                                                .expect("write failed");
                                         }
                                     });
                                 }
                             }
                         });
-                        black_box(start.elapsed());
+                        cleanup_path(path);
+                        black_box(());
                     },
                     BatchSize::SmallInput,
                 )

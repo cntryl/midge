@@ -1,41 +1,67 @@
 //! Tier 3 — MVCC & Transaction Isolation Benchmarks
 //!
-//! **Target Runtime:** ~15 seconds
+//! **Target Runtime:** ~30-60 seconds
 //! **Run Frequency:** Nightly CI / Perf Baselines
 //!
 //! Focus areas:
 //! - Snapshot creation and consistency under concurrent writes
 //! - Transaction isolation and MVCC overhead
-//! - Snapshot behavior during compaction (old versions preserved)
 //! - Single-threaded baseline for scaling analysis
-//! - Latency distribution under concurrent reader/writer load
-//! - Compaction amplification measurement
+//! - Contention breakdown (readers vs writers)
+//!
+//! ## Design Notes
+//!
+//! - Returns engine from timed closures to exclude teardown from timing
+//! - Precomputes all keys/values outside hot loops
+//! - Uses unique paths to avoid cross-iteration interference
+//! - Throughput measured in bytes where applicable
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{
+    criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
+/// Global counter for unique benchmark directory names
+static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Key size in bytes
+const KEY_SIZE: usize = 14;
+/// Default value size
+const VALUE_SIZE: usize = 128;
+/// Bytes per operation
+const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
+
+/// Generate unique path for benchmark database
+fn unique_bench_path(prefix: &str) -> PathBuf {
+    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("midge_bench_mvcc_{}_{}_{}", prefix, pid, counter))
+}
+
+#[inline]
 fn make_key(i: usize) -> Bytes {
-    // Fixed-size key using direct byte manipulation (no format! allocations)
-    let mut key = vec![0u8; 14];
+    let mut key = vec![0u8; KEY_SIZE];
     key[..4].copy_from_slice(b"key_");
     let mut n = i;
-    for j in (4..14).rev() {
+    for j in (4..KEY_SIZE).rev() {
         key[j] = b'0' + (n % 10) as u8;
         n /= 10;
     }
     Bytes::from(key)
 }
-fn make_value(size: usize) -> Bytes {
+
+#[inline]
+fn make_value_fixed(size: usize) -> Bytes {
     Bytes::from(vec![b'x'; size])
 }
 
@@ -44,22 +70,26 @@ fn precompute_kv(n: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut vals = Vec::with_capacity(n);
     for i in 0..n {
         keys.push(make_key(i));
-        vals.push(make_value(value_size));
+        vals.push(make_value_fixed(value_size));
     }
     (keys, vals)
 }
 
 fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
-    let path = std::env::temp_dir().join(format!("midge_bench_t3_mvcc_{}", name));
+    let path = unique_bench_path(name);
     let _ = std::fs::remove_dir_all(&path);
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk { db_path: path },
         memtable_size: 4 * 1024 * 1024,
         enable_compaction: compaction,
-        wal_sync: true,
+        wal_sync: false, // Disable sync for benchmark speed
         ..Default::default()
     };
     MidgeEngine::open(opts).unwrap()
+}
+
+fn setup_db_arc(name: &str) -> Arc<MidgeEngine> {
+    Arc::new(setup_db(name, false))
 }
 
 // ============================================================================
@@ -68,176 +98,173 @@ fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
 
 fn bench_single_thread_baseline(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_baseline_single_thread");
+    group.sampling_mode(SamplingMode::Flat);
 
-    let (keys_put, vals_put) = precompute_kv(1000, 128);
-    group.bench_function("baseline_seq_puts_128b", |b| {
+    let num_ops = 1_000usize;
+    let (keys, vals) = precompute_kv(num_ops, VALUE_SIZE);
+    let bytes_total = (num_ops as u64) * BYTES_PER_OP;
+
+    group.throughput(Throughput::Bytes(bytes_total));
+    group.bench_function("baseline_seq_puts", |b| {
         b.iter_batched(
-            || Arc::new(setup_db("baseline_seq", false)),
+            || setup_db("baseline_seq", false),
             |engine| {
                 let cf = engine.default_column_family();
-                for i in 0..1_000 {
-                    engine.put(&cf, &keys_put[i], &vals_put[i]).unwrap();
+                for i in 0..num_ops {
+                    engine.put(&cf, &keys[i], &vals[i]).unwrap();
                 }
+                engine // prevent Drop during timing
             },
             BatchSize::SmallInput,
         )
     });
 
-    let (keys_get, vals_get) = precompute_kv(1000, 128);
+    // Get benchmark - reads step_by(5) = 200 reads
+    let read_count = num_ops / 5;
+    group.throughput(Throughput::Bytes((read_count as u64) * BYTES_PER_OP));
     group.bench_function("baseline_random_gets_hit", |b| {
-        let engine = Arc::new(setup_db("baseline_get", false));
+        let engine = setup_db("baseline_get", false);
         let cf = engine.default_column_family();
-        for i in 0..1_000 {
-            engine.put(&cf, &keys_get[i], &vals_get[i]).unwrap();
+        for i in 0..num_ops {
+            engine.put(&cf, &keys[i], &vals[i]).unwrap();
         }
 
         b.iter(|| {
-            for i in (0..1_000).step_by(5) {
-                let _ = engine.get(&cf, &keys_get[i]).unwrap();
+            for i in (0..num_ops).step_by(5) {
+                black_box(engine.get(&cf, &keys[i]).unwrap());
             }
-        })
+        });
     });
 
     group.finish();
 }
 
 // ============================================================================
-// 2. Concurrent Puts with Latency Distribution
-// ============================================================================
-
-fn bench_concurrent_puts_latency(c: &mut Criterion) {
-    let mut group = c.benchmark_group("system_concurrent_puts_latency");
-    group.sample_size(50);
-
-    for &threads in &[1, 2, 4, 8] {
-        for latency_pct in &["p50", "p99"] {
-            group.bench_with_input(
-                BenchmarkId::new(format!("put_{}_latency_us", latency_pct), threads),
-                &threads,
-                |b, &tcount| {
-                    b.iter_batched(
-                        || Arc::new(setup_db(&format!("latency_{}", tcount), false)),
-                        |engine| {
-                            let cf = engine.default_column_family();
-                            let latencies = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-                            thread::scope(|scope| {
-                                for tid in 0..tcount {
-                                    let engine = Arc::clone(&engine);
-                                    let cf = cf.clone();
-                                    let lats = Arc::clone(&latencies);
-
-                                    scope.spawn(move || {
-                                        for i in 0..1_000 {
-                                            let start = Instant::now();
-                                            engine
-                                                .put(
-                                                    &cf,
-                                                    &make_key(tid * 1_000 + i),
-                                                    &make_value(128),
-                                                )
-                                                .unwrap();
-                                            let elapsed_us = start.elapsed().as_micros() as u64;
-                                            lats.lock().unwrap().push(elapsed_us);
-                                        }
-                                    });
-                                }
-                            });
-
-                            black_box(Arc::try_unwrap(latencies).unwrap().into_inner().unwrap());
-                        },
-                        BatchSize::SmallInput,
-                    )
-                },
-            );
-        }
-    }
-
-    group.finish();
-}
-
-// ============================================================================
-// 3. Contention Breakdown
+// 2. Contention Breakdown
 // ============================================================================
 
 fn bench_contention_breakdown(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_contention_breakdown");
+    group.sampling_mode(SamplingMode::Flat);
 
+    let ops_per_thread = 2_500usize;
+    let num_threads = 4usize;
+    let total_ops = ops_per_thread * num_threads;
+
+    // Precompute all KV pairs for writers
+    let all_kv: Vec<Vec<(Bytes, Bytes)>> = (0..num_threads)
+        .map(|tid| {
+            (0..ops_per_thread)
+                .map(|i| {
+                    let idx = tid * ops_per_thread + i;
+                    (make_key(idx), make_value_fixed(VALUE_SIZE))
+                })
+                .collect()
+        })
+        .collect();
+
+    let bytes_total = (total_ops as u64) * BYTES_PER_OP;
+
+    group.throughput(Throughput::Bytes(bytes_total));
     group.bench_function("writers_only_4threads", |b| {
         b.iter_batched(
-            || Arc::new(setup_db("writers_only", false)),
+            || setup_db_arc("writers_only"),
             |engine| {
                 let cf = engine.default_column_family();
-                let start = Instant::now();
 
                 thread::scope(|scope| {
-                    for tid in 0..4 {
+                    for tid in 0..num_threads {
                         let e = Arc::clone(&engine);
                         let cf = cf.clone();
+                        let thread_kv = &all_kv[tid];
                         scope.spawn(move || {
-                            for i in 0..2_500 {
-                                e.put(&cf, &make_key(tid * 2_500 + i), &make_value(128))
-                                    .unwrap();
+                            for (k, v) in thread_kv.iter() {
+                                e.put(&cf, k, v).unwrap();
                             }
                         });
                     }
                 });
 
-                black_box(start.elapsed());
+                engine // prevent Drop during timing
             },
             BatchSize::SmallInput,
         )
     });
 
+    // Readers benchmark - preload data once
+    let read_keys: Vec<Bytes> = (0..10_000).map(make_key).collect();
+    let read_count = 10_000 / 4; // step_by(4)
+
+    group.throughput(Throughput::Bytes((read_count as u64) * BYTES_PER_OP));
     group.bench_function("readers_only_4threads", |b| {
-        let engine = Arc::new(setup_db("readers_only", false));
+        let engine = setup_db_arc("readers_only");
         let cf = engine.default_column_family();
+        let vals: Vec<Bytes> = (0..10_000).map(|_| make_value_fixed(VALUE_SIZE)).collect();
         for i in 0..10_000 {
-            engine.put(&cf, &make_key(i), &make_value(128)).unwrap();
+            engine.put(&cf, &read_keys[i], &vals[i]).unwrap();
         }
 
         b.iter(|| {
-            let start = Instant::now();
-
             thread::scope(|scope| {
                 for _ in 0..4 {
                     let e = Arc::clone(&engine);
                     let cf = cf.clone();
+                    let keys_ref = &read_keys;
                     scope.spawn(move || {
                         for i in (0..10_000).step_by(4) {
-                            let _ = e.get(&cf, &make_key(i)).unwrap();
+                            black_box(e.get(&cf, &keys_ref[i]).unwrap());
                         }
                     });
                 }
             });
-
-            black_box(start.elapsed());
-        })
+        });
     });
 
+    // Mixed workload
+    let prefill_count = 5_000usize;
+    let (prefill_keys, prefill_vals) = precompute_kv(prefill_count, VALUE_SIZE);
+
+    // Writers will write to keys 10_000+
+    let writer_kv: Vec<Vec<(Bytes, Bytes)>> = (0..num_threads)
+        .map(|tid| {
+            (0..ops_per_thread)
+                .map(|i| {
+                    let idx = 10_000 + tid * ops_per_thread + i;
+                    (make_key(idx), make_value_fixed(VALUE_SIZE))
+                })
+                .collect()
+        })
+        .collect();
+
+    // Total: 4 writers * 2500 ops + 4 readers * 1000 ops
+    let mixed_write_ops = num_threads * ops_per_thread;
+    let mixed_read_ops = prefill_count / 5; // step_by(5) per reader * 4 readers
+    let mixed_bytes = ((mixed_write_ops + mixed_read_ops) as u64) * BYTES_PER_OP;
+
+    group.throughput(Throughput::Bytes(mixed_bytes));
     group.bench_function("mixed_4w4r", |b| {
         b.iter_batched(
             || {
-                let engine = Arc::new(setup_db("mixed_contention", false));
+                let engine = setup_db_arc("mixed_contention");
                 let cf = engine.default_column_family();
-                for i in 0..5_000 {
-                    engine.put(&cf, &make_key(i), &make_value(128)).unwrap();
+                for i in 0..prefill_count {
+                    engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
                 }
                 engine
             },
             |engine| {
                 let cf = engine.default_column_family();
-                let start = Instant::now();
+                let keys_ref = &prefill_keys;
 
                 thread::scope(|scope| {
                     // Writers
-                    for tid in 0..4 {
+                    for tid in 0..num_threads {
                         let e = Arc::clone(&engine);
                         let cf = cf.clone();
+                        let thread_kv = &writer_kv[tid];
                         scope.spawn(move || {
-                            for i in 0..2_500 {
-                                e.put(&cf, &make_key(10_000 + tid * 2_500 + i), &make_value(128))
-                                    .unwrap();
+                            for (k, v) in thread_kv.iter() {
+                                e.put(&cf, k, v).unwrap();
                             }
                         });
                     }
@@ -247,14 +274,14 @@ fn bench_contention_breakdown(c: &mut Criterion) {
                         let e = Arc::clone(&engine);
                         let cf = cf.clone();
                         scope.spawn(move || {
-                            for i in (0..5_000).step_by(5) {
-                                let _ = e.get(&cf, &make_key(i)).unwrap();
+                            for i in (0..prefill_count).step_by(5) {
+                                black_box(e.get(&cf, &keys_ref[i]).unwrap());
                             }
                         });
                     }
                 });
 
-                black_box(start.elapsed());
+                engine // prevent Drop during timing
             },
             BatchSize::SmallInput,
         )
@@ -264,144 +291,62 @@ fn bench_contention_breakdown(c: &mut Criterion) {
 }
 
 // ============================================================================
-// 4. Compaction Amplification
+// 3. MVCC & Snapshot Consistency
 // ============================================================================
 
-fn bench_compaction_amplification(c: &mut Criterion) {
-    let mut group = c.benchmark_group("system_compaction_amplification");
-
-    group.bench_function("write_amplification_ratio", |b| {
-        b.iter_batched(
-            || setup_db("compaction_amp", true),
-            |engine| {
-                let cf = engine.default_column_family();
-
-                // Multiple rounds to accumulate SSTs
-                for round in 0..3 {
-                    for i in 0..10_000 {
-                        engine
-                            .put(&cf, &make_key(round * 10_000 + i), &make_value(256))
-                            .unwrap();
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-
-                black_box(());
-            },
-            BatchSize::SmallInput,
-        )
-    });
-
-    group.finish();
-}
-
-// ============================================================================
-// 5. Read Interference During Compaction
-// ============================================================================
-
-fn bench_reads_during_compaction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("system_compaction_interference");
-
-    group.bench_function("read_latency_during_compaction", |b| {
-        b.iter_batched(
-            || {
-                let engine = Arc::new(setup_db("compaction_interference", true));
-                let cf = engine.default_column_family();
-
-                // Prefill
-                for i in 0..10_000 {
-                    engine.put(&cf, &make_key(i), &make_value(256)).unwrap();
-                }
-
-                (engine, cf)
-            },
-            |(engine, cf)| {
-                let read_count = Arc::new(AtomicUsize::new(0));
-
-                thread::scope(|scope| {
-                    // Writer thread triggering compaction
-                    scope.spawn({
-                        let engine = Arc::clone(&engine);
-                        let cf_h = cf.clone();
-
-                        move || {
-                            for round in 0..3 {
-                                for i in 0..5_000 {
-                                    engine
-                                        .put(
-                                            &cf_h,
-                                            &make_key(10_000 + round * 5_000 + i),
-                                            &make_value(256),
-                                        )
-                                        .unwrap();
-                                }
-                                thread::sleep(Duration::from_millis(50));
-                            }
-                        }
-                    });
-
-                    // Reader threads: measure latency during writes
-                    for _ in 0..2 {
-                        scope.spawn({
-                            let engine = Arc::clone(&engine);
-                            let cf_h = cf.clone();
-                            let rc = Arc::clone(&read_count);
-
-                            move || {
-                                for _ in 0..1_000 {
-                                    let _ = engine.get(&cf_h, &make_key(1_000)).unwrap();
-                                    rc.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                        });
-                    }
-                });
-
-                black_box(read_count);
-            },
-            BatchSize::SmallInput,
-        )
-    });
-
-    group.finish();
-}
-
-// ============================================================================
-// 6. MVCC & Snapshot Consistency Stress
-// ============================================================================
-
-/// Benchmark snapshot creation and isolation under concurrent writes
 fn bench_snapshot_stress(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_snapshot_stress");
+    group.sampling_mode(SamplingMode::Flat);
 
+    let prefill_count = 1_000usize;
+    let (prefill_keys, prefill_vals) = precompute_kv(prefill_count, VALUE_SIZE);
+
+    // Writer KV pairs
+    let writer_ops = 500usize;
+    let writer_kv: Vec<Vec<(Bytes, Bytes)>> = (0..2)
+        .map(|tid| {
+            (0..writer_ops)
+                .map(|i| {
+                    let idx = prefill_count + tid * writer_ops + i;
+                    (make_key(idx), make_value_fixed(VALUE_SIZE))
+                })
+                .collect()
+        })
+        .collect();
+
+    // Snapshot read keys
+    let snap_read_indices: Vec<usize> = (0..500).step_by(10).collect();
+
+    let total_write_ops = 2 * writer_ops;
+    let total_read_ops = snap_read_indices.len() * 10 * 2; // 10 snapshots per reader, 2 readers
+    let bytes_total = ((total_write_ops + total_read_ops) as u64) * BYTES_PER_OP;
+
+    group.throughput(Throughput::Bytes(bytes_total));
     group.bench_function("concurrent_snapshots_with_writes", |b| {
         b.iter_batched(
             || {
-                let engine = Arc::new(setup_db("snapshot_stress", false));
+                let engine = setup_db_arc("snapshot_stress");
                 let cf = engine.default_column_family();
-                // Prefill with some initial data
-                for i in 0..1_000 {
-                    engine.put(&cf, &make_key(i), &make_value(128)).unwrap();
+                for i in 0..prefill_count {
+                    engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
                 }
                 engine
             },
             |engine| {
                 let cf = engine.default_column_family();
                 let snapshot_count = Arc::new(AtomicUsize::new(0));
+                let keys_ref = &prefill_keys;
+                let indices_ref = &snap_read_indices;
 
                 thread::scope(|scope| {
                     // Writer threads
                     for tid in 0..2 {
                         let e = Arc::clone(&engine);
                         let cf_clone = cf.clone();
+                        let thread_kv = &writer_kv[tid];
                         scope.spawn(move || {
-                            for i in 0..500 {
-                                e.put(
-                                    &cf_clone,
-                                    &make_key(1_000 + tid * 500 + i),
-                                    &make_value(128),
-                                )
-                                .unwrap();
+                            for (k, v) in thread_kv.iter() {
+                                e.put(&cf_clone, k, v).unwrap();
                             }
                         });
                     }
@@ -414,9 +359,8 @@ fn bench_snapshot_stress(c: &mut Criterion) {
                         scope.spawn(move || {
                             for _ in 0..10 {
                                 let snap = e.snapshot();
-                                // Try to read through snapshot
-                                for i in (0..500).step_by(10) {
-                                    let _ = e.get_at(&cf_clone, &make_key(i), &snap).ok();
+                                for &i in indices_ref {
+                                    black_box(e.get_at(&cf_clone, &keys_ref[i], &snap).ok());
                                 }
                                 sc.fetch_add(1, Ordering::Relaxed);
                             }
@@ -425,6 +369,7 @@ fn bench_snapshot_stress(c: &mut Criterion) {
                 });
 
                 black_box(snapshot_count);
+                engine // prevent Drop during timing
             },
             BatchSize::SmallInput,
         )
@@ -434,32 +379,49 @@ fn bench_snapshot_stress(c: &mut Criterion) {
 }
 
 // ============================================================================
-// 7. Transaction Isolation Stress
+// 4. Transaction Isolation
 // ============================================================================
 
-/// Benchmark transaction isolation across concurrent writers
 fn bench_transaction_isolation(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_transaction_isolation");
+    group.sampling_mode(SamplingMode::Flat);
 
+    let ops_per_thread = 100usize;
+    let num_threads = 4usize;
+    let total_ops = ops_per_thread * num_threads;
+
+    // Precompute all KV pairs
+    let all_kv: Vec<Vec<(Bytes, Bytes)>> = (0..num_threads)
+        .map(|tid| {
+            (0..ops_per_thread)
+                .map(|i| {
+                    let idx = tid * 1_000 + i;
+                    (make_key(idx), make_value_fixed(VALUE_SIZE))
+                })
+                .collect()
+        })
+        .collect();
+
+    let bytes_total = (total_ops as u64) * BYTES_PER_OP;
+
+    group.throughput(Throughput::Bytes(bytes_total));
     group.bench_function("concurrent_tx_isolation", |b| {
         b.iter_batched(
-            || Arc::new(setup_db("tx_isolation", false)),
+            || setup_db_arc("tx_isolation"),
             |engine| {
                 let cf = engine.default_column_family();
                 let tx_success = Arc::new(AtomicUsize::new(0));
 
                 thread::scope(|scope| {
-                    for tid in 0..4 {
+                    for tid in 0..num_threads {
                         let e = Arc::clone(&engine);
                         let cf_clone = cf.clone();
                         let counter = Arc::clone(&tx_success);
+                        let thread_kv = &all_kv[tid];
 
                         scope.spawn(move || {
-                            for i in 0..100 {
-                                let key = make_key(tid * 1_000 + i);
-                                let value = make_value(128);
-
-                                if e.put(&cf_clone, &key, &value).is_ok() {
+                            for (k, v) in thread_kv.iter() {
+                                if e.put(&cf_clone, k, v).is_ok() {
                                     counter.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -468,6 +430,7 @@ fn bench_transaction_isolation(c: &mut Criterion) {
                 });
 
                 black_box(tx_success);
+                engine // prevent Drop during timing
             },
             BatchSize::SmallInput,
         )
@@ -476,84 +439,15 @@ fn bench_transaction_isolation(c: &mut Criterion) {
     group.finish();
 }
 
-// ============================================================================
-// 8. Snapshot + Compaction Interaction
-// ============================================================================
 
-/// Benchmark snapshot behavior during active compaction
-fn bench_snapshots_during_compaction(c: &mut Criterion) {
-    let mut group = c.benchmark_group("system_snapshots_compaction");
-
-    group.bench_function("snapshot_reads_during_compaction", |b| {
-        b.iter_batched(
-            || Arc::new(setup_db("snap_compact", true)), // compaction enabled
-            |engine| {
-                let cf = engine.default_column_family();
-
-                // Prefill
-                for i in 0..5_000 {
-                    engine.put(&cf, &make_key(i), &make_value(256)).unwrap();
-                }
-
-                let read_ops = Arc::new(AtomicUsize::new(0));
-                let snapshot_count = Arc::new(AtomicUsize::new(0));
-
-                thread::scope(|scope| {
-                    // Continuous writes to trigger compaction
-                    {
-                        let e = Arc::clone(&engine);
-                        let cf_clone = cf.clone();
-                        scope.spawn(move || {
-                            for i in 0..2_000 {
-                                e.put(&cf_clone, &make_key(10_000 + i), &make_value(256))
-                                    .ok();
-                            }
-                        });
-                    }
-
-                    // Snapshot readers checking consistency
-                    for _ in 0..2 {
-                        let e = Arc::clone(&engine);
-                        let cf_clone = cf.clone();
-                        let ro = Arc::clone(&read_ops);
-                        let sc = Arc::clone(&snapshot_count);
-
-                        scope.spawn(move || {
-                            thread::sleep(Duration::from_millis(10));
-                            for _ in 0..5 {
-                                let snap = e.snapshot();
-                                for i in (0..5_000).step_by(50) {
-                                    if e.get_at(&cf_clone, &make_key(i), &snap).is_ok() {
-                                        ro.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                                sc.fetch_add(1, Ordering::Relaxed);
-                                thread::sleep(Duration::from_millis(50));
-                            }
-                        });
-                    }
-                });
-
-                black_box((read_ops, snapshot_count));
-            },
-            BatchSize::SmallInput,
-        )
-    });
-
-    group.finish();
-}
 
 criterion_group! {
     name = tier3_system_isolation_mvcc;
     config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_single_thread_baseline,
-        bench_concurrent_puts_latency,
         bench_contention_breakdown,
-        bench_compaction_amplification,
-        bench_reads_during_compaction,
         bench_snapshot_stress,
-        bench_transaction_isolation,
-        bench_snapshots_during_compaction
+        bench_transaction_isolation
 }
 criterion_main!(tier3_system_isolation_mvcc);

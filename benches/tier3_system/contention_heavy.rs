@@ -3,7 +3,14 @@
 //! **Target Runtime:** ~2 minutes
 //! **Run Frequency:** Nightly / release builds
 //!
-//! Covers heavy contention scenarios with multiple threads
+//! Covers heavy contention scenarios with multiple threads competing for
+//! concurrent access to the storage engine.
+//!
+//! ## Benchmarks
+//!
+//! - `system_engine_heavy_write_contention`: 16 threads writing concurrently
+//! - `system_engine_heavy_read_contention`: 16 threads reading same keys
+//! - `system_engine_mixed_contention`: Mixed read/write workload
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -12,16 +19,26 @@ use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::sync::{Arc, Barrier};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
-use tempfile::TempDir;
+
+/// Global counter for unique benchmark directory names
+static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Key sizes for consistent throughput measurement
+const SHARED_KEY_SIZE: usize = 10; // "key_" + 6 digits
+const THREAD_KEY_SIZE: usize = 14; // "t00_key_" + 6 digits
+const VALUE_SIZE: usize = 64; // Fixed value size for accurate throughput
 
 /// Pre-generate keys with format "key_{:06}"
+#[inline]
 fn make_key(i: usize) -> Vec<u8> {
-    let mut key = vec![0u8; 10];
+    let mut key = vec![0u8; SHARED_KEY_SIZE];
     key[..4].copy_from_slice(b"key_");
     let mut n = i;
-    for j in (4..10).rev() {
+    for j in (4..SHARED_KEY_SIZE).rev() {
         key[j] = b'0' + (n % 10) as u8;
         n /= 10;
     }
@@ -29,68 +46,80 @@ fn make_key(i: usize) -> Vec<u8> {
 }
 
 /// Pre-generate keys with format "t{:02}_key_{:06}"
+#[inline]
 fn make_thread_key(tid: usize, i: usize) -> Vec<u8> {
-    let mut key = vec![0u8; 15];
+    let mut key = vec![0u8; THREAD_KEY_SIZE];
     key[0] = b't';
     key[1] = b'0' + (tid / 10) as u8;
     key[2] = b'0' + (tid % 10) as u8;
     key[3] = b'_';
     key[4..8].copy_from_slice(b"key_");
     let mut n = i;
-    for j in (8..14).rev() {
+    for j in (8..THREAD_KEY_SIZE).rev() {
         key[j] = b'0' + (n % 10) as u8;
         n /= 10;
     }
-    key[14] = 0; // null terminator not needed but keeping length consistent
-    key.truncate(14);
     key
 }
 
-/// Pre-generate value with format "value_{}"
+/// Pre-generate fixed-size value
+#[inline]
 fn make_value(i: usize) -> Vec<u8> {
-    let mut val = Vec::with_capacity(16);
-    val.extend_from_slice(b"value_");
-    // Append i as decimal string
-    if i == 0 {
-        val.push(b'0');
-    } else {
-        let mut n = i;
-        let start = val.len();
-        while n > 0 {
-            val.push(b'0' + (n % 10) as u8);
-            n /= 10;
-        }
-        val[start..].reverse();
+    let mut val = vec![0u8; VALUE_SIZE];
+    // Store index in first 8 bytes for verification
+    if VALUE_SIZE >= 8 {
+        val[..8].copy_from_slice(&(i as u64).to_be_bytes());
+    }
+    // Fill rest with pattern
+    let pattern = (i % 256) as u8;
+    for byte in val.iter_mut().skip(8) {
+        *byte = pattern;
     }
     val
 }
 
-fn setup_db(name: &str) -> (MidgeEngine, TempDir) {
-    let tmp = TempDir::new().expect("tempdir");
-    let path = tmp.path().join(name);
+/// Generate unique path for benchmark database
+fn unique_bench_path(prefix: &str) -> PathBuf {
+    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("midge_bench_contention_{}_{}_{}", prefix, pid, counter))
+}
+
+fn setup_db(prefix: &str) -> (MidgeEngine, PathBuf) {
+    let path = unique_bench_path(prefix);
+    let _ = std::fs::remove_dir_all(&path);
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path },
+        storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
         memtable_size: 8 * 1024 * 1024,
         enable_compaction: false,
+        wal_sync: false, // Disable WAL sync for raw throughput
         ..Default::default()
     };
-    (MidgeEngine::open(opts).unwrap(), tmp)
+    (MidgeEngine::open(opts).expect("failed to open engine"), path)
+}
+
+fn cleanup_path(path: PathBuf) {
+    let _ = std::fs::remove_dir_all(&path);
 }
 
 /// Benchmark heavy write contention (16 threads, 1000 ops each)
 fn bench_engine_heavy_write_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_engine_heavy_write_contention");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(16_000));
+    
+    let num_threads = 16;
+    let ops_per_thread = 1_000;
+    let total_ops = num_threads * ops_per_thread;
+    let total_bytes = total_ops * (THREAD_KEY_SIZE + VALUE_SIZE);
+    group.throughput(Throughput::Bytes(total_bytes as u64));
     group.measurement_time(std::time::Duration::from_secs(3));
     group.sample_size(10);
 
     // Pre-compute all keys and values outside the benchmark loop
-    // 16 threads * 1000 ops = 16000 key/value pairs
-    let keys: Vec<Vec<Vec<u8>>> = (0..16)
-        .map(|tid| (0..1000).map(|i| make_thread_key(tid, i)).collect())
+    let keys: Vec<Vec<Vec<u8>>> = (0..num_threads)
+        .map(|tid| (0..ops_per_thread).map(|i| make_thread_key(tid, i)).collect())
         .collect();
-    let values: Vec<Vec<u8>> = (0..1000).map(make_value).collect();
+    let values: Vec<Vec<u8>> = (0..ops_per_thread).map(make_value).collect();
     let keys = Arc::new(keys);
     let values = Arc::new(values);
 
@@ -98,34 +127,29 @@ fn bench_engine_heavy_write_contention(c: &mut Criterion) {
         let keys = Arc::clone(&keys);
         let values = Arc::clone(&values);
         b.iter(|| {
-            let (engine, _tmp) = setup_db("write_contention");
+            let (engine, path) = setup_db("write_contention");
             let engine = Arc::new(engine);
             let cf = engine.default_column_family();
-            let barrier = Arc::new(Barrier::new(17)); // 16 workers + 1 main
 
-            let mut handles = vec![];
-            for tid in 0..16 {
-                let engine_clone = Arc::clone(&engine);
-                let cf_clone = cf.clone();
-                let barrier_clone = Arc::clone(&barrier);
-                let keys = Arc::clone(&keys);
-                let values = Arc::clone(&values);
+            thread::scope(|scope| {
+                for tid in 0..num_threads {
+                    let engine = Arc::clone(&engine);
+                    let cf = cf.clone();
+                    let keys = Arc::clone(&keys);
+                    let values = Arc::clone(&values);
 
-                handles.push(thread::spawn(move || {
-                    barrier_clone.wait(); // Sync start
-                    for i in 0..1000 {
-                        engine_clone
-                            .put(&cf_clone, &keys[tid][i], &values[i])
-                            .unwrap();
-                    }
-                }));
-            }
+                    scope.spawn(move || {
+                        for i in 0..ops_per_thread {
+                            engine
+                                .put(&cf, &keys[tid][i], &values[i])
+                                .expect("put failed");
+                        }
+                    });
+                }
+            });
 
-            barrier.wait(); // Start all threads
-            for h in handles {
-                h.join().unwrap();
-            }
-            black_box(engine);
+            cleanup_path(path);
+            black_box(());
         })
     });
 
@@ -136,13 +160,19 @@ fn bench_engine_heavy_write_contention(c: &mut Criterion) {
 fn bench_engine_heavy_read_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_engine_heavy_read_contention");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(32_000));
+    
+    let num_threads = 16;
+    let num_keys = 2_000;
+    let reads_per_thread = num_keys;
+    let total_reads = num_threads * reads_per_thread;
+    // Throughput in reads (elements) since read data varies
+    group.throughput(Throughput::Elements(total_reads as u64));
     group.measurement_time(std::time::Duration::from_secs(3));
     group.sample_size(10);
 
     // Pre-compute keys and values outside the benchmark loop
-    let keys: Vec<Vec<u8>> = (0..2000).map(make_key).collect();
-    let values: Vec<Vec<u8>> = (0..2000).map(make_value).collect();
+    let keys: Vec<Vec<u8>> = (0..num_keys).map(make_key).collect();
+    let values: Vec<Vec<u8>> = (0..num_keys).map(make_value).collect();
     let keys = Arc::new(keys);
     let values = Arc::new(values);
 
@@ -150,38 +180,33 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
         let keys = Arc::clone(&keys);
         let values = Arc::clone(&values);
         b.iter(|| {
-            let (engine, _tmp) = setup_db("read_contention");
+            let (engine, path) = setup_db("read_contention");
             let cf = engine.default_column_family();
 
             // Pre-populate with data (using precomputed keys/values)
-            for i in 0..2000 {
-                engine.put(&cf, &keys[i], &values[i]).unwrap();
+            for i in 0..num_keys {
+                engine.put(&cf, &keys[i], &values[i]).expect("put failed");
             }
-            engine.flush().unwrap();
+            engine.flush().expect("flush failed");
 
             let engine = Arc::new(engine);
-            let barrier = Arc::new(Barrier::new(17));
 
-            let mut handles = vec![];
-            for _tid in 0..16 {
-                let engine_clone = Arc::clone(&engine);
-                let cf_clone = cf.clone();
-                let barrier_clone = Arc::clone(&barrier);
-                let keys = Arc::clone(&keys);
+            thread::scope(|scope| {
+                for _ in 0..num_threads {
+                    let engine = Arc::clone(&engine);
+                    let cf = cf.clone();
+                    let keys = Arc::clone(&keys);
 
-                handles.push(thread::spawn(move || {
-                    barrier_clone.wait();
-                    for i in 0..2000 {
-                        let _ = engine_clone.get(&cf_clone, &keys[i]);
-                    }
-                }));
-            }
+                    scope.spawn(move || {
+                        for i in 0..num_keys {
+                            let _ = engine.get(&cf, &keys[i]);
+                        }
+                    });
+                }
+            });
 
-            barrier.wait();
-            for h in handles {
-                h.join().unwrap();
-            }
-            black_box(engine);
+            cleanup_path(path);
+            black_box(());
         })
     });
 
@@ -192,46 +217,21 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
 fn bench_engine_mixed_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_engine_mixed_contention");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(24_000));
+    
+    let num_threads = 16;
+    let ops_per_thread = 1_500;
+    let total_ops = num_threads * ops_per_thread;
+    // Approximately half reads, half writes
+    let total_bytes = (total_ops / 2) * (SHARED_KEY_SIZE + VALUE_SIZE);
+    group.throughput(Throughput::Bytes(total_bytes as u64));
     group.measurement_time(std::time::Duration::from_secs(3));
     group.sample_size(10);
 
-    // Pre-compute keys and values outside the benchmark loop
-    let keys: Vec<Vec<u8>> = (0..1500).map(make_key).collect();
-    // Pre-compute thread-specific values "t{}_v{}"
-    let thread_values: Vec<Vec<Vec<u8>>> = (0..16)
-        .map(|tid| {
-            (0..1500)
-                .map(|i| {
-                    let mut val = Vec::with_capacity(16);
-                    val.push(b't');
-                    if tid == 0 {
-                        val.push(b'0');
-                    } else {
-                        let mut n = tid;
-                        let start = val.len();
-                        while n > 0 {
-                            val.push(b'0' + (n % 10) as u8);
-                            n /= 10;
-                        }
-                        val[start..].reverse();
-                    }
-                    val.extend_from_slice(b"_v");
-                    if i == 0 {
-                        val.push(b'0');
-                    } else {
-                        let mut n = i;
-                        let start = val.len();
-                        while n > 0 {
-                            val.push(b'0' + (n % 10) as u8);
-                            n /= 10;
-                        }
-                        val[start..].reverse();
-                    }
-                    val
-                })
-                .collect()
-        })
+    // Pre-compute keys outside the benchmark loop
+    let keys: Vec<Vec<u8>> = (0..ops_per_thread).map(make_key).collect();
+    // Pre-compute thread-specific values with fixed size
+    let thread_values: Vec<Vec<Vec<u8>>> = (0..num_threads)
+        .map(|tid| (0..ops_per_thread).map(|i| make_value(tid * ops_per_thread + i)).collect())
         .collect();
     let keys = Arc::new(keys);
     let thread_values = Arc::new(thread_values);
@@ -240,46 +240,42 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
         let keys = Arc::clone(&keys);
         let thread_values = Arc::clone(&thread_values);
         b.iter(|| {
-            let (engine, _tmp) = setup_db("mixed_contention");
+            let (engine, path) = setup_db("mixed_contention");
             let cf = engine.default_column_family();
 
-            // Pre-populate (using precomputed keys)
-            for i in 0..1500 {
-                engine.put(&cf, &keys[i], b"init_value").unwrap();
+            // Pre-populate with init values
+            let init_value = make_value(0);
+            for i in 0..ops_per_thread {
+                engine.put(&cf, &keys[i], &init_value).expect("put failed");
             }
 
             let engine = Arc::new(engine);
-            let barrier = Arc::new(Barrier::new(17));
 
-            let mut handles = vec![];
-            for tid in 0..16 {
-                let engine_clone = Arc::clone(&engine);
-                let cf_clone = cf.clone();
-                let barrier_clone = Arc::clone(&barrier);
-                let keys = Arc::clone(&keys);
-                let thread_values = Arc::clone(&thread_values);
+            thread::scope(|scope| {
+                for tid in 0..num_threads {
+                    let engine = Arc::clone(&engine);
+                    let cf = cf.clone();
+                    let keys = Arc::clone(&keys);
+                    let thread_values = Arc::clone(&thread_values);
 
-                handles.push(thread::spawn(move || {
-                    barrier_clone.wait();
-                    for i in 0..1500 {
-                        if (tid + i) % 2 == 0 {
-                            // Write
-                            engine_clone
-                                .put(&cf_clone, &keys[i], &thread_values[tid][i])
-                                .unwrap();
-                        } else {
-                            // Read
-                            let _ = engine_clone.get(&cf_clone, &keys[i]);
+                    scope.spawn(move || {
+                        for i in 0..ops_per_thread {
+                            if (tid + i) % 2 == 0 {
+                                // Write
+                                engine
+                                    .put(&cf, &keys[i], &thread_values[tid][i])
+                                    .expect("put failed");
+                            } else {
+                                // Read
+                                let _ = engine.get(&cf, &keys[i]);
+                            }
                         }
-                    }
-                }));
-            }
+                    });
+                }
+            });
 
-            barrier.wait();
-            for h in handles {
-                h.join().unwrap();
-            }
-            black_box(engine);
+            cleanup_path(path);
+            black_box(());
         })
     });
 
