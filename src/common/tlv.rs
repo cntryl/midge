@@ -676,7 +676,7 @@ pub fn parse_u64(v: &[u8]) -> MidgeResult<u64> {
             message: "expected 8 bytes".into(),
         })
 }
-#[inline]
+#[inline(always)]
 pub fn parse_varint32_from_slice(v: &[u8]) -> MidgeResult<u32> {
     Ok(decode_varint32(v)?.0)
 }

@@ -75,6 +75,7 @@ pub fn encode(
 }
 
 /// Parse a single TLV entry from data block
+#[inline]
 pub fn decode<'a>(data: &'a [u8], offset: usize, limit: usize) -> MidgeResult<TlvEntry<'a>> {
     if offset >= limit {
         return Err(MidgeError::InvalidData("offset >= limit".into()));
@@ -114,37 +115,17 @@ pub fn decode<'a>(data: &'a [u8], offset: usize, limit: usize) -> MidgeResult<Tl
                 value = Some(tag_data);
             }
             tags::SEQUENCE => {
-                if tag_data.len() >= 8 {
-                    let arr: [u8; 8] = [
-                        tag_data[0],
-                        tag_data[1],
-                        tag_data[2],
-                        tag_data[3],
-                        tag_data[4],
-                        tag_data[5],
-                        tag_data[6],
-                        tag_data[7],
-                    ];
+                if let Ok(arr) = <[u8; 8]>::try_from(tag_data) {
                     sequence = u64::from_be_bytes(arr);
                 }
             }
             tags::ENTRY_TYPE => {
-                if !tag_data.is_empty() {
-                    entry_type = tag_data[0];
+                if let Some(&b) = tag_data.first() {
+                    entry_type = b;
                 }
             }
             tags::EXPIRATION => {
-                if tag_data.len() >= 8 {
-                    let arr: [u8; 8] = [
-                        tag_data[0],
-                        tag_data[1],
-                        tag_data[2],
-                        tag_data[3],
-                        tag_data[4],
-                        tag_data[5],
-                        tag_data[6],
-                        tag_data[7],
-                    ];
+                if let Ok(arr) = <[u8; 8]>::try_from(tag_data) {
                     expiration = Some(u64::from_be_bytes(arr));
                 }
             }
@@ -179,6 +160,7 @@ pub struct TlvBlockIterator<'a> {
 }
 
 impl<'a> TlvBlockIterator<'a> {
+    #[inline]
     pub fn new(data: &'a [u8]) -> Self {
         if data.len() < 9 {
             return Self {
@@ -217,6 +199,7 @@ impl<'a> TlvBlockIterator<'a> {
 impl<'a> Iterator for TlvBlockIterator<'a> {
     type Item = TlvEntryResult<'a>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.cursor >= self.limit {
             return None;
@@ -229,16 +212,20 @@ impl<'a> Iterator for TlvBlockIterator<'a> {
             }
         };
 
-        // Reconstruct full key
-        let mut key = Vec::with_capacity(entry.shared_len as usize + entry.key_delta.len());
-        if entry.shared_len as usize > self.last_key.len() {
+        // Bounds check once upfront
+        let shared_len = entry.shared_len as usize;
+        if shared_len > self.last_key.len() {
             return None; // Invalid shared length
         }
-        key.extend_from_slice(&self.last_key[..entry.shared_len as usize]);
+
+        // Build the return key with exact capacity (no over-allocation)
+        let mut key = Vec::with_capacity(shared_len + entry.key_delta.len());
+        key.extend_from_slice(&self.last_key[..shared_len]);
         key.extend_from_slice(entry.key_delta);
 
         self.cursor += entry.bytes_consumed;
-        // Reuse the existing buffer if possible to avoid allocation
+
+        // Update last_key for next iteration - reuse buffer to avoid reallocation
         self.last_key.clear();
         self.last_key.extend_from_slice(&key);
 
