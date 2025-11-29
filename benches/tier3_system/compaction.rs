@@ -1,6 +1,6 @@
 //! Tier 3 — System Benchmarks: Compaction
 //!
-//! **Target Runtime:** 1-5 minutes
+//! **Target Runtime:** <3 minutes total
 //! **Run Frequency:** Nightly / release builds
 //!
 //! Covers full compaction workflows (flush, merge, write amplification).
@@ -15,6 +15,7 @@
 //! ## Design Notes
 //!
 //! - Uses DURABLE_STORAGE_MODES since compaction requires persistence
+//! - Optimized for benchmark accuracy: precomputed KV, no allocations in hot loop
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -39,6 +40,9 @@ const KEY_SIZE: usize = 16;
 const DEFAULT_VALUE_SIZE: usize = 100;
 
 /// Pre-generate keys and values with configurable value size.
+/// Keys: "k" + 15-digit zero-padded number (16 bytes total)
+/// Values: index in first 8 bytes + pattern fill
+#[inline]
 fn generate_kv(num_keys: usize, value_size: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let mut keys = Vec::with_capacity(num_keys);
     let mut values = Vec::with_capacity(num_keys);
@@ -53,7 +57,7 @@ fn generate_kv(num_keys: usize, value_size: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>
         }
         keys.push(key);
 
-        // Fixed-size value
+        // Fixed-size value with index + pattern
         let mut value = vec![0u8; value_size];
         if value_size >= 8 {
             value[..8].copy_from_slice(&(i as u64).to_be_bytes());
@@ -68,7 +72,7 @@ fn generate_kv(num_keys: usize, value_size: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>
     (keys, values)
 }
 
-/// Setup engine at specific path for reopen
+/// Setup engine at specific path for reopen tests
 fn setup_engine_at_path(path: &std::path::Path, mode: BenchStorageMode) -> MidgeEngine {
     use cntryl_midge::cloud::mock::MockCloudBackend;
 
