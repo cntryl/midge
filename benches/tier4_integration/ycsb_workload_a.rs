@@ -60,8 +60,10 @@ fn run_workload_a(
     let cf_list = engine.list_column_families();
     let mut rng = StdRng::seed_from_u64(rng_seed);
 
-    // Precomputed Zipfian
+    // Precomputed data - get references once outside the loop
     let zipf = ZIPF_DEFAULT.get().unwrap();
+    let keys = PREGEN_KEYS.get().unwrap();
+    let values = PREGEN_VALUES.get().unwrap();
 
     // Latency histogram
     let mut hist = Histogram::<u64>::new(3).unwrap();
@@ -72,7 +74,7 @@ fn run_workload_a(
     for _ in 0..operations {
         // Pick key
         let key_id = zipf.next(&mut rng);
-        let key = PREGEN_KEYS.get().unwrap()[key_id].clone();
+        let key = &keys[key_id];
 
         // Pick CF
         let cf = &cf_list[rng.gen_range(0..cf_count)];
@@ -82,11 +84,11 @@ fn run_workload_a(
 
         if rng.next_u32() & 1 == 0 {
             // ----- READ -----
-            let _ = black_box(engine.get(cf, &key));
+            let _ = black_box(engine.get(cf, key));
         } else {
             // ----- WRITE -----
-            let value = PREGEN_VALUES.get().unwrap()[key_id].clone();
-            batch.put(cf_id, key, value);
+            let value = &values[key_id];
+            batch.put(cf_id, key.clone(), value.clone());
 
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();
@@ -121,14 +123,17 @@ fn run_workload_a_concurrent(
     let cf_list = engine.list_column_families();
     let mut rng = make_thread_rng(thread_id, 0xCAFEBABE);
 
+    // Get references once outside the loop
     let zipf = ZIPF_DEFAULT.get().unwrap();
+    let keys = PREGEN_KEYS.get().unwrap();
+    let values = PREGEN_VALUES.get().unwrap();
 
     let mut hist = Histogram::<u64>::new(3).unwrap();
     let mut batch = WriteBatch::new();
 
     for _ in 0..ops_per_thread {
         let key_id = zipf.next(&mut rng);
-        let key = PREGEN_KEYS.get().unwrap()[key_id].clone();
+        let key = &keys[key_id];
 
         let cf = &cf_list[rng.gen_range(0..cf_count)];
         let cf_id = cf.id();
@@ -136,10 +141,10 @@ fn run_workload_a_concurrent(
         let start = Instant::now();
 
         if rng.next_u32() & 1 == 0 {
-            let _ = black_box(engine.get(cf, &key));
+            let _ = black_box(engine.get(cf, key));
         } else {
-            let value = PREGEN_VALUES.get().unwrap()[key_id].clone();
-            batch.put(cf_id, key, value);
+            let value = &values[key_id];
+            batch.put(cf_id, key.clone(), value.clone());
 
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();

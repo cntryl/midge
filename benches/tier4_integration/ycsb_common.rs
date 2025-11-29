@@ -26,7 +26,7 @@ pub const OPS_PER_ITER: usize = 5_000;
 #[allow(dead_code)]
 pub const RECORD_COUNT: usize = 25_000;
 pub const VALUE_SIZE: usize = 1_000;
-pub const BATCH_SIZE: usize = 100;
+pub const BATCH_SIZE: usize = 128; // Bumped from 100 for fewer flushes
 
 #[allow(dead_code)]
 pub const THREAD_COUNTS: [usize; 3] = [1, 2, 8];

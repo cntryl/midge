@@ -72,7 +72,7 @@ fn run_workload_b(
     for _ in 0..operations {
         // Zipfian key
         let key_id = zipf.next(&mut rng);
-        let key = keys[key_id].clone();
+        let key = &keys[key_id];
 
         // CF selection
         let cf = &cf_list[rng.gen_range(0..cf_count)];
@@ -83,11 +83,11 @@ fn run_workload_b(
         // 95% read, 5% update — use simple modulo to avoid float math
         if rng.next_u32() % 20 != 0 {
             // READ
-            let _ = black_box(engine.get(cf, &key));
+            let _ = black_box(engine.get(cf, key));
         } else {
             // UPDATE
-            let value = values[key_id].clone();
-            batch.put(cf_id, key, value);
+            let value = &values[key_id];
+            batch.put(cf_id, key.clone(), value.clone());
 
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();
@@ -129,7 +129,7 @@ fn run_workload_b_concurrent(
 
     for _ in 0..ops_per_thread {
         let key_id = zipf.next(&mut rng);
-        let key = keys[key_id].clone();
+        let key = &keys[key_id];
 
         let cf = &cf_list[rng.gen_range(0..cf_count)];
         let cf_id = cf.id();
@@ -138,11 +138,11 @@ fn run_workload_b_concurrent(
 
         if !rng.next_u32().is_multiple_of(20) {
             // READ
-            let _ = black_box(engine.get(cf, &key));
+            let _ = black_box(engine.get(cf, key));
         } else {
             // UPDATE
-            let value = values[key_id].clone();
-            batch.put(cf_id, key, value);
+            let value = &values[key_id];
+            batch.put(cf_id, key.clone(), value.clone());
 
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();
