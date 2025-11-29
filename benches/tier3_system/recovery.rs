@@ -23,64 +23,22 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_kv, unique_bench_path, BenchStorageMode, BYTES_PER_OP, DURABLE_STORAGE_MODES,
-    KEY_SIZE, VALUE_SIZE,
+    precompute_kv, setup_engine_at_path, unique_bench_path, BenchEngineConfig, BYTES_PER_OP,
+    DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
 };
 
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::sync::Arc;
 
-/// Setup a db at a specific path for recovery tests.
-/// Returns the path so we can reopen the same database.
-fn setup_db_at_path_with_mode(
-    path: &std::path::Path,
-    mode: BenchStorageMode,
-    wal_sync: bool,
-) -> MidgeEngine {
-    use cntryl_midge::cloud::mock::MockCloudBackend;
-    use std::time::Duration;
-
-    match mode {
-        BenchStorageMode::Memory => {
-            panic!("Recovery benchmarks require durable storage")
-        }
-        BenchStorageMode::LocalDisk => {
-            let opts = MidgeOptions {
-                storage_mode: StorageMode::LocalDisk {
-                    db_path: path.to_path_buf(),
-                },
-                memtable_size: 4 * 1024 * 1024,
-                enable_compaction: false,
-                wal_sync,
-                ..Default::default()
-            };
-            MidgeEngine::open(opts).unwrap()
-        }
-        BenchStorageMode::CloudBacked => {
-            let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(1)));
-            let opts = MidgeOptions {
-                storage_mode: StorageMode::CloudBacked {
-                    local_cache_path: path.to_path_buf(),
-                    cloud_backend: backend,
-                    storage_context: Default::default(),
-                    local_wal_sync: wal_sync,
-                    wal_batch_size: 1024 * 1024,
-                    sst_cache_capacity: 10,
-                },
-                memtable_size: 4 * 1024 * 1024,
-                enable_compaction: false,
-                wal_sync,
-                ..Default::default()
-            };
-            MidgeEngine::open(opts).unwrap()
-        }
-    }
-}
+/// Benchmark name constants
+const BENCH_REPLAY: &str = "replay";
+const BENCH_SYNC: &str = "sync";
+const BENCH_L0: &str = "l0";
+const BENCH_SMALL_VALS: &str = "small_vals";
+const BENCH_LARGE_VALS: &str = "large_vals";
 
 // ============================================================================
 // WAL Recovery Performance
@@ -115,33 +73,41 @@ fn bench_recovery_throughput(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             // Setup and prefill database
-                            let db_path = unique_bench_path("replay");
+                            let db_path = unique_bench_path(BENCH_REPLAY);
                             let _ = std::fs::remove_dir_all(&db_path);
 
-                            let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                            let config = BenchEngineConfig {
+                                storage_mode: mode,
+                                enable_compaction: false,
+                                wal_sync: false,
+                                ..Default::default()
+                            };
+
+                            let engine = setup_engine_at_path(&db_path, &config);
                             let cf = engine.default_column_family();
 
                             // Write records to create WAL entries
                             for i in 0..num_ops {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                             }
 
                             // Simulate crash (drop engine, don't clean up DB)
                             drop(engine);
-                            (db_path, mode)
+                            (db_path, config)
                         },
-                        |(db_path, mode)| {
+                        |(db_path, config)| {
                             // Measure recovery time (WAL replay)
-                            let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                            let engine = setup_engine_at_path(&db_path, &config);
 
                             // Validate some data integrity
                             let cf = engine.default_column_family();
                             for i in (0..num_ops).step_by(1_000) {
-                                let val = engine.get(&cf, &keys_ref[i]).unwrap();
+                                let key = black_box(&keys_ref[i]);
+                                let val = engine.get(&cf, key).expect("get failed");
                                 assert!(val.is_some(), "key not recovered: {}", i);
                             }
 
-                            engine // prevent Drop during timing
+                            engine
                         },
                         BatchSize::LargeInput,
                     )
@@ -179,29 +145,37 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
 
                     b.iter_batched(
                         || {
-                            let db_path = unique_bench_path("sync");
+                            let db_path = unique_bench_path(BENCH_SYNC);
                             let _ = std::fs::remove_dir_all(&db_path);
 
-                            let engine = setup_db_at_path_with_mode(&db_path, mode, true);
+                            let config = BenchEngineConfig {
+                                storage_mode: mode,
+                                enable_compaction: false,
+                                wal_sync: true,
+                                ..Default::default()
+                            };
+
+                            let engine = setup_engine_at_path(&db_path, &config);
                             let cf = engine.default_column_family();
 
                             for i in 0..num_ops {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                             }
 
                             drop(engine);
-                            (db_path, mode)
+                            (db_path, config)
                         },
-                        |(db_path, mode)| {
-                            let engine = setup_db_at_path_with_mode(&db_path, mode, true);
+                        |(db_path, config)| {
+                            let engine = setup_engine_at_path(&db_path, &config);
 
                             // Quick validation
                             let cf = engine.default_column_family();
                             for i in (0..num_ops).step_by(10_000) {
-                                black_box(engine.get(&cf, &keys_ref[i]).unwrap());
+                                let key = black_box(&keys_ref[i]);
+                                black_box(engine.get(&cf, key).expect("get failed"));
                             }
 
-                            engine // prevent Drop during timing
+                            engine
                         },
                         BatchSize::LargeInput,
                     )
@@ -239,39 +213,47 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
 
                     b.iter_batched(
                         || {
-                            let db_path = unique_bench_path("l0");
+                            let db_path = unique_bench_path(BENCH_L0);
                             let _ = std::fs::remove_dir_all(&db_path);
 
-                            let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                            let config = BenchEngineConfig {
+                                storage_mode: mode,
+                                enable_compaction: false,
+                                wal_sync: false,
+                                ..Default::default()
+                            };
+
+                            let engine = setup_engine_at_path(&db_path, &config);
                             let cf = engine.default_column_family();
 
                             // Write half the data
                             for i in 0..(num_ops / 2) {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                             }
 
                             // Flush memtable to L0
-                            engine.flush().unwrap();
+                            engine.flush().expect("flush failed");
 
                             // Write remaining data (stays in WAL)
                             for i in (num_ops / 2)..num_ops {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                             }
 
                             drop(engine);
-                            (db_path, mode)
+                            (db_path, config)
                         },
-                        |(db_path, mode)| {
-                            let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                        |(db_path, config)| {
+                            let engine = setup_engine_at_path(&db_path, &config);
 
                             // Validate all data recovered
                             let cf = engine.default_column_family();
                             for i in (0..num_ops).step_by(5_000) {
-                                let val = engine.get(&cf, &keys_ref[i]).unwrap();
+                                let key = black_box(&keys_ref[i]);
+                                let val = engine.get(&cf, key).expect("get failed");
                                 assert!(val.is_some(), "key {} not recovered", i);
                             }
 
-                            engine // prevent Drop during timing
+                            engine
                         },
                         BatchSize::LargeInput,
                     )
@@ -311,26 +293,34 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
                 b.iter_batched(
                     || {
-                        let db_path = unique_bench_path("small_vals");
+                        let db_path = unique_bench_path(BENCH_SMALL_VALS);
                         let _ = std::fs::remove_dir_all(&db_path);
 
-                        let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                        let config = BenchEngineConfig {
+                            storage_mode: mode,
+                            enable_compaction: false,
+                            wal_sync: false,
+                            ..Default::default()
+                        };
+
+                        let engine = setup_engine_at_path(&db_path, &config);
                         let cf = engine.default_column_family();
 
                         for i in 0..op_count {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                         }
 
                         drop(engine);
-                        (db_path, mode)
+                        (db_path, config)
                     },
-                    |(db_path, mode)| {
-                        let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                    |(db_path, config)| {
+                        let engine = setup_engine_at_path(&db_path, &config);
 
                         let cf = engine.default_column_family();
-                        black_box(engine.get(&cf, &keys_ref[50_000]).unwrap());
+                        let key = black_box(&keys_ref[50_000]);
+                        black_box(engine.get(&cf, key).expect("get failed"));
 
-                        engine // prevent Drop during timing
+                        engine
                     },
                     BatchSize::LargeInput,
                 )
@@ -355,26 +345,34 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
                 b.iter_batched(
                     || {
-                        let db_path = unique_bench_path("large_vals");
+                        let db_path = unique_bench_path(BENCH_LARGE_VALS);
                         let _ = std::fs::remove_dir_all(&db_path);
 
-                        let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                        let config = BenchEngineConfig {
+                            storage_mode: mode,
+                            enable_compaction: false,
+                            wal_sync: false,
+                            ..Default::default()
+                        };
+
+                        let engine = setup_engine_at_path(&db_path, &config);
                         let cf = engine.default_column_family();
 
                         for i in 0..op_count {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                         }
 
                         drop(engine);
-                        (db_path, mode)
+                        (db_path, config)
                     },
-                    |(db_path, mode)| {
-                        let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                    |(db_path, config)| {
+                        let engine = setup_engine_at_path(&db_path, &config);
 
                         let cf = engine.default_column_family();
-                        black_box(engine.get(&cf, &keys_ref[50_000]).unwrap());
+                        let key = black_box(&keys_ref[50_000]);
+                        black_box(engine.get(&cf, key).expect("get failed"));
 
-                        engine // prevent Drop during timing
+                        engine
                     },
                     BatchSize::LargeInput,
                 )

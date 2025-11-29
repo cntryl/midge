@@ -90,7 +90,7 @@ fn load_data_batched(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes]) {
     for chunk in keys.chunks(BATCH_SIZE) {
         for (i, key) in chunk.iter().enumerate() {
             let val_idx = i % values.len();
-            engine.put(&cf, key, &values[val_idx]).unwrap();
+            engine.put(&cf, key, &values[val_idx]).expect("put failed");
         }
     }
 }
@@ -141,9 +141,9 @@ fn bench_durability_async_wal(c: &mut Criterion) {
                     },
                     |engine| {
                         run_mixed_workload(&engine, keys_ref, values_ref, OPS_PER_THREAD);
-                        engine // prevent Drop during timing
+                        engine
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::LargeInput,
                 )
             },
         );
@@ -182,9 +182,9 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
                     },
                     |engine| {
                         run_mixed_workload(&engine, keys_ref, values_ref, OPS_PER_THREAD);
-                        engine // prevent Drop during timing
+                        engine
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::LargeInput,
                 )
             },
         );
@@ -231,7 +231,7 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                             {
                                 let cf = engine.default_column_family();
                                 for (i, key) in keys.iter().take(RECORD_COUNT).enumerate() {
-                                    engine.put(&cf, key, &values[i % values.len()]).unwrap();
+                                    engine.put(&cf, key, &values[i % values.len()]).expect("put failed");
                                 }
                             }
                             Arc::new(engine)
@@ -251,9 +251,9 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                                 }
                             });
 
-                            engine // prevent Drop during timing
+                            engine
                         },
-                        BatchSize::SmallInput,
+                        BatchSize::LargeInput,
                     )
                 },
             );
@@ -307,9 +307,9 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
                         },
                         |engine| {
                             run_write_heavy_workload(&engine, keys_ref, values_ref, OPS_PER_THREAD);
-                            engine // prevent Drop during timing
+                            engine
                         },
-                        BatchSize::SmallInput,
+                        BatchSize::LargeInput,
                     )
                 },
             );

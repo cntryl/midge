@@ -67,16 +67,16 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
 
                         // Populate with 50k keys to trigger multiple flushes and compactions
                         for i in 0..num_keys {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
 
                             // Flush periodically to create multiple files
                             if i % 5000 == 4999 {
-                                engine.flush().unwrap();
+                                engine.flush().expect("flush failed");
                             }
                         }
 
                         // Trigger compactions to spread data across levels
-                        engine.flush().unwrap();
+                        engine.flush().expect("final flush failed");
                         let _ = engine.compact_level(&cf, 0);
 
                         engine
@@ -88,10 +88,10 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
                             .start_key(start.clone())
                             .end_key(end.clone());
 
-                        let results = engine.scan(&cf, query).unwrap();
+                        let results = engine.scan(&cf, query).expect("scan failed");
                         black_box(results.len());
 
-                        engine // prevent Drop during timing
+                        engine
                     },
                     BatchSize::LargeInput,
                 )

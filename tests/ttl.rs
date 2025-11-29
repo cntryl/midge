@@ -293,9 +293,6 @@ fn should_hide_expired_key_given_snapshot_after_expiry_when_reading_at_snapshot(
 
     // Act - take snapshot after expiry
     let snapshot = engine.snapshot();
-    let result = engine
-        .get_at(&cf, b"snap_ttl:key", &snapshot)
-        .expect("get_at");
 
     // Assert - snapshot should not see expired key
     let result = engine

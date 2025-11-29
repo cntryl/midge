@@ -282,6 +282,43 @@ pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> MidgeEngi
     setup_engine(prefix, &config)
 }
 
+/// Setup a benchmark engine at a specific path with the given configuration.
+/// Use this when you need to control the exact path (e.g., for reopen tests).
+#[allow(dead_code)]
+pub fn setup_engine_at_path(path: &std::path::Path, config: &BenchEngineConfig) -> MidgeEngine {
+    let _ = std::fs::remove_dir_all(path);
+
+    let storage_mode = match config.storage_mode {
+        BenchStorageMode::Memory => panic!("setup_engine_at_path requires persistent storage"),
+        BenchStorageMode::LocalDisk => StorageMode::LocalDisk {
+            db_path: path.to_path_buf(),
+        },
+        BenchStorageMode::CloudBacked => {
+            let backend = Arc::new(
+                MockCloudBackend::new().with_latency(Duration::from_millis(config.cloud_latency_ms)),
+            );
+            StorageMode::CloudBacked {
+                local_cache_path: path.to_path_buf(),
+                cloud_backend: backend,
+                storage_context: Default::default(),
+                local_wal_sync: config.wal_sync,
+                wal_batch_size: 1024 * 1024,
+                sst_cache_capacity: 10,
+            }
+        }
+    };
+
+    let opts = MidgeOptions {
+        storage_mode,
+        memtable_size: config.memtable_size,
+        enable_compaction: config.enable_compaction,
+        wal_sync: config.wal_sync,
+        ..Default::default()
+    };
+
+    MidgeEngine::open(opts).expect("failed to open engine")
+}
+
 /// Setup engine with storage mode and WAL sync option.
 #[allow(dead_code)]
 pub fn setup_engine_with_mode_and_sync(

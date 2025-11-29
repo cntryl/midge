@@ -69,9 +69,9 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
                         for (chunk_idx, chunk) in keys_ref.chunks(2_500).enumerate() {
                             let base_idx = chunk_idx * 2_500;
                             for (i, key) in chunk.iter().enumerate() {
-                                engine.put(&cf, key, &vals_ref[base_idx + i]).unwrap();
+                                engine.put(&cf, key, &vals_ref[base_idx + i]).expect("put failed");
                             }
-                            engine.flush().unwrap();
+                            engine.flush().expect("flush failed");
                         }
 
                         engine
@@ -79,13 +79,13 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         let query = Query::new().start_key(start.clone()).end_key(end.clone());
-                        let results = engine.scan(&cf, query).unwrap();
+                        let results = engine.scan(&cf, query).expect("scan failed");
                         for kv in results {
                             black_box(kv);
                         }
-                        engine // prevent Drop during timing
+                        engine
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::LargeInput,
                 )
             },
         );
@@ -134,9 +134,9 @@ fn bench_scan_l0_prefix(c: &mut Criterion) {
                         for (chunk_idx, chunk) in keys_ref.chunks(2_500).enumerate() {
                             let base_idx = chunk_idx * 2_500;
                             for (i, key) in chunk.iter().enumerate() {
-                                engine.put(&cf, key, &vals_ref[base_idx + i]).unwrap();
+                                engine.put(&cf, key, &vals_ref[base_idx + i]).expect("put failed");
                             }
-                            engine.flush().unwrap();
+                            engine.flush().expect("flush failed");
                         }
 
                         engine
@@ -144,13 +144,13 @@ fn bench_scan_l0_prefix(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         let query = Query::new().prefix(prefix_ref.clone());
-                        let results = engine.scan(&cf, query).unwrap();
+                        let results = engine.scan(&cf, query).expect("scan failed");
                         for kv in results {
                             black_box(kv);
                         }
-                        engine // prevent Drop during timing
+                        engine
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::LargeInput,
                 )
             },
         );

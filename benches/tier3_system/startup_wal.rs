@@ -15,57 +15,18 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_kv, unique_bench_path, BenchStorageMode, BYTES_PER_OP, DURABLE_STORAGE_MODES,
-    VALUE_SIZE,
+    precompute_kv, setup_engine_at_path, unique_bench_path, BenchEngineConfig, BYTES_PER_OP,
+    DURABLE_STORAGE_MODES, VALUE_SIZE,
 };
 
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::sync::Arc;
-use std::time::Duration;
 
-/// Setup engine at specific path for WAL replay tests
-fn setup_engine_at_path(path: &std::path::Path, mode: BenchStorageMode) -> MidgeEngine {
-    use cntryl_midge::cloud::mock::MockCloudBackend;
-
-    match mode {
-        BenchStorageMode::Memory => panic!("WAL replay benchmarks require persistent storage"),
-        BenchStorageMode::LocalDisk => {
-            let opts = MidgeOptions {
-                storage_mode: StorageMode::LocalDisk {
-                    db_path: path.to_path_buf(),
-                },
-                memtable_size: 100 * 1024 * 1024, // Large memtable = no auto flush
-                enable_compaction: false,
-                wal_sync: false,
-                ..Default::default()
-            };
-            MidgeEngine::open(opts).expect("failed to open")
-        }
-        BenchStorageMode::CloudBacked => {
-            let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(1)));
-            let opts = MidgeOptions {
-                storage_mode: StorageMode::CloudBacked {
-                    local_cache_path: path.to_path_buf(),
-                    cloud_backend: backend,
-                    storage_context: Default::default(),
-                    local_wal_sync: false,
-                    wal_batch_size: 1024 * 1024,
-                    sst_cache_capacity: 10,
-                },
-                memtable_size: 100 * 1024 * 1024,
-                enable_compaction: false,
-                wal_sync: false,
-                ..Default::default()
-            };
-            MidgeEngine::open(opts).expect("failed to open")
-        }
-    }
-}
+/// Benchmark name constant
+const BENCH_WAL_REPLAY: &str = "wal_replay";
 
 /// Benchmark engine startup with WAL replay (50k operations)
 fn bench_engine_startup_from_wal(c: &mut Criterion) {
@@ -88,32 +49,40 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
 
                 b.iter_batched(
                     || {
-                        let path = unique_bench_path("wal_replay");
+                        let path = unique_bench_path(BENCH_WAL_REPLAY);
                         let _ = std::fs::remove_dir_all(&path);
+
+                        // Large memtable = no auto flush, keep data only in WAL
+                        let config = BenchEngineConfig {
+                            storage_mode: mode,
+                            enable_compaction: false,
+                            memtable_size: 100 * 1024 * 1024,
+                            ..Default::default()
+                        };
 
                         // Create WAL with 50k operations WITHOUT flushing
                         {
-                            let engine = setup_engine_at_path(&path, mode);
+                            let engine = setup_engine_at_path(&path, &config);
                             let cf = engine.default_column_family();
 
-                            // Write ops to WAL without flushing
                             for i in 0..num_ops {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                             }
                             // DO NOT flush - keep data only in WAL
                         }
 
-                        (path, mode)
+                        (path, config)
                     },
-                    |(path, mode)| {
+                    |(path, config)| {
                         // Measure startup time (WAL replay into memtable)
-                        let engine = setup_engine_at_path(&path, mode);
+                        let engine = setup_engine_at_path(&path, &config);
 
                         // Verify data was recovered from WAL
                         let cf = engine.default_column_family();
-                        black_box(engine.get(&cf, &keys_ref[25_000]).unwrap());
+                        let key = black_box(&keys_ref[25_000]);
+                        black_box(engine.get(&cf, key).expect("get failed"));
 
-                        engine // prevent Drop during timing
+                        engine
                     },
                     BatchSize::LargeInput,
                 )

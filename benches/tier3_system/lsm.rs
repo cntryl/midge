@@ -25,19 +25,16 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_read_indices, setup_engine, unique_bench_path, BenchEngineConfig, BenchStorageMode,
-    DURABLE_STORAGE_MODES,
+    precompute_read_indices, setup_engine, setup_engine_at_path, unique_bench_path,
+    BenchEngineConfig, DURABLE_STORAGE_MODES,
 };
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::sync::Arc;
-use std::time::Duration;
 
 /// Key size in bytes
 const KEY_SIZE: usize = 21; // "user:" + 8 bytes BE + ":profile"
@@ -45,6 +42,12 @@ const KEY_SIZE: usize = 21; // "user:" + 8 bytes BE + ":profile"
 const VALUE_SIZE: usize = 40;
 /// Bytes per operation
 const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
+
+/// Benchmark name constants to avoid repeated string allocations
+const BENCH_WAL_WRITE: &str = "wal_write";
+const BENCH_FLUSH_REOPEN: &str = "flush_reopen";
+const BENCH_L0_COMPACT: &str = "l0_compact";
+const BENCH_MIXED: &str = "mixed_workload";
 
 #[inline]
 fn make_key(i: usize) -> Bytes {
@@ -55,40 +58,16 @@ fn make_key(i: usize) -> Bytes {
     Bytes::from(key)
 }
 
+/// Generate a fixed-size value with index encoded in first 8 bytes.
+/// Fast and deterministic - no JSON overhead needed for benchmarks.
 #[inline]
 fn make_value(i: usize) -> Bytes {
-    // Build value without format! allocation
-    let mut value = Vec::with_capacity(VALUE_SIZE);
-    value.extend_from_slice(b"{\"id\":");
-    // Append i as decimal
-    if i == 0 {
-        value.push(b'0');
-    } else {
-        let start = value.len();
-        let mut n = i;
-        while n > 0 {
-            value.push(b'0' + (n % 10) as u8);
-            n /= 10;
-        }
-        value[start..].reverse();
-    }
-    value.extend_from_slice(b",\"name\":\"User");
-    // Append i again
-    if i == 0 {
-        value.push(b'0');
-    } else {
-        let start = value.len();
-        let mut n = i;
-        while n > 0 {
-            value.push(b'0' + (n % 10) as u8);
-            n /= 10;
-        }
-        value[start..].reverse();
-    }
-    value.extend_from_slice(b"\"}");
-    // Pad to VALUE_SIZE for consistent throughput
-    while value.len() < VALUE_SIZE {
-        value.push(b' ');
+    let mut value = vec![0u8; VALUE_SIZE];
+    value[..8].copy_from_slice(&(i as u64).to_be_bytes());
+    // Fill remainder with deterministic pattern
+    let pattern = (i % 256) as u8;
+    for byte in value.iter_mut().skip(8) {
+        *byte = pattern;
     }
     Bytes::from(value)
 }
@@ -103,45 +82,6 @@ fn precompute_kv(n: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     (keys, vals)
 }
 
-/// Setup engine at a specific path for reopen tests
-fn setup_engine_at_path(path: &std::path::Path, mode: BenchStorageMode) -> MidgeEngine {
-    use cntryl_midge::cloud::mock::MockCloudBackend;
-
-    match mode {
-        BenchStorageMode::Memory => panic!("LSM benchmarks require persistent storage"),
-        BenchStorageMode::LocalDisk => {
-            let opts = MidgeOptions {
-                storage_mode: StorageMode::LocalDisk {
-                    db_path: path.to_path_buf(),
-                },
-                memtable_size: 4 * 1024 * 1024,
-                enable_compaction: false,
-                wal_sync: false,
-                ..Default::default()
-            };
-            MidgeEngine::open(opts).unwrap()
-        }
-        BenchStorageMode::CloudBacked => {
-            let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(1)));
-            let opts = MidgeOptions {
-                storage_mode: StorageMode::CloudBacked {
-                    local_cache_path: path.to_path_buf(),
-                    cloud_backend: backend,
-                    storage_context: Default::default(),
-                    local_wal_sync: false,
-                    wal_batch_size: 1024 * 1024,
-                    sst_cache_capacity: 10,
-                },
-                memtable_size: 4 * 1024 * 1024,
-                enable_compaction: false,
-                wal_sync: false,
-                ..Default::default()
-            };
-            MidgeEngine::open(opts).unwrap()
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 1. WAL + Memtable Writes
 // ---------------------------------------------------------------------------
@@ -151,6 +91,7 @@ fn bench_system_wal_write(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
 
     for &entries in &[1_000usize, 10_000, 100_000] {
+        // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
 
@@ -168,7 +109,7 @@ fn bench_system_wal_write(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             setup_engine(
-                                "wal_write",
+                                BENCH_WAL_WRITE,
                                 &BenchEngineConfig {
                                     storage_mode: mode,
                                     enable_compaction: false,
@@ -179,11 +120,11 @@ fn bench_system_wal_write(c: &mut Criterion) {
                         |engine| {
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                             }
-                            engine // prevent Drop during timing
+                            engine
                         },
-                        BatchSize::SmallInput,
+                        BatchSize::LargeInput,
                     );
                 },
             );
@@ -202,6 +143,7 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
 
     for &entries in &[10_000usize, 50_000] {
+        // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let read_count = 1_000usize;
         let read_indices = precompute_read_indices(entries, read_count, 42);
@@ -221,29 +163,35 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
 
                     b.iter_batched(
                         || {
-                            let path = unique_bench_path("flush_reopen");
+                            let path = unique_bench_path(BENCH_FLUSH_REOPEN);
                             let _ = std::fs::remove_dir_all(&path);
 
-                            let engine = setup_engine_at_path(&path, mode);
+                            let config = BenchEngineConfig {
+                                storage_mode: mode,
+                                enable_compaction: false,
+                                ..Default::default()
+                            };
+                            let engine = setup_engine_at_path(&path, &config);
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                             }
-                            engine.flush().unwrap();
+                            engine.flush().expect("flush failed");
                             drop(engine);
-                            (path, mode)
+                            (path, config)
                         },
-                        |(path, mode)| {
-                            let engine = setup_engine_at_path(&path, mode);
+                        |(path, config)| {
+                            let engine = setup_engine_at_path(&path, &config);
                             let cf = engine.default_column_family();
 
                             for &idx in read_indices_ref {
-                                black_box(engine.get(&cf, &keys_ref[idx]).unwrap());
+                                let key = black_box(&keys_ref[idx]);
+                                black_box(engine.get(&cf, key).expect("get failed"));
                             }
 
-                            engine // prevent Drop during timing
+                            engine
                         },
-                        BatchSize::SmallInput,
+                        BatchSize::LargeInput,
                     );
                 },
             );
@@ -262,6 +210,7 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
 
     for &entries in &[50_000usize, 100_000] {
+        // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
 
@@ -279,7 +228,7 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
                     b.iter_batched(
                         || {
                             let engine = setup_engine(
-                                "l0_compact",
+                                BENCH_L0_COMPACT,
                                 &BenchEngineConfig {
                                     storage_mode: mode,
                                     enable_compaction: true,
@@ -288,16 +237,17 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
                             );
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
                             }
-                            engine.flush().unwrap();
+                            // Flush to create L0 file(s) for compaction
+                            engine.flush().expect("flush failed");
                             (engine, cf)
                         },
                         |(engine, cf)| {
-                            engine.compact_level(&cf, 0).unwrap();
-                            engine // prevent Drop during timing
+                            engine.compact_level(&cf, 0).expect("compact_level failed");
+                            engine
                         },
-                        BatchSize::SmallInput,
+                        BatchSize::LargeInput,
                     );
                 },
             );
@@ -320,13 +270,12 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
     let (keys, vals) = precompute_kv(hot_set_size);
 
     // Precompute operation indices and types (80% read, 20% write)
-    // Deterministic sequence
+    // Deterministic sequence using LCG
     let mut ops: Vec<(usize, bool)> = Vec::with_capacity(total_ops);
     let mut state = 12345u64;
     for _ in 0..total_ops {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         let idx = (state as usize) % hot_set_size;
-        // 80% read (is_read = true), 20% write
         let is_read = (state >> 32) % 100 < 80;
         ops.push((idx, is_read));
     }
@@ -346,7 +295,7 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let engine = setup_engine(
-                            "mixed_workload",
+                            BENCH_MIXED,
                             &BenchEngineConfig {
                                 storage_mode: mode,
                                 enable_compaction: false,
@@ -356,25 +305,27 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         // Prefill hot set
                         for i in 0..hot_set_size {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("prefill put failed");
                         }
-                        engine.flush().unwrap();
+                        engine.flush().expect("prefill flush failed");
                         engine
                     },
                     |engine| {
                         let cf = engine.default_column_family();
 
                         for &(idx, is_read) in ops_ref {
+                            let key = black_box(&keys_ref[idx]);
                             if is_read {
-                                black_box(engine.get(&cf, &keys_ref[idx]).unwrap());
+                                black_box(engine.get(&cf, key).expect("get failed"));
                             } else {
-                                engine.put(&cf, &keys_ref[idx], &vals_ref[idx]).unwrap();
+                                let val = black_box(&vals_ref[idx]);
+                                engine.put(&cf, key, val).expect("put failed");
                             }
                         }
 
-                        engine // prevent Drop during timing
+                        engine
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::LargeInput,
                 );
             },
         );

@@ -15,7 +15,7 @@
 //! ## Design Notes
 //!
 //! - Uses DURABLE_STORAGE_MODES since compaction requires persistence
-//! - Optimized for benchmark accuracy: precomputed KV, no allocations in hot loop
+//! - Optimized for benchmark accuracy: precomputed KV using Bytes, no allocations in hot loop
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -23,27 +23,32 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    setup_engine, unique_bench_path, BenchEngineConfig, BenchStorageMode, DURABLE_STORAGE_MODES,
+    setup_engine, setup_engine_at_path, unique_bench_path, BenchEngineConfig,
+    DURABLE_STORAGE_MODES,
 };
 
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use bytes::Bytes;
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
-use std::sync::Arc;
-use std::time::Duration;
 
 /// Key size in bytes (fixed for consistent measurements)
 const KEY_SIZE: usize = 16;
 /// Default value size in bytes
 const DEFAULT_VALUE_SIZE: usize = 100;
 
-/// Pre-generate keys and values with configurable value size.
+/// Benchmark name constants to avoid repeated string allocations
+const BENCH_FLUSH: &str = "flush";
+const BENCH_COMPACT: &str = "compact";
+const BENCH_FLUSH_TP: &str = "flush_tp";
+const BENCH_INCR_COMPACT: &str = "incr_compact";
+
+/// Pre-generate immutable keys and values with configurable value size.
 /// Keys: "k" + 15-digit zero-padded number (16 bytes total)
 /// Values: index in first 8 bytes + pattern fill
-#[inline]
-fn generate_kv(num_keys: usize, value_size: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+/// Returns Bytes for zero-copy sharing across iterations.
+fn generate_kv(num_keys: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(num_keys);
     let mut values = Vec::with_capacity(num_keys);
 
@@ -55,7 +60,7 @@ fn generate_kv(num_keys: usize, value_size: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>
             key[j] = b'0' + (n % 10) as u8;
             n /= 10;
         }
-        keys.push(key);
+        keys.push(Bytes::from(key));
 
         // Fixed-size value with index + pattern
         let mut value = vec![0u8; value_size];
@@ -66,48 +71,49 @@ fn generate_kv(num_keys: usize, value_size: usize) -> (Vec<Vec<u8>>, Vec<Vec<u8>
         for byte in value.iter_mut().skip(8) {
             *byte = pattern;
         }
-        values.push(value);
+        values.push(Bytes::from(value));
     }
 
     (keys, values)
 }
 
-/// Setup engine at specific path for reopen tests
-fn setup_engine_at_path(path: &std::path::Path, mode: BenchStorageMode) -> MidgeEngine {
-    use cntryl_midge::cloud::mock::MockCloudBackend;
+/// Precomputed key-value data for benchmarks.
+/// Stored as immutable Bytes for zero-copy sharing.
+struct PrecomputedKV {
+    keys: Vec<Bytes>,
+    values: Vec<Bytes>,
+}
 
-    match mode {
-        BenchStorageMode::Memory => panic!("Compaction benchmarks require persistent storage"),
-        BenchStorageMode::LocalDisk => {
-            let opts = MidgeOptions {
-                storage_mode: StorageMode::LocalDisk {
-                    db_path: path.to_path_buf(),
-                },
-                memtable_size: 4 * 1024 * 1024,
-                enable_compaction: false,
-                wal_sync: false,
-                ..Default::default()
-            };
-            MidgeEngine::open(opts).expect("failed to open")
+impl PrecomputedKV {
+    fn new(num_keys: usize, value_size: usize) -> Self {
+        let (keys, values) = generate_kv(num_keys, value_size);
+        Self { keys, values }
+    }
+
+    /// Generate batched KV data with overlapping key ranges for realistic compaction.
+    /// Uses secondary byte variation to create overlap between batches.
+    fn new_batched(num_keys_per_batch: usize, num_batches: usize, value_size: usize) -> Self {
+        let total_keys = num_keys_per_batch * num_batches;
+        let mut keys = Vec::with_capacity(total_keys);
+        let mut values = Vec::with_capacity(total_keys);
+
+        for batch in 0..num_batches {
+            let (batch_keys, batch_values) = generate_kv(num_keys_per_batch, value_size);
+            for (k, v) in batch_keys.into_iter().zip(batch_values.into_iter()) {
+                // Modify secondary byte to create overlapping ranges across batches
+                // This produces more realistic compaction pressure than disjoint prefixes
+                let mut key_bytes = k.to_vec();
+                key_bytes[1] = b'0' + (batch % 10) as u8;
+                keys.push(Bytes::from(key_bytes));
+                values.push(v);
+            }
         }
-        BenchStorageMode::CloudBacked => {
-            let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(1)));
-            let opts = MidgeOptions {
-                storage_mode: StorageMode::CloudBacked {
-                    local_cache_path: path.to_path_buf(),
-                    cloud_backend: backend,
-                    storage_context: Default::default(),
-                    local_wal_sync: false,
-                    wal_batch_size: 1024 * 1024,
-                    sst_cache_capacity: 10,
-                },
-                memtable_size: 4 * 1024 * 1024,
-                enable_compaction: false,
-                wal_sync: false,
-                ..Default::default()
-            };
-            MidgeEngine::open(opts).expect("failed to open")
-        }
+
+        Self { keys, values }
+    }
+
+    fn len(&self) -> usize {
+        self.keys.len()
     }
 }
 
@@ -117,24 +123,24 @@ fn bench_flush(c: &mut Criterion) {
 
     // Reduced key counts to keep each iteration under ~2s
     for &num_keys in &[5_000, 20_000] {
-        let (keys, values) = generate_kv(num_keys, DEFAULT_VALUE_SIZE);
-        let total_bytes = num_keys * (KEY_SIZE + DEFAULT_VALUE_SIZE);
+        // Precompute KV once per key count, reused across all modes
+        let kv = PrecomputedKV::new(num_keys, DEFAULT_VALUE_SIZE);
+        let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
 
-        group.throughput(Throughput::Bytes(total_bytes as u64));
+        group.throughput(Throughput::Bytes(total_bytes));
 
         for mode in DURABLE_STORAGE_MODES {
             let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
             group.bench_with_input(
-                BenchmarkId::new("flush", &bench_name),
+                BenchmarkId::new(BENCH_FLUSH, &bench_name),
                 &(num_keys, mode),
                 |b, &(_size, mode)| {
-                    let keys_ref = &keys;
-                    let vals_ref = &values;
+                    let kv_ref = &kv;
 
                     b.iter_batched(
                         || {
                             let engine = setup_engine(
-                                "flush",
+                                BENCH_FLUSH,
                                 &BenchEngineConfig {
                                     storage_mode: mode,
                                     enable_compaction: false,
@@ -142,14 +148,14 @@ fn bench_flush(c: &mut Criterion) {
                                 },
                             );
                             let cf = engine.default_column_family();
-                            for (k, v) in keys_ref.iter().zip(vals_ref.iter()) {
-                                engine.put(&cf, k, v).unwrap();
+                            for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
+                                engine.put(&cf, k, v).expect("put failed");
                             }
                             engine
                         },
                         |engine| {
                             engine.flush().expect("flush failed");
-                            engine // prevent Drop during timing
+                            engine
                         },
                         BatchSize::LargeInput,
                     )
@@ -167,10 +173,11 @@ fn bench_compact_all(c: &mut Criterion) {
 
     // Reduced key counts to keep each iteration under ~2s
     for &num_keys in &[10_000, 25_000] {
-        let (keys, values) = generate_kv(num_keys, DEFAULT_VALUE_SIZE);
-        let total_bytes = num_keys * (KEY_SIZE + DEFAULT_VALUE_SIZE);
+        // Precompute KV once per key count, reused across all modes
+        let kv = PrecomputedKV::new(num_keys, DEFAULT_VALUE_SIZE);
+        let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
 
-        group.throughput(Throughput::Bytes(total_bytes as u64));
+        group.throughput(Throughput::Bytes(total_bytes));
 
         for mode in DURABLE_STORAGE_MODES {
             let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
@@ -178,13 +185,12 @@ fn bench_compact_all(c: &mut Criterion) {
                 BenchmarkId::new("compact_all", &bench_name),
                 &(num_keys, mode),
                 |b, &(_size, mode)| {
-                    let keys_ref = &keys;
-                    let vals_ref = &values;
+                    let kv_ref = &kv;
 
                     b.iter_batched(
                         || {
                             let engine = setup_engine(
-                                "compact",
+                                BENCH_COMPACT,
                                 &BenchEngineConfig {
                                     storage_mode: mode,
                                     enable_compaction: true,
@@ -192,15 +198,15 @@ fn bench_compact_all(c: &mut Criterion) {
                                 },
                             );
                             let cf = engine.default_column_family();
-                            for (k, v) in keys_ref.iter().zip(vals_ref.iter()) {
-                                engine.put(&cf, k, v).unwrap();
+                            for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
+                                engine.put(&cf, k, v).expect("put failed");
                             }
-                            engine.flush().unwrap();
+                            engine.flush().expect("flush failed");
                             engine
                         },
                         |engine| {
                             engine.compact_all().expect("compact_all failed");
-                            engine // prevent Drop during timing
+                            engine
                         },
                         BatchSize::LargeInput,
                     )
@@ -220,24 +226,24 @@ fn bench_flush_throughput(c: &mut Criterion) {
     let num_keys = 5_000;
 
     for &value_size in &[64, 256, 1024, 4096] {
-        let (keys, values) = generate_kv(num_keys, value_size);
-        let total_bytes = num_keys * (KEY_SIZE + value_size);
+        // Precompute KV once per value size, reused across all modes
+        let kv = PrecomputedKV::new(num_keys, value_size);
+        let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + value_size as u64);
 
-        group.throughput(Throughput::Bytes(total_bytes as u64));
+        group.throughput(Throughput::Bytes(total_bytes));
 
         for mode in DURABLE_STORAGE_MODES {
             let bench_name = format!("{}B_values/{}", value_size, mode.as_str());
             group.bench_with_input(
-                BenchmarkId::new("flush_tp", &bench_name),
+                BenchmarkId::new(BENCH_FLUSH_TP, &bench_name),
                 &(value_size, mode),
                 |b, &(_vs, mode)| {
-                    let keys_ref = &keys;
-                    let vals_ref = &values;
+                    let kv_ref = &kv;
 
                     b.iter_batched(
                         || {
                             let engine = setup_engine(
-                                "flush_tp",
+                                BENCH_FLUSH_TP,
                                 &BenchEngineConfig {
                                     storage_mode: mode,
                                     enable_compaction: false,
@@ -245,14 +251,14 @@ fn bench_flush_throughput(c: &mut Criterion) {
                                 },
                             );
                             let cf = engine.default_column_family();
-                            for (k, v) in keys_ref.iter().zip(vals_ref.iter()) {
-                                engine.put(&cf, k, v).unwrap();
+                            for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
+                                engine.put(&cf, k, v).expect("put failed");
                             }
                             engine
                         },
                         |engine| {
                             engine.flush().expect("flush failed");
-                            engine // prevent Drop during timing
+                            engine
                         },
                         BatchSize::LargeInput,
                     )
@@ -272,39 +278,37 @@ fn bench_incremental_compact(c: &mut Criterion) {
     let num_keys_per_batch = 2_000;
     let num_batches = 4;
 
-    // Generate multiple batches of overlapping keys
-    let mut all_keys = Vec::new();
-    let mut all_values = Vec::new();
+    // Generate batched KV with overlapping key ranges for realistic compaction
+    let kv = PrecomputedKV::new_batched(num_keys_per_batch, num_batches, DEFAULT_VALUE_SIZE);
+    let total_bytes: u64 =
+        (kv.len() as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
 
-    for batch in 0..num_batches {
-        let (keys, values) = generate_kv(num_keys_per_batch, DEFAULT_VALUE_SIZE);
-        for (mut k, v) in keys.into_iter().zip(values.into_iter()) {
-            k[0] = b'a' + (batch as u8);
-            all_keys.push(k);
-            all_values.push(v);
-        }
-    }
-
-    let total_keys = num_keys_per_batch * num_batches;
-    let total_bytes = total_keys * (KEY_SIZE + DEFAULT_VALUE_SIZE);
-
-    group.throughput(Throughput::Bytes(total_bytes as u64));
+    group.throughput(Throughput::Bytes(total_bytes));
 
     for mode in DURABLE_STORAGE_MODES {
-        let bench_name = format!("{}batches_x_{}keys/{}", num_batches, num_keys_per_batch, mode.as_str());
+        let bench_name = format!(
+            "{}batches_x_{}keys/{}",
+            num_batches,
+            num_keys_per_batch,
+            mode.as_str()
+        );
         group.bench_with_input(
             BenchmarkId::new("incremental", &bench_name),
             &mode,
             |b, &mode| {
-                let keys_ref = &all_keys;
-                let vals_ref = &all_values;
+                let kv_ref = &kv;
 
                 b.iter_batched(
                     || {
-                        let path = unique_bench_path("incr_compact");
+                        let path = unique_bench_path(BENCH_INCR_COMPACT);
                         let _ = std::fs::remove_dir_all(&path);
 
-                        let engine = setup_engine_at_path(&path, mode);
+                        let config = BenchEngineConfig {
+                            storage_mode: mode,
+                            enable_compaction: true,
+                            ..Default::default()
+                        };
+                        let engine = setup_engine_at_path(&path, &config);
                         let cf = engine.default_column_family();
 
                         // Write and flush in batches to create multiple L0 files
@@ -312,16 +316,18 @@ fn bench_incremental_compact(c: &mut Criterion) {
                             let start = batch_idx * num_keys_per_batch;
                             let end = start + num_keys_per_batch;
                             for idx in start..end {
-                                engine.put(&cf, &keys_ref[idx], &vals_ref[idx]).unwrap();
+                                engine
+                                    .put(&cf, &kv_ref.keys[idx], &kv_ref.values[idx])
+                                    .expect("put failed");
                             }
-                            engine.flush().unwrap();
+                            engine.flush().expect("flush failed");
                         }
 
                         engine
                     },
                     |engine| {
                         engine.compact_all().expect("compact_all failed");
-                        engine // prevent Drop during timing
+                        engine
                     },
                     BatchSize::LargeInput,
                 )
