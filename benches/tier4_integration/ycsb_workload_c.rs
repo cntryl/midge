@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use ycsb_common::*;
 
-const CF_COUNTS: &[usize] = &[1, 2, 4, 8, 16];
+const CF_COUNTS: &[usize] = &[1, 4, 16]; // Reduced from [1,2,4,8,16] - cloud doesn't need full sweep
 
 // ============================================================================
 // Latency stats

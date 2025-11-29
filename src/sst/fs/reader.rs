@@ -389,8 +389,41 @@ impl SstFile {
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
         let mut out: Vec<(Bytes, KeyState)> = Vec::new();
 
-        for en in sparse_index.entries() {
-            let blk = self.read_data_block(en.block_handle)?;
+        // Use sparse index to find only blocks that might contain keys in range
+        // This is O(log n) + O(relevant blocks) instead of O(all blocks)
+        let block_handles: Vec<BlockHandle> = match (start, end) {
+            (Some(s), Some(e)) => sparse_index.find_blocks_in_range(s, e).copied().collect(),
+            (Some(s), None) => {
+                let entries = sparse_index.entries();
+                let start_idx = entries
+                    .binary_search_by(|en| en.key.as_ref().cmp(s))
+                    .unwrap_or_else(|i| i.saturating_sub(1));
+                entries[start_idx..]
+                    .iter()
+                    .map(|en| en.block_handle)
+                    .collect()
+            }
+            (None, Some(e)) => {
+                let entries = sparse_index.entries();
+                let end_idx = entries
+                    .binary_search_by(|en| en.key.as_ref().cmp(e))
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or_else(|i| i.saturating_sub(1))
+                    .min(entries.len().saturating_sub(1));
+                entries[..=end_idx]
+                    .iter()
+                    .map(|en| en.block_handle)
+                    .collect()
+            }
+            (None, None) => sparse_index
+                .entries()
+                .iter()
+                .map(|en| en.block_handle)
+                .collect(),
+        };
+
+        for block_handle in block_handles {
+            let blk = self.read_data_block(block_handle)?;
             let data = blk.data.as_ref();
 
             // Use shared TlvBlockIterator
@@ -451,8 +484,40 @@ impl SstFile {
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
         let mut out: Vec<(Bytes, KeyState)> = Vec::new();
 
-        for en in sparse_index.entries() {
-            let blk = self.read_data_block(en.block_handle)?;
+        // Use sparse index to find only blocks that might contain keys in range
+        let block_handles: Vec<BlockHandle> = match (start, end) {
+            (Some(s), Some(e)) => sparse_index.find_blocks_in_range(s, e).copied().collect(),
+            (Some(s), None) => {
+                let entries = sparse_index.entries();
+                let start_idx = entries
+                    .binary_search_by(|en| en.key.as_ref().cmp(s))
+                    .unwrap_or_else(|i| i.saturating_sub(1));
+                entries[start_idx..]
+                    .iter()
+                    .map(|en| en.block_handle)
+                    .collect()
+            }
+            (None, Some(e)) => {
+                let entries = sparse_index.entries();
+                let end_idx = entries
+                    .binary_search_by(|en| en.key.as_ref().cmp(e))
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or_else(|i| i.saturating_sub(1))
+                    .min(entries.len().saturating_sub(1));
+                entries[..=end_idx]
+                    .iter()
+                    .map(|en| en.block_handle)
+                    .collect()
+            }
+            (None, None) => sparse_index
+                .entries()
+                .iter()
+                .map(|en| en.block_handle)
+                .collect(),
+        };
+
+        for block_handle in block_handles {
+            let blk = self.read_data_block(block_handle)?;
             let data = blk.data.as_ref();
 
             // Use shared TlvBlockIterator
