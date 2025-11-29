@@ -26,7 +26,7 @@ mod bench_common;
 
 use bench_common::{
     precompute_read_indices, setup_engine, setup_engine_at_path, unique_bench_path,
-    BenchEngineConfig, DURABLE_STORAGE_MODES,
+    BenchEngineConfig, BenchStorageMode, DURABLE_STORAGE_MODES,
 };
 
 use bytes::Bytes;
@@ -89,8 +89,9 @@ fn precompute_kv(n: usize) -> (Vec<Bytes>, Vec<Bytes>) {
 fn bench_system_wal_write(c: &mut Criterion) {
     let mut g = c.benchmark_group("system_wal_write");
     g.sampling_mode(SamplingMode::Flat);
+    g.sample_size(15);
 
-    for &entries in &[1_000usize, 10_000, 100_000] {
+    for &entries in &[1_000usize, 10_000, 50_000] { // Reduced from 100k for faster runs
         // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
@@ -141,6 +142,7 @@ fn bench_system_wal_write(c: &mut Criterion) {
 fn bench_system_flush_reopen_read(c: &mut Criterion) {
     let mut g = c.benchmark_group("system_flush_reopen_read");
     g.sampling_mode(SamplingMode::Flat);
+    g.sample_size(15);
 
     for &entries in &[10_000usize, 50_000] {
         // Precompute once per entry count, reused across modes
@@ -208,15 +210,20 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
 fn bench_system_l0_compaction(c: &mut Criterion) {
     let mut g = c.benchmark_group("system_l0_compaction");
     g.sampling_mode(SamplingMode::Flat);
+    g.sample_size(12);
 
-    for &entries in &[50_000usize, 100_000] {
+    for &entries in &[25_000usize, 50_000] { // Reduced from 50k/100k for faster runs
         // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
 
         g.throughput(Throughput::Bytes(bytes_total));
 
+        // LocalDisk only for larger workload to avoid cloud overhead
         for mode in DURABLE_STORAGE_MODES {
+            if entries > 25_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
+                continue;
+            }
             let bench_name = format!("{}/{}", entries, mode.as_str());
             g.bench_with_input(
                 BenchmarkId::new("compact", &bench_name),
@@ -264,6 +271,7 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
 fn bench_system_mixed_workload(c: &mut Criterion) {
     let mut g = c.benchmark_group("system_mixed_workload");
     g.sampling_mode(SamplingMode::Flat);
+    g.sample_size(15);
 
     let hot_set_size = 10_000usize;
     let total_ops = 50_000usize;

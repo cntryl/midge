@@ -25,7 +25,7 @@ mod bench_common;
 
 use bench_common::{
     make_key, make_value_fixed, precompute_kv, setup_engine, setup_engine_arc, BenchEngineConfig,
-    ALL_STORAGE_MODES, KEY_SIZE,
+    BenchStorageMode, ALL_STORAGE_MODES, DURABLE_STORAGE_MODES, KEY_SIZE,
 };
 
 use criterion::{
@@ -42,9 +42,10 @@ use std::thread;
 fn bench_concurrent_puts(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_concurrent_puts");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(15);
 
     let max_threads = 16;
-    let n_ops = 5_000;
+    let n_ops = 3_000; // Reduced from 5000 for faster runs
     let value_size = 128;
     let total_ops = max_threads * n_ops;
     let (keys, vals) = precompute_kv(total_ops, value_size);
@@ -104,19 +105,20 @@ fn bench_concurrent_puts(c: &mut Criterion) {
 fn bench_mixed_read_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_read_write_contention");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(15);
 
     // Precompute data to avoid allocations in hot path
-    let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
-    let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value_fixed(64)).collect();
-    let writer_keys: Vec<_> = (0..4_000).map(|i| make_key(i + 20_000)).collect();
-    let writer_vals: Vec<_> = (0..4_000).map(|_| make_value_fixed(128)).collect();
+    let prefill_keys: Vec<_> = (0..5_000).map(make_key).collect(); // Reduced from 10000
+    let prefill_vals: Vec<_> = (0..5_000).map(|_| make_value_fixed(64)).collect();
+    let writer_keys: Vec<_> = (0..2_000).map(|i| make_key(i + 20_000)).collect(); // Reduced from 4000
+    let writer_vals: Vec<_> = (0..2_000).map(|_| make_value_fixed(128)).collect();
     let writer_keys = Arc::new(writer_keys);
     let writer_vals = Arc::new(writer_vals);
-    let reader_keys: Vec<_> = (0..10_000).step_by(3).map(make_key).collect();
+    let reader_keys: Vec<_> = (0..5_000).step_by(3).map(make_key).collect();
     let reader_keys = Arc::new(reader_keys);
 
-    // Calculate throughput: 4 writers * 1000 ops + 4 readers * ~3333 ops
-    let total_ops = 4 * 1_000 + 4 * reader_keys.len();
+    // Calculate throughput: 4 writers * 500 ops + 4 readers * ~1666 ops
+    let total_ops = 4 * 500 + 4 * reader_keys.len();
     group.throughput(Throughput::Elements(total_ops as u64));
 
     for mode in ALL_STORAGE_MODES {
@@ -135,7 +137,7 @@ fn bench_mixed_read_write(c: &mut Criterion) {
                         let engine = setup_engine_arc("mixed", mode);
                         let cf = engine.default_column_family();
                         // Prefill in setup
-                        for i in 0..10_000 {
+                        for i in 0..5_000 {
                             engine
                                 .put(&cf, &prefill_keys_ref[i], &prefill_vals_ref[i])
                                 .expect("prefill failed");
@@ -156,8 +158,8 @@ fn bench_mixed_read_write(c: &mut Criterion) {
                                 let writer_keys = Arc::clone(&writer_keys);
                                 let writer_vals = Arc::clone(&writer_vals);
                                 scope.spawn(move || {
-                                    for i in 0..1_000 {
-                                        let idx = t * 1_000 + i;
+                                    for i in 0..500 {
+                                        let idx = t * 500 + i;
                                         e.put(&cf, &writer_keys[idx], &writer_vals[idx])
                                             .expect("write failed");
                                     }
@@ -193,16 +195,21 @@ fn bench_mixed_read_write(c: &mut Criterion) {
 fn bench_compaction_pressure(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_compaction_pressure");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(10);
 
-    // Precompute data
-    let compaction_keys: Vec<_> = (0..25_000).map(make_key).collect();
-    let compaction_vals: Vec<_> = (0..25_000).map(|_| make_value_fixed(256)).collect();
+    // Precompute data - reduced from 25k for faster runs
+    let compaction_keys: Vec<_> = (0..15_000).map(make_key).collect();
+    let compaction_vals: Vec<_> = (0..15_000).map(|_| make_value_fixed(256)).collect();
     let verify_keys: Vec<_> = (0..1_000).step_by(50).map(make_key).collect();
 
-    let total_bytes = 25_000 * (KEY_SIZE + 256);
+    let total_bytes = 15_000 * (KEY_SIZE + 256);
     group.throughput(Throughput::Bytes(total_bytes as u64));
 
-    for mode in ALL_STORAGE_MODES {
+    // Heavy scenario: LocalDisk only to avoid cloud latency overhead
+    for mode in DURABLE_STORAGE_MODES {
+        if !matches!(mode, BenchStorageMode::LocalDisk) {
+            continue;
+        }
         group.bench_with_input(
             BenchmarkId::new("steady_write_with_compaction", mode.as_str()),
             &mode,
@@ -225,8 +232,8 @@ fn bench_compaction_pressure(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         for round in 0..5 {
-                            for i in 0..5_000 {
-                                let idx = round * 5_000 + i;
+                            for i in 0..3_000 {
+                                let idx = round * 3_000 + i;
                                 engine
                                     .put(&cf, &keys_ref[idx], &vals_ref[idx])
                                     .expect("write failed");

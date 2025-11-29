@@ -23,8 +23,8 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_kv, setup_engine_at_path, unique_bench_path, BenchEngineConfig, BYTES_PER_OP,
-    DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
+    precompute_kv, setup_engine_at_path, unique_bench_path, BenchEngineConfig, BenchStorageMode,
+    BYTES_PER_OP, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
 };
 
 use criterion::{
@@ -54,8 +54,9 @@ const BENCH_LARGE_VALS: &str = "large_vals";
 fn bench_recovery_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_recovery_throughput");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(15);
 
-    for &op_count in &[10_000usize, 100_000] {
+    for &op_count in &[10_000usize, 50_000] { // Reduced from 100k for faster runs
         let (keys, vals) = precompute_kv(op_count, VALUE_SIZE);
         let bytes_total = (op_count as u64) * BYTES_PER_OP;
 
@@ -195,14 +196,19 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
 fn bench_recovery_with_l0_data(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_recovery_with_l0");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(12);
 
-    for &op_count in &[50_000usize, 100_000] {
+    for &op_count in &[25_000usize, 50_000] { // Reduced from 50k/100k
         let (keys, vals) = precompute_kv(op_count, VALUE_SIZE);
         let bytes_total = (op_count as u64) * BYTES_PER_OP;
 
         group.throughput(Throughput::Bytes(bytes_total));
 
+        // LocalDisk only for larger workload to avoid cloud overhead
         for mode in DURABLE_STORAGE_MODES {
+            if op_count > 25_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
+                continue;
+            }
             let bench_name = format!("{}/{}", op_count, mode.as_str());
             group.bench_with_input(
                 BenchmarkId::new("replay_l0", &bench_name),
@@ -273,8 +279,9 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
 fn bench_recovery_speed_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_recovery_comparison");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(12);
 
-    let op_count = 100_000usize;
+    let op_count = 50_000usize; // Reduced from 100k for faster runs
 
     // Small values (128 bytes)
     let small_value_size = 128usize;
@@ -285,7 +292,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
     for mode in DURABLE_STORAGE_MODES {
         group.bench_with_input(
-            BenchmarkId::new("recovery_small_values_100k", mode.as_str()),
+            BenchmarkId::new("recovery_small_values_50k", mode.as_str()),
             &mode,
             |b, &mode| {
                 let keys_ref = &keys_small;
@@ -317,7 +324,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
                         let engine = setup_engine_at_path(&db_path, &config);
 
                         let cf = engine.default_column_family();
-                        let key = black_box(&keys_ref[50_000]);
+                        let key = black_box(&keys_ref[25_000]);
                         black_box(engine.get(&cf, key).expect("get failed"));
 
                         engine
@@ -337,7 +344,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
     for mode in DURABLE_STORAGE_MODES {
         group.bench_with_input(
-            BenchmarkId::new("recovery_large_values_100k", mode.as_str()),
+            BenchmarkId::new("recovery_large_values_50k", mode.as_str()),
             &mode,
             |b, &mode| {
                 let keys_ref = &keys_large;
@@ -369,7 +376,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
                         let engine = setup_engine_at_path(&db_path, &config);
 
                         let cf = engine.default_column_family();
-                        let key = black_box(&keys_ref[50_000]);
+                        let key = black_box(&keys_ref[25_000]);
                         black_box(engine.get(&cf, key).expect("get failed"));
 
                         engine

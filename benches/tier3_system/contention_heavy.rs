@@ -24,7 +24,7 @@ mod criterion_helper;
 
 mod bench_common;
 
-use bench_common::{make_key, make_value_fixed, setup_engine_arc, ALL_STORAGE_MODES, KEY_SIZE};
+use bench_common::{make_key, make_value_fixed, setup_engine_arc, BenchStorageMode, DURABLE_STORAGE_MODES, KEY_SIZE};
 
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
@@ -92,7 +92,11 @@ fn bench_engine_heavy_write_contention(c: &mut Criterion) {
     let keys = Arc::new(keys);
     let values = Arc::new(values);
 
-    for mode in ALL_STORAGE_MODES {
+    // Heavy scenario: LocalDisk only to avoid cloud overhead with 16 threads
+    for mode in DURABLE_STORAGE_MODES {
+        if !matches!(mode, BenchStorageMode::LocalDisk) {
+            continue;
+        }
         group.bench_with_input(
             BenchmarkId::new("write_16_threads", mode.as_str()),
             &mode,
@@ -154,7 +158,11 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
     let values: Vec<_> = (0..num_keys).map(|_| make_value_fixed(VALUE_SIZE)).collect();
     let keys_arc = Arc::new(keys.clone());
 
-    for mode in ALL_STORAGE_MODES {
+    // Heavy scenario: LocalDisk only to avoid cloud overhead with 16 threads
+    for mode in DURABLE_STORAGE_MODES {
+        if !matches!(mode, BenchStorageMode::LocalDisk) {
+            continue;
+        }
         group.bench_with_input(
             BenchmarkId::new("read_16_threads", mode.as_str()),
             &mode,
@@ -232,7 +240,11 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
     let thread_values = Arc::new(thread_values);
     let init_value = make_value_pattern(0);
 
-    for mode in ALL_STORAGE_MODES {
+    // Heavy scenario: LocalDisk only to avoid cloud overhead with 16 threads
+    for mode in DURABLE_STORAGE_MODES {
+        if !matches!(mode, BenchStorageMode::LocalDisk) {
+            continue;
+        }
         group.bench_with_input(
             BenchmarkId::new("mixed_16_threads", mode.as_str()),
             &mode,

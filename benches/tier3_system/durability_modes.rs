@@ -14,6 +14,7 @@
 //!
 //! - Uses DURABLE_STORAGE_MODES since durability requires persistence
 //! - Tests both wal_sync=false (async) and wal_sync=true (sync)
+//! - Heavy scenarios are restricted to LocalDisk to keep runtime bounded
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -39,8 +40,9 @@ use std::thread;
 // Configuration
 // ============================================================================
 
-const OPS_PER_THREAD: usize = 5_000;
-const RECORD_COUNT: usize = 25_000;
+// Trimmed to keep runtime reasonable while still exercising durability paths.
+const OPS_PER_THREAD: usize = 2_000;
+const RECORD_COUNT: usize = 10_000;
 const BATCH_SIZE: usize = 100;
 
 // ============================================================================
@@ -91,7 +93,9 @@ fn load_data_batched(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes]) {
     for chunk in keys.chunks(BATCH_SIZE) {
         for (i, key) in chunk.iter().enumerate() {
             let val_idx = i % values.len();
-            engine.put(&cf, key, &values[val_idx]).expect("put failed");
+            engine
+                .put(&cf, key, &values[val_idx])
+                .expect("put failed");
         }
     }
 }
@@ -121,6 +125,7 @@ fn bench_durability_async_wal(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability_async_wal");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
+    group.sample_size(20);
 
     // Pre-compute keys and values outside benchmark
     let keys: Vec<Bytes> = (0..RECORD_COUNT).map(make_key).collect();
@@ -201,6 +206,7 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
 fn bench_durability_concurrent(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability_concurrent");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(15);
 
     let total_ops = 4 * OPS_PER_THREAD;
     group.throughput(Throughput::Elements(total_ops as u64));
@@ -211,6 +217,11 @@ fn bench_durability_concurrent(c: &mut Criterion) {
         Arc::new((0..OPS_PER_THREAD).map(|_| make_value_fixed(VALUE_SIZE)).collect());
 
     for mode in DURABLE_STORAGE_MODES {
+        // Heavy scenario: skip cloud-backed to keep bench fast
+        if !matches!(mode, BenchStorageMode::LocalDisk) {
+            continue;
+        }
+
         for &wal_sync in &[false, true] {
             let sync_name = if wal_sync { "sync" } else { "async" };
             let bench_name = format!("{}/{}", mode.as_str(), sync_name);
@@ -287,11 +298,16 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
     let values: Vec<_> = (0..OPS_PER_THREAD).map(|_| make_value_fixed(VALUE_SIZE)).collect();
 
     for mode in DURABLE_STORAGE_MODES {
+        // Heavy scenario: skip cloud-backed to keep bench fast
+        if !matches!(mode, BenchStorageMode::LocalDisk) {
+            continue;
+        }
+
         for &wal_sync in &[false, true] {
             let sync_name = if wal_sync { "sync" } else { "async" };
             let bench_name = format!("{}/{}", mode.as_str(), sync_name);
 
-            group.sample_size(if wal_sync { 10 } else { 20 });
+            group.sample_size(if wal_sync { 10 } else { 15 });
 
             group.bench_with_input(
                 BenchmarkId::new("100pct_writes", &bench_name),

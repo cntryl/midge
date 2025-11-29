@@ -23,7 +23,7 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    setup_engine, setup_engine_at_path, unique_bench_path, BenchEngineConfig,
+    setup_engine, setup_engine_at_path, unique_bench_path, BenchEngineConfig, BenchStorageMode,
     DURABLE_STORAGE_MODES,
 };
 
@@ -170,9 +170,10 @@ fn bench_flush(c: &mut Criterion) {
 fn bench_compact_all(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_compact");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(12);
 
-    // Reduced key counts to keep each iteration under ~2s
-    for &num_keys in &[10_000, 25_000] {
+    // Reduced key counts for faster runs; LocalDisk-only for larger
+    for &num_keys in &[10_000, 15_000] {
         // Precompute KV once per key count, reused across all modes
         let kv = PrecomputedKV::new(num_keys, DEFAULT_VALUE_SIZE);
         let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
@@ -180,6 +181,10 @@ fn bench_compact_all(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(total_bytes));
 
         for mode in DURABLE_STORAGE_MODES {
+            // LocalDisk only for larger workload to avoid cloud overhead
+            if num_keys > 10_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
+                continue;
+            }
             let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
             group.bench_with_input(
                 BenchmarkId::new("compact_all", &bench_name),
@@ -273,6 +278,7 @@ fn bench_flush_throughput(c: &mut Criterion) {
 fn bench_incremental_compact(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_incremental_compact");
     group.sampling_mode(SamplingMode::Flat);
+    group.sample_size(12);
 
     // Reduced to keep iterations under ~2s while still testing multi-batch compaction
     let num_keys_per_batch = 2_000;
