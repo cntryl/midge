@@ -526,7 +526,6 @@ mod tests {
     #[test]
     fn should_distribute_keys_evenly_using_double_hashing() {
         // Arrange
-        let f = BloomFilter::new(100, 0.01);
 
         // Act
         let (h1a, s1a) = BloomFilter::double_hash(b"test_key_a");
