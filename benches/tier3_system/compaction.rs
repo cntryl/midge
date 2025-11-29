@@ -115,7 +115,8 @@ fn bench_flush(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_flush");
     group.sampling_mode(SamplingMode::Flat);
 
-    for &num_keys in &[10_000, 50_000] {
+    // Reduced key counts to keep each iteration under ~2s
+    for &num_keys in &[5_000, 20_000] {
         let (keys, values) = generate_kv(num_keys, DEFAULT_VALUE_SIZE);
         let total_bytes = num_keys * (KEY_SIZE + DEFAULT_VALUE_SIZE);
 
@@ -164,7 +165,8 @@ fn bench_compact_all(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_compact");
     group.sampling_mode(SamplingMode::Flat);
 
-    for &num_keys in &[50_000, 100_000] {
+    // Reduced key counts to keep each iteration under ~2s
+    for &num_keys in &[10_000, 25_000] {
         let (keys, values) = generate_kv(num_keys, DEFAULT_VALUE_SIZE);
         let total_bytes = num_keys * (KEY_SIZE + DEFAULT_VALUE_SIZE);
 
@@ -214,7 +216,8 @@ fn bench_flush_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_flush_throughput");
     group.sampling_mode(SamplingMode::Flat);
 
-    let num_keys = 20_000;
+    // Reduced to keep iterations fast while still measuring throughput accurately
+    let num_keys = 5_000;
 
     for &value_size in &[64, 256, 1024, 4096] {
         let (keys, values) = generate_kv(num_keys, value_size);
@@ -265,8 +268,9 @@ fn bench_incremental_compact(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_incremental_compact");
     group.sampling_mode(SamplingMode::Flat);
 
-    let num_keys_per_batch = 10_000;
-    let num_batches = 5;
+    // Reduced to keep iterations under ~2s while still testing multi-batch compaction
+    let num_keys_per_batch = 2_000;
+    let num_batches = 4;
 
     // Generate multiple batches of overlapping keys
     let mut all_keys = Vec::new();
