@@ -61,14 +61,17 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
             .without_plots(),
 
         // ---------------------------------------------------------------
-        // Tier 3: Integration (ms → 10ms)
+        // Tier 3: Integration (ms → 100ms)
         //
         // Full engine ops: put/get through full stack, flush, scan.
         // Goal: end-to-end latency with real I/O.
+        // Note: Increased measurement_time to accommodate iter_batched
+        // setup overhead (engine creation, data population) which runs
+        // before each timed iteration.
         // ---------------------------------------------------------------
         BenchTier::Tier3System => Criterion::default()
-            .warm_up_time(Duration::from_millis(500))
-            .measurement_time(Duration::from_secs(2))
+            .warm_up_time(Duration::from_secs(1))
+            .measurement_time(Duration::from_secs(5))
             .sample_size(10)
             .noise_threshold(0.03)
             .confidence_level(0.95)
