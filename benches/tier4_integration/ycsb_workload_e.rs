@@ -67,8 +67,11 @@ fn run_workload_e(
     let mut rng = StdRng::seed_from_u64(seed);
     let mut hist = Histogram::<u64>::new(3).unwrap();
 
+    // Use actual CF list length to avoid index out of bounds
+    let actual_cf_count = cf_list.len().min(cf_count);
+
     for (start_key, end_key) in ranges.iter() {
-        let cf = &cf_list[rng.gen_range(0..cf_count)];
+        let cf = &cf_list[rng.gen_range(0..actual_cf_count)];
 
         let start = Instant::now();
 
@@ -108,9 +111,12 @@ fn run_workload_e_concurrent(
 
     let mut hist = Histogram::<u64>::new(3).unwrap();
 
-    for i in 0..ops_per_thread {
+    // Use actual CF list length to avoid index out of bounds
+    let actual_cf_count = cf_list.len().min(cf_count);
+
+    for i in 0..ops_per_thread.min(ranges.len()) {
         let (start_key, end_key) = &ranges[i];
-        let cf = &cf_list[rng.gen_range(0..cf_count)];
+        let cf = &cf_list[rng.gen_range(0..actual_cf_count)];
 
         let start = Instant::now();
 
