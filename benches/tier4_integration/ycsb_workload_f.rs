@@ -170,11 +170,11 @@ fn bench_workload_f(c: &mut Criterion) {
                     e
                 }
                 "cloud_nosync" => {
-                    let (e, _b) = setup_engine_cloud_nosync_with_latency(1);
+                    let (e, _b) = setup_engine_cloud_nosync();
                     e
                 }
                 "cloud_sync" => {
-                    let (e, _b) = setup_engine_cloud_sync_with_latency(1);
+                    let (e, _b) = setup_engine_cloud_sync();
                     e
                 }
                 _ => unreachable!(),

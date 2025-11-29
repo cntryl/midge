@@ -53,7 +53,7 @@ fn setup_db_with_options(
     wal_sync: bool,
 ) -> MidgeEngine {
     use cntryl_midge::cloud::mock::MockCloudBackend;
-    use std::time::Duration;
+    use cntryl_midge::cloud::LatencyConfig;
 
     let path = unique_bench_path(db_name);
     let _ = std::fs::remove_dir_all(&path);
@@ -62,7 +62,8 @@ fn setup_db_with_options(
         BenchStorageMode::Memory => panic!("Durability benchmarks require persistent storage"),
         BenchStorageMode::LocalDisk => StorageMode::LocalDisk { db_path: path },
         BenchStorageMode::CloudBacked => {
-            let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(1)));
+            // Use fast simulation for benchmarks (non-blocking)
+            let backend = Arc::new(MockCloudBackend::new().with_latency_config(LatencyConfig::fast_simulation()));
             StorageMode::CloudBacked {
                 local_cache_path: path,
                 cloud_backend: backend,

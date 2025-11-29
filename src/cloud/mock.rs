@@ -1,4 +1,5 @@
 use crate::cloud::backend::{BlobMeta, StorageBackend};
+use crate::cloud::latency_sim::{LatencyConfig, LatencySimulator};
 use crate::common::timestamp;
 use crate::error::{MidgeError, MidgeResult};
 use bytes::Bytes;
@@ -14,7 +15,10 @@ use std::time::Duration;
 pub struct MockCloudBackend {
     root_dir: PathBuf,
     etags: Mutex<HashMap<String, String>>,
+    /// Legacy fixed latency (deprecated, use latency_sim instead)
     latency: Option<Duration>,
+    /// Realistic latency simulator
+    latency_sim: LatencySimulator,
     /// Counter for total uploads (put_blob calls)
     upload_count: AtomicUsize,
     /// Counter for failed uploads
@@ -59,6 +63,7 @@ impl MockCloudBackend {
             root_dir: actual_root,
             etags: Mutex::new(HashMap::new()),
             latency: None,
+            latency_sim: LatencySimulator::none(),
             upload_count: AtomicUsize::new(0),
             upload_failure_count: AtomicUsize::new(0),
             sst_upload_count: AtomicUsize::new(0),
@@ -68,8 +73,30 @@ impl MockCloudBackend {
         }
     }
 
+    /// Set a fixed latency for all operations (legacy API).
+    /// For more realistic simulation, use `with_latency_config` instead.
     pub fn with_latency(mut self, latency: Duration) -> Self {
         self.latency = Some(latency);
+        self
+    }
+
+    /// Configure realistic latency simulation.
+    ///
+    /// # Example
+    /// ```
+    /// use cntryl_midge::cloud::{MockCloudBackend, LatencyConfig};
+    ///
+    /// // Same-region cloud simulation with actual sleeping
+    /// let backend = MockCloudBackend::new()
+    ///     .with_latency_config(LatencyConfig::same_region());
+    ///
+    /// // Fast benchmark mode (no sleeping, just accounting)
+    /// let backend = MockCloudBackend::new()
+    ///     .with_latency_config(LatencyConfig::benchmark());
+    /// ```
+    pub fn with_latency_config(mut self, config: LatencyConfig) -> Self {
+        self.latency = None; // Disable legacy latency
+        self.latency_sim = LatencySimulator::new(config);
         self
     }
 
@@ -125,10 +152,49 @@ impl MockCloudBackend {
         false
     }
 
-    fn simulate_latency(&self) {
+    /// Simulate latency for a read operation of the given size.
+    fn simulate_read_latency(&self, size_bytes: usize) {
+        if let Some(delay) = self.latency {
+            // Legacy fixed latency mode
+            std::thread::sleep(delay);
+        } else {
+            // Realistic latency simulation
+            self.latency_sim.simulate_read(size_bytes);
+        }
+    }
+
+    /// Simulate latency for a write operation of the given size.
+    fn simulate_write_latency(&self, size_bytes: usize) {
+        if let Some(delay) = self.latency {
+            // Legacy fixed latency mode
+            std::thread::sleep(delay);
+        } else {
+            // Realistic latency simulation
+            self.latency_sim.simulate_write(size_bytes);
+        }
+    }
+
+    /// Simulate latency for a list operation.
+    fn simulate_list_latency(&self) {
         if let Some(delay) = self.latency {
             std::thread::sleep(delay);
+        } else {
+            self.latency_sim.simulate_list();
         }
+    }
+
+    /// Simulate latency for a head/metadata operation.
+    fn simulate_head_latency(&self) {
+        if let Some(delay) = self.latency {
+            std::thread::sleep(delay);
+        } else {
+            self.latency_sim.simulate_head();
+        }
+    }
+
+    /// Get the latency simulator for stats access.
+    pub fn latency_stats(&self) -> &LatencySimulator {
+        &self.latency_sim
     }
 
     fn blob_path(&self, key: &str) -> PathBuf {
@@ -153,7 +219,7 @@ impl Default for MockCloudBackend {
 
 impl StorageBackend for MockCloudBackend {
     fn put_blob(&self, key: &str, data: Bytes) -> MidgeResult<()> {
-        self.simulate_latency();
+        self.simulate_write_latency(data.len());
 
         // Attempt to reserve a successful upload slot atomically.
         // This makes the fail-after semantics reliable under concurrency.
@@ -217,12 +283,11 @@ impl StorageBackend for MockCloudBackend {
     }
 
     fn get_blob(&self, key: &str) -> MidgeResult<Bytes> {
-        self.simulate_latency();
-
         // Special handling for manifest.json - return the cloud manifest if set
         if key == "manifest.json" {
             if let Some(ref manifest) = *self.cloud_manifest.lock() {
                 let data = serde_json::to_vec_pretty(manifest)?;
+                self.simulate_read_latency(data.len());
                 return Ok(Bytes::from(data));
             }
         }
@@ -238,11 +303,12 @@ impl StorageBackend for MockCloudBackend {
                 key: key.to_string(),
             });
         }
-        Ok(Bytes::from(std::fs::read(&path)?))
+        let data = std::fs::read(&path)?;
+        self.simulate_read_latency(data.len());
+        Ok(Bytes::from(data))
     }
 
     fn get_blob_range(&self, key: &str, start: u64, end: Option<u64>) -> MidgeResult<Bytes> {
-        self.simulate_latency();
         let path = self.blob_path(key);
         if !path.exists() {
             return Err(MidgeError::KeyNotFound {
@@ -256,11 +322,13 @@ impl StorageBackend for MockCloudBackend {
         if s > e || s >= data.len() {
             return Ok(Bytes::new());
         }
-        Ok(Bytes::from(data[s..e].to_vec()))
+        let result = data[s..e].to_vec();
+        self.simulate_read_latency(result.len());
+        Ok(Bytes::from(result))
     }
 
     fn delete_blob(&self, key: &str) -> MidgeResult<()> {
-        self.simulate_latency();
+        self.simulate_write_latency(0); // Delete is a write operation
         let path = self.blob_path(key);
         if path.exists() {
             std::fs::remove_file(&path)?;
@@ -270,7 +338,7 @@ impl StorageBackend for MockCloudBackend {
     }
 
     fn list_blobs(&self, prefix: &str) -> MidgeResult<Vec<String>> {
-        self.simulate_latency();
+        self.simulate_list_latency();
         let mut keys = Vec::new();
         fn visit_dir(
             dir: &std::path::Path,
@@ -307,7 +375,7 @@ impl StorageBackend for MockCloudBackend {
     }
 
     fn head_blob(&self, key: &str) -> MidgeResult<Option<BlobMeta>> {
-        self.simulate_latency();
+        self.simulate_head_latency();
         let path = self.blob_path(key);
         if !path.exists() {
             return Ok(None);
@@ -322,7 +390,7 @@ impl StorageBackend for MockCloudBackend {
     }
 
     fn put_blob_if_not_exists(&self, key: &str, data: Bytes) -> MidgeResult<String> {
-        self.simulate_latency();
+        self.simulate_write_latency(data.len());
         let path = self.blob_path(key);
         if path.exists() {
             // Map KeyExists to DatabaseLocked for lock acquisition semantics

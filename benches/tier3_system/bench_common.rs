@@ -17,11 +17,11 @@
 
 use bytes::Bytes;
 use cntryl_midge::cloud::mock::MockCloudBackend;
+use cntryl_midge::cloud::LatencyConfig;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 // ============================================================================
 // Constants
@@ -177,7 +177,9 @@ pub struct BenchEngineConfig {
     pub wal_sync: bool,
     pub enable_compaction: bool,
     pub memtable_size: usize,
-    pub cloud_latency_ms: u64,
+    /// Cloud latency configuration. Use `LatencyConfig::fast_simulation()` for
+    /// non-blocking benchmarks or `LatencyConfig::same_region()` for realistic simulation.
+    pub cloud_latency: LatencyConfig,
 }
 
 impl Default for BenchEngineConfig {
@@ -187,7 +189,8 @@ impl Default for BenchEngineConfig {
             wal_sync: false,
             enable_compaction: false,
             memtable_size: BENCH_MEMTABLE_SIZE,
-            cloud_latency_ms: 1, // 1ms mock cloud latency
+            // Use fast simulation by default (non-blocking, tracks latency)
+            cloud_latency: LatencyConfig::fast_simulation(),
         }
     }
 }
@@ -230,8 +233,23 @@ impl BenchEngineConfig {
         self
     }
 
-    pub fn with_cloud_latency(mut self, ms: u64) -> Self {
-        self.cloud_latency_ms = ms;
+    /// Set cloud latency using a LatencyConfig preset or custom configuration.
+    pub fn with_cloud_latency(mut self, config: LatencyConfig) -> Self {
+        self.cloud_latency = config;
+        self
+    }
+
+    /// Use fast cloud simulation (non-blocking, latency tracked but not applied).
+    /// Good for measuring pure engine throughput.
+    pub fn with_fast_cloud(mut self) -> Self {
+        self.cloud_latency = LatencyConfig::fast_simulation();
+        self
+    }
+
+    /// Use realistic same-region cloud simulation (blocking, ~5ms RTT).
+    /// Good for measuring realistic cloud performance.
+    pub fn with_realistic_cloud(mut self) -> Self {
+        self.cloud_latency = LatencyConfig::same_region();
         self
     }
 }
@@ -248,7 +266,7 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
         BenchStorageMode::LocalDisk => StorageMode::LocalDisk { db_path: path },
         BenchStorageMode::CloudBacked => {
             let backend = Arc::new(
-                MockCloudBackend::new().with_latency(Duration::from_millis(config.cloud_latency_ms)),
+                MockCloudBackend::new().with_latency_config(config.cloud_latency.clone()),
             );
             StorageMode::CloudBacked {
                 local_cache_path: path,
@@ -295,7 +313,7 @@ pub fn setup_engine_at_path(path: &std::path::Path, config: &BenchEngineConfig) 
         },
         BenchStorageMode::CloudBacked => {
             let backend = Arc::new(
-                MockCloudBackend::new().with_latency(Duration::from_millis(config.cloud_latency_ms)),
+                MockCloudBackend::new().with_latency_config(config.cloud_latency.clone()),
             );
             StorageMode::CloudBacked {
                 local_cache_path: path.to_path_buf(),

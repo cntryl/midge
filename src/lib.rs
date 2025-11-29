@@ -42,6 +42,9 @@ pub mod health;
 pub mod sst;
 pub mod wal;
 
+// Re-export commonly used cloud types for convenience
+pub use cloud::{LatencyConfig, LatencySimulator, MockCloudBackend, StorageBackend};
+
 // Convenience re-exports from core (commonly needed internal types)
 pub use crate::core::backup;
 pub use crate::core::locking;

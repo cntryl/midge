@@ -25,6 +25,10 @@
 pub mod backend;
 pub use backend::{BlobMeta, StorageBackend};
 
+// Latency simulation for realistic cloud testing
+pub mod latency_sim;
+pub use latency_sim::{LatencyConfig, LatencyMode, LatencySimulator};
+
 // Hybrid storage layer (local cache + cloud tier)
 pub mod hybrid;
 pub use hybrid::{CacheStats, CloudMetricsSnapshot, HybridStorage, HybridStorageBackend};

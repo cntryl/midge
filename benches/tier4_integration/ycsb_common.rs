@@ -9,12 +9,12 @@
 
 use bytes::Bytes;
 use cntryl_midge::cloud::mock::MockCloudBackend;
+use cntryl_midge::cloud::LatencyConfig;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Duration;
 use tempfile::TempDir;
 
 // ============================================================================
@@ -236,11 +236,14 @@ pub fn setup_engine_fs_sync() -> (MidgeEngine, TempDir) {
 // Engine Setup Variants (Cloud-backed)
 // ============================================================================
 
+/// Setup cloud-backed engine with realistic latency simulation.
+/// Use `LatencyConfig::benchmark()` for pure throughput testing (no sleep).
+/// Use `LatencyConfig::same_region()` for realistic same-region simulation.
+/// Use `LatencyConfig::fast_simulation()` for accounting-only mode.
 #[allow(dead_code)]
-pub fn setup_engine_cloud_nosync_with_latency(cloud_latency_ms: u64) -> (MidgeEngine, TempDir) {
+pub fn setup_engine_cloud_nosync_with_config(config: LatencyConfig) -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
-    let backend =
-        Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(cloud_latency_ms)));
+    let backend = Arc::new(MockCloudBackend::new().with_latency_config(config));
 
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
@@ -261,10 +264,9 @@ pub fn setup_engine_cloud_nosync_with_latency(cloud_latency_ms: u64) -> (MidgeEn
 }
 
 #[allow(dead_code)]
-pub fn setup_engine_cloud_sync_with_latency(cloud_latency_ms: u64) -> (MidgeEngine, TempDir) {
+pub fn setup_engine_cloud_sync_with_config(config: LatencyConfig) -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
-    let backend =
-        Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(cloud_latency_ms)));
+    let backend = Arc::new(MockCloudBackend::new().with_latency_config(config));
 
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
@@ -284,14 +286,17 @@ pub fn setup_engine_cloud_sync_with_latency(cloud_latency_ms: u64) -> (MidgeEngi
     (MidgeEngine::open(opts).unwrap(), dir)
 }
 
-// Convenience wrappers with a “typical” cloud latency (1ms)
+// Convenience wrappers - use fast_simulation (no blocking) for benchmarks
+// to measure engine throughput without artificial latency delays.
 
 #[allow(dead_code)]
 pub fn setup_engine_cloud_nosync() -> (MidgeEngine, TempDir) {
-    setup_engine_cloud_nosync_with_latency(1)
+    // Use fast simulation for benchmarks - tracks latency but doesn't block
+    setup_engine_cloud_nosync_with_config(LatencyConfig::fast_simulation())
 }
 
 #[allow(dead_code)]
 pub fn setup_engine_cloud_sync() -> (MidgeEngine, TempDir) {
-    setup_engine_cloud_sync_with_latency(1)
+    // Use fast simulation for benchmarks - tracks latency but doesn't block
+    setup_engine_cloud_sync_with_config(LatencyConfig::fast_simulation())
 }
