@@ -17,7 +17,9 @@ mod ycsb_common;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -95,7 +97,9 @@ fn setup_db_with_wal_sync(db_name: &str, wal_sync: bool) -> (MidgeEngine, PathBu
     let _ = std::fs::remove_dir_all(&path);
 
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
+        storage_mode: StorageMode::LocalDisk {
+            db_path: path.clone(),
+        },
         memtable_size: 8 * 1024 * 1024,
         enable_compaction: false,
         wal_sync,
@@ -113,7 +117,12 @@ fn cleanup_path(path: PathBuf) {
 
 /// Workload A variant: 50% read, 50% write
 /// Uses pre-computed keys and values to avoid allocations
-fn run_workload_a_variant(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], operations: usize) {
+fn run_workload_a_variant(
+    engine: &MidgeEngine,
+    keys: &[Bytes],
+    values: &[Bytes],
+    operations: usize,
+) {
     let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(12345);
     let zipfian = ZipfianGenerator::new(keys.len(), 0.99);
@@ -202,7 +211,6 @@ fn bench_durability_concurrent(c: &mut Criterion) {
     for (mode_name, wal_sync) in &[("async", false), ("sync_every", true)] {
         let total_ops = 4 * OPS_PER_THREAD;
         group.throughput(Throughput::Elements(total_ops as u64));
-        group.sample_size(if *wal_sync { 5 } else { 20 });
 
         let keys = Arc::clone(&keys);
         let values = Arc::clone(&values);
@@ -213,11 +221,12 @@ fn bench_durability_concurrent(c: &mut Criterion) {
             |b, &mode_name| {
                 let keys = Arc::clone(&keys);
                 let values = Arc::clone(&values);
+                let sync = *wal_sync;
                 b.iter_batched(
                     || {
                         setup_db_with_wal_sync(
                             &format!("concurrent_{}", mode_name),
-                            mode_name == "sync_every",
+                            sync,
                         )
                     },
                     |(engine, path)| {
@@ -253,7 +262,12 @@ fn bench_durability_concurrent(c: &mut Criterion) {
 // ============================================================================
 
 /// 95% read, 5% write - durability should have smaller impact on reads
-fn run_workload_b_variant(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], operations: usize) {
+fn run_workload_b_variant(
+    engine: &MidgeEngine,
+    keys: &[Bytes],
+    values: &[Bytes],
+    operations: usize,
+) {
     let cf = engine.default_column_family();
     let mut rng = StdRng::seed_from_u64(54321);
     let zipfian = ZipfianGenerator::new(keys.len(), 0.99);
@@ -313,7 +327,12 @@ fn bench_durability_read_heavy(c: &mut Criterion) {
 // ============================================================================
 
 /// 100% write workload - durability impact is maximum
-fn run_write_heavy_workload(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], operations: usize) {
+fn run_write_heavy_workload(
+    engine: &MidgeEngine,
+    keys: &[Bytes],
+    values: &[Bytes],
+    operations: usize,
+) {
     let cf = engine.default_column_family();
 
     for i in 0..operations {
@@ -330,11 +349,13 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
 
     // Pre-compute keys and values outside benchmark
     // Need keys beyond RECORD_COUNT for write-heavy workload
-    let keys: Vec<Bytes> = (0..RECORD_COUNT + OPS_PER_THREAD).map(generate_key).collect();
+    let keys: Vec<Bytes> = (0..RECORD_COUNT + OPS_PER_THREAD)
+        .map(generate_key)
+        .collect();
     let values = pregen_workload_values(OPS_PER_THREAD, 99999);
 
     for (mode_name, wal_sync) in &[("async", false), ("sync_every", true)] {
-        group.sample_size(if *wal_sync { 5 } else { 20 });
+        group.sample_size(if *wal_sync { 10 } else { 20 });
 
         group.bench_with_input(
             BenchmarkId::from_parameter(*mode_name),

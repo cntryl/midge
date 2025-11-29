@@ -9,110 +9,31 @@
 //! - Compaction interference under sustained load
 //! - Delete-heavy concurrent operations
 //! - Column family scalability under concurrent access
+//!
+//! ## Design Notes
+//!
+//! - Returns engine from timed closures to exclude teardown from timing
+//! - Precomputes all keys/values outside hot loops
+//! - Uses unique paths to avoid cross-iteration interference
+//! - Throughput measured in bytes where applicable
+//! - Tests all storage modes: Memory, LocalDisk, and CloudBacked
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+mod bench_common;
+
+use bench_common::{
+    make_key, make_value_fixed, precompute_kv, setup_engine, setup_engine_arc, BenchEngineConfig,
+    ALL_STORAGE_MODES, KEY_SIZE,
+};
+
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
-use std::hint::black_box;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-
-/// Global counter for unique benchmark directory names
-static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Key size in bytes (14 = "key_" + 10 digit number)
-const KEY_SIZE: usize = 14;
-
-#[inline]
-fn make_key(i: usize) -> Bytes {
-    // Fixed-size key using direct byte manipulation (no format! allocations)
-    let mut key = vec![0u8; KEY_SIZE];
-    key[..4].copy_from_slice(b"key_");
-    // Write i as 10-digit decimal directly
-    let mut n = i;
-    for j in (4..KEY_SIZE).rev() {
-        key[j] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    Bytes::from(key)
-}
-
-#[inline]
-fn make_value(size: usize) -> Bytes {
-    Bytes::from(vec![b'x'; size])
-}
-
-fn precompute_kv(n: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
-    let mut keys = Vec::with_capacity(n);
-    let mut vals = Vec::with_capacity(n);
-    for i in 0..n {
-        keys.push(make_key(i));
-        vals.push(make_value(value_size));
-    }
-    (keys, vals)
-}
-
-/// Generate unique path for benchmark to avoid cross-iteration interference
-fn unique_bench_path(prefix: &str) -> PathBuf {
-    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    std::env::temp_dir().join(format!("midge_bench_t3_stress_{}_{}_{}", prefix, pid, counter))
-}
-
-/// Wrapper to ensure cleanup on drop
-struct BenchDb {
-    engine: MidgeEngine,
-    path: PathBuf,
-}
-
-impl BenchDb {
-    fn new(prefix: &str, compaction: bool) -> Self {
-        let path = unique_bench_path(prefix);
-        let _ = std::fs::remove_dir_all(&path);
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
-            memtable_size: 4 * 1024 * 1024,
-            enable_compaction: compaction,
-            wal_sync: false, // Disable WAL sync for raw throughput measurement
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("failed to open engine");
-        Self { engine, path }
-    }
-}
-
-impl Drop for BenchDb {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-/// Create db for Arc usage (returns engine and path for cleanup)
-fn setup_db_arc(prefix: &str, compaction: bool) -> (Arc<MidgeEngine>, PathBuf) {
-    let path = unique_bench_path(prefix);
-    let _ = std::fs::remove_dir_all(&path);
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path.clone() },
-        memtable_size: 4 * 1024 * 1024,
-        enable_compaction: compaction,
-        wal_sync: false,
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("failed to open engine");
-    (Arc::new(engine), path)
-}
-
-fn cleanup_path(path: PathBuf) {
-    let _ = std::fs::remove_dir_all(&path);
-}
 
 // ============================================================================
 // Concurrent Writer Scaling
@@ -134,40 +55,43 @@ fn bench_concurrent_puts(c: &mut Criterion) {
         let ops_per_iter = threads * n_ops;
         let bytes_per_iter = ops_per_iter * (KEY_SIZE + value_size);
         group.throughput(Throughput::Bytes(bytes_per_iter as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}threads", threads)),
-            &threads,
-            |b, &tcount| {
-                let keys = Arc::clone(&keys);
-                let vals = Arc::clone(&vals);
-                b.iter_batched(
-                    || setup_db_arc("concurrent", false),
-                    |(engine, path)| {
-                        let cf = engine.default_column_family();
-                        thread::scope(|scope| {
-                            for tid in 0..tcount {
-                                let engine = Arc::clone(&engine);
-                                let cf = cf.clone();
-                                let keys = Arc::clone(&keys);
-                                let vals = Arc::clone(&vals);
-                                scope.spawn(move || {
-                                    let offset = tid * n_ops;
-                                    for i in 0..n_ops {
-                                        let idx = offset + i;
-                                        engine
-                                            .put(&cf, &keys[idx], &vals[idx])
-                                            .expect("put failed");
-                                    }
-                                });
-                            }
-                        });
-                        cleanup_path(path);
-                        black_box(());
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
+
+        for mode in ALL_STORAGE_MODES {
+            let bench_name = format!("{}threads/{}", threads, mode.as_str());
+            group.bench_with_input(
+                BenchmarkId::new("scaling", &bench_name),
+                &(threads, mode),
+                |b, &(tcount, mode)| {
+                    let keys = Arc::clone(&keys);
+                    let vals = Arc::clone(&vals);
+                    b.iter_batched(
+                        || setup_engine_arc("concurrent", mode),
+                        |engine| {
+                            let cf = engine.default_column_family();
+                            thread::scope(|scope| {
+                                for tid in 0..tcount {
+                                    let engine = Arc::clone(&engine);
+                                    let cf = cf.clone();
+                                    let keys = Arc::clone(&keys);
+                                    let vals = Arc::clone(&vals);
+                                    scope.spawn(move || {
+                                        let offset = tid * n_ops;
+                                        for i in 0..n_ops {
+                                            let idx = offset + i;
+                                            engine
+                                                .put(&cf, &keys[idx], &vals[idx])
+                                                .expect("put failed");
+                                        }
+                                    });
+                                }
+                            });
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::SmallInput,
+                    )
+                },
+            );
+        }
     }
 
     group.finish();
@@ -183,9 +107,9 @@ fn bench_mixed_read_write(c: &mut Criterion) {
 
     // Precompute data to avoid allocations in hot path
     let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
-    let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value(64)).collect();
+    let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value_fixed(64)).collect();
     let writer_keys: Vec<_> = (0..4_000).map(|i| make_key(i + 20_000)).collect();
-    let writer_vals: Vec<_> = (0..4_000).map(|_| make_value(128)).collect();
+    let writer_vals: Vec<_> = (0..4_000).map(|_| make_value_fixed(128)).collect();
     let writer_keys = Arc::new(writer_keys);
     let writer_vals = Arc::new(writer_vals);
     let reader_keys: Vec<_> = (0..10_000).step_by(3).map(make_key).collect();
@@ -195,56 +119,69 @@ fn bench_mixed_read_write(c: &mut Criterion) {
     let total_ops = 4 * 1_000 + 4 * reader_keys.len();
     group.throughput(Throughput::Elements(total_ops as u64));
 
-    group.bench_function("4w4r_threads", |b| {
-        let writer_keys = Arc::clone(&writer_keys);
-        let writer_vals = Arc::clone(&writer_vals);
-        let reader_keys = Arc::clone(&reader_keys);
-        
-        b.iter_batched(
-            || setup_db_arc("mixed", false),
-            |(engine, path)| {
-                let cf = engine.default_column_family();
+    for mode in ALL_STORAGE_MODES {
+        group.bench_with_input(
+            BenchmarkId::new("4w4r_threads", mode.as_str()),
+            &mode,
+            |b, &mode| {
                 let writer_keys = Arc::clone(&writer_keys);
                 let writer_vals = Arc::clone(&writer_vals);
                 let reader_keys = Arc::clone(&reader_keys);
-                
-                // Prefill (outside timed section ideally, but we measure full scenario)
-                for i in 0..10_000 {
-                    engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).expect("prefill failed");
-                }
+                let prefill_keys_ref = &prefill_keys;
+                let prefill_vals_ref = &prefill_vals;
 
-                thread::scope(|scope| {
-                    // Writers
-                    for t in 0..4 {
-                        let e = Arc::clone(&engine);
-                        let cf = cf.clone();
+                b.iter_batched(
+                    || {
+                        let engine = setup_engine_arc("mixed", mode);
+                        let cf = engine.default_column_family();
+                        // Prefill in setup
+                        for i in 0..10_000 {
+                            engine
+                                .put(&cf, &prefill_keys_ref[i], &prefill_vals_ref[i])
+                                .expect("prefill failed");
+                        }
+                        engine
+                    },
+                    |engine| {
+                        let cf = engine.default_column_family();
                         let writer_keys = Arc::clone(&writer_keys);
                         let writer_vals = Arc::clone(&writer_vals);
-                        scope.spawn(move || {
-                            for i in 0..1_000 {
-                                let idx = t * 1_000 + i;
-                                e.put(&cf, &writer_keys[idx], &writer_vals[idx]).expect("write failed");
-                            }
-                        });
-                    }
-                    // Readers
-                    for _ in 0..4 {
-                        let e = Arc::clone(&engine);
-                        let cf = cf.clone();
                         let reader_keys = Arc::clone(&reader_keys);
-                        scope.spawn(move || {
-                            for j in 0..reader_keys.len() {
-                                let _ = e.get(&cf, &reader_keys[j]);
+
+                        thread::scope(|scope| {
+                            // Writers
+                            for t in 0..4 {
+                                let e = Arc::clone(&engine);
+                                let cf = cf.clone();
+                                let writer_keys = Arc::clone(&writer_keys);
+                                let writer_vals = Arc::clone(&writer_vals);
+                                scope.spawn(move || {
+                                    for i in 0..1_000 {
+                                        let idx = t * 1_000 + i;
+                                        e.put(&cf, &writer_keys[idx], &writer_vals[idx])
+                                            .expect("write failed");
+                                    }
+                                });
+                            }
+                            // Readers
+                            for _ in 0..4 {
+                                let e = Arc::clone(&engine);
+                                let cf = cf.clone();
+                                let reader_keys = Arc::clone(&reader_keys);
+                                scope.spawn(move || {
+                                    for j in 0..reader_keys.len() {
+                                        let _ = e.get(&cf, &reader_keys[j]);
+                                    }
+                                });
                             }
                         });
-                    }
-                });
-                cleanup_path(path);
-                black_box(());
+                        engine // prevent Drop during timing
+                    },
+                    BatchSize::SmallInput,
+                )
             },
-            BatchSize::SmallInput,
-        )
-    });
+        );
+    }
 
     group.finish();
 }
@@ -259,37 +196,55 @@ fn bench_compaction_pressure(c: &mut Criterion) {
 
     // Precompute data
     let compaction_keys: Vec<_> = (0..25_000).map(make_key).collect();
-    let compaction_vals: Vec<_> = (0..25_000).map(|_| make_value(256)).collect();
+    let compaction_vals: Vec<_> = (0..25_000).map(|_| make_value_fixed(256)).collect();
     let verify_keys: Vec<_> = (0..1_000).step_by(50).map(make_key).collect();
 
     let total_bytes = 25_000 * (KEY_SIZE + 256);
     group.throughput(Throughput::Bytes(total_bytes as u64));
 
-    group.bench_function("steady_write_with_compaction", |b| {
-        b.iter_batched(
-            || BenchDb::new("compacting", true),
-            |db| {
-                let cf = db.engine.default_column_family();
-                for round in 0..5 {
-                    for i in 0..5_000 {
-                        let idx = round * 5_000 + i;
-                        db.engine
-                            .put(&cf, &compaction_keys[idx], &compaction_vals[idx])
-                            .expect("write failed");
-                    }
-                    // Small yield to allow compaction progress (avoid blocking the whole benchmark)
-                    std::thread::yield_now();
-                }
-                // Verify a few reads during/after compaction
-                for key in &verify_keys {
-                    let _ = db.engine.get(&cf, key);
-                }
-                black_box(());
-                // BenchDb cleanup happens on drop
+    for mode in ALL_STORAGE_MODES {
+        group.bench_with_input(
+            BenchmarkId::new("steady_write_with_compaction", mode.as_str()),
+            &mode,
+            |b, &mode| {
+                let keys_ref = &compaction_keys;
+                let vals_ref = &compaction_vals;
+                let verify_ref = &verify_keys;
+
+                b.iter_batched(
+                    || {
+                        setup_engine(
+                            "compacting",
+                            &BenchEngineConfig {
+                                storage_mode: mode,
+                                enable_compaction: true,
+                                ..Default::default()
+                            },
+                        )
+                    },
+                    |engine| {
+                        let cf = engine.default_column_family();
+                        for round in 0..5 {
+                            for i in 0..5_000 {
+                                let idx = round * 5_000 + i;
+                                engine
+                                    .put(&cf, &keys_ref[idx], &vals_ref[idx])
+                                    .expect("write failed");
+                            }
+                            // Small yield to allow compaction progress
+                            std::thread::yield_now();
+                        }
+                        // Verify a few reads during/after compaction
+                        for key in verify_ref {
+                            let _ = engine.get(&cf, key);
+                        }
+                        engine // prevent Drop during timing
+                    },
+                    BatchSize::SmallInput,
+                )
             },
-            BatchSize::SmallInput,
-        )
-    });
+        );
+    }
 
     group.finish();
 }
@@ -304,51 +259,59 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
 
     // Precompute data
     let prefill_keys: Vec<_> = (0..10_000).map(make_key).collect();
-    let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value(100)).collect();
+    let prefill_vals: Vec<_> = (0..10_000).map(|_| make_value_fixed(100)).collect();
     let delete_keys: Vec<_> = (0..10_000).map(make_key).collect();
     let delete_keys = Arc::new(delete_keys);
 
     for &threads in &[2, 4, 8] {
         group.throughput(Throughput::Elements(10_000));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}threads", threads)),
-            &threads,
-            |b, &tcount| {
-                let delete_keys = Arc::clone(&delete_keys);
-                b.iter_batched(
-                    || {
-                        let (engine, path) = setup_db_arc("delete_concurrent", false);
-                        let cf = engine.default_column_family();
-                        // Prefill with 10k keys
-                        for i in 0..10_000 {
-                            engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).expect("prefill failed");
-                        }
-                        (engine, path)
-                    },
-                    |(engine, path)| {
-                        let cf = engine.default_column_family();
-                        let delete_keys = Arc::clone(&delete_keys);
-                        thread::scope(|scope| {
-                            for tid in 0..tcount {
-                                let engine = Arc::clone(&engine);
-                                let cf = cf.clone();
-                                let delete_keys = Arc::clone(&delete_keys);
-                                scope.spawn(move || {
-                                    let offset = tid * (10_000 / tcount);
-                                    let count = 10_000 / tcount;
-                                    for i in 0..count {
-                                        engine.delete(&cf, &delete_keys[offset + i]).ok();
-                                    }
-                                });
+
+        for mode in ALL_STORAGE_MODES {
+            let bench_name = format!("{}threads/{}", threads, mode.as_str());
+            group.bench_with_input(
+                BenchmarkId::new("delete_scaling", &bench_name),
+                &(threads, mode),
+                |b, &(tcount, mode)| {
+                    let delete_keys = Arc::clone(&delete_keys);
+                    let prefill_keys_ref = &prefill_keys;
+                    let prefill_vals_ref = &prefill_vals;
+
+                    b.iter_batched(
+                        || {
+                            let engine = setup_engine_arc("delete_concurrent", mode);
+                            let cf = engine.default_column_family();
+                            // Prefill with 10k keys
+                            for i in 0..10_000 {
+                                engine
+                                    .put(&cf, &prefill_keys_ref[i], &prefill_vals_ref[i])
+                                    .expect("prefill failed");
                             }
-                        });
-                        cleanup_path(path);
-                        black_box(());
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
+                            engine
+                        },
+                        |engine| {
+                            let cf = engine.default_column_family();
+                            let delete_keys = Arc::clone(&delete_keys);
+                            thread::scope(|scope| {
+                                for tid in 0..tcount {
+                                    let engine = Arc::clone(&engine);
+                                    let cf = cf.clone();
+                                    let delete_keys = Arc::clone(&delete_keys);
+                                    scope.spawn(move || {
+                                        let offset = tid * (10_000 / tcount);
+                                        let count = 10_000 / tcount;
+                                        for i in 0..count {
+                                            engine.delete(&cf, &delete_keys[offset + i]).ok();
+                                        }
+                                    });
+                                }
+                            });
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::SmallInput,
+                    )
+                },
+            );
+        }
     }
 
     group.finish();
@@ -366,7 +329,7 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
     // Precompute for max pairs=8, 8*2*2500=40000
     let value_size = 150;
     let multi_cf_keys: Vec<_> = (0..40_000).map(make_key).collect();
-    let multi_cf_vals: Vec<_> = (0..40_000).map(|_| make_value(value_size)).collect();
+    let multi_cf_vals: Vec<_> = (0..40_000).map(|_| make_value_fixed(value_size)).collect();
     let multi_cf_keys = Arc::new(multi_cf_keys);
     let multi_cf_vals = Arc::new(multi_cf_vals);
 
@@ -374,57 +337,60 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
         let ops_per_iter = thread_pairs * 2 * 2_500; // pairs * threads_per_cf * ops_per_thread
         let bytes_per_iter = ops_per_iter * (KEY_SIZE + value_size);
         group.throughput(Throughput::Bytes(bytes_per_iter as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}cfs", thread_pairs)),
-            &thread_pairs,
-            |b, &pairs| {
-                let multi_cf_keys = Arc::clone(&multi_cf_keys);
-                let multi_cf_vals = Arc::clone(&multi_cf_vals);
-                b.iter_batched(
-                    || {
-                        let (engine, path) = setup_db_arc("multi_cf", false);
-                        // Create N column families
-                        for i in 1..pairs {
-                            engine
-                                .create_column_family(&format!("cf{}", i), Default::default())
-                                .ok();
-                        }
-                        (engine, path)
-                    },
-                    |(engine, path)| {
-                        let cf_list = engine.list_column_families();
-                        let multi_cf_keys = Arc::clone(&multi_cf_keys);
-                        let multi_cf_vals = Arc::clone(&multi_cf_vals);
-                        thread::scope(|scope| {
-                            // 2 threads per CF
-                            for (cf_idx, cf) in cf_list.iter().enumerate().take(pairs) {
-                                for tid in 0..2 {
-                                    let engine = Arc::clone(&engine);
-                                    let cf = cf.clone();
-                                    let multi_cf_keys = Arc::clone(&multi_cf_keys);
-                                    let multi_cf_vals = Arc::clone(&multi_cf_vals);
-                                    scope.spawn(move || {
-                                        let base = cf_idx * 2 * 2_500 + tid * 2_500;
-                                        for i in 0..2_500 {
-                                            engine
-                                                .put(
-                                                    &cf,
-                                                    &multi_cf_keys[base + i],
-                                                    &multi_cf_vals[base + i],
-                                                )
-                                                .expect("write failed");
-                                        }
-                                    });
-                                }
+
+        for mode in ALL_STORAGE_MODES {
+            let bench_name = format!("{}cfs/{}", thread_pairs, mode.as_str());
+            group.bench_with_input(
+                BenchmarkId::new("cf_scaling", &bench_name),
+                &(thread_pairs, mode),
+                |b, &(pairs, mode)| {
+                    let multi_cf_keys = Arc::clone(&multi_cf_keys);
+                    let multi_cf_vals = Arc::clone(&multi_cf_vals);
+                    b.iter_batched(
+                        || {
+                            let engine = setup_engine_arc("multi_cf", mode);
+                            // Create N column families
+                            for i in 1..pairs {
+                                engine
+                                    .create_column_family(&format!("cf{}", i), Default::default())
+                                    .ok();
                             }
-                        });
-                        cleanup_path(path);
-                        black_box(());
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
+                            engine
+                        },
+                        |engine| {
+                            let cf_list = engine.list_column_families();
+                            let multi_cf_keys = Arc::clone(&multi_cf_keys);
+                            let multi_cf_vals = Arc::clone(&multi_cf_vals);
+                            thread::scope(|scope| {
+                                // 2 threads per CF
+                                for (cf_idx, cf) in cf_list.iter().enumerate().take(pairs) {
+                                    for tid in 0..2 {
+                                        let engine = Arc::clone(&engine);
+                                        let cf = cf.clone();
+                                        let multi_cf_keys = Arc::clone(&multi_cf_keys);
+                                        let multi_cf_vals = Arc::clone(&multi_cf_vals);
+                                        scope.spawn(move || {
+                                            let base = cf_idx * 2 * 2_500 + tid * 2_500;
+                                            for i in 0..2_500 {
+                                                engine
+                                                    .put(
+                                                        &cf,
+                                                        &multi_cf_keys[base + i],
+                                                        &multi_cf_vals[base + i],
+                                                    )
+                                                    .expect("write failed");
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::SmallInput,
+                    )
+                },
+            );
+        }
     }
 
     group.finish();

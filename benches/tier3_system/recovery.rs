@@ -15,11 +15,18 @@
 //! - Precomputes all keys/values outside hot loops
 //! - Uses unique paths to avoid cross-iteration interference
 //! - Throughput measured in bytes
+//! - Uses DURABLE_STORAGE_MODES since recovery requires persistence
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use bytes::Bytes;
+mod bench_common;
+
+use bench_common::{
+    make_key, make_value_fixed, precompute_kv, setup_engine, unique_bench_path, BenchEngineConfig,
+    BenchStorageMode, BYTES_PER_OP, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
+};
+
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
@@ -27,63 +34,53 @@ use criterion::{
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-/// Global counter for unique benchmark directory names
-static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Setup a db at a specific path for recovery tests.
+/// Returns the path so we can reopen the same database.
+fn setup_db_at_path_with_mode(
+    path: &std::path::Path,
+    mode: BenchStorageMode,
+    wal_sync: bool,
+) -> MidgeEngine {
+    use cntryl_midge::cloud::mock::MockCloudBackend;
+    use std::time::Duration;
 
-/// Key size in bytes
-const KEY_SIZE: usize = 14;
-/// Default value size
-const VALUE_SIZE: usize = 128;
-/// Bytes per operation
-const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
-
-/// Generate unique path for benchmark database
-fn unique_bench_path(prefix: &str) -> PathBuf {
-    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    std::env::temp_dir().join(format!("midge_bench_recovery_{}_{}_{}", prefix, pid, counter))
-}
-
-#[inline]
-fn make_key(i: usize) -> Bytes {
-    let mut key = vec![0u8; KEY_SIZE];
-    key[..4].copy_from_slice(b"key_");
-    let mut n = i;
-    for j in (4..KEY_SIZE).rev() {
-        key[j] = b'0' + (n % 10) as u8;
-        n /= 10;
+    match mode {
+        BenchStorageMode::Memory => {
+            panic!("Recovery benchmarks require durable storage")
+        }
+        BenchStorageMode::LocalDisk => {
+            let opts = MidgeOptions {
+                storage_mode: StorageMode::LocalDisk {
+                    db_path: path.to_path_buf(),
+                },
+                memtable_size: 4 * 1024 * 1024,
+                enable_compaction: false,
+                wal_sync,
+                ..Default::default()
+            };
+            MidgeEngine::open(opts).unwrap()
+        }
+        BenchStorageMode::CloudBacked => {
+            let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(1)));
+            let opts = MidgeOptions {
+                storage_mode: StorageMode::CloudBacked {
+                    local_cache_path: path.to_path_buf(),
+                    cloud_backend: backend,
+                    storage_context: Default::default(),
+                    local_wal_sync: wal_sync,
+                    wal_batch_size: 1024 * 1024,
+                    sst_cache_capacity: 10,
+                },
+                memtable_size: 4 * 1024 * 1024,
+                enable_compaction: false,
+                wal_sync,
+                ..Default::default()
+            };
+            MidgeEngine::open(opts).unwrap()
+        }
     }
-    Bytes::from(key)
-}
-
-#[inline]
-fn make_value_fixed(size: usize) -> Bytes {
-    Bytes::from(vec![b'x'; size])
-}
-
-fn precompute_kv(n: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
-    let mut keys = Vec::with_capacity(n);
-    let mut vals = Vec::with_capacity(n);
-    for i in 0..n {
-        keys.push(make_key(i));
-        vals.push(make_value_fixed(value_size));
-    }
-    (keys, vals)
-}
-
-fn setup_db_at_path(path: &std::path::Path, enable_wal_sync: bool) -> MidgeEngine {
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: path.to_path_buf(),
-        },
-        memtable_size: 4 * 1024 * 1024,
-        enable_compaction: false,
-        wal_sync: enable_wal_sync,
-        ..Default::default()
-    };
-    MidgeEngine::open(opts).unwrap()
 }
 
 // ============================================================================
@@ -106,45 +103,52 @@ fn bench_recovery_throughput(c: &mut Criterion) {
         let bytes_total = (op_count as u64) * BYTES_PER_OP;
 
         group.throughput(Throughput::Bytes(bytes_total));
-        group.bench_with_input(
-            BenchmarkId::new("replay", op_count),
-            &op_count,
-            |b, &num_ops| {
-                b.iter_batched(
-                    || {
-                        // Setup and prefill database
-                        let db_path = unique_bench_path("replay");
-                        let _ = std::fs::remove_dir_all(&db_path);
 
-                        let engine = setup_db_at_path(&db_path, false);
-                        let cf = engine.default_column_family();
+        for mode in DURABLE_STORAGE_MODES {
+            let bench_name = format!("{}/{}", op_count, mode.as_str());
+            group.bench_with_input(
+                BenchmarkId::new("replay", &bench_name),
+                &(op_count, mode),
+                |b, &(num_ops, mode)| {
+                    let keys_ref = &keys;
+                    let vals_ref = &vals;
 
-                        // Write records to create WAL entries
-                        for i in 0..num_ops {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                        }
+                    b.iter_batched(
+                        || {
+                            // Setup and prefill database
+                            let db_path = unique_bench_path("replay");
+                            let _ = std::fs::remove_dir_all(&db_path);
 
-                        // Simulate crash (drop engine, don't clean up DB)
-                        drop(engine);
-                        db_path
-                    },
-                    |db_path| {
-                        // Measure recovery time (WAL replay)
-                        let engine = setup_db_at_path(&db_path, false);
+                            let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                            let cf = engine.default_column_family();
 
-                        // Validate some data integrity
-                        let cf = engine.default_column_family();
-                        for i in (0..num_ops).step_by(1_000) {
-                            let val = engine.get(&cf, &keys[i]).unwrap();
-                            assert!(val.is_some(), "key not recovered: {}", i);
-                        }
+                            // Write records to create WAL entries
+                            for i in 0..num_ops {
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            }
 
-                        engine // prevent Drop during timing
-                    },
-                    BatchSize::LargeInput,
-                )
-            },
-        );
+                            // Simulate crash (drop engine, don't clean up DB)
+                            drop(engine);
+                            (db_path, mode)
+                        },
+                        |(db_path, mode)| {
+                            // Measure recovery time (WAL replay)
+                            let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+
+                            // Validate some data integrity
+                            let cf = engine.default_column_family();
+                            for i in (0..num_ops).step_by(1_000) {
+                                let val = engine.get(&cf, &keys_ref[i]).unwrap();
+                                assert!(val.is_some(), "key not recovered: {}", i);
+                            }
+
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::LargeInput,
+                    )
+                },
+            );
+        }
     }
 
     group.finish();
@@ -164,40 +168,47 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
         let bytes_total = (op_count as u64) * BYTES_PER_OP;
 
         group.throughput(Throughput::Bytes(bytes_total));
-        group.bench_with_input(
-            BenchmarkId::new("replay_sync", op_count),
-            &op_count,
-            |b, &num_ops| {
-                b.iter_batched(
-                    || {
-                        let db_path = unique_bench_path("sync");
-                        let _ = std::fs::remove_dir_all(&db_path);
 
-                        let engine = setup_db_at_path(&db_path, true);
-                        let cf = engine.default_column_family();
+        for mode in DURABLE_STORAGE_MODES {
+            let bench_name = format!("{}/{}", op_count, mode.as_str());
+            group.bench_with_input(
+                BenchmarkId::new("replay_sync", &bench_name),
+                &(op_count, mode),
+                |b, &(num_ops, mode)| {
+                    let keys_ref = &keys;
+                    let vals_ref = &vals;
 
-                        for i in 0..num_ops {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                        }
+                    b.iter_batched(
+                        || {
+                            let db_path = unique_bench_path("sync");
+                            let _ = std::fs::remove_dir_all(&db_path);
 
-                        drop(engine);
-                        db_path
-                    },
-                    |db_path| {
-                        let engine = setup_db_at_path(&db_path, true);
+                            let engine = setup_db_at_path_with_mode(&db_path, mode, true);
+                            let cf = engine.default_column_family();
 
-                        // Quick validation
-                        let cf = engine.default_column_family();
-                        for i in (0..num_ops).step_by(10_000) {
-                            black_box(engine.get(&cf, &keys[i]).unwrap());
-                        }
+                            for i in 0..num_ops {
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            }
 
-                        engine // prevent Drop during timing
-                    },
-                    BatchSize::LargeInput,
-                )
-            },
-        );
+                            drop(engine);
+                            (db_path, mode)
+                        },
+                        |(db_path, mode)| {
+                            let engine = setup_db_at_path_with_mode(&db_path, mode, true);
+
+                            // Quick validation
+                            let cf = engine.default_column_family();
+                            for i in (0..num_ops).step_by(10_000) {
+                                black_box(engine.get(&cf, &keys_ref[i]).unwrap());
+                            }
+
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::LargeInput,
+                    )
+                },
+            );
+        }
     }
 
     group.finish();
@@ -217,50 +228,57 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
         let bytes_total = (op_count as u64) * BYTES_PER_OP;
 
         group.throughput(Throughput::Bytes(bytes_total));
-        group.bench_with_input(
-            BenchmarkId::new("replay_l0", op_count),
-            &op_count,
-            |b, &num_ops| {
-                b.iter_batched(
-                    || {
-                        let db_path = unique_bench_path("l0");
-                        let _ = std::fs::remove_dir_all(&db_path);
 
-                        let engine = setup_db_at_path(&db_path, false);
-                        let cf = engine.default_column_family();
+        for mode in DURABLE_STORAGE_MODES {
+            let bench_name = format!("{}/{}", op_count, mode.as_str());
+            group.bench_with_input(
+                BenchmarkId::new("replay_l0", &bench_name),
+                &(op_count, mode),
+                |b, &(num_ops, mode)| {
+                    let keys_ref = &keys;
+                    let vals_ref = &vals;
 
-                        // Write half the data
-                        for i in 0..(num_ops / 2) {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                        }
+                    b.iter_batched(
+                        || {
+                            let db_path = unique_bench_path("l0");
+                            let _ = std::fs::remove_dir_all(&db_path);
 
-                        // Flush memtable to L0
-                        engine.flush().unwrap();
+                            let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                            let cf = engine.default_column_family();
 
-                        // Write remaining data (stays in WAL)
-                        for i in (num_ops / 2)..num_ops {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                        }
+                            // Write half the data
+                            for i in 0..(num_ops / 2) {
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            }
 
-                        drop(engine);
-                        db_path
-                    },
-                    |db_path| {
-                        let engine = setup_db_at_path(&db_path, false);
+                            // Flush memtable to L0
+                            engine.flush().unwrap();
 
-                        // Validate all data recovered
-                        let cf = engine.default_column_family();
-                        for i in (0..num_ops).step_by(5_000) {
-                            let val = engine.get(&cf, &keys[i]).unwrap();
-                            assert!(val.is_some(), "key {} not recovered", i);
-                        }
+                            // Write remaining data (stays in WAL)
+                            for i in (num_ops / 2)..num_ops {
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            }
 
-                        engine // prevent Drop during timing
-                    },
-                    BatchSize::LargeInput,
-                )
-            },
-        );
+                            drop(engine);
+                            (db_path, mode)
+                        },
+                        |(db_path, mode)| {
+                            let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+
+                            // Validate all data recovered
+                            let cf = engine.default_column_family();
+                            for i in (0..num_ops).step_by(5_000) {
+                                let val = engine.get(&cf, &keys_ref[i]).unwrap();
+                                assert!(val.is_some(), "key {} not recovered", i);
+                            }
+
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::LargeInput,
+                    )
+                },
+            );
+        }
     }
 
     group.finish();
@@ -283,33 +301,43 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
     let small_bytes = (op_count as u64) * (KEY_SIZE + small_value_size) as u64;
 
     group.throughput(Throughput::Bytes(small_bytes));
-    group.bench_function("recovery_small_values_100k", |b| {
-        b.iter_batched(
-            || {
-                let db_path = unique_bench_path("small_vals");
-                let _ = std::fs::remove_dir_all(&db_path);
 
-                let engine = setup_db_at_path(&db_path, false);
-                let cf = engine.default_column_family();
+    for mode in DURABLE_STORAGE_MODES {
+        group.bench_with_input(
+            BenchmarkId::new("recovery_small_values_100k", mode.as_str()),
+            &mode,
+            |b, &mode| {
+                let keys_ref = &keys_small;
+                let vals_ref = &vals_small;
 
-                for i in 0..op_count {
-                    engine.put(&cf, &keys_small[i], &vals_small[i]).unwrap();
-                }
+                b.iter_batched(
+                    || {
+                        let db_path = unique_bench_path("small_vals");
+                        let _ = std::fs::remove_dir_all(&db_path);
 
-                drop(engine);
-                db_path
+                        let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                        let cf = engine.default_column_family();
+
+                        for i in 0..op_count {
+                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                        }
+
+                        drop(engine);
+                        (db_path, mode)
+                    },
+                    |(db_path, mode)| {
+                        let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+
+                        let cf = engine.default_column_family();
+                        black_box(engine.get(&cf, &keys_ref[50_000]).unwrap());
+
+                        engine // prevent Drop during timing
+                    },
+                    BatchSize::LargeInput,
+                )
             },
-            |db_path| {
-                let engine = setup_db_at_path(&db_path, false);
-
-                let cf = engine.default_column_family();
-                black_box(engine.get(&cf, &keys_small[50_000]).unwrap());
-
-                engine // prevent Drop during timing
-            },
-            BatchSize::LargeInput,
-        )
-    });
+        );
+    }
 
     // Large values (1KB)
     let large_value_size = 1024usize;
@@ -317,33 +345,43 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
     let large_bytes = (op_count as u64) * (KEY_SIZE + large_value_size) as u64;
 
     group.throughput(Throughput::Bytes(large_bytes));
-    group.bench_function("recovery_large_values_100k", |b| {
-        b.iter_batched(
-            || {
-                let db_path = unique_bench_path("large_vals");
-                let _ = std::fs::remove_dir_all(&db_path);
 
-                let engine = setup_db_at_path(&db_path, false);
-                let cf = engine.default_column_family();
+    for mode in DURABLE_STORAGE_MODES {
+        group.bench_with_input(
+            BenchmarkId::new("recovery_large_values_100k", mode.as_str()),
+            &mode,
+            |b, &mode| {
+                let keys_ref = &keys_large;
+                let vals_ref = &vals_large;
 
-                for i in 0..op_count {
-                    engine.put(&cf, &keys_large[i], &vals_large[i]).unwrap();
-                }
+                b.iter_batched(
+                    || {
+                        let db_path = unique_bench_path("large_vals");
+                        let _ = std::fs::remove_dir_all(&db_path);
 
-                drop(engine);
-                db_path
+                        let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+                        let cf = engine.default_column_family();
+
+                        for i in 0..op_count {
+                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                        }
+
+                        drop(engine);
+                        (db_path, mode)
+                    },
+                    |(db_path, mode)| {
+                        let engine = setup_db_at_path_with_mode(&db_path, mode, false);
+
+                        let cf = engine.default_column_family();
+                        black_box(engine.get(&cf, &keys_ref[50_000]).unwrap());
+
+                        engine // prevent Drop during timing
+                    },
+                    BatchSize::LargeInput,
+                )
             },
-            |db_path| {
-                let engine = setup_db_at_path(&db_path, false);
-
-                let cf = engine.default_column_family();
-                black_box(engine.get(&cf, &keys_large[50_000]).unwrap());
-
-                engine // prevent Drop during timing
-            },
-            BatchSize::LargeInput,
-        )
-    });
+        );
+    }
 
     group.finish();
 }
