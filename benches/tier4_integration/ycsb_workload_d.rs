@@ -18,7 +18,7 @@ mod criterion_helper;
 mod ycsb_common;
 
 use cntryl_midge::{MidgeEngine, WriteBatch};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use hdrhistogram::Histogram;
 
@@ -173,6 +173,7 @@ fn bench_workload_d(c: &mut Criterion) {
     init_ycsb_globals();
 
     let mut group = c.benchmark_group("ycsb_workload_d_cf_variants");
+    group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_ITER as u64));
 
     let scenarios = ["fs_nosync", "fs_sync", "cloud_nosync", "cloud_sync"];

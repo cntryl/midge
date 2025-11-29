@@ -23,7 +23,7 @@ mod ycsb_common;
 use bytes::Bytes;
 use cntryl_midge::MidgeEngine;
 use cntryl_midge::Query;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use hdrhistogram::Histogram;
 
@@ -149,6 +149,7 @@ fn bench_workload_e(c: &mut Criterion) {
     let scan_ranges = Arc::new(scan_ranges);
 
     let mut group = c.benchmark_group("ycsb_workload_e_cf_variants");
+    group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_ITER as u64));
 
     let scenarios = ["fs_nosync", "cloud_nosync"];
