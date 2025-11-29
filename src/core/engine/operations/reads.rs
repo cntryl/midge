@@ -419,11 +419,17 @@ impl MidgeEngine {
 
         // Add SST sources for this CF
         let version = self.version_set.load();
+        
+        // Filter SST files to only those that overlap with the scan range
+        // This avoids opening/downloading SSTs that can't possibly contain keys in range
         let mut cf_files: Vec<_> = version
             .manifest
             .files
             .iter()
             .filter(|f| f.cf_id == cf_id.as_u32())
+            .filter(|f| {
+                crate::core::manifest::Manifest::file_overlaps_range(f, start, end_ref)
+            })
             .collect();
 
         // Collect all range tombstones from SSTs for this CF

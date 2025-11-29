@@ -22,9 +22,9 @@ use tempfile::TempDir;
 // ============================================================================
 
 #[allow(dead_code)]
-pub const OPS_PER_ITER: usize = 2_000; // Reduced from 5000 for faster iterations
+pub const OPS_PER_ITER: usize = 500; // Reduced for fast feedback (~200ms iterations)
 #[allow(dead_code)]
-pub const RECORD_COUNT: usize = 10_000; // Reduced from 25000 for faster load
+pub const RECORD_COUNT: usize = 2_500; // Reduced for fast load
 pub const VALUE_SIZE: usize = 1_000;
 pub const BATCH_SIZE: usize = 128; // Bumped from 100 for fewer flushes
 

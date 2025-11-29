@@ -38,7 +38,7 @@ use std::time::Instant;
 use ycsb_common::*;
 
 const CF_COUNTS: &[usize] = &[1, 4, 16]; // Reduced from [1,2,4,8,16] - cloud doesn't need full sweep
-const SCAN_LENGTH: usize = 50;
+const SCAN_LENGTH: usize = 20; // Reduced from 50 for faster iterations
 const RANGE_COUNT: usize = OPS_PER_ITER;
 
 // ============================================================================
