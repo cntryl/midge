@@ -83,28 +83,32 @@ impl SparseIndex {
 
     /// Find blocks in a range without allocating.
     /// Returns an iterator over block handles where keys may fall in [start, end).
+    ///
+    /// Note: Since the sparse index stores the LAST key of each block, we must be
+    /// conservative about the end bound. A block with last_key >= end might still
+    /// contain keys < end, so we must include such blocks.
     #[inline]
     pub fn find_blocks_in_range<'a>(
         &'a self,
         start: &[u8],
         end: &'a [u8],
     ) -> impl Iterator<Item = &'a BlockHandle> + 'a {
-        // Use partition_point for cleaner binary search
+        // Find start index: first block where last_key >= start.
+        // This is the first block that could contain keys >= start.
         let start_idx = self.entries.partition_point(|e| e.key.as_ref() < start);
 
-        // Clamp to valid range - if start is beyond last entry, start from last
-        let start_idx = if start_idx == 0 {
-            0
-        } else if start_idx >= self.entries.len() {
-            self.entries.len().saturating_sub(1)
-        } else {
-            start_idx - 1
-        };
+        // If start is beyond all entries, clamp to last entry
+        let start_idx = start_idx.min(self.entries.len().saturating_sub(1));
 
-        // Use iterator instead of collecting into Vec
-        self.entries[start_idx..]
+        // Find end index: partition_point returns first index where last_key >= end.
+        // We need to INCLUDE that block because it may contain keys < end.
+        // So we add 1 to include the block at end_idx.
+        let end_idx = self.entries.partition_point(|e| e.key.as_ref() < end);
+        // Include the block at end_idx if it exists (add 1 to the slice end)
+        let end_idx = (end_idx + 1).min(self.entries.len());
+
+        self.entries[start_idx..end_idx]
             .iter()
-            .take_while(move |en| en.key.as_ref() < end)
             .map(|en| &en.block_handle)
     }
 }
@@ -198,19 +202,23 @@ mod tests {
     #[test]
     fn should_find_blocks_in_range_from_start_to_end_exclusive() {
         // Arrange
+        // Sparse index stores LAST key in each block
         let mut b = SparseIndexBuilder::new();
-        b.add(Bytes::from_static(b"a"), BlockHandle::new(10, 1));
-        b.add(Bytes::from_static(b"c"), BlockHandle::new(20, 2));
-        b.add(Bytes::from_static(b"e"), BlockHandle::new(30, 3));
+        b.add(Bytes::from_static(b"a"), BlockHandle::new(10, 1)); // Block 0 ends with "a"
+        b.add(Bytes::from_static(b"c"), BlockHandle::new(20, 2)); // Block 1 ends with "c"
+        b.add(Bytes::from_static(b"e"), BlockHandle::new(30, 3)); // Block 2 ends with "e"
         let idx = b.finish();
 
-        // Act
+        // Act: Query range [b, e)
+        // - Block 0 (last="a"): last_key < "b", so no keys >= "b" → skip
+        // - Block 1 (last="c"): last_key >= "b", could have keys in [b, c] → include
+        // - Block 2 (last="e"): last_key >= "e", could have keys in [first_key, e) → include
         let handles: Vec<u64> = idx
             .find_blocks_in_range(b"b", b"e")
             .map(|h| h.offset)
             .collect();
 
-        // Assert
-        assert_eq!(handles, vec![10u64, 20u64]);
+        // Assert: Should return blocks 1 and 2
+        assert_eq!(handles, vec![20u64, 30u64]);
     }
 }

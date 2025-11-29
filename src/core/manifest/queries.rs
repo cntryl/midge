@@ -47,31 +47,6 @@ impl Manifest {
         }
     }
 
-    /// Check if a file's key range overlaps with the given scan range.
-    /// Returns true if the file might contain keys in [start, end).
-    pub fn file_overlaps_range(file: &FileMeta, start: Option<&[u8]>, end: Option<&[u8]>) -> bool {
-        match (&file.smallest_key, &file.largest_key) {
-            (Some(file_smallest), Some(file_largest)) => {
-                // File range: [file_smallest, file_largest]
-                // Scan range: [start, end)
-                //
-                // No overlap if:
-                //   - file ends before scan starts: file_largest < start
-                //   - file starts at or after scan ends: file_smallest >= end
-                let file_ends_before_scan = match start {
-                    Some(s) => file_largest.as_slice() < s,
-                    None => false, // No lower bound, so can't end before scan
-                };
-                let file_starts_after_scan = match end {
-                    Some(e) => file_smallest.as_slice() >= e,
-                    None => false, // No upper bound, so can't start after scan
-                };
-                !file_ends_before_scan && !file_starts_after_scan
-            }
-            _ => true, // If bounds are unknown, must check
-        }
-    }
-
     /// Get all levels that have files, sorted ascending.
     pub fn active_levels(&self) -> Vec<u32> {
         let mut levels: Vec<u32> = self.files.iter().map(|f| f.level).collect();

@@ -91,7 +91,7 @@ fn bench_system_wal_write(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(15);
 
-    for &entries in &[500usize, 2_000, 10_000] { // Reduced for fast feedback
+    for &entries in &[1_000usize, 10_000, 50_000] { // Reduced from 100k for faster runs
         // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
@@ -144,7 +144,7 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(15);
 
-    for &entries in &[2_000usize, 10_000] { // Reduced for fast feedback
+    for &entries in &[10_000usize, 50_000] {
         // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let read_count = 1_000usize;
@@ -212,7 +212,7 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(12);
 
-    for &entries in &[5_000usize, 15_000] { // Reduced for fast feedback
+    for &entries in &[25_000usize, 50_000] { // Reduced from 50k/100k for faster runs
         // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
@@ -221,7 +221,7 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
 
         // LocalDisk only for larger workload to avoid cloud overhead
         for mode in DURABLE_STORAGE_MODES {
-            if entries > 5_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
+            if entries > 25_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
                 continue;
             }
             let bench_name = format!("{}/{}", entries, mode.as_str());
@@ -273,8 +273,8 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(15);
 
-    let hot_set_size = 2_000usize;  // Reduced for fast feedback
-    let total_ops = 10_000usize;    // Reduced for fast feedback
+    let hot_set_size = 10_000usize;
+    let total_ops = 50_000usize;
     let (keys, vals) = precompute_kv(hot_set_size);
 
     // Precompute operation indices and types (80% read, 20% write)

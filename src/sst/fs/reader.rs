@@ -303,12 +303,12 @@ impl SstFile {
             // End bound only - take all blocks up to end position
             (None, Some(e)) => {
                 let entries = sparse_index.entries();
-                let end_idx = entries
-                    .binary_search_by(|en| en.key.as_ref().cmp(e))
-                    .map(|i| i.saturating_sub(1))
-                    .unwrap_or_else(|i| i.saturating_sub(1))
-                    .min(entries.len().saturating_sub(1));
-                entries[..=end_idx]
+                // Find first block where last_key >= e. Include that block too
+                // because it may contain keys < e (last_key is the max key in block)
+                let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
+                // Include block at end_idx if it exists
+                let end_idx = (end_idx + 1).min(entries.len());
+                entries[..end_idx]
                     .iter()
                     .map(|en| en.block_handle)
                     .collect()
@@ -405,12 +405,11 @@ impl SstFile {
             }
             (None, Some(e)) => {
                 let entries = sparse_index.entries();
-                let end_idx = entries
-                    .binary_search_by(|en| en.key.as_ref().cmp(e))
-                    .map(|i| i.saturating_sub(1))
-                    .unwrap_or_else(|i| i.saturating_sub(1))
-                    .min(entries.len().saturating_sub(1));
-                entries[..=end_idx]
+                // Find first block where last_key >= e. Include that block too
+                // because it may contain keys < e
+                let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
+                let end_idx = (end_idx + 1).min(entries.len());
+                entries[..end_idx]
                     .iter()
                     .map(|en| en.block_handle)
                     .collect()
@@ -499,12 +498,11 @@ impl SstFile {
             }
             (None, Some(e)) => {
                 let entries = sparse_index.entries();
-                let end_idx = entries
-                    .binary_search_by(|en| en.key.as_ref().cmp(e))
-                    .map(|i| i.saturating_sub(1))
-                    .unwrap_or_else(|i| i.saturating_sub(1))
-                    .min(entries.len().saturating_sub(1));
-                entries[..=end_idx]
+                // Find first block where last_key >= e. Include that block too
+                // because it may contain keys < e
+                let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
+                let end_idx = (end_idx + 1).min(entries.len());
+                entries[..end_idx]
                     .iter()
                     .map(|en| en.block_handle)
                     .collect()

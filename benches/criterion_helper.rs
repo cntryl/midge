@@ -36,8 +36,8 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // NOTE: Use group.sampling_mode(SamplingMode::Flat) in benchmarks.
         // ---------------------------------------------------------------
         BenchTier::Tier1Hot => Criterion::default()
-            .warm_up_time(Duration::from_millis(100))
-            .measurement_time(Duration::from_secs(1))
+            .warm_up_time(Duration::from_millis(200))
+            .measurement_time(Duration::from_millis(500))
             .sample_size(20)
             .noise_threshold(0.015)
             .confidence_level(0.95)
@@ -52,7 +52,7 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // NOTE: Use group.sampling_mode(SamplingMode::Flat) in benchmarks.
         // ---------------------------------------------------------------
         BenchTier::Tier2Subsystem => Criterion::default()
-            .warm_up_time(Duration::from_millis(100))
+            .warm_up_time(Duration::from_millis(300))
             .measurement_time(Duration::from_secs(1))
             .sample_size(15)
             .noise_threshold(0.02)
@@ -70,8 +70,8 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // before each timed iteration.
         // ---------------------------------------------------------------
         BenchTier::Tier3System => Criterion::default()
-            .warm_up_time(Duration::from_millis(100))
-            .measurement_time(Duration::from_secs(60))
+            .warm_up_time(Duration::from_secs(1))
+            .measurement_time(Duration::from_secs(5))
             .sample_size(10)
             .noise_threshold(0.03)
             .confidence_level(0.95)
@@ -85,8 +85,8 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // Goal: measure durable write latency.
         // ---------------------------------------------------------------
         BenchTier::Tier4Integration => Criterion::default()
-            .warm_up_time(Duration::from_millis(100))
-            .measurement_time(Duration::from_secs(60))
+            .warm_up_time(Duration::from_millis(500))
+            .measurement_time(Duration::from_secs(3))
             .sample_size(10)
             .noise_threshold(0.05)
             .confidence_level(0.90)
@@ -103,8 +103,8 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // - simulate multi-threaded hot load
         // ---------------------------------------------------------------
         BenchTier::Tier5Soak => Criterion::default()
-            .warm_up_time(Duration::from_millis(100))
-            .measurement_time(Duration::from_secs(90))
+            .warm_up_time(Duration::from_secs(1))
+            .measurement_time(Duration::from_secs(10))
             .sample_size(10)
             .noise_threshold(0.10)
             .confidence_level(0.85)
@@ -121,8 +121,8 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // take seconds → minutes.
         // ---------------------------------------------------------------
         BenchTier::Tier6Capacity => Criterion::default()
-            .warm_up_time(Duration::from_millis(100))
-            .measurement_time(Duration::from_secs(90))
+            .warm_up_time(Duration::from_secs(2))
+            .measurement_time(Duration::from_secs(30))
             .sample_size(3)
             .noise_threshold(0.20)
             .confidence_level(0.80)

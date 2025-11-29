@@ -121,8 +121,8 @@ fn bench_flush(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_flush");
     group.sampling_mode(SamplingMode::Flat);
 
-    // Reduced key counts for fast feedback (~500ms per iteration)
-    for &num_keys in &[1_000, 5_000] {
+    // Reduced key counts to keep each iteration under ~2s
+    for &num_keys in &[5_000, 20_000] {
         // Precompute KV once per key count, reused across all modes
         let kv = PrecomputedKV::new(num_keys, DEFAULT_VALUE_SIZE);
         let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
@@ -172,8 +172,8 @@ fn bench_compact_all(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(12);
 
-    // Reduced key counts for fast feedback (~500ms per iteration)
-    for &num_keys in &[2_000, 5_000] {
+    // Reduced key counts for faster runs; LocalDisk-only for larger
+    for &num_keys in &[10_000, 15_000] {
         // Precompute KV once per key count, reused across all modes
         let kv = PrecomputedKV::new(num_keys, DEFAULT_VALUE_SIZE);
         let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
@@ -182,7 +182,7 @@ fn bench_compact_all(c: &mut Criterion) {
 
         for mode in DURABLE_STORAGE_MODES {
             // LocalDisk only for larger workload to avoid cloud overhead
-            if num_keys > 2_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
+            if num_keys > 10_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
                 continue;
             }
             let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
@@ -227,8 +227,8 @@ fn bench_flush_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_flush_throughput");
     group.sampling_mode(SamplingMode::Flat);
 
-    // Reduced for fast feedback (~200ms per iteration)
-    let num_keys = 1_000;
+    // Reduced to keep iterations fast while still measuring throughput accurately
+    let num_keys = 5_000;
 
     for &value_size in &[64, 256, 1024, 4096] {
         // Precompute KV once per value size, reused across all modes
@@ -280,8 +280,8 @@ fn bench_incremental_compact(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(12);
 
-    // Reduced for fast feedback (~500ms per iteration)
-    let num_keys_per_batch = 500;
+    // Reduced to keep iterations under ~2s while still testing multi-batch compaction
+    let num_keys_per_batch = 2_000;
     let num_batches = 4;
 
     // Generate batched KV with overlapping key ranges for realistic compaction

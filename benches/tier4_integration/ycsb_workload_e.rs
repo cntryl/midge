@@ -23,7 +23,7 @@ mod ycsb_common;
 use bytes::Bytes;
 use cntryl_midge::MidgeEngine;
 use cntryl_midge::Query;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use hdrhistogram::Histogram;
 
@@ -38,7 +38,7 @@ use std::time::Instant;
 use ycsb_common::*;
 
 const CF_COUNTS: &[usize] = &[1, 4, 16]; // Reduced from [1,2,4,8,16] - cloud doesn't need full sweep
-const SCAN_LENGTH: usize = 20; // Reduced from 50 for faster iterations
+const SCAN_LENGTH: usize = 50;
 const RANGE_COUNT: usize = OPS_PER_ITER;
 
 // ============================================================================
@@ -149,7 +149,6 @@ fn bench_workload_e(c: &mut Criterion) {
     let scan_ranges = Arc::new(scan_ranges);
 
     let mut group = c.benchmark_group("ycsb_workload_e_cf_variants");
-    group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_ITER as u64));
 
     let scenarios = ["fs_nosync", "cloud_nosync"];
