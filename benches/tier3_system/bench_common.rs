@@ -28,15 +28,19 @@ use std::time::Duration;
 // ============================================================================
 
 /// Default key size in bytes (14 bytes: "key_" + 10 digits)
+#[allow(dead_code)]
 pub const KEY_SIZE: usize = 14;
 
 /// Default value size for benchmarks
+#[allow(dead_code)]
 pub const VALUE_SIZE: usize = 128;
 
 /// Bytes per operation (key + value)
+#[allow(dead_code)]
 pub const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
 
 /// Default memtable size for benchmarks (4MB)
+#[allow(dead_code)]
 pub const BENCH_MEMTABLE_SIZE: usize = 4 * 1024 * 1024;
 
 // ============================================================================

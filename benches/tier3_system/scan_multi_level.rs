@@ -15,7 +15,8 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_kv, setup_engine, BenchEngineConfig, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
+    precompute_kv, setup_engine, BenchEngineConfig, BYTES_PER_OP, DURABLE_STORAGE_MODES,
+    VALUE_SIZE,
 };
 
 use bytes::Bytes;
@@ -25,9 +26,6 @@ use criterion::{
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-
-/// Bytes per operation
-const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
 
 /// Benchmark scanning across multiple LSM levels (50k keys)
 fn bench_scan_multi_level_range(c: &mut Criterion) {

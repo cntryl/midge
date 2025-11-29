@@ -15,8 +15,8 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    make_key, make_value_fixed, precompute_kv, setup_engine, BenchEngineConfig,
-    DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
+    precompute_kv, setup_engine, BenchEngineConfig, BYTES_PER_OP, DURABLE_STORAGE_MODES,
+    VALUE_SIZE,
 };
 
 use bytes::Bytes;
@@ -26,9 +26,6 @@ use criterion::{
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-
-/// Bytes per operation
-const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
 
 /// Benchmark scanning L0 SSTs (10k keys spread across multiple L0 files)
 fn bench_scan_l0_direct(c: &mut Criterion) {
@@ -69,10 +66,10 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
                         let cf = engine.default_column_family();
 
                         // Write in chunks and flush each
-                        for chunk in keys_ref.chunks(2_500) {
+                        for (chunk_idx, chunk) in keys_ref.chunks(2_500).enumerate() {
+                            let base_idx = chunk_idx * 2_500;
                             for (i, key) in chunk.iter().enumerate() {
-                                let global_idx = keys_ref.iter().position(|k| k == key).unwrap();
-                                engine.put(&cf, key, &vals_ref[global_idx]).unwrap();
+                                engine.put(&cf, key, &vals_ref[base_idx + i]).unwrap();
                             }
                             engine.flush().unwrap();
                         }
@@ -134,10 +131,10 @@ fn bench_scan_l0_prefix(c: &mut Criterion) {
                         );
                         let cf = engine.default_column_family();
 
-                        for chunk in keys_ref.chunks(2_500) {
+                        for (chunk_idx, chunk) in keys_ref.chunks(2_500).enumerate() {
+                            let base_idx = chunk_idx * 2_500;
                             for (i, key) in chunk.iter().enumerate() {
-                                let global_idx = keys_ref.iter().position(|k| k == key).unwrap();
-                                engine.put(&cf, key, &vals_ref[global_idx]).unwrap();
+                                engine.put(&cf, key, &vals_ref[base_idx + i]).unwrap();
                             }
                             engine.flush().unwrap();
                         }

@@ -223,8 +223,8 @@ fn bench_wal_io_platform(c: &mut Criterion) {
     );
     let frag = encoder.encode_one(&rec).expect("encode");
 
-    // Clone frag data for the second benchmark since we need to use it in both closures
-    let frag_header = frag.header.clone();
+    // Copy/Clone frag data for the second benchmark since we need to use it in both closures
+    let frag_header = frag.header; // Copy, not clone - it's [u8; 8]
     let frag_body = frag.body.clone();
 
     group.bench_function("fallback_writev", |b| {

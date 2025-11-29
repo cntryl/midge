@@ -30,7 +30,6 @@ use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
-use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 

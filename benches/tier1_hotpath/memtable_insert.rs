@@ -49,8 +49,8 @@ fn bench_memtable_put_single(c: &mut Criterion) {
 
     // Warm memtable - pre-populated with some data
     let memtable = MemTable::new();
-    for i in 0..100 {
-        memtable.put(keys[i].as_ref(), small_val.as_ref());
+    for key in keys.iter().take(100) {
+        memtable.put(key.as_ref(), small_val.as_ref());
     }
 
     let mut counter = 100usize;

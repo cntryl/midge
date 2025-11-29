@@ -248,8 +248,8 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
                         let cf = engine.default_column_family();
 
                         // Pre-populate with init values
-                        for i in 0..ops_per_thread {
-                            engine.put(&cf, &keys_ref[i], init_ref).expect("put failed");
+                        for key in keys_ref.iter().take(ops_per_thread) {
+                            engine.put(&cf, key, init_ref).expect("put failed");
                         }
                         engine
                     },

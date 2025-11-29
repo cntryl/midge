@@ -15,7 +15,8 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_kv, unique_bench_path, BenchStorageMode, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
+    precompute_kv, unique_bench_path, BenchStorageMode, BYTES_PER_OP, DURABLE_STORAGE_MODES,
+    VALUE_SIZE,
 };
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
@@ -26,9 +27,6 @@ use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Bytes per operation
-const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
 
 /// Setup engine at specific path for WAL replay tests
 fn setup_engine_at_path(path: &std::path::Path, mode: BenchStorageMode) -> MidgeEngine {
