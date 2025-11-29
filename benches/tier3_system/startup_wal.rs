@@ -7,64 +7,66 @@
 //!
 //! ## Design Notes
 //!
-//! - Returns engine from timed closures to exclude teardown from timing
-//! - Precomputes all keys/values outside hot loops
-//! - Uses unique paths to avoid cross-iteration interference
-//! - Throughput measured in bytes
+//! - Uses DURABLE_STORAGE_MODES since WAL replay requires persistence
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use bytes::Bytes;
+mod bench_common;
+
+use bench_common::{
+    precompute_kv, unique_bench_path, BenchStorageMode, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
+};
+
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-/// Global counter for unique benchmark directory names
-static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Key size in bytes
-const KEY_SIZE: usize = 14;
-/// Value size in bytes  
-const VALUE_SIZE: usize = 128;
 /// Bytes per operation
 const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
 
-/// Generate unique path for benchmark database
-fn unique_bench_path(prefix: &str) -> PathBuf {
-    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    std::env::temp_dir().join(format!("midge_bench_startup_wal_{}_{}_{}", prefix, pid, counter))
-}
+/// Setup engine at specific path for WAL replay tests
+fn setup_engine_at_path(path: &std::path::Path, mode: BenchStorageMode) -> MidgeEngine {
+    use cntryl_midge::cloud::mock::MockCloudBackend;
 
-#[inline]
-fn make_key(i: usize) -> Bytes {
-    let mut key = vec![0u8; KEY_SIZE];
-    key[..4].copy_from_slice(b"key_");
-    let mut n = i;
-    for j in (4..KEY_SIZE).rev() {
-        key[j] = b'0' + (n % 10) as u8;
-        n /= 10;
+    match mode {
+        BenchStorageMode::Memory => panic!("WAL replay benchmarks require persistent storage"),
+        BenchStorageMode::LocalDisk => {
+            let opts = MidgeOptions {
+                storage_mode: StorageMode::LocalDisk {
+                    db_path: path.to_path_buf(),
+                },
+                memtable_size: 100 * 1024 * 1024, // Large memtable = no auto flush
+                enable_compaction: false,
+                wal_sync: false,
+                ..Default::default()
+            };
+            MidgeEngine::open(opts).expect("failed to open")
+        }
+        BenchStorageMode::CloudBacked => {
+            let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(1)));
+            let opts = MidgeOptions {
+                storage_mode: StorageMode::CloudBacked {
+                    local_cache_path: path.to_path_buf(),
+                    cloud_backend: backend,
+                    storage_context: Default::default(),
+                    local_wal_sync: false,
+                    wal_batch_size: 1024 * 1024,
+                    sst_cache_capacity: 10,
+                },
+                memtable_size: 100 * 1024 * 1024,
+                enable_compaction: false,
+                wal_sync: false,
+                ..Default::default()
+            };
+            MidgeEngine::open(opts).expect("failed to open")
+        }
     }
-    Bytes::from(key)
-}
-
-#[inline]
-fn make_value_fixed(size: usize) -> Bytes {
-    Bytes::from(vec![b'x'; size])
-}
-
-fn precompute_kv(n: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
-    let mut keys = Vec::with_capacity(n);
-    let mut vals = Vec::with_capacity(n);
-    for i in 0..n {
-        keys.push(make_key(i));
-        vals.push(make_value_fixed(value_size));
-    }
-    (keys, vals)
 }
 
 /// Benchmark engine startup with WAL replay (50k operations)
@@ -77,55 +79,49 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
     let bytes_total = (num_ops as u64) * BYTES_PER_OP;
 
     group.throughput(Throughput::Bytes(bytes_total));
-    group.bench_function("replay_50k_wal_ops", |b| {
-        b.iter_batched(
-            || {
-                let path = unique_bench_path("wal_replay");
-                let _ = std::fs::remove_dir_all(&path);
 
-                // Create WAL with 50k operations WITHOUT flushing
-                {
-                    let opts = MidgeOptions {
-                        storage_mode: StorageMode::LocalDisk {
-                            db_path: path.clone(),
-                        },
-                        memtable_size: 100 * 1024 * 1024, // Large memtable = no auto flush
-                        enable_compaction: false,
-                        wal_sync: false,
-                        ..Default::default()
-                    };
-                    let engine = MidgeEngine::open(opts).unwrap();
-                    let cf = engine.default_column_family();
+    for mode in DURABLE_STORAGE_MODES {
+        group.bench_with_input(
+            BenchmarkId::new("replay_50k_wal_ops", mode.as_str()),
+            &mode,
+            |b, &mode| {
+                let keys_ref = &keys;
+                let vals_ref = &vals;
 
-                    // Write ops to WAL without flushing
-                    for i in 0..num_ops {
-                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                    }
-                    // DO NOT flush - keep data only in WAL
-                }
+                b.iter_batched(
+                    || {
+                        let path = unique_bench_path("wal_replay");
+                        let _ = std::fs::remove_dir_all(&path);
 
-                path
+                        // Create WAL with 50k operations WITHOUT flushing
+                        {
+                            let engine = setup_engine_at_path(&path, mode);
+                            let cf = engine.default_column_family();
+
+                            // Write ops to WAL without flushing
+                            for i in 0..num_ops {
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            }
+                            // DO NOT flush - keep data only in WAL
+                        }
+
+                        (path, mode)
+                    },
+                    |(path, mode)| {
+                        // Measure startup time (WAL replay into memtable)
+                        let engine = setup_engine_at_path(&path, mode);
+
+                        // Verify data was recovered from WAL
+                        let cf = engine.default_column_family();
+                        black_box(engine.get(&cf, &keys_ref[25_000]).unwrap());
+
+                        engine // prevent Drop during timing
+                    },
+                    BatchSize::LargeInput,
+                )
             },
-            |path| {
-                // Measure startup time (WAL replay into memtable)
-                let opts = MidgeOptions {
-                    storage_mode: StorageMode::LocalDisk { db_path: path },
-                    memtable_size: 100 * 1024 * 1024,
-                    enable_compaction: false,
-                    wal_sync: false,
-                    ..Default::default()
-                };
-                let engine = MidgeEngine::open(opts).unwrap();
-
-                // Verify data was recovered from WAL
-                let cf = engine.default_column_family();
-                black_box(engine.get(&cf, &keys[25_000]).unwrap());
-
-                engine // prevent Drop during timing
-            },
-            BatchSize::LargeInput,
-        )
-    });
+        );
+    }
 
     group.finish();
 }

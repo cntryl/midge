@@ -17,9 +17,17 @@
 //! - Precomputes all keys/values outside hot loops
 //! - Uses unique paths to avoid cross-iteration interference
 //! - Throughput measured in bytes
+//! - Uses DURABLE_STORAGE_MODES since LSM operations require persistence
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
+
+mod bench_common;
+
+use bench_common::{
+    precompute_read_indices, setup_engine, unique_bench_path, BenchEngineConfig, BenchStorageMode,
+    DURABLE_STORAGE_MODES,
+};
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
@@ -28,11 +36,8 @@ use criterion::{
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Global counter for unique benchmark directory names
-static BENCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Key size in bytes
 const KEY_SIZE: usize = 21; // "user:" + 8 bytes BE + ":profile"
@@ -40,13 +45,6 @@ const KEY_SIZE: usize = 21; // "user:" + 8 bytes BE + ":profile"
 const VALUE_SIZE: usize = 40;
 /// Bytes per operation
 const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
-
-/// Generate unique path for benchmark database
-fn unique_bench_path(prefix: &str) -> PathBuf {
-    let counter = BENCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    std::env::temp_dir().join(format!("midge_bench_lsm_{}_{}_{}", prefix, pid, counter))
-}
 
 #[inline]
 fn make_key(i: usize) -> Bytes {
@@ -105,30 +103,43 @@ fn precompute_kv(n: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     (keys, vals)
 }
 
-/// Precompute deterministic indices for reads
-fn precompute_read_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
-    // Simple deterministic pseudo-random using seed
-    let mut indices = Vec::with_capacity(count);
-    let mut state = seed;
-    for _ in 0..count {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        indices.push((state as usize) % n);
-    }
-    indices
-}
+/// Setup engine at a specific path for reopen tests
+fn setup_engine_at_path(path: &std::path::Path, mode: BenchStorageMode) -> MidgeEngine {
+    use cntryl_midge::cloud::mock::MockCloudBackend;
 
-fn setup_db(name: &str, compaction: bool) -> MidgeEngine {
-    let path = unique_bench_path(name);
-    let _ = std::fs::remove_dir_all(&path);
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path },
-        memtable_size: 4 * 1024 * 1024,
-        enable_compaction: compaction,
-        wal_sync: false, // Disable sync for benchmark speed
-        wal_buffer_size: 1024 * 1024,
-        ..Default::default()
-    };
-    MidgeEngine::open(opts).unwrap()
+    match mode {
+        BenchStorageMode::Memory => panic!("LSM benchmarks require persistent storage"),
+        BenchStorageMode::LocalDisk => {
+            let opts = MidgeOptions {
+                storage_mode: StorageMode::LocalDisk {
+                    db_path: path.to_path_buf(),
+                },
+                memtable_size: 4 * 1024 * 1024,
+                enable_compaction: false,
+                wal_sync: false,
+                ..Default::default()
+            };
+            MidgeEngine::open(opts).unwrap()
+        }
+        BenchStorageMode::CloudBacked => {
+            let backend = Arc::new(MockCloudBackend::new().with_latency(Duration::from_millis(1)));
+            let opts = MidgeOptions {
+                storage_mode: StorageMode::CloudBacked {
+                    local_cache_path: path.to_path_buf(),
+                    cloud_backend: backend,
+                    storage_context: Default::default(),
+                    local_wal_sync: false,
+                    wal_batch_size: 1024 * 1024,
+                    sst_cache_capacity: 10,
+                },
+                memtable_size: 4 * 1024 * 1024,
+                enable_compaction: false,
+                wal_sync: false,
+                ..Default::default()
+            };
+            MidgeEngine::open(opts).unwrap()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -145,19 +156,38 @@ fn bench_system_wal_write(c: &mut Criterion) {
 
         g.throughput(Throughput::Bytes(bytes_total));
 
-        g.bench_with_input(BenchmarkId::from_parameter(entries), &entries, |b, &n| {
-            b.iter_batched(
-                || setup_db("wal_write", false),
-                |engine| {
-                    let cf = engine.default_column_family();
-                    for i in 0..n {
-                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                    }
-                    engine // prevent Drop during timing
+        for mode in DURABLE_STORAGE_MODES {
+            let bench_name = format!("{}/{}", entries, mode.as_str());
+            g.bench_with_input(
+                BenchmarkId::new("writes", &bench_name),
+                &(entries, mode),
+                |b, &(n, mode)| {
+                    let keys_ref = &keys;
+                    let vals_ref = &vals;
+
+                    b.iter_batched(
+                        || {
+                            setup_engine(
+                                "wal_write",
+                                &BenchEngineConfig {
+                                    storage_mode: mode,
+                                    enable_compaction: false,
+                                    ..Default::default()
+                                },
+                            )
+                        },
+                        |engine| {
+                            let cf = engine.default_column_family();
+                            for i in 0..n {
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            }
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::SmallInput,
+                    );
                 },
-                BatchSize::SmallInput,
             );
-        });
+        }
     }
 
     g.finish();
@@ -179,49 +209,45 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
 
         g.throughput(Throughput::Bytes(bytes_total));
 
-        g.bench_with_input(BenchmarkId::from_parameter(entries), &entries, |b, &n| {
-            b.iter_batched(
-                || {
-                    let path = unique_bench_path("flush_reopen");
-                    let _ = std::fs::remove_dir_all(&path);
-                    let opts = MidgeOptions {
-                        storage_mode: StorageMode::LocalDisk {
-                            db_path: path.clone(),
+        for mode in DURABLE_STORAGE_MODES {
+            let bench_name = format!("{}/{}", entries, mode.as_str());
+            g.bench_with_input(
+                BenchmarkId::new("reads", &bench_name),
+                &(entries, mode),
+                |b, &(n, mode)| {
+                    let keys_ref = &keys;
+                    let vals_ref = &vals;
+                    let read_indices_ref = &read_indices;
+
+                    b.iter_batched(
+                        || {
+                            let path = unique_bench_path("flush_reopen");
+                            let _ = std::fs::remove_dir_all(&path);
+
+                            let engine = setup_engine_at_path(&path, mode);
+                            let cf = engine.default_column_family();
+                            for i in 0..n {
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            }
+                            engine.flush().unwrap();
+                            drop(engine);
+                            (path, mode)
                         },
-                        memtable_size: 4 * 1024 * 1024,
-                        enable_compaction: false,
-                        wal_sync: false,
-                        ..Default::default()
-                    };
-                    let engine = MidgeEngine::open(opts).unwrap();
-                    let cf = engine.default_column_family();
-                    for i in 0..n {
-                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                    }
-                    engine.flush().unwrap();
-                    drop(engine);
-                    path
-                },
-                |path| {
-                    let opts = MidgeOptions {
-                        storage_mode: StorageMode::LocalDisk { db_path: path },
-                        memtable_size: 4 * 1024 * 1024,
-                        enable_compaction: false,
-                        wal_sync: false,
-                        ..Default::default()
-                    };
-                    let engine = MidgeEngine::open(opts).unwrap();
-                    let cf = engine.default_column_family();
+                        |(path, mode)| {
+                            let engine = setup_engine_at_path(&path, mode);
+                            let cf = engine.default_column_family();
 
-                    for &idx in &read_indices {
-                        black_box(engine.get(&cf, &keys[idx]).unwrap());
-                    }
+                            for &idx in read_indices_ref {
+                                black_box(engine.get(&cf, &keys_ref[idx]).unwrap());
+                            }
 
-                    engine // prevent Drop during timing
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::SmallInput,
+                    );
                 },
-                BatchSize::SmallInput,
             );
-        });
+        }
     }
 
     g.finish();
@@ -241,24 +267,41 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
 
         g.throughput(Throughput::Bytes(bytes_total));
 
-        g.bench_with_input(BenchmarkId::from_parameter(entries), &entries, |b, &n| {
-            b.iter_batched(
-                || {
-                    let engine = setup_db("l0_compact", true);
-                    let cf = engine.default_column_family();
-                    for i in 0..n {
-                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                    }
-                    engine.flush().unwrap();
-                    (engine, cf)
+        for mode in DURABLE_STORAGE_MODES {
+            let bench_name = format!("{}/{}", entries, mode.as_str());
+            g.bench_with_input(
+                BenchmarkId::new("compact", &bench_name),
+                &(entries, mode),
+                |b, &(n, mode)| {
+                    let keys_ref = &keys;
+                    let vals_ref = &vals;
+
+                    b.iter_batched(
+                        || {
+                            let engine = setup_engine(
+                                "l0_compact",
+                                &BenchEngineConfig {
+                                    storage_mode: mode,
+                                    enable_compaction: true,
+                                    ..Default::default()
+                                },
+                            );
+                            let cf = engine.default_column_family();
+                            for i in 0..n {
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            }
+                            engine.flush().unwrap();
+                            (engine, cf)
+                        },
+                        |(engine, cf)| {
+                            engine.compact_level(&cf, 0).unwrap();
+                            engine // prevent Drop during timing
+                        },
+                        BatchSize::SmallInput,
+                    );
                 },
-                |(engine, cf)| {
-                    engine.compact_level(&cf, 0).unwrap();
-                    engine // prevent Drop during timing
-                },
-                BatchSize::SmallInput,
             );
-        });
+        }
     }
 
     g.finish();
@@ -291,34 +334,51 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
     let bytes_total = (total_ops as u64) * BYTES_PER_OP;
     g.throughput(Throughput::Bytes(bytes_total));
 
-    g.bench_function("mixed_80r_20w_hotset", |b| {
-        b.iter_batched(
-            || {
-                let engine = setup_db("mixed_workload", false);
-                let cf = engine.default_column_family();
-                // Prefill hot set
-                for i in 0..hot_set_size {
-                    engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                }
-                engine.flush().unwrap();
-                engine
-            },
-            |engine| {
-                let cf = engine.default_column_family();
+    for mode in DURABLE_STORAGE_MODES {
+        g.bench_with_input(
+            BenchmarkId::new("mixed_80r_20w_hotset", mode.as_str()),
+            &mode,
+            |b, &mode| {
+                let keys_ref = &keys;
+                let vals_ref = &vals;
+                let ops_ref = &ops;
 
-                for &(idx, is_read) in &ops {
-                    if is_read {
-                        black_box(engine.get(&cf, &keys[idx]).unwrap());
-                    } else {
-                        engine.put(&cf, &keys[idx], &vals[idx]).unwrap();
-                    }
-                }
+                b.iter_batched(
+                    || {
+                        let engine = setup_engine(
+                            "mixed_workload",
+                            &BenchEngineConfig {
+                                storage_mode: mode,
+                                enable_compaction: false,
+                                ..Default::default()
+                            },
+                        );
+                        let cf = engine.default_column_family();
+                        // Prefill hot set
+                        for i in 0..hot_set_size {
+                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                        }
+                        engine.flush().unwrap();
+                        engine
+                    },
+                    |engine| {
+                        let cf = engine.default_column_family();
 
-                engine // prevent Drop during timing
+                        for &(idx, is_read) in ops_ref {
+                            if is_read {
+                                black_box(engine.get(&cf, &keys_ref[idx]).unwrap());
+                            } else {
+                                engine.put(&cf, &keys_ref[idx], &vals_ref[idx]).unwrap();
+                            }
+                        }
+
+                        engine // prevent Drop during timing
+                    },
+                    BatchSize::SmallInput,
+                );
             },
-            BatchSize::SmallInput,
         );
-    });
+    }
 
     g.finish();
 }

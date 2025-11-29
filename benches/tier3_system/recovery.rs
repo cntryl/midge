@@ -23,8 +23,8 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    make_key, make_value_fixed, precompute_kv, setup_engine, unique_bench_path, BenchEngineConfig,
-    BenchStorageMode, BYTES_PER_OP, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
+    precompute_kv, unique_bench_path, BenchStorageMode, BYTES_PER_OP, DURABLE_STORAGE_MODES,
+    KEY_SIZE, VALUE_SIZE,
 };
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
@@ -33,7 +33,6 @@ use criterion::{
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Setup a db at a specific path for recovery tests.
