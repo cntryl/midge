@@ -287,6 +287,7 @@ fn should_refill_tokens_given_time_elapsed_when_waiting() {
     thread::sleep(Duration::from_millis(150));
 
     // Assert - should have refilled some tokens
+    // available_tokens() triggers refill internally to return accurate value
     let refilled = limiter.available_tokens();
     // At 100 KB/s, 150ms = 15 KB refill, capped at burst 10 KB
     assert!(

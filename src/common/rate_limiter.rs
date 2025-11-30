@@ -169,8 +169,9 @@ impl RateLimiter {
         self.inner.bytes_per_sec.load(Ordering::Relaxed)
     }
 
-    /// Get current available tokens
+    /// Get current available tokens (triggers refill to return accurate value)
     pub fn available_tokens(&self) -> u64 {
+        self.refill();
         self.inner.available_tokens.load(Ordering::Relaxed)
     }
 
