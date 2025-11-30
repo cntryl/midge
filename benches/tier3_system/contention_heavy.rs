@@ -24,7 +24,9 @@ mod criterion_helper;
 
 mod bench_common;
 
-use bench_common::{make_key, make_value_fixed, setup_engine_arc, BenchStorageMode, DURABLE_STORAGE_MODES, KEY_SIZE};
+use bench_common::{
+    make_key, make_value_fixed, setup_engine_arc, BenchStorageMode, DURABLE_STORAGE_MODES, KEY_SIZE,
+};
 
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
@@ -86,7 +88,11 @@ fn bench_engine_heavy_write_contention(c: &mut Criterion) {
 
     // Pre-compute all keys and values outside the benchmark loop
     let keys: Vec<Vec<Vec<u8>>> = (0..num_threads)
-        .map(|tid| (0..ops_per_thread).map(|i| make_thread_key(tid, i)).collect())
+        .map(|tid| {
+            (0..ops_per_thread)
+                .map(|i| make_thread_key(tid, i))
+                .collect()
+        })
         .collect();
     let values: Vec<Vec<u8>> = (0..ops_per_thread).map(make_value_pattern).collect();
     let keys = Arc::new(keys);
@@ -155,7 +161,9 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
 
     // Pre-compute keys and values outside the benchmark loop
     let keys: Vec<_> = (0..num_keys).map(make_key).collect();
-    let values: Vec<_> = (0..num_keys).map(|_| make_value_fixed(VALUE_SIZE)).collect();
+    let values: Vec<_> = (0..num_keys)
+        .map(|_| make_value_fixed(VALUE_SIZE))
+        .collect();
     let keys_arc = Arc::new(keys.clone());
 
     // Heavy scenario: LocalDisk only to avoid cloud overhead with 16 threads
@@ -178,7 +186,9 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
 
                         // Pre-populate with data
                         for i in 0..num_keys {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                            engine
+                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .expect("put failed");
                         }
                         engine.flush().expect("flush failed");
                         engine

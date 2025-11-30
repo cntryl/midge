@@ -43,6 +43,11 @@ pub const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
 #[allow(dead_code)]
 pub const BENCH_MEMTABLE_SIZE: usize = 4 * 1024 * 1024;
 
+/// Whether to use BenchFast mode for cloud backends (no filesystem IO).
+/// Set to false to test with real filesystem for debugging.
+#[allow(dead_code)]
+pub const USE_BENCH_FAST_CLOUD: bool = true;
+
 // ============================================================================
 // Unique Path Generation
 // ============================================================================
@@ -153,17 +158,13 @@ pub const ALL_STORAGE_MODES: [BenchStorageMode; 3] = [
 
 /// Fast storage modes (excludes cloud for quick iteration).
 #[allow(dead_code)]
-pub const FAST_STORAGE_MODES: [BenchStorageMode; 2] = [
-    BenchStorageMode::Memory,
-    BenchStorageMode::LocalDisk,
-];
+pub const FAST_STORAGE_MODES: [BenchStorageMode; 2] =
+    [BenchStorageMode::Memory, BenchStorageMode::LocalDisk];
 
 /// Durable storage modes (excludes memory).
 #[allow(dead_code)]
-pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 2] = [
-    BenchStorageMode::LocalDisk,
-    BenchStorageMode::CloudBacked,
-];
+pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 2] =
+    [BenchStorageMode::LocalDisk, BenchStorageMode::CloudBacked];
 
 // ============================================================================
 // Engine Setup Functions
@@ -265,9 +266,12 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
         BenchStorageMode::Memory => StorageMode::Memory,
         BenchStorageMode::LocalDisk => StorageMode::LocalDisk { db_path: path },
         BenchStorageMode::CloudBacked => {
-            let backend = Arc::new(
-                MockCloudBackend::new().with_latency_config(config.cloud_latency.clone()),
-            );
+            // Use BenchFast mode for deterministic, low-variance benchmarks
+            let backend = Arc::new(if USE_BENCH_FAST_CLOUD {
+                MockCloudBackend::bench_fast()
+            } else {
+                MockCloudBackend::new().with_latency_config(config.cloud_latency.clone())
+            });
             StorageMode::CloudBacked {
                 local_cache_path: path,
                 cloud_backend: backend,
@@ -319,9 +323,12 @@ pub fn reopen_engine_at_path(path: &std::path::Path, config: &BenchEngineConfig)
             db_path: path.to_path_buf(),
         },
         BenchStorageMode::CloudBacked => {
-            let backend = Arc::new(
-                MockCloudBackend::new().with_latency_config(config.cloud_latency.clone()),
-            );
+            // Use BenchFast mode for deterministic, low-variance benchmarks
+            let backend = Arc::new(if USE_BENCH_FAST_CLOUD {
+                MockCloudBackend::bench_fast()
+            } else {
+                MockCloudBackend::new().with_latency_config(config.cloud_latency.clone())
+            });
             StorageMode::CloudBacked {
                 local_cache_path: path.to_path_buf(),
                 cloud_backend: backend,

@@ -49,11 +49,7 @@ const BATCH_SIZE: usize = 100;
 // Database Setup - Durability Modes
 // ============================================================================
 
-fn setup_db_with_options(
-    db_name: &str,
-    mode: BenchStorageMode,
-    wal_sync: bool,
-) -> MidgeEngine {
+fn setup_db_with_options(db_name: &str, mode: BenchStorageMode, wal_sync: bool) -> MidgeEngine {
     use cntryl_midge::cloud::mock::MockCloudBackend;
     use cntryl_midge::cloud::LatencyConfig;
 
@@ -65,7 +61,9 @@ fn setup_db_with_options(
         BenchStorageMode::LocalDisk => StorageMode::LocalDisk { db_path: path },
         BenchStorageMode::CloudBacked => {
             // Use fast simulation for benchmarks (non-blocking)
-            let backend = Arc::new(MockCloudBackend::new().with_latency_config(LatencyConfig::fast_simulation()));
+            let backend = Arc::new(
+                MockCloudBackend::new().with_latency_config(LatencyConfig::fast_simulation()),
+            );
             StorageMode::CloudBacked {
                 local_cache_path: path,
                 cloud_backend: backend,
@@ -93,9 +91,7 @@ fn load_data_batched(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes]) {
     for chunk in keys.chunks(BATCH_SIZE) {
         for (i, key) in chunk.iter().enumerate() {
             let val_idx = i % values.len();
-            engine
-                .put(&cf, key, &values[val_idx])
-                .expect("put failed");
+            engine.put(&cf, key, &values[val_idx]).expect("put failed");
         }
     }
 }
@@ -129,7 +125,9 @@ fn bench_durability_async_wal(c: &mut Criterion) {
 
     // Pre-compute keys and values outside benchmark
     let keys: Vec<Bytes> = (0..RECORD_COUNT).map(make_key).collect();
-    let values: Vec<_> = (0..OPS_PER_THREAD).map(|_| make_value_fixed(VALUE_SIZE)).collect();
+    let values: Vec<_> = (0..OPS_PER_THREAD)
+        .map(|_| make_value_fixed(VALUE_SIZE))
+        .collect();
 
     for mode in DURABLE_STORAGE_MODES {
         group.bench_with_input(
@@ -170,7 +168,9 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
 
     // Pre-compute keys and values outside benchmark
     let keys: Vec<Bytes> = (0..RECORD_COUNT).map(make_key).collect();
-    let values: Vec<_> = (0..OPS_PER_THREAD).map(|_| make_value_fixed(VALUE_SIZE)).collect();
+    let values: Vec<_> = (0..OPS_PER_THREAD)
+        .map(|_| make_value_fixed(VALUE_SIZE))
+        .collect();
 
     for mode in DURABLE_STORAGE_MODES {
         group.bench_with_input(
@@ -213,8 +213,11 @@ fn bench_durability_concurrent(c: &mut Criterion) {
 
     // Pre-compute keys and values outside benchmark
     let keys: Arc<Vec<Bytes>> = Arc::new((0..RECORD_COUNT).map(make_key).collect());
-    let values: Arc<Vec<Bytes>> =
-        Arc::new((0..OPS_PER_THREAD).map(|_| make_value_fixed(VALUE_SIZE)).collect());
+    let values: Arc<Vec<Bytes>> = Arc::new(
+        (0..OPS_PER_THREAD)
+            .map(|_| make_value_fixed(VALUE_SIZE))
+            .collect(),
+    );
 
     for mode in DURABLE_STORAGE_MODES {
         // Heavy scenario: skip cloud-backed to keep bench fast
@@ -243,7 +246,9 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                             {
                                 let cf = engine.default_column_family();
                                 for (i, key) in keys.iter().take(RECORD_COUNT).enumerate() {
-                                    engine.put(&cf, key, &values[i % values.len()]).expect("put failed");
+                                    engine
+                                        .put(&cf, key, &values[i % values.len()])
+                                        .expect("put failed");
                                 }
                             }
                             Arc::new(engine)
@@ -279,7 +284,12 @@ fn bench_durability_concurrent(c: &mut Criterion) {
 // Write-Heavy Workload
 // ============================================================================
 
-fn run_write_heavy_workload(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], operations: usize) {
+fn run_write_heavy_workload(
+    engine: &MidgeEngine,
+    keys: &[Bytes],
+    values: &[Bytes],
+    operations: usize,
+) {
     let cf = engine.default_column_family();
     for i in 0..operations {
         let key_idx = i % keys.len();
@@ -295,7 +305,9 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
 
     // Pre-compute keys and values outside benchmark
     let keys: Vec<Bytes> = (0..RECORD_COUNT + OPS_PER_THREAD).map(make_key).collect();
-    let values: Vec<_> = (0..OPS_PER_THREAD).map(|_| make_value_fixed(VALUE_SIZE)).collect();
+    let values: Vec<_> = (0..OPS_PER_THREAD)
+        .map(|_| make_value_fixed(VALUE_SIZE))
+        .collect();
 
     for mode in DURABLE_STORAGE_MODES {
         // Heavy scenario: skip cloud-backed to keep bench fast

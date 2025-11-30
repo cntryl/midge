@@ -15,8 +15,7 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_kv, setup_engine, BenchEngineConfig, BYTES_PER_OP, DURABLE_STORAGE_MODES,
-    VALUE_SIZE,
+    precompute_kv, setup_engine, BenchEngineConfig, BYTES_PER_OP, DURABLE_STORAGE_MODES, VALUE_SIZE,
 };
 
 use bytes::Bytes;
@@ -67,7 +66,9 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
 
                         // Populate with 50k keys to trigger multiple flushes and compactions
                         for i in 0..num_keys {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                            engine
+                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .expect("put failed");
 
                             // Flush periodically to create multiple files
                             if i % 5000 == 4999 {
@@ -84,9 +85,7 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
                     |engine| {
                         // Scan a large range across all levels
                         let cf = engine.default_column_family();
-                        let query = Query::new()
-                            .start_key(start.clone())
-                            .end_key(end.clone());
+                        let query = Query::new().start_key(start.clone()).end_key(end.clone());
 
                         let results = engine.scan(&cf, query).expect("scan failed");
                         black_box(results.len());

@@ -193,7 +193,11 @@ fn should_include_tombstones_in_sequence_range() {
 
     // Assert
     assert_eq!(smallest_seq, Some(5));
-    assert_eq!(largest_seq, Some(20), "Range tombstone sequence must be included");
+    assert_eq!(
+        largest_seq,
+        Some(20),
+        "Range tombstone sequence must be included"
+    );
 }
 
 #[test]
@@ -275,10 +279,7 @@ fn should_handle_cloud_checkpoint_at_zero() {
     let safe_seq = determine_safe_prune_sequence(&manifest);
 
     // Assert - must use 0, preventing all WAL pruning until cloud catches up
-    assert_eq!(
-        safe_seq, 0,
-        "Cloud at zero should prevent all WAL pruning"
-    );
+    assert_eq!(safe_seq, 0, "Cloud at zero should prevent all WAL pruning");
 }
 
 // ============================================================================

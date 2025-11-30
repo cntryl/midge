@@ -133,7 +133,9 @@ mod tests {
     #[test]
     fn should_clear_background_error() {
         // Arrange
-        let holder = Arc::new(parking_lot::RwLock::new(Some(MidgeError::internal("error"))));
+        let holder = Arc::new(parking_lot::RwLock::new(Some(MidgeError::internal(
+            "error",
+        ))));
         let holder_opt = Some(holder.clone());
 
         // Act

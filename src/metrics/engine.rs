@@ -276,7 +276,10 @@ impl Metrics {
         let new_depth = self.inner.flush_queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
         // Update high watermark if exceeded
         loop {
-            let current = self.inner.flush_queue_high_watermark.load(Ordering::Relaxed);
+            let current = self
+                .inner
+                .flush_queue_high_watermark
+                .load(Ordering::Relaxed);
             if new_depth <= current {
                 break;
             }

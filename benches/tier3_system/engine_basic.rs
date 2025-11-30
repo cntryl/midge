@@ -43,23 +43,19 @@ fn bench_single_put(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(bytes_total));
 
     for mode in ALL_STORAGE_MODES {
-        group.bench_with_input(
-            BenchmarkId::new("put", mode.as_str()),
-            &mode,
-            |b, &mode| {
-                b.iter_batched(
-                    || setup_engine_with_mode("single_put", mode),
-                    |engine| {
-                        let cf = engine.default_column_family();
-                        for i in 0..num_ops {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                        }
-                        engine // prevent Drop during timing
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("put", mode.as_str()), &mode, |b, &mode| {
+            b.iter_batched(
+                || setup_engine_with_mode("single_put", mode),
+                |engine| {
+                    let cf = engine.default_column_family();
+                    for i in 0..num_ops {
+                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                    }
+                    engine // prevent Drop during timing
+                },
+                BatchSize::SmallInput,
+            )
+        });
     }
 
     group.finish();
@@ -76,36 +72,34 @@ fn bench_single_get(c: &mut Criterion) {
     let num_keys = 10_000usize;
     let num_reads = 1_000usize;
     let (keys, vals) = precompute_kv(num_keys, VALUE_SIZE);
-    let bytes_total = (num_reads as u64) * BYTES_PER_OP;
 
+    // Precompute read indices so the inner loop is just the engine call
+    let read_indices: Vec<usize> = (0..num_reads).map(|i| i % num_keys).collect();
+
+    let bytes_total = (num_reads as u64) * BYTES_PER_OP;
     group.throughput(Throughput::Bytes(bytes_total));
 
     for mode in ALL_STORAGE_MODES {
-        group.bench_with_input(
-            BenchmarkId::new("get", mode.as_str()),
-            &mode,
-            |b, &mode| {
-                b.iter_batched(
-                    || {
-                        let engine = setup_engine_with_mode("single_get", mode);
-                        let cf = engine.default_column_family();
-                        for i in 0..num_keys {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
-                        }
-                        engine
-                    },
-                    |engine| {
-                        let cf = engine.default_column_family();
-                        for i in 0..num_reads {
-                            let idx = i % num_keys;
-                            black_box(engine.get(&cf, &keys[idx]).unwrap());
-                        }
-                        engine // prevent Drop during timing
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("get", mode.as_str()), &mode, |b, &mode| {
+            b.iter_batched(
+                || {
+                    let engine = setup_engine_with_mode("single_get", mode);
+                    let cf = engine.default_column_family();
+                    for i in 0..num_keys {
+                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                    }
+                    engine
+                },
+                |engine| {
+                    let cf = engine.default_column_family();
+                    for &idx in &read_indices {
+                        black_box(engine.get(&cf, &keys[idx]).unwrap());
+                    }
+                    engine // prevent Drop during timing
+                },
+                BatchSize::SmallInput,
+            )
+        });
     }
 
     group.finish();
@@ -134,14 +128,14 @@ fn bench_single_delete(c: &mut Criterion) {
                     || {
                         let engine = setup_engine_with_mode("single_delete", mode);
                         let cf = engine.default_column_family();
-                        for (key, val) in keys.iter().zip(vals.iter()).take(num_keys) {
+                        for (key, val) in keys.iter().zip(vals.iter()) {
                             engine.put(&cf, key, val).unwrap();
                         }
                         engine
                     },
                     |engine| {
                         let cf = engine.default_column_family();
-                        for key in keys.iter().take(num_keys) {
+                        for key in &keys {
                             engine.delete(&cf, key).unwrap();
                         }
                         engine // prevent Drop during timing
@@ -182,10 +176,13 @@ fn bench_batch_put(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         for batch_idx in 0..num_batches {
                             let mut batch = WriteBatch::new();
-                            for i in 0..batch_size {
-                                let key_idx = batch_idx * batch_size + i;
-                                batch.put(cf.id(), keys[key_idx].clone(), vals[key_idx].clone());
+                            let start = batch_idx * batch_size;
+                            let end = start + batch_size;
+
+                            for (k, v) in keys[start..end].iter().zip(&vals[start..end]) {
+                                batch.put(cf.id(), k.clone(), v.clone());
                             }
+
                             engine.write_batch(&batch).unwrap();
                         }
                         engine // prevent Drop during timing
@@ -209,9 +206,28 @@ fn bench_mixed_crud(c: &mut Criterion) {
 
     let num_keys = 2_000usize;
     let (keys, vals) = precompute_kv(num_keys, VALUE_SIZE);
-    // Approximate: 25% put, 50% get, 25% delete
-    let bytes_total = (num_keys as u64) * BYTES_PER_OP;
 
+    // Approximate: 25% put, 50% get, 25% delete
+    // Precompute operations so the inner loop is branch-only
+    #[derive(Clone, Copy)]
+    enum Op {
+        Put(usize),
+        Get(usize),
+        Delete(usize),
+    }
+
+    let ops: Vec<Op> = (0..num_keys)
+        .map(|i| {
+            let key_idx = i % num_keys;
+            match i % 4 {
+                0 => Op::Put(key_idx),
+                1 | 2 => Op::Get(key_idx),
+                _ => Op::Delete(key_idx),
+            }
+        })
+        .collect();
+
+    let bytes_total = (num_keys as u64) * BYTES_PER_OP;
     group.throughput(Throughput::Bytes(bytes_total));
 
     for mode in ALL_STORAGE_MODES {
@@ -231,18 +247,16 @@ fn bench_mixed_crud(c: &mut Criterion) {
                     },
                     |engine| {
                         let cf = engine.default_column_family();
-                        for i in 0..num_keys {
-                            let op = i % 4;
-                            let key_idx = i % num_keys;
-                            match op {
-                                0 => {
-                                    engine.put(&cf, &keys[key_idx], &vals[key_idx]).unwrap();
+                        for op in &ops {
+                            match *op {
+                                Op::Put(idx) => {
+                                    engine.put(&cf, &keys[idx], &vals[idx]).unwrap();
                                 }
-                                1 | 2 => {
-                                    let _ = engine.get(&cf, &keys[key_idx]);
+                                Op::Get(idx) => {
+                                    let _ = engine.get(&cf, &keys[idx]);
                                 }
-                                _ => {
-                                    let _ = engine.delete(&cf, &keys[key_idx]);
+                                Op::Delete(idx) => {
+                                    let _ = engine.delete(&cf, &keys[idx]);
                                 }
                             }
                         }
@@ -269,8 +283,17 @@ fn bench_concurrent_reads(c: &mut Criterion) {
     let ops_per_thread = 500usize;
     let num_threads = 4usize;
     let (keys, vals) = precompute_kv(num_keys, VALUE_SIZE);
-    let bytes_total = (num_threads * ops_per_thread) as u64 * BYTES_PER_OP;
 
+    // Precompute per-thread index sequences
+    let thread_indices: Vec<Vec<usize>> = (0..num_threads)
+        .map(|t| {
+            (0..ops_per_thread)
+                .map(|i| (t * ops_per_thread + i) % num_keys)
+                .collect()
+        })
+        .collect();
+
+    let bytes_total = (num_threads * ops_per_thread) as u64 * BYTES_PER_OP;
     group.throughput(Throughput::Bytes(bytes_total));
 
     for mode in ALL_STORAGE_MODES {
@@ -290,14 +313,14 @@ fn bench_concurrent_reads(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         std::thread::scope(|s| {
-                            for thread_id in 0..num_threads {
+                            for indices in &thread_indices {
                                 let engine_ref = &engine;
                                 let cf_ref = &cf;
                                 let keys_ref = &keys;
+
                                 s.spawn(move || {
-                                    for i in 0..ops_per_thread {
-                                        let key_idx = (thread_id * ops_per_thread + i) % num_keys;
-                                        let _ = engine_ref.get(cf_ref, &keys_ref[key_idx]);
+                                    for &idx in indices {
+                                        let _ = engine_ref.get(cf_ref, &keys_ref[idx]);
                                     }
                                 });
                             }
@@ -338,7 +361,6 @@ fn bench_concurrent_writes(c: &mut Criterion) {
         .collect();
 
     let bytes_total = (total_ops as u64) * BYTES_PER_OP;
-
     group.throughput(Throughput::Bytes(bytes_total));
 
     for mode in ALL_STORAGE_MODES {
@@ -354,6 +376,7 @@ fn bench_concurrent_writes(c: &mut Criterion) {
                             for (keys, vals) in &thread_data {
                                 let engine_ref = &engine;
                                 let cf_ref = &cf;
+
                                 s.spawn(move || {
                                     for (k, v) in keys.iter().zip(vals.iter()) {
                                         engine_ref.put(cf_ref, k, v).unwrap();
@@ -382,6 +405,7 @@ fn bench_point_lookup_miss(c: &mut Criterion) {
 
     let num_keys = 5_000usize;
     let num_lookups = 1_000usize;
+
     // Insert even keys, lookup odd keys (guaranteed misses)
     let even_keys: Vec<Bytes> = (0..num_keys).map(|i| make_key(i * 2)).collect();
     let odd_keys: Vec<Bytes> = (0..num_lookups).map(|i| make_key(i * 2 + 1)).collect();
@@ -390,7 +414,6 @@ fn bench_point_lookup_miss(c: &mut Criterion) {
         .collect();
 
     let bytes_total = (num_lookups as u64) * KEY_SIZE as u64; // only key for miss
-
     group.throughput(Throughput::Bytes(bytes_total));
 
     for mode in ALL_STORAGE_MODES {

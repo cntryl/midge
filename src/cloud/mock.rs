@@ -3,6 +3,7 @@ use crate::cloud::latency_sim::{LatencyConfig, LatencySimulator};
 use crate::common::timestamp;
 use crate::error::{MidgeError, MidgeResult};
 use bytes::Bytes;
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,7 +13,22 @@ use std::sync::{
 };
 use std::time::Duration;
 
+/// Operating mode for MockCloudBackend.
+///
+/// - `RealFs`: Full filesystem IO with latency simulation (for tests)
+/// - `BenchFast`: In-memory storage, no IO, no sleeps (for benchmarks)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CloudMode {
+    /// Full filesystem IO with latency simulation - realistic for tests
+    #[default]
+    RealFs,
+    /// In-memory only, no IO, no sleeps - deterministic for benchmarks
+    BenchFast,
+}
+
 pub struct MockCloudBackend {
+    /// Operating mode (RealFs for tests, BenchFast for benchmarks)
+    mode: CloudMode,
     root_dir: PathBuf,
     etags: Mutex<HashMap<String, String>>,
     /// Legacy fixed latency (deprecated, use latency_sim instead)
@@ -31,6 +47,8 @@ pub struct MockCloudBackend {
     fail_upload_after: AtomicUsize,
     /// Simulated cloud manifest for drift testing
     cloud_manifest: Mutex<Option<crate::core::manifest::Manifest>>,
+    /// In-memory blob storage for BenchFast mode (zero IO)
+    mem_blobs: DashMap<String, Bytes>,
 }
 
 static NEXT_ROOT_ID: AtomicU64 = AtomicU64::new(0);
@@ -60,6 +78,7 @@ impl MockCloudBackend {
             }
         };
         Self {
+            mode: CloudMode::RealFs,
             root_dir: actual_root,
             etags: Mutex::new(HashMap::new()),
             latency: None,
@@ -70,6 +89,40 @@ impl MockCloudBackend {
             sst_download_count: AtomicUsize::new(0),
             fail_upload_after: AtomicUsize::new(usize::MAX),
             cloud_manifest: Mutex::new(None),
+            mem_blobs: DashMap::new(),
+        }
+    }
+
+    /// Create a fast benchmark mock with no IO and no latency.
+    ///
+    /// This mode:
+    /// - Uses in-memory storage (no filesystem IO)
+    /// - Has no latency simulation (no sleeps)
+    /// - Provides deterministic, stable performance
+    /// - Maintains same API semantics and error behavior
+    ///
+    /// Use this for benchmarks to eliminate variance from OS/filesystem.
+    ///
+    /// # Example
+    /// ```
+    /// use cntryl_midge::cloud::MockCloudBackend;
+    ///
+    /// let backend = MockCloudBackend::bench_fast();
+    /// ```
+    pub fn bench_fast() -> Self {
+        Self {
+            mode: CloudMode::BenchFast,
+            root_dir: PathBuf::new(), // Not used in BenchFast mode
+            etags: Mutex::new(HashMap::new()),
+            latency: None,
+            latency_sim: LatencySimulator::none(),
+            upload_count: AtomicUsize::new(0),
+            upload_failure_count: AtomicUsize::new(0),
+            sst_upload_count: AtomicUsize::new(0),
+            sst_download_count: AtomicUsize::new(0),
+            fail_upload_after: AtomicUsize::new(usize::MAX),
+            cloud_manifest: Mutex::new(None),
+            mem_blobs: DashMap::new(),
         }
     }
 
@@ -219,7 +272,10 @@ impl Default for MockCloudBackend {
 
 impl StorageBackend for MockCloudBackend {
     fn put_blob(&self, key: &str, data: Bytes) -> MidgeResult<()> {
-        self.simulate_write_latency(data.len());
+        // Only simulate latency in RealFs mode
+        if self.mode == CloudMode::RealFs {
+            self.simulate_write_latency(data.len());
+        }
 
         // Attempt to reserve a successful upload slot atomically.
         // This makes the fail-after semantics reliable under concurrency.
@@ -245,24 +301,31 @@ impl StorageBackend for MockCloudBackend {
             }
         }
 
-        // Perform the upload (we have reserved a slot). If the write fails,
-        // revert the reservation and count it as a failure.
-        let path = self.blob_path(key);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Perform the upload based on mode
+        match self.mode {
+            CloudMode::RealFs => {
+                let path = self.blob_path(key);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if let Err(e) = std::fs::write(&path, &data) {
+                    // writing failed; undo reserved slot and mark a failed upload
+                    self.upload_count.fetch_sub(1, Ordering::SeqCst);
+                    self.upload_failure_count.fetch_add(1, Ordering::SeqCst);
+                    return Err(e.into());
+                }
+            }
+            CloudMode::BenchFast => {
+                // In-memory storage only - no filesystem IO
+                self.mem_blobs.insert(key.to_string(), data.clone());
+            }
         }
-        if let Err(e) = std::fs::write(&path, &data) {
-            // writing failed; undo reserved slot and mark a failed upload
-            self.upload_count.fetch_sub(1, Ordering::SeqCst);
-            self.upload_failure_count.fetch_add(1, Ordering::SeqCst);
-            return Err(e.into());
-        }
+
         self.etags
             .lock()
             .insert(key.to_string(), Self::generate_etag());
 
-        // At this point the upload succeeded and the slot we reserved already
-        // accounted for this successful upload.
+        // Track SST uploads
         if Self::is_sst_key(key) {
             self.sst_upload_count.fetch_add(1, Ordering::SeqCst);
         }
@@ -287,7 +350,9 @@ impl StorageBackend for MockCloudBackend {
         if key == "manifest.json" {
             if let Some(ref manifest) = *self.cloud_manifest.lock() {
                 let data = serde_json::to_vec_pretty(manifest)?;
-                self.simulate_read_latency(data.len());
+                if self.mode == CloudMode::RealFs {
+                    self.simulate_read_latency(data.len());
+                }
                 return Ok(Bytes::from(data));
             }
         }
@@ -297,112 +362,207 @@ impl StorageBackend for MockCloudBackend {
             self.sst_download_count.fetch_add(1, Ordering::SeqCst);
         }
 
-        let path = self.blob_path(key);
-        if !path.exists() {
-            return Err(MidgeError::KeyNotFound {
-                key: key.to_string(),
-            });
+        match self.mode {
+            CloudMode::RealFs => {
+                let path = self.blob_path(key);
+                if !path.exists() {
+                    return Err(MidgeError::KeyNotFound {
+                        key: key.to_string(),
+                    });
+                }
+                let data = std::fs::read(&path)?;
+                self.simulate_read_latency(data.len());
+                Ok(Bytes::from(data))
+            }
+            CloudMode::BenchFast => {
+                // In-memory lookup - no filesystem IO
+                match self.mem_blobs.get(key) {
+                    Some(v) => Ok(v.clone()),
+                    None => Err(MidgeError::KeyNotFound {
+                        key: key.to_string(),
+                    }),
+                }
+            }
         }
-        let data = std::fs::read(&path)?;
-        self.simulate_read_latency(data.len());
-        Ok(Bytes::from(data))
     }
 
     fn get_blob_range(&self, key: &str, start: u64, end: Option<u64>) -> MidgeResult<Bytes> {
-        let path = self.blob_path(key);
-        if !path.exists() {
-            return Err(MidgeError::KeyNotFound {
-                key: key.to_string(),
-            });
+        match self.mode {
+            CloudMode::RealFs => {
+                let path = self.blob_path(key);
+                if !path.exists() {
+                    return Err(MidgeError::KeyNotFound {
+                        key: key.to_string(),
+                    });
+                }
+                let data = std::fs::read(&path)?;
+                let len = data.len() as u64;
+                let s = std::cmp::min(start, len) as usize;
+                let e = end.map(|e| std::cmp::min(e, len)).unwrap_or(len) as usize;
+                if s > e || s >= data.len() {
+                    return Ok(Bytes::new());
+                }
+                let result = data[s..e].to_vec();
+                self.simulate_read_latency(result.len());
+                Ok(Bytes::from(result))
+            }
+            CloudMode::BenchFast => {
+                // In-memory lookup with range extraction
+                match self.mem_blobs.get(key) {
+                    Some(data) => {
+                        let len = data.len() as u64;
+                        let s = std::cmp::min(start, len) as usize;
+                        let e = end.map(|e| std::cmp::min(e, len)).unwrap_or(len) as usize;
+                        if s > e || s >= data.len() {
+                            return Ok(Bytes::new());
+                        }
+                        Ok(data.slice(s..e))
+                    }
+                    None => Err(MidgeError::KeyNotFound {
+                        key: key.to_string(),
+                    }),
+                }
+            }
         }
-        let data = std::fs::read(&path)?;
-        let len = data.len() as u64;
-        let s = std::cmp::min(start, len) as usize;
-        let e = end.map(|e| std::cmp::min(e, len)).unwrap_or(len) as usize;
-        if s > e || s >= data.len() {
-            return Ok(Bytes::new());
-        }
-        let result = data[s..e].to_vec();
-        self.simulate_read_latency(result.len());
-        Ok(Bytes::from(result))
     }
 
     fn delete_blob(&self, key: &str) -> MidgeResult<()> {
-        self.simulate_write_latency(0); // Delete is a write operation
-        let path = self.blob_path(key);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
+        match self.mode {
+            CloudMode::RealFs => {
+                self.simulate_write_latency(0); // Delete is a write operation
+                let path = self.blob_path(key);
+                if path.exists() {
+                    std::fs::remove_file(&path)?;
+                }
+            }
+            CloudMode::BenchFast => {
+                // Just remove from in-memory map
+                self.mem_blobs.remove(key);
+            }
         }
         self.etags.lock().remove(key);
         Ok(())
     }
 
     fn list_blobs(&self, prefix: &str) -> MidgeResult<Vec<String>> {
-        self.simulate_list_latency();
-        let mut keys = Vec::new();
-        fn visit_dir(
-            dir: &std::path::Path,
-            root: &std::path::Path,
-            prefix: &str,
-            keys: &mut Vec<String>,
-        ) -> MidgeResult<()> {
-            if !dir.exists() {
-                return Ok(());
-            }
-            for entry in std::fs::read_dir(dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_dir() {
-                    visit_dir(&path, root, prefix, keys)?;
-                } else if path.is_file() {
-                    let relative = path
-                        .strip_prefix(root)
-                        .map_err(|_| MidgeError::internal("Failed to compute relative path"))?;
-                    let key = relative
-                        .to_str()
-                        .ok_or_else(|| MidgeError::internal("Invalid UTF-8 in path"))?
-                        .replace(std::path::MAIN_SEPARATOR, "/");
-                    if key.starts_with(prefix) {
-                        keys.push(key);
+        match self.mode {
+            CloudMode::RealFs => {
+                self.simulate_list_latency();
+                let mut keys = Vec::new();
+                fn visit_dir(
+                    dir: &std::path::Path,
+                    root: &std::path::Path,
+                    prefix: &str,
+                    keys: &mut Vec<String>,
+                ) -> MidgeResult<()> {
+                    if !dir.exists() {
+                        return Ok(());
                     }
+                    for entry in std::fs::read_dir(dir)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        if path.is_dir() {
+                            visit_dir(&path, root, prefix, keys)?;
+                        } else if path.is_file() {
+                            let relative = path.strip_prefix(root).map_err(|_| {
+                                MidgeError::internal("Failed to compute relative path")
+                            })?;
+                            let key = relative
+                                .to_str()
+                                .ok_or_else(|| MidgeError::internal("Invalid UTF-8 in path"))?
+                                .replace(std::path::MAIN_SEPARATOR, "/");
+                            if key.starts_with(prefix) {
+                                keys.push(key);
+                            }
+                        }
+                    }
+                    Ok(())
                 }
+                visit_dir(&self.root_dir, &self.root_dir, prefix, &mut keys)?;
+                keys.sort();
+                Ok(keys)
             }
-            Ok(())
+            CloudMode::BenchFast => {
+                // O(n) scan of in-memory map - no filesystem IO
+                let mut keys: Vec<String> = self
+                    .mem_blobs
+                    .iter()
+                    .map(|kv| kv.key().clone())
+                    .filter(|k| k.starts_with(prefix))
+                    .collect();
+                keys.sort();
+                Ok(keys)
+            }
         }
-        visit_dir(&self.root_dir, &self.root_dir, prefix, &mut keys)?;
-        keys.sort();
-        Ok(keys)
     }
 
     fn head_blob(&self, key: &str) -> MidgeResult<Option<BlobMeta>> {
-        self.simulate_head_latency();
-        let path = self.blob_path(key);
-        if !path.exists() {
-            return Ok(None);
+        match self.mode {
+            CloudMode::RealFs => {
+                self.simulate_head_latency();
+                let path = self.blob_path(key);
+                if !path.exists() {
+                    return Ok(None);
+                }
+                let metadata = std::fs::metadata(&path)?;
+                let etags = self.etags.lock();
+                Ok(Some(BlobMeta {
+                    size: metadata.len(),
+                    last_modified: metadata.modified().ok(),
+                    etag: etags.get(key).cloned(),
+                }))
+            }
+            CloudMode::BenchFast => {
+                // In-memory metadata lookup
+                match self.mem_blobs.get(key) {
+                    Some(data) => {
+                        let etags = self.etags.lock();
+                        Ok(Some(BlobMeta {
+                            size: data.len() as u64,
+                            last_modified: None, // No filesystem, no mtime
+                            etag: etags.get(key).cloned(),
+                        }))
+                    }
+                    None => Ok(None),
+                }
+            }
         }
-        let metadata = std::fs::metadata(&path)?;
-        let etags = self.etags.lock();
-        Ok(Some(BlobMeta {
-            size: metadata.len(),
-            last_modified: metadata.modified().ok(),
-            etag: etags.get(key).cloned(),
-        }))
     }
 
     fn put_blob_if_not_exists(&self, key: &str, data: Bytes) -> MidgeResult<String> {
-        self.simulate_write_latency(data.len());
-        let path = self.blob_path(key);
-        if path.exists() {
-            // Map KeyExists to DatabaseLocked for lock acquisition semantics
-            return Err(MidgeError::DatabaseLocked);
+        match self.mode {
+            CloudMode::RealFs => {
+                self.simulate_write_latency(data.len());
+                let path = self.blob_path(key);
+                if path.exists() {
+                    // Map KeyExists to DatabaseLocked for lock acquisition semantics
+                    return Err(MidgeError::DatabaseLocked);
+                }
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, &data)?;
+                let etag = Self::generate_etag();
+                self.etags.lock().insert(key.to_string(), etag.clone());
+                Ok(etag)
+            }
+            CloudMode::BenchFast => {
+                // Check-and-insert atomically using DashMap entry API
+                use dashmap::mapref::entry::Entry;
+                match self.mem_blobs.entry(key.to_string()) {
+                    Entry::Occupied(_) => {
+                        // Key exists - return error
+                        Err(MidgeError::DatabaseLocked)
+                    }
+                    Entry::Vacant(vacant) => {
+                        vacant.insert(data);
+                        let etag = Self::generate_etag();
+                        self.etags.lock().insert(key.to_string(), etag.clone());
+                        Ok(etag)
+                    }
+                }
+            }
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, &data)?;
-        let etag = Self::generate_etag();
-        self.etags.lock().insert(key.to_string(), etag.clone());
-        Ok(etag)
     }
 }
 

@@ -66,7 +66,9 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
                             let cf = engine.default_column_family();
 
                             for i in 0..num_ops {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
                             }
                             // DO NOT flush - keep data only in WAL
                         }

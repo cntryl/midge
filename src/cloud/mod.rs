@@ -35,7 +35,7 @@ pub use hybrid::{CacheStats, CloudMetricsSnapshot, HybridStorage, HybridStorageB
 
 // Mock implementation (always available)
 pub mod mock;
-pub use mock::MockCloudBackend;
+pub use mock::{CloudMode, MockCloudBackend};
 
 // Cloud provider implementations (feature-gated)
 #[cfg(feature = "cloud-aws")]

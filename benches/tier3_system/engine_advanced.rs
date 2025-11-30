@@ -176,9 +176,7 @@ fn bench_large_values(c: &mut Criterion) {
         for &value_size in &[64 * 1024, 512 * 1024, 1024 * 1024] {
             // Precompute keys and large values
             let keys: Vec<Bytes> = (0..num_ops).map(make_key).collect();
-            let vals: Vec<Bytes> = (0..num_ops)
-                .map(|_| make_value_fixed(value_size))
-                .collect();
+            let vals: Vec<Bytes> = (0..num_ops).map(|_| make_value_fixed(value_size)).collect();
             let bytes_total = (num_ops as u64) * (KEY_SIZE as u64 + value_size as u64);
 
             group.throughput(Throughput::Bytes(bytes_total));

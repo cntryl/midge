@@ -91,7 +91,8 @@ fn bench_system_wal_write(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(15);
 
-    for &entries in &[1_000usize, 10_000, 50_000] { // Reduced from 100k for faster runs
+    for &entries in &[1_000usize, 10_000, 50_000] {
+        // Reduced from 100k for faster runs
         // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
@@ -121,7 +122,9 @@ fn bench_system_wal_write(c: &mut Criterion) {
                         |engine| {
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
                             }
                             engine
                         },
@@ -176,7 +179,9 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
                             let engine = setup_engine_at_path(&path, &config);
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
                             }
                             engine.flush().expect("flush failed");
                             drop(engine);
@@ -212,7 +217,8 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(12);
 
-    for &entries in &[25_000usize, 50_000] { // Reduced from 50k/100k for faster runs
+    for &entries in &[25_000usize, 50_000] {
+        // Reduced from 50k/100k for faster runs
         // Precompute once per entry count, reused across modes
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
@@ -244,7 +250,9 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
                             );
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
                             }
                             // Flush to create L0 file(s) for compaction
                             engine.flush().expect("flush failed");
@@ -313,7 +321,9 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         // Prefill hot set
                         for i in 0..hot_set_size {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("prefill put failed");
+                            engine
+                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .expect("prefill put failed");
                         }
                         engine.flush().expect("prefill flush failed");
                         engine

@@ -359,7 +359,9 @@ fn bench_snapshot_stress(c: &mut Criterion) {
                                     for _ in 0..10 {
                                         let snap = e.snapshot();
                                         for &i in indices_ref {
-                                            black_box(e.get_at(&cf_clone, &keys_ref[i], &snap).ok());
+                                            black_box(
+                                                e.get_at(&cf_clone, &keys_ref[i], &snap).ok(),
+                                            );
                                         }
                                         sc.fetch_add(1, Ordering::Relaxed);
                                     }

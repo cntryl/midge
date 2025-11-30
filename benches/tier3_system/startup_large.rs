@@ -66,7 +66,9 @@ fn bench_engine_startup_100k_sst_files(c: &mut Criterion) {
 
                             // Write keys with periodic flushes to create ~50 SST files
                             for i in 0..num_keys {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
 
                                 if i % 100 == 99 {
                                     engine.flush().expect("flush failed");

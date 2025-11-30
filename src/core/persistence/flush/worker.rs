@@ -56,7 +56,8 @@ pub struct FlushWorkerConfig {
     pub test_hooks: Option<crate::common::test_hooks::TestHooks>,
     /// Callback to update the engine's manifest cache after flush completes
     /// This ensures reads can immediately see newly flushed SST files
-    pub manifest_update_callback: Option<Arc<dyn Fn(crate::core::manifest::Manifest) + Send + Sync>>,
+    pub manifest_update_callback:
+        Option<Arc<dyn Fn(crate::core::manifest::Manifest) + Send + Sync>>,
     /// Optional shared background error container. When worker encounters a
     /// background error, it should set this to Some(err).
     pub background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,

@@ -56,7 +56,8 @@ fn bench_recovery_throughput(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(15);
 
-    for &op_count in &[10_000usize, 50_000] { // Reduced from 100k for faster runs
+    for &op_count in &[10_000usize, 50_000] {
+        // Reduced from 100k for faster runs
         let (keys, vals) = precompute_kv(op_count, VALUE_SIZE);
         let bytes_total = (op_count as u64) * BYTES_PER_OP;
 
@@ -89,7 +90,9 @@ fn bench_recovery_throughput(c: &mut Criterion) {
 
                             // Write records to create WAL entries
                             for i in 0..num_ops {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
                             }
 
                             // Simulate crash (drop engine, don't clean up DB)
@@ -160,7 +163,9 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
                             let cf = engine.default_column_family();
 
                             for i in 0..num_ops {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
                             }
 
                             drop(engine);
@@ -198,7 +203,8 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(12);
 
-    for &op_count in &[25_000usize, 50_000] { // Reduced from 50k/100k
+    for &op_count in &[25_000usize, 50_000] {
+        // Reduced from 50k/100k
         let (keys, vals) = precompute_kv(op_count, VALUE_SIZE);
         let bytes_total = (op_count as u64) * BYTES_PER_OP;
 
@@ -234,7 +240,9 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
 
                             // Write half the data
                             for i in 0..(num_ops / 2) {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
                             }
 
                             // Flush memtable to L0
@@ -242,7 +250,9 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
 
                             // Write remaining data (stays in WAL)
                             for i in (num_ops / 2)..num_ops {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                                engine
+                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .expect("put failed");
                             }
 
                             drop(engine);
@@ -314,7 +324,9 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
                         let cf = engine.default_column_family();
 
                         for i in 0..op_count {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                            engine
+                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .expect("put failed");
                         }
 
                         drop(engine);
@@ -366,7 +378,9 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
                         let cf = engine.default_column_family();
 
                         for i in 0..op_count {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).expect("put failed");
+                            engine
+                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .expect("put failed");
                         }
 
                         drop(engine);

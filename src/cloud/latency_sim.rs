@@ -90,11 +90,11 @@ impl LatencyConfig {
     /// ~5ms base RTT, high bandwidth
     pub fn same_region() -> Self {
         Self {
-            base_rtt_us: 5_000,        // 5ms
-            jitter_percent: 20,        // ±10%
+            base_rtt_us: 5_000,          // 5ms
+            jitter_percent: 20,          // ±10%
             bandwidth_bytes_per_us: 100, // ~100MB/s
-            write_penalty_us: 2_000,   // +2ms for writes
-            list_penalty_us: 10_000,   // +10ms for list
+            write_penalty_us: 2_000,     // +2ms for writes
+            list_penalty_us: 10_000,     // +10ms for list
             p99_probability: 0.01,
             p99_multiplier: 5,
             p999_probability: 0.001,
@@ -107,11 +107,11 @@ impl LatencyConfig {
     /// ~80ms base RTT, moderate bandwidth
     pub fn cross_region() -> Self {
         Self {
-            base_rtt_us: 80_000,       // 80ms
-            jitter_percent: 30,        // ±15%
+            base_rtt_us: 80_000,        // 80ms
+            jitter_percent: 30,         // ±15%
             bandwidth_bytes_per_us: 50, // ~50MB/s
-            write_penalty_us: 10_000,  // +10ms for writes
-            list_penalty_us: 30_000,   // +30ms for list
+            write_penalty_us: 10_000,   // +10ms for writes
+            list_penalty_us: 30_000,    // +30ms for list
             p99_probability: 0.02,
             p99_multiplier: 4,
             p999_probability: 0.002,
@@ -124,7 +124,7 @@ impl LatencyConfig {
     /// ~100μs base, no sleep - just accounting
     pub fn fast_simulation() -> Self {
         Self {
-            base_rtt_us: 100,          // 100μs
+            base_rtt_us: 100, // 100μs
             jitter_percent: 10,
             bandwidth_bytes_per_us: 1000, // ~1GB/s (fast local disk)
             write_penalty_us: 50,
@@ -270,7 +270,8 @@ impl LatencySimulator {
         }
 
         // Add transfer time based on size
-        if size_bytes > 0 && cfg.bandwidth_bytes_per_us > 0 && cfg.bandwidth_bytes_per_us < u64::MAX {
+        if size_bytes > 0 && cfg.bandwidth_bytes_per_us > 0 && cfg.bandwidth_bytes_per_us < u64::MAX
+        {
             latency_us += (size_bytes as u64) / cfg.bandwidth_bytes_per_us;
         }
 

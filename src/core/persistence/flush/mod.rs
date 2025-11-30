@@ -27,7 +27,9 @@ pub mod traits;
 pub mod worker;
 
 // Re-export primary types at module level for convenience
-pub use bounds::{compute_bounds, flush_memtable_to_sst, rollover_and_queue_flush, FlushConfig, KeyBounds};
+pub use bounds::{
+    compute_bounds, flush_memtable_to_sst, rollover_and_queue_flush, FlushConfig, KeyBounds,
+};
 pub use process::{determine_safe_prune_sequence, prune_old_wal_files};
 pub use stats::FlushStats;
 pub use traits::{CallbackFlushOutput, FlushOutput, NullFlushOutput};

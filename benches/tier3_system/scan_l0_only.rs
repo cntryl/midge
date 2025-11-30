@@ -15,8 +15,7 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_kv, setup_engine, BenchEngineConfig, BYTES_PER_OP, DURABLE_STORAGE_MODES,
-    VALUE_SIZE,
+    precompute_kv, setup_engine, BenchEngineConfig, BYTES_PER_OP, DURABLE_STORAGE_MODES, VALUE_SIZE,
 };
 
 use bytes::Bytes;
@@ -69,7 +68,9 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
                         for (chunk_idx, chunk) in keys_ref.chunks(2_500).enumerate() {
                             let base_idx = chunk_idx * 2_500;
                             for (i, key) in chunk.iter().enumerate() {
-                                engine.put(&cf, key, &vals_ref[base_idx + i]).expect("put failed");
+                                engine
+                                    .put(&cf, key, &vals_ref[base_idx + i])
+                                    .expect("put failed");
                             }
                             engine.flush().expect("flush failed");
                         }
@@ -134,7 +135,9 @@ fn bench_scan_l0_prefix(c: &mut Criterion) {
                         for (chunk_idx, chunk) in keys_ref.chunks(2_500).enumerate() {
                             let base_idx = chunk_idx * 2_500;
                             for (i, key) in chunk.iter().enumerate() {
-                                engine.put(&cf, key, &vals_ref[base_idx + i]).expect("put failed");
+                                engine
+                                    .put(&cf, key, &vals_ref[base_idx + i])
+                                    .expect("put failed");
                             }
                             engine.flush().expect("flush failed");
                         }

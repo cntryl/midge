@@ -110,7 +110,7 @@ impl SparseIndex {
 
             // If start_idx >= end_idx, return empty range
             let start_idx = start_idx.min(end_idx);
-            
+
             (start_idx, end_idx)
         };
 

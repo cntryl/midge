@@ -216,7 +216,10 @@ fn spawn_cloud_upload(
     test_hooks: Option<crate::common::test_hooks::TestHooks>,
 ) {
     let sequence_range = (seq_range.0.unwrap_or(0), seq_range.1.unwrap_or(0));
-    let key_range_vec = (key_range.0.map(|k| k.to_vec()), key_range.1.map(|k| k.to_vec()));
+    let key_range_vec = (
+        key_range.0.map(|k| k.to_vec()),
+        key_range.1.map(|k| k.to_vec()),
+    );
 
     // Use the centralized guarded spawn helper so panics are converted to
     // TestHooks notifications instead of unwinding into the test harness.
