@@ -11,11 +11,14 @@
 //! - `system_compact`: Measures full compaction (compact_all) latency
 //! - `system_flush_throughput`: Measures flush bytes/sec with varying value sizes
 //! - `system_incremental_compact`: Multiple L0 files compaction
+//! - `system_flush_concurrent`: Measures flush latency under concurrent writes
 //!
 //! ## Design Notes
 //!
 //! - Uses DURABLE_STORAGE_MODES since compaction requires persistence
 //! - Optimized for benchmark accuracy: precomputed KV using Bytes, no allocations in hot loop
+//! - All data precomputed outside measurement loop
+//! - Returns engine from closure to prevent Drop during timing
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -32,6 +35,8 @@ use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
+use std::hint::black_box;
+use std::sync::Arc;
 
 /// Key size in bytes (fixed for consistent measurements)
 const KEY_SIZE: usize = 16;
@@ -43,11 +48,13 @@ const BENCH_FLUSH: &str = "flush";
 const BENCH_COMPACT: &str = "compact";
 const BENCH_FLUSH_TP: &str = "flush_tp";
 const BENCH_INCR_COMPACT: &str = "incr_compact";
+const BENCH_FLUSH_CONCURRENT: &str = "flush_concurrent";
 
 /// Pre-generate immutable keys and values with configurable value size.
 /// Keys: "k" + 15-digit zero-padded number (16 bytes total)
 /// Values: index in first 8 bytes + pattern fill
 /// Returns Bytes for zero-copy sharing across iterations.
+#[inline]
 fn generate_kv(num_keys: usize, value_size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(num_keys);
     let mut values = Vec::with_capacity(num_keys);
@@ -170,7 +177,6 @@ fn bench_flush(c: &mut Criterion) {
 fn bench_compact_all(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_compact");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(12);
 
     // Reduced key counts for faster runs; LocalDisk-only for larger
     for &num_keys in &[10_000, 15_000] {
@@ -187,7 +193,7 @@ fn bench_compact_all(c: &mut Criterion) {
             }
             let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
             group.bench_with_input(
-                BenchmarkId::new("compact_all", &bench_name),
+                BenchmarkId::new(BENCH_COMPACT, &bench_name),
                 &(num_keys, mode),
                 |b, &(_size, mode)| {
                     let kv_ref = &kv;
@@ -278,7 +284,6 @@ fn bench_flush_throughput(c: &mut Criterion) {
 fn bench_incremental_compact(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_incremental_compact");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(12);
 
     // Reduced to keep iterations under ~2s while still testing multi-batch compaction
     let num_keys_per_batch = 2_000;
@@ -286,8 +291,7 @@ fn bench_incremental_compact(c: &mut Criterion) {
 
     // Generate batched KV with overlapping key ranges for realistic compaction
     let kv = PrecomputedKV::new_batched(num_keys_per_batch, num_batches, DEFAULT_VALUE_SIZE);
-    let total_bytes: u64 =
-        (kv.len() as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
+    let total_bytes: u64 = (kv.len() as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
 
     group.throughput(Throughput::Bytes(total_bytes));
 
@@ -299,7 +303,7 @@ fn bench_incremental_compact(c: &mut Criterion) {
             mode.as_str()
         );
         group.bench_with_input(
-            BenchmarkId::new("incremental", &bench_name),
+            BenchmarkId::new(BENCH_INCR_COMPACT, &bench_name),
             &mode,
             |b, &mode| {
                 let kv_ref = &kv;
@@ -344,9 +348,96 @@ fn bench_incremental_compact(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark flush under concurrent write load.
+/// Measures flush latency when other threads are actively writing.
+fn bench_flush_concurrent(c: &mut Criterion) {
+    let mut group = c.benchmark_group("system_flush_concurrent");
+    group.sampling_mode(SamplingMode::Flat);
+
+    let num_keys = 5_000;
+    let concurrent_writers = 2;
+    let writes_per_writer = 500;
+
+    // Precompute data
+    let kv = PrecomputedKV::new(num_keys, DEFAULT_VALUE_SIZE);
+    let writer_keys: Vec<Vec<Bytes>> = (0..concurrent_writers)
+        .map(|w| {
+            let base = num_keys + w * writes_per_writer;
+            (base..(base + writes_per_writer))
+                .map(|i| {
+                    let mut key = vec![b'w'; KEY_SIZE];
+                    let mut n = i;
+                    for j in (1..KEY_SIZE).rev() {
+                        key[j] = b'0' + (n % 10) as u8;
+                        n /= 10;
+                    }
+                    Bytes::from(key)
+                })
+                .collect()
+        })
+        .collect();
+    let writer_value = Bytes::from(vec![b'v'; DEFAULT_VALUE_SIZE]);
+    let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
+
+    group.throughput(Throughput::Bytes(total_bytes));
+
+    // Only test disk mode for concurrent scenarios to keep runtime reasonable
+    let mode = BenchStorageMode::LocalDisk;
+    group.bench_with_input(
+        BenchmarkId::new(BENCH_FLUSH_CONCURRENT, "concurrent_2writers"),
+        &mode,
+        |b, &mode| {
+            let kv_ref = &kv;
+            let writer_keys_ref = &writer_keys;
+            let writer_value_ref = &writer_value;
+
+            b.iter_batched(
+                || {
+                    let engine = Arc::new(setup_engine(
+                        BENCH_FLUSH_CONCURRENT,
+                        &BenchEngineConfig {
+                            storage_mode: mode,
+                            enable_compaction: false,
+                            ..Default::default()
+                        },
+                    ));
+                    let cf = engine.default_column_family();
+                    for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
+                        engine.put(&cf, k, v).expect("put failed");
+                    }
+                    engine
+                },
+                |engine| {
+                    let cf = engine.default_column_family();
+                    // Spawn concurrent writers while flushing
+                    std::thread::scope(|s| {
+                        // Writer threads
+                        for w_keys in writer_keys_ref {
+                            let engine_ref = &engine;
+                            let cf_ref = &cf;
+                            let val = writer_value_ref;
+                            s.spawn(move || {
+                                for k in w_keys {
+                                    let _ = engine_ref.put(cf_ref, k, val);
+                                }
+                            });
+                        }
+                        // Flush in main thread (timed operation)
+                        black_box(engine.flush().expect("flush failed"));
+                    });
+                    engine
+                },
+                BatchSize::LargeInput,
+            )
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group! {
     name = tier3_system_compaction;
     config = criterion_config_for_tier(BenchTier::Tier3System);
-    targets = bench_flush, bench_compact_all, bench_flush_throughput, bench_incremental_compact
+    targets = bench_flush, bench_compact_all, bench_flush_throughput, bench_incremental_compact, bench_flush_concurrent
 }
 criterion_main!(tier3_system_compaction);

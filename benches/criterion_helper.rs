@@ -1,15 +1,19 @@
-/// Criterion configuration helper with tier-based tuning.
-///
-/// Usage in benchmarks:
-/// ```
-/// use criterion_helper::{criterion_config, BenchTier};
-/// criterion_group!(name = my_bench; config = criterion_config(BenchTier::Tier1Hot); targets = bench_fn);
-/// ```
-///
-/// For backward compatibility, `criterion_config()` without arguments defaults to Tier2Subsystem.
-///
-/// NOTE: `SamplingMode::Flat` should be set on individual `BenchmarkGroup`s for Tier1/Tier2
-/// benchmarks where iterations are fast. Use `group.sampling_mode(SamplingMode::Flat)`.
+//! Criterion configuration helper with tier-based tuning.
+//!
+//! Usage in benchmarks:
+//! ```
+//! use criterion_helper::{criterion_config_for_tier, BenchTier};
+//! criterion_group!(name = my_bench;
+//!     config = criterion_config_for_tier(BenchTier::Tier1Hot);
+//!     targets = bench_fn);
+//! ```
+//!
+//! For backward compatibility, calling `criterion_config()` without arguments
+//! defaults to `Tier2Subsystem`.
+//!
+//! NOTE: For Tier1 and Tier2, set `SamplingMode::Flat` on the benchmark group:
+//! `group.sampling_mode(SamplingMode::Flat)`.
+
 use criterion::Criterion;
 use std::time::Duration;
 
@@ -24,16 +28,14 @@ pub enum BenchTier {
     Tier6Capacity,
 }
 
-/// Tier-specific Criterion configuration.
 #[allow(dead_code)]
 pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
     match tier {
         // ---------------------------------------------------------------
-        // Tier 1: Hotpath (ns → µs)
+        // Tier 1 — Hotpath (ns → µs)
         //
         // Ultra-tight loops: bloom probe, cache lookup, TLV parse.
-        // Goal: stable sub-microsecond measurements.
-        // NOTE: Use group.sampling_mode(SamplingMode::Flat) in benchmarks.
+        // Goal: stable sub-microsecond signals.
         // ---------------------------------------------------------------
         BenchTier::Tier1Hot => Criterion::default()
             .warm_up_time(Duration::from_millis(200))
@@ -45,11 +47,10 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
             .without_plots(),
 
         // ---------------------------------------------------------------
-        // Tier 2: Subsystem (µs → ms)
+        // Tier 2 — Subsystem (µs → ms)
         //
-        // Component-level: memtable insert, SST block read, WAL append.
-        // Goal: measure individual subsystem latency.
-        // NOTE: Use group.sampling_mode(SamplingMode::Flat) in benchmarks.
+        // Component-level latencies: memtable insert, block read, WAL append.
+        // Used very frequently during perf tuning.
         // ---------------------------------------------------------------
         BenchTier::Tier2Subsystem => Criterion::default()
             .warm_up_time(Duration::from_millis(300))
@@ -61,28 +62,28 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
             .without_plots(),
 
         // ---------------------------------------------------------------
-        // Tier 3: Integration (ms → 100ms)
+        // Tier 3 — System (ms → 100ms)
         //
-        // Full engine ops: put/get through full stack, flush, scan.
-        // Goal: end-to-end latency with real I/O.
-        // Note: Increased measurement_time to accommodate iter_batched
-        // setup overhead (engine creation, data population) which runs
-        // before each timed iteration.
+        // Full-engine operations: flush, compact, scan, put/get full stack.
+        // Tuned for FAST FEEDBACK LOOPS while preserving meaningful signal.
+        //
+        // Typical runtime across all Tier 3 benches:
+        //     ~2–3 minutes total on dev hardware.
         // ---------------------------------------------------------------
         BenchTier::Tier3System => Criterion::default()
-            .warm_up_time(Duration::from_secs(1))
-            .measurement_time(Duration::from_secs(5))
+            .warm_up_time(Duration::from_millis(300))
+            .measurement_time(Duration::from_millis(700))
             .sample_size(10)
-            .noise_threshold(0.03)
-            .confidence_level(0.95)
-            .nresamples(20_000)
+            .noise_threshold(0.05)
+            .confidence_level(0.90)
+            .nresamples(5_000)
             .without_plots(),
 
         // ---------------------------------------------------------------
-        // Tier 4: Durability (10ms → 100ms)
+        // Tier 4 — Durability / Integration
         //
-        // fsync-heavy: WAL sync, SST write, manifest update.
-        // Goal: measure durable write latency.
+        // fsync, WAL sync, SST write, manifest updates.
+        // Used in release tuning + durability regression.
         // ---------------------------------------------------------------
         BenchTier::Tier4Integration => Criterion::default()
             .warm_up_time(Duration::from_millis(500))
@@ -94,13 +95,10 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
             .without_plots(),
 
         // ---------------------------------------------------------------
-        // Tier 5: Stress / Load / Compaction Pressure
+        // Tier 5 — Soak (stress, concurrency, compaction pressure)
         //
-        // Progress tracking, not fine timing. Goals:
-        // - detect deadlocks
-        // - measure wallclock throughput
-        // - observe compactor/reactor latencies
-        // - simulate multi-threaded hot load
+        // Focus is forward progress, regressions, deadlock detection.
+        // Not about micro-precision.
         // ---------------------------------------------------------------
         BenchTier::Tier5Soak => Criterion::default()
             .warm_up_time(Duration::from_secs(1))
@@ -113,12 +111,10 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
             .without_plots(),
 
         // ---------------------------------------------------------------
-        // Tier 6: Soak / Chaos / Long Runtime Stability
+        // Tier 6 — Capacity / Chaos / Long Runtime Stability
         //
-        // Often run overnight on dedicated hardware with chaos triggers
-        // (compaction storms, WAL corruption sims). Criterion used to
-        // standardize harness; low sample counts since iterations may
-        // take seconds → minutes.
+        // Intended for multi-minute to multi-hour runs;
+        // Criterion gives a consistent harness but not fine-grained timing.
         // ---------------------------------------------------------------
         BenchTier::Tier6Capacity => Criterion::default()
             .warm_up_time(Duration::from_secs(2))
