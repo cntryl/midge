@@ -1,23 +1,22 @@
 //! Tier 3 — System LSM Benchmarks
 //!
-//! **Target Runtime:** ~30-60 seconds
+//! **Target Runtime:** ~30–60 seconds
 //! **Run Frequency:** Nightly CI / Perf Baselines
 //!
-//! Covers:
+//! Covers full LSM-engine behaviors:
 //! - WAL append throughput
-//! - Memtable insert throughput
-//! - Flush to SST
-//! - Reopen and point reads
+//! - Memtable inserts
+//! - Flush → Reopen → Point reads
 //! - L0 → L1 compaction
-//! - Mixed read/write workloads
+//! - Mixed 80/20 read/write hotspot workload
 //!
 //! ## Design Notes
 //!
-//! - Returns engine from timed closures to exclude teardown from timing
+//! - Returns engine from timed closures to exclude teardown
 //! - Precomputes all keys/values outside hot loops
-//! - Uses unique paths to avoid cross-iteration interference
-//! - Throughput measured in bytes
-//! - Uses DURABLE_STORAGE_MODES since LSM operations require persistence
+//! - Uses unique paths to avoid cross-test interference
+//! - Throughput measured in total bytes
+//! - Uses DURABLE_STORAGE_MODES since LSM ops require persistence
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
@@ -36,40 +35,41 @@ use criterion::{
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
-/// Key size in bytes
-const KEY_SIZE: usize = 21; // "user:" + 8 bytes BE + ":profile"
-/// Default value size
+// ===========================================================================
+// Shared Constants
+// ===========================================================================
+
+const KEY_SIZE: usize = 21; // "user:{u64_be}:profile"
 const VALUE_SIZE: usize = 40;
-/// Bytes per operation
 const BYTES_PER_OP: u64 = (KEY_SIZE + VALUE_SIZE) as u64;
 
-/// Benchmark name constants to avoid repeated string allocations
 const BENCH_WAL_WRITE: &str = "wal_write";
 const BENCH_FLUSH_REOPEN: &str = "flush_reopen";
 const BENCH_L0_COMPACT: &str = "l0_compact";
 const BENCH_MIXED: &str = "mixed_workload";
 
+// ===========================================================================
+// Fast deterministic key/value generators
+// ===========================================================================
+
 #[inline]
 fn make_key(i: usize) -> Bytes {
-    let mut key = Vec::with_capacity(KEY_SIZE);
-    key.extend_from_slice(b"user:");
-    key.extend_from_slice(&(i as u64).to_be_bytes());
-    key.extend_from_slice(b":profile");
-    Bytes::from(key)
+    let mut buf = Vec::with_capacity(KEY_SIZE);
+    buf.extend_from_slice(b"user:");
+    buf.extend_from_slice(&(i as u64).to_be_bytes());
+    buf.extend_from_slice(b":profile");
+    Bytes::from(buf)
 }
 
-/// Generate a fixed-size value with index encoded in first 8 bytes.
-/// Fast and deterministic - no JSON overhead needed for benchmarks.
 #[inline]
 fn make_value(i: usize) -> Bytes {
-    let mut value = vec![0u8; VALUE_SIZE];
-    value[..8].copy_from_slice(&(i as u64).to_be_bytes());
-    // Fill remainder with deterministic pattern
+    let mut buf = vec![0u8; VALUE_SIZE];
+    buf[..8].copy_from_slice(&(i as u64).to_be_bytes());
     let pattern = (i % 256) as u8;
-    for byte in value.iter_mut().skip(8) {
-        *byte = pattern;
+    for b in buf.iter_mut().skip(8) {
+        *b = pattern;
     }
-    Bytes::from(value)
+    Bytes::from(buf)
 }
 
 fn precompute_kv(n: usize) -> (Vec<Bytes>, Vec<Bytes>) {
@@ -82,27 +82,24 @@ fn precompute_kv(n: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     (keys, vals)
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // 1. WAL + Memtable Writes
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 fn bench_system_wal_write(c: &mut Criterion) {
-    let mut g = c.benchmark_group("system_wal_write");
+    let mut g = c.benchmark_group("system_lsm/wal_write");
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(15);
 
-    for &entries in &[1_000usize, 10_000, 50_000] {
-        // Reduced from 100k for faster runs
-        // Precompute once per entry count, reused across modes
+    for &entries in &[1_000, 10_000, 50_000] {
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
 
         g.throughput(Throughput::Bytes(bytes_total));
 
         for mode in DURABLE_STORAGE_MODES {
-            let bench_name = format!("{}/{}", entries, mode.as_str());
             g.bench_with_input(
-                BenchmarkId::new("writes", &bench_name),
+                BenchmarkId::new(format!("{}_entries", entries), mode.as_str()),
                 &(entries, mode),
                 |b, &(n, mode)| {
                     let keys_ref = &keys;
@@ -122,9 +119,7 @@ fn bench_system_wal_write(c: &mut Criterion) {
                         |engine| {
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine
-                                    .put(&cf, &keys_ref[i], &vals_ref[i])
-                                    .expect("put failed");
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
                             }
                             engine
                         },
@@ -138,28 +133,26 @@ fn bench_system_wal_write(c: &mut Criterion) {
     g.finish();
 }
 
-// ---------------------------------------------------------------------------
-// 2. Flush + Reopen + Point Reads
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// 2. Flush → Reopen → Point Reads
+// ===========================================================================
 
 fn bench_system_flush_reopen_read(c: &mut Criterion) {
-    let mut g = c.benchmark_group("system_flush_reopen_read");
+    let mut g = c.benchmark_group("system_lsm/flush_reopen_read");
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(15);
 
-    for &entries in &[10_000usize, 50_000] {
-        // Precompute once per entry count, reused across modes
+    for &entries in &[10_000, 50_000] {
         let (keys, vals) = precompute_kv(entries);
-        let read_count = 1_000usize;
+        let read_count = 1_000;
         let read_indices = precompute_read_indices(entries, read_count, 42);
         let bytes_total = (read_count as u64) * BYTES_PER_OP;
 
         g.throughput(Throughput::Bytes(bytes_total));
 
         for mode in DURABLE_STORAGE_MODES {
-            let bench_name = format!("{}/{}", entries, mode.as_str());
             g.bench_with_input(
-                BenchmarkId::new("reads", &bench_name),
+                BenchmarkId::new(format!("{}_entries", entries), mode.as_str()),
                 &(entries, mode),
                 |b, &(n, mode)| {
                     let keys_ref = &keys;
@@ -171,29 +164,30 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
                             let path = unique_bench_path(BENCH_FLUSH_REOPEN);
                             let _ = std::fs::remove_dir_all(&path);
 
-                            let config = BenchEngineConfig {
+                            let cfg = BenchEngineConfig {
                                 storage_mode: mode,
                                 enable_compaction: false,
                                 ..Default::default()
                             };
-                            let engine = setup_engine_at_path(&path, &config);
+
+                            let engine = setup_engine_at_path(&path, &cfg);
                             let cf = engine.default_column_family();
+
                             for i in 0..n {
-                                engine
-                                    .put(&cf, &keys_ref[i], &vals_ref[i])
-                                    .expect("put failed");
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
                             }
-                            engine.flush().expect("flush failed");
+                            engine.flush().unwrap();
                             drop(engine);
-                            (path, config)
+
+                            (path, cfg)
                         },
-                        |(path, config)| {
-                            let engine = setup_engine_at_path(&path, &config);
+                        |(path, cfg)| {
+                            let engine = setup_engine_at_path(&path, &cfg);
                             let cf = engine.default_column_family();
 
                             for &idx in read_indices_ref {
                                 let key = black_box(&keys_ref[idx]);
-                                black_box(engine.get(&cf, key).expect("get failed"));
+                                black_box(engine.get(&cf, key).unwrap());
                             }
 
                             engine
@@ -208,31 +202,28 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
     g.finish();
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // 3. L0 → L1 Compaction
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 fn bench_system_l0_compaction(c: &mut Criterion) {
-    let mut g = c.benchmark_group("system_l0_compaction");
+    let mut g = c.benchmark_group("system_lsm/l0_compaction");
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(12);
 
-    for &entries in &[25_000usize, 50_000] {
-        // Reduced from 50k/100k for faster runs
-        // Precompute once per entry count, reused across modes
+    for &entries in &[25_000, 50_000] {
         let (keys, vals) = precompute_kv(entries);
         let bytes_total = (entries as u64) * BYTES_PER_OP;
 
         g.throughput(Throughput::Bytes(bytes_total));
 
-        // LocalDisk only for larger workload to avoid cloud overhead
         for mode in DURABLE_STORAGE_MODES {
             if entries > 25_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
-                continue;
+                continue; // Avoid huge cloud costs
             }
-            let bench_name = format!("{}/{}", entries, mode.as_str());
+
             g.bench_with_input(
-                BenchmarkId::new("compact", &bench_name),
+                BenchmarkId::new(format!("{}_entries", entries), mode.as_str()),
                 &(entries, mode),
                 |b, &(n, mode)| {
                     let keys_ref = &keys;
@@ -248,18 +239,17 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
                                     ..Default::default()
                                 },
                             );
+
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine
-                                    .put(&cf, &keys_ref[i], &vals_ref[i])
-                                    .expect("put failed");
+                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
                             }
-                            // Flush to create L0 file(s) for compaction
-                            engine.flush().expect("flush failed");
+                            engine.flush().unwrap(); // creates L0
+
                             (engine, cf)
                         },
                         |(engine, cf)| {
-                            engine.compact_level(&cf, 0).expect("compact_level failed");
+                            engine.compact_level(&cf, 0).unwrap();
                             engine
                         },
                         BatchSize::LargeInput,
@@ -272,27 +262,32 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
     g.finish();
 }
 
-// ---------------------------------------------------------------------------
-// 4. Mixed Read/Write Hotspot Workload
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// 4. Mixed Hotspot Read/Write Workload (80/20)
+// ===========================================================================
 
 fn bench_system_mixed_workload(c: &mut Criterion) {
-    let mut g = c.benchmark_group("system_mixed_workload");
+    let mut g = c.benchmark_group("system_lsm/mixed_workload");
     g.sampling_mode(SamplingMode::Flat);
     g.sample_size(15);
 
-    let hot_set_size = 10_000usize;
-    let total_ops = 50_000usize;
+    let hot_set_size = 10_000;
+    let total_ops = 50_000;
+
     let (keys, vals) = precompute_kv(hot_set_size);
 
-    // Precompute operation indices and types (80% read, 20% write)
-    // Deterministic sequence using LCG
-    let mut ops: Vec<(usize, bool)> = Vec::with_capacity(total_ops);
+    // Precompute deterministic 80% read / 20% write sequence
+    let mut ops = Vec::with_capacity(total_ops);
     let mut state = 12345u64;
+
     for _ in 0..total_ops {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
+
         let idx = (state as usize) % hot_set_size;
-        let is_read = (state >> 32) % 100 < 80;
+        let is_read = ((state >> 32) % 100) < 80;
+
         ops.push((idx, is_read));
     }
 
@@ -301,7 +296,7 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
 
     for mode in DURABLE_STORAGE_MODES {
         g.bench_with_input(
-            BenchmarkId::new("mixed_80r_20w_hotset", mode.as_str()),
+            BenchmarkId::new("80r_20w_hotset", mode.as_str()),
             &mode,
             |b, &mode| {
                 let keys_ref = &keys;
@@ -318,14 +313,13 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
                                 ..Default::default()
                             },
                         );
+
                         let cf = engine.default_column_family();
-                        // Prefill hot set
                         for i in 0..hot_set_size {
-                            engine
-                                .put(&cf, &keys_ref[i], &vals_ref[i])
-                                .expect("prefill put failed");
+                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
                         }
-                        engine.flush().expect("prefill flush failed");
+                        engine.flush().unwrap(); // baseline L0
+
                         engine
                     },
                     |engine| {
@@ -334,10 +328,10 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
                         for &(idx, is_read) in ops_ref {
                             let key = black_box(&keys_ref[idx]);
                             if is_read {
-                                black_box(engine.get(&cf, key).expect("get failed"));
+                                black_box(engine.get(&cf, key).unwrap());
                             } else {
                                 let val = black_box(&vals_ref[idx]);
-                                engine.put(&cf, key, val).expect("put failed");
+                                engine.put(&cf, key, val).unwrap();
                             }
                         }
 
@@ -352,9 +346,9 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
     g.finish();
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Registration
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 criterion_group! {
     name = tier3_system_lsm;
