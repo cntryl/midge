@@ -301,11 +301,18 @@ pub fn setup_engine_with_mode(prefix: &str, mode: BenchStorageMode) -> MidgeEngi
 }
 
 /// Setup a benchmark engine at a specific path with the given configuration.
-/// Use this when you need to control the exact path (e.g., for reopen tests).
+/// This creates a NEW database at the path (deletes any existing data).
+/// Use `reopen_engine_at_path` for recovery/reopen tests.
 #[allow(dead_code)]
 pub fn setup_engine_at_path(path: &std::path::Path, config: &BenchEngineConfig) -> MidgeEngine {
     let _ = std::fs::remove_dir_all(path);
+    reopen_engine_at_path(path, config)
+}
 
+/// Reopen an existing database at a specific path.
+/// Does NOT delete existing data - use for recovery/reopen tests.
+#[allow(dead_code)]
+pub fn reopen_engine_at_path(path: &std::path::Path, config: &BenchEngineConfig) -> MidgeEngine {
     let storage_mode = match config.storage_mode {
         BenchStorageMode::Memory => panic!("setup_engine_at_path requires persistent storage"),
         BenchStorageMode::LocalDisk => StorageMode::LocalDisk {

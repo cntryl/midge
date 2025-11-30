@@ -23,8 +23,8 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    precompute_kv, setup_engine_at_path, unique_bench_path, BenchEngineConfig, BenchStorageMode,
-    BYTES_PER_OP, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
+    precompute_kv, reopen_engine_at_path, setup_engine_at_path, unique_bench_path,
+    BenchEngineConfig, BenchStorageMode, BYTES_PER_OP, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
 };
 
 use criterion::{
@@ -98,7 +98,7 @@ fn bench_recovery_throughput(c: &mut Criterion) {
                         },
                         |(db_path, config)| {
                             // Measure recovery time (WAL replay)
-                            let engine = setup_engine_at_path(&db_path, &config);
+                            let engine = reopen_engine_at_path(&db_path, &config);
 
                             // Validate some data integrity
                             let cf = engine.default_column_family();
@@ -167,7 +167,7 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
                             (db_path, config)
                         },
                         |(db_path, config)| {
-                            let engine = setup_engine_at_path(&db_path, &config);
+                            let engine = reopen_engine_at_path(&db_path, &config);
 
                             // Quick validation
                             let cf = engine.default_column_family();
@@ -249,7 +249,7 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
                             (db_path, config)
                         },
                         |(db_path, config)| {
-                            let engine = setup_engine_at_path(&db_path, &config);
+                            let engine = reopen_engine_at_path(&db_path, &config);
 
                             // Validate all data recovered
                             let cf = engine.default_column_family();
@@ -321,7 +321,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
                         (db_path, config)
                     },
                     |(db_path, config)| {
-                        let engine = setup_engine_at_path(&db_path, &config);
+                        let engine = reopen_engine_at_path(&db_path, &config);
 
                         let cf = engine.default_column_family();
                         let key = black_box(&keys_ref[25_000]);
@@ -373,7 +373,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
                         (db_path, config)
                     },
                     |(db_path, config)| {
-                        let engine = setup_engine_at_path(&db_path, &config);
+                        let engine = reopen_engine_at_path(&db_path, &config);
 
                         let cf = engine.default_column_family();
                         let key = black_box(&keys_ref[25_000]);
