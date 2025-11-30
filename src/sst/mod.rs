@@ -33,11 +33,35 @@ pub mod table_cache;
 pub mod traits;
 pub mod writer_common;
 
-pub use block_cache::{
-    create_adaptive_cache, create_basic_cache, create_hot_cache, create_sharded_cache,
-    AdaptiveCacheStats, BlockCacheTrait, BlockKey, BlockType as CacheBlockType, CacheStats,
-    CachedBlock, CompactBlockKey, HotTierCache, HotTierStats,
-};
+// ─── Block cache re-exports (temporary shims for existing code) ──────────────
+// These re-export names from the new block_cache module so call-sites like
+// `crate::sst::BlockCacheTrait` keep compiling while we finish the new impl.
+pub use block_cache::{BlockCache as BlockCacheTrait, BlockCacheStats as CacheStats};
+
+/// Temporary factory that returns a stub cache until new impl is ready.
+pub fn create_basic_cache(_max_size_bytes: usize) -> std::sync::Arc<dyn BlockCacheTrait> {
+    std::sync::Arc::new(StubBlockCache)
+}
+
+/// Minimal stub so engine code compiles; always misses.
+struct StubBlockCache;
+
+impl BlockCacheTrait for StubBlockCache {
+    fn get(&self, _key: &block_cache::BlockKey) -> Option<block_cache::BlockHandle> {
+        None
+    }
+    fn insert(&self, _key: block_cache::BlockKey, data: block_cache::BlockData) -> block_cache::BlockHandle {
+        block_cache::BlockHandle::unpinned(std::sync::Arc::new(data))
+    }
+    fn insert_if_absent(&self, key: block_cache::BlockKey, data: block_cache::BlockData) -> block_cache::BlockHandle {
+        self.insert(key, data)
+    }
+    fn capacity_bytes(&self) -> usize { 0 }
+    fn used_bytes(&self) -> usize { 0 }
+    fn stats(&self) -> block_cache::BlockCacheStats { block_cache::BlockCacheStats::default() }
+}
+
+// ─── Other public re-exports ─────────────────────────────────────────────────
 pub use bloom::{BloomFilter, BloomFilterBuilder, Filter};
 pub use cloud::{
     ArchiveTier, CloudSst, CloudSstFactory, CloudSstManager, CloudSstManagerConfig,

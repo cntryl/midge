@@ -8,42 +8,42 @@
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use bytes::Bytes;
-use cntryl_midge::sst::{create_basic_cache, BlockKey, CacheBlockType, CachedBlock};
+use cntryl_midge::sst::block_cache::{
+    BlockCache, BlockCacheOptions, BlockData, BlockKey, BlockKind, ShardedBlockCache,
+};
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
+use std::sync::Arc;
 
-fn make_block_key(file_num: usize, offset: u64) -> BlockKey {
-    BlockKey {
-        file_name: format!("sst_{:06}.sst", file_num),
-        block_type: CacheBlockType::Data,
-        offset,
-    }
+fn make_block_key(file_num: u64, offset: u64) -> BlockKey {
+    BlockKey::new(file_num, offset, BlockKind::Data, 0)
 }
 
-fn make_cached_block(size: usize) -> CachedBlock {
-    let data = vec![0u8; size];
-    CachedBlock {
-        data: Bytes::from(data),
-    }
+fn make_block_data(size: usize) -> BlockData {
+    let data: Arc<[u8]> = vec![0u8; size].into();
+    BlockData::uncompressed(data, BlockKind::Data)
 }
 
 fn precompute_keys_and_blocks(
     num_blocks: usize,
     block_size: usize,
-) -> (Vec<BlockKey>, Vec<CachedBlock>) {
+) -> (Vec<BlockKey>, Vec<BlockData>) {
     let mut keys = Vec::with_capacity(num_blocks);
     let mut blocks = Vec::with_capacity(num_blocks);
     for i in 0..num_blocks {
-        let key = make_block_key(i / 100, (i % 100) as u64 * block_size as u64);
-        let block = make_cached_block(block_size);
+        let key = make_block_key((i / 100) as u64, (i % 100) as u64 * block_size as u64);
+        let block = make_block_data(block_size);
         keys.push(key);
         blocks.push(block);
     }
     (keys, blocks)
+}
+
+fn create_cache(capacity: usize) -> ShardedBlockCache {
+    ShardedBlockCache::new(BlockCacheOptions::with_capacity(capacity))
 }
 
 /// Benchmark cache insert operations
@@ -64,7 +64,7 @@ fn bench_cache_insert(c: &mut Criterion) {
             &num_blocks,
             |b, &n| {
                 b.iter_batched(
-                    || create_basic_cache(cache_size),
+                    || create_cache(cache_size),
                     |cache| {
                         for i in 0..n {
                             cache.insert(keys[i].clone(), blocks[i].clone());
@@ -94,7 +94,7 @@ fn bench_cache_get_hit(c: &mut Criterion) {
     let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
 
     // Pre-populate cache
-    let cache = create_basic_cache(cache_size);
+    let cache = create_cache(cache_size);
     for i in 0..num_blocks {
         cache.insert(keys[i].clone(), blocks[i].clone());
     }
@@ -128,14 +128,14 @@ fn bench_cache_get_miss(c: &mut Criterion) {
     let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
 
     // Pre-populate cache with keys 0..1000
-    let cache = create_basic_cache(cache_size);
+    let cache = create_cache(cache_size);
     for i in 0..num_blocks {
         cache.insert(keys[i].clone(), blocks[i].clone());
     }
 
     // Create miss keys that DON'T exist in the cache (different file range: 100-199)
     let miss_keys: Vec<BlockKey> = (0..num_blocks)
-        .map(|i| make_block_key(100 + i / 100, (i % 100) as u64 * block_size as u64))
+        .map(|i| make_block_key((100 + i / 100) as u64, (i % 100) as u64 * block_size as u64))
         .collect();
 
     group.bench_function("get_miss", |b| {
@@ -170,7 +170,7 @@ fn bench_cache_eviction(c: &mut Criterion) {
     // Insert more blocks than cache can hold
     group.bench_function("evict_under_pressure", |b| {
         b.iter(|| {
-            let cache = create_basic_cache(cache_size);
+            let cache = create_cache(cache_size);
             // Try to insert 1000 blocks when only ~512 fit
             for i in 0..num_blocks {
                 cache.insert(keys[i].clone(), blocks[i].clone());

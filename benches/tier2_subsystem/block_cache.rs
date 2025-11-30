@@ -14,9 +14,11 @@ mod criterion_helper;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
+use std::sync::Arc;
 
-use cntryl_midge::sst::block_cache::BlockType;
-use cntryl_midge::sst::{create_basic_cache, BlockKey, CachedBlock};
+use cntryl_midge::sst::block_cache::{
+    BlockCache, BlockCacheOptions, BlockData, BlockKey, BlockKind, ShardedBlockCache,
+};
 
 /// Pre-computed block keys to avoid allocation in benchmarks.
 struct PrecomputedKeys {
@@ -27,13 +29,13 @@ impl PrecomputedKeys {
     fn new(file_count: usize, blocks_per_file: usize) -> Self {
         let mut keys = Vec::with_capacity(file_count * blocks_per_file);
         for file_idx in 0..file_count {
-            let file_name = format!("file_{}.sst", file_idx);
             for block_idx in 0..blocks_per_file {
-                keys.push(BlockKey {
-                    file_name: file_name.clone(),
-                    block_type: BlockType::Data,
-                    offset: (block_idx * 4096) as u64,
-                });
+                keys.push(BlockKey::new(
+                    file_idx as u64,
+                    (block_idx * 4096) as u64,
+                    BlockKind::Data,
+                    0,
+                ));
             }
         }
         Self { keys }
@@ -51,19 +53,22 @@ impl PrecomputedKeys {
 }
 
 /// Pre-allocated block data to avoid allocation in benchmarks.
-fn make_cached_block_static() -> CachedBlock {
-    // Use static data - Bytes::from_static is zero-copy
+fn make_block_data_static() -> BlockData {
+    // Use static data
     static BLOCK_DATA: [u8; 4096] = [0xAB; 4096];
-    CachedBlock {
-        data: bytes::Bytes::from_static(&BLOCK_DATA),
-    }
+    let data: Arc<[u8]> = Arc::from(&BLOCK_DATA[..]);
+    BlockData::uncompressed(data, BlockKind::Data)
+}
+
+fn create_cache(capacity: usize) -> ShardedBlockCache {
+    ShardedBlockCache::new(BlockCacheOptions::with_capacity(capacity))
 }
 
 /// Benchmark block cache eviction scanning
 fn bench_block_cache_eviction_scan(c: &mut Criterion) {
     // Pre-compute keys outside the benchmark
     let keys = PrecomputedKeys::new(1, 1000);
-    let block = make_cached_block_static();
+    let block = make_block_data_static();
 
     let mut group = c.benchmark_group("subsystem_block_cache_eviction_scan");
     group.sampling_mode(SamplingMode::Flat);
@@ -72,8 +77,8 @@ fn bench_block_cache_eviction_scan(c: &mut Criterion) {
     group.bench_function("scan_1k_entries", |b| {
         b.iter_batched(
             || {
-                let cache = create_basic_cache(5 * 1024 * 1024); // 5MB to hold all 1000 x 4KB blocks
-                                                                 // Fill cache with pre-computed keys
+                let cache = create_cache(5 * 1024 * 1024); // 5MB to hold all 1000 x 4KB blocks
+                // Fill cache with pre-computed keys
                 for i in 0..1000 {
                     cache.insert(keys.get_linear(i).clone(), block.clone());
                 }
@@ -100,7 +105,7 @@ fn bench_block_cache_eviction_scan(c: &mut Criterion) {
 fn bench_block_cache_fill_then_hit(c: &mut Criterion) {
     // Pre-compute keys for 2 files, 1000 blocks each
     let keys = PrecomputedKeys::new(2, 1000);
-    let block = make_cached_block_static();
+    let block = make_block_data_static();
 
     let mut group = c.benchmark_group("subsystem_block_cache_fill_then_hit");
     group.sampling_mode(SamplingMode::Flat);
@@ -109,8 +114,8 @@ fn bench_block_cache_fill_then_hit(c: &mut Criterion) {
     group.bench_function("fill_100_then_hit_1000", |b| {
         b.iter_batched(
             || {
-                let cache = create_basic_cache(1024 * 1024); // 1MB cache
-                                                             // Fill with initial 100 blocks from file 0
+                let cache = create_cache(1024 * 1024); // 1MB cache
+                // Fill with initial 100 blocks from file 0
                 for i in 0..100 {
                     cache.insert(keys.get(0, i, 1000).clone(), block.clone());
                 }
@@ -141,7 +146,7 @@ fn bench_block_cache_fill_then_hit(c: &mut Criterion) {
 fn bench_block_cache_hotset_rotation(c: &mut Criterion) {
     // Pre-compute keys: need indices 0..74 for the rotation pattern
     let keys = PrecomputedKeys::new(1, 100);
-    let block = make_cached_block_static();
+    let block = make_block_data_static();
 
     let mut group = c.benchmark_group("subsystem_block_cache_hotset_rotation");
     group.sampling_mode(SamplingMode::Flat);
@@ -150,8 +155,8 @@ fn bench_block_cache_hotset_rotation(c: &mut Criterion) {
     group.bench_function("rotate_hotset_50_entries", |b| {
         b.iter_batched(
             || {
-                let cache = create_basic_cache(1024 * 1024); // 1MB cache
-                                                             // Establish initial hot set (indices 0..49)
+                let cache = create_cache(1024 * 1024); // 1MB cache
+                // Establish initial hot set (indices 0..49)
                 for i in 0..50 {
                     cache.insert(keys.get_linear(i).clone(), block.clone());
                 }
@@ -167,7 +172,7 @@ fn bench_block_cache_hotset_rotation(c: &mut Criterion) {
                         }
                     }
                 }
-                black_box(cache.stats().entry_count)
+                black_box(cache.stats())
             },
             criterion::BatchSize::SmallInput,
         )

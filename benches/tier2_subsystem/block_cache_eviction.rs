@@ -11,9 +11,11 @@ mod criterion_helper;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
+use std::sync::Arc;
 
-use cntryl_midge::sst::block_cache::BlockType;
-use cntryl_midge::sst::{create_basic_cache, BlockKey, CachedBlock};
+use cntryl_midge::sst::block_cache::{
+    BlockCache, BlockCacheOptions, BlockData, BlockKey, BlockKind, ShardedBlockCache,
+};
 
 /// Pre-computed block keys to avoid allocation in benchmarks.
 struct PrecomputedKeys {
@@ -22,13 +24,8 @@ struct PrecomputedKeys {
 
 impl PrecomputedKeys {
     fn new(count: usize) -> Self {
-        let file_name = "file_0.sst".to_string();
         let keys = (0..count)
-            .map(|i| BlockKey {
-                file_name: file_name.clone(),
-                block_type: BlockType::Data,
-                offset: (i * 4096) as u64,
-            })
+            .map(|i| BlockKey::new(0, (i * 4096) as u64, BlockKind::Data, 0))
             .collect();
         Self { keys }
     }
@@ -40,11 +37,14 @@ impl PrecomputedKeys {
 }
 
 /// Pre-allocated block data to avoid allocation in benchmarks.
-fn make_cached_block_static() -> CachedBlock {
+fn make_block_data_static() -> BlockData {
     static BLOCK_DATA: [u8; 4096] = [0xAB; 4096];
-    CachedBlock {
-        data: bytes::Bytes::from_static(&BLOCK_DATA),
-    }
+    let data: Arc<[u8]> = Arc::from(&BLOCK_DATA[..]);
+    BlockData::uncompressed(data, BlockKind::Data)
+}
+
+fn create_cache(capacity: usize) -> ShardedBlockCache {
+    ShardedBlockCache::new(BlockCacheOptions::with_capacity(capacity))
 }
 
 /// Benchmark LRU eviction with 1k entries
@@ -52,7 +52,7 @@ fn make_cached_block_static() -> CachedBlock {
 fn bench_block_cache_lru_eviction_1k(c: &mut Criterion) {
     // Pre-compute all keys needed (1125 total: 125 initial + 1000 evictions)
     let keys = PrecomputedKeys::new(1125);
-    let block = make_cached_block_static();
+    let block = make_block_data_static();
 
     let mut group = c.benchmark_group("subsystem_block_cache_lru_eviction_1k");
     group.sampling_mode(SamplingMode::Flat);
@@ -62,7 +62,7 @@ fn bench_block_cache_lru_eviction_1k(c: &mut Criterion) {
         b.iter_batched(
             || {
                 // Setup: create cache and fill to capacity (125 blocks in 512KB)
-                let cache = create_basic_cache(512 * 1024);
+                let cache = create_cache(512 * 1024);
                 for i in 0..125 {
                     cache.insert(keys.get(i).clone(), block.clone());
                 }
@@ -87,7 +87,7 @@ fn bench_block_cache_lru_eviction_1k(c: &mut Criterion) {
 fn bench_block_cache_lru_eviction_10k(c: &mut Criterion) {
     // Pre-compute all keys needed (10500 total: 500 initial + 10000 evictions)
     let keys = PrecomputedKeys::new(10_500);
-    let block = make_cached_block_static();
+    let block = make_block_data_static();
 
     let mut group = c.benchmark_group("subsystem_block_cache_lru_eviction_10k");
     group.sampling_mode(SamplingMode::Flat);
@@ -97,7 +97,7 @@ fn bench_block_cache_lru_eviction_10k(c: &mut Criterion) {
         b.iter_batched(
             || {
                 // Setup: create cache and fill to capacity (500 blocks in 2MB)
-                let cache = create_basic_cache(2 * 1024 * 1024);
+                let cache = create_cache(2 * 1024 * 1024);
                 for i in 0..500 {
                     cache.insert(keys.get(i).clone(), block.clone());
                 }
