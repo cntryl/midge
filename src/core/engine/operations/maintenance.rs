@@ -209,19 +209,13 @@ impl MidgeEngine {
             0
         };
 
-        // Add file and update sequence (keeping as separate operations for now to match background flush pattern)
-        let add_file_edit = crate::core::manifest::VersionEdit::AddFile {
-            file: Box::new(file_meta.clone()),
+        // Add file and update sequence atomically in a single manifest write
+        let add_file_edit = crate::core::manifest::VersionEdit::CombinedAddRemove {
+            add: Box::new(file_meta.clone()),
+            remove: vec![],
+            sequence: file_meta.largest_seq,
         };
         self.version_manager.apply_edit_sync(add_file_edit)?;
-
-        // Update sequence after file is added
-        if let Some(largest_seq) = file_meta.largest_seq {
-            let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
-                sequence: largest_seq,
-            };
-            self.version_manager.apply_edit_sync(seq_edit)?;
-        }
 
         // Update manifest cache to reflect the new SST file
         let updated_manifest = self.version_set.load().manifest.clone();

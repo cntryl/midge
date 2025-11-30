@@ -14,7 +14,7 @@ pub mod traits;
 pub mod types;
 
 // Re-export main WAL types from types module
-pub use types::{WalOpKind, WalPos, WalRecord, WalSyncMode};
+pub use types::{WalOpKind, WalPos, WalRecord, WalRecoveryStats, WalSyncMode};
 
 // Re-export traits
 pub use traits::{WalFactory, WalReader, WalReaderDyn, WalWriter};

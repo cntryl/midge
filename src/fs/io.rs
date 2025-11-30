@@ -190,6 +190,7 @@ pub fn write_vectored_with_hooks(
         return uring::write_vectored_uring_with_hooks(file, buffers, test_hooks);
     }
 
+    #[allow(unreachable_code)]
     write_vectored_fallback_with_hooks(file, buffers, test_hooks)
 }
 

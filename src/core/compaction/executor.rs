@@ -34,6 +34,9 @@ pub struct CompactionVersion {
     pub tombstone: bool,
     pub value: Option<Bytes>,
     pub expiration: Option<u64>, // TTL: Unix milliseconds when key expires
+    /// Operation type: 0=Put, 2=Delete, 3=Merge
+    /// Preserved through compaction to maintain merge operator semantics
+    pub op_type: u8,
 }
 
 /// A range tombstone participating in a compaction run.
@@ -91,9 +94,11 @@ pub(crate) fn collect_compaction_versions(
             // The key returned by scan_range_state is now a user key (after SST encoding fix)
             // The sequence number is in the KeyState, not in the key itself
             let user_key = raw_key.to_vec();
-            let (seq, tombstone, value, expiration) = match state {
-                crate::sst::KeyState::Value(v, seq, exp, _op_type) => (seq, false, Some(v), exp),
-                crate::sst::KeyState::Tombstone(seq) => (seq, true, None, None),
+            let (seq, tombstone, value, expiration, op_type) = match state {
+                crate::sst::KeyState::Value(v, seq, exp, op_type) => {
+                    (seq, false, Some(v), exp, op_type)
+                }
+                crate::sst::KeyState::Tombstone(seq) => (seq, true, None, None, 2u8),
                 crate::sst::KeyState::Absent => continue,
             };
             if seen.insert((user_key.clone(), seq, tombstone)) {
@@ -104,6 +109,7 @@ pub(crate) fn collect_compaction_versions(
                     tombstone,
                     value,
                     expiration,
+                    op_type,
                 });
             }
         }
@@ -342,6 +348,7 @@ pub(crate) fn apply_compaction_filter(
                     tombstone: true,
                     value: None,
                     expiration: v.expiration,
+                    op_type: 2, // Delete
                 });
             }
         }
@@ -428,7 +435,8 @@ pub(crate) fn write_compacted_sst(
             entry.tombstone,
         );
 
-        let op_type = if entry.tombstone { 2 } else { 0 };
+        // Preserve the original op_type (0=Put, 2=Delete, 3=Merge) to maintain merge semantics
+        let op_type = entry.op_type;
         if entry.tombstone {
             writer.add_with_meta(&internal_key, None, entry.seq, op_type, entry.expiration)?;
         } else if let Some(value) = &entry.value {
@@ -545,6 +553,7 @@ mod tests {
                 Some(Bytes::from(format!("value_{}", seq)))
             },
             expiration: None,
+            op_type: if tombstone { 2 } else { 0 }, // Delete or Put
         }
     }
 
@@ -555,6 +564,7 @@ mod tests {
             tombstone: true,
             value: None,
             expiration: None,
+            op_type: 2, // Delete
         }
     }
 
@@ -949,6 +959,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v1")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -956,6 +967,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v10")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -963,6 +975,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v5")),
                 expiration: None,
+                op_type: 0,
             },
         ];
 
@@ -985,6 +998,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v10")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -992,6 +1006,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v5")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -999,6 +1014,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v1")),
                 expiration: None,
+                op_type: 0,
             },
         ];
 
@@ -1021,6 +1037,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v10")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -1028,6 +1045,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v5")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key1".to_vec(),
@@ -1035,6 +1053,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"v1")),
                 expiration: None,
+                op_type: 0,
             },
         ];
 
@@ -1058,6 +1077,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"a3")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key_b".to_vec(),
@@ -1065,6 +1085,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"b8")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key_a".to_vec(),
@@ -1072,6 +1093,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"a1")),
                 expiration: None,
+                op_type: 0,
             },
             CompactionVersion {
                 user_key: b"key_b".to_vec(),
@@ -1079,6 +1101,7 @@ mod tests {
                 tombstone: false,
                 value: Some(Bytes::from_static(b"b2")),
                 expiration: None,
+                op_type: 0,
             },
         ];
 

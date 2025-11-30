@@ -144,6 +144,7 @@ mod tests {
             tombstone: value.is_none(),
             value: value.map(Bytes::copy_from_slice),
             expiration,
+            op_type: if value.is_none() { 2 } else { 0 }, // Delete or Put
         }
     }
 

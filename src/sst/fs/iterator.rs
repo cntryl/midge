@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
@@ -8,6 +8,10 @@ use crate::sst::format::BlockHandle;
 
 use super::utils::decode_data_block;
 
+/// Range iterator over SST file blocks with cached file handle.
+///
+/// The file handle is opened once on first block read and reused for all
+/// subsequent reads, avoiding the overhead of repeated file open/close.
 pub struct SstRangeIter {
     path: PathBuf,
     blocks: Vec<BlockHandle>,
@@ -19,6 +23,8 @@ pub struct SstRangeIter {
     start: Option<Vec<u8>>,
     end: Option<Vec<u8>>,
     use_internal_keys: bool,
+    /// Cached file handle for efficient sequential block reads
+    cached_file: Option<File>,
 }
 
 impl SstRangeIter {
@@ -40,7 +46,18 @@ impl SstRangeIter {
             start,
             end,
             use_internal_keys,
+            cached_file: None,
         }
+    }
+
+    /// Get or create the cached file handle
+    fn get_or_open_file(&mut self) -> MidgeResult<&mut File> {
+        if self.cached_file.is_none() {
+            let file = OpenOptions::new().read(true).open(&self.path)?;
+            self.cached_file = Some(file);
+        }
+        // SAFETY: We just ensured cached_file is Some
+        Ok(self.cached_file.as_mut().unwrap())
     }
 
     fn load_next_block(&mut self) -> MidgeResult<bool> {
@@ -49,10 +66,13 @@ impl SstRangeIter {
         }
         let bh = self.blocks[self.blk_idx];
         self.blk_idx += 1;
-        let mut file = OpenOptions::new().read(true).open(&self.path)?;
+
+        // Use cached file handle instead of opening a new file each time
+        let file = self.get_or_open_file()?;
         file.seek(SeekFrom::Start(bh.offset))?;
         let mut block_data = vec![0u8; bh.size as usize];
         file.read_exact(&mut block_data)?;
+
         let block = decode_data_block(&block_data)?;
         let data: Vec<u8> = block.data.to_vec();
         let len = data.len();

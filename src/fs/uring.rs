@@ -26,8 +26,29 @@ thread_local! {
 /// and waiting for its completion. This blocks the calling thread while the
 /// kernel processes the IO but avoids a user->kernel syscall for writev.
 pub fn write_vectored_uring(file: &mut File, buffers: &[&[u8]]) -> MidgeResult<()> {
+    write_vectored_uring_with_hooks(file, buffers, None)
+}
+
+/// Write multiple buffers using io_uring with optional test hooks for fault injection.
+///
+/// When test hooks are provided and indicate I/O should fail, returns an error
+/// without performing the actual write.
+pub fn write_vectored_uring_with_hooks(
+    file: &mut File,
+    buffers: &[&[u8]],
+    test_hooks: Option<&crate::common::test_hooks::TestHooks>,
+) -> MidgeResult<()> {
     if buffers.is_empty() {
         return Ok(());
+    }
+
+    // Check test hooks for I/O failure injection
+    if let Some(hooks) = test_hooks {
+        if let Some(err_msg) = hooks.before_io_write() {
+            return Err(MidgeError::IoError {
+                source: std::io::Error::new(std::io::ErrorKind::Other, err_msg),
+            });
+        }
     }
 
     // Build libc iovec array referencing the provided slices. Keep them

@@ -8,6 +8,7 @@ use crate::core::data_structures::skiplist::{OpType, SkipList};
 use crate::error::MidgeResult;
 use crate::wal::WalRecord;
 
+use super::bloom_hint::BloomHint;
 use super::range_tombstones::RangeTombstones;
 use super::wal_loading;
 
@@ -27,19 +28,44 @@ fn is_expired(expiration: Option<u64>) -> bool {
 }
 
 /// Simple in-memory memtable using a lock-free SkipList for ordered keys and tombstones.
+///
+/// Optionally includes a bloom filter hint to accelerate negative point lookups.
 #[derive(Clone)]
 pub struct MemTable {
     pub(super) inner: Arc<SkipList>,
     pub(super) bytes: Arc<AtomicUsize>,
     pub(super) range_tombstones: RangeTombstones,
+    /// Optional bloom filter for fast negative lookups.
+    /// When enabled, point queries check bloom first and skip skiplist traversal
+    /// if the key is definitely absent.
+    bloom_hint: Option<Arc<BloomHint>>,
 }
 
 impl MemTable {
+    /// Create a new memtable without bloom filter optimization.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(SkipList::new()),
             bytes: Arc::new(AtomicUsize::new(0)),
             range_tombstones: RangeTombstones::new(),
+            bloom_hint: None,
+        }
+    }
+
+    /// Create a new memtable with bloom filter optimization enabled.
+    ///
+    /// The bloom filter helps accelerate point lookups by quickly rejecting
+    /// queries for keys that definitely don't exist, avoiding skiplist traversal.
+    ///
+    /// # Arguments
+    /// * `expected_keys` - Estimated number of keys for sizing the bloom filter.
+    ///   Uses ~10 bits per key for ~1% false positive rate.
+    pub fn with_bloom_hint(expected_keys: usize) -> Self {
+        Self {
+            inner: Arc::new(SkipList::new()),
+            bytes: Arc::new(AtomicUsize::new(0)),
+            range_tombstones: RangeTombstones::new(),
+            bloom_hint: Some(Arc::new(BloomHint::for_keys(expected_keys))),
         }
     }
 
@@ -50,8 +76,18 @@ impl MemTable {
 
     /// Get the latest value for a key, respecting TTL expiration.
     /// Returns None if key doesn't exist, is deleted, or has expired.
+    ///
+    /// When bloom hint is enabled, quickly returns None for keys that
+    /// definitely don't exist, avoiding skiplist traversal.
     #[inline]
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        // Fast path: check bloom filter if enabled
+        if let Some(ref bloom) = self.bloom_hint {
+            if !bloom.may_contain(key) {
+                return None; // Definitely absent
+            }
+        }
+
         // Get the latest version with expiration info
         match self.inner.get_visible_with_exp(key, u64::MAX) {
             Some(Some((v, exp))) => {
@@ -71,7 +107,17 @@ impl MemTable {
     /// - Key does not exist
     /// - Key has a tombstone at or before the snapshot sequence
     /// - Key has expired (and enforces no-resurrection: does not fall back to older versions)
+    ///
+    /// When bloom hint is enabled, quickly returns None for keys that
+    /// definitely don't exist, avoiding skiplist traversal.
     pub fn get_at(&self, key: &[u8], seq: u64) -> Option<Bytes> {
+        // Fast path: check bloom filter if enabled
+        if let Some(ref bloom) = self.bloom_hint {
+            if !bloom.may_contain(key) {
+                return None; // Definitely absent
+            }
+        }
+
         match self.inner.get_visible_with_exp(key, seq) {
             Some(Some((v, exp))) => {
                 if is_expired(exp) {
@@ -164,6 +210,11 @@ impl MemTable {
         expiration: Option<u64>,
         op_type: OpType,
     ) {
+        // Add to bloom filter if enabled (before skiplist for correct may_contain)
+        if let Some(ref bloom) = self.bloom_hint {
+            bloom.add(key);
+        }
+
         let k = Bytes::copy_from_slice(key);
         let v = Some(Bytes::copy_from_slice(value));
         let total_bytes = key.len() + value.len();
@@ -185,6 +236,11 @@ impl MemTable {
         expiration: Option<u64>,
         op_type: OpType,
     ) {
+        // Add to bloom filter if enabled (before skiplist for correct may_contain)
+        if let Some(ref bloom) = self.bloom_hint {
+            bloom.add(&key);
+        }
+
         let total_bytes = key.len() + value.as_ref().map(|v| v.len()).unwrap_or(0);
 
         // Perform the upsert directly with owned Bytes
@@ -201,6 +257,11 @@ impl MemTable {
 
     #[inline]
     pub fn delete_with_seq(&self, key: &[u8], seq: u64) {
+        // Add to bloom filter if enabled (tombstones are still "present")
+        if let Some(ref bloom) = self.bloom_hint {
+            bloom.add(key);
+        }
+
         let k = Bytes::copy_from_slice(key);
         let key_len = key.len();
 
@@ -743,5 +804,96 @@ mod tests {
         // Assert
         assert_eq!(mt.size_bytes(), 0);
         assert!(mt.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bloom hint optimization tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn should_find_key_with_bloom_hint_enabled() {
+        // Arrange
+        let mt = MemTable::with_bloom_hint(100);
+        mt.put(b"key1", b"value1");
+
+        // Act
+        let result = mt.get(b"key1");
+
+        // Assert
+        assert_eq!(result, Some(Bytes::from_static(b"value1")));
+    }
+
+    #[test]
+    fn should_return_none_for_absent_key_with_bloom_hint() {
+        // Arrange
+        let mt = MemTable::with_bloom_hint(100);
+        mt.put(b"key1", b"value1");
+
+        // Act
+        let result = mt.get(b"nonexistent_key");
+
+        // Assert
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn should_find_key_at_snapshot_with_bloom_hint() {
+        // Arrange
+        let mt = MemTable::with_bloom_hint(100);
+        mt.put_with_seq(b"key1", b"v1", 10);
+        mt.put_with_seq(b"key1", b"v2", 20);
+
+        // Act
+        let v_at_15 = mt.get_at(b"key1", 15);
+        let v_at_25 = mt.get_at(b"key1", 25);
+
+        // Assert
+        assert_eq!(v_at_15, Some(Bytes::from_static(b"v1")));
+        assert_eq!(v_at_25, Some(Bytes::from_static(b"v2")));
+    }
+
+    #[test]
+    fn should_handle_delete_with_bloom_hint() {
+        // Arrange
+        let mt = MemTable::with_bloom_hint(100);
+        mt.put(b"key1", b"value1");
+        mt.delete(b"key1");
+
+        // Act
+        let result = mt.get(b"key1");
+
+        // Assert - key is deleted (tombstone)
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn should_handle_many_keys_with_bloom_hint() {
+        // Arrange
+        let mt = MemTable::with_bloom_hint(1000);
+        for i in 0..1000u32 {
+            let key = format!("key_{:06}", i);
+            let value = format!("value_{}", i);
+            mt.put(key.as_bytes(), value.as_bytes());
+        }
+
+        // Act & Assert - all inserted keys should be found
+        for i in 0..1000u32 {
+            let key = format!("key_{:06}", i);
+            let expected = format!("value_{}", i);
+            let result = mt.get(key.as_bytes());
+            assert_eq!(
+                result,
+                Some(Bytes::from(expected)),
+                "Key {} should be found",
+                key
+            );
+        }
+
+        // Act & Assert - non-existent keys should not be found
+        for i in 100_000..100_100u32 {
+            let key = format!("key_{:06}", i);
+            let result = mt.get(key.as_bytes());
+            assert!(result.is_none(), "Key {} should not be found", key);
+        }
     }
 }

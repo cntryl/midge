@@ -77,7 +77,11 @@ impl VersionSet {
             VersionEdit::UpdateSequence { sequence } => {
                 manifest.last_persisted_sequence = sequence;
             }
-            VersionEdit::CombinedAddRemove { add, remove } => {
+            VersionEdit::CombinedAddRemove {
+                add,
+                remove,
+                sequence,
+            } => {
                 let name = add.name.clone();
                 manifest.files.push(*add);
                 manifest.ssts.push(name);
@@ -91,6 +95,11 @@ impl VersionSet {
                         .files
                         .retain(|f| !remove_set.contains(f.name.as_str()));
                     manifest.ssts.retain(|s| !remove_set.contains(s.as_str()));
+                }
+                // Update sequence if provided (batched with add/remove)
+                if let Some(seq) = sequence {
+                    manifest.last_persisted_sequence =
+                        std::cmp::max(manifest.last_persisted_sequence, seq);
                 }
             }
         }
@@ -109,9 +118,12 @@ pub enum VersionEdit {
     UpdateSequence { sequence: u64 },
     /// Atomic combination of adding one file and removing a set of files.
     /// Prevents interleaving flush AddFile between compaction AddFile/RemoveFiles.
+    /// Optionally updates last_persisted_sequence in the same manifest write.
     CombinedAddRemove {
         add: Box<FileMeta>,
         remove: Vec<String>,
+        /// Optional sequence update batched with add/remove to avoid extra manifest write.
+        sequence: Option<u64>,
     },
 }
 

@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use std::fs::OpenOptions;
+use parking_lot::Mutex;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use tracing::{debug, trace};
 
@@ -22,7 +23,10 @@ use super::utils::{
 
 /// Helper struct for building and processing block entries during linear search
 
-#[derive(Debug)]
+/// SST file reader with cached file handle for efficient repeated reads.
+///
+/// The file handle is lazily opened on first read and cached for subsequent
+/// reads, avoiding the overhead of repeated file open/close operations.
 pub struct SstFile {
     path: PathBuf,
     footer: Option<Footer>,
@@ -31,6 +35,24 @@ pub struct SstFile {
     range_tombstones: Vec<RangeTombstone>,
     use_internal_keys: bool,
     paranoid_checksums: bool,
+    /// Cached file handle for efficient repeated reads.
+    /// Using Mutex for thread-safety when SstFile is shared.
+    cached_file: Mutex<Option<File>>,
+}
+
+impl std::fmt::Debug for SstFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SstFile")
+            .field("path", &self.path)
+            .field("footer", &self.footer)
+            .field("sparse_index", &self.sparse_index.is_some())
+            .field("bloom_filter", &self.bloom_filter.is_some())
+            .field("range_tombstones", &self.range_tombstones.len())
+            .field("use_internal_keys", &self.use_internal_keys)
+            .field("paranoid_checksums", &self.paranoid_checksums)
+            .field("cached_file", &"<cached>")
+            .finish()
+    }
 }
 
 impl SstFile {
@@ -43,6 +65,7 @@ impl SstFile {
             range_tombstones: Vec::new(),
             use_internal_keys: false,
             paranoid_checksums: false,
+            cached_file: Mutex::new(None),
         }
     }
 
@@ -56,6 +79,7 @@ impl SstFile {
             range_tombstones: Vec::new(),
             use_internal_keys: false,
             paranoid_checksums,
+            cached_file: Mutex::new(None),
         }
     }
 
@@ -351,12 +375,27 @@ impl SstFile {
         }
     }
 
+    /// Get or create the cached file handle for this SST file.
+    ///
+    /// Opens the file on first call and caches it for subsequent reads.
+    /// This avoids the overhead of repeated file open/close operations.
+    fn get_or_open_file(&self) -> MidgeResult<parking_lot::MutexGuard<'_, Option<File>>> {
+        let mut guard = self.cached_file.lock();
+        if guard.is_none() {
+            let file = OpenOptions::new().read(true).open(&self.path)?;
+            *guard = Some(file);
+        }
+        Ok(guard)
+    }
+
     #[inline]
     fn read_data_block(&self, handle: BlockHandle) -> MidgeResult<Block> {
-        // OPTIMIZATION OPPORTUNITY: This could be enhanced with block caching.
-        // For now, we optimize by reusing file handles and minimizing allocations.
-        let mut file = OpenOptions::new().read(true).open(&self.path)?;
-        let block_data = fs::read_range(&mut file, handle.offset, handle.offset + handle.size)?;
+        // Use cached file handle to avoid repeated open/close overhead
+        let mut file_guard = self.get_or_open_file()?;
+        let file = file_guard
+            .as_mut()
+            .ok_or_else(|| MidgeError::InvalidData("file handle missing after open".into()))?;
+        let block_data = fs::read_range(file, handle.offset, handle.offset + handle.size)?;
         if self.paranoid_checksums {
             decode_data_block_paranoid(&block_data, true)
         } else {

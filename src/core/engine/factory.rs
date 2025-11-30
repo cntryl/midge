@@ -402,6 +402,7 @@ pub(crate) fn setup_compaction_coordinator(
             test_hooks: opts.test_hooks.clone(),
             version_manager,
             background_error,
+            rate_limiter: opts.compaction_rate_limiter.clone(),
         };
 
         Ok(Some(crate::core::CompactionController::spawn(config)?))

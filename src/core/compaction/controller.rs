@@ -61,6 +61,10 @@ pub struct CompactionWorkerConfig {
     pub version_manager: Arc<crate::core::manifest::VersionManager>,
     /// Optional shared background error container used to report errors back to the engine.
     pub background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
+    /// Optional rate limiter for compaction I/O (bytes/sec).
+    /// When set, throttles both SST reads and writes to prevent I/O starvation
+    /// of foreground operations.
+    pub rate_limiter: Option<Arc<crate::common::rate_limiter::RateLimiter>>,
 }
 
 /// Internal work item representing a single compaction plan.
@@ -114,6 +118,7 @@ impl CompactionController {
         let test_hooks = config.test_hooks.clone();
         let version_manager = config.version_manager.clone();
         let background_error = config.background_error.clone();
+        let rate_limiter = config.rate_limiter.clone();
 
         let background_error_for_panic = background_error.clone();
 
@@ -280,6 +285,26 @@ impl CompactionController {
                             ));
                         }
 
+                        // Estimate bytes read for rate limiting (sum of input SST sizes)
+                        let mut estimated_read_bytes: u64 = 0;
+                        for input_file in &plan.input_files {
+                            let path = sst_dir.join(input_file);
+                            if let Ok(meta) = std::fs::metadata(&path) {
+                                estimated_read_bytes += meta.len();
+                            }
+                        }
+
+                        // Apply read rate limiting before SST reads
+                        if let Some(ref limiter) = rate_limiter {
+                            if estimated_read_bytes > 0 {
+                                limiter.request(estimated_read_bytes);
+                                tracing::trace!(
+                                    bytes = estimated_read_bytes,
+                                    "compaction rate limiter: throttled read"
+                                );
+                            }
+                        }
+
                         // Collect versions from input files.
                         let mut versions = super::executor::collect_compaction_versions(
                             &sst_reader_factory,
@@ -347,7 +372,19 @@ impl CompactionController {
                         let write_res =
                             super::executor::write_compacted_sst(&ctx, &deduped, plan.cf_id)?;
 
-                        if let Some((_path, meta)) = write_res {
+                        if let Some((_path, ref meta)) = write_res {
+                            // Apply write rate limiting after SST write completes
+                            if let Some(ref limiter) = rate_limiter {
+                                let written_bytes = meta.size_bytes;
+                                if written_bytes > 0 {
+                                    limiter.request(written_bytes);
+                                    tracing::trace!(
+                                        bytes = written_bytes,
+                                        "compaction rate limiter: throttled write"
+                                    );
+                                }
+                            }
+
                             // Update manifest and version_set atomically via VersionManager.
                             if let Some(ref hooks) = test_hooks {
                                 hooks.maybe_pause_compaction(
@@ -358,31 +395,12 @@ impl CompactionController {
                             let combined = crate::core::manifest::VersionEdit::CombinedAddRemove {
                                 add: Box::new(meta.clone()),
                                 remove: plan.input_files.clone(),
+                                sequence: meta.largest_seq, // Batch sequence update
                             };
                             {
                                 let vm_start = std::time::Instant::now();
                                 version_manager.apply_edit_sync(combined)?;
                                 tracing::trace!(dur_ms = %vm_start.elapsed().as_millis(), "version_manager.apply_edit_sync duration (ms)");
-                            }
-                            // Also update the manifest's persisted sequence to reflect the
-                            // largest sequence present in the newly written compacted SST.
-                            if let Some(lg) = meta.largest_seq {
-                                let current_seq = Manifest::load_with_retry(
-                                    &db_path,
-                                    5,
-                                    std::time::Duration::from_millis(10),
-                                )
-                                .unwrap_or_default()
-                                .last_persisted_sequence;
-                                let seq_to_set = std::cmp::max(current_seq, lg);
-                                let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
-                                    sequence: seq_to_set,
-                                };
-                                {
-                                    let vm2_start = std::time::Instant::now();
-                                    version_manager.apply_edit_sync(seq_edit)?;
-                                    tracing::trace!(dur_ms = %vm2_start.elapsed().as_millis(), "version_manager.apply_edit_sync UpdateSequence duration (ms)");
-                                }
                             }
 
                             if let Some(ref hooks) = test_hooks {
@@ -472,7 +490,7 @@ impl CompactionController {
     #[allow(clippy::too_many_arguments)]
     pub fn run_plan_sync(
         &self,
-        db_path: &Path,
+        _db_path: &Path,
         cf_set: &Arc<crate::core::engine::column_family::ColumnFamilySet>,
         sst_dir: &Path,
         sst_factory: &Arc<dyn crate::sst::SstFactory>,
@@ -549,20 +567,9 @@ impl CompactionController {
             let combined = crate::core::manifest::VersionEdit::CombinedAddRemove {
                 add: Box::new(meta.clone()),
                 remove: plan.input_files.clone(),
+                sequence: meta.largest_seq, // Batch sequence update
             };
             version_manager.apply_edit_sync(combined)?;
-
-            if let Some(lg) = meta.largest_seq {
-                let current_seq =
-                    Manifest::load_with_retry(db_path, 5, std::time::Duration::from_millis(10))
-                        .unwrap_or_default()
-                        .last_persisted_sequence;
-                let seq_to_set = std::cmp::max(current_seq, lg);
-                let seq_edit = crate::core::manifest::VersionEdit::UpdateSequence {
-                    sequence: seq_to_set,
-                };
-                version_manager.apply_edit_sync(seq_edit)?;
-            }
 
             if let Some(ref hooks) = test_hooks {
                 hooks.maybe_pause_compaction(CompactionGatePoint::AfterManifestUpdate);
@@ -838,6 +845,7 @@ mod tests {
             test_hooks: None,
             version_manager: Arc::clone(&version_manager),
             background_error: None,
+            rate_limiter: None,
         };
 
         let guard = TestGuard {

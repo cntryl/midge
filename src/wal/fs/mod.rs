@@ -13,4 +13,4 @@ mod writer;
 pub use batched_sync::{BatchedSyncConfig, BatchedSyncCoordinator};
 pub use factory::FsWalFactory;
 pub use reader::replay_wal_file;
-pub use writer::{replay_wal_file_with_mode, Wal};
+pub use writer::{replay_wal_file_with_mode, replay_wal_file_with_stats, Wal};
