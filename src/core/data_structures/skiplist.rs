@@ -1,9 +1,12 @@
 //! Lock-Free Multi-Version Skiplist
 //!
-//! - Fully lock-free (writers use CAS, readers are wait-free under epoch guards).
+//! - Fully lock-free inserts (writers use CAS, readers are wait-free under epoch guards).
 //! - Uses crossbeam-epoch for safe concurrent memory reclamation.
-//! - Supports MVCC visibility via sequence numbers.
+//! - Supports MVCC-style visibility via sequence numbers (LSM snapshot semantics).
 //! - Designed for LSM memtable use: no physical deletion, tombstones only.
+//!
+//! Snapshot rule (LSM-style):
+//!   - A version is visible to a snapshot if `vn.seq < snapshot_seq`.
 
 use bytes::Bytes;
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
@@ -12,14 +15,19 @@ use std::num::Wrapping;
 use std::sync::atomic::{AtomicUsize, Ordering as AO};
 use std::sync::Arc;
 
-const MAX_LEVEL: usize = 16;
+/// Maximum height of the skiplist towers.
+///
+/// Higher levels give shorter search paths while remaining cheap to maintain.
+/// 20 is a common choice in production LSM engines (e.g., similar to Pebble).
+const MAX_LEVEL: usize = 20;
 
 /// Entry metadata tuple: (key, value_opt, sequence, is_tombstone)
 pub type SkipListEntry = (Bytes, Option<Bytes>, u64, bool);
-/// Extended entry metadata including optional expiration (Unix millis)
+
+/// Extended entry metadata including optional expiration (Unix millis) and op type.
 pub type SkipListEntryWithExp = (Bytes, Option<Bytes>, u64, bool, Option<u64>, OpType);
 
-/// Operation type for a skiplist version
+/// Operation type for a skiplist version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpType {
     Put,
@@ -38,7 +46,7 @@ impl OpType {
     }
 }
 
-/// A version node in the lock-free version chain
+/// A version node in the lock-free version chain (newest-first).
 #[derive(Debug)]
 struct VersionNode {
     seq: u64,
@@ -60,13 +68,16 @@ impl VersionNode {
     }
 }
 
-/// A node in the lock-free skiplist
+/// A node in the lock-free skiplist.
+///
+/// Each node holds a key and a newest-first version chain. Forward pointers
+/// form the skiplist tower at each level.
 #[derive(Debug)]
 struct Node {
     key: Bytes,
-    /// Head of newest-first version chain
+    /// Head of newest-first version chain.
     versions_head: Atomic<VersionNode>,
-    /// Forward pointers per level (level 0..level-1 valid)
+    /// Forward pointers per level (levels 0..level-1 are valid).
     forward: [Atomic<Node>; MAX_LEVEL],
     #[allow(dead_code)]
     level: usize,
@@ -76,8 +87,7 @@ impl Node {
     fn new(key: Bytes, first_version: Owned<VersionNode>, level: usize) -> Self {
         debug_assert!((1..=MAX_LEVEL).contains(&level));
 
-        // Initialize forward array to null
-        let forward: [Atomic<Node>; MAX_LEVEL] = Default::default();
+        let forward: [Atomic<Node>; MAX_LEVEL] = std::array::from_fn(|_| Atomic::null());
 
         Node {
             key,
@@ -89,43 +99,24 @@ impl Node {
 
     fn sentinel() -> Self {
         let empty_version = Owned::new(VersionNode::new(0, None, None, OpType::Put));
+        // Sentinel uses full height so we always have a tower root.
         Node::new(Bytes::new(), empty_version, MAX_LEVEL)
     }
 }
 
-/// Splice hint for optimizing sequential/localized insertions
-/// Caches the search path from the last insert
-struct Splice<'g> {
-    /// Cached predecessors at each level
-    preds: [Shared<'g, Node>; MAX_LEVEL],
-    /// Cached successors at each level
-    succs: [Shared<'g, Node>; MAX_LEVEL],
-    /// Height of the cached splice
-    height: usize,
-}
-
-impl<'g> Splice<'g> {
-    #[allow(dead_code)]
-    fn new() -> Self {
-        Splice {
-            preds: [Shared::null(); MAX_LEVEL],
-            succs: [Shared::null(); MAX_LEVEL],
-            height: 0,
-        }
-    }
-}
-
-/// Lock-free skiplist with multi-version concurrency control
+/// Lock-free skiplist with multi-version concurrency control.
 ///
-/// This implementation uses epoch-based memory reclamation (crossbeam-epoch) for safe
-/// concurrent access without locks. All operations are lock-free and linearizable.
+/// All concurrent memory accesses rely on crossbeam-epoch. We never physically
+/// delete nodes in the memtable (to match LSM design); deletions are represented
+/// as tombstone versions.
 pub struct SkipList {
     head: Arc<Node>,
+    /// Highest level currently in use (1-based).
     top_level: AtomicUsize,
 }
 
 impl SkipList {
-    /// Create a new lock-free skiplist
+    /// Create a new lock-free skiplist.
     pub fn new() -> Self {
         let head = Arc::new(Node::sentinel());
         SkipList {
@@ -134,31 +125,38 @@ impl SkipList {
         }
     }
 
-    /// Generate a random level using thread-local RNG
+    /// Generate a random level using a thread-local RNG.
+    ///
+    /// Uses an xorshift64* PRNG with approximately p=1/2 probability of
+    /// advancing each level. This keeps towers tall enough for efficient
+    /// search while staying cheap to maintain.
     #[inline]
     fn random_level() -> usize {
         use std::cell::RefCell;
 
         thread_local! {
-            static RNG: RefCell<Wrapping<u64>> = const { RefCell::new(Wrapping(0x9E37_79B9_7F4A_7C15)) };
+            static RNG: RefCell<Wrapping<u64>> =
+                const { RefCell::new(Wrapping(0x9E37_79B9_7F4A_7C15)) };
         }
 
         RNG.with(|rng| {
             let mut lvl = 1;
-            let mut r = rng.borrow_mut();
+            let mut state = rng.borrow_mut();
 
             // xorshift64*
-            let mut x = r.0;
+            let mut x = state.0;
             x ^= x >> 12;
             x ^= x << 25;
             x ^= x >> 27;
-            *r = Wrapping(x);
-            let rand = x.wrapping_mul(0x2545F4914F6CDD1D);
+            *state = Wrapping(x);
+            let mut rand = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
 
-            // p = 1/4: advance level while lowest two bits are zero
-            while lvl < MAX_LEVEL && (rand >> (lvl * 2)) & 0b11 == 0 {
+            // p ≈ 1/2: bump level while low bit is 0
+            while lvl < MAX_LEVEL && (rand & 1) == 0 {
                 lvl += 1;
+                rand >>= 1;
             }
+
             lvl
         })
     }
@@ -168,7 +166,10 @@ impl SkipList {
         a.cmp(b)
     }
 
-    /// Find predecessors and successors at all levels for the given key
+    /// Find predecessors and successors at all levels for the given key.
+    ///
+    /// Fills `preds` and `succs` arrays such that, at each level `l`,
+    ///   preds[l].key < key <= succs[l].key   (when they exist).
     fn find<'g>(
         &self,
         key: &[u8],
@@ -176,20 +177,19 @@ impl SkipList {
         preds: &mut [Shared<'g, Node>; MAX_LEVEL],
         succs: &mut [Shared<'g, Node>; MAX_LEVEL],
     ) {
-        // Start from head sentinel
+        // Start from head sentinel.
         let mut pred: Shared<'g, Node> = Shared::from(&*self.head as *const Node);
 
-        // Relaxed ordering is sufficient - we only need approximate top level for search
+        // Approximate top level is enough for search.
         let mut level = self.top_level.load(AO::Relaxed);
 
         while level > 0 {
             let l = level - 1;
 
-            // SAFETY: pred is valid (head or previously loaded node protected by guard)
             let pred_ref = unsafe { pred.deref() };
             let mut curr = pred_ref.forward[l].load(AO::Acquire, guard);
 
-            // Advance while current key < target key
+            // Advance while current.key < target.
             while let Some(curr_ref) = unsafe { curr.as_ref() } {
                 match Self::cmp_key(&curr_ref.key, key) {
                     Ordering::Less => {
@@ -206,7 +206,7 @@ impl SkipList {
         }
     }
 
-    /// Fast-path find for point queries (only computes level 0)
+    /// Point search: find node for key, or null if absent.
     #[inline]
     fn find_node<'g>(&self, key: &[u8], guard: &'g Guard) -> Shared<'g, Node> {
         let mut pred: Shared<'g, Node> = Shared::from(&*self.head as *const Node);
@@ -223,95 +223,62 @@ impl SkipList {
                         pred = curr;
                         curr = curr_ref.forward[l].load(AO::Acquire, guard);
                     }
-                    Ordering::Equal => return curr, // Early exit on exact match
+                    Ordering::Equal => return curr,
                     Ordering::Greater => break,
                 }
             }
 
             if l == 0 {
-                return curr; // Return level 0 result
+                return curr;
             }
             level -= 1;
         }
+
         Shared::null()
     }
 
-    /// Check if the splice is valid for the given key
-    /// Returns true if the splice brackets the key at all levels
-    fn is_splice_valid<'g>(&self, key: &[u8], splice: &Splice<'g>, guard: &'g Guard) -> bool {
-        if splice.height == 0 {
-            return false;
-        }
-
-        // Check level 0 first (most important)
-        let pred0 = unsafe { splice.preds[0].as_ref() };
-        let succ0 = unsafe { splice.succs[0].as_ref() };
-
-        // Check predecessor brackets key from below
-        if let Some(pred_node) = pred0 {
-            if std::ptr::eq(pred_node as *const Node, &*self.head as *const Node) {
-                // Head is always valid predecessor
-            } else if Self::cmp_key(&pred_node.key, key) >= Ordering::Equal {
-                return false; // Predecessor is >= key, not valid
-            }
-        }
-
-        // Check successor brackets key from above
-        if let Some(succ_node) = succ0 {
-            if Self::cmp_key(&succ_node.key, key) <= Ordering::Equal {
-                return false; // Successor is <= key, not valid
-            }
-        }
-
-        // Verify splice hasn't been invalidated by concurrent inserts
-        if let Some(pred_node) = pred0 {
-            let current_next = pred_node.forward[0].load(AO::Acquire, guard);
-            if current_next != splice.succs[0] {
-                return false; // Splice is stale
-            }
-        }
-
-        true
-    }
-
-    /// Recompute splice levels starting from a valid base level
-    #[allow(dead_code)]
-    fn recompute_splice<'g>(
-        &self,
-        key: &[u8],
+    /// Internal helper: find first visible version at or before snapshot_seq.
+    ///
+    /// LSM snapshot semantics:
+    ///   - visible if vn.seq < snapshot_seq (strictly less-than).
+    #[inline]
+    fn visible_version<'g>(
+        versions_head: &Atomic<VersionNode>,
+        snapshot_seq: u64,
         guard: &'g Guard,
-        splice: &mut Splice<'g>,
-        recompute_from_level: usize,
-    ) {
-        let mut pred = if recompute_from_level == 0 {
-            Shared::from(&*self.head as *const Node)
-        } else {
-            splice.preds[recompute_from_level - 1]
-        };
-
-        let mut level = self.top_level.load(AO::Relaxed).max(recompute_from_level);
-
-        while level > recompute_from_level {
-            level -= 1;
-            let pred_ref = unsafe { pred.deref() };
-            let mut curr = pred_ref.forward[level].load(AO::Acquire, guard);
-
-            while let Some(curr_ref) = unsafe { curr.as_ref() } {
-                match Self::cmp_key(&curr_ref.key, key) {
-                    Ordering::Less => {
-                        pred = curr;
-                        curr = curr_ref.forward[level].load(AO::Acquire, guard);
-                    }
-                    _ => break,
-                }
+    ) -> Option<&'g VersionNode> {
+        let mut v = versions_head.load(AO::Acquire, guard);
+        while let Some(vn) = unsafe { v.as_ref() } {
+            if vn.seq < snapshot_seq {
+                return Some(vn);
             }
+            // Version nodes are immutable after publishing, relaxed is fine.
+            v = vn.next.load(AO::Relaxed, guard);
+        }
+        None
+    }
 
-            splice.preds[level] = pred;
-            splice.succs[level] = curr;
+    /// Internal helper: iterate all visible versions for merge.
+    #[inline]
+    fn collect_visible_versions_for_merge<'g>(
+        versions_head: &Atomic<VersionNode>,
+        snapshot_seq: u64,
+        guard: &'g Guard,
+        out: &mut Vec<(Option<Bytes>, Option<u64>, OpType)>,
+    ) {
+        let mut v = versions_head.load(AO::Acquire, guard);
+        while let Some(vn) = unsafe { v.as_ref() } {
+            if vn.seq < snapshot_seq {
+                out.push((vn.val.clone(), vn.exp, vn.op));
+            }
+            v = vn.next.load(AO::Relaxed, guard);
         }
     }
 
-    /// Get the visible value at or before snapshot_seq
+    /// Get the visible value at or before snapshot_seq.
+    ///
+    /// Returns `Some(value)` if a visible non-tombstone version exists,
+    /// otherwise `None`.
     #[inline]
     pub fn get(&self, key: &[u8], snapshot_seq: u64) -> Option<Bytes> {
         let guard = &epoch::pin();
@@ -319,21 +286,21 @@ impl SkipList {
 
         if let Some(node) = unsafe { node_ptr.as_ref() } {
             if node.key.as_ref() == key {
-                // Walk version chain to find visible version
-                // Snapshot isolation: only see writes with seq < snapshot_seq
-                let mut v = node.versions_head.load(AO::Acquire, guard);
-                while let Some(vn) = unsafe { v.as_ref() } {
-                    if vn.seq < snapshot_seq {
-                        return vn.val.clone();
-                    }
-                    // Relaxed is safe: version nodes are immutable after publishing
-                    v = vn.next.load(AO::Relaxed, guard);
+                if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
+                    return vn.val.clone();
                 }
             }
         }
+
         None
     }
-    /// Get visible value with expiration at or before snapshot_seq
+
+    /// Get visible value with expiration at or before snapshot_seq.
+    ///
+    /// Returns:
+    ///   - None           → key not visible at this snapshot
+    ///   - Some(None)     → key visible as a tombstone
+    ///   - Some(Some(..)) → key visible with (value, exp)
     pub fn get_visible_with_exp(
         &self,
         key: &[u8],
@@ -344,22 +311,18 @@ impl SkipList {
 
         if let Some(node) = unsafe { node_ptr.as_ref() } {
             if node.key.as_ref() == key {
-                let mut v = node.versions_head.load(AO::Acquire, guard);
-                while let Some(vn) = unsafe { v.as_ref() } {
-                    // Snapshot isolation: only see writes with seq < snapshot_seq
-                    // (strictly less than, not <=)
-                    if vn.seq < snapshot_seq {
-                        return Some(vn.val.clone().map(|val| (val, vn.exp)));
-                    }
-                    // Relaxed is safe: version nodes are immutable after publishing
-                    v = vn.next.load(AO::Relaxed, guard);
+                if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
+                    return Some(vn.val.clone().map(|val| (val, vn.exp)));
                 }
             }
         }
+
         None
     }
 
-    /// Get all versions for merge resolution
+    /// Get all versions for merge resolution (visible at snapshot_seq).
+    ///
+    /// Newest-first ordering, including tombstones and expirations.
     pub fn get_versions_for_merge(
         &self,
         key: &[u8],
@@ -372,22 +335,19 @@ impl SkipList {
 
         if let Some(node) = unsafe { node_ptr.as_ref() } {
             if node.key.as_ref() == key {
-                // Collect all visible versions (no unrolling here since we need all versions)
-                let mut v = node.versions_head.load(AO::Acquire, guard);
-                while let Some(vn) = unsafe { v.as_ref() } {
-                    // Snapshot isolation: only see writes with seq < snapshot_seq
-                    if vn.seq < snapshot_seq {
-                        versions.push((vn.val.clone(), vn.exp, vn.op));
-                    }
-                    v = vn.next.load(AO::Relaxed, guard);
-                }
+                Self::collect_visible_versions_for_merge(
+                    &node.versions_head,
+                    snapshot_seq,
+                    guard,
+                    &mut versions,
+                );
             }
         }
 
         versions
     }
 
-    /// Upsert with optional expiration and OpType (lock-free, linearizable)
+    /// Upsert with optional expiration and OpType (lock-free, linearizable).
     pub fn upsert_exp(
         &self,
         key: Bytes,
@@ -396,12 +356,14 @@ impl SkipList {
         exp: Option<u64>,
         op: OpType,
     ) {
-        // Use internal method without hint for public API
         let guard = &epoch::pin();
-        self.upsert_exp_internal(key, value, seq, exp, op, None, guard);
+        self.upsert_exp_internal(key, value, seq, exp, op, guard);
     }
 
-    /// Internal upsert with optional splice hint
+    /// Internal upsert implementation.
+    ///
+    /// - If the key exists, prepend a new version to the version chain.
+    /// - If the key is absent, insert a new node at a random level.
     #[allow(clippy::too_many_arguments)]
     fn upsert_exp_internal<'g>(
         &self,
@@ -410,35 +372,17 @@ impl SkipList {
         seq: u64,
         exp: Option<u64>,
         op: OpType,
-        hint: Option<&mut Splice<'g>>,
         guard: &'g Guard,
     ) {
         let mut preds: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
         let mut succs: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
 
-        // Try to use hint if provided and valid
-        let use_hint = if let Some(ref splice) = hint {
-            if self.is_splice_valid(&key, splice, guard) {
-                // Copy splice data to preds/succs
-                preds.copy_from_slice(&splice.preds);
-                succs.copy_from_slice(&splice.succs);
-                true
-            } else {
-                // Splice invalid, fall back to normal find
-                false
-            }
-        } else {
-            false
-        };
+        // Initial search.
+        self.find(&key, guard, &mut preds, &mut succs);
 
-        if !use_hint {
-            self.find(&key, guard, &mut preds, &mut succs);
-        }
-
-        // Case 1: Key exists - prepend new version to version chain
+        // Case 1: Key exists – prepend new version to the version chain.
         if let Some(curr) = unsafe { succs[0].as_ref() } {
             if curr.key == key {
-                // Retry loop for version CAS only (avoid expensive re-find)
                 loop {
                     let curr_head = curr.versions_head.load(AO::Acquire, guard);
                     let new_ver = Owned::new(VersionNode {
@@ -456,17 +400,9 @@ impl SkipList {
                         AO::Acquire,
                         guard,
                     ) {
-                        Ok(_) => {
-                            // Update hint if provided
-                            if let Some(splice) = hint {
-                                splice.preds.copy_from_slice(&preds);
-                                splice.succs.copy_from_slice(&succs);
-                                splice.height = MAX_LEVEL;
-                            }
-                            return; // Success!
-                        }
+                        Ok(_) => return, // success
                         Err(e) => {
-                            // CAS failed - version chain changed; drop newly created node (never published)
+                            // CAS failed; drop newly allocated node and retry.
                             drop(e.new);
                             continue;
                         }
@@ -475,94 +411,84 @@ impl SkipList {
             }
         }
 
-        // Case 2: Key absent - insert new node at random level
+        // Case 2: Key absent – insert new node at a random level.
         let node_level = Self::random_level();
 
-        // Raise top_level if needed
+        // Raise top_level if needed so future searches can use this height.
         let _ = self.top_level.fetch_max(node_level, AO::AcqRel);
 
-        // Stage 1: Insert at level 0 (the linearization point)
+        // Stage 1: insert at level 0 (linearization point).
         let new_ptr = loop {
-            // Recompute window for level 0 to reduce chances of CAS fail
+            // Refresh the window at level 0 to minimize CAS failures.
             self.find(&key, guard, &mut preds, &mut succs);
             let pred0 = unsafe { preds[0].deref() };
             let succ0 = succs[0];
 
-            // Build new node with first version
+            // Build new node with first version.
             let first_ver = Owned::new(VersionNode::new(seq, value.clone(), exp, op));
             let new_node = Owned::new(Node::new(key.clone(), first_ver, node_level));
             let new_ptr = new_node.into_shared(guard);
-            // Set level 0 forward pointer to current successor
+
+            // Set level-0 forward pointer to current successor.
             unsafe { new_ptr.deref() }.forward[0].store(succ0, AO::Relaxed);
 
-            // Validate window and try to splice at level 0
+            // Validate window and splice at level 0.
             let pred_next0 = pred0.forward[0].load(AO::Acquire, guard);
             if pred_next0 != succ0 {
-                // Window changed; discard this node and retry
+                // Window changed; discard and retry.
                 unsafe { guard.defer_destroy(new_ptr) };
                 continue;
             }
+
             match pred0.forward[0].compare_exchange(succ0, new_ptr, AO::AcqRel, AO::Acquire, guard)
             {
                 Ok(_) => break new_ptr, // level 0 inserted
                 Err(_) => {
-                    // CAS failed due to interference; discard node and retry
+                    // CAS failed; discard node and retry.
                     unsafe { guard.defer_destroy(new_ptr) };
                     continue;
                 }
             }
         };
 
-        // Stage 2: Best-effort link higher levels (1..node_level-1)
+        // Stage 2: best-effort link higher levels (1..node_level-1).
         for l in 1..node_level {
             loop {
-                // Find current window at level l
                 self.find(&key, guard, &mut preds, &mut succs);
                 let pred = unsafe { preds[l].deref() };
                 let succ = succs[l];
-                // Set forward pointer for this level to successor
+
                 unsafe { new_ptr.deref() }.forward[l].store(succ, AO::Relaxed);
                 let pred_next = pred.forward[l].load(AO::Acquire, guard);
                 if pred_next != succ {
-                    // Window changed; retry
-                    continue;
+                    continue; // window changed, retry
                 }
+
                 if pred.forward[l]
                     .compare_exchange(succ, new_ptr, AO::AcqRel, AO::Acquire, guard)
                     .is_ok()
                 {
                     break; // linked this level
                 }
-                // Retry on CAS failure; it's okay to loop a few times
             }
         }
-
-        // Update hint to point after the newly inserted node
-        if let Some(splice) = hint {
-            // Set pred to the newly inserted node for the next insert
-            for (i, succ) in succs.iter().enumerate().take(node_level) {
-                splice.preds[i] = new_ptr;
-                splice.succs[i] = *succ;
-            }
-            splice.height = node_level;
-        }
-
-        // Inserted successfully
     }
 
-    /// Insert or update with sequence number
+    /// Insert or update with sequence number (Put).
     #[inline]
     pub fn upsert(&self, key: Bytes, value: Option<Bytes>, seq: u64) {
         self.upsert_exp(key, value, seq, None, OpType::Put);
     }
 
-    /// Delete a key (insert tombstone)
+    /// Delete a key (insert tombstone).
     #[inline]
     pub fn delete(&self, key: Bytes, seq: u64) {
         self.upsert_exp(key, None, seq, None, OpType::Delete);
     }
 
-    /// Range scan returning visible entries at snapshot_seq
+    /// Range scan returning visible entries at snapshot_seq.
+    ///
+    /// Returns newest visible non-tombstone value for each key in [start, end).
     pub fn range_visible(
         &self,
         start: Option<&[u8]>,
@@ -571,14 +497,13 @@ impl SkipList {
     ) -> Vec<(Bytes, Bytes)> {
         let guard = &epoch::pin();
 
-        // Find starting point
+        // Find starting point.
         let start_key = start.unwrap_or(&[]);
         let mut preds: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
         let mut succs: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
         self.find(start_key, guard, &mut preds, &mut succs);
 
-        // Don't pre-allocate - let Vec grow naturally to avoid over-allocation
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(128);
         let mut curr = if start.is_none() {
             self.head.forward[0].load(AO::Acquire, guard)
         } else {
@@ -586,25 +511,17 @@ impl SkipList {
         };
 
         while let Some(node) = unsafe { curr.as_ref() } {
-            // Check end boundary
+            // Check end boundary.
             if let Some(end_key) = end {
                 if node.key.as_ref() >= end_key {
                     break;
                 }
             }
 
-            // Find first visible version
-            // Snapshot isolation: only see writes with seq < snapshot_seq
-            let mut v = node.versions_head.load(AO::Acquire, guard);
-            while let Some(vn) = unsafe { v.as_ref() } {
-                if vn.seq < snapshot_seq {
-                    if let Some(ref val) = vn.val {
-                        out.push((node.key.clone(), val.clone()));
-                    }
-                    break;
+            if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
+                if let Some(ref val) = vn.val {
+                    out.push((node.key.clone(), val.clone()));
                 }
-                // Relaxed is safe: version nodes are immutable after publishing
-                v = vn.next.load(AO::Relaxed, guard);
             }
 
             curr = node.forward[0].load(AO::Acquire, guard);
@@ -613,7 +530,7 @@ impl SkipList {
         out
     }
 
-    /// Get all tombstoned keys in range visible at snapshot
+    /// Get all tombstoned keys in range visible at snapshot_seq.
     pub fn tombstones_range_visible(
         &self,
         start: Option<&[u8]>,
@@ -627,7 +544,6 @@ impl SkipList {
         let mut succs: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
         self.find(start_key, guard, &mut preds, &mut succs);
 
-        // Pre-allocate with reasonable capacity
         let mut out = Vec::with_capacity(32);
         let mut curr = if start.is_none() {
             self.head.forward[0].load(AO::Acquire, guard)
@@ -642,17 +558,10 @@ impl SkipList {
                 }
             }
 
-            // Snapshot isolation: only see writes with seq < snapshot_seq
-            let mut v = node.versions_head.load(AO::Acquire, guard);
-            while let Some(vn) = unsafe { v.as_ref() } {
-                if vn.seq < snapshot_seq {
-                    if vn.val.is_none() {
-                        out.push(node.key.clone());
-                    }
-                    break;
+            if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq, guard) {
+                if vn.val.is_none() {
+                    out.push(node.key.clone());
                 }
-                // Relaxed is safe: version nodes are immutable after publishing
-                v = vn.next.load(AO::Relaxed, guard);
             }
 
             curr = node.forward[0].load(AO::Acquire, guard);
@@ -661,19 +570,17 @@ impl SkipList {
         out
     }
 
-    /// Drain all entries with metadata and expiration (consumes skiplist logically)
-    /// Note: In lock-free version, this creates a snapshot rather than destructive drain
+    /// Drain all entries with metadata and expiration (logical snapshot).
+    ///
+    /// This does *not* physically clear the skiplist; instead it walks all
+    /// nodes and returns all versions newest-first for each key.
     pub fn drain_with_meta_with_exp(&self) -> Vec<SkipListEntryWithExp> {
         let guard = &epoch::pin();
-        // Pre-allocate with reasonable capacity for typical memtable sizes
         let mut out = Vec::with_capacity(256);
 
         let mut curr = self.head.forward[0].load(AO::Acquire, guard);
 
         while let Some(node) = unsafe { curr.as_ref() } {
-            // Get all versions of this key (newest to oldest)
-            // This is needed for merge resolution - we need all merge operands,
-            // not just the most recent one
             let mut vn_ptr = node.versions_head.load(AO::Acquire, guard);
             while let Some(vn) = unsafe { vn_ptr.as_ref() } {
                 let is_tomb = vn.val.is_none();
@@ -685,7 +592,7 @@ impl SkipList {
                     vn.exp,
                     vn.op,
                 ));
-                vn_ptr = vn.next.load(AO::Acquire, guard);
+                vn_ptr = vn.next.load(AO::Relaxed, guard);
             }
 
             curr = node.forward[0].load(AO::Acquire, guard);
@@ -694,11 +601,14 @@ impl SkipList {
         out
     }
 
-    /// Delete range by inserting tombstones for all keys in [start, end)
+    /// Delete range by inserting tombstones for all keys in [start, end).
+    ///
+    /// Returns the number of keys whose visible value changed from non-tombstone
+    /// to tombstone at this sequence.
     pub fn delete_range(&self, start: Option<&[u8]>, end: Option<&[u8]>, seq: u64) -> usize {
         let guard = &epoch::pin();
 
-        // Collect keys in range first
+        // Collect all keys in the range first.
         let start_key = start.unwrap_or(&[]);
         let mut preds: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
         let mut succs: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
@@ -721,25 +631,22 @@ impl SkipList {
             curr = node.forward[0].load(AO::Acquire, guard);
         }
 
-        // Insert tombstones for all keys (reuses the guard from collection phase)
+        // Insert tombstones for all keys.
         let mut changed = 0;
         for key in keys_to_delete {
-            // Check if it had a value before
-            // Note: get() will create its own guard, but that's acceptable for correctness
+            // Observe if there was a visible value before this seq.
             if self.get(&key, seq).is_some() {
                 changed += 1;
             }
-            // Insert tombstone using existing guard by calling upsert_exp_with_guard
             self.delete(key, seq);
         }
 
         changed
     }
 
-    /// Get all keys currently in the skiplist
+    /// Get all keys currently in the skiplist (no snapshot filtering).
     pub fn get_all_keys(&self) -> Vec<Bytes> {
         let guard = &epoch::pin();
-        // Pre-allocate with reasonable capacity
         let mut keys = Vec::with_capacity(128);
 
         let mut curr = self.head.forward[0].load(AO::Acquire, guard);
@@ -751,13 +658,14 @@ impl SkipList {
         keys
     }
 
-    /// Range scan returning latest visible non-tombstone entries (no snapshot filtering)
-    /// This is used by MemTable for current state queries
+    /// Range scan returning latest visible non-tombstone entries (no snapshot filtering).
+    ///
+    /// This is used by the memtable for "current state" queries.
     pub fn range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Bytes, Bytes)> {
         self.range_visible(start, end, u64::MAX)
     }
 
-    /// Get all tombstoned keys in range (no snapshot filtering)
+    /// Get all tombstoned keys in range (no snapshot filtering).
     pub fn tombstones_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<Bytes> {
         self.tombstones_range_visible(start, end, u64::MAX)
     }
@@ -769,7 +677,10 @@ impl Default for SkipList {
     }
 }
 
-// Safety: SkipListLf is Send + Sync because all operations use atomic operations
+// Safety: SkipList is Send + Sync because:
+// - All shared state is accessed via atomic operations and epoch-based pointers.
+// - We do not use interior mutability without synchronization.
+// - Memory reclamation is handled by crossbeam-epoch.
 unsafe impl Send for SkipList {}
 unsafe impl Sync for SkipList {}
 
@@ -938,7 +849,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        // Assert
+        // Assert – no panics, all operations race-safe
     }
 
     #[test]
@@ -1017,7 +928,7 @@ mod tests {
         assert_eq!(entries[0].0, Bytes::from_static(b"a"));
         assert!(!entries[0].3); // not tombstone
         assert_eq!(entries[1].0, Bytes::from_static(b"b"));
-        assert!(entries[1].3); // is tombstone
+        assert!(entries[1].3); // tombstone
         assert_eq!(entries[2].4, Some(12345)); // has expiration
     }
 }

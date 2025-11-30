@@ -5,8 +5,10 @@
 //! • MemTable (sequential, random, reads)
 //! • LZ4 compression/decompression
 //!
-//! • Zero allocations inside measured loop
-//! • Flat sampling mode
+//! Design notes:
+//! • Uses `iter_batched` to isolate allocation from measurement
+//! • Flat sampling mode for stable results
+//! • Returns structure from closure to prevent Drop during measurement
 //!
 //! Runtime target: < 1 second
 //! Run frequency: Every PR (CI gate)
@@ -16,7 +18,7 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 
@@ -74,13 +76,16 @@ fn bench_skiplist_sequential(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
-            b.iter(|| {
-                let sl = SkipList::new();
-                for i in 0..size {
-                    sl.upsert(keys[i].clone(), Some(vals[i].clone()), i as u64);
-                }
-                black_box(sl)
-            });
+            b.iter_batched(
+                SkipList::new,
+                |sl| {
+                    for i in 0..size {
+                        sl.upsert(keys[i].clone(), Some(vals[i].clone()), i as u64);
+                    }
+                    sl // return to prevent Drop during measurement
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
@@ -100,13 +105,16 @@ fn bench_skiplist_random(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
-            b.iter(|| {
-                let sl = SkipList::new();
-                for (i, idx) in order.iter().enumerate() {
-                    sl.upsert(keys[*idx].clone(), Some(vals[i].clone()), i as u64);
-                }
-                black_box(sl);
-            });
+            b.iter_batched(
+                SkipList::new,
+                |sl| {
+                    for (i, idx) in order.iter().enumerate() {
+                        sl.upsert(keys[*idx].clone(), Some(vals[i].clone()), i as u64);
+                    }
+                    sl
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
@@ -116,7 +124,7 @@ fn bench_skiplist_random(c: &mut Criterion) {
 // Thread-based benchmarks belong in tier2 even with barrier-based thread reuse.
 
 // =============================================================================
-// MemTable — Sequential / Random / Concurrent
+// MemTable — Sequential / Random
 // =============================================================================
 
 fn bench_memtable_sequential(c: &mut Criterion) {
@@ -126,14 +134,18 @@ fn bench_memtable_sequential(c: &mut Criterion) {
     for &size in &[1_000, 5_000] {
         let (keys, vals) = make_fixed_kv(size);
 
+        group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
-            b.iter(|| {
-                let mt = MemTable::new();
-                for i in 0..size {
-                    mt.put_owned_with_seq(keys[i].clone(), vals[i].clone(), i as u64);
-                }
-                black_box(mt);
-            });
+            b.iter_batched(
+                MemTable::new,
+                |mt| {
+                    for i in 0..size {
+                        mt.put_owned_with_seq(keys[i].clone(), vals[i].clone(), i as u64);
+                    }
+                    mt
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
@@ -147,14 +159,18 @@ fn bench_memtable_random(c: &mut Criterion) {
         let (keys, vals) = make_fixed_kv(size);
         let order = shuffle_indices(size);
 
+        group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
-            b.iter(|| {
-                let mt = MemTable::new();
-                for (i, idx) in order.iter().enumerate() {
-                    mt.put_owned_with_seq(keys[*idx].clone(), vals[i].clone(), i as u64);
-                }
-                black_box(mt);
-            });
+            b.iter_batched(
+                MemTable::new,
+                |mt| {
+                    for (i, idx) in order.iter().enumerate() {
+                        mt.put_owned_with_seq(keys[*idx].clone(), vals[i].clone(), i as u64);
+                    }
+                    mt
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
