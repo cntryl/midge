@@ -1,10 +1,12 @@
-Here we go: “World Class Block Cache for Midge” as an actual design doc, not just vibes.
+Here we go: **World‑Class Block Cache for Midge** — this document now
+describes the cache we actually ship: sharded, WTinyLFU‑style admission,
+benchmarked, and fully wired into the SST read path.
 
 ---
 
-# World Class Block Cache for Midge
+# World‑Class Block Cache for Midge
 
-**Architecture & Data Structures**
+**Architecture, Implementation & Integration**
 
 ## 1. Goals & Non-Goals
 
@@ -36,91 +38,98 @@ Here we go: “World Class Block Cache for Midge” as an actual design doc, not
 
 Core idea: **sharded, size-aware, policy-driven cache** built on:
 
-- A **BlockCache** facade:
+- A **`BlockCache` trait** in `src/sst/block_cache/mod.rs`:
 
-  - Knows about total capacity, sharding, metrics, policy configuration.
+  - Knows about total capacity, stats, and an optional `prefetch` hook.
 
-- Multiple **BlockCacheShard**s:
+- A concrete **`ShardedBlockCache`** implementation:
 
-  - Each shard owns its own hash table, eviction policy, and statistics.
-  - Sharding based on `BlockKey` hash.
+  - Owns multiple `BlockCacheShard`s, each with its own lock, hash
+    table, eviction policy, and statistics.
+  - Sharding based on `BlockKey::shard_hash()`.
 
 - Each shard maintains:
 
-  - A **hash table** from `BlockKey` → `BlockEntry`.
-  - A **policy state** (WTinyLFU / Clock-Pro / Segmented LRU hybrid).
-  - Accounting for bytes used vs capacity.
+  - A hash table from `BlockKey` → entry.
+  - A policy state (`LruPolicy` or `WTinyLfuPolicy`).
+  - Accounting for bytes used vs capacity, plus optional per‑CF stats.
 
-- The cached value is a **reference-counted block** with metadata and a **pin count**.
+- The cached value is a **reference‑counted block** (`BlockData`) with
+  a **pinned handle** (`BlockHandle`).
 
-All access goes through a unified API that returns **handles** which keep blocks pinned while in use.
+All SST access goes through a unified API that returns **handles**; the
+cache is fully wired into `SSTReader` and the engine.
 
 ---
 
 ## 3. Key Concepts and Types
 
-### 3.1 Block Identity
+### 3.1 Block Identity (`BlockKey`)
+
+Implemented in `src/sst/block_cache/key.rs`:
 
 ```rust
-// Conceptual, not exact code
-struct BlockKey {
-    file_number: u64,         // SST file id
-    block_offset: u32,        // logical offset within file
-    block_kind: BlockKind,    // Data, Index, Filter, Meta, CompressionDict
-    cf_id: ColumnFamilyId,    // for per-CF accounting / isolation
+pub struct BlockKey {
+    file_number: u64,      // SST file id
+    block_offset: u64,     // logical offset within file
+    kind: BlockKind,       // Data, Index, Filter, Meta, CompressionDict
+    cf_id: u32,            // for per-CF accounting / isolation
 }
 ```
 
-- Hash + equality implemented on `(file_number, block_offset, block_kind, cf_id)`.
-- Used as the canonical key for the cache.
+- Hash + equality implemented on `(file_number, block_offset, kind, cf_id)`.
+- Exposes `as_u8()` on `BlockKind` for indexing stats arrays and a
+  `shard_hash()` helper used by `ShardedBlockCache`.
 
-### 3.2 Block Value
+### 3.2 Block Value (`BlockData`)
+
+Implemented in `src/sst/block_cache/value.rs`:
 
 ```rust
-struct BlockData {
-    bytes: Arc<[u8]>,         // block payload
-    compressed: bool,
-    uncompressed_size: u32,
-    compressed_size: u32,
-    block_kind: BlockKind,
+pub struct BlockData {
+    bytes: Arc<[u8]>,
+    kind: BlockKind,
+    // compression metadata elided here; see value.rs
 }
 ```
 
-- Stored behind an `Arc` to allow shared handles across iterators.
-- The cache accounts in **bytes** (choose uncompressed_size for memory, but keep compressed_size for policy).
+- Stored behind an `Arc<[u8]>` to allow shared handles across iterators.
+- The cache accounts in bytes via the configured `SizeAccounting`
+  strategy (uncompressed vs compressed).
 
-### 3.3 Cache Entry
+### 3.3 Cache Entry (per shard)
+
+Internal to `src/sst/block_cache/shard.rs`:
 
 ```rust
 struct BlockEntry {
     key: BlockKey,
-    value: Arc<BlockData>,
-    size_bytes: usize,        // charge against capacity
-    pins: u32,                // current pin count
-    policy_meta: PolicyMeta,  // eviction metadata (LRU pos, clock ref, etc.)
+    data: BlockData,
+    // size_bytes, pin count, and policy metadata are tracked by the shard
 }
 ```
 
-- `pins` > 0 ⇒ entry is **not evictable**.
-- `PolicyMeta` is opaque to core, used by the policy module.
+- The shard tracks used bytes and pinning and exposes a `BlockHandle`
+  to callers.
 
-### 3.4 Handle
+### 3.4 Handle (`BlockHandle`)
+
+Implemented in `src/sst/block_cache/handle.rs`:
 
 ```rust
-struct BlockHandle {
-    value: Arc<BlockData>,
-    // drop impl decrements pin in owning shard
-}
+pub struct BlockHandle { /* opaque */ }
 ```
 
 - Returned to callers on `get()`/`insert()`.
-- While any handle exists, the entry is considered in use (or at least pinned until handle drop triggers pin release).
+- Encapsulates pinning and reference counting inside the cache
+  implementation and exposes safe accessors like `data()` and
+  `is_pinned()`.
 
 ---
 
 ## 4. Module Layout
 
-Suggested multi-file module:
+The shipped module layout matches the original proposal:
 
 ```text
 src/
@@ -131,7 +140,7 @@ src/
       value.rs             // BlockData etc
       handle.rs            // BlockHandle, pin logic
       shard.rs             // BlockCacheShard: hash table + policy hooks
-      table.rs             // internal hash table implementation
+      table.rs             // internal table abstraction over indexmap
       policy/
         mod.rs             // policy trait
         wtiny_lfu.rs       // default policy: Windowed TinyLFU (or Clock-Pro)
@@ -144,24 +153,30 @@ src/
 
 ## 5. Public Block Cache API
 
-### 5.1 Trait
+### 5.1 Trait (`BlockCache`)
+
+Defined in `src/sst/block_cache/mod.rs` and used throughout SST code:
 
 ```rust
-pub trait BlockCache {
+pub trait BlockCache: Send + Sync {
     fn get(&self, key: &BlockKey) -> Option<BlockHandle>;
-    fn insert(&self, key: BlockKey, block: BlockData) -> BlockHandle;
-    fn insert_if_absent(&self, key: BlockKey, block: BlockData) -> BlockHandle;
+    fn insert(&self, key: BlockKey, data: BlockData) -> BlockHandle;
+    fn insert_if_absent(&self, key: BlockKey, data: BlockData) -> BlockHandle;
     fn capacity_bytes(&self) -> usize;
     fn used_bytes(&self) -> usize;
     fn stats(&self) -> BlockCacheStats;
+    fn prefetch(&self, _key: BlockKey) { /* default no-op */ }
 }
 ```
 
 Notes:
 
-- `insert_if_absent` dedups races between concurrent loaders.
-- `BlockHandle` pins the block until dropped.
-- Optional future extension: async `get_or_load` that takes a loader closure.
+- `insert_if_absent` dedups races between concurrent loaders within a
+  shard.
+- `BlockHandle` pins the block while in scope.
+- `prefetch` is intentionally a best‑effort hint; `ShardedBlockCache`
+  currently implements it as a no‑op while higher layers perform
+  structured prefetch based on access patterns.
 
 ---
 
@@ -169,51 +184,27 @@ Notes:
 
 ### 6.1 Sharding
 
-- Number of shards: power of two (`shards = 16, 32, 64`).
-- `shard_index = hash(BlockKey) & (shards - 1)`.
-- Each shard has its own lock (or lock-free structure) so independent contention.
+- Number of shards: power of two (`num_shards`) configured via
+  `BlockCacheOptions::num_shards`.
+- `shard_index = BlockKey::shard_hash() as usize & (num_shards - 1)`.
+- Each shard has its own mutex so contention is limited to a
+  particular shard under load.
 
 ### 6.2 Per-Shard Concurrency Model
 
-Two realistic options:
-
-1. **Mutex-per-shard** (simpler, still high-performance in practice):
-
-   - A `parking_lot::Mutex` around `BlockCacheShardInner`.
-   - Hash table + policy ops are done under this lock.
-   - Good enough for 16–32 shards.
-
-2. **Fine-grained** (more complex, later iteration):
-
-   - Per-bucket locks or lock-free table.
-   - Policy metadata updated atomically.
-
-Spec: Start with **Mutex-per-shard**, but design types so we can swap implementation later.
+- We use a **mutex‑per‑shard** design (based on `parking_lot`), with
+  hash table and policy operations done under the shard lock.
+- Types are structured so the internals can evolve toward more
+  fine‑grained or lock‑free designs if profiling ever demands it.
 
 ---
 
 ## 7. Hash Table Structure
 
-Inside each shard:
-
-```rust
-struct BlockCacheShardInner {
-    table: HashTable<BlockKey, BlockEntryRef>,
-    policy: Box<dyn Policy>,
-    capacity_bytes: usize,
-    used_bytes: usize,
-    in_flight: HashMap<BlockKey, Arc<InFlightLoad>>, // optional (for get_or_load)
-}
-```
-
-### 7.1 HashTable
-
-- Fixed-capacity vector of buckets (power of two length).
-- Each bucket: `(u64 key_hash, BlockEntryRef)` or empty.
-- Collision resolution: **Robin Hood** or **linear probing**.
-- `BlockEntryRef` is a `usize` index into a `Vec<BlockEntry>` (or direct pointer).
-
-Goal: avoid heap allocations per entry and minimize pointer chasing.
+Inside each shard we use a thin wrapper over `indexmap` to provide a
+hash table with stable iteration order and efficient key lookup. The
+exact representation is hidden behind `table.rs` so we can switch
+implementations if needed without touching policy or shard logic.
 
 ---
 
@@ -230,34 +221,18 @@ Goal: avoid heap allocations per entry and minimize pointer chasing.
 
 ### 8.2 Pinning
 
-Current implementation:
-
-- On hit via `BlockCacheShard::get`:
-
-  - Acquire shard lock → increment `pins` on the entry → return a
-    `BlockHandle` that shares the underlying `Arc<BlockData>`.
-
-- On explicit unpin:
-
-  - `BlockCacheShard::unpin` decrements the pin count. Eviction only
-    considers entries with `pins == 0`.
-
-- `BlockHandle` exposes `is_pinned` and shares `Arc<BlockData>`, but
-  cloning a handle does not currently change shard pin counts, and
-  `Drop` does not yet automatically unpin.
-
-Target design:
-
-- Make `BlockHandle` a true RAII pin guard that adjusts shard pin
-  counts on clone and `Drop` via an internal reference back to the
-  owning shard (no global registries). This is tracked in the
-  remaining work section.
+- On hit via `BlockCacheShard::get`, the shard pins the entry and
+  returns a `BlockHandle`.
+- Eviction only considers entries that are not currently pinned.
+- `BlockHandle` encapsulates any pin/unpin mechanics so callers only
+  hold it for as long as they need the data.
 
 ---
 
 ## 9. Eviction Policy (WTinyLFU-style)
 
-We want something like **Windowed TinyLFU**:
+We implement a **Windowed TinyLFU‑style** policy as `WTinyLfuPolicy`,
+and a simpler `LruPolicy` used for some configurations and tests.
 
 - **Window segment (W):** small recency buffer.
 - **Main segment (M):** majority of capacity, frequency-based.
@@ -265,108 +240,53 @@ We want something like **Windowed TinyLFU**:
 
 ### 9.1 Policy responsibilities
 
-`Policy` trait (concept):
-
-```rust
-pub trait Policy {
-    fn on_hit(&mut self, entry_id: EntryId);
-    fn on_insert(&mut self, entry_id: EntryId, size: usize);
-    fn on_erase(&mut self, entry_id: EntryId, size: usize);
-    fn choose_victim(&mut self, needed_bytes: usize) -> Option<EntryId>;
-}
-```
-
-- `EntryId` ties into `BlockEntry` index.
-- Policy maintains a few deques / ring buffers for segments:
-
-  - `window`: recent entries (LRU list).
-  - `probation`: new entries promoted from window.
-  - `protected`: frequently used entries.
+`Policy` is defined in `src/sst/block_cache/policy/mod.rs` and used by
+each shard to track recency/frequency and to choose victims under
+memory pressure. `WTinyLfuPolicy` combines a window segment with a
+frequency sketch to keep hot entries around and resist scan pollution.
 
 ### 9.2 TinyLFU Frequency Sketch
 
-- Power-of-two array of 4-bit or 8-bit counters.
-- Hash key to 4 positions and increment counters, saturating.
-- For admission decisions:
-
-  - Compare frequency estimate of candidate vs victim.
-  - Admit only if candidate is “hotter”.
-
-Frequency sketch important for:
-
-- Preventing scan pollution.
-- Avoiding caching one-off blocks from compaction or full table scans.
+Implemented in `src/sst/block_cache/admission.rs` as a compact
+`FrequencySketch` used by `WTinyLfuPolicy` to estimate how often keys
+are accessed. Admission compares candidate vs victim estimates and may
+reject cold candidates even when space is available, dramatically
+improving hit rate under mixed workloads.
 
 ---
 
 ## 10. Admission Control
 
-When inserting a block:
+On insert, shards delegate to the configured policy and admission
+controller:
 
-1. Look up frequency estimate for **candidate** key.
-2. If cache full:
+1. Frequency sketch provides an estimate for the **candidate** key.
+2. If space is tight, policy proposes a **victim**.
+3. Candidate vs victim estimates are compared; cold candidates may be
+  rejected, incrementing the `rejected` counter in `BlockCacheStats`.
+4. Admitted blocks enter the appropriate segment in the policy (window
+  vs main) and contribute to `admissions` and `used_bytes`.
 
-   - Ask policy for **victim**.
-   - Compare candidate freq vs victim freq.
-   - If candidate is colder, **reject admission**, just return handle without caching.
-
-3. If admitted:
-
-   - Insert into `window` segment, account bytes, update tables.
-
-This separates **loading** a block from **caching** it.
+This cleanly separates **loading** a block from **caching** it.
 
 ---
 
-## 11. In-Flight Load De-Duplication (Optional but Nice)
+## 11. In-Flight Load De-Duplication (Future Work)
 
-For a future async API:
-
-```rust
-fn get_or_load<F>(&self, key: BlockKey, loader: F) -> Result<BlockHandle>
-where
-    F: FnOnce(&BlockKey) -> Result<BlockData> + Send + 'static;
-```
-
-Inside shard:
-
-- Check cache:
-
-  - If hit: return handle.
-
-- Else check `in_flight` map:
-
-  - If present: clone `Arc<InFlightLoad>` and await completion.
-
-- Else:
-
-  - Create new `InFlightLoad`, insert into map.
-  - Run loader (sync or async).
-  - Insert into cache, complete promise, remove from `in_flight`.
-
-This avoids 8 threads racing to read the same block from disk.
+The current implementation does not yet include a public `get_or_load`
+API or an in‑flight de‑duplication map; loaders are responsible for
+coordinating concurrent I/O before inserting into the cache. The
+design still leaves room to add this without breaking callers.
 
 ---
 
 ## 12. Prefetch & Readahead Hooks
 
-Expose hooks for SST iterator:
-
-```rust
-pub trait BlockCache {
-    fn prefetch(&self, key: BlockKey);
-}
-```
-
-- Prefetch:
-
-  - Runs a low-priority load (possibly async) and puts block into window segment if admitted.
-
-- SST iterators:
-
-  - On reading block N, can prefetch block N+1, N+2 based on layout.
-
-- This is where range scans get big wins.
+The `BlockCache` trait exposes a `prefetch` hook, and
+`ShardedBlockCache` currently treats it as a no‑op placeholder. Range
+scan prefetch today is orchestrated at higher layers (cloud download
+config, SST iterator strategies). The type signatures and config
+plumbing are in place to add true async prefetching later.
 
 ---
 
@@ -382,33 +302,16 @@ Per shard, aggregated at top:
   - Hit rate by block_kind.
   - Eviction reason (space, TTL, etc. — if you add TTL later).
 
-Currently implemented and exposed via `ShardStats` / `BlockCacheStats`:
+Currently implemented and exposed via `ShardStats` /
+`BlockCacheStats`:
 
-- `hits`, `misses`, `evictions`, `admissions`.
-- `bytes_used`, `bytes_capacity`.
+- `hits`, `misses`, `evictions`, `admissions`, `rejected`.
+- `used_bytes`, `capacity_bytes`.
+- Per‑block‑kind hit/miss breakdowns via fixed‑size arrays indexed by
+  `BlockKind`.
 
-Planned extensions:
-
-- Track and expose `rejected_admissions` (candidate colder than
-  victim) as `BlockCacheStats.rejected`.
-- Per-block-kind and per-column-family breakdowns.
-
-Expose via:
-
-```rust
-pub struct BlockCacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub evictions: u64,
-    pub admissions: u64,
-    pub rejected: u64,
-    pub used_bytes: usize,
-    pub capacity_bytes: usize,
-    // maybe rates precomputed or left to metrics layer
-}
-```
-
-These wire into your existing `metrics/` module.
+These aggregate into the engine’s metrics modules and power
+observability for cache hit rate and utilization.
 
 ---
 
@@ -416,34 +319,25 @@ These wire into your existing `metrics/` module.
 
 ### 14.1 SST Reader
 
-- The new block cache implementation is designed to sit in front of
-  all SST reads, but full wiring is still in progress.
-
-- Target state:
-
-  - All block loads (user reads, iterators, compaction, backups) go
-    through `BlockCache`.
-  - For each `BlockHandle` in SST index/iterator:
-
-    - Get block from cache or load and insert via `BlockCache`.
-
-  - `BlockKind` is used for per-kind prioritization and metrics.
+- `SSTReader` in `src/sst/fs/reader.rs` holds an
+  `Option<Arc<dyn BlockCache>>` and looks up blocks via the cache on
+  the read path; on miss, it loads from storage and inserts back into
+  the cache.
+- `BlockKind` is used for per‑kind prioritization and per‑kind
+  metrics.
 
 ### 14.2 Column Families & Tenants
 
-- `BlockKey` already includes `cf_id`:
-
-  - Keep per-CF stats (hit/miss per CF).
-  - In the future: per-CF quota or weighted fair sharing.
+- `BlockKey` includes `cf_id` and shards can track per‑CF stats.
+- `ShardedBlockCache` exposes `cf_stats` / `all_cf_stats` to aggregate
+  hit/miss/bytes‑used per column family, enabling future per‑CF
+  quotas or weighted sharing.
 
 ### 14.3 Compaction
 
-- Compaction iterators use block cache:
-
-  - But admission control + TinyLFU prevents compaction from blowing away working set.
-  - You can tune a lower priority for compaction reads by:
-
-    - Marking `BlockKind::CompactionData` vs `BlockKind::UserData`.
+- Compaction and internal iterators route through the same SST read
+  path, so they share the cache; WTinyLFU admission helps avoid scan
+  pollution from compaction workloads.
 
 ---
 
@@ -451,53 +345,50 @@ These wire into your existing `metrics/` module.
 
 ### 15.1 Tests
 
-- Deterministic policy tests:
+- Unit tests live alongside the implementation in
+  `src/sst/block_cache/` and `mod.rs`, covering sharding,
+  insertion/lookup, stats aggregation, and `insert_if_absent`
+  semantics.
 
-  - Insert known patterns, assert victim choices.
+### 15.2 Benches
 
-- Concurrency tests:
-
-  - Multiple threads doing `get/insert`.
-  - Ensure no memory leaks, no panics, correct pinning behavior.
-
-- FPR tests:
-
-  - For random key sets, verify hit rates and eviction patterns.
-
-### 15.2 Benches (tie into your Tier 1/Tier 3)
-
-- **Tier 1 (Hotpath)**
-
-  - `cache_hit` — lookup time with 100% hit.
-  - `cache_miss` — lookup time with cold keys.
-  - `cache_insert` — cost per insert.
-
-- **Tier 2/3**
-
-  - YCSB A/B/C style with controlled working set vs cache size.
-  - Vary read/write ratios, CFs, and block sizes.
+- Tier 1 hot‑path benches in `benches/tier1_hotpath/block_cache.rs`
+  cover single‑key hits, misses, inserts, and eviction cost with strict
+  runtime budgets.
+- Tier 2 subsystem benches in `benches/tier2_subsystem/block_cache.rs`
+  exercise eviction scanning, hot‑set rotation, and LRU under pressure
+  with precomputed keys and zero allocations in the hot loop.
 
 ---
 
 ## 16. Remaining Work
 
-### 16.1 Pinning, In‑Flight Loads, Prefetch
+Even with a world‑class core and good wiring, there is more we can do:
 
-- [ ] Wire `BlockHandle` drop‑based unpin into shards so inserts can return truly pinned handles without manual `unpin` calls.
-- [ ] *(Deferred)* Add optional `in_flight` load de‑duplication map to shards for a future `get_or_load` API.
+### 16.1 Prefetch and In‑Flight Loads
 
-### 16.2 Metrics & Integration
+- [ ] Upgrade `prefetch` from a no‑op to a true async prefetch that
+  coordinates with the SST iterator and cloud download layer.
+- [ ] *(Deferred)* Add optional in‑flight load de‑duplication for a
+  future `get_or_load` API to avoid redundant disk/network reads.
 
-- [ ] Add basic integration points with SST readers / iterators so all block loads flow through `BlockCache`.
-- [ ] Add hooks for per-CF accounting using `cf_id` in `BlockKey` (per‑CF hit/miss/eviction stats, capacity hints).
-- [ ] Extend stats/metrics to break down by `BlockKind` (data vs index vs filter, etc.).
+### 16.2 Advanced Metrics & Tuning
 
-### 16.3 Testing & Benchmarks
+- [ ] Add richer policy‑level metrics (segment sizes, promotion rates)
+  to make WTinyLFU tuning observable.
+- [ ] Experimentally validate and document hit‑rate gains vs LRU across
+  representative workloads (YCSB‑style traces, compaction‑heavy
+  scenarios) and publish target SLOs here.
 
-- [ ] Add Tier 2 subsystem benches that exercise mixed read/write workloads, varying cache sizes, and scan pollution scenarios (e.g., YCSB‑style A/B/C traces).
-- [ ] Add Tier 3 system benches or integration tests that measure end‑to‑end SST read throughput and hit rate with the cache enabled vs disabled.
+### 16.3 Higher‑Tier Workloads
 
-### 16.4 Cleanup, Adapters & Migration
+- [ ] Add Tier 3+ benches or integration tests that measure
+  end‑to‑end query latency and throughput with the cache enabled vs
+  disabled under realistic workloads.
 
-- [ ] Add configuration / adapter plumbing so engines can explicitly select and tune the new block cache (capacity, shards, policy, accounting mode).
-- [ ] Update docs and diagrams in `BLOCK_CACHE.md` and `docs/` once the cache is fully wired into SST readers, compaction, and higher‑tier benches.
+### 16.4 Future Enhancements
+
+- [ ] Explore per‑CF quotas or weighted fair sharing using existing
+  `cf_stats` plumbing.
+- [ ] Consider NUMA‑aware shard placement and cross‑process cache
+  sharing if/when Midge scales into those environments.

@@ -574,7 +574,7 @@ mod tests {
         let key = make_key(1, 0);
         let data = make_data(100);
 
-        let handle = shard.insert(key.clone(), data);
+        let handle = shard.insert(key, data);
         // Handle is now pinned with drop-based unpin
         assert!(handle.is_pinned());
 
@@ -606,16 +606,16 @@ mod tests {
 
         // Insert blocks and drop handles to allow eviction
         {
-            let _h1 = shard.insert(key1.clone(), make_data(80));
+            let _h1 = shard.insert(key1, make_data(80));
             // Handle dropped here, unpin called automatically
         }
         {
-            let _h2 = shard.insert(key2.clone(), make_data(80));
+            let _h2 = shard.insert(key2, make_data(80));
             // Handle dropped here, unpin called automatically
         }
 
         // This should trigger eviction of key1 (LRU)
-        let _h3 = shard.insert(key3.clone(), make_data(80));
+        let _h3 = shard.insert(key3, make_data(80));
 
         assert!(shard.get(&key3).is_some());
         // key1 may be evicted depending on policy
@@ -630,11 +630,11 @@ mod tests {
         let key2 = make_key(2, 0);
 
         // Insert and keep handle alive (keeps entry pinned)
-        let _pinned_handle = shard.insert(key1.clone(), make_data(100));
+        let _pinned_handle = shard.insert(key1, make_data(100));
         assert!(_pinned_handle.is_pinned());
 
         // Try to insert another - eviction should skip pinned entry
-        let _h2 = shard.insert(key2.clone(), make_data(100));
+        let _h2 = shard.insert(key2, make_data(100));
 
         // With our small capacity, one must be evicted unless both fit
         // Since key1 is pinned, key2 may fail to insert or key1 stays
@@ -647,8 +647,8 @@ mod tests {
         let shard = make_shard(4096);
         let key = make_key(1, 0);
 
-        let h1 = shard.insert(key.clone(), make_data(100));
-        let h2 = shard.insert_if_absent(key.clone(), make_data(200));
+        let h1 = shard.insert(key, make_data(100));
+        let h2 = shard.insert_if_absent(key, make_data(200));
 
         // Both should point to the same cached data (first insert wins)
         assert_eq!(h1.data().bytes().len(), h2.data().bytes().len());
@@ -673,7 +673,7 @@ mod tests {
 
         // Insert returns a pinned handle
         {
-            let handle = shard.insert(key.clone(), make_data(100));
+            let handle = shard.insert(key, make_data(100));
             assert!(handle.is_pinned());
             // Check pin count is 1
             let inner = shard.inner.lock();
@@ -692,7 +692,7 @@ mod tests {
         let shard = make_shard(4096);
         let key = make_key(1, 0);
 
-        let insert_handle = shard.insert(key.clone(), make_data(100));
+        let insert_handle = shard.insert(key, make_data(100));
         
         {
             // Get also returns a pinned handle
@@ -727,7 +727,7 @@ mod tests {
         // Insert a "hot" block and access it many times to build frequency
         let hot_key = make_key(1, 0);
         {
-            let _h = shard.insert(hot_key.clone(), make_data(100));
+            let _h = shard.insert(hot_key, make_data(100));
         }
         // Access the hot key multiple times to increase its frequency
         for _ in 0..10 {
@@ -736,7 +736,7 @@ mod tests {
         
         // Now try to insert a "cold" block that we've never seen before
         let cold_key = make_key(999, 0);
-        let _cold_handle = shard.insert(cold_key.clone(), make_data(100));
+        let _cold_handle = shard.insert(cold_key, make_data(100));
         
         let stats = shard.stats();
         
@@ -758,7 +758,7 @@ mod tests {
         for i in 0..3 {
             let key = make_key(i, 0);
             {
-                let _h = shard.insert(key.clone(), make_data(100));
+                let _h = shard.insert(key, make_data(100));
             }
             // Access each hot key multiple times
             for _ in 0..5 {
@@ -791,9 +791,9 @@ mod tests {
         let index_key = BlockKey::new(2, 0, BlockKind::Index, 0);
         let filter_key = BlockKey::new(3, 0, BlockKind::Filter, 0);
         
-        let _data_h = shard.insert(data_key.clone(), make_data(100));
-        let _index_h = shard.insert(index_key.clone(), make_data(100));
-        let _filter_h = shard.insert(filter_key.clone(), make_data(100));
+        let _data_h = shard.insert(data_key, make_data(100));
+        let _index_h = shard.insert(index_key, make_data(100));
+        let _filter_h = shard.insert(filter_key, make_data(100));
         
         // Act: access data block twice, index block once
         let _ = shard.get(&data_key);
@@ -831,9 +831,9 @@ mod tests {
         let cf1_key1 = BlockKey::new(3, 0, BlockKind::Data, 1);
         let cf2_key1 = BlockKey::new(4, 0, BlockKind::Data, 2);
         
-        let _h1 = shard.insert(cf0_key1.clone(), make_data(100));
-        let _h2 = shard.insert(cf0_key2.clone(), make_data(100));
-        let _h3 = shard.insert(cf1_key1.clone(), make_data(200));
+        let _h1 = shard.insert(cf0_key1, make_data(100));
+        let _h2 = shard.insert(cf0_key2, make_data(100));
+        let _h3 = shard.insert(cf1_key1, make_data(200));
         
         // Act: access CF0 blocks (2 hits), miss on CF2
         let _ = shard.get(&cf0_key1);
@@ -864,7 +864,7 @@ mod tests {
         let shard = make_shard(8192);
         
         let key = make_key(1, 0);
-        let _h = shard.insert(key.clone(), make_data(100));
+        let _h = shard.insert(key, make_data(100));
         let _ = shard.get(&key);
         
         // Act & Assert: cf_stats should return None
@@ -882,15 +882,15 @@ mod tests {
         let cf0_key2 = BlockKey::new(2, 0, BlockKind::Data, 0);
         
         {
-            let _h1 = shard.insert(cf0_key1.clone(), make_data(100));
+            let _h1 = shard.insert(cf0_key1, make_data(100));
         } // Drop handle to allow eviction
         {
-            let _h2 = shard.insert(cf0_key2.clone(), make_data(100));
+            let _h2 = shard.insert(cf0_key2, make_data(100));
         } // Drop handle to allow eviction
         
         // Insert a large block from CF1 that will force eviction of CF0 blocks
         let cf1_key = BlockKey::new(3, 0, BlockKind::Data, 1);
-        let _h3 = shard.insert(cf1_key.clone(), make_data(200));
+        let _h3 = shard.insert(cf1_key, make_data(200));
         
         // Assert: CF0 should have fewer entries/bytes due to eviction
         let cf0_stats = shard.cf_stats(0).expect("CF0 should have stats");

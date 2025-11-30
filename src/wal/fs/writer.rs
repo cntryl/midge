@@ -33,9 +33,6 @@ const DIRECT_WRITE_THRESHOLD: usize = BUF_CAP * 2;
 /// The file will be truncated to actual size on clean shutdown.
 const WAL_PREALLOC_SIZE: u64 = 64 * 1024 * 1024;
 
-/// Minimum remaining space before triggering re-preallocation (4 MB).
-const WAL_PREALLOC_THRESHOLD: u64 = 4 * 1024 * 1024;
-
 // ============================================================================
 // WAL implementation
 // ============================================================================
@@ -245,18 +242,6 @@ impl Wal {
         }
 
         Ok(())
-    }
-
-    /// Ensure sufficient preallocated space for upcoming writes.
-    ///
-    /// Called internally to check if re-preallocation is needed.
-    /// Returns true if caller should call preallocate() after releasing the inner lock.
-    fn needs_repreallocation(inner: &WalInner, additional_bytes: u64) -> bool {
-        if inner.preallocated_size == 0 {
-            return false; // Preallocation not enabled
-        }
-        let needed = inner.pos + additional_bytes;
-        needed + WAL_PREALLOC_THRESHOLD > inner.preallocated_size
     }
 
     fn write_header(&mut self, start_sequence: u64) -> MidgeResult<()> {
@@ -2065,7 +2050,7 @@ mod tests {
 
         // Write valid records
         {
-            let mut wal = Wal::open(dir.path()).expect("open");
+            let wal = Wal::open(dir.path()).expect("open");
             wal.append_op(crate::wal::WalOpKind::Put, b"key1", Some(b"value1"))
                 .expect("append 1");
             wal.append_op(crate::wal::WalOpKind::Put, b"key2", Some(b"value2"))
@@ -2104,7 +2089,7 @@ mod tests {
         let wal_path = dir.path().join("wal.log");
 
         {
-            let mut wal = Wal::open(dir.path()).expect("open");
+            let wal = Wal::open(dir.path()).expect("open");
             wal.append_op(crate::wal::WalOpKind::Put, b"key1", Some(b"value1"))
                 .expect("append");
             wal.sync().expect("sync");
@@ -2130,7 +2115,7 @@ mod tests {
         let wal_path = dir.path().join("wal.log");
 
         {
-            let mut wal = Wal::open(dir.path()).expect("open");
+            let wal = Wal::open(dir.path()).expect("open");
             wal.append_op(crate::wal::WalOpKind::Put, b"key1", Some(b"value1"))
                 .expect("append");
             wal.sync().expect("sync");

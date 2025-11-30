@@ -40,7 +40,7 @@ fn should_cache_block_given_basic_cache_when_inserting() {
     let block = make_block_data(b"test block data");
 
     // Act
-    cache.insert(key.clone(), block);
+    cache.insert(key, block);
     let retrieved = cache.get(&key);
 
     // Assert
@@ -77,9 +77,9 @@ fn should_distinguish_block_types_given_same_file_and_offset_when_caching() {
     let filter_block = BlockData::uncompressed(filter_data, BlockKind::Filter);
 
     // Act
-    cache.insert(data_key.clone(), data_block);
-    cache.insert(index_key.clone(), index_block);
-    cache.insert(filter_key.clone(), filter_block);
+    cache.insert(data_key, data_block);
+    cache.insert(index_key, index_block);
+    cache.insert(filter_key, filter_block);
 
     // Assert - each block type stored separately
     assert_eq!(cache.get(&data_key).unwrap().data().bytes(), b"data block");
@@ -95,7 +95,7 @@ fn should_track_stats_given_cache_operations_when_querying_stats() {
     let block = make_block_data(b"stats test data");
 
     // Act
-    cache.insert(key.clone(), block);
+    cache.insert(key, block);
     let _ = cache.get(&key); // Hit
     let _ = cache.get(&key); // Hit
     let nonexistent = make_block_key(999, 0, BlockKind::Data);
@@ -120,7 +120,7 @@ fn should_cache_block_given_sharded_cache_when_inserting() {
     let block = make_block_data(b"sharded block data");
 
     // Act
-    cache.insert(key.clone(), block);
+    cache.insert(key, block);
     let retrieved = cache.get(&key);
 
     // Assert
@@ -263,8 +263,8 @@ fn should_distinguish_keys_given_different_files_when_same_offset() {
     let key1 = make_block_key(1, 0, BlockKind::Data);
     let key2 = make_block_key(2, 0, BlockKind::Data);
 
-    cache.insert(key1.clone(), make_block_data(b"file a data"));
-    cache.insert(key2.clone(), make_block_data(b"file b data"));
+    cache.insert(key1, make_block_data(b"file a data"));
+    cache.insert(key2, make_block_data(b"file b data"));
 
     // Act
     let result1 = cache.get(&key1);
@@ -284,9 +284,9 @@ fn should_distinguish_keys_given_different_offsets_when_same_file() {
     let key2 = make_block_key(1, 4096, BlockKind::Data);
     let key3 = make_block_key(1, 8192, BlockKind::Data);
 
-    cache.insert(key1.clone(), make_block_data(b"block 0"));
-    cache.insert(key2.clone(), make_block_data(b"block 1"));
-    cache.insert(key3.clone(), make_block_data(b"block 2"));
+    cache.insert(key1, make_block_data(b"block 0"));
+    cache.insert(key2, make_block_data(b"block 1"));
+    cache.insert(key3, make_block_data(b"block 2"));
 
     // Act
     let result1 = cache.get(&key1);

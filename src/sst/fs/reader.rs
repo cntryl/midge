@@ -23,8 +23,6 @@ use super::utils::{
     decode_data_block_paranoid, decode_internal_key_or_raw,
 };
 
-/// Helper struct for building and processing block entries during linear search
-
 /// SST file reader with cached file handle for efficient repeated reads.
 ///
 /// The file handle is lazily opened on first read and cached for subsequent

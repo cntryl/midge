@@ -277,7 +277,7 @@ fn should_persist_compression_setting_given_reopen_when_using_same_options() {
 #[test]
 fn should_support_all_compression_types_given_valid_enum_when_configuring() {
     // Arrange
-    let types = vec![
+    let types = [
         CompressionType::None,
         CompressionType::Lz4,
         CompressionType::Zstd1,

@@ -134,7 +134,7 @@ fn bench_get_batch_hit(c: &mut Criterion) {
     // Pre-populate cache
     let cache = create_cache(cache_size);
     for i in 0..num_blocks {
-        cache.insert(keys[i].clone(), blocks[i].clone());
+        cache.insert(keys[i], blocks[i].clone());
     }
 
     group.bench_function("1000_lookups", |b| {
@@ -167,7 +167,7 @@ fn bench_get_batch_miss(c: &mut Criterion) {
     // Pre-populate cache with keys in file range 0-9
     let cache = create_cache(cache_size);
     for i in 0..num_blocks {
-        cache.insert(keys[i].clone(), blocks[i].clone());
+        cache.insert(keys[i], blocks[i].clone());
     }
 
     // Create miss keys in different file range (100-199)
@@ -210,7 +210,7 @@ fn bench_insert_batch(c: &mut Criterion) {
                     || create_cache(cache_size),
                     |cache| {
                         for i in 0..n {
-                            cache.insert(keys[i].clone(), blocks[i].clone());
+                            cache.insert(keys[i], blocks[i].clone());
                         }
                         black_box(());
                     },
@@ -242,7 +242,7 @@ fn bench_eviction(c: &mut Criterion) {
         b.iter(|| {
             let cache = create_cache(cache_size);
             for i in 0..num_blocks {
-                cache.insert(keys[i].clone(), blocks[i].clone());
+                cache.insert(keys[i], blocks[i].clone());
             }
             black_box(cache)
         })

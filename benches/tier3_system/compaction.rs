@@ -423,7 +423,8 @@ fn bench_flush_concurrent(c: &mut Criterion) {
                             });
                         }
                         // Flush in main thread (timed operation)
-                        black_box(engine.flush().expect("flush failed"));
+                        engine.flush().expect("flush failed");
+                        black_box(());
                     });
                     engine
                 },

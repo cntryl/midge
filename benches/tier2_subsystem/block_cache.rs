@@ -89,7 +89,7 @@ fn bench_eviction_scan(c: &mut Criterion) {
             || {
                 let cache = create_cache(5 * 1024 * 1024); // 5MB to hold all 1000 x 4KB blocks
                 for i in 0..1000 {
-                    cache.insert(keys.get_linear(i).clone(), block.clone());
+                    cache.insert(*keys.get_linear(i), block.clone());
                 }
                 cache
             },
@@ -125,7 +125,7 @@ fn bench_fill_then_hit(c: &mut Criterion) {
             || {
                 let cache = create_cache(1024 * 1024); // 1MB cache
                 for i in 0..100 {
-                    cache.insert(keys.get(0, i, 1000).clone(), block.clone());
+                    cache.insert(*keys.get(0, i, 1000), block.clone());
                 }
                 cache
             },
@@ -136,7 +136,7 @@ fn bench_fill_then_hit(c: &mut Criterion) {
                     if cache.get(key).is_some() {
                         hits += 1;
                     } else {
-                        cache.insert(keys.get(1, i, 1000).clone(), block.clone());
+                        cache.insert(*keys.get(1, i, 1000), block.clone());
                     }
                 }
                 black_box(hits)
@@ -164,7 +164,7 @@ fn bench_hotset_rotation(c: &mut Criterion) {
             || {
                 let cache = create_cache(1024 * 1024); // 1MB cache
                 for i in 0..50 {
-                    cache.insert(keys.get_linear(i).clone(), block.clone());
+                    cache.insert(*keys.get_linear(i), block.clone());
                 }
                 cache
             },
@@ -173,7 +173,7 @@ fn bench_hotset_rotation(c: &mut Criterion) {
                     for i in 0..50 {
                         let key = keys.get_linear((i + round) % 75);
                         if cache.get(key).is_none() {
-                            cache.insert(key.clone(), block.clone());
+                            cache.insert(*key, block.clone());
                         }
                     }
                 }
@@ -202,13 +202,13 @@ fn bench_lru_eviction_1k(c: &mut Criterion) {
             || {
                 let cache = create_cache(512 * 1024); // 512KB holds ~125 blocks
                 for i in 0..125 {
-                    cache.insert(keys.get_linear(i).clone(), block.clone());
+                    cache.insert(*keys.get_linear(i), block.clone());
                 }
                 cache
             },
             |cache| {
                 for i in 125..1125 {
-                    cache.insert(keys.get_linear(i).clone(), block.clone());
+                    cache.insert(*keys.get_linear(i), block.clone());
                 }
                 black_box(cache)
             },
@@ -233,13 +233,13 @@ fn bench_lru_eviction_10k(c: &mut Criterion) {
             || {
                 let cache = create_cache(2 * 1024 * 1024); // 2MB holds ~500 blocks
                 for i in 0..500 {
-                    cache.insert(keys.get_linear(i).clone(), block.clone());
+                    cache.insert(*keys.get_linear(i), block.clone());
                 }
                 cache
             },
             |cache| {
                 for i in 500..10_500 {
-                    cache.insert(keys.get_linear(i).clone(), block.clone());
+                    cache.insert(*keys.get_linear(i), block.clone());
                 }
                 black_box(cache)
             },

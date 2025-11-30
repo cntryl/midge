@@ -260,10 +260,10 @@ impl SkipList {
 
     /// Internal helper: iterate all visible versions for merge.
     #[inline]
-    fn collect_visible_versions_for_merge<'g>(
+    fn collect_visible_versions_for_merge(
         versions_head: &Atomic<VersionNode>,
         snapshot_seq: u64,
-        guard: &'g Guard,
+        guard: &Guard,
         out: &mut Vec<(Option<Bytes>, Option<u64>, OpType)>,
     ) {
         let mut v = versions_head.load(AO::Acquire, guard);
@@ -365,14 +365,14 @@ impl SkipList {
     /// - If the key exists, prepend a new version to the version chain.
     /// - If the key is absent, insert a new node at a random level.
     #[allow(clippy::too_many_arguments)]
-    fn upsert_exp_internal<'g>(
+    fn upsert_exp_internal(
         &self,
         key: Bytes,
         value: Option<Bytes>,
         seq: u64,
         exp: Option<u64>,
         op: OpType,
-        guard: &'g Guard,
+        guard: &Guard,
     ) {
         let mut preds: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];
         let mut succs: [Shared<Node>; MAX_LEVEL] = [Shared::null(); MAX_LEVEL];

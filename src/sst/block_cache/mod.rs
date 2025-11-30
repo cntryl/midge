@@ -319,7 +319,7 @@ mod tests {
         let cache = ShardedBlockCache::new(BlockCacheOptions::with_capacity(1024 * 1024));
         let key = make_key(1, 0);
 
-        let _handle = cache.insert(key.clone(), make_data(100));
+        let _handle = cache.insert(key, make_data(100));
         let retrieved = cache.get(&key);
 
         assert!(retrieved.is_some());
@@ -359,7 +359,7 @@ mod tests {
 
         for i in 0..10 {
             let key = make_key(i, 0);
-            cache.insert(key.clone(), make_data(100));
+            cache.insert(key, make_data(100));
             cache.get(&key); // Hit
         }
         cache.get(&make_key(999, 0)); // Miss
@@ -374,8 +374,8 @@ mod tests {
         let cache = ShardedBlockCache::new(BlockCacheOptions::with_capacity(1024 * 1024));
         let key = make_key(1, 0);
 
-        let h1 = cache.insert(key.clone(), make_data(100));
-        let h2 = cache.insert_if_absent(key.clone(), make_data(200));
+        let h1 = cache.insert(key, make_data(100));
+        let h2 = cache.insert_if_absent(key, make_data(200));
 
         // Both should return the same data (first insert wins)
         assert_eq!(h1.data().bytes().len(), h2.data().bytes().len());
