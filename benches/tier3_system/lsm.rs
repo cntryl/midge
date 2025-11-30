@@ -281,9 +281,7 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
     let mut state = 12345u64;
 
     for _ in 0..total_ops {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
 
         let idx = (state as usize) % hot_set_size;
         let is_read = ((state >> 32) % 100) < 80;

@@ -51,7 +51,6 @@ const BATCH_SIZE: usize = 100;
 
 fn setup_db_with_options(db_name: &str, mode: BenchStorageMode, wal_sync: bool) -> MidgeEngine {
     use cntryl_midge::cloud::mock::MockCloudBackend;
-    use cntryl_midge::cloud::LatencyConfig;
 
     let path = unique_bench_path(db_name);
     let _ = std::fs::remove_dir_all(&path);
@@ -60,10 +59,8 @@ fn setup_db_with_options(db_name: &str, mode: BenchStorageMode, wal_sync: bool) 
         BenchStorageMode::Memory => panic!("Durability benchmarks require persistent storage"),
         BenchStorageMode::LocalDisk => StorageMode::LocalDisk { db_path: path },
         BenchStorageMode::CloudBacked => {
-            // Use fast simulation for benchmarks (non-blocking)
-            let backend = Arc::new(
-                MockCloudBackend::new().with_latency_config(LatencyConfig::fast_simulation()),
-            );
+            // Use BenchFast mode for deterministic, low-variance benchmarks
+            let backend = Arc::new(MockCloudBackend::bench_fast());
             StorageMode::CloudBacked {
                 local_cache_path: path,
                 cloud_backend: backend,
@@ -83,7 +80,7 @@ fn setup_db_with_options(db_name: &str, mode: BenchStorageMode, wal_sync: bool) 
         ..Default::default()
     };
 
-    MidgeEngine::open(opts).expect("failed to open engine")
+    MidgeEngine::open(opts).unwrap()
 }
 
 fn load_data_batched(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes]) {
@@ -91,7 +88,7 @@ fn load_data_batched(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes]) {
     for chunk in keys.chunks(BATCH_SIZE) {
         for (i, key) in chunk.iter().enumerate() {
             let val_idx = i % values.len();
-            engine.put(&cf, key, &values[val_idx]).expect("put failed");
+            engine.put(&cf, key, &values[val_idx]).unwrap();
         }
     }
 }
@@ -118,7 +115,7 @@ fn run_mixed_workload(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], op
 // ============================================================================
 
 fn bench_durability_async_wal(c: &mut Criterion) {
-    let mut group = c.benchmark_group("durability_async_wal");
+    let mut group = c.benchmark_group("durability/async_wal");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
     group.sample_size(20);
@@ -161,7 +158,7 @@ fn bench_durability_async_wal(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_durability_wal_sync_every(c: &mut Criterion) {
-    let mut group = c.benchmark_group("durability_wal_sync_every");
+    let mut group = c.benchmark_group("durability/sync_wal");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
     group.sample_size(10); // Fewer samples since it's slow
@@ -204,7 +201,7 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_durability_concurrent(c: &mut Criterion) {
-    let mut group = c.benchmark_group("durability_concurrent");
+    let mut group = c.benchmark_group("durability/concurrent");
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(15);
 
@@ -243,13 +240,9 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                         || {
                             let engine = setup_db_with_options("concurrent", mode, wal_sync);
                             // Load data outside timed section
-                            {
-                                let cf = engine.default_column_family();
-                                for (i, key) in keys.iter().take(RECORD_COUNT).enumerate() {
-                                    engine
-                                        .put(&cf, key, &values[i % values.len()])
-                                        .expect("put failed");
-                                }
+                            let cf = engine.default_column_family();
+                            for (i, key) in keys.iter().take(RECORD_COUNT).enumerate() {
+                                engine.put(&cf, key, &values[i % values.len()]).unwrap();
                             }
                             Arc::new(engine)
                         },
@@ -299,7 +292,7 @@ fn run_write_heavy_workload(
 }
 
 fn bench_durability_write_heavy(c: &mut Criterion) {
-    let mut group = c.benchmark_group("durability_write_heavy");
+    let mut group = c.benchmark_group("durability/write_heavy");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
 

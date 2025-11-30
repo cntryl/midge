@@ -60,7 +60,9 @@ fn bench_ttl(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         for i in 0..num_ops {
-                            engine.put_with_ttl(&cf, &keys[i], &vals[i], ttl_secs).unwrap();
+                            engine
+                                .put_with_ttl(&cf, &keys[i], &vals[i], ttl_secs)
+                                .unwrap();
                         }
                         engine
                     },
@@ -87,7 +89,9 @@ fn bench_ttl(c: &mut Criterion) {
                         let engine = setup_engine_with_mode("ttl_read", mode);
                         let cf = engine.default_column_family();
                         for i in 0..num_ops {
-                            engine.put_with_ttl(&cf, &keys[i], &vals[i], ttl_secs).unwrap();
+                            engine
+                                .put_with_ttl(&cf, &keys[i], &vals[i], ttl_secs)
+                                .unwrap();
                         }
                         engine
                     },
@@ -172,9 +176,7 @@ fn bench_large_values(c: &mut Criterion) {
         for &value_size in &[64 * 1024, 512 * 1024, 1024 * 1024] {
             // Precompute large buffers
             let keys: Vec<Bytes> = (0..num_ops).map(make_key).collect();
-            let vals: Vec<Bytes> = (0..num_ops)
-                .map(|_| make_value_fixed(value_size))
-                .collect();
+            let vals: Vec<Bytes> = (0..num_ops).map(|_| make_value_fixed(value_size)).collect();
 
             let bytes_total = (num_ops as u64) * (KEY_SIZE as u64 + value_size as u64);
 
