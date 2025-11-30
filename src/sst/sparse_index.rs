@@ -93,19 +93,26 @@ impl SparseIndex {
         start: &[u8],
         end: &'a [u8],
     ) -> impl Iterator<Item = &'a BlockHandle> + 'a {
-        // Find start index: first block where last_key >= start.
-        // This is the first block that could contain keys >= start.
-        let start_idx = self.entries.partition_point(|e| e.key.as_ref() < start);
+        // Empty range [a, a) should return no blocks
+        let (start_idx, end_idx) = if start >= end {
+            (0, 0)
+        } else {
+            // Find start index: first block where last_key >= start.
+            // This is the first block that could contain keys >= start.
+            let start_idx = self.entries.partition_point(|e| e.key.as_ref() < start);
 
-        // If start is beyond all entries, clamp to last entry
-        let start_idx = start_idx.min(self.entries.len().saturating_sub(1));
+            // Find end index: partition_point returns first index where last_key >= end.
+            // We need to INCLUDE that block because it may contain keys < end.
+            // So we add 1 to include the block at end_idx.
+            let end_idx = self.entries.partition_point(|e| e.key.as_ref() < end);
+            // Include the block at end_idx if it exists (add 1 to the slice end)
+            let end_idx = (end_idx + 1).min(self.entries.len());
 
-        // Find end index: partition_point returns first index where last_key >= end.
-        // We need to INCLUDE that block because it may contain keys < end.
-        // So we add 1 to include the block at end_idx.
-        let end_idx = self.entries.partition_point(|e| e.key.as_ref() < end);
-        // Include the block at end_idx if it exists (add 1 to the slice end)
-        let end_idx = (end_idx + 1).min(self.entries.len());
+            // If start_idx >= end_idx, return empty range
+            let start_idx = start_idx.min(end_idx);
+            
+            (start_idx, end_idx)
+        };
 
         self.entries[start_idx..end_idx]
             .iter()
