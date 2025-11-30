@@ -156,9 +156,45 @@ fn bench_memtable_seek_reverse_32steps(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark bloom hint optimization for negative lookups
+fn bench_memtable_bloom_hint_miss(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hotpath_memtable_bloom_hint_miss");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(1));
+    group.measurement_time(std::time::Duration::from_millis(200));
+
+    let keys: Vec<Bytes> = (0..1000).map(make_key).collect();
+    let values: Vec<Bytes> = (0..1000).map(make_value).collect();
+
+    // Create memtable WITHOUT bloom hint
+    let memtable_no_bloom = MemTable::new();
+    for i in 0..1000 {
+        memtable_no_bloom.put(keys[i].as_ref(), values[i].as_ref());
+    }
+
+    // Create memtable WITH bloom hint
+    let memtable_with_bloom = MemTable::with_bloom_hint(1000);
+    for i in 0..1000 {
+        memtable_with_bloom.put(keys[i].as_ref(), values[i].as_ref());
+    }
+
+    // Key that doesn't exist
+    let miss_key = make_key(100_000);
+
+    group.bench_function("miss_no_bloom", |b| {
+        b.iter(|| black_box(memtable_no_bloom.get(black_box(miss_key.as_ref()))))
+    });
+
+    group.bench_function("miss_with_bloom", |b| {
+        b.iter(|| black_box(memtable_with_bloom.get(black_box(miss_key.as_ref()))))
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = tier1_hotpath_memtable_seek;
     config = criterion_config_for_tier(BenchTier::Tier1Hot);
-    targets = bench_memtable_get_point_lookup, bench_memtable_get_latest_version, bench_memtable_seek_forward_32steps, bench_memtable_seek_reverse_32steps
+    targets = bench_memtable_get_point_lookup, bench_memtable_get_latest_version, bench_memtable_seek_forward_32steps, bench_memtable_seek_reverse_32steps, bench_memtable_bloom_hint_miss
 }
 criterion_main!(tier1_hotpath_memtable_seek);
