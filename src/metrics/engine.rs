@@ -74,6 +74,12 @@ struct MetricsInner {
     autotune_wal_interval_adjustments: AtomicU64,
     autotune_compaction_thread_adjustments: AtomicU64,
     autotune_bloom_bits_adjustments: AtomicU64,
+
+    // Flush throughput metrics
+    flush_bytes_total: AtomicU64,
+    flush_duration_us_total: AtomicU64,
+    flush_queue_depth: AtomicU64,
+    flush_queue_high_watermark: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -138,6 +144,11 @@ impl Metrics {
                 autotune_wal_interval_adjustments: AtomicU64::new(0),
                 autotune_compaction_thread_adjustments: AtomicU64::new(0),
                 autotune_bloom_bits_adjustments: AtomicU64::new(0),
+
+                flush_bytes_total: AtomicU64::new(0),
+                flush_duration_us_total: AtomicU64::new(0),
+                flush_queue_depth: AtomicU64::new(0),
+                flush_queue_high_watermark: AtomicU64::new(0),
             }),
         }
     }
@@ -247,6 +258,58 @@ impl Metrics {
 
     pub fn record_memtable_flush(&self) {
         self.inner.memtable_flushes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record flush throughput metrics: bytes written and duration.
+    /// Call this after a flush completes with the size of data flushed.
+    pub fn record_flush_throughput(&self, bytes: u64, duration_us: u64) {
+        self.inner
+            .flush_bytes_total
+            .fetch_add(bytes, Ordering::Relaxed);
+        self.inner
+            .flush_duration_us_total
+            .fetch_add(duration_us, Ordering::Relaxed);
+    }
+
+    /// Increment the flush queue depth (call when job is queued).
+    pub fn increment_flush_queue(&self) {
+        let new_depth = self.inner.flush_queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
+        // Update high watermark if exceeded
+        loop {
+            let current = self.inner.flush_queue_high_watermark.load(Ordering::Relaxed);
+            if new_depth <= current {
+                break;
+            }
+            if self
+                .inner
+                .flush_queue_high_watermark
+                .compare_exchange_weak(current, new_depth, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+
+    /// Decrement the flush queue depth (call when job completes).
+    pub fn decrement_flush_queue(&self) {
+        self.inner.flush_queue_depth.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Get current flush queue depth for backpressure decisions.
+    pub fn flush_queue_depth(&self) -> u64 {
+        self.inner.flush_queue_depth.load(Ordering::Relaxed)
+    }
+
+    /// Get average flush throughput in bytes per second (0 if no flushes yet).
+    pub fn flush_throughput_bytes_per_sec(&self) -> f64 {
+        let bytes = self.inner.flush_bytes_total.load(Ordering::Relaxed);
+        let duration_us = self.inner.flush_duration_us_total.load(Ordering::Relaxed);
+        if duration_us == 0 {
+            0.0
+        } else {
+            (bytes as f64 / duration_us as f64) * 1_000_000.0
+        }
     }
 
     pub fn record_wal_write(&self) {
