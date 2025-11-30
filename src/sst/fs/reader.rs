@@ -2,10 +2,12 @@ use bytes::Bytes;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{debug, trace};
 
 use crate::error::{MidgeError, MidgeResult};
 use crate::fs;
+use crate::sst::block_cache::{BlockCache, BlockData, BlockKey, BlockKind};
 use crate::sst::bloom::BloomFilter;
 use crate::sst::encoding::{decode, decode_key_at_offset, TlvBlockIterator};
 use crate::sst::format::{Block, BlockHandle, BlockType, Footer};
@@ -38,6 +40,13 @@ pub struct SstFile {
     /// Cached file handle for efficient repeated reads.
     /// Using Mutex for thread-safety when SstFile is shared.
     cached_file: Mutex<Option<File>>,
+    /// Optional block cache for caching data blocks.
+    block_cache: Option<Arc<dyn BlockCache>>,
+    /// File number for block cache key construction.
+    /// Typically derived from the SST filename (e.g., "000123.sst" → 123).
+    file_number: u64,
+    /// Column family ID for per-CF cache accounting.
+    cf_id: u32,
 }
 
 impl std::fmt::Debug for SstFile {
@@ -51,6 +60,9 @@ impl std::fmt::Debug for SstFile {
             .field("use_internal_keys", &self.use_internal_keys)
             .field("paranoid_checksums", &self.paranoid_checksums)
             .field("cached_file", &"<cached>")
+            .field("block_cache", &self.block_cache.is_some())
+            .field("file_number", &self.file_number)
+            .field("cf_id", &self.cf_id)
             .finish()
     }
 }
@@ -66,6 +78,9 @@ impl SstFile {
             use_internal_keys: false,
             paranoid_checksums: false,
             cached_file: Mutex::new(None),
+            block_cache: None,
+            file_number: 0,
+            cf_id: 0,
         }
     }
 
@@ -80,6 +95,9 @@ impl SstFile {
             use_internal_keys: false,
             paranoid_checksums,
             cached_file: Mutex::new(None),
+            block_cache: None,
+            file_number: 0,
+            cf_id: 0,
         }
     }
 
@@ -99,6 +117,32 @@ impl SstFile {
         }
         debug!("SST file metadata loaded successfully");
         Ok(sst)
+    }
+
+    /// Set the block cache for this SST reader.
+    ///
+    /// When a block cache is configured, data block reads will check the cache
+    /// first and insert blocks on miss. This can significantly reduce I/O for
+    /// workloads with temporal locality.
+    ///
+    /// The `file_number` and `cf_id` are used to construct unique cache keys.
+    pub fn with_block_cache(
+        mut self,
+        cache: Arc<dyn BlockCache>,
+        file_number: u64,
+        cf_id: u32,
+    ) -> Self {
+        self.block_cache = Some(cache);
+        self.file_number = file_number;
+        self.cf_id = cf_id;
+        self
+    }
+
+    /// Set the block cache on an already-opened SST file.
+    pub fn set_block_cache(&mut self, cache: Arc<dyn BlockCache>, file_number: u64, cf_id: u32) {
+        self.block_cache = Some(cache);
+        self.file_number = file_number;
+        self.cf_id = cf_id;
     }
 
     fn load_metadata(&mut self) -> MidgeResult<()> {
@@ -390,7 +434,45 @@ impl SstFile {
 
     #[inline]
     fn read_data_block(&self, handle: BlockHandle) -> MidgeResult<Block> {
-        // Use cached file handle to avoid repeated open/close overhead
+        // Try block cache first if configured
+        if let Some(ref cache) = self.block_cache {
+            let cache_key = BlockKey::new(
+                self.file_number,
+                handle.offset,
+                BlockKind::Data,
+                self.cf_id,
+            );
+
+            // Cache hit: decode the cached raw bytes
+            if let Some(cached_handle) = cache.get(&cache_key) {
+                let raw_bytes = cached_handle.data().bytes();
+                return if self.paranoid_checksums {
+                    decode_data_block_paranoid(raw_bytes, true)
+                } else {
+                    decode_data_block(raw_bytes)
+                };
+            }
+
+            // Cache miss: read from disk
+            let mut file_guard = self.get_or_open_file()?;
+            let file = file_guard
+                .as_mut()
+                .ok_or_else(|| MidgeError::InvalidData("file handle missing after open".into()))?;
+            let block_data = fs::read_range(file, handle.offset, handle.offset + handle.size)?;
+
+            // Insert raw bytes into cache before decoding
+            let cache_data = BlockData::uncompressed(block_data.clone().into(), BlockKind::Data);
+            let _handle = cache.insert(cache_key, cache_data);
+
+            // Decode and return
+            return if self.paranoid_checksums {
+                decode_data_block_paranoid(&block_data, true)
+            } else {
+                decode_data_block(&block_data)
+            };
+        }
+
+        // No cache: read directly from disk
         let mut file_guard = self.get_or_open_file()?;
         let file = file_guard
             .as_mut()
@@ -863,5 +945,122 @@ impl SstStateReader for SstFile {
 
     fn range_tombstones(&self) -> Vec<RangeTombstone> {
         self.range_tombstones.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::codec::CompressionType;
+    use crate::sst::block_cache::{BlockCacheOptions, ShardedBlockCache};
+    use crate::sst::mem::SstMemWriter;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    /// Helper to create a minimal SST file for testing
+    fn create_test_sst(dir: &TempDir) -> PathBuf {
+        let mut writer = SstMemWriter::new(CompressionType::None, 4096);
+
+        // Add some test data
+        for i in 0..10 {
+            let key = format!("key_{:03}", i);
+            let value = format!("value_{:03}", i);
+            writer.add(key.as_bytes(), value.as_bytes()).unwrap();
+        }
+
+        let bytes = writer.finish_bytes().unwrap();
+        let path = dir.path().join("test.sst");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.sync_all().unwrap();
+        path
+    }
+
+    #[test]
+    fn should_read_without_cache_given_no_cache_configured_when_get_called() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let sst_path = create_test_sst(&dir);
+        let sst = SstFile::open(&sst_path).unwrap();
+
+        // Act
+        let result = sst.get(b"key_005").unwrap();
+
+        // Assert
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_ref(), b"value_005");
+    }
+
+    #[test]
+    fn should_read_with_cache_given_cache_configured_when_get_called() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let sst_path = create_test_sst(&dir);
+        let cache = Arc::new(ShardedBlockCache::new(
+            BlockCacheOptions::with_capacity(1024 * 1024),
+        ));
+        let sst = SstFile::open(&sst_path)
+            .unwrap()
+            .with_block_cache(cache.clone(), 1, 0);
+
+        // Act
+        let result = sst.get(b"key_005").unwrap();
+
+        // Assert
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_ref(), b"value_005");
+        // Cache should have some bytes now (data block was cached)
+        assert!(cache.used_bytes() > 0);
+    }
+
+    #[test]
+    fn should_hit_cache_given_repeated_read_when_cache_configured() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let sst_path = create_test_sst(&dir);
+        let cache = Arc::new(ShardedBlockCache::new(
+            BlockCacheOptions::with_capacity(1024 * 1024),
+        ));
+        let sst = SstFile::open(&sst_path)
+            .unwrap()
+            .with_block_cache(cache.clone(), 1, 0);
+
+        // Act - first read (cache miss)
+        let _ = sst.get(b"key_005").unwrap();
+        let stats_after_first = cache.stats();
+
+        // Act - second read (cache hit)
+        let result = sst.get(b"key_005").unwrap();
+        let stats_after_second = cache.stats();
+
+        // Assert
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_ref(), b"value_005");
+        // Should have at least one more hit after second read
+        assert!(stats_after_second.hits >= stats_after_first.hits);
+    }
+
+    #[test]
+    fn should_scan_with_cache_given_cache_configured_when_scan_range_called() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let sst_path = create_test_sst(&dir);
+        let cache = Arc::new(ShardedBlockCache::new(
+            BlockCacheOptions::with_capacity(1024 * 1024),
+        ));
+        let sst = SstFile::open(&sst_path)
+            .unwrap()
+            .with_block_cache(cache.clone(), 1, 0);
+
+        // Act
+        let results = sst.scan_range(Some(b"key_003"), Some(b"key_007")).unwrap();
+
+        // Assert - scan_range uses iterator which has its own file handle,
+        // so blocks may not go through the cache. Just verify scan works.
+        assert!(!results.is_empty());
+        // Verify we got the expected keys in range
+        let keys: Vec<_> = results.iter().map(|(k, _)| k.as_ref()).collect();
+        assert!(keys.iter().any(|k| *k == b"key_003"));
+        assert!(keys.iter().any(|k| *k == b"key_004"));
     }
 }

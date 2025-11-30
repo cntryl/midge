@@ -37,28 +37,38 @@ pub mod writer_common;
 // These re-export names from the new block_cache module so call-sites like
 // `crate::sst::BlockCacheTrait` keep compiling while we finish the new impl.
 pub use block_cache::{BlockCache as BlockCacheTrait, BlockCacheStats as CacheStats};
+pub use block_cache::{
+    BlockCacheOptions, BlockData, BlockHandle as CacheBlockHandle, BlockKey, BlockKind,
+    CfCacheStats, EvictionPolicy, ShardedBlockCache, SizeAccounting,
+};
 
-/// Temporary factory that returns a stub cache until new impl is ready.
-pub fn create_basic_cache(_max_size_bytes: usize) -> std::sync::Arc<dyn BlockCacheTrait> {
-    std::sync::Arc::new(StubBlockCache)
+/// Create a block cache with the specified capacity.
+///
+/// Uses the new `ShardedBlockCache` implementation with WTinyLFU eviction
+/// policy for scan resistance and high hit rates.
+pub fn create_basic_cache(max_size_bytes: usize) -> std::sync::Arc<dyn BlockCacheTrait> {
+    std::sync::Arc::new(ShardedBlockCache::new(
+        BlockCacheOptions::with_capacity(max_size_bytes),
+    ))
 }
 
-/// Minimal stub so engine code compiles; always misses.
-struct StubBlockCache;
-
-impl BlockCacheTrait for StubBlockCache {
-    fn get(&self, _key: &block_cache::BlockKey) -> Option<block_cache::BlockHandle> {
-        None
-    }
-    fn insert(&self, _key: block_cache::BlockKey, data: block_cache::BlockData) -> block_cache::BlockHandle {
-        block_cache::BlockHandle::unpinned(std::sync::Arc::new(data))
-    }
-    fn insert_if_absent(&self, key: block_cache::BlockKey, data: block_cache::BlockData) -> block_cache::BlockHandle {
-        self.insert(key, data)
-    }
-    fn capacity_bytes(&self) -> usize { 0 }
-    fn used_bytes(&self) -> usize { 0 }
-    fn stats(&self) -> block_cache::BlockCacheStats { block_cache::BlockCacheStats::default() }
+/// Create a block cache with full configuration options.
+///
+/// Allows customizing shards, eviction policy, size accounting, and per-CF stats.
+///
+/// # Example
+/// ```ignore
+/// use midge::sst::{create_cache_with_options, BlockCacheOptions, EvictionPolicy};
+///
+/// let cache = create_cache_with_options(
+///     BlockCacheOptions::with_capacity(128 * 1024 * 1024)
+///         .num_shards(32)
+///         .eviction_policy(EvictionPolicy::WTinyLfu)
+///         .per_cf_stats(true)
+/// );
+/// ```
+pub fn create_cache_with_options(options: BlockCacheOptions) -> std::sync::Arc<ShardedBlockCache> {
+    std::sync::Arc::new(ShardedBlockCache::new(options))
 }
 
 // ─── Other public re-exports ─────────────────────────────────────────────────

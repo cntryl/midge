@@ -20,6 +20,9 @@ Here we go: “World Class Block Cache for Midge” as an actual design doc, not
 - **Pluggable policy**, but with a strong default (WTinyLFU-style).
 - **Per-tenant / per-CF isolation hooks** (so one tenant can’t poison others).
 - **First-class metrics** for hit/miss/eviction/admission.
+  - Target: under realistic Midge workloads, WTinyLFU should achieve
+    materially higher hit rates than LRU at the same capacity while
+    keeping cache lookups sub-microsecond at high concurrency.
 
 ### Non-Goals (for now)
 
@@ -227,17 +230,28 @@ Goal: avoid heap allocations per entry and minimize pointer chasing.
 
 ### 8.2 Pinning
 
-Pin count is updated when:
+Current implementation:
 
-- On hit:
+- On hit via `BlockCacheShard::get`:
 
-  - Acquire shard lock → increment `pins` → return `BlockHandle`.
+  - Acquire shard lock → increment `pins` on the entry → return a
+    `BlockHandle` that shares the underlying `Arc<BlockData>`.
 
-- On `BlockHandle::drop`:
+- On explicit unpin:
 
-  - Call back into the shard (via weak reference or `BlockHandleInner`) to decrement pins.
+  - `BlockCacheShard::unpin` decrements the pin count. Eviction only
+    considers entries with `pins == 0`.
 
-Eviction only considers entries with `pins == 0`.
+- `BlockHandle` exposes `is_pinned` and shares `Arc<BlockData>`, but
+  cloning a handle does not currently change shard pin counts, and
+  `Drop` does not yet automatically unpin.
+
+Target design:
+
+- Make `BlockHandle` a true RAII pin guard that adjusts shard pin
+  counts on clone and `Drop` via an internal reference back to the
+  owning shard (no global registries). This is tracked in the
+  remaining work section.
 
 ---
 
@@ -368,6 +382,17 @@ Per shard, aggregated at top:
   - Hit rate by block_kind.
   - Eviction reason (space, TTL, etc. — if you add TTL later).
 
+Currently implemented and exposed via `ShardStats` / `BlockCacheStats`:
+
+- `hits`, `misses`, `evictions`, `admissions`.
+- `bytes_used`, `bytes_capacity`.
+
+Planned extensions:
+
+- Track and expose `rejected_admissions` (candidate colder than
+  victim) as `BlockCacheStats.rejected`.
+- Per-block-kind and per-column-family breakdowns.
+
 Expose via:
 
 ```rust
@@ -391,13 +416,18 @@ These wire into your existing `metrics/` module.
 
 ### 14.1 SST Reader
 
-- All block loads go through `BlockCache`:
+- The new block cache implementation is designed to sit in front of
+  all SST reads, but full wiring is still in progress.
 
+- Target state:
+
+  - All block loads (user reads, iterators, compaction, backups) go
+    through `BlockCache`.
   - For each `BlockHandle` in SST index/iterator:
 
-    - Get block from cache or load and insert.
+    - Get block from cache or load and insert via `BlockCache`.
 
-  - Block type tags used for per-kind prioritization.
+  - `BlockKind` is used for per-kind prioritization and metrics.
 
 ### 14.2 Column Families & Tenants
 

@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::BlockCacheStats;
 
+// Number of BlockKind variants for array sizing.
+const NUM_BLOCK_KINDS: usize = 5;
+
 /// Thread-safe metrics for a single cache shard.
 #[derive(Debug, Default)]
 pub struct ShardMetrics {
@@ -118,6 +121,10 @@ impl ShardMetricsSnapshot {
     }
 
     /// Convert to public stats type.
+    ///
+    /// Note: The metrics system doesn't currently track per-BlockKind stats,
+    /// so those arrays will be zeroed. Use `ShardStats::to_cache_stats()` for
+    /// full per-kind breakdown.
     pub fn to_cache_stats(&self, capacity_bytes: usize) -> BlockCacheStats {
         BlockCacheStats {
             hits: self.hits,
@@ -127,6 +134,8 @@ impl ShardMetricsSnapshot {
             rejected: self.rejections,
             used_bytes: self.used_bytes,
             capacity_bytes,
+            hits_by_kind: [0; NUM_BLOCK_KINDS],
+            misses_by_kind: [0; NUM_BLOCK_KINDS],
         }
     }
 }

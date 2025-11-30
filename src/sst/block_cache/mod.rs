@@ -36,8 +36,11 @@ pub use value::BlockData;
 
 // ─── Stats ───────────────────────────────────────────────────────────────────
 
+// Number of BlockKind variants for array sizing.
+const NUM_BLOCK_KINDS: usize = 5;
+
 /// Aggregated statistics for the block cache.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BlockCacheStats {
     /// Number of cache hits.
     pub hits: u64,
@@ -53,6 +56,28 @@ pub struct BlockCacheStats {
     pub used_bytes: usize,
     /// Total capacity in bytes.
     pub capacity_bytes: usize,
+    /// Per-BlockKind hit counts, indexed by BlockKind as u8.
+    /// Order: [Data, Index, Filter, Meta, CompressionDict].
+    pub hits_by_kind: [u64; NUM_BLOCK_KINDS],
+    /// Per-BlockKind miss counts, indexed by BlockKind as u8.
+    /// Order: [Data, Index, Filter, Meta, CompressionDict].
+    pub misses_by_kind: [u64; NUM_BLOCK_KINDS],
+}
+
+impl Default for BlockCacheStats {
+    fn default() -> Self {
+        Self {
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            admissions: 0,
+            rejected: 0,
+            used_bytes: 0,
+            capacity_bytes: 0,
+            hits_by_kind: [0; NUM_BLOCK_KINDS],
+            misses_by_kind: [0; NUM_BLOCK_KINDS],
+        }
+    }
 }
 
 impl BlockCacheStats {
@@ -64,6 +89,27 @@ impl BlockCacheStats {
         } else {
             self.hits as f64 / total as f64
         }
+    }
+
+    /// Compute the hit rate for a specific block kind.
+    pub fn hit_rate_by_kind(&self, kind: BlockKind) -> f64 {
+        let idx = kind.as_u8() as usize;
+        let total = self.hits_by_kind[idx] + self.misses_by_kind[idx];
+        if total == 0 {
+            0.0
+        } else {
+            self.hits_by_kind[idx] as f64 / total as f64
+        }
+    }
+
+    /// Get the number of hits for a specific block kind.
+    pub fn hits_for_kind(&self, kind: BlockKind) -> u64 {
+        self.hits_by_kind[kind.as_u8() as usize]
+    }
+
+    /// Get the number of misses for a specific block kind.
+    pub fn misses_for_kind(&self, kind: BlockKind) -> u64 {
+        self.misses_by_kind[kind.as_u8() as usize]
     }
 }
 
@@ -106,6 +152,7 @@ pub trait BlockCache: Send + Sync {
 
 use policy::{LruPolicy, Policy, WTinyLfuPolicy};
 use shard::{BlockCacheShard, ShardStats};
+pub use shard::CfCacheStats;
 
 /// A sharded block cache that distributes entries across multiple shards.
 ///
@@ -115,6 +162,7 @@ pub struct ShardedBlockCache {
     shards: Box<[BlockCacheShard]>,
     shard_mask: usize,
     capacity_bytes: usize,
+    per_cf_stats_enabled: bool,
 }
 
 impl ShardedBlockCache {
@@ -123,6 +171,7 @@ impl ShardedBlockCache {
         let num_shards = options.num_shards;
         let capacity_per_shard = options.capacity_per_shard();
         let expected_entries_per_shard = capacity_per_shard / 4096; // assume 4KB avg block
+        let per_cf_stats_enabled = options.per_cf_stats;
 
         let shards: Vec<BlockCacheShard> = (0..num_shards)
             .map(|i| {
@@ -139,6 +188,7 @@ impl ShardedBlockCache {
                     capacity_per_shard,
                     options.size_accounting,
                     policy,
+                    per_cf_stats_enabled,
                 )
             })
             .collect();
@@ -147,6 +197,7 @@ impl ShardedBlockCache {
             shards: shards.into_boxed_slice(),
             shard_mask: num_shards - 1,
             capacity_bytes: options.capacity_bytes,
+            per_cf_stats_enabled,
         }
     }
 
@@ -169,6 +220,47 @@ impl ShardedBlockCache {
             total.merge(&shard.stats());
         }
         total
+    }
+
+    /// Get aggregated statistics for a specific column family.
+    ///
+    /// Returns `None` if per-CF stats are not enabled.
+    pub fn cf_stats(&self, cf_id: u32) -> Option<CfCacheStats> {
+        if !self.per_cf_stats_enabled {
+            return None;
+        }
+        let mut total = CfCacheStats::default();
+        for shard in self.shards.iter() {
+            if let Some(stats) = shard.cf_stats(cf_id) {
+                total.hits += stats.hits;
+                total.misses += stats.misses;
+                total.used_bytes += stats.used_bytes;
+                total.entry_count += stats.entry_count;
+            }
+        }
+        Some(total)
+    }
+
+    /// Get aggregated statistics for all column families.
+    ///
+    /// Returns `None` if per-CF stats are not enabled.
+    pub fn all_cf_stats(&self) -> Option<std::collections::HashMap<u32, CfCacheStats>> {
+        if !self.per_cf_stats_enabled {
+            return None;
+        }
+        let mut total: std::collections::HashMap<u32, CfCacheStats> = std::collections::HashMap::new();
+        for shard in self.shards.iter() {
+            if let Some(shard_cf_stats) = shard.all_cf_stats() {
+                for (cf_id, stats) in shard_cf_stats {
+                    let entry = total.entry(cf_id).or_default();
+                    entry.hits += stats.hits;
+                    entry.misses += stats.misses;
+                    entry.used_bytes += stats.used_bytes;
+                    entry.entry_count += stats.entry_count;
+                }
+            }
+        }
+        Some(total)
     }
 }
 

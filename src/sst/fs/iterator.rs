@@ -57,7 +57,9 @@ impl SstRangeIter {
             self.cached_file = Some(file);
         }
         // SAFETY: We just ensured cached_file is Some
-        Ok(self.cached_file.as_mut().unwrap())
+        self.cached_file
+            .as_mut()
+            .ok_or_else(|| crate::error::MidgeError::InvalidData("file handle missing".into()))
     }
 
     fn load_next_block(&mut self) -> MidgeResult<bool> {

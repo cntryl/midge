@@ -163,13 +163,8 @@ path = "benches/tier1_hotpath/bloom.rs"
 harness = false
 
 [[bench]]
-name = "tier1_hotpath_block_cache_hot"
-path = "benches/tier1_hotpath/block_cache_hot.rs"
-harness = false
-
-[[bench]]
-name = "tier1_hotpath_cache"
-path = "benches/tier1_hotpath/cache.rs"
+name = "tier1_hotpath_block_cache"
+path = "benches/tier1_hotpath/block_cache.rs"
 harness = false
 
 [[bench]]
@@ -178,13 +173,8 @@ path = "benches/tier1_hotpath/index.rs"
 harness = false
 
 [[bench]]
-name = "tier1_hotpath_memtable_insert"
-path = "benches/tier1_hotpath/memtable_insert.rs"
-harness = false
-
-[[bench]]
-name = "tier1_hotpath_memtable_seek"
-path = "benches/tier1_hotpath/memtable_seek.rs"
+name = "tier1_hotpath_memtable"
+path = "benches/tier1_hotpath/memtable.rs"
 harness = false
 
 [[bench]]
@@ -219,11 +209,6 @@ harness = false
 [[bench]]
 name = "tier2_subsystem_block_cache"
 path = "benches/tier2_subsystem/block_cache.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_block_cache_eviction"
-path = "benches/tier2_subsystem/block_cache_eviction.rs"
 harness = false
 
 [[bench]]
