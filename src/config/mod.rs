@@ -372,6 +372,7 @@ impl Config {
                 None
             },
             paranoid_checksums: false, // Default to false for performance
+            compaction_rate_limiter: None, // No rate limiting when using Config API
         }
     }
 

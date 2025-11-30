@@ -55,6 +55,28 @@ pub enum WalRecoveryMode {
     /// };
     /// ```
     TolerateCorruptedTail,
+
+    /// Skip ANY corrupted record and continue recovery
+    ///
+    /// Maximum data recovery mode - attempts to salvage as many records as
+    /// possible by skipping corrupted sections. Use when availability is
+    /// critical and some data loss is acceptable.
+    ///
+    /// **Warning:** This mode may skip valid records if corruption spans
+    /// record boundaries. Use recovery statistics to audit what was skipped.
+    ///
+    /// **Use for:** Disaster recovery, forensic analysis, non-critical data
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use cntryl_midge::config::{MidgeOptions, WalRecoveryMode};
+    ///
+    /// let opts = MidgeOptions {
+    ///     wal_recovery_mode: WalRecoveryMode::SkipAnyCorruptedRecord,
+    ///     ..Default::default()
+    /// };
+    /// ```
+    SkipAnyCorruptedRecord,
 }
 
 /// Midge database configuration options - low-level fine-grained control
@@ -200,6 +222,28 @@ pub struct MidgeOptions {
     /// Controls how much burst traffic is allowed before throttling kicks in.
     pub cloud_upload_max_burst_bytes: u64,
 
+    /// Optional rate limiter for compaction I/O (bytes/sec).
+    ///
+    /// When set, throttles both SST reads and writes during compaction to prevent
+    /// I/O starvation of foreground operations. This is especially useful on
+    /// systems with limited disk throughput or when compaction competes with
+    /// latency-sensitive reads.
+    ///
+    /// Example: Limit compaction to 50MB/s
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use midge::common::rate_limiter::RateLimiter;
+    ///
+    /// let limiter = Arc::new(RateLimiter::new(
+    ///     50 * 1024 * 1024,  // 50MB/s
+    ///     10 * 1024 * 1024,  // 10MB burst
+    /// ));
+    /// opts.compaction_rate_limiter = Some(limiter);
+    /// ```
+    ///
+    /// Set to `None` to disable compaction rate limiting (default).
+    pub compaction_rate_limiter: Option<Arc<crate::common::rate_limiter::RateLimiter>>,
+
     /// Test hooks for fault injection and instrumentation (test builds only).
     ///
     /// Allows tests to intercept operations, inject failures, and verify
@@ -254,9 +298,10 @@ impl Default for MidgeOptions {
             wal_recovery_mode: WalRecoveryMode::default(), // Strict consistency
             cloud_upload_bytes_per_sec: 0,
             cloud_upload_max_burst_bytes: 0,
-            test_hooks: None,          // No test hooks by default
-            autotuner: None,           // No autotuner by default
-            paranoid_checksums: false, // Disabled by default for performance
+            compaction_rate_limiter: None, // No compaction rate limiting by default
+            test_hooks: None,              // No test hooks by default
+            autotuner: None,               // No autotuner by default
+            paranoid_checksums: false,     // Disabled by default for performance
         }
     }
 }
