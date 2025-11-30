@@ -51,7 +51,7 @@ fn cloud_configs() -> Vec<(&'static str, bool, usize)> {
         ("default", true, 10),
         ("no-wal-sync", false, 10),
         ("large-cache", true, 50),
-        ("small-cache", true, 2),
+        ("small-cache", true, 4), // At least 3 to hold SSTs from 3 flush rounds + headroom
     ]
 }
 
@@ -176,6 +176,8 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
 
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload to complete/attempt
+            let _ = mock_backend.wait_for_uploads(attempts_before + 1, Duration::from_millis(500));
 
             let attempts_after = mock_backend.upload_count() + mock_backend.upload_failure_count();
 
@@ -212,6 +214,9 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
                 );
             }
         }
+
+        // Explicitly drop engine before next iteration to ensure cleanup
+        drop(eng);
     }
 }
 
@@ -335,6 +340,9 @@ fn should_not_poison_wal_startup_given_fail_upload_after_is_armed_post_open() {
 
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
+            let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload to complete/attempt
+            let _ = backend.wait_for_uploads(attempts_before + 1, Duration::from_millis(500));
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             assert!(
