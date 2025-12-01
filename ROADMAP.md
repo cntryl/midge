@@ -1,184 +1,66 @@
 # Midge Roadmap
 
-**Vision:** Transform Midge into the fastest, most reliable embedded LSM-tree database engine.
+**Vision:** Focus this roadmap on work that is still outstanding, so it stays a live queue of what is left to build rather than a history of what we already shipped.
 
-This roadmap is organized into phases, prioritizing correctness and durability first, then performance, then advanced features. Each item includes effort estimates and dependencies.
+This document only lists **remaining** work. Completed items have been pruned and should be discoverable via Git history and issues.
 
 ---
 
-## Phase 1: Correctness & Durability (Critical)
+## Phase 1: Correctness & Durability (Remaining)
 
-These issues must be fixed before any production use. They affect data integrity.
+These are non-blocking for basic use but important to harden long-term durability.
 
-### 1.1 Fix Merge Operator Persistence ✅ COMPLETED
-
-**Problem:** Merge operands were being converted to Put entries during compaction, losing merge semantics.
-
-**Root Cause:** `CompactionVersion` struct lacked `op_type` field. The compaction executor discarded `op_type` when collecting versions from SSTs and reconstructed it incorrectly as `if tombstone { 2 } else { 0 }`.
-
-**Fix Applied:**
-- [x] SST encoding/decoding already supported `entry_type=3` for merge operands
-- [x] Flush path already correctly passed `entry.op_type.as_u8()` to SST writer
-- [x] Added `op_type: u8` field to `CompactionVersion` struct
-- [x] Updated `collect_compaction_versions()` to capture `op_type` from `KeyState`
-- [x] Updated SST writing to use `entry.op_type` instead of recomputing from tombstone flag
-- [x] All 21 merge operator tests pass, including `should_preserve_merge_semantics_across_restart_given_flush_when_recovering`
-
-**Files Changed:** `src/core/compaction/executor.rs`, `src/core/compaction/filter.rs`
-
-### 1.2 Manifest Durability Audit ✅ PARTIALLY COMPLETED
-
-**Problem:** Each `VersionEdit` triggers a separate manifest write. No batching, no compaction.
-
-**Fix Applied:**
-- [x] Batch multiple edits in compaction (AddFile + RemoveFiles + UpdateSequence as single write)
-  - Extended `CombinedAddRemove` to include optional `sequence` field
-  - Compaction now uses single manifest write instead of two
-  - Flush path also batches AddFile + sequence in single write
-- [x] Verify fsync ordering: manifest must be durable before SST deletion
-  - Already implemented in `save_atomic_with_hooks()` with proper fsync ordering
+### 1.2 Manifest Durability (Remaining)
 
 **Remaining:**
-- [ ] Implement manifest snapshotting (full checkpoint + incremental edits) - Future optimization
-- [ ] Add manifest size monitoring and auto-compaction trigger - Future optimization
-
-**Files Changed:** `src/core/manifest/version_set.rs`, `src/core/compaction/controller.rs`, `src/core/engine/operations/maintenance.rs`
-
-### 1.3 WAL Recovery Edge Cases ✅ COMPLETED
-
-**Problem:** `TolerateCorruptedTail` mode may silently lose data if corruption is in the middle.
-
-**Fix Applied:**
-- [x] Added `SkipAnyCorruptedRecord` mode for maximum recovery
-  - New mode continues past any corrupted record, recovering all valid records
-  - Useful for disaster recovery scenarios
-- [x] Added `WalRecoveryStats` struct for recovery metrics:
-  - `files_processed`: Number of WAL files processed
-  - `records_recovered`: Successfully recovered records
-  - `records_skipped`: Records skipped due to corruption
-  - `bytes_recovered` / `bytes_skipped`: Data accounting
-  - `corruption_locations`: File offsets of detected corruption
-  - `had_corruption`: Boolean flag for quick corruption check
-- [x] Added `replay_wal_file_with_stats()` function for detailed recovery information
-- [x] Added tests for all recovery modes:
-  - `should_skip_corrupted_record_given_skip_mode_when_crc_mismatch`
-  - `should_return_stats_given_clean_wal_when_replaying`
-  - `should_fail_given_corruption_when_absolute_consistency_mode`
-
-**Remaining (Future):**
-- [ ] Fuzz test WAL recovery with random truncation/corruption patterns
-
-**Files Changed:** `src/wal/fs/writer.rs`, `src/wal/types.rs`, `src/config/options.rs`
-
-### 1.4 Crash Consistency Test Suite ✅ COMPLETED
-
-**Status:** Already implemented via comprehensive test infrastructure.
-
-**Existing Implementation:**
-- [x] `MockCloudBackend` provides deterministic failure injection (`set_fail_upload_after`)
-- [x] `TestHooks` infrastructure supports:
-  - `FsyncBehavior::Skip` - simulate crash before fsync
-  - `WalBehavior::TruncateAfterWrite` - simulate torn writes
-  - `ManifestBehavior::FailSave` - fail manifest updates
-  - `CompactionBehavior::FailMidway/CrashBeforeFsync` - crash during compaction
-  - `IoBehavior::FailWithEnospc/FailWithEio` - disk errors
-  - `CompactionGatePoint` and `FlushGatePoint` for deterministic pause points
-- [x] Crash-recovery tests in `tests/durability_recovery.rs`:
-  - `should_recover_unflushed_data_given_crash_during_flush_when_reopening`
-  - `should_preserve_consistency_given_crash_before_manifest_update_when_reopening`
-- [x] Fault injection tests in `tests/fault_injection.rs`:
-  - `should_survive_recovery_given_skip_fsync_when_reopening`
-  - `should_recover_to_last_valid_record_given_truncated_wal_when_reopening`
-  - `should_recover_given_compaction_failure_midway_when_reopening`
-  - `should_recover_given_crash_during_compaction_with_pending_wal_when_reopening`
-- [x] Cloud durability tests in `tests/cloud_durability.rs`:
-  - `should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifest_was_already_updated`
-  - `should_not_poison_wal_startup_given_fail_upload_after_is_armed_post_open`
-
-**Files:** `tests/durability_recovery.rs`, `tests/fault_injection.rs`, `tests/cloud_durability.rs`, `src/common/test_hooks.rs`, `src/cloud/mock.rs`
+- [ ] Implement manifest snapshotting (full checkpoint + incremental edits)
+	- Design: periodically write a full `Manifest` image to a separate, versioned snapshot file, then append only `VersionEdit`s to the main manifest log. On recovery, load the newest valid snapshot, then replay subsequent edits. Keep the on-disk format backward-compatible and reuse existing serialization code where possible.
+- [ ] Add manifest size monitoring and auto-compaction trigger
+	- Design: track manifest file size and/or number of edits in memory as they are appended. Expose thresholds in config (e.g., max bytes / max edits). When limits are exceeded, atomically rewrite the manifest as a fresh snapshot (compacted manifest) and switch over readers, ensuring the new file is durable before deleting/archiving the old one.
 
 ---
 
-## Phase 2: Performance Foundations
+## Phase 2: Performance Foundations (Remaining)
 
-With correctness assured, optimize the hot paths.
+With the core hot paths implemented, this phase tracks the remaining performance work.
 
-### 2.1 WAL Write Path Optimization ✅ PARTIALLY COMPLETED
-
-**Current State:** Group commit works well. Parallel encode scales. io_uring feature-gated.
-
-**Completed:**
-- [x] io_uring write path for Linux (feature-gated with `--features uring`)
-  - Implemented `write_vectored_uring_with_hooks()` with test hook support
-  - Uses thread-local IoUring instances for low overhead
-  - Proper error handling and I/O failure injection support
-- [x] Write buffer pooling (avoid per-batch allocations)
-  - `WalInner.scratch` Arena reused across writes (256KB page-aligned buffer)
-  - `encode_batch_arena()` uses contiguous buffer for zero-copy vectored I/O
-  - Thread-local buffers (`TLS_BUF`) in parallel encode path
-- [x] WAL file pre-allocation (reduce metadata updates)
-  - Auto-preallocates 64MB on WAL open using `posix_fallocate` (Unix) or `set_len` (Windows)
-  - Reduces filesystem metadata updates during sequential writes
-  - Added `preallocate()` public API and `needs_repreallocation()` helper
+### 2.1 WAL Write Path
 
 **Remaining:**
 - [ ] Benchmark: target 500K+ single-key writes/sec on NVMe
+	- Design: add Criterion benches under `benches/` that exercise single-key writes with realistic options (`sync=BatchedSync`, configured WAL preallocation, small value sizes). Report throughput per configuration and use these benches as the canonical place to track the 500K ops/sec goal.
 - [ ] Dynamic re-preallocation when approaching preallocated limit
+	- Design: extend the WAL writer to monitor how much of the preallocated region is consumed and, when a threshold (e.g., 75–80%) is reached, grow the underlying file in fixed-size chunks. Avoid frequent `set_len` calls, ensure alignment to filesystem expectations, and keep behavior configurable for different environments.
 
-**Files Changed:** `src/wal/fs/writer.rs`, `src/fs/uring.rs`, `src/fs/io.rs`
+### 2.2 Memtable
 
-### 2.2 Memtable Optimization — PARTIALLY COMPLETED
-
-**Current State:** Lock-free skiplist with MVCC. Good concurrency.
-
-**Improvements:**
-- [ ] Add arena allocator for skiplist nodes (reduce malloc pressure) — *Deferred: crossbeam-epoch provides adequate memory reclamation*
+**Remaining:**
 - [ ] Implement version chain compaction (collapse old versions on read)
-- [x] Add bloom filter hint for point lookups (skip scan if key absent) — **8x speedup for negative lookups!**
-- [ ] Consider hybrid: skiplist for small memtables, B-tree for large
+	- Design: when lookups encounter long per-key version chains (many overwrites), opportunistically collapse older versions into a shorter representation while preserving MVCC semantics (respecting snapshots and sequence numbers). Start with a simple heuristic (e.g., cap chain length), measure impact via targeted benches, and avoid adding global locks.
+- [ ] Consider hybrid structure: skiplist for small memtables, B-tree for large
+	- Design: introduce an experimental mode where memtables begin as a skiplist, and once size or key count crosses a threshold, new inserts go into a B-tree-like structure. Reads consult both structures. Keep this behind a config flag and drive the decision with benchmarks rather than default behavior.
 
-**Completed Work:**
-- Added concurrent `BloomHint` filter in `src/core/memtable/bloom_hint.rs`
-- `MemTable::with_bloom_hint(expected_keys)` constructor for opt-in optimization
-- Bloom filter uses atomic bit operations for lock-free concurrent add/query
-- Benchmark shows **~74ns → ~9ns** per negative lookup (8x improvement)
+> Note: Arena allocator for skiplist nodes is considered **deferred**; crossbeam-epoch currently provides adequate behavior.
 
-**Effort:** 3-4 days | **Files:** `src/core/data_structures/skiplist.rs`, `src/core/memtable/core.rs`, `src/core/memtable/bloom_hint.rs`
+### 2.3 SST Read Path
 
-### 2.3 SST Read Path Optimization — PARTIALLY COMPLETED
-
-**Current State:** Per-block file open. No prefetching.
-
-**Improvements:**
-- [x] Cache file handles per SST (avoid repeated open/close)
+**Remaining:**
 - [ ] Implement block prefetching for sequential scans
+	- Design: in range iterators, detect forward-sequential access patterns and asynchronously prefetch the next N blocks (configurable window) using the existing I/O abstraction. Coordinate with the block cache so prefetches populate it instead of bypassing it, and ensure memory usage stays bounded.
 - [ ] Add direct I/O option (bypass page cache for large scans)
+	- Design: add a per-DB/CF option to open SST files with direct I/O on supported platforms. Enforce alignment and buffer size requirements in the I/O layer, and fall back gracefully when direct I/O is unavailable. This should primarily benefit large, sequential scans.
 - [ ] Optimize bloom filter check before block read
+	- Design: make the bloom filter check a mandatory, cheap gate before issuing a block read for point lookups. Ensure all read paths (including iterators and block cache misses) go through the bloom check, and validate behavior with negative lookup benches.
 
-**Completed Work:**
-- Added cached file handle to `SstFile` using `parking_lot::Mutex<Option<File>>`
-- `get_or_open_file()` lazily opens file on first read, reuses for subsequent reads
-- Added cached file handle to `SstRangeIter` for efficient sequential block reads
-- Eliminates per-block file open/close overhead during range scans
-
-**Effort:** 3-4 days | **Files:** `src/sst/fs/iterator.rs`, `src/sst/fs/reader.rs`
-
-### 2.4 Compaction I/O Optimization
-
-**Current State:** Rate limiting implemented. No I/O priority support.
-
-**Completed:**
-- [x] Compaction rate limiter (bytes/sec cap) via `MidgeOptions::compaction_rate_limiter`
-  - Throttles both SST reads (before collection) and writes (after SST write)
-  - Uses existing `RateLimiter` (token bucket algorithm)
-  - Optional - `None` by default for backward compatibility
+### 2.4 Compaction I/O
 
 **Remaining:**
 - [ ] Add compaction I/O priority (lower than foreground)
+	- Design: use the existing rate limiter and/or OS-level hints (where available) to ensure compaction traffic yields to foreground reads/writes. Start with a separate rate limiter or weight for compaction, then consider platform-specific priorities only if needed.
 - [ ] Parallelize compaction input reading (read multiple SSTs concurrently)
-- [ ] Add compaction statistics: read amp, write amp, space amp (metrics already exist)
-
-**Effort:** 3-4 days | **Files:** `src/core/compaction/controller.rs`, `src/core/compaction/executor.rs`
+	- Design: read from multiple input SSTs in parallel with a bounded worker pool, feeding a merge step that preserves key ordering. Keep memory usage and open file handles under control, and validate correctness under concurrent compactions.
+- [ ] Add compaction statistics: read amp, write amp, space amp (metrics already exist, but need surfaced in the API/metrics)
+	- Design: standardize the existing compaction statistics into a stable metrics API, export them via the metrics subsystem, and ensure they are tagged by column family and level where possible.
 
 ---
 
@@ -188,49 +70,55 @@ With correctness assured, optimize the hot paths.
 
 **Current State:** Leveled compaction only.
 
-**Improvements:**
+**Remaining:**
 - [ ] Implement tiered (size-tiered) compaction for write-heavy workloads
+	- Design: add a size-tiered picker alongside the existing leveled picker. Group SSTs of similar size into tiers and compact within a tier once it exceeds a configured count, favoring lower write amplification over read amplification. Keep behavior configurable per CF.
 - [ ] Add FIFO compaction for TTL-heavy use cases
+	- Design: implement a simple FIFO strategy that drops oldest files first, primarily for CFs where TTL makes data naturally short-lived. Integrate with existing TTL/index handling to avoid resurrecting expired keys.
 - [ ] Allow per-column-family compaction strategy
 - [ ] Add compaction picker scoring and logging
 
-**Effort:** 5-7 days | **Files:** `src/core/compaction/picker.rs`, `src/core/compaction/strategy.rs`
-
-### 3.2 Block Cache Improvements
+### 3.2 Block Cache
 
 **Current State:** 128MB default, basic LRU.
 
-**Improvements:**
+**Remaining:**
 - [ ] Implement clock-based eviction (lower overhead than LRU)
+	- Design: replace or augment the current LRU implementation with a clock-based policy that uses a circular buffer and reference bits to reduce per-operation overhead, while maintaining similar hit rates.
 - [ ] Add cache partitioning (index vs data blocks)
+	- Design: split the cache into logical partitions (e.g., index/metadata vs data blocks) with configurable size ratios, so hot metadata is protected from eviction by bulk data reads.
 - [ ] Add compressed block cache option
+	- Design: optionally store compressed blocks in cache and decompress on hit, trading CPU for memory. Ensure we only compress when it is a net win (based on block size/entropy) and keep this behind a configuration toggle.
 - [ ] Add cache hit/miss metrics per SST level
+	- Design: instrument cache lookups with level tags so we can observe hit/miss behavior per level, then export these via the metrics subsystem.
 
-**Effort:** 3-4 days | **Files:** `src/core/block_cache/mod.rs`
-
-### 3.3 Bloom Filter Enhancements
+### 3.3 Bloom Filters
 
 **Current State:** Per-SST bloom filter, 10 bits/key default.
 
-**Improvements:**
-- [ ] Add configurable bits_per_key in MidgeOptions
+**Remaining:**
+- [ ] Add configurable `bits_per_key` in `MidgeOptions`
+	- Design: surface `bits_per_key` as a tuning parameter per CF, plumb it through SST building, and validate expected false-positive rates via targeted tests/benches.
 - [ ] Implement prefix bloom filters for range queries
+	- Design: add an optional prefix bloom filter that indexes key prefixes (e.g., user key prefix or shard prefix) to speed up range scans that share common prefixes, ensuring it coexists cleanly with existing point-lookups blooms.
 - [ ] Add bloom filter statistics (FPR monitoring)
+	- Design: periodically sample lookups and track bloom hits that lead to misses at the SST/block level to estimate false-positive rate, exporting this as a metric per CF/level.
 - [ ] Consider ribbon filters for better space efficiency
+	- Design: prototype a ribbon filter implementation behind a feature flag and compare space and performance characteristics against the current bloom implementation before considering it for default use.
 
-**Effort:** 2-3 days | **Files:** `src/sst/bloom.rs`, `src/config/options.rs`
-
-### 3.4 Column Family Improvements
+### 3.4 Column Families
 
 **Current State:** Basic CF support, shared WAL.
 
-**Improvements:**
+**Remaining:**
 - [ ] Add per-CF memtable size configuration
+	- Design: extend configuration to allow overriding memtable size per CF, with sensible defaults and validation to prevent pathological combinations (e.g., too-small per-CF memtables exploding flush frequency).
 - [ ] Add per-CF compression configuration
+	- Design: allow each CF to choose its own compression algorithm and level, wired through SST building, while keeping a clear default path for users who don’t need per-CF tuning.
 - [ ] Implement atomic cross-CF writes (WriteBatch spanning CFs)
+	- Design: ensure `WriteBatch` operations that span CFs are applied atomically across WAL, memtables, and recovery. This likely involves encoding CF information into the WAL entries and committing all or none of the batch on crash/recovery.
 - [ ] Add CF-level statistics and metrics
-
-**Effort:** 3-4 days | **Files:** `src/api/column_family.rs`, `src/core/engine.rs`
+	- Design: expose per-CF metrics for size on disk, write/read throughput, compaction activity, and cache behavior to make CF-specific tuning actionable.
 
 ---
 
@@ -240,25 +128,21 @@ With correctness assured, optimize the hot paths.
 
 **Current State:** S3/Azure/GCS/OCI backends. MockCloud for testing.
 
-**Improvements:**
+**Remaining:**
 - [ ] Add retry with exponential backoff for transient failures
 - [ ] Implement parallel SST upload (multiple parts)
 - [ ] Add cloud operation metrics (latency, errors, retries)
 - [ ] Implement local SST cache for cloud-backed mode
 
-**Effort:** 4-5 days | **Files:** `src/cloud/*.rs`
-
 ### 4.2 Backup & Restore
 
 **Current State:** Basic checkpoint support.
 
-**Improvements:**
+**Remaining:**
 - [ ] Implement incremental backup (only changed SSTs)
 - [ ] Add backup verification (checksum validation)
 - [ ] Support backup to cloud storage
 - [ ] Add point-in-time recovery (PITR) via WAL replay
-
-**Effort:** 4-5 days | **Files:** `src/api/backup.rs`, `src/core/checkpoint.rs`
 
 ---
 
@@ -268,57 +152,50 @@ With correctness assured, optimize the hot paths.
 
 **Current State:** Basic metrics infrastructure.
 
-**Improvements:**
+**Remaining:**
 - [ ] Add Prometheus exposition format
 - [ ] Implement histogram metrics (latency percentiles)
 - [ ] Add per-operation breakdown (get/put/delete/scan)
 - [ ] Add internal event tracing (spans for compaction, flush)
 
-**Effort:** 3-4 days | **Files:** `src/metrics/*.rs`
-
 ### 5.2 Diagnostics & Debugging
 
-**Improvements:**
+**Remaining:**
 - [ ] Add `db_stats()` command returning JSON summary
 - [ ] Implement SST file inspector tool
 - [ ] Add manifest dump utility
 - [ ] Add WAL dump utility with corruption detection
 
-**Effort:** 2-3 days | **Files:** `src/api/admin.rs`, `scripts/`
-
 ### 5.3 Configuration Validation
 
-**Improvements:**
+**Remaining:**
 - [ ] Add configuration linting (warn on suboptimal settings)
 - [ ] Implement configuration diff (show changes from defaults)
 - [ ] Add runtime configuration updates (where safe)
 - [ ] Document all configuration options with tuning guidance
 
-**Effort:** 2 days | **Files:** `src/config/options.rs`, `docs/`
-
 ---
 
-## Implementation Priority Matrix
+## Implementation Priority Matrix (Remaining Only)
 
 | Item | Impact | Effort | Priority |
 |------|--------|--------|----------|
-| Merge operator persistence | Critical | Medium | **P0** |
-| Manifest durability | High | Medium | **P0** |
-| WAL recovery edge cases | High | Low | **P0** |
-| Crash consistency tests | High | Medium | **P0** |
-| WAL io_uring | High | Medium | P1 |
-| SST read optimization | High | Medium | P1 |
-| Compaction rate limiter | Medium | Low | P1 |
-| Memtable optimization | Medium | Medium | P2 |
-| Tiered compaction | Medium | High | P2 |
-| Block cache improvements | Medium | Medium | P2 |
-| Cloud robustness | Medium | Medium | P2 |
-| Metrics & monitoring | Medium | Medium | P3 |
-| Backup improvements | Low | Medium | P3 |
+| Manifest durability (snapshotting, compaction) | High | Medium | **P0** |
+| WAL benchmarks + dynamic preallocation | High | Medium | **P1** |
+| SST read optimization (prefetch, direct I/O, bloom-before-read) | High | Medium | **P1** |
+| Compaction I/O improvements (priority, parallelism, stats) | Medium | Medium | **P1** |
+| Memtable follow-ups (version chain compaction, hybrid structure) | Medium | Medium | **P2** |
+| Tiered compaction | Medium | High | **P2** |
+| Block cache improvements | Medium | Medium | **P2** |
+| Cloud robustness | Medium | Medium | **P2** |
+| Metrics & monitoring | Medium | Medium | **P3** |
+| Backup & restore improvements | Low | Medium | **P3** |
+| Diagnostics & debugging tools | Medium | Medium | **P3** |
+| Configuration validation | Medium | Low | **P3** |
 
 ---
 
-## Success Metrics
+## Success Metrics (Still Targeted)
 
 ### Correctness
 - [ ] Zero data loss in crash-recovery tests (1000+ iterations)
@@ -338,37 +215,14 @@ With correctness assured, optimize the hot paths.
 
 ---
 
-## Contributing
+## Working From This Roadmap
 
-When working on roadmap items:
+When picking up a roadmap item:
 
-1. **Create an issue** linking to this roadmap item
-2. **Write tests first** — especially for correctness fixes
-3. **Follow naming conventions** — `should_{action}_when_{context}`
-4. **Run full test suite** — `cargo test` + `cargo run --bin validate_tests`
-5. **Update documentation** — especially for new configuration options
+1. **Create an issue** linking to the specific bullet in this file.
+2. **Write tests first** — especially for correctness and durability changes.
+3. **Follow naming conventions** — `should_{action}_when_{context}`.
+4. **Run the test suite** — `cargo test` + `cargo run --bin validate_tests`.
+5. **Update documentation** where behavior or tuning guidance changes.
 
----
-
-## Version Milestones
-
-### v0.2.0 — Correctness Release
-- All Phase 1 items complete
-- Merge operator bug fixed
-- Crash consistency test suite passing
-
-### v0.3.0 — Performance Release
-- All Phase 2 items complete
-- WAL io_uring support (Linux)
-- Compaction rate limiting
-
-### v0.4.0 — Feature Release
-- Tiered compaction strategy
-- Enhanced block cache
-- Cloud backend robustness
-
-### v1.0.0 — Production Ready
-- All phases complete
-- Performance benchmarks published
-- Production deployment guide
-- Long-term support commitment
+Version milestones (v0.2.0, v0.3.0, etc.) are now tracked in the changelog and release notes rather than this file, to keep this document focused on **what is left to do**.
