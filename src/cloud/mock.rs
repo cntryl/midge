@@ -205,6 +205,20 @@ impl MockCloudBackend {
         false
     }
 
+    /// Wait for total upload attempts (successes + failures) to reach expected value
+    /// Returns true if condition met, false if timed out
+    pub fn wait_for_upload_attempts(&self, expected: usize, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            let total = self.upload_count() + self.upload_failure_count();
+            if total >= expected {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     /// Simulate latency for a read operation of the given size.
     fn simulate_read_latency(&self, size_bytes: usize) {
         if let Some(delay) = self.latency {

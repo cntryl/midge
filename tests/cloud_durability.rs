@@ -176,8 +176,12 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
 
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
-            // Wait for background cloud upload to complete/attempt
-            let _ = mock_backend.wait_for_uploads(attempts_before + 1, Duration::from_millis(500));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                mock_backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout (config: {})",
+                config_name
+            );
 
             let attempts_after = mock_backend.upload_count() + mock_backend.upload_failure_count();
 
@@ -341,8 +345,11 @@ fn should_not_poison_wal_startup_given_fail_upload_after_is_armed_post_open() {
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
-            // Wait for background cloud upload to complete/attempt
-            let _ = backend.wait_for_uploads(attempts_before + 1, Duration::from_millis(500));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout"
+            );
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             assert!(
