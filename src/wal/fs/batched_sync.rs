@@ -195,21 +195,18 @@ impl BatchedSyncCoordinator {
                 // We are a follower - wait for the current leader to finish
 
                 // Spin briefly to avoid parking syscall overhead for very short batches
-                let mut spins = 0;
-                while self.epoch.load(Acquire) == my_epoch {
-                    if spins < self.config.spin_loops {
-                        std::hint::spin_loop();
-                        spins += 1;
-                        continue;
+                for _ in 0..self.config.spin_loops {
+                    if self.epoch.load(Acquire) != my_epoch {
+                        break;
                     }
-                    // Exceeded spin threshold - park until leader wakes us
-                    let mut guard = self.park_lock.lock();
-                    // Double-check epoch after acquiring lock (leader may have finished)
-                    if self.epoch.load(Acquire) == my_epoch {
-                        self.park_cv.wait(&mut guard);
-                    }
+                    std::hint::spin_loop();
+                }
 
-                    // Lock dropped here; re-check epoch in outer loop
+                // If still waiting after spin, park until leader wakes us
+                if self.epoch.load(Acquire) == my_epoch {
+                    let mut guard = self.park_lock.lock();
+                    // Use wait_while to handle spurious wakeups and re-check condition atomically
+                    self.park_cv.wait_while(&mut guard, |_| self.epoch.load(Acquire) == my_epoch);
                 }
 
                 // Epoch changed - the batch we joined has completed
