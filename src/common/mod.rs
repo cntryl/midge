@@ -13,5 +13,8 @@ pub mod timestamp;
 pub mod tlv;
 pub mod worker;
 
+#[cfg(test)]
+pub mod test_cleanup;
+
 // Re-export commonly used error types for convenience
 pub use error::{MidgeError, MidgeResult};

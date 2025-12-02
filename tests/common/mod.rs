@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+pub mod cleanup;
 pub mod cloud;
 pub mod test_helpers;
 

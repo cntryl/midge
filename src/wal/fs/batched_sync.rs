@@ -265,7 +265,11 @@ mod tests {
     #[test]
     fn should_batch_multiple_sync_requests() {
         // Arrange
-        let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig::default()));
+        // Use a fast config to avoid timing-related stalls in CI
+        let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
+            wait_micros: 0,
+            spin_loops: 50,
+        }));
         let sync_count = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(std::sync::Barrier::new(10));
 
@@ -444,7 +448,11 @@ mod tests {
         // The coordinator will notify when a leader has collected a batch; the
         // test then explicitly allows the leader to continue, so the test does
         // not depend on scheduler timing or busy-spin heuristics.
-        let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig::default()));
+        // Use a fast config to avoid timing-related stalls in CI
+        let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
+            wait_micros: 0,
+            spin_loops: 50,
+        }));
 
         // Act - run several back-to-back rounds of small concurrent syncs
         for _round in 0..5 {

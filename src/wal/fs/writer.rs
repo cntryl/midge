@@ -209,7 +209,7 @@ impl Wal {
         }
 
         inner.file.flush()?;
-        let current_pos = inner.pos;
+        let _current_pos = inner.pos;
 
         // Try platform-specific preallocation
         #[cfg(unix)]
