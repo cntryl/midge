@@ -183,6 +183,7 @@ fn should_read_compressed_data_given_lz4_compression_when_flushed_to_sst() {
             db_path: temp_dir.path().to_path_buf(),
         },
         compression: CompressionType::Lz4,
+        enable_compaction: false, // Disable background compaction to avoid race
         ..Default::default()
     };
     let engine = MidgeEngine::open(opts).expect("open engine");

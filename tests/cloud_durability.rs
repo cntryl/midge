@@ -288,6 +288,12 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
 
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
+            let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout"
+            );
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             // Assert
@@ -516,6 +522,11 @@ fn should_allow_clean_shutdown_given_cloud_upload_failures_after_flush_attempts(
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout"
+            );
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             assert!(
@@ -669,6 +680,11 @@ fn should_report_upload_attempts_when_manifest_sync_happens_under_fail_after() {
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout"
+            );
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             assert!(

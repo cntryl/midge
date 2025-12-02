@@ -16,7 +16,8 @@ use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query};
 use common::{
     assert_get_equals, assert_key_absent, compaction_test_opts, create_storage_mode,
-    disk_storage_modes, populate_multi_level_data, test_helpers::wait_for_signal_default,
+    disk_storage_modes, manual_compaction_test_opts, populate_multi_level_data,
+    test_helpers::wait_for_signal_default,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
@@ -33,7 +34,7 @@ fn should_serve_reads_given_compaction_in_progress_when_reading() {
         let (mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
@@ -95,7 +96,7 @@ fn should_return_correct_value_given_key_being_compacted_when_reading() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
 
@@ -155,7 +156,7 @@ fn should_handle_scan_given_files_being_merged_when_scanning() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
@@ -205,7 +206,7 @@ fn should_not_expose_deleted_keys_given_tombstone_compaction_in_progress_when_re
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
 
@@ -262,7 +263,7 @@ fn should_maintain_read_consistency_given_compaction_updates_manifest_when_readi
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
@@ -319,7 +320,7 @@ fn should_allow_writes_given_l0_l1_compaction_running_when_writing() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
@@ -359,7 +360,7 @@ fn should_handle_put_to_compacting_key_range_when_writing() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
 
@@ -413,7 +414,7 @@ fn should_flush_to_new_sst_given_ongoing_compaction_when_flushing() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
@@ -462,7 +463,7 @@ fn should_not_corrupt_newly_flushed_files_given_compaction_in_progress_when_flus
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
@@ -574,7 +575,7 @@ fn should_maintain_iterator_stability_given_compaction_in_progress_when_iteratin
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);
@@ -624,7 +625,7 @@ fn should_serialize_concurrent_compaction_requests_when_multiple_triggered() {
         let (_mode_name, storage_mode, _temp_dir) = create_storage_mode(mode);
 
         // Arrange
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let engine = Arc::new(MidgeEngine::open(opts).unwrap());
         let cf = engine.default_column_family();
         populate_multi_level_data(&engine, &cf);

@@ -530,8 +530,31 @@ pub fn compaction_test_opts(storage_mode: StorageMode) -> MidgeOptions {
     MidgeOptions {
         storage_mode,
         memtable_size: 1024,         // Small memtable to trigger flushes easily
-        enable_compaction: true, // Enable background compaction for compaction workloads in tests
-        compaction_sst_threshold: 2, // Not used when background compaction is disabled
+        enable_compaction: true, // Enable background compaction for tests using compact_range()
+        compaction_sst_threshold: 2, // Trigger compaction after 2 SSTs
+        ..Default::default()
+    }
+}
+
+/// Options for tests that call `compact_all()` manually.
+///
+/// Disables background compaction to avoid races between the background
+/// compaction thread and manual `compact_all()` calls. Use this instead of
+/// `compaction_test_opts()` when your test calls `compact_all()`.
+///
+/// # Examples
+///
+/// ```rust
+/// let opts = manual_compaction_test_opts(storage_mode);
+/// let engine = MidgeEngine::open(opts).unwrap();
+/// engine.compact_all().unwrap();
+/// ```
+#[allow(dead_code)]
+pub fn manual_compaction_test_opts(storage_mode: StorageMode) -> MidgeOptions {
+    MidgeOptions {
+        storage_mode,
+        memtable_size: 1024,         // Small memtable to trigger flushes easily
+        enable_compaction: false, // Disable background compaction for manual compact_all() tests
         ..Default::default()
     }
 }
@@ -859,7 +882,7 @@ pub fn create_storage_mode(mode: &str) -> (String, StorageMode, Option<TempDir>)
                 storage_context: StorageContext::default(),
                 local_wal_sync: false,
                 wal_batch_size: 4 * 1024 * 1024,
-                sst_cache_capacity: 16,
+                sst_cache_capacity: 64, // Large enough to hold all SSTs during compaction tests
             };
             ("CloudBacked".to_string(), storage_mode, Some(temp_dir))
         }
