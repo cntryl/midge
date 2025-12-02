@@ -195,19 +195,17 @@ mod tests {
     use super::*;
     use crate::core::manifest::types::{FileMeta, Manifest};
     use crate::core::manifest::VersionSet;
-    use tempfile::TempDir;
 
     #[test]
     fn should_process_add_file_edit() {
-        // Arrange
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().to_path_buf();
+        // Arrange - use mem_mode to skip disk I/O
+        let db_path = PathBuf::from("/nonexistent");
 
         let manifest = Manifest::default();
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(version_set.clone(), db_path, None, false);
+        let manager = VersionManager::new(version_set.clone(), db_path, None, true);
 
         let file = FileMeta {
             name: "test.sst".to_string(),
@@ -233,15 +231,14 @@ mod tests {
 
     #[test]
     fn should_process_multiple_edits_serially() {
-        // Arrange
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().to_path_buf();
+        // Arrange - use mem_mode to skip disk I/O
+        let db_path = PathBuf::from("/nonexistent");
 
         let manifest = Manifest::default();
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(version_set.clone(), db_path, None, false);
+        let manager = VersionManager::new(version_set.clone(), db_path, None, true);
 
         // Act
         for i in 0..5 {
@@ -267,15 +264,14 @@ mod tests {
 
     #[test]
     fn should_handle_async_edits() {
-        // Arrange
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().to_path_buf();
+        // Arrange - use mem_mode to skip disk I/O
+        let db_path = PathBuf::from("/nonexistent");
 
         let manifest = Manifest::default();
         let version = VersionSet::new(manifest);
         let version_set = AtomicVersionSet::new(version);
 
-        let manager = VersionManager::new(version_set.clone(), db_path, None, false);
+        let manager = VersionManager::new(version_set.clone(), db_path, None, true);
 
         let file = FileMeta {
             name: "test.sst".to_string(),
@@ -284,19 +280,29 @@ mod tests {
             ..Default::default()
         };
 
-        // Act
+        // Act - send async edit, then use sync edit to ensure ordering
         manager
             .apply_edit_async(VersionEdit::AddFile {
                 file: Box::new(file),
             })
             .unwrap();
 
-        // Wait for processing
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Use a sync edit to wait for the async edit to complete (deterministic)
+        let file2 = FileMeta {
+            name: "test2.sst".to_string(),
+            level: 0,
+            size_bytes: 1024,
+            ..Default::default()
+        };
+        manager
+            .apply_edit_sync(VersionEdit::AddFile {
+                file: Box::new(file2),
+            })
+            .unwrap();
 
-        // Assert
+        // Assert - both edits should be processed
         let current = version_set.load();
-        assert_eq!(current.manifest.files.len(), 1);
+        assert_eq!(current.manifest.files.len(), 2);
 
         manager.shutdown();
     }

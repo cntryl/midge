@@ -52,10 +52,18 @@ use tempfile::TempDir;
 /// let dir = test_temp_dir();
 /// let opts = default_opts(dir.path().to_path_buf());
 /// ```
-/// Create a temporary directory for testing that auto-cleans on drop
+/// Create a temporary directory for testing that auto-cleans on drop.
+/// Uses target/tmp instead of system /tmp to avoid quota issues.
 #[allow(dead_code)]
 pub fn test_temp_dir() -> TempDir {
-    tempfile::tempdir().expect("Failed to create test temp directory")
+    // Use target/tmp which is on /home with plenty of space,
+    // rather than /tmp which may have quota limits
+    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/tmp");
+    std::fs::create_dir_all(&base).ok();
+    tempfile::Builder::new()
+        .prefix("midge_test_")
+        .tempdir_in(&base)
+        .expect("Failed to create test temp directory")
 }
 
 /// Creates a new MidgeEngine in a fresh temporary directory.
