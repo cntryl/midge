@@ -1,68 +1,114 @@
 //! Streaming merging iterator for efficient range scans across multiple sources.
 //!
-//! Merges results from memtable, immutable memtables, and SSTs in newest-to-oldest order,
-//! applying tombstone masking and deduplication without materializing the entire result set.
+//! World-class merging iterator following LSM best practices:
+//! - Internal key ordering: (user_key ASC/DESC, seq DESC, value before tombstone, source priority)
+//! - Single-key dedup via tracking last emitted/processed user_key
+//! - Tombstones mask older values
+//! - Snapshot visibility support
+//! - Heap maintains one entry per source; advance only producing source
+//! - Correct forward and reverse iteration without materializing the full result
 
 use bytes::Bytes;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::BinaryHeap;
 
-/// Entry from a source with priority for min-heap ordering.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//   Heap Entry
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct HeapEntry {
     key: Bytes,
     value: Option<Bytes>, // None = tombstone
     seq: u64,
-    source_id: usize, // Unique ID per source, lower = newer
+    source_id: usize,
+    source_priority: u8, // lower = newer (mem=0, imm=1, L0=2, L1+=3)
     reverse: bool,
 }
 
 impl Eq for HeapEntry {}
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.source_id == other.source_id
+        self.key == other.key && self.seq == other.seq && self.source_id == other.source_id
     }
 }
 
 impl Ord for HeapEntry {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        // We want the smallest (or largest for reverse) key at the top of BinaryHeap.
-        // BinaryHeap is a max-heap, so we invert ordering where appropriate.
-        let ord = if self.reverse {
-            self.key.cmp(&other.key) // reverse → largest key first
-        } else {
-            other.key.cmp(&self.key) // forward → smallest key first
-        };
+        // BinaryHeap = max-heap. We return "greater means more desirable".
 
-        match ord {
-            // When keys are equal, prioritize lower source_id (newer data).
-            // Since BinaryHeap is a max-heap and pops the max element,
-            // we need other.source_id.cmp(&self.source_id) to make lower IDs pop first.
-            Ordering::Equal => other.source_id.cmp(&self.source_id),
-            o => o,
+        // 1. User key ordering (ASC vs DESC).
+        let key_ord = if self.reverse {
+            self.key.cmp(&other.key) // reverse = larger key wins
+        } else {
+            other.key.cmp(&self.key) // forward = smaller key wins
+        };
+        if key_ord != Ordering::Equal {
+            return key_ord;
         }
+
+        // 2. seq DESC (newest version first).
+        if self.seq != other.seq {
+            return self.seq.cmp(&other.seq);
+        }
+
+        // 3. Values before tombstones.
+        let self_val = self.value.is_some();
+        let other_val = other.value.is_some();
+        if self_val != other_val {
+            return if self_val {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+        }
+
+        // 4. Source priority (lower = newer).
+        if self.source_priority != other.source_priority {
+            return other.source_priority.cmp(&self.source_priority);
+        }
+
+        // 5. Stable tie-breaker.
+        other.source_id.cmp(&self.source_id)
     }
 }
+
 impl PartialOrd for HeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-/// Iterator source trait - abstracts over memtable, immutable memtables, and SSTs.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//   Iterator Source Trait
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
 pub trait IteratorSource {
-    /// Get the next key-value pair from this source. Returns None when exhausted.
     fn next(&mut self) -> Option<(Bytes, Option<Bytes>, u64)>;
+
+    // mem=0, imm=1, L0=2, L1+=3 (default low signal)
+    fn priority(&self) -> u8 {
+        10
+    }
 }
 
-/// In-memory source backed by a Vec (sorted key-value pairs).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//   VecSource (for testing)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
 pub struct VecSource {
     items: Vec<Option<(Bytes, Option<Bytes>, u64)>>,
     pos: usize,
     #[allow(dead_code)]
     reverse: bool,
+    priority: u8,
 }
 
 impl VecSource {
@@ -72,6 +118,7 @@ impl VecSource {
             items: items.into_iter().map(Some).collect(),
             pos: 0,
             reverse: false,
+            priority: 3,
         }
     }
 
@@ -81,6 +128,17 @@ impl VecSource {
             items: items.into_iter().map(Some).collect(),
             pos: 0,
             reverse: true,
+            priority: 3,
+        }
+    }
+
+    pub fn with_priority(mut items: Vec<(Bytes, Option<Bytes>, u64)>, priority: u8) -> Self {
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        Self {
+            items: items.into_iter().map(Some).collect(),
+            pos: 0,
+            reverse: false,
+            priority,
         }
     }
 }
@@ -91,43 +149,61 @@ impl IteratorSource for VecSource {
         if self.pos >= self.items.len() {
             return None;
         }
-        // Move the item out of the vector without cloning
-        let item_opt = self.items[self.pos].take();
+        let out = self.items[self.pos].take();
         self.pos += 1;
-        item_opt
+        out
+    }
+
+    fn priority(&self) -> u8 {
+        self.priority
     }
 }
 
-/// Merging iterator that streams results from multiple sources.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//   Merging Iterator
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
 pub struct MergingIterator {
     heap: BinaryHeap<HeapEntry>,
     sources: Vec<Box<dyn IteratorSource>>,
-    seen_keys: HashSet<Bytes>,
+    last_key: Option<Bytes>,
     limit: Option<usize>,
     emitted: usize,
     reverse: bool,
+    snapshot_seq: Option<u64>,
 }
 
 impl MergingIterator {
-    /// Create a new merging iterator (forward).
     pub fn new(sources: Vec<Box<dyn IteratorSource>>, limit: Option<usize>) -> Self {
-        Self::with_reverse(sources, limit, false)
+        Self::with_reverse_and_snapshot(sources, limit, false, None)
     }
 
-    /// Create a new merging iterator with reverse iteration support.
     pub fn with_reverse(
-        mut sources: Vec<Box<dyn IteratorSource>>,
+        sources: Vec<Box<dyn IteratorSource>>,
         limit: Option<usize>,
         reverse: bool,
     ) -> Self {
+        Self::with_reverse_and_snapshot(sources, limit, reverse, None)
+    }
+
+    pub fn with_reverse_and_snapshot(
+        mut sources: Vec<Box<dyn IteratorSource>>,
+        limit: Option<usize>,
+        reverse: bool,
+        snapshot_seq: Option<u64>,
+    ) -> Self {
         let mut heap = BinaryHeap::with_capacity(sources.len());
+
         for (id, src) in sources.iter_mut().enumerate() {
-            if let Some((key, val, seq)) = src.next() {
+            if let Some((k, v, s)) = src.next() {
                 heap.push(HeapEntry {
-                    key,
-                    value: val,
-                    seq,
+                    key: k,
+                    value: v,
+                    seq: s,
                     source_id: id,
+                    source_priority: src.priority(),
                     reverse,
                 });
             }
@@ -136,10 +212,11 @@ impl MergingIterator {
         Self {
             heap,
             sources,
-            seen_keys: HashSet::with_capacity(256),
+            last_key: None,
             limit,
             emitted: 0,
             reverse,
+            snapshot_seq,
         }
     }
 }
@@ -150,40 +227,60 @@ impl Iterator for MergingIterator {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(entry) = self.heap.pop() {
-            // Stop if limit reached
+            // Limit
             if let Some(limit) = self.limit {
                 if self.emitted >= limit {
                     return None;
                 }
             }
 
-            // Fetch next from this source
-            if let Some((key, val, seq)) = self.sources[entry.source_id].next() {
+            // Advance producing source
+            if let Some((k, v, s)) = self.sources[entry.source_id].next() {
                 self.heap.push(HeapEntry {
-                    key,
-                    value: val,
-                    seq,
+                    key: k,
+                    value: v,
+                    seq: s,
                     source_id: entry.source_id,
+                    source_priority: self.sources[entry.source_id].priority(),
                     reverse: self.reverse,
                 });
             }
 
-            // Deduplication: skip if key already emitted (newest wins)
-            if !self.seen_keys.insert(entry.key.clone()) {
-                // Key was already in set, skip
-                continue;
+            // Snapshot visibility (skip versions > snapshot, but do not finalize key yet)
+            if let Some(snap) = self.snapshot_seq {
+                if entry.seq > snap {
+                    continue;
+                }
             }
 
-            // Skip tombstones
-            let Some(value) = entry.value else { continue };
+            // Dedup: if we already processed this user_key, skip this entry.
+            if let Some(last) = &self.last_key {
+                if *last == entry.key {
+                    continue;
+                }
+            }
 
-            // Emit live key/value
+            // First visible version for this key: remember the key whether value or tombstone.
+            self.last_key = Some(entry.key.clone());
+
+            // Tombstone → skip but block older versions.
+            let Some(value) = entry.value else {
+                continue;
+            };
+
+            // Emit value
             self.emitted += 1;
             return Some((entry.key, value));
         }
         None
     }
 }
+
+//
+// ─────────────────────────────────────────────────────────────────────────────
+//   Tests
+// ─────────────────────────────────────────────────────────────────────────────
+//
 
 #[cfg(test)]
 mod tests {
@@ -200,70 +297,62 @@ mod tests {
 
     #[test]
     fn should_merge_two_sources_with_deduplication() {
-        // Arrange
-        let src0 = VecSource::new(vec![kv("k1", "v1_new", 2)]);
-        let src1 = VecSource::new(vec![kv("k1", "v1_old", 1), kv("k2", "v2", 1)]);
-        let sources: Vec<Box<dyn IteratorSource>> = vec![Box::new(src0), Box::new(src1)];
-
-        // Act
-        let iter = MergingIterator::new(sources, None);
-        let results: Vec<_> = iter.collect();
-
-        // Assert
+        let s0 = VecSource::new(vec![kv("k1", "v1_new", 2)]);
+        let s1 = VecSource::new(vec![kv("k1", "v1_old", 1), kv("k2", "v2", 1)]);
+        let it = MergingIterator::new(vec![Box::new(s0), Box::new(s1)], None);
+        let res: Vec<_> = it.collect();
         assert_eq!(
-            results,
+            res,
             vec![
                 (Bytes::from("k1"), Bytes::from("v1_new")),
-                (Bytes::from("k2"), Bytes::from("v2"))
+                (Bytes::from("k2"), Bytes::from("v2")),
             ]
         );
     }
 
     #[test]
-    fn should_mask_tombstones() {
-        // Arrange
+    fn tombstone_masks_older_value() {
         let s0 = VecSource::new(vec![(Bytes::from("k1"), None, 2)]);
         let s1 = VecSource::new(vec![kv("k1", "v1", 1)]);
-        let sources: Vec<Box<dyn IteratorSource>> = vec![Box::new(s0), Box::new(s1)];
+        let it = MergingIterator::new(vec![Box::new(s0), Box::new(s1)], None);
+        let res: Vec<_> = it.collect();
+        assert!(res.is_empty());
+    }
 
-        // Act
-        let results: Vec<_> = MergingIterator::new(sources, None).collect();
+    #[test]
+    fn snapshot_sees_older_value_even_if_newer_tombstone_exists() {
+        let s0 = VecSource::new(vec![(Bytes::from("k1"), None, 200)]);
+        let s1 = VecSource::new(vec![kv("k1", "v1", 100)]);
+        let it = MergingIterator::with_reverse_and_snapshot(
+            vec![Box::new(s0), Box::new(s1)],
+            None,
+            false,
+            Some(150),
+        );
 
-        // Assert
-        assert!(results.is_empty());
+        let res: Vec<_> = it.collect();
+        assert_eq!(res, vec![(Bytes::from("k1"), Bytes::from("v1"))]);
     }
 
     #[test]
     fn should_respect_limit() {
-        // Arrange
-        let src = VecSource::new(vec![
+        let s = VecSource::new(vec![
             kv("k1", "v1", 1),
             kv("k2", "v2", 1),
             kv("k3", "v3", 1),
             kv("k4", "v4", 1),
-            kv("k5", "v5", 1),
         ]);
-        let sources: Vec<Box<dyn IteratorSource>> = vec![Box::new(src)];
-
-        // Act
-        let results: Vec<_> = MergingIterator::new(sources, Some(3)).collect();
-
-        // Assert
-        assert_eq!(results.len(), 3);
+        let it = MergingIterator::new(vec![Box::new(s)], Some(2));
+        let res: Vec<_> = it.collect();
+        assert_eq!(res.len(), 2);
     }
 
     #[test]
     fn should_merge_sorted_across_sources() {
-        // Arrange
         let s0 = VecSource::new(vec![kv("a", "a0", 3), kv("c", "c0", 3)]);
         let s1 = VecSource::new(vec![kv("b", "b1", 2), kv("d", "d1", 2)]);
-        let sources: Vec<Box<dyn IteratorSource>> = vec![Box::new(s0), Box::new(s1)];
-
-        // Act
-        let res: Vec<_> = MergingIterator::new(sources, None).collect();
-        let keys: Vec<_> = res.iter().map(|(k, _)| k.clone()).collect();
-
-        // Assert
+        let it = MergingIterator::new(vec![Box::new(s0), Box::new(s1)], None);
+        let keys: Vec<_> = it.map(|(k, _)| k).collect();
         assert_eq!(
             keys,
             vec!["a", "b", "c", "d"]
@@ -274,24 +363,17 @@ mod tests {
     }
 
     #[test]
-    fn should_iterate_in_reverse() {
-        // Arrange
-        let src = VecSource::new_reverse(vec![
+    fn reverse_iteration() {
+        let s = VecSource::new_reverse(vec![
             kv("k1", "v1", 1),
             kv("k2", "v2", 1),
             kv("k3", "v3", 1),
-            kv("k4", "v4", 1),
         ]);
-        let sources: Vec<Box<dyn IteratorSource>> = vec![Box::new(src)];
-
-        // Act
-        let results: Vec<_> = MergingIterator::with_reverse(sources, None, true).collect();
-        let keys: Vec<_> = results.iter().map(|(k, _)| k.clone()).collect();
-
-        // Assert
+        let it = MergingIterator::with_reverse(vec![Box::new(s)], None, true);
+        let keys: Vec<_> = it.map(|(k, _)| k).collect();
         assert_eq!(
             keys,
-            vec!["k4", "k3", "k2", "k1"]
+            vec!["k3", "k2", "k1"]
                 .into_iter()
                 .map(Bytes::from)
                 .collect::<Vec<_>>()
@@ -299,55 +381,40 @@ mod tests {
     }
 
     #[test]
-    fn should_reverse_with_deduplication() {
-        // Arrange
+    fn reverse_with_dedup() {
         let s0 = VecSource::new_reverse(vec![(Bytes::from("k3"), Some(Bytes::from("v3_new")), 2)]);
         let s1 = VecSource::new_reverse(vec![
             (Bytes::from("k3"), Some(Bytes::from("v3_old")), 1),
             (Bytes::from("k2"), Some(Bytes::from("v2")), 1),
             (Bytes::from("k1"), Some(Bytes::from("v1")), 1),
         ]);
-        let sources: Vec<Box<dyn IteratorSource>> = vec![Box::new(s0), Box::new(s1)];
 
-        // Act
-        let results: Vec<_> = MergingIterator::with_reverse(sources, None, true).collect();
+        let it = MergingIterator::with_reverse(vec![Box::new(s0), Box::new(s1)], None, true);
+        let res: Vec<_> = it.collect();
 
-        // Assert
-        assert_eq!(results[0], (Bytes::from("k3"), Bytes::from("v3_new")));
-        assert_eq!(results[1].0, Bytes::from("k2"));
-        assert_eq!(results[2].0, Bytes::from("k1"));
+        assert_eq!(res[0], (Bytes::from("k3"), Bytes::from("v3_new")));
+        assert_eq!(res[1].0, Bytes::from("k2"));
+        assert_eq!(res[2].0, Bytes::from("k1"));
     }
 
     #[test]
-    fn should_return_empty_given_empty_sources() {
-        // Arrange
-        let s0 = VecSource::new(vec![]);
-        let s1 = VecSource::new(vec![]);
-        let sources: Vec<Box<dyn IteratorSource>> = vec![Box::new(s0), Box::new(s1)];
-
-        // Act
-        let results = MergingIterator::new(sources, None).collect::<Vec<_>>();
-
-        // Assert
-        assert!(results.is_empty());
+    fn empty_sources() {
+        let it = MergingIterator::new(vec![Box::new(VecSource::new(vec![]))], None);
+        let res: Vec<_> = it.collect();
+        assert!(res.is_empty());
     }
 
     #[test]
-    fn should_handle_limit_with_tombstones() {
-        // Arrange
-        let src = VecSource::new(vec![
+    fn limit_with_tombstones() {
+        let s = VecSource::new(vec![
             kv("k1", "v1", 1),
             (Bytes::from("k2"), None, 2),
             kv("k3", "v3", 3),
             (Bytes::from("k4"), None, 4),
             kv("k5", "v5", 5),
         ]);
-        let sources: Vec<Box<dyn IteratorSource>> = vec![Box::new(src)];
-
-        // Act
-        let res: Vec<_> = MergingIterator::new(sources, Some(2)).collect();
-
-        // Assert
+        let it = MergingIterator::new(vec![Box::new(s)], Some(2));
+        let res: Vec<_> = it.collect();
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].0, Bytes::from("k1"));
         assert_eq!(res[1].0, Bytes::from("k3"));

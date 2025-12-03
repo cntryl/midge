@@ -8,7 +8,7 @@ use crate::error::{MidgeError, MidgeResult};
 use crate::manifest::Manifest;
 use crossbeam::channel;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
@@ -154,11 +154,12 @@ impl Drop for CompactionController {
 impl CompactionController {
     /// Execute a compaction plan synchronously via the orchestrator.
     /// Intended for maintenance paths that need inline execution.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_plan_sync(
         &self,
-        db_path: &PathBuf,
+        db_path: &Path,
         cf_set: &Arc<ColumnFamilySet>,
-        sst_dir: &PathBuf,
+        sst_dir: &Path,
         sst_factory: &Arc<dyn SstFactory>,
         sst_reader_factory: &Arc<dyn SstReaderFactory>,
         snapshot_registry: &Arc<SnapshotRegistry>,
@@ -171,8 +172,8 @@ impl CompactionController {
         plan: CompactionPlan,
     ) -> MidgeResult<()> {
         let cfg = Arc::new(CompactionWorkerConfig {
-            db_path: db_path.clone(),
-            sst_dir: sst_dir.clone(),
+            db_path: db_path.to_path_buf(),
+            sst_dir: sst_dir.to_path_buf(),
             sst_factory: Arc::clone(sst_factory),
             sst_reader_factory: Arc::clone(sst_reader_factory),
             snapshot_registry: Arc::clone(snapshot_registry),
