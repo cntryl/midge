@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::test_attr_in_doctest)]
 //! Deadlock Detection Utility for Integration Tests
 //!
 //! Provides utilities to detect potential deadlocks and hanging tests at runtime.

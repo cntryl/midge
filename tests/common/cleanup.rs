@@ -44,10 +44,8 @@ pub fn cleanup_leaked_test_dirs() -> std::io::Result<usize> {
             if let Ok(file_name) = entry.file_name().into_string() {
                 if file_name.starts_with("midge_test_") || file_name == "midge-mem" {
                     let path = entry.path();
-                    if path.is_dir() {
-                        if std::fs::remove_dir_all(&path).is_ok() {
-                            cleaned += 1;
-                        }
+                    if path.is_dir() && std::fs::remove_dir_all(&path).is_ok() {
+                        cleaned += 1;
                     }
                 }
             }

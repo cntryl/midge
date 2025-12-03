@@ -271,21 +271,20 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
         if wait_mut_re.is_match(trimmed)
             && !wait_while_re.is_match(trimmed)
             && condvar_re.is_match(trimmed)
+            && !has_enclosing_loop(&lines, i)
         {
-            if !has_enclosing_loop(&lines, i) {
-                issues.push(DeadlockIssue {
-                    file: file_str.clone(),
-                    line: i + 1,
-                    pattern: "condvar.wait() without loop".into(),
-                    severity: Severity::High,
-                    description:
-                        "Condvar.wait() outside a loop can miss notifications and deadlock."
-                            .into(),
-                    fix_suggestion:
-                        "Wrap condvar.wait() in a loop or use wait_while with a predicate."
-                            .into(),
-                });
-            }
+            issues.push(DeadlockIssue {
+                file: file_str.clone(),
+                line: i + 1,
+                pattern: "condvar.wait() without loop".into(),
+                severity: Severity::High,
+                description:
+                    "Condvar.wait() outside a loop can miss notifications and deadlock."
+                        .into(),
+                fix_suggestion:
+                    "Wrap condvar.wait() in a loop or use wait_while with a predicate."
+                        .into(),
+            });
         }
 
         // A-4 / C-11: Empty atomic spin-loop
@@ -319,8 +318,7 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
                 // A-2: Double-lock same mutex in same region
                 let mut double_lock_reported = false;
 
-                for j in (region.start_idx + 1)..region.end_idx {
-                    let l = &lines[j];
+                for l in lines.iter().take(region.end_idx).skip(region.start_idx + 1) {
                     if l.contains(&format!("{}.lock(", region.mutex_name)) {
                         issues.push(DeadlockIssue {
                             file: file_str.clone(),
@@ -345,8 +343,7 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
                     let mut seen_other_lock = false;
                     let mut other_mutexes: Vec<String> = Vec::new();
 
-                    for j in (region.start_idx + 1)..region.end_idx {
-                        let l = &lines[j];
+                    for l in lines.iter().take(region.end_idx).skip(region.start_idx + 1) {
                         if let Some(caps) = lock_call_re.captures(l) {
                             let name = caps.get(1).unwrap().as_str().to_string();
                             if name != region.mutex_name {
@@ -393,8 +390,12 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
                 }
 
                 // B-8: Blocking I/O while holding lock
-                for j in (region.start_idx + 1)..region.end_idx {
-                    let l = &lines[j];
+                for (j, l) in lines
+                    .iter()
+                    .enumerate()
+                    .take(region.end_idx)
+                    .skip(region.start_idx + 1)
+                {
                     if io_re.is_match(l) {
                         issues.push(DeadlockIssue {
                             file: file_str.clone(),
@@ -414,8 +415,12 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
                 }
 
                 // B-9: .await while holding lock (async)
-                for j in (region.start_idx + 1)..region.end_idx {
-                    let l = &lines[j];
+                for (j, l) in lines
+                    .iter()
+                    .enumerate()
+                    .take(region.end_idx)
+                    .skip(region.start_idx + 1)
+                {
                     if await_re.is_match(l) {
                         issues.push(DeadlockIssue {
                             file: file_str.clone(),
@@ -435,8 +440,12 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
                 }
 
                 // C-13: Guard clone / copy (perf smell)
-                for j in (region.start_idx + 1)..region.end_idx {
-                    let l = &lines[j];
+                for (j, l) in lines
+                    .iter()
+                    .enumerate()
+                    .take(region.end_idx)
+                    .skip(region.start_idx + 1)
+                {
                     if l.contains(&format!("{}.clone()", region.guard_name)) {
                         issues.push(DeadlockIssue {
                             file: file_str.clone(),
@@ -456,8 +465,12 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
                 }
 
                 // B-10: condvar.wait(...) without reassigning guard (suspicious)
-                for j in (region.start_idx + 1)..region.end_idx {
-                    let l = &lines[j];
+                for (j, l) in lines
+                    .iter()
+                    .enumerate()
+                    .take(region.end_idx)
+                    .skip(region.start_idx + 1)
+                {
                     if wait_re.is_match(l) && l.contains(&region.guard_name) {
                         // If the line doesn't contain '=' it likely isn't reassigning the guard
                         if !l.contains('=') {
@@ -479,8 +492,12 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
                 }
 
                 // A-6 / B-6: Notify while holding lock (only if guard is still live)
-                for j in (region.start_idx + 1)..region.end_idx {
-                    let l = &lines[j];
+                for (j, l) in lines
+                    .iter()
+                    .enumerate()
+                    .take(region.end_idx)
+                    .skip(region.start_idx + 1)
+                {
                     if (l.contains(".notify_all()") || l.contains(".notify_one()"))
                         && condvar_re.is_match(l)
                     {
