@@ -218,7 +218,6 @@ impl Wal {
         }
 
         inner.file.flush()?;
-        let current_pos = inner.pos;
 
         // Try platform-specific preallocation
         #[cfg(unix)]
@@ -238,6 +237,7 @@ impl Wal {
         // Use set_len to reserve space (may write zeros or create sparse file)
         #[cfg(windows)]
         {
+            let current_pos = inner.pos;
             let current_len = inner.file.get_ref().metadata()?.len();
             if current_len < target_size {
                 let file = inner.file.get_mut();
