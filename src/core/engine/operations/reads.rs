@@ -829,23 +829,25 @@ mod tests {
     use bytes::Bytes;
     use uuid;
 
-    fn create_test_engine() -> MidgeEngine {
+    fn create_test_engine() -> (MidgeEngine, crate::common::test_cleanup::TempDirGuard) {
         let temp_dir =
             std::env::temp_dir().join(format!("midge_test_reads_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
+        let guard = crate::common::test_cleanup::TempDirGuard::new(temp_dir.clone());
         let db_path = temp_dir;
         let opts = MidgeOptions {
             storage_mode: StorageMode::LocalDisk { db_path },
             enable_compaction: false,
             ..Default::default()
         };
-        MidgeEngine::open(opts).unwrap()
+        let engine = MidgeEngine::open(opts).unwrap();
+        (engine, guard)
     }
 
     #[test]
     fn should_return_none_when_getting_nonexistent_key() {
         // Arrange
-        let engine = create_test_engine();
+        let (engine, _guard) = create_test_engine();
         let cf = engine.default_column_family();
 
         // Act
@@ -859,7 +861,7 @@ mod tests {
     #[test]
     fn should_return_value_when_getting_existing_key() {
         // Arrange
-        let engine = create_test_engine();
+        let (engine, _guard) = create_test_engine();
         let cf = engine.default_column_family();
         engine.put(&cf, b"key1", b"value1").unwrap();
 
@@ -874,7 +876,7 @@ mod tests {
     #[test]
     fn should_return_empty_vec_when_scanning_empty_engine() {
         // Arrange
-        let engine = create_test_engine();
+        let (engine, _guard) = create_test_engine();
         let cf = engine.default_column_family();
         let query = Query::new();
 
@@ -889,7 +891,7 @@ mod tests {
     #[test]
     fn should_return_entries_when_scanning_with_data() {
         // Arrange
-        let engine = create_test_engine();
+        let (engine, _guard) = create_test_engine();
         let cf = engine.default_column_family();
         engine.put(&cf, b"key1", b"value1").unwrap();
         engine.put(&cf, b"key2", b"value2").unwrap();
@@ -909,7 +911,7 @@ mod tests {
     #[test]
     fn should_return_value_at_snapshot_when_get_at() {
         // Arrange
-        let engine = create_test_engine();
+        let (engine, _guard) = create_test_engine();
         let cf = engine.default_column_family();
         engine.put(&cf, b"key1", b"value1").unwrap();
         let snapshot = engine.snapshot();
@@ -926,7 +928,7 @@ mod tests {
     #[test]
     fn should_return_entries_at_snapshot_when_scan_at() {
         // Arrange
-        let engine = create_test_engine();
+        let (engine, _guard) = create_test_engine();
         let cf = engine.default_column_family();
         engine.put(&cf, b"key1", b"value1").unwrap();
         let snapshot = engine.snapshot();

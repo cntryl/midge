@@ -51,7 +51,7 @@ fn cloud_configs() -> Vec<(&'static str, bool, usize)> {
         ("default", true, 10),
         ("no-wal-sync", false, 10),
         ("large-cache", true, 50),
-        ("small-cache", true, 2),
+        ("small-cache", true, 4), // At least 3 to hold SSTs from 3 flush rounds + headroom
     ]
 }
 
@@ -176,6 +176,12 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
 
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                mock_backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout (config: {})",
+                config_name
+            );
 
             let attempts_after = mock_backend.upload_count() + mock_backend.upload_failure_count();
 
@@ -212,6 +218,9 @@ fn should_upload_sst_idempotently_given_duplicate_upload_attempt_when_network_fl
                 );
             }
         }
+
+        // Explicitly drop engine before next iteration to ensure cleanup
+        drop(eng);
     }
 }
 
@@ -279,6 +288,12 @@ fn should_recover_consistently_given_partial_cloud_sst_upload_when_local_manifes
 
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
+            let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout"
+            );
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             // Assert
@@ -335,6 +350,12 @@ fn should_not_poison_wal_startup_given_fail_upload_after_is_armed_post_open() {
 
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
+            let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout"
+            );
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             assert!(
@@ -501,6 +522,11 @@ fn should_allow_clean_shutdown_given_cloud_upload_failures_after_flush_attempts(
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout"
+            );
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             assert!(
@@ -654,6 +680,11 @@ fn should_report_upload_attempts_when_manifest_sync_happens_under_fail_after() {
             let attempts_before = backend.upload_count() + backend.upload_failure_count();
             let _ = eng.flush_cf(&cf);
             let _ = eng.wait_for_flush(Duration::from_secs(5));
+            // Wait for background cloud upload attempt (success or failure)
+            assert!(
+                backend.wait_for_upload_attempts(attempts_before + 1, Duration::from_secs(5)),
+                "upload attempt should complete within timeout"
+            );
             let attempts_after = backend.upload_count() + backend.upload_failure_count();
 
             assert!(

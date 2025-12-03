@@ -31,6 +31,10 @@ const DIRECT_WRITE_THRESHOLD: usize = BUF_CAP * 2;
 /// Pre-allocating WAL files reduces metadata updates during writes and improves
 /// sequential write performance on many filesystems (ext4, XFS, NTFS).
 /// The file will be truncated to actual size on clean shutdown.
+///
+/// NOTE: Currently unused because append mode is incompatible with preallocation.
+/// See the comment in `Wal::open()` for details.
+#[allow(dead_code)]
 const WAL_PREALLOC_SIZE: u64 = 64 * 1024 * 1024;
 
 // ============================================================================
@@ -183,8 +187,13 @@ impl Wal {
         };
         // Ensure header exists for a fresh file
         let _ = wal.write_header(0);
-        // Pre-allocate for performance (non-critical, ignore errors)
-        let _ = wal.preallocate(WAL_PREALLOC_SIZE);
+        // NOTE: Preallocation disabled because the file is opened in append mode,
+        // which causes all writes to go to the end of the file. With preallocation,
+        // writes would go to position 64MB instead of position 16 (after header).
+        // To re-enable preallocation, either:
+        // 1. Don't use append mode and manage position manually
+        // 2. Use pwrite-style positional writes
+        // let _ = wal.preallocate(WAL_PREALLOC_SIZE);
         Ok(wal)
     }
 

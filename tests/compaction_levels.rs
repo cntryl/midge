@@ -17,8 +17,8 @@ mod common;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions};
 use common::{
-    assert_get_equals, compaction_test_opts, create_storage_mode, disk_storage_modes,
-    populate_multi_level_data,
+    assert_get_equals, create_storage_mode, disk_storage_modes,
+    manual_compaction_test_opts, populate_multi_level_data,
 };
 
 // ============================================================================
@@ -30,7 +30,7 @@ fn should_organize_l0_into_sublevels_given_overlapping_files_when_flushing() {
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
@@ -69,7 +69,7 @@ fn should_compact_oldest_sublevel_first_given_incremental_strategy_when_compacti
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
@@ -110,7 +110,7 @@ fn should_compact_all_sublevels_given_high_file_count_when_aggressive_compaction
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
@@ -147,7 +147,7 @@ fn should_maintain_sublevel_ordering_given_sequential_flushes_when_reading() {
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
@@ -235,7 +235,7 @@ fn should_compact_largest_file_given_varying_sizes_when_level_too_large() {
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
@@ -295,6 +295,7 @@ fn should_respect_level_multiplier_given_cascading_compaction_when_levels_fill()
             memtable_size: 256,
             max_levels: 5,
             level_multiplier: 10,
+            enable_compaction: false, // Disable background compaction for manual compact_all()
             ..Default::default()
         };
         let eng = MidgeEngine::open(opts).expect("open");
@@ -336,7 +337,7 @@ fn should_not_exceed_target_size_given_completed_compaction_when_data_consolidat
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
         populate_multi_level_data(&eng, &cf);
@@ -373,6 +374,7 @@ fn should_trigger_l2_compaction_given_l1_exceeds_capacity_when_compacting() {
             memtable_size: 512,
             max_levels: 4,
             level_multiplier: 4,
+            enable_compaction: false, // Disable background compaction for manual compact_all()
             ..Default::default()
         };
         let eng = MidgeEngine::open(opts).expect("open");
@@ -417,6 +419,7 @@ fn should_propagate_compaction_to_deeper_levels_given_overflow_when_incremental_
             storage_mode,
             memtable_size: 256,
             max_levels: 5,
+            enable_compaction: false, // Disable background compaction for manual compact_all()
             ..Default::default()
         };
         let eng = MidgeEngine::open(opts).expect("open");
@@ -460,7 +463,7 @@ fn should_handle_cascading_compaction_to_max_level_given_deep_structure_when_com
     for mode in disk_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 
@@ -496,7 +499,7 @@ fn should_not_trigger_cascade_given_sufficient_capacity_when_modest_data() {
     for mode in disk_storage_modes() {
         // Arrange - write modest amount of data
         let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = compaction_test_opts(storage_mode);
+        let opts = manual_compaction_test_opts(storage_mode);
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng.default_column_family();
 

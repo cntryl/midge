@@ -1,7 +1,53 @@
 use std::path::PathBuf;
 
+/// A test directory that automatically cleans itself up when dropped.
+/// This ensures test directories are always removed, even on panic.
+pub struct TempTestDir {
+    path: PathBuf,
+    cleanup: bool,
+}
+
+impl TempTestDir {
+    /// Create a new temporary test directory with automatic cleanup
+    pub fn new(prefix: &str) -> Self {
+        let mut base = std::env::temp_dir();
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+        base.push(format!("midge_test_{}_{}", prefix, t));
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        
+        Self {
+            path: base,
+            cleanup: true,
+        }
+    }
+
+    /// Get the path to this directory
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Disable automatic cleanup (for debugging)
+    #[allow(dead_code)]
+    pub fn keep(&mut self) {
+        self.cleanup = false;
+    }
+}
+
+impl Drop for TempTestDir {
+    fn drop(&mut self) {
+        if self.cleanup {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 /// Create a unique temporary directory under the OS temp dir for tests.
-/// Simple, dependency-free helper used by integration test stubs.
+/// Returns a TempTestDir that auto-cleans on drop.
+///
+/// For backwards compatibility with existing code that expects PathBuf,
+/// use `.path().to_path_buf()` on the returned value.
+#[deprecated(note = "Use TempTestDir::new() directly for automatic cleanup")]
 pub fn create_temp_dir(prefix: &str) -> PathBuf {
     let mut base = std::env::temp_dir();
     use std::time::{SystemTime, UNIX_EPOCH};
