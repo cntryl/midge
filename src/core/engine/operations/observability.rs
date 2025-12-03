@@ -21,8 +21,8 @@ impl MidgeEngine {
     /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
     /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
     /// if let Some(cache) = engine.block_cache() {
-    ///     // BlockCache exposes stats; use max_size_bytes as capacity
-    ///     println!("Block cache enabled with capacity: {} bytes", cache.stats().max_size_bytes);
+    ///     // BlockCache exposes stats; use capacity_bytes as capacity
+    ///     println!("Block cache enabled with capacity: {} bytes", cache.stats().capacity_bytes);
     /// }
     /// ```
     pub fn block_cache(&self) -> Option<&Arc<dyn crate::sst::BlockCacheTrait>> {

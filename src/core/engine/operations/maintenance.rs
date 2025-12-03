@@ -410,7 +410,9 @@ impl MidgeEngine {
                 cf.id.as_u32(),
                 start_key.map(|k| k.to_vec()),
                 end_key.map(|k| k.to_vec()),
-            )
+            )?;
+            // Wait deterministically for completion to ensure consistent reads in tests
+            coordinator.wait_until_idle(std::time::Duration::from_secs(5))
         } else {
             Err(MidgeError::invalid_config(
                 "Manual compaction requested but compaction is disabled",
@@ -632,17 +634,14 @@ impl MidgeEngine {
 
         // Apply compaction filter from default CF
         let cf_id = crate::api::column_family::DEFAULT_CF_ID;
-        let filter_arc = self.cf_set.cfs.get(&cf_id.as_u32()).and_then(|cf| {
+        let versions = if let Some(cf) = self.cf_set.cfs.get(&cf_id.as_u32()) {
             let guard = cf.compaction_filter.read();
-            if let Some(ref arc) = *guard {
-                Some(Arc::clone(arc))
+            if let Some(ref filter) = *guard {
+                crate::core::compaction::apply_compaction_filter(&versions, &**filter, 0)
             } else {
-                None
+                let noop = crate::core::compaction::filter::NoOpFilter;
+                crate::core::compaction::apply_compaction_filter(&versions, &noop, 0)
             }
-        });
-
-        let versions = if let Some(filter) = filter_arc {
-            crate::core::compaction::apply_compaction_filter(&versions, filter.as_ref(), 0)
         } else {
             let noop = crate::core::compaction::filter::NoOpFilter;
             crate::core::compaction::apply_compaction_filter(&versions, &noop, 0)

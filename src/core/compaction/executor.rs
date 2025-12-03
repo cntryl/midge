@@ -533,6 +533,117 @@ pub(crate) fn write_compacted_sst(
 }
 
 // ============================================================================
+// Orchestrated Execution
+// ============================================================================
+
+/// Execute a full compaction plan end-to-end.
+///
+/// This orchestrates the entire pipeline deterministically:
+/// - Collect versions and range tombstones
+/// - Sort versions for output
+/// - Convert values covered by range tombstones to tombstones
+/// - Filter safe tombstones based on snapshot visibility
+/// - Apply user compaction filter
+/// - Deduplicate preserving snapshot visibility
+/// - Write compacted SST
+/// - Update manifest via VersionManager and remove old SSTs
+pub(crate) fn execute_compaction_plan(
+    cfg: &Arc<crate::core::compaction::controller::CompactionWorkerConfig>,
+    _db_path: &std::path::Path,
+    sst_dir: &std::path::Path,
+    plan: crate::core::compaction::strategy::CompactionPlan,
+) -> MidgeResult<Option<(PathBuf, crate::manifest::FileMeta)>> {
+    let start_time = std::time::Instant::now();
+    let mut bytes_read: u64 = 0;
+    let mut _bytes_written: u64 = 0;
+    // 1) Collect
+    let mut versions = collect_compaction_versions(&cfg.sst_reader_factory, sst_dir, &plan.input_files);
+    if versions.is_empty() {
+        return Ok(None);
+    }
+    let range_tombs = collect_compaction_range_tombstones(&cfg.sst_reader_factory, sst_dir, &plan.input_files);
+
+    // 2) Sort
+    sort_versions_for_output(&mut versions);
+
+    // 3) Range-tombstone overlay
+    let versions = filter_versions_with_range_tombstones(&versions, &range_tombs);
+
+    // 4) Snapshot-aware tombstone filtering
+    let min_snapshot_seq = cfg.snapshot_registry.min_active_seq();
+    let (versions_after_tomb_filter, _removed) = filter_safe_tombstones(&versions, min_snapshot_seq);
+
+    // 5) Apply compaction filter
+    // Apply compaction filter if present (NoOp otherwise).
+    // Use filter by reference; storage is Box behind RwLock allowing mutation elsewhere.
+    let versions_after_cf = if let Some(cf) = cfg.cf_set.cfs.get(&plan.cf_id) {
+        let guard = cf.compaction_filter.read();
+        if let Some(ref filter) = *guard {
+            apply_compaction_filter(&versions_after_tomb_filter, &**filter, plan.target_level)
+        } else {
+            let noop = super::filter::NoOpFilter;
+            apply_compaction_filter(&versions_after_tomb_filter, &noop, plan.target_level)
+        }
+    } else {
+        let noop = super::filter::NoOpFilter;
+        apply_compaction_filter(&versions_after_tomb_filter, &noop, plan.target_level)
+    };
+
+    // 6) Deduplicate (snapshot-preserving)
+    let deduped = deduplicate_versions(&versions_after_cf, min_snapshot_seq);
+
+    // 7) Write SST
+    let ctx = SstWriterContext {
+        sst_factory: &cfg.sst_factory,
+        compression: cfg.compression,
+        block_size: cfg.block_size,
+        sst_dir,
+        cloud_sst_manager: cfg.cloud_sst_manager.as_ref(),
+    };
+    let write_res = write_compacted_sst(&ctx, &deduped, plan.cf_id)?;
+
+    // 8) Update manifest and cleanup
+    if let Some((_path, meta)) = &write_res {
+        if let Some(ref hooks) = cfg.test_hooks {
+            hooks.maybe_pause_compaction(crate::common::test_hooks::CompactionGatePoint::BeforeManifestUpdate);
+        }
+
+        let combined = crate::core::manifest::VersionEdit::CombinedAddRemove {
+            add: Box::new(meta.clone()),
+            remove: plan.input_files.clone(),
+            sequence: meta.largest_seq,
+        };
+        cfg.version_manager.apply_edit_sync(combined)?;
+
+        if let Some(ref hooks) = cfg.test_hooks {
+            hooks.maybe_pause_compaction(crate::common::test_hooks::CompactionGatePoint::AfterManifestUpdate);
+        }
+
+        // Remove old SSTs after manifest update
+        for old_sst in &plan.input_files {
+            let old_path = sst_dir.join(old_sst);
+            if old_path.exists() {
+                let _ = std::fs::remove_file(&old_path);
+            }
+        }
+
+        // Metrics: record compaction run details (placeholder; integrate with existing metrics API if available)
+        let _duration_ms = start_time.elapsed().as_millis() as u64;
+        if let Some((_path, meta)) = &write_res {
+            _bytes_written = meta.size_bytes;
+        }
+        for name in &plan.input_files {
+            let p = sst_dir.join(name);
+            if let Ok(md) = std::fs::metadata(&p) {
+                bytes_read = bytes_read.saturating_add(md.len());
+            }
+        }
+    }
+
+    Ok(write_res)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

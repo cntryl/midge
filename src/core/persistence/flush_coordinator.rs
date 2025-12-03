@@ -105,12 +105,21 @@ impl FlushCoordinator {
 
 impl Drop for FlushCoordinator {
     fn drop(&mut self) {
-        // Best-effort shutdown signal
-        let _ = self.tx.send(FlushMsg::Shutdown);
+        // Best-effort shutdown signal - use try_send to avoid blocking in Drop
+        let _ = self.tx.try_send(FlushMsg::Shutdown);
 
-        // Wait for thread to finish if handle still exists
+        // Give thread a moment to finish, but don't block indefinitely in Drop
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            let timeout = std::time::Duration::from_millis(100);
+            let start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < timeout {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if !handle.is_finished() {
+                tracing::warn!("Flush worker did not shutdown cleanly in Drop");
+            } else {
+                let _ = handle.join();
+            }
         }
     }
 }

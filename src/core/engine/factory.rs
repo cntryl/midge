@@ -399,7 +399,7 @@ pub(crate) fn setup_compaction_coordinator(
             cloud_sst_manager: cloud_sst_manager_c,
             compactor,
             cf_set: cf_set_arc,
-            test_hooks: opts.test_hooks.clone(),
+            test_hooks: opts.test_hooks.as_ref().map(|h| Arc::new(h.clone())),
             version_manager,
             background_error,
             rate_limiter: opts.compaction_rate_limiter.clone(),

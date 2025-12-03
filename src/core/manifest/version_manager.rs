@@ -185,7 +185,17 @@ impl Drop for VersionManager {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.lock().take() {
             tracing::warn!("VersionManager dropped without explicit shutdown");
-            let _ = handle.join();
+            // Give thread a moment to finish, but don't block indefinitely in Drop
+            let timeout = std::time::Duration::from_millis(100);
+            let start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < timeout {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if !handle.is_finished() {
+                tracing::warn!("Version manager worker did not shutdown cleanly in Drop");
+            } else {
+                let _ = handle.join();
+            }
         }
     }
 }

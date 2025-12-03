@@ -1,28 +1,27 @@
-//! Lock-free batched sync mechanism for WAL synchronization
+//! Mutex-based batched sync mechanism for WAL synchronization
 //!
 //! Allows multiple concurrent threads to share a single fsync operation,
 //! dramatically improving throughput under concurrent write workloads.
 //!
 //! ## How it works
 //! 1. Multiple threads append to WAL (buffered, no fsync)
-//! 2. When a thread calls sync(), it attempts a CAS on `in_progress` to become leader
-//! 3. If CAS succeeds: becomes leader, performs ONE fsync for all waiting threads
-//! 4. If CAS fails: becomes follower, spins briefly then parks until epoch changes
+//! 2. When a thread calls sync(), it checks `in_progress` under a mutex
+//! 3. First caller becomes leader, others become followers waiting on condvar
+//! 4. Leader performs ONE fsync for all waiting threads (without holding lock)
 //! 5. Leader increments epoch after sync completes, waking all followers
 //!
 //! This can batch 100+ fsync requests into a single syscall, increasing
 //! throughput from ~1K writes/sec to >100K writes/sec.
 //!
-//! ## Memory ordering
-//! - Leader: Uses `AcqRel` CAS to claim leadership
-//! - Leader: Publishes result with `Release`, then increments epoch with `Release`
-//! - Follower: Observes epoch with `Acquire` (synchronizes-with leader's Release)
-//! - Follower: Reads result with `Acquire` after epoch change
+//! ## Coordination
+//! - All state is protected by a single `Mutex<State>`
+//! - Leader releases lock while performing fsync (avoids blocking new waiters)
+//! - Followers wait on condvar until `epoch` changes
+//! - No lock-free primitives needed - simpler and more reliable
 
 use crate::error::{MidgeError, MidgeResult};
 use crossbeam::channel;
 use parking_lot::{Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::*};
 use std::time::Duration;
 
 /// Configuration for batched synchronization behavior
@@ -31,79 +30,70 @@ pub struct BatchedSyncConfig {
     /// Delay to accumulate waiters (microseconds). Set to 0 to disable.
     /// Default: 100µs
     pub wait_micros: u64,
-    /// Number of spin loop iterations before parking a follower thread.
-    /// Avoids syscall overhead for very short batches.
-    /// Default: 100
-    pub spin_loops: u32,
 }
 
 impl Default for BatchedSyncConfig {
     fn default() -> Self {
-        // Allow runtime override for experiments via environment variable
-        // `SHALE_BATCHED_SYNC_WAIT_US`. If unset or invalid, fall back to 100µs.
         let wait_micros = std::env::var("SHALE_BATCHED_SYNC_WAIT_US")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(100);
 
-        let spin_loops = std::env::var("SHALE_BATCHED_SYNC_SPIN_LOOPS")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(100);
+        Self { wait_micros }
+    }
+}
 
+/// Internal shared state guarded by a single mutex.
+#[derive(Debug)]
+struct State {
+    /// Monotonically increasing batch epoch; incremented after each completed sync.
+    epoch: u64,
+    /// True while a leader is currently doing work for this epoch.
+    in_progress: bool,
+    /// Number of callers that joined the current batch (including leader).
+    waiters: u64,
+    /// Whether the last completed batch failed (followers only see generic error).
+    last_failed: bool,
+}
+
+impl State {
+    fn new() -> Self {
         Self {
-            wait_micros,
-            spin_loops,
+            epoch: 0,
+            in_progress: false,
+            waiters: 0,
+            last_failed: false,
         }
     }
 }
 
-/// Lock-free batched-sync coordinator that batches fsync requests
+/// Batched-sync coordinator implemented with a single mutex + condvar.
+///
+/// This is much easier to reason about than the lock-free variant:
+/// - All coordination state is behind one `Mutex<State>`.
+/// - The leader runs `sync_fn` *without* holding the lock.
+/// - Followers simply wait for `epoch` to change.
 pub struct BatchedSyncCoordinator {
-    /// True while leader is performing sync (leadership flag)
-    in_progress: AtomicBool,
-    /// Monotonically increasing batch epoch; incremented after each completed sync
-    epoch: AtomicU64,
-    /// Result of the last completed batch: 0=pending, 1=ok, 2=err
-    result: AtomicU8,
-    /// Number of callers waiting to be included in the next batch. Incremented
-    /// by all callers upon entry to `wait_for_sync`, and reset by the leader
-    /// when it collects the batch. This provides a cheap approximation of
-    /// the batch size for metrics and tuning.
-    pending: AtomicU64,
-    /// Parking gate to avoid busy-wait after spin threshold (not used for correctness)
-    park_lock: Mutex<()>,
-    /// Condition variable for waking parked followers
-    park_cv: Condvar,
-    /// Configuration
+    state: Mutex<State>,
+    cv: Condvar,
     config: BatchedSyncConfig,
-    /// Optional test hooks: a sender that leader will notify when batch is collected
-    /// and a receiver that the leader will wait on for deterministic tests.
+
+    // Optional test hooks (used only in tests, but kept here for API compatibility).
     test_leader_ready: Mutex<Option<channel::Sender<()>>>,
     test_leader_continue: Mutex<Option<channel::Receiver<()>>>,
 }
 
 impl BatchedSyncCoordinator {
-    /// Create a new batched-sync coordinator
     pub fn new(config: BatchedSyncConfig) -> Self {
         Self {
-            in_progress: AtomicBool::new(false),
-            epoch: AtomicU64::new(0),
-            result: AtomicU8::new(0),
-            park_lock: Mutex::new(()),
-            park_cv: Condvar::new(),
-            pending: AtomicU64::new(0),
+            state: Mutex::new(State::new()),
+            cv: Condvar::new(),
             config,
             test_leader_ready: Mutex::new(None),
             test_leader_continue: Mutex::new(None),
         }
     }
 
-    /// Test helper to set deterministic synchronization hooks.
-    ///
-    /// `ready` - optional sender that the leader sends to when batch is collected.
-    /// `continue_rx` - optional receiver that the leader will wait on until test allows it to continue.
-    #[cfg(test)]
     pub fn set_test_leader_sync(
         &self,
         ready: Option<channel::Sender<()>>,
@@ -113,131 +103,99 @@ impl BatchedSyncCoordinator {
         *self.test_leader_continue.lock() = continue_rx;
     }
 
+    /// Exposed only for tests that previously touched `epoch` / `in_progress` directly.
+    #[cfg(test)]
+    fn epoch(&self) -> u64 {
+        self.state.lock().epoch
+    }
+
+    #[cfg(test)]
+    fn in_progress(&self) -> bool {
+        self.state.lock().in_progress
+    }
+
     /// Wait for the next sync to complete, batching with other concurrent callers.
     ///
-    /// The first caller becomes the leader via lock-free CAS and performs the actual fsync.
-    /// Other callers spin briefly then park until the leader completes and increments the epoch.
+    /// The first caller that finds `in_progress == false` for this epoch becomes the leader
+    /// and performs the actual durable sync. All other callers wait until `epoch` advances.
     pub fn wait_for_sync<F>(&self, sync_fn: F) -> MidgeResult<()>
     where
         F: FnOnce() -> MidgeResult<()>,
     {
-        // Track that we're wanting to join the next batch. This is incremented
-        // by all callers and read/reset by the leader to compute the batch size
-        // for metrics.
-        self.pending.fetch_add(1, AcqRel);
+        // Fast path: try to become leader under the mutex.
+        let mut state = self.state.lock();
+        let my_epoch = state.epoch;
 
-        // Capture the current epoch before attempting to become leader
-        let my_epoch = self.epoch.load(Acquire);
+        if state.in_progress {
+            // Already a leader for this epoch -> become follower.
+            state.waiters += 1;
+            return self.wait_as_follower(state, my_epoch);
+        }
 
-        // Try to become leader via CAS (fast path, lock-free)
-        match self
-            .in_progress
-            .compare_exchange(false, true, AcqRel, Acquire)
+        // We are the leader for this epoch.
+        state.in_progress = true;
+        state.waiters += 1;
+        drop(state); // Do not hold the lock while doing fsync.
+
+        // Optional small sleep to accumulate followers into this batch.
+        if self.config.wait_micros > 0 {
+            std::thread::sleep(Duration::from_micros(self.config.wait_micros));
+        }
+
+        // Test hook: signal that leader is ready and optionally wait for test to continue.
+        #[cfg(test)]
         {
-            Ok(_) => {
-                // We are the leader - perform sync for all concurrent callers
-
-                // Optionally sleep briefly to accumulate more followers (increases batch size)
-                if self.config.wait_micros > 0 {
-                    std::thread::sleep(Duration::from_micros(self.config.wait_micros));
-                }
-
-                // Determine how many callers we collected for this batch. Swap
-                // resets the pending counter to 0 for the next batch. The value
-                // includes the leader itself and any followers that incremented
-                // the counter before the swap.
-                let batch = self.pending.swap(0, AcqRel);
-
-                // If test hooks are configured, notify the test that the leader
-                // has collected the batch and pause until the test allows us to continue.
-                let tx_opt = self.test_leader_ready.lock().clone();
-                if let Some(tx) = tx_opt {
-                    let _ = tx.send(());
-                }
-                let rx_opt = self.test_leader_continue.lock().clone();
-                if let Some(rx) = rx_opt {
-                    let _ = rx.recv();
-                }
-
-                // Mark result as pending (defensive, should already be 0 or stale)
-                self.result.store(0, Release);
-
-                // Perform the actual durable sync outside any locks
-                let res = sync_fn();
-
-                // Record batch metrics (uses global accessor to avoid wiring)
-                #[allow(unused_imports)]
-                {
-                    // Avoid a hard dependency on a metrics crate when not used by
-                    // tests; record only when available at runtime.
-                    if batch > 0 {
-                        crate::metrics::global_performance_metrics()
-                            .wal
-                            .record_batched_sync(batch);
-                    }
-                }
-
-                // Publish the result atomically: 1=success, 2=error
-                // This happens-before the epoch increment (both use Release ordering)
-                self.result.store(if res.is_ok() { 1 } else { 2 }, Release);
-
-                // Increment epoch to signal batch completion (synchronizes-with follower Acquire)
-                // All followers spinning/parked on my_epoch will observe the new epoch
-                self.epoch.fetch_add(1, Release);
-
-                // Release leadership so next caller can become leader
-                self.in_progress.store(false, Release);
-
-                // Wake all parked followers (they'll observe the new epoch and result)
-                self.park_cv.notify_all();
-
-                res
+            if let Some(tx) = self.test_leader_ready.lock().clone() {
+                let _ = tx.send(());
             }
-            Err(_) => {
-                // We are a follower - wait for the current leader to finish
-
-                // Spin briefly to avoid parking syscall overhead for very short batches
-                for _ in 0..self.config.spin_loops {
-                    if self.epoch.load(Acquire) != my_epoch {
-                        break;
-                    }
-                    std::hint::spin_loop();
-                }
-
-                // If still waiting after spin, park until leader wakes us
-                if self.epoch.load(Acquire) == my_epoch {
-                    let mut guard = self.park_lock.lock();
-                    // Use wait_while to handle spurious wakeups and re-check condition atomically
-                    self.park_cv.wait_while(&mut guard, |_| self.epoch.load(Acquire) == my_epoch);
-                }
-
-                // Epoch changed - the batch we joined has completed
-                // Read the result with Acquire ordering (synchronizes-with leader's Release)
-                match self.result.load(Acquire) {
-                    1 => Ok(()),
-                    2 => {
-                        // Leader's sync failed. We can't propagate the original error
-                        // (would require shared storage), so return a generic error.
-                        // The leader thread should log the actual failure.
-                        Err(MidgeError::internal("batched-sync leader fsync failed"))
-                    }
-                    0 => {
-                        // Very rare race: epoch changed but result not yet visible due to
-                        // CPU cache coherency delay. Spin briefly to let the write propagate.
-                        for _ in 0..10 {
-                            std::hint::spin_loop();
-                        }
-                        match self.result.load(Acquire) {
-                            1 => Ok(()),
-                            2 => Err(MidgeError::internal("batched-sync leader fsync failed")),
-                            // Still 0 after spin? Treat as success (leader already released lock)
-                            _ => Ok(()),
-                        }
-                    }
-                    // Any other value (shouldn't happen) - treat as success
-                    _ => Ok(()),
-                }
+            if let Some(rx) = self.test_leader_continue.lock().clone() {
+                let _ = rx.recv();
             }
+        }
+
+        // Perform the actual durable sync.
+        let res = sync_fn();
+        let success = res.is_ok();
+
+        // Reacquire lock and complete the batch.
+        let mut state = self.state.lock();
+        let batch_size = state.waiters;
+        state.waiters = 0;
+        state.in_progress = false;
+        state.last_failed = !success;
+        state.epoch = state.epoch.wrapping_add(1);
+
+        // Record batch metrics while still holding the state (for consistency).
+        if batch_size > 0 {
+            #[allow(unused_imports)]
+            {
+                crate::metrics::global_performance_metrics()
+                    .wal
+                    .record_batched_sync(batch_size);
+            }
+        }
+
+        // Wake up all followers waiting on the previous epoch.
+        self.cv.notify_all();
+        drop(state);
+
+        // Leader returns the original result.
+        res
+    }
+
+    fn wait_as_follower(
+        &self,
+        mut state: parking_lot::MutexGuard<'_, State>,
+        my_epoch: u64,
+    ) -> MidgeResult<()> {
+        // Wait until epoch changes. We never block if the leader already completed.
+        self.cv.wait_while(&mut state, |s| s.epoch == my_epoch);
+
+        // Now we're observing a completed batch.
+        if state.last_failed {
+            Err(MidgeError::internal("batched-sync leader fsync failed"))
+        } else {
+            Ok(())
         }
     }
 }
@@ -250,15 +208,11 @@ mod tests {
 
     #[test]
     fn should_create_coordinator_with_default_config() {
-        // Arrange
         let config = BatchedSyncConfig::default();
-
-        // Act
         let coordinator = BatchedSyncCoordinator::new(config);
 
-        // Assert
-        assert!(!coordinator.in_progress.load(Acquire));
-        assert_eq!(coordinator.epoch.load(Acquire), 0);
+        assert!(!coordinator.in_progress());
+        assert_eq!(coordinator.epoch(), 0);
     }
 
     #[test]
@@ -266,8 +220,7 @@ mod tests {
         // Arrange
         // Use a small wait to allow followers to accumulate
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
-            wait_micros: 100, // Small delay to accumulate followers
-            spin_loops: 50,
+            wait_micros: 100,
         }));
         let sync_count = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(std::sync::Barrier::new(10));
@@ -339,7 +292,6 @@ mod tests {
         // Use fast config to avoid timing-related stalls in CI
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
             wait_micros: 0,
-            spin_loops: 50,
         }));
         let barrier = Arc::new(std::sync::Barrier::new(5));
 
@@ -363,10 +315,8 @@ mod tests {
 
     #[test]
     fn should_propagate_error_given_leader_fails_when_followers_wait() {
-        // Arrange
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
             wait_micros: 10,
-            spin_loops: 50,
         }));
         let barrier = Arc::new(std::sync::Barrier::new(6));
 
@@ -393,11 +343,9 @@ mod tests {
     }
 
     #[test]
-    fn should_clear_error_after_last_follower_consumes_when_new_batch_starts() {
-        // Arrange
+    fn should_clear_error_after_failed_batch_when_new_batch_starts() {
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
             wait_micros: 10,
-            spin_loops: 50,
         }));
         let barrier = Arc::new(std::sync::Barrier::new(4));
 
@@ -425,17 +373,14 @@ mod tests {
     #[test]
     fn should_increment_batch_id_given_new_leader_starts_when_previous_finished() {
         // Arrange
-        let coordinator = BatchedSyncCoordinator::new(BatchedSyncConfig {
-            wait_micros: 1,
-            spin_loops: 10,
-        });
+        let coordinator = BatchedSyncCoordinator::new(BatchedSyncConfig { wait_micros: 1 });
 
         // Act - perform two sequential syncs and observe the epoch monotonicity
         coordinator.wait_for_sync(|| Ok(())).unwrap();
-        let first_epoch = coordinator.epoch.load(Acquire);
+        let first_epoch = coordinator.epoch();
 
         coordinator.wait_for_sync(|| Ok(())).unwrap();
-        let second_epoch = coordinator.epoch.load(Acquire);
+        let second_epoch = coordinator.epoch();
 
         // Assert
         assert!(
@@ -446,19 +391,15 @@ mod tests {
 
     #[test]
     fn should_allow_back_to_back_syncs_given_multiple_rounds_when_reused() {
-        // Arrange
-        // Use a simple sequential test without complex channel coordination
-        // to avoid race conditions that cause hangs.
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
             wait_micros: 0,
-            spin_loops: 10,
         }));
 
         // Act - run several back-to-back rounds of concurrent syncs
         for _round in 0..5 {
             let barrier = Arc::new(std::sync::Barrier::new(4));
             let mut handles = vec![];
-            
+
             for _ in 0..4 {
                 let coord = coordinator.clone();
                 let bar = barrier.clone();
@@ -476,7 +417,7 @@ mod tests {
         }
 
         // Assert - coordinator survived repeated reuse; final state is sane
-        assert!(!coordinator.in_progress.load(Acquire));
+        assert!(!coordinator.in_progress());
     }
 
     #[test]
@@ -484,7 +425,6 @@ mod tests {
         // Arrange
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
             wait_micros: 5,
-            spin_loops: 100,
         }));
         let sync_count = Arc::new(AtomicUsize::new(0));
         let threads = 50usize;
