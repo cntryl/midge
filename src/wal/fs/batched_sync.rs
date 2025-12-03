@@ -150,10 +150,12 @@ impl BatchedSyncCoordinator {
 
                 // If test hooks are configured, notify the test that the leader
                 // has collected the batch and pause until the test allows us to continue.
-                if let Some(tx) = self.test_leader_ready.lock().clone() {
+                let tx_opt = self.test_leader_ready.lock().clone();
+                if let Some(tx) = tx_opt {
                     let _ = tx.send(());
                 }
-                if let Some(rx) = self.test_leader_continue.lock().clone() {
+                let rx_opt = self.test_leader_continue.lock().clone();
+                if let Some(rx) = rx_opt {
                     let _ = rx.recv();
                 }
 

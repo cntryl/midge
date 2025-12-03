@@ -148,6 +148,10 @@ targets = ["x86_64-unknown-linux-gnu"]
 name = "validate_tests"
 path = "testutils/validate_tests.rs"
 
+[[bin]]
+name = "detect_deadlocks"
+path = "testutils/detect_deadlocks.rs"
+
 # =============================================================================
 # Benchmarks — Tier 1: Hot Path (<1s)
 # =============================================================================

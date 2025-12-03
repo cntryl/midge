@@ -31,6 +31,7 @@
 
 pub mod cleanup;
 pub mod cloud;
+pub mod deadlock_detector;
 pub mod test_helpers;
 
 use bytes::Bytes;
