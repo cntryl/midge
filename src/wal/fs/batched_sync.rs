@@ -264,9 +264,9 @@ mod tests {
     #[test]
     fn should_batch_multiple_sync_requests() {
         // Arrange
-        // Use a fast config to avoid timing-related stalls in CI
+        // Use a small wait to allow followers to accumulate
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
-            wait_micros: 0,
+            wait_micros: 100, // Small delay to accumulate followers
             spin_loops: 50,
         }));
         let sync_count = Arc::new(AtomicUsize::new(0));
