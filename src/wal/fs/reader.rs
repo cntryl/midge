@@ -60,6 +60,7 @@ pub fn replay_wal_file(path: &std::path::Path) -> MidgeResult<Vec<WalRecord>> {
         let mut seq = None;
         let mut key = None;
         let mut value = None;
+        let mut is_value_compressed = false;
         let mut expiration = None;
         let mut range_end = None;
         let mut txn_id = None;
@@ -81,10 +82,12 @@ pub fn replay_wal_file(path: &std::path::Path) -> MidgeResult<Vec<WalRecord>> {
                 }
                 tags::VALUE => {
                     value = Some(bytes::Bytes::copy_from_slice(field_value));
+                    is_value_compressed = false;
                 }
                 tags::VALUE_COMPRESSED => {
                     // Compressed value - will decompress after reading compression type
                     value = Some(bytes::Bytes::copy_from_slice(field_value));
+                    is_value_compressed = true;
                 }
                 tags::COMPRESSION => {
                     compression = Some(parse_u8(field_value)?);
@@ -104,10 +107,12 @@ pub fn replay_wal_file(path: &std::path::Path) -> MidgeResult<Vec<WalRecord>> {
             }
         }
 
-        // Decompress value if needed
-        if let (Some(comp_type), Some(ref compressed_value)) = (compression, &value) {
-            let decompressed = decompress_value(comp_type, compressed_value)?;
-            value = Some(bytes::Bytes::from(decompressed));
+        // Decompress value if needed (only if it came from VALUE_COMPRESSED tag)
+        if is_value_compressed {
+            if let (Some(comp_type), Some(ref compressed_value)) = (compression, &value) {
+                let decompressed = decompress_value(comp_type, compressed_value)?;
+                value = Some(bytes::Bytes::from(decompressed));
+            }
         }
 
         // Validate required fields

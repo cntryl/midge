@@ -27,6 +27,8 @@ pub struct WalRecordRef<'a> {
     pub range_end: Option<&'a [u8]>,
     pub txn_id: Option<u64>,
     pub compression: Option<u8>,
+    /// Tracks whether value came from VALUE_COMPRESSED tag (true) or VALUE tag (false)
+    pub value_is_compressed: bool,
 }
 
 impl<'a> WalRecordRef<'a> {
@@ -39,13 +41,13 @@ impl<'a> WalRecordRef<'a> {
 
         let key = bytes::Bytes::copy_from_slice(self.key);
 
-        // Decompress value if needed
-        let value = match (self.compression, self.value) {
-            (Some(comp_type), Some(compressed_value)) => {
+        // Decompress value if needed (only if it came from VALUE_COMPRESSED tag)
+        let value = match (self.value_is_compressed, self.compression, self.value) {
+            (true, Some(comp_type), Some(compressed_value)) => {
                 let decompressed = decompress_value(comp_type, compressed_value)?;
                 Some(bytes::Bytes::from(decompressed))
             }
-            (None, Some(v)) => Some(bytes::Bytes::copy_from_slice(v)),
+            (false, _, Some(v)) => Some(bytes::Bytes::copy_from_slice(v)),
             _ => None,
         };
 
@@ -267,6 +269,7 @@ pub fn decode_borrowed(body: &[u8]) -> MidgeResult<WalRecordRef<'_>> {
     let mut seq: u64 = 0;
     let mut key: Option<&[u8]> = None;
     let mut value: Option<&[u8]> = None;
+    let mut value_is_compressed = false;
     let mut expiration = None;
     let mut range_end: Option<&[u8]> = None;
     let mut txn_id = None;
@@ -286,7 +289,14 @@ pub fn decode_borrowed(body: &[u8]) -> MidgeResult<WalRecordRef<'_>> {
                 has_seq = true;
             }
             tags::KEY => key = Some(field_value),
-            tags::VALUE | tags::VALUE_COMPRESSED => value = Some(field_value),
+            tags::VALUE => {
+                value = Some(field_value);
+                value_is_compressed = false;
+            }
+            tags::VALUE_COMPRESSED => {
+                value = Some(field_value);
+                value_is_compressed = true;
+            }
             tags::COMPRESSION => compression = Some(parse_u8(field_value)?),
             tags::EXPIRATION => expiration = Some(parse_u64(field_value)?),
             tags::RANGE_END => range_end = Some(field_value),
@@ -317,6 +327,7 @@ pub fn decode_borrowed(body: &[u8]) -> MidgeResult<WalRecordRef<'_>> {
         range_end,
         txn_id,
         compression,
+        value_is_compressed,
     })
 }
 

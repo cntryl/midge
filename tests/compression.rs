@@ -225,50 +225,42 @@ fn should_read_compressed_data_given_lz4_compression_when_flushed_to_sst() {
 #[test]
 fn should_persist_compression_setting_given_reopen_when_using_same_options() {
     // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-
-    // Write data with compression
-    {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: temp_dir.path().to_path_buf(),
-            },
-            compression: CompressionType::Lz4,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
-        let cf = engine.default_column_family();
-        for i in 0..1000 {
-            let key = format!("persist_key_{:04}", i);
-            let value = format!("persist_value_{:04}", i);
-            engine
-                .put(&cf, key.as_bytes(), value.as_bytes())
-                .expect("put");
-        }
-        engine.flush().expect("flush");
-    }
-
-    // Act - reopen with same options
+    let dir = common::test_temp_dir();
     let opts = MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
-            db_path: temp_dir.path().to_path_buf(),
+            db_path: dir.path().to_path_buf(),
         },
         compression: CompressionType::Lz4,
         ..Default::default()
     };
-    let engine = MidgeEngine::open(opts).expect("reopen");
-    let cf = engine.default_column_family();
 
-    // Assert - data should be readable
-    for i in 0..1000 {
-        let key = format!("persist_key_{:04}", i);
-        let expected = format!("persist_value_{:04}", i);
-        let value = engine
-            .get(&cf, key.as_bytes())
-            .expect("get")
-            .expect("exists");
-        assert_eq!(value.as_ref(), expected.as_bytes());
-    }
+    // Act & Assert
+    common::with_engine_restart(
+        opts,
+        |engine| {
+            let cf = engine.default_column_family();
+            for i in 0..1000 {
+                let key = format!("persist_key_{:04}", i);
+                let value = format!("persist_value_{:04}", i);
+                engine
+                    .put(&cf, key.as_bytes(), value.as_bytes())
+                    .expect("put");
+            }
+            engine.flush().expect("flush");
+        },
+        |engine| {
+            let cf = engine.default_column_family();
+            for i in 0..1000 {
+                let key = format!("persist_key_{:04}", i);
+                let expected = format!("persist_value_{:04}", i);
+                let value = engine
+                    .get(&cf, key.as_bytes())
+                    .expect("get")
+                    .expect("exists");
+                assert_eq!(value.as_ref(), expected.as_bytes());
+            }
+        },
+    );
 }
 
 // =============================================================================
