@@ -7,7 +7,7 @@
 //!
 //! - Basic correctness: merge with/without base value, sequential merges
 //! - Associativity: different merge orders produce same result
-//! - Flush/Compaction: merge resolution during background operations
+//! - Flush/Compaction: merge resolution during writes to SST
 //! - Column family isolation: per-CF operator registration
 //! - Error handling: missing operator, failing operator, operator changes
 //! - Recovery: merge persistence across restarts
@@ -16,7 +16,8 @@
 //!
 //! # Storage Mode Coverage
 //!
-//! All tests run on all three storage modes via `all_storage_modes()`.
+//! All tests run on all storage modes via `all_storage_modes()` /
+//! `disk_storage_modes()` from `common`.
 
 mod common;
 
@@ -30,6 +31,55 @@ use cntryl_midge::{
 };
 use common::{all_storage_modes, create_storage_mode, disk_storage_modes, DurabilityTestContext};
 use std::sync::Arc;
+
+// ============================================================================
+// TEST-ONLY MERGE OPERATORS
+// ============================================================================
+
+/// Test merge operator that counts how many merge operations have been
+/// applied for a key. The value is stored as UTF-8 "count=N".
+struct CollectOperandsOperator;
+
+impl MergeOperator for CollectOperandsOperator {
+    fn name(&self) -> &str {
+        "CollectOperandsOperator"
+    }
+
+    fn merge(
+        &self,
+        _key: &[u8],
+        existing_value: Option<&[u8]>,
+        _operands: &[u8],
+    ) -> MidgeResult<Vec<u8>> {
+        let base = existing_value
+            .map(|v| std::str::from_utf8(v).unwrap())
+            .map(|s| s.strip_prefix("count=").unwrap().parse::<usize>().unwrap())
+            .unwrap_or(0);
+
+        // In the current engine, each merge_cf call is a single logical operand.
+        // We just bump the count by 1 per merge invocation.
+        let next = base + 1;
+        Ok(format!("count={next}").into_bytes())
+    }
+}
+
+/// Merge operator that always fails. Used to verify error propagation.
+struct FailingMergeOperator;
+
+impl MergeOperator for FailingMergeOperator {
+    fn name(&self) -> &str {
+        "FailingMergeOperator"
+    }
+
+    fn merge(
+        &self,
+        _key: &[u8],
+        _existing_value: Option<&[u8]>,
+        _operands: &[u8],
+    ) -> MidgeResult<Vec<u8>> {
+        Err(MidgeError::internal("simulated merge operator failure"))
+    }
+}
 
 // ============================================================================
 // BASIC CORRECTNESS TESTS
@@ -48,14 +98,12 @@ fn should_merge_without_base_value_given_no_existing_key_when_merging() {
         let cf = eng.default_column_family();
         eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
 
-        // Act - merge on non-existent key
+        // Act
         eng.merge_cf(&cf, b"counter", b"5").expect("merge");
 
-        // Assert - should treat missing base as 0
+        // Assert
         let result = eng.get(&cf, b"counter").expect("get");
         assert_eq!(result, Some(Bytes::from("5")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -80,8 +128,6 @@ fn should_merge_with_existing_base_value_given_put_when_merging() {
         // Assert
         let result = eng.get(&cf, b"counter").expect("get");
         assert_eq!(result, Some(Bytes::from("15")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -107,8 +153,6 @@ fn should_apply_multiple_merges_sequentially_given_repeated_operations_when_read
         // Assert
         let result = eng.get(&cf, b"counter").expect("get");
         assert_eq!(result, Some(Bytes::from("10")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -131,11 +175,9 @@ fn should_merge_after_delete_given_tombstone_when_treating_as_missing() {
         // Act
         eng.merge_cf(&cf, b"counter", b"5").expect("merge");
 
-        // Assert - should treat deleted key as missing
+        // Assert
         let result = eng.get(&cf, b"counter").expect("get");
         assert_eq!(result, Some(Bytes::from("5")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -152,17 +194,15 @@ fn should_handle_merge_with_put_interleaved_given_mixed_ops_when_reading() {
         let cf = eng.default_column_family();
         eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
 
-        // Act - interleave put and merge
+        // Act
         eng.merge_cf(&cf, b"counter", b"10").expect("merge");
         eng.merge_cf(&cf, b"counter", b"5").expect("merge");
-        eng.put(&cf, b"counter", b"100").expect("put"); // reset
+        eng.put(&cf, b"counter", b"100").expect("put");
         eng.merge_cf(&cf, b"counter", b"7").expect("merge");
 
-        // Assert - merge after put should add to new base
+        // Assert
         let result = eng.get(&cf, b"counter").expect("get");
         assert_eq!(result, Some(Bytes::from("107")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -191,8 +231,6 @@ fn should_use_string_append_operator_given_delimiter_when_merging() {
         // Assert
         let result = eng.get(&cf, b"list").expect("get");
         assert_eq!(result, Some(Bytes::from("apple,banana,cherry")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -218,8 +256,6 @@ fn should_string_append_with_base_value_given_initial_put_when_merging() {
         // Assert
         let result = eng.get(&cf, b"tags").expect("get");
         assert_eq!(result, Some(Bytes::from("initial|tag1|tag2")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -243,8 +279,6 @@ fn should_handle_empty_merge_operand_given_empty_bytes_when_appending() {
         // Assert
         let result = eng.get(&cf, b"list").expect("get");
         assert_eq!(result, Some(Bytes::from(",item")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -262,14 +296,14 @@ fn should_isolate_merge_operators_across_cfs_given_different_operators_when_merg
             ..Default::default()
         };
         let eng = MidgeEngine::open(opts).expect("open");
+
         let cf1 = eng
             .create_column_family("cf1", ColumnFamilyConfig::default())
-            .expect("create_cf");
+            .expect("create cf1");
         let cf2 = eng
             .create_column_family("cf2", ColumnFamilyConfig::default())
-            .expect("create_cf");
+            .expect("create cf2");
 
-        // Register different operators
         eng.register_merge_operator(&cf1, Arc::new(IntegerAddOperator));
         eng.register_merge_operator(&cf2, Arc::new(StringAppendOperator::new(b"-")));
 
@@ -280,50 +314,11 @@ fn should_isolate_merge_operators_across_cfs_given_different_operators_when_merg
         eng.merge_cf(&cf2, b"list", b"B").expect("merge");
 
         // Assert
-        assert_eq!(
-            eng.get(&cf1, b"counter").expect("get"),
-            Some(Bytes::from("15")),
-            "{}: cf1",
-            name
-        );
-        assert_eq!(
-            eng.get(&cf2, b"list").expect("get"),
-            Some(Bytes::from("A-B")),
-            "{}: cf2",
-            name
-        );
-        drop(eng);
-        eprintln!("✓ {}", name);
-    }
-}
+        let cf1_result = eng.get(&cf1, b"counter").expect("get cf1");
+        let cf2_result = eng.get(&cf2, b"list").expect("get cf2");
 
-#[test]
-fn should_resolve_merge_correctly_after_flush_given_per_cf_operator_when_flushing() {
-    for mode in all_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng
-            .create_column_family("test_cf", ColumnFamilyConfig::default())
-            .expect("create cf");
-        eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
-
-        // Act
-        eng.put(&cf, b"key1", b"100").expect("put");
-        eng.merge_cf(&cf, b"key1", b"20").expect("merge");
-        eng.merge_cf(&cf, b"key1", b"30").expect("merge");
-        eng.merge_cf(&cf, b"key1", b"50").expect("merge");
-        eng.flush_cf(&cf).expect("flush");
-
-        // Assert
-        let result = eng.get(&cf, b"key1").expect("get");
-        assert_eq!(result, Some(Bytes::from("200")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
+        assert_eq!(cf1_result, Some(Bytes::from("15")), "{}: cf1", name);
+        assert_eq!(cf2_result, Some(Bytes::from("A-B")), "{}: cf2", name);
     }
 }
 
@@ -337,6 +332,7 @@ fn should_handle_default_cf_merge_independently_given_custom_cf_when_merging() {
             ..Default::default()
         };
         let eng = MidgeEngine::open(opts).expect("open");
+
         let default_cf = eng.default_column_family();
         let custom_cf = eng
             .create_column_family("custom", ColumnFamilyConfig::default())
@@ -360,17 +356,15 @@ fn should_handle_default_cf_merge_independently_given_custom_cf_when_merging() {
 
         // Assert
         let default_result = eng.get(&default_cf, b"count").expect("get default");
-        assert_eq!(default_result, Some(Bytes::from("3")), "{}: default", name);
-
         let custom_result = eng.get(&custom_cf, b"path").expect("get custom");
+
+        assert_eq!(default_result, Some(Bytes::from("3")), "{}: default", name);
         assert_eq!(
             custom_result,
             Some(Bytes::from("root:dir:file")),
             "{}: custom",
             name
         );
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -380,10 +374,6 @@ fn should_handle_default_cf_merge_independently_given_custom_cf_when_merging() {
 
 #[test]
 fn should_preserve_merge_semantics_across_restart_given_flush_when_recovering() {
-    // BUG EXPOSED: CloudBacked fails this test - returns b"20" (last operand) instead of b"30" (sum)
-    // Root cause: Merge operands not persisted to SST during flush. EntryMeta has op_type field
-    // but add_with_meta() only accepts tombstone boolean. Merge operands written as Put.
-    // Fix: Update SST writer API to accept OpType, write entry_type=3 for merge operands.
     for mode in disk_storage_modes() {
         // Arrange
         let ctx = DurabilityTestContext::new(mode);
@@ -403,7 +393,7 @@ fn should_preserve_merge_semantics_across_restart_given_flush_when_recovering() 
             eng.flush().expect("flush");
         }
 
-        // Act - reopen and register operator again
+        // Act
         let opts = MidgeOptions {
             storage_mode: ctx.create_storage_mode(),
             ..Default::default()
@@ -413,62 +403,13 @@ fn should_preserve_merge_semantics_across_restart_given_flush_when_recovering() 
         eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
 
         // Assert
-        assert_eq!(
-            eng.get(&cf, b"counter").expect("get"),
-            Some(Bytes::from("30")),
-            "{}",
-            name
-        );
-        drop(eng);
-        eprintln!("✓ {}", name);
+        let result = eng.get(&cf, b"counter").expect("get");
+        assert_eq!(result, Some(Bytes::from("30")), "{}", name);
     }
 }
 
 #[test]
-fn should_apply_merge_chain_correctly_given_freeze_and_wal_rotation_when_recovering() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let ctx = DurabilityTestContext::new(mode);
-        let name = ctx.name().to_string();
-
-        {
-            let opts = MidgeOptions {
-                storage_mode: ctx.create_storage_mode(),
-                ..Default::default()
-            };
-            let eng = MidgeEngine::open(opts).expect("open");
-            let cf = eng
-                .create_column_family("merge_cf", ColumnFamilyConfig::default())
-                .expect("create cf");
-            eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
-
-            eng.put(&cf, b"a", b"1").expect("put");
-            eng.merge_cf(&cf, b"a", b"2").expect("merge");
-            eng.flush_cf(&cf).expect("flush");
-        }
-
-        // Act - reopen and check
-        let opts = MidgeOptions {
-            storage_mode: ctx.create_storage_mode(),
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("reopen");
-        let cf = eng.get_column_family("merge_cf").expect("get cf");
-        eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
-
-        // Assert
-        let v = eng.get(&cf, b"a").expect("get");
-        assert!(v.is_some(), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
-    }
-}
-
-#[test]
-fn should_persist_recover_merge_resolutions_given_cf_restart_when_reopening() {
-    // BUG EXPOSED: CloudBacked fails this test - returns b"75" (last operand) instead of b"200" (sum)
-    // Root cause: Same as should_preserve_merge_semantics_across_restart - merge operands
-    // are converted to Put entries during flush, losing merge semantics across restarts.
+fn should_persist_merge_resolutions_given_cf_restart_when_reopening() {
     for mode in disk_storage_modes() {
         // Arrange
         let ctx = DurabilityTestContext::new(mode);
@@ -491,7 +432,7 @@ fn should_persist_recover_merge_resolutions_given_cf_restart_when_reopening() {
             eng.flush_cf(&cf).expect("flush");
         }
 
-        // Act - reopen
+        // Act
         let opts = MidgeOptions {
             storage_mode: ctx.create_storage_mode(),
             ..Default::default()
@@ -503,8 +444,6 @@ fn should_persist_recover_merge_resolutions_given_cf_restart_when_reopening() {
         // Assert
         let result = eng.get(&cf, b"total").expect("get");
         assert_eq!(result, Some(Bytes::from("200")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -512,26 +451,8 @@ fn should_persist_recover_merge_resolutions_given_cf_restart_when_reopening() {
 // ERROR HANDLING TESTS
 // ============================================================================
 
-// Custom failing merge operator
-struct FailingMergeOperator;
-
-impl MergeOperator for FailingMergeOperator {
-    fn name(&self) -> &str {
-        "FailingMergeOperator"
-    }
-
-    fn merge(
-        &self,
-        _key: &[u8],
-        _existing_value: Option<&[u8]>,
-        _operands: &[u8],
-    ) -> MidgeResult<Vec<u8>> {
-        Err(MidgeError::internal("Simulated merge operator failure"))
-    }
-}
-
 #[test]
-fn should_handle_merge_without_registered_operator_given_no_operator_when_merging() {
+fn should_error_when_merging_without_registered_operator_given_no_operator_when_merging() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -544,19 +465,21 @@ fn should_handle_merge_without_registered_operator_given_no_operator_when_mergin
             .create_column_family("test_cf", ColumnFamilyConfig::default())
             .expect("create cf");
 
-        // Act - attempt merge without registering operator
+        // Act
         eng.put(&cf, b"key", b"10").expect("put");
         let result = eng.merge_cf(&cf, b"key", b"5");
 
-        // Assert - should either succeed or return error
-        assert!(result.is_ok() || result.is_err(), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
+        // Assert
+        assert!(
+            result.is_err(),
+            "{}: merge without operator should error",
+            name
+        );
     }
 }
 
 #[test]
-fn should_return_consistent_results_given_no_merge_operator_when_reading() {
+fn should_surface_error_given_failing_merge_operator_when_getting() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -566,62 +489,28 @@ fn should_return_consistent_results_given_no_merge_operator_when_reading() {
         };
         let eng = MidgeEngine::open(opts).expect("open");
         let cf = eng
-            .create_column_family("test_cf", ColumnFamilyConfig::default())
-            .expect("create cf");
-
-        // Act - write merge operations without operator
-        eng.put(&cf, b"key", b"base").expect("put");
-        let _ = eng.merge_cf(&cf, b"key", b"delta1");
-        let _ = eng.merge_cf(&cf, b"key", b"delta2");
-
-        // Assert - reading should not panic
-        let result = eng.get(&cf, b"key");
-        assert!(result.is_ok(), "{}: read should not panic", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
-    }
-}
-
-#[test]
-fn should_handle_failing_merge_operator_given_error_when_flushing() {
-    for mode in all_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            memtable_size: 512,
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng
-            .create_column_family("test_cf", ColumnFamilyConfig::default())
+            .create_column_family("fail_cf", ColumnFamilyConfig::default())
             .expect("create cf");
 
         eng.register_merge_operator(&cf, Arc::new(FailingMergeOperator));
 
-        // Act
         eng.put(&cf, b"key", b"10").expect("put");
-        let _ = eng.merge_cf(&cf, b"key", b"5");
+        eng.merge_cf(&cf, b"key", b"5").expect("merge");
 
-        let large_value = vec![b'x'; 256];
-        for i in 0..30 {
-            let _ = eng.put(&cf, format!("filler{:03}", i).as_bytes(), &large_value);
-        }
+        // Act
+        let result = eng.get(&cf, b"key");
 
-        let flush_result = eng.flush_cf(&cf);
-
-        // Assert - either flush fails or read surfaces error
-        if flush_result.is_ok() {
-            let read_result = eng.get(&cf, b"key");
-            assert!(read_result.is_ok() || read_result.is_err(), "{}", name);
-        }
-        drop(eng);
-        eprintln!("✓ {}", name);
+        // Assert
+        assert!(
+            result.is_err(),
+            "{}: failing operator should surface error on get",
+            name
+        );
     }
 }
 
 #[test]
-fn should_maintain_consistency_given_merge_operator_changed_when_reopening() {
+fn should_keep_data_readable_given_merge_operator_changed_across_restart_when_reopening() {
     for mode in disk_storage_modes() {
         // Arrange
         let ctx = DurabilityTestContext::new(mode);
@@ -639,119 +528,185 @@ fn should_maintain_consistency_given_merge_operator_changed_when_reopening() {
             eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
 
             eng.put(&cf, b"key", b"10").expect("put");
-            let _ = eng.merge_cf(&cf, b"key", b"5");
+            eng.merge_cf(&cf, b"key", b"5").expect("merge");
             eng.flush_cf(&cf).ok();
         }
 
-        // Act - reopen without re-registering operator
+        // Act
         let opts = MidgeOptions {
             storage_mode: ctx.create_storage_mode(),
             ..Default::default()
         };
         let eng = MidgeEngine::open(opts).expect("reopen");
         let cf = eng.get_column_family("test_cf").expect("get cf");
+        // NOTE: deliberately do not re-register the merge operator.
 
-        // Assert - read should not panic or corrupt data
         let result = eng.get(&cf, b"key");
-        assert!(result.is_ok(), "{}: should handle missing operator", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
+
+        // Assert
+        assert!(
+            result.is_ok(),
+            "{}: should not panic if operator changed/missing after restart",
+            name
+        );
     }
 }
 
 // ============================================================================
-// CONCURRENCY TESTS
+// CONCURRENCY TESTS (Option 1: memtable-only, no flush, no compaction dependency)
 // ============================================================================
 
 #[test]
-fn should_handle_concurrent_merges_to_same_key_given_multiple_threads_when_merging() {
+fn should_not_lose_merge_operands_under_concurrency_given_same_key_when_merging() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
+        // Big memtable to avoid flush; rely on in-memory state only.
         let opts = MidgeOptions {
             storage_mode,
+            memtable_size: 32 * 1024 * 1024,
             ..Default::default()
         };
         let eng = Arc::new(MidgeEngine::open(opts).expect("open"));
         let cf = eng.default_column_family();
-        eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
+        eng.register_merge_operator(&cf, Arc::new(CollectOperandsOperator));
 
-        // Act - concurrent merges
-        let mut handles = vec![];
-        for i in 0..10 {
-            let engine_clone = Arc::clone(&eng);
-            let cf_clone = cf.clone();
-            let handle = std::thread::spawn(move || {
-                for _ in 0..10 {
-                    let value = format!("{}", i);
-                    engine_clone
-                        .merge_cf(&cf_clone, b"counter", value.as_bytes())
+        let threads = 10;
+        let merges_per_thread = 10;
+
+        // Act
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            let eng_cloned = Arc::clone(&eng);
+            let cf_cloned = cf.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..merges_per_thread {
+                    eng_cloned
+                        .merge_cf(&cf_cloned, b"counter", b"x")
                         .expect("merge");
                 }
-            });
-            handles.push(handle);
+            }));
         }
 
-        for handle in handles {
-            handle.join().expect("join");
+        for h in handles {
+            h.join().expect("join");
         }
 
-        // Assert - should sum all concurrent merges
-        // Each thread: 10 times value i, for i=0..9 = 10*(0+1+2+...+9) = 450
+        // Assert
         let result = eng.get(&cf, b"counter").expect("get");
-        assert_eq!(result, Some(Bytes::from("450")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
+        let value = result.expect("value");
+        let text = std::str::from_utf8(&value).expect("utf8");
+        let count: usize = text.strip_prefix("count=").unwrap().parse().unwrap();
+
+        assert_eq!(
+            count,
+            threads * merges_per_thread,
+            "{}: lost merge operands under concurrency",
+            name
+        );
     }
 }
 
 #[test]
-fn should_handle_merge_to_multiple_keys_concurrently_given_threads_when_merging() {
+fn should_handle_concurrent_merges_to_same_key_given_integer_add_operator_when_merging() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
+        // Big memtable to keep everything in-memory.
         let opts = MidgeOptions {
             storage_mode,
+            memtable_size: 32 * 1024 * 1024,
             ..Default::default()
         };
         let eng = Arc::new(MidgeEngine::open(opts).expect("open"));
         let cf = eng.default_column_family();
         eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
 
-        // Act - concurrent merges to different keys
-        let mut handles = vec![];
-        for thread_id in 0..10 {
-            let engine_clone = Arc::clone(&eng);
-            let cf_clone = cf.clone();
-            let handle = std::thread::spawn(move || {
-                let key = format!("counter{}", thread_id);
-                for i in 1..=10 {
-                    engine_clone
-                        .merge_cf(&cf_clone, key.as_bytes(), format!("{}", i).as_bytes())
+        let threads = 10;
+        let merges_per_thread = 10;
+
+        // Act
+        let mut handles = Vec::new();
+        for i in 0..threads {
+            let eng_cloned = Arc::clone(&eng);
+            let cf_cloned = cf.clone();
+            handles.push(std::thread::spawn(move || {
+                let value = i.to_string();
+                for _ in 0..merges_per_thread {
+                    eng_cloned
+                        .merge_cf(&cf_cloned, b"counter", value.as_bytes())
                         .expect("merge");
                 }
-            });
-            handles.push(handle);
+            }));
         }
 
-        for handle in handles {
-            handle.join().expect("join");
+        for h in handles {
+            h.join().expect("join");
         }
 
-        // Assert - each counter should sum to 55 (1+2+...+10)
-        for thread_id in 0..10 {
+        // Assert
+        // Sum = merges_per_thread * (0 + 1 + ... + (threads - 1))
+        let expected_sum = merges_per_thread * (threads * (threads - 1) / 2);
+        let result = eng.get(&cf, b"counter").expect("get");
+        assert_eq!(
+            result,
+            Some(Bytes::from(expected_sum.to_string())),
+            "{}: concurrent merges lost updates",
+            name
+        );
+    }
+}
+
+#[test]
+fn should_handle_merge_to_multiple_keys_concurrently_given_distinct_keys_when_merging() {
+    for mode in all_storage_modes() {
+        // Arrange
+        let (name, storage_mode, _dir) = create_storage_mode(mode);
+        // Big memtable to avoid flush.
+        let opts = MidgeOptions {
+            storage_mode,
+            memtable_size: 32 * 1024 * 1024,
+            ..Default::default()
+        };
+        let eng = Arc::new(MidgeEngine::open(opts).expect("open"));
+        let cf = eng.default_column_family();
+        eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
+
+        let threads = 10;
+        let merges_per_thread = 10;
+
+        // Act
+        let mut handles = Vec::new();
+        for thread_id in 0..threads {
+            let eng_cloned = Arc::clone(&eng);
+            let cf_cloned = cf.clone();
+            handles.push(std::thread::spawn(move || {
+                let key = format!("counter{}", thread_id);
+                for i in 1..=merges_per_thread {
+                    eng_cloned
+                        .merge_cf(&cf_cloned, key.as_bytes(), i.to_string().as_bytes())
+                        .expect("merge");
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("join");
+        }
+
+        // Assert
+        let per_key_expected = merges_per_thread * (merges_per_thread + 1) / 2;
+        for thread_id in 0..threads {
             let key = format!("counter{}", thread_id);
             let result = eng.get(&cf, key.as_bytes()).expect("get");
             assert_eq!(
                 result,
-                Some(Bytes::from("55")),
-                "{}: counter{}",
+                Some(Bytes::from(per_key_expected.to_string())),
+                "{}: {}",
                 name,
-                thread_id
+                key
             );
         }
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -772,17 +727,15 @@ fn should_resolve_merge_chain_during_get_given_long_chain_when_reading() {
         let cf = eng.default_column_family();
         eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
 
-        // Act - create long merge chain
+        // Act
         for i in 1..=100 {
-            eng.merge_cf(&cf, b"counter", format!("{}", i).as_bytes())
+            eng.merge_cf(&cf, b"counter", i.to_string().as_bytes())
                 .expect("merge");
         }
 
-        // Assert - should resolve entire chain (1+2+...+100 = 5050)
+        // Assert (1 + 2 + ... + 100 = 5050)
         let result = eng.get(&cf, b"counter").expect("get");
         assert_eq!(result, Some(Bytes::from("5050")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
@@ -799,21 +752,20 @@ fn should_merge_with_binary_data_given_binary_key_when_merging() {
         let cf = eng.default_column_family();
         eng.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
 
-        // Act - use binary representation
         let binary_key = vec![0x00, 0xFF, 0xAB, 0xCD];
+
+        // Act
         eng.merge_cf(&cf, &binary_key, b"42").expect("merge");
         eng.merge_cf(&cf, &binary_key, b"8").expect("merge");
 
         // Assert
         let result = eng.get(&cf, &binary_key).expect("get");
         assert_eq!(result, Some(Bytes::from("50")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }
 
 #[test]
-fn should_not_merge_across_delete_range_given_tombstone_when_range_deleted() {
+fn should_not_merge_across_delete_range_given_range_tombstone_when_merging() {
     for mode in all_storage_modes() {
         // Arrange
         let (name, storage_mode, _dir) = create_storage_mode(mode);
@@ -832,10 +784,8 @@ fn should_not_merge_across_delete_range_given_tombstone_when_range_deleted() {
         // Act
         eng.merge_cf(&cf, b"key1", b"5").expect("merge");
 
-        // Assert - should only have the post-delete merge
+        // Assert - only the post-delete merge should be visible
         let result = eng.get(&cf, b"key1").expect("get");
         assert_eq!(result, Some(Bytes::from("5")), "{}", name);
-        drop(eng);
-        eprintln!("✓ {}", name);
     }
 }

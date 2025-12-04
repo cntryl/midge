@@ -421,6 +421,39 @@ impl SkipList {
         let new_ptr = loop {
             // Refresh the window at level 0 to minimize CAS failures.
             self.find(&key, guard, &mut preds, &mut succs);
+
+            // Re-check if the key was inserted by another thread while we were preparing.
+            // If so, append to the existing node's version chain instead of inserting a new node.
+            if let Some(curr) = unsafe { succs[0].as_ref() } {
+                if curr.key == key {
+                    // Key now exists; prepend version to existing node's chain.
+                    loop {
+                        let curr_head = curr.versions_head.load(AO::Acquire, guard);
+                        let new_ver = Owned::new(VersionNode {
+                            seq,
+                            val: value.clone(),
+                            exp,
+                            op,
+                            next: Atomic::from(curr_head),
+                        });
+
+                        match curr.versions_head.compare_exchange(
+                            curr_head,
+                            new_ver,
+                            AO::AcqRel,
+                            AO::Acquire,
+                            guard,
+                        ) {
+                            Ok(_) => return, // success, version appended to existing node
+                            Err(e) => {
+                                drop(e.new);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
             let pred0 = unsafe { preds[0].deref() };
             let succ0 = succs[0];
 
