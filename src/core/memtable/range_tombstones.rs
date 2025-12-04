@@ -64,12 +64,13 @@ impl RangeTombstones {
         false
     }
 
-    /// Returns true if a range tombstone with sequence <= `seq` covers `key`.
-    /// Used for snapshot reads. Assumes MVCC where tombstone seq hides keys <= snapshot seq.
+    /// Returns true if a range tombstone with sequence < `seq` covers `key`.
+    /// Used for snapshot reads. Snapshot sees entries with seq < snapshot_seq,
+    /// so tombstones should follow the same rule (strictly less than).
     pub(super) fn covers_at(&self, key: &[u8], seq: u64) -> bool {
         let tombstones = self.inner.read();
         for r in tombstones.iter() {
-            if r.seq <= seq && key >= r.start.as_slice() && key < r.end.as_slice() {
+            if r.seq < seq && key >= r.start.as_slice() && key < r.end.as_slice() {
                 return true;
             }
         }

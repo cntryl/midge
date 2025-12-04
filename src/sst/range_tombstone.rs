@@ -69,9 +69,12 @@ pub fn decode_range_tombstones(data: &[u8]) -> MidgeResult<Vec<RangeTombstone>> 
 }
 
 pub fn is_covered_by_range_tombstone(ts: &[RangeTombstone], key: &[u8], snapshot_seq: u64) -> bool {
-    // Snapshot isolation: tombstone becomes visible at its own sequence and later
+    // Snapshot isolation: tombstone is visible only if its sequence is strictly less than
+    // the snapshot sequence. This matches the entry visibility rule (seq < snapshot_seq).
+    // A snapshot captures the "next sequence to be assigned", so writes at that sequence
+    // or later should not be visible to the snapshot.
     ts.iter()
-        .any(|t| t.seq <= snapshot_seq && key >= t.start.as_slice() && key < t.end.as_slice())
+        .any(|t| t.seq < snapshot_seq && key >= t.start.as_slice() && key < t.end.as_slice())
 }
 
 #[cfg(test)]
