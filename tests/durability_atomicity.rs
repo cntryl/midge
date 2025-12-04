@@ -281,6 +281,9 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
         },
         memtable_size: 1024,
         enable_compaction: true,
+        // Set very high interval to effectively disable auto-compaction ticks,
+        // allowing manual compaction to be triggered without infinite retry loop.
+        compaction_check_interval_ms: 60_000,
         wal_sync: true,
         test_hooks: Some(hooks.clone()),
         ..Default::default()
@@ -296,8 +299,14 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
     }
 
     eng.flush().expect("flush should succeed");
+    // Trigger manual compaction - it will fail due to FailMidway hook
     eng.compact_level(&cf, 0).expect("compact_level");
-    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
+    
+    // Wait for at least one compaction failure to occur
+    let deadline = std::time::Instant::now() + TEST_GATE_TIMEOUT;
+    while hooks.compaction_failed_count() == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     let compaction_started = hooks.compaction_start_count() > 0;
     drop(eng);
