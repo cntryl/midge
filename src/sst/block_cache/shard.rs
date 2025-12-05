@@ -538,14 +538,14 @@ impl ShardStats {
 mod tests {
     use super::*;
     use crate::sst::block_cache::key::BlockKind;
-    use crate::sst::block_cache::policy::LruPolicy;
+    use crate::sst::block_cache::policy::ClockProPolicy;
 
     fn make_shard(capacity: usize) -> BlockCacheShard {
         BlockCacheShard::new(
             0,
             capacity,
             SizeAccounting::Uncompressed,
-            Box::new(LruPolicy::new(1024)),
+            Box::new(ClockProPolicy::new(1024)),
             false, // per-CF stats disabled by default in tests
         )
     }
@@ -555,7 +555,7 @@ mod tests {
             0,
             capacity,
             SizeAccounting::Uncompressed,
-            Box::new(LruPolicy::new(1024)),
+            Box::new(ClockProPolicy::new(1024)),
             true, // per-CF stats enabled
         )
     }

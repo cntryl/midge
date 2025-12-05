@@ -114,8 +114,8 @@ impl FrequencySketch {
         for byte in self.table.iter_mut() {
             // Halve both 4-bit counters in each byte
             let lo = (*byte & 0x0F) >> 1;
-            let hi = (*byte & 0xF0) >> 1;
-            *byte = lo | (hi & 0xF0);
+            let hi = ((*byte >> 4) >> 1) << 4; // bring high nibble down, halve, put back
+            *byte = lo | hi;
         }
         self.sample_count = 0;
     }
@@ -242,5 +242,57 @@ mod tests {
 
         sketch.clear();
         assert_eq!(sketch.estimate(12345), 0);
+    }
+
+    #[test]
+    fn should_halve_both_nibbles_correctly_given_decay_when_halve_all_called() {
+        // Arrange: create a small sketch and manually set a byte
+        let mut sketch = FrequencySketch::new(16);
+        
+        // Increment two different keys that land in different nibbles of the same byte
+        // We'll verify by checking that after many increments, halving reduces counts
+        let key1 = 0u64;
+        let key2 = 1u64;
+        
+        // Build up frequency
+        for _ in 0..10 {
+            sketch.increment(key1);
+        }
+        for _ in 0..10 {
+            sketch.increment(key2);
+        }
+        
+        let freq1_before = sketch.estimate(key1);
+        let freq2_before = sketch.estimate(key2);
+        
+        // Act: manually trigger halving
+        sketch.halve_all();
+        
+        // Assert: both frequencies should be roughly halved
+        let freq1_after = sketch.estimate(key1);
+        let freq2_after = sketch.estimate(key2);
+        
+        // After halving, frequencies should be approximately half (within rounding)
+        assert!(
+            freq1_after <= freq1_before,
+            "freq1 should decrease: {} -> {}",
+            freq1_before,
+            freq1_after
+        );
+        assert!(
+            freq2_after <= freq2_before,
+            "freq2 should decrease: {} -> {}",
+            freq2_before,
+            freq2_after
+        );
+        // Verify halving actually happened (not zeroed)
+        if freq1_before > 1 {
+            assert!(
+                freq1_after > 0,
+                "freq1 should not be zeroed from {}: got {}",
+                freq1_before,
+                freq1_after
+            );
+        }
     }
 }

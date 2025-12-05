@@ -1,20 +1,27 @@
 //! Simple LRU (Least Recently Used) eviction policy.
 //!
 //! This is a baseline policy. For production, consider WTinyLFU or Clock-Pro
-//! which offer better scan resistance.
-
-use std::collections::VecDeque;
+//! which offer better scan resistance, but this implementation is now
+//! O(1) for access/insert/evict and suitable for hot paths.
 
 use super::{EntryId, Policy};
 
-/// LRU eviction policy using a simple deque.
+#[derive(Clone, Copy, Debug, Default)]
+struct Node {
+    prev: Option<EntryId>,
+    next: Option<EntryId>,
+    present: bool,
+}
+
+/// LRU eviction policy backed by an intrusive doubly linked list.
 ///
-/// Most recently accessed entries are at the back; LRU entries are at the front.
+/// - `head` is the LRU entry
+/// - `tail` is the MRU entry
 pub struct LruPolicy {
-    /// Ordered list of entry IDs (front = LRU, back = MRU).
-    order: VecDeque<EntryId>,
-    /// Maximum entries to track (soft limit for the deque).
-    /// Reserved for future capacity-based decisions.
+    nodes: Vec<Node>,
+    head: Option<EntryId>,
+    tail: Option<EntryId>,
+    /// Soft hint about expected max entries (used only for initial capacity).
     #[allow(dead_code)]
     max_entries: usize,
 }
@@ -23,42 +30,128 @@ impl LruPolicy {
     /// Create a new LRU policy.
     pub fn new(max_entries: usize) -> Self {
         Self {
-            order: VecDeque::with_capacity(max_entries.min(1024)),
+            nodes: Vec::with_capacity(max_entries.min(1024)),
+            head: None,
+            tail: None,
             max_entries,
         }
     }
 
-    /// Remove an entry from the order list (if present).
-    fn remove_from_order(&mut self, entry_id: EntryId) {
-        if let Some(pos) = self.order.iter().position(|&id| id == entry_id) {
-            self.order.remove(pos);
+    /// Ensure the slots vector can hold the given entry ID.
+    ///
+    /// Note: This assumes `EntryId` values are dense and start from 0,
+    /// matching the `entries: Vec<Option<BlockEntry>>` layout in the shard.
+    #[inline]
+    fn ensure_capacity(&mut self, id: EntryId) {
+        let idx = id as usize;
+        if idx >= self.nodes.len() {
+            self.nodes.resize(idx + 1, Node::default());
         }
+    }
+
+    #[inline]
+    fn node(&self, id: EntryId) -> &Node {
+        &self.nodes[id as usize]
+    }
+
+    #[inline]
+    fn node_mut(&mut self, id: EntryId) -> &mut Node {
+        &mut self.nodes[id as usize]
+    }
+
+    /// Unlink a node from the list, if present.
+    fn unlink(&mut self, id: EntryId) {
+        self.ensure_capacity(id);
+        if !self.node(id).present {
+            return;
+        }
+
+        let (prev, next);
+        {
+            let node = self.node(id);
+            prev = node.prev;
+            next = node.next;
+        }
+
+        // Fix prev.next
+        if let Some(p) = prev {
+            self.node_mut(p).next = next;
+        } else {
+            // This was head
+            self.head = next;
+        }
+
+        // Fix next.prev
+        if let Some(n) = next {
+            self.node_mut(n).prev = prev;
+        } else {
+            // This was tail
+            self.tail = prev;
+        }
+
+        let n = self.node_mut(id);
+        n.prev = None;
+        n.next = None;
+        n.present = false;
+    }
+
+    /// Link a node at the tail (MRU position).
+    fn link_at_tail(&mut self, id: EntryId) {
+        self.ensure_capacity(id);
+
+        // If already present, unlink first to avoid duplicates.
+        if self.node(id).present {
+            self.unlink(id);
+        }
+
+        let old_tail = self.tail;
+        let node = self.node_mut(id);
+
+        node.prev = old_tail;
+        node.next = None;
+        node.present = true;
+
+        if let Some(t) = old_tail {
+            self.node_mut(t).next = Some(id);
+        } else {
+            // List was empty
+            self.head = Some(id);
+        }
+
+        self.tail = Some(id);
     }
 }
 
 impl Policy for LruPolicy {
     fn on_access(&mut self, entry_id: EntryId) {
-        // Move to back (MRU position)
-        self.remove_from_order(entry_id);
-        self.order.push_back(entry_id);
+        // Move to MRU (tail)
+        self.link_at_tail(entry_id);
     }
 
     fn on_insert(&mut self, entry_id: EntryId, _size: usize) {
-        // New entries go to back (MRU)
-        self.order.push_back(entry_id);
+        // New entries are MRU
+        self.link_at_tail(entry_id);
     }
 
     fn on_evict(&mut self, entry_id: EntryId) {
-        self.remove_from_order(entry_id);
+        // Remove from list entirely
+        self.unlink(entry_id);
     }
 
     fn choose_victim(&mut self) -> Option<EntryId> {
-        // Return the LRU entry (front of deque)
-        self.order.front().copied()
+        // LRU is at head
+        if let Some(id) = self.head {
+            debug_assert!(self.node(id).present, "head must always be present");
+            Some(id)
+        } else {
+            None
+        }
     }
 
     fn clear(&mut self) {
-        self.order.clear();
+        self.nodes.clear();
+        self.head = None;
+        self.tail = None;
     }
 }
 

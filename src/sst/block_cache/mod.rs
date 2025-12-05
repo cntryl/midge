@@ -150,7 +150,7 @@ pub trait BlockCache: Send + Sync {
 
 // ─── Sharded Block Cache ─────────────────────────────────────────────────────
 
-use policy::{LruPolicy, Policy, WTinyLfuPolicy};
+use policy::{ClockProPolicy, LruPolicy, Policy};
 use shard::{BlockCacheShard, ShardStats};
 pub use shard::CfCacheStats;
 
@@ -176,11 +176,13 @@ impl ShardedBlockCache {
         let shards: Vec<BlockCacheShard> = (0..num_shards)
             .map(|i| {
                 let policy: Box<dyn Policy + Send> = match options.eviction_policy {
-                    EvictionPolicy::Lru | EvictionPolicy::Clock => {
+                    EvictionPolicy::Lru => {
                         Box::new(LruPolicy::new(expected_entries_per_shard))
                     }
-                    EvictionPolicy::WTinyLfu => {
-                        Box::new(WTinyLfuPolicy::new(expected_entries_per_shard))
+                    EvictionPolicy::Clock | EvictionPolicy::WTinyLfu => {
+                        // CLOCK-Pro is the default high-performance policy
+                        // It provides O(1) operations with scan resistance
+                        Box::new(ClockProPolicy::new(expected_entries_per_shard))
                     }
                 };
                 BlockCacheShard::new(
