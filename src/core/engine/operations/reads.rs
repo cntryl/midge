@@ -92,11 +92,9 @@ impl MidgeEngine {
                         if !operands.is_empty() {
                             let operand_refs: Vec<&[u8]> =
                                 operands.iter().map(|b| b.as_ref()).collect();
-                            if let Ok(resolved) =
-                                merge_op.merge_many(key, base_value.as_deref(), &operand_refs)
-                            {
-                                return Ok(Some(Bytes::from(resolved)));
-                            }
+                            let resolved =
+                                merge_op.merge_many(key, base_value.as_deref(), &operand_refs)?;
+                            return Ok(Some(Bytes::from(resolved)));
                         } else if let Some(base) = base_value {
                             return Ok(Some(base));
                         }
@@ -155,11 +153,9 @@ impl MidgeEngine {
                             if !operands.is_empty() {
                                 let operand_refs: Vec<&[u8]> =
                                     operands.iter().map(|b| b.as_ref()).collect();
-                                if let Ok(resolved) =
-                                    merge_op.merge_many(key, base_value.as_deref(), &operand_refs)
-                                {
-                                    return Ok(Some(Bytes::from(resolved)));
-                                }
+                                let resolved =
+                                    merge_op.merge_many(key, base_value.as_deref(), &operand_refs)?;
+                                return Ok(Some(Bytes::from(resolved)));
                             } else if let Some(base) = base_value {
                                 return Ok(Some(base));
                             }
@@ -301,11 +297,9 @@ impl MidgeEngine {
 
                 if !operands.is_empty() {
                     let operand_refs: Vec<&[u8]> = operands.iter().map(|b| b.as_ref()).collect();
-                    if let Ok(resolved) =
-                        merge_op.merge_many(key, base_value.as_deref(), &operand_refs)
-                    {
-                        return Ok(Some(Bytes::from(resolved)));
-                    }
+                    let resolved =
+                        merge_op.merge_many(key, base_value.as_deref(), &operand_refs)?;
+                    return Ok(Some(Bytes::from(resolved)));
                 } else if let Some(base) = base_value {
                     return Ok(Some(base));
                 }

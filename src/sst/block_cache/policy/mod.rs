@@ -4,9 +4,11 @@
 //! Different policies offer different trade-offs between hit rate,
 //! scan resistance, and implementation complexity.
 
+pub mod clock_pro;
 pub mod lru;
 pub mod wtiny_lfu;
 
+pub use clock_pro::ClockProPolicy;
 pub use lru::LruPolicy;
 pub use wtiny_lfu::WTinyLfuPolicy;
 

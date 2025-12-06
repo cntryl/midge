@@ -6,13 +6,13 @@
 /// Eviction policy selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EvictionPolicy {
-    /// Windowed TinyLFU (frequency + recency, scan-resistant). Default.
+    /// CLOCK-Pro (O(1), scan-resistant, adaptive). Default and recommended.
     #[default]
-    WTinyLfu,
-    /// Simple LRU (least recently used).
-    Lru,
-    /// Clock / second-chance approximation of LRU.
     Clock,
+    /// Windowed TinyLFU (maps to CLOCK-Pro internally).
+    WTinyLfu,
+    /// Simple LRU (least recently used). O(1) but not scan-resistant.
+    Lru,
 }
 
 /// How to charge block size against cache capacity.
@@ -109,7 +109,7 @@ mod tests {
 
         assert_eq!(opts.capacity_bytes, 64 * 1024 * 1024);
         assert_eq!(opts.num_shards, 16);
-        assert_eq!(opts.eviction_policy, EvictionPolicy::WTinyLfu);
+        assert_eq!(opts.eviction_policy, EvictionPolicy::Clock);
         assert_eq!(opts.size_accounting, SizeAccounting::Uncompressed);
         assert!(!opts.per_cf_stats);
     }

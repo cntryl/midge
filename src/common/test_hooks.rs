@@ -362,10 +362,13 @@ impl TestHooks {
 
     /// Hook called after WAL append. Returns whether to truncate WAL.
     pub fn after_wal_append(&self) -> bool {
-        matches!(
-            *self.wal_behavior.read(),
-            WalBehavior::TruncateAfterWrite | WalBehavior::TruncateAfterWriteFail
-        )
+        match *self.wal_behavior.read() {
+            // Leave the first append intact so earlier records exist before
+            // we simulate a torn tail on subsequent writes.
+            WalBehavior::TruncateAfterWrite => self.wal_append_count() > 1,
+            WalBehavior::TruncateAfterWriteFail => true,
+            WalBehavior::Normal => false,
+        }
     }
 
     /// Hook called before manifest update. Returns whether to fail the update.

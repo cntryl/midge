@@ -1,4 +1,4 @@
-//! Write Operations Module
+﻿//! Write Operations Module
 //!
 //! This module contains all write operations for MidgeEngine, including:
 //! - Point writes (put, put_with_ttl)
@@ -14,24 +14,23 @@
 //! - Automatic flush triggering
 //! - Write stall prevention
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::api::column_family::ColumnFamilyHandle;
-use crate::api::column_family::DEFAULT_CF_ID;
+use bytes::Bytes;
+
+use crate::api::column_family::{ColumnFamilyHandle, DEFAULT_CF_ID};
 use crate::common::timestamp;
 use crate::core::engine::core::MidgeEngine;
-use crate::error::MidgeResult;
-use bytes::Bytes;
-use std::sync::atomic::Ordering;
+use crate::error::{MidgeError, MidgeResult};
 
-/// Helper to predict WAL record size
+/// Helper to predict WAL record size (approximate, for rotation decisions).
 fn wal_record_encoded_len(
     _op: crate::api::write_batch::OpKind,
     key_len: usize,
     value_len: Option<usize>,
     _range_end_len: Option<usize>,
 ) -> usize {
-    // Approximate size calculation
     let base = 32; // Fixed overhead
     let key_size = key_len;
     let value_size = value_len.unwrap_or(0);
@@ -39,6 +38,33 @@ fn wal_record_encoded_len(
 }
 
 impl MidgeEngine {
+    /// Allocate the next global sequence number.
+    #[inline]
+    fn next_seq(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Unified WAL sync semantics:
+    ///
+    /// - If `wal_sync == false`: no sync at all (caller is async / unsafe mode).
+    /// - If `wal_sync == true` and `wait_for_cloud_wal_uploads_on_sync == true`:
+    ///   full sync including cloud uploads.
+    /// - If `wal_sync == true` and `wait_for_cloud_wal_uploads_on_sync == false`:
+    ///   only local WAL sync; cloud uploads are best-effort.
+    #[inline]
+    fn sync_wal_if_needed(&self) -> MidgeResult<()> {
+        if !self.wal_sync {
+            return Ok(());
+        }
+
+        if self.wait_for_cloud_wal_uploads_on_sync {
+            self.wal_coordinator.sync()
+        } else {
+            let _ = self.wal_coordinator.sync_local();
+            Ok(())
+        }
+    }
+
     /// Internal helper to manage write stalls caused by full immutable memtable queue.
     /// Attempts to proactively flush and waits (bounded) for stall condition to clear.
     /// Latency target: typically < 2s once background error is cleared and a flush drains.
@@ -47,13 +73,13 @@ impl MidgeEngine {
         cf: &ColumnFamilyHandle,
         column_family: &Arc<crate::core::engine::column_family::ColumnFamily>,
     ) -> MidgeResult<()> {
-        use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
 
         let mut background_wait_duration_ms = 0u64;
         let mut capacity_wait_duration_ms = 0u64;
         let mut background_blocked = false;
 
+        // If there is a background error, block until it is cleared.
         if self.background_error.read().is_some() {
             background_blocked = true;
             let bg_start = Instant::now();
@@ -76,6 +102,7 @@ impl MidgeEngine {
             return Ok(());
         }
 
+        // Proactively kick off flush/rollover when stalled.
         if column_family.should_stall_writes() {
             let _ = self.flush_cf(cf);
             if column_family.should_stall_writes() {
@@ -83,7 +110,7 @@ impl MidgeEngine {
             }
         }
 
-        let max_wait = Duration::from_millis(2000); // Upper bound on active waiting
+        let max_wait = Duration::from_millis(2000);
         let mut attempts: usize = 0;
 
         is_stalled = column_family.should_stall_writes();
@@ -104,12 +131,12 @@ impl MidgeEngine {
                         .store(imm_len, Ordering::Release);
                     imm_len
                 };
+
                 if imm_len == 0 {
                     break;
                 }
 
                 std::thread::sleep(Duration::from_millis(backoff_ms));
-
                 let _ = self.wait_for_flush(Duration::from_millis(50));
                 attempts += 1;
 
@@ -142,18 +169,39 @@ impl MidgeEngine {
 
         Ok(())
     }
+
+    /// Core helper to handle "memtable is full" logic for all write paths.
+    #[inline]
+    fn handle_memtable_full(
+        &self,
+        cf: &ColumnFamilyHandle,
+        cf_arc: &Arc<crate::core::engine::column_family::ColumnFamily>,
+    ) -> MidgeResult<()> {
+        if !cf_arc.is_full() {
+            // Still may need to handle stalls even if not strictly "full".
+            return self.handle_write_stall(cf, cf_arc);
+        }
+
+        // Prefer the unified freeze path used elsewhere.
+        let frozen = cf_arc.try_freeze_memtable();
+        if frozen && cf.id() == DEFAULT_CF_ID {
+            // For default CF, trigger a global flush.
+            let _ = self.flush();
+        }
+
+        self.handle_write_stall(cf, cf_arc)
+    }
+
     /// Put a key-value pair into a specific column family.
     pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         if self.read_only {
-            return Err(crate::error::MidgeError::invalid_config(
-                "Cannot write in read-only mode",
-            ));
+            return Err(MidgeError::invalid_config("Cannot write in read-only mode"));
         }
 
         let cf_id = cf.id();
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let seq = self.next_seq();
 
-        // Write to WAL
+        // WAL record
         let rec = crate::wal::WalRecord::new_cf(
             cf_id,
             crate::wal::WalOpKind::Put,
@@ -163,73 +211,21 @@ impl MidgeEngine {
         );
 
         self.wal_coordinator.append_record(&rec)?;
-        if self.wal_sync {
-            // If the engine is configured to only perform a local WAL sync
-            // (cloud-backed and local_wal_sync = true), prefer a non-blocking
-            // flush rather than waiting for potentially flaky cloud uploads.
-            if self.wait_for_cloud_wal_uploads_on_sync {
-                // Wait for cloud uploads as part of sync semantics
-                self.wal_coordinator.sync()?;
-            } else {
-                // Local-only WAL durability: ensure we sync the local WAL without
-                // waiting for cloud uploads (non-blocking w.r.t. remote failures)
-                let _ = self.wal_coordinator.sync_local();
-            }
-        }
+        self.sync_wal_if_needed()?;
 
-        // Write to MemTable
-        let column_family = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
-            crate::error::MidgeError::invalid_config(format!(
-                "Column family '{}' does not exist",
-                cf.name()
-            ))
+        // MemTable
+        let cf_arc = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+            MidgeError::invalid_config(format!("Column family '{}' does not exist", cf.name()))
         })?;
-
-        // MemTable uses interior mutability - acquire read lock and write
         {
-            let mt = column_family.memtable.load();
+            let mt = cf_arc.memtable.load();
             mt.put_with_seq(key, value, seq);
         }
 
-        // Check if memtable is full and trigger freeze + flush
-        let memtable_full = column_family.is_full();
-
-        if memtable_full {
-            // Freeze the current memtable: atomic swap with new empty one
-            let old_arc = column_family
-                .memtable
-                .swap(Arc::new(crate::core::memtable::MemTable::new()));
-
-            // Extract memtable from Arc (cheap if refcount is 1, clone if shared)
-            let old_memtable = Arc::try_unwrap(old_arc).unwrap_or_else(|arc| (*arc).clone());
-
-            // Flush the frozen memtable to SST by calling flush_frozen_memtable
-            let _ = self.flush_frozen_memtable(cf, old_memtable);
-        }
-
-        Ok(())
+        self.handle_memtable_full(cf, &cf_arc)
     }
 
     /// Put a key-value pair with TTL into a specific column family.
-    ///
-    /// # Arguments
-    ///
-    /// * `cf` - Column family handle
-    /// * `key` - Key to write
-    /// * `value` - Value to write
-    /// * `ttl_seconds` - Time-to-live in seconds (0 = no expiration)
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
-    /// # use bytes::Bytes;
-    /// # let opts = MidgeOptions::default();
-    /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// let cf = engine.default_column_family();
-    /// // Key expires after 60 seconds
-    /// engine.put_with_ttl(&cf, b"session:123", b"data", 60).unwrap();
-    /// ```
     pub fn put_with_ttl(
         &self,
         cf: &ColumnFamilyHandle,
@@ -238,23 +234,21 @@ impl MidgeEngine {
         ttl_seconds: u64,
     ) -> MidgeResult<()> {
         if self.read_only {
-            return Err(crate::error::MidgeError::invalid_config(
-                "Cannot write in read-only mode",
-            ));
+            return Err(MidgeError::invalid_config("Cannot write in read-only mode"));
         }
 
         let cf_id = cf.id();
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let seq = self.next_seq();
 
         // Compute expiration time in milliseconds if TTL > 0
         let expiration = if ttl_seconds > 0 {
             let now_millis = timestamp::now_millis();
-            Some(now_millis + (ttl_seconds * 1000))
+            Some(now_millis + ttl_seconds * 1000)
         } else {
             None
         };
 
-        // Write to WAL with TTL
+        // WAL with TTL
         let rec = crate::wal::WalRecord::new_with_ttl(
             cf_id,
             crate::wal::WalOpKind::Put,
@@ -265,51 +259,30 @@ impl MidgeEngine {
         );
 
         self.wal_coordinator.append_record(&rec)?;
-        if self.wal_sync {
-            self.wal_coordinator.sync()?;
-        }
+        self.sync_wal_if_needed()?;
 
-        // Write to MemTable with expiration
-        let column_family = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
-            crate::error::MidgeError::invalid_config(format!(
-                "Column family '{}' does not exist",
-                cf.name()
-            ))
+        // MemTable with expiration
+        let cf_arc = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+            MidgeError::invalid_config(format!("Column family '{}' does not exist", cf.name()))
         })?;
-
         {
-            let mt = column_family.memtable.load();
+            let mt = cf_arc.memtable.load();
             mt.put_with_seq_and_exp(key, value, seq, expiration);
         }
 
-        // Check if memtable is full and trigger freeze + flush
-        let memtable_full = column_family.is_full();
-
-        if memtable_full {
-            let frozen = column_family.try_freeze_memtable();
-            if frozen && cf_id == DEFAULT_CF_ID {
-                let _ = self.flush();
-            }
-        }
-
-        // Unified stall handling
-        self.handle_write_stall(cf, &column_family)?;
-
-        Ok(())
+        self.handle_memtable_full(cf, &cf_arc)
     }
 
     /// Delete a key from a column family.
     pub fn delete(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
         if self.read_only {
-            return Err(crate::error::MidgeError::invalid_config(
-                "Cannot write in read-only mode",
-            ));
+            return Err(MidgeError::invalid_config("Cannot write in read-only mode"));
         }
 
         let cf_id = cf.id();
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let seq = self.next_seq();
 
-        // Write to WAL
+        // WAL
         let rec = crate::wal::WalRecord::new_cf(
             cf_id,
             crate::wal::WalOpKind::Delete,
@@ -319,24 +292,19 @@ impl MidgeEngine {
         );
 
         self.wal_coordinator.append_record(&rec)?;
-        if self.wal_sync {
-            self.wal_coordinator.sync()?;
-        }
+        self.sync_wal_if_needed()?;
 
-        let column_family = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
-            crate::error::MidgeError::invalid_config(format!(
-                "Column family '{}' does not exist",
-                cf.name()
-            ))
+        // MemTable
+        let cf_arc = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+            MidgeError::invalid_config(format!("Column family '{}' does not exist", cf.name()))
         })?;
-
-        // MemTable uses interior mutability - acquire read lock and delete
         {
-            let mt = column_family.memtable.load();
+            let mt = cf_arc.memtable.load();
             mt.delete_with_seq(key, seq);
         }
 
-        Ok(())
+        // Delete is cheap; we still want stall handling for consistency
+        self.handle_write_stall(cf, &cf_arc)
     }
 
     /// Delete a range of keys in a column family where `start <= key < end`.
@@ -357,9 +325,9 @@ impl MidgeEngine {
         }
 
         let cf_id = cf.id();
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let seq = self.next_seq();
 
-        // Write to WAL first for durability
+        // WAL first for durability
         self.metrics.record_wal_write();
         let record = crate::wal::WalRecord::new_delete_range(
             cf_id,
@@ -368,28 +336,20 @@ impl MidgeEngine {
             seq,
         );
         self.wal_coordinator.append_record(&record)?;
+        self.sync_wal_if_needed()?;
 
-        if self.wal_sync {
-            self.wal_coordinator.sync()?;
-        }
-
-        // Apply to column family's memtable
-        let column_family = self.cf_set.get_cf(cf_id).ok_or_else(|| {
-            crate::error::MidgeError::invalid_config(format!(
-                "Column family '{}' does not exist",
-                cf.name()
-            ))
-        })?;
+        // Apply to memtable
+        let cf_arc = self
+            .cf_set
+            .get_cf(cf_id)
+            .ok_or_else(|| MidgeError::invalid_config(format!("Column family '{}' does not exist", cf.name())))?;
 
         {
-            let mt = column_family.memtable.load();
+            let mt = cf_arc.memtable.load();
             mt.delete_range_with_seq(start, end, seq);
         }
 
-        // Apply stall handling for consistency with other write paths (e.g., put_with_ttl, merge)
-        self.handle_write_stall(cf, &column_family)?;
-
-        Ok(())
+        self.handle_write_stall(cf, &cf_arc)
     }
 
     /// Write a batch of operations atomically.
@@ -397,8 +357,6 @@ impl MidgeEngine {
     /// All operations in the batch are written to the WAL in a single write,
     /// then applied to the memtable. This provides better throughput than
     /// individual puts by reducing WAL overhead.
-    ///
-    /// Each operation in the batch can target a different column family.
     pub fn write_batch(&self, batch: &crate::api::WriteBatch) -> MidgeResult<()> {
         if batch.is_empty() {
             return Ok(());
@@ -428,9 +386,7 @@ impl MidgeEngine {
             .saturating_add(total_size)
             > self.wal_buffer_size as u64
         {
-            // Flush the CF that triggered the rotation (first op in batch)
-            // If batch is empty (shouldn't happen due to early return), flush default
-            let cf_to_flush = first_cf.unwrap_or(crate::api::column_family::DEFAULT_CF_ID);
+            let cf_to_flush = first_cf.unwrap_or(DEFAULT_CF_ID);
             let _ = self.rollover_and_queue_flush(cf_to_flush);
         }
 
@@ -438,21 +394,20 @@ impl MidgeEngine {
         let mut wal_records = Vec::with_capacity(batch.operations().size_hint().0);
         let mut sequences = Vec::with_capacity(batch.operations().size_hint().0);
 
-        // OPTIMIZATION: Compute timestamp once for entire batch to avoid redundant system calls
+        // Single timestamp for the batch to avoid many syscalls
         let now_millis = timestamp::now_millis();
 
         for op in batch.operations() {
-            let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+            let seq = self.next_seq();
 
             let expiration = if op.ttl_seconds() > 0 {
-                Some(now_millis + (op.ttl_seconds() * 1000))
+                Some(now_millis + op.ttl_seconds() * 1000)
             } else {
                 None
             };
 
             sequences.push((op, seq, expiration));
 
-            // Convert internal OpKind to WalOpKind
             let wal_op_kind = match op.kind() {
                 crate::api::write_batch::OpKind::Put => crate::wal::WalOpKind::Put,
                 crate::api::write_batch::OpKind::Delete => crate::wal::WalOpKind::Delete,
@@ -472,15 +427,16 @@ impl MidgeEngine {
             wal_records.push(record);
         }
 
-        // Write all records in one batch
+        // WAL append
         self.metrics.record_wal_write();
         self.wal_coordinator.append_batch(&wal_records)?;
+        self.sync_wal_if_needed()?;
 
-        // Apply to memtable (using pre-computed expirations from WAL record creation)
+        // Apply to memtables
         for (op, seq, expiration) in sequences {
             let cf_id = op.cf_id();
-            let column_family = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
-                crate::error::MidgeError::invalid_config(format!(
+            let cf_arc = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+                MidgeError::invalid_config(format!(
                     "Column family with id {} does not exist",
                     cf_id.as_u32()
                 ))
@@ -492,7 +448,7 @@ impl MidgeEngine {
                     self.metrics.record_memtable_write();
 
                     if let Some(value) = op.value() {
-                        let mt = column_family.memtable.load();
+                        let mt = cf_arc.memtable.load();
                         mt.put_with_seq_and_exp(op.key(), value, seq, expiration);
                     }
                 }
@@ -500,19 +456,13 @@ impl MidgeEngine {
                     self.metrics.record_delete();
                     self.metrics.record_memtable_write();
                     self.metrics.record_point_tombstone_created();
-                    let mt = column_family.memtable.load();
+                    let mt = cf_arc.memtable.load();
                     mt.delete_with_seq(op.key(), seq);
                 }
             }
         }
 
-        // Single sync for entire batch if configured
-        if self.wal_sync {
-            self.metrics.record_wal_sync();
-            self.wal_coordinator.sync()?;
-        }
-
-        // Check if any memtables are full after batch and trigger per-CF flushes
+        // Check if any memtables are full after batch and trigger per-CF handling
         let cfs = self.list_column_families();
         for cf in cfs {
             let is_full = if cf.id() == DEFAULT_CF_ID {
@@ -531,47 +481,14 @@ impl MidgeEngine {
     }
 
     /// Apply a merge operation to a key in a specific column family.
-    ///
-    /// Merge operations are deferred - they don't require reading the current value.
-    /// Multiple merge operands are combined during compaction or on read.
-    ///
-    /// A merge operator must be registered for the column family before calling merge.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
-    /// # use cntryl_midge::IntegerAddOperator;
-    /// # use std::sync::Arc;
-    /// # let opts = MidgeOptions::default();
-    /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// let cf = engine.default_column_family();
-    /// engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
-    /// // Increment counter without reading current value
-    /// engine.merge_cf(&cf, b"page_views", b"1").unwrap();
-    /// engine.merge_cf(&cf, b"page_views", b"5").unwrap();
-    /// ```
     pub fn merge_cf(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         self.merge_with_ttl_cf(cf, key, value, 0)
     }
 
     /// Apply a merge operation with TTL to a key in a specific column family.
     ///
-    /// Like `merge_cf`, but the resulting value will expire after the specified duration.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
-    /// # use cntryl_midge::IntegerAddOperator;
-    /// # use std::sync::Arc;
-    /// # let opts = MidgeOptions::default();
-    /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// let cf = engine.default_column_family();
-    /// engine.register_merge_operator(&cf, Arc::new(IntegerAddOperator));
-    /// // Temporary counter expires after 60 seconds
-    /// engine.merge_with_ttl_cf(&cf, b"temp_counter", b"1", 60).unwrap();
-    /// ```
+    /// Merge operations are deferred - they don't require reading the current value.
+    /// Multiple merge operands are combined during compaction or on read.
     pub fn merge_with_ttl_cf(
         &self,
         cf: &ColumnFamilyHandle,
@@ -580,35 +497,33 @@ impl MidgeEngine {
         ttl_seconds: u64,
     ) -> MidgeResult<()> {
         if self.read_only {
-            return Err(crate::error::MidgeError::invalid_config(
-                "Cannot write in read-only mode",
-            ));
+            return Err(MidgeError::invalid_config("Cannot write in read-only mode"));
         }
 
         let cf_id = cf.id();
 
-        // Check that a merge operator is registered for this CF
+        // Ensure a merge operator is registered for this CF.
         {
             let ops = self.merge_operators.read();
             if !ops.contains_key(&cf_id.as_u32()) {
-                return Err(crate::error::MidgeError::invalid_config(format!(
+                return Err(MidgeError::invalid_config(format!(
                     "No merge operator registered for column family '{}'",
                     cf.name()
                 )));
             }
         }
 
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let seq = self.next_seq();
 
         // Compute expiration time in milliseconds if TTL > 0
         let expiration = if ttl_seconds > 0 {
             let now_millis = timestamp::now_millis();
-            Some(now_millis + (ttl_seconds * 1000))
+            Some(now_millis + ttl_seconds * 1000)
         } else {
             None
         };
 
-        // Write to WAL
+        // WAL
         let rec = crate::wal::WalRecord::new_with_ttl(
             cf_id,
             crate::wal::WalOpKind::Merge,
@@ -619,60 +534,23 @@ impl MidgeEngine {
         );
 
         self.wal_coordinator.append_record(&rec)?;
-        if self.wal_sync {
-            self.wal_coordinator.sync()?;
-        }
+        self.sync_wal_if_needed()?;
 
-        // Write to MemTable as merge operand
-        let column_family = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
-            crate::error::MidgeError::invalid_config(format!(
-                "Column family '{}' does not exist",
-                cf.name()
-            ))
+        // MemTable as merge operand
+        let cf_arc = self.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+            MidgeError::invalid_config(format!("Column family '{}' does not exist", cf.name()))
         })?;
-
         {
-            let mt = column_family.memtable.load();
+            let mt = cf_arc.memtable.load();
             mt.merge_with_seq_and_exp(key, value, seq, expiration);
         }
 
-        // Check if memtable is full and trigger freeze + flush
-        let memtable_full = column_family.is_full();
-
-        if memtable_full {
-            let frozen = column_family.try_freeze_memtable();
-            if frozen && cf_id == DEFAULT_CF_ID {
-                let _ = self.flush();
-            }
-            // Apply unified stall handling instead of returning error
-            self.handle_write_stall(cf, &column_family)?;
-        } else {
-            // Even if not full, immutable queue may already be saturated by prior freezes.
-            self.handle_write_stall(cf, &column_family)?;
-        }
-
-        Ok(())
+        self.handle_memtable_full(cf, &cf_arc)
     }
 
     /// Insert only if the key does not exist (atomic check-and-set).
     ///
     /// Uses snapshot isolation for consistency.
-    ///
-    /// # Examples
-    /// ```
-    /// # use cntryl_midge::{MidgeOptions, MidgeEngine, StorageMode};
-    /// # use bytes::Bytes;
-    /// # let mut opts = MidgeOptions::default();
-    /// # opts.storage_mode = StorageMode::Memory;
-    /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// let cf = engine.default_column_family();
-    ///
-    /// // First insert succeeds
-    /// assert!(engine.insert(&cf, b"user:123", b"Alice").unwrap());
-    ///
-    /// // Second insert fails (key exists)
-    /// assert!(!engine.insert(&cf, b"user:123", b"Alice").unwrap());
-    /// ```
     pub fn insert(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<bool> {
         self.insert_with_ttl(cf, key, value, 0)
     }
@@ -680,22 +558,6 @@ impl MidgeEngine {
     /// Insert a key-value pair only if the key does not exist, with TTL.
     ///
     /// Returns true if inserted, false if key already exists.
-    /// TTL is specified in seconds; 0 means no expiration.
-    ///
-    /// # Examples
-    /// ```no_run
-    /// # use cntryl_midge::{MidgeOptions, MidgeEngine};
-    /// # let opts = MidgeOptions::default();
-    /// # let engine = MidgeEngine::open(opts).unwrap();
-    /// let cf = engine.default_column_family();
-    /// // Insert with 300 second TTL
-    /// let inserted = engine.insert_with_ttl(
-    ///     &cf,
-    ///     b"lock:resource",
-    ///     b"held",
-    ///     300
-    /// ).unwrap();
-    /// ```
     pub fn insert_with_ttl(
         &self,
         cf: &ColumnFamilyHandle,
@@ -705,7 +567,7 @@ impl MidgeEngine {
     ) -> MidgeResult<bool> {
         self.check_read_only()?;
 
-        // Use snapshot isolation for consistent read-then-write
+        // Snapshot-based read for "does this exist?"
         let snapshot = self.snapshot();
         let exists = self.get_at(cf, key, &snapshot)?.is_some();
 
@@ -721,9 +583,10 @@ impl MidgeEngine {
 
 #[cfg(test)]
 mod tests {
-    use crate::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
     use bytes::Bytes;
     use uuid;
+
+    use crate::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
 
     fn create_test_engine() -> MidgeEngine {
         let temp_dir =
@@ -856,7 +719,7 @@ mod tests {
         let engine = create_test_engine();
         let cf = engine.default_column_family();
 
-        // Act: Write multiple keys
+        // Act
         for i in 0..100 {
             engine
                 .put(&cf, format!("key{}", i).as_bytes(), b"value")
@@ -864,7 +727,7 @@ mod tests {
         }
         engine.flush().unwrap();
 
-        // Assert: All writes succeeded (sequence allocation worked)
+        // Assert
         for i in 0..100 {
             let val = engine.get(&cf, format!("key{}", i).as_bytes()).unwrap();
             assert!(val.is_some(), "Key {} should exist", i);
@@ -879,7 +742,7 @@ mod tests {
         let num_threads = 4;
         let writes_per_thread = 50;
 
-        // Act: Spawn multiple threads writing concurrently
+        // Act
         let handles: Vec<_> = (0..num_threads)
             .map(|t| {
                 let engine = engine.clone();
@@ -897,7 +760,7 @@ mod tests {
             h.join().unwrap();
         }
 
-        // Assert: All writes should be present (no lost writes due to sequence conflicts)
+        // Assert
         let mut found = 0;
         for t in 0..num_threads {
             for i in 0..writes_per_thread {
@@ -907,27 +770,23 @@ mod tests {
                 }
             }
         }
-        assert_eq!(
-            found,
-            num_threads * writes_per_thread,
-            "All writes should succeed"
-        );
+        assert_eq!(found, num_threads * writes_per_thread);
     }
 
     #[test]
     fn should_handle_rapid_overwrites_with_unique_sequences() {
-        // Arrange: Same key written many times rapidly
+        // Arrange
         let engine = create_test_engine();
         let cf = engine.default_column_family();
 
-        // Act: 100 rapid overwrites to same key
+        // Act
         for i in 0..100 {
             engine
                 .put(&cf, b"hot_key", format!("v{}", i).as_bytes())
                 .unwrap();
         }
 
-        // Assert: Latest value should be visible
+        // Assert
         let value = engine.get(&cf, b"hot_key").unwrap();
         assert_eq!(value.as_deref(), Some(b"v99".as_ref()));
     }
@@ -938,13 +797,13 @@ mod tests {
         let engine = create_test_engine();
         let cf = engine.default_column_family();
 
-        // Act: Write in specific order then flush
+        // Act
         engine.put(&cf, b"a", b"first").unwrap();
         engine.put(&cf, b"z", b"second").unwrap();
         engine.put(&cf, b"m", b"third").unwrap();
         engine.flush().unwrap();
 
-        // Assert: All values should be retrievable
+        // Assert
         assert_eq!(
             engine.get(&cf, b"a").unwrap().as_deref(),
             Some(b"first".as_ref())
@@ -959,3 +818,4 @@ mod tests {
         );
     }
 }
+
