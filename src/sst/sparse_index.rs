@@ -1,6 +1,7 @@
 use crate::error::{MidgeError, MidgeResult};
 use crate::sst::encoding::TlvBlockIterator;
 use crate::sst::format::BlockHandle;
+use crate::sst::block_meta::BlockMeta;
 use bytes::Bytes;
 
 #[derive(Debug, Clone)]
@@ -20,6 +21,24 @@ impl SparseIndex {
     }
     pub fn entries(&self) -> &[IndexEntry] {
         &self.entries
+    }
+
+    /// Build BlockMeta entries for all blocks.
+    /// 
+    /// Note: This is conservative because the sparse index only stores max_key for each block.
+    /// We use empty/None for fence pointers since we can't reliably determine min_key from the index alone.
+    /// In Phase 2, we'll enhance this by extracting actual min_keys from block data during reads.
+    pub fn build_block_metas(&self) -> Vec<BlockMeta> {
+        let mut metas = Vec::new();
+        for entry in self.entries.iter() {
+            // For now, use empty min_key - we'll extract actual min_key from block data when needed
+            let min_key = Bytes::new();
+            let max_key = entry.key.clone();
+            let handle = entry.block_handle;
+            let meta = BlockMeta::new(min_key, max_key, handle);
+            metas.push(meta);
+        }
+        metas
     }
 
     pub fn encode(&self) -> Bytes {

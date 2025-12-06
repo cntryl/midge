@@ -205,6 +205,11 @@ name = "tier1_hotpath_wal_frame_parse"
 path = "benches/tier1_hotpath/wal_frame_parse.rs"
 harness = false
 
+[[bench]]
+name = "tier1_hotpath_per_block_bloom"
+path = "benches/tier1_hotpath/per_block_bloom.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 2: Subsystem (<8s)
 # =============================================================================

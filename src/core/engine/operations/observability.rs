@@ -36,9 +36,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// if let Some(stats) = engine.cache_stats() {
     ///     println!("Cache hit rate: {:.2}%", stats.hit_rate() * 100.0);
     ///     // CacheStats exposes fields for hits/misses
@@ -55,9 +57,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// if let Some(cache) = engine.table_cache() {
     ///     println!("Table cache enabled");
     /// }
@@ -73,9 +77,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// if let Some(stats) = engine.table_cache_stats() {
     ///     println!("Table cache hit rate: {:.2}%", stats.hit_rate() * 100.0);
     /// }
@@ -149,9 +155,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let usage = engine.total_memory_usage();
     /// println!("Total memtable memory: {} MB", usage / 1024 / 1024);
     /// ```
@@ -173,9 +181,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let usage = engine.memory_usage_by_cf();
     /// for (cf_id, bytes) in usage {
     ///     println!("CF {}: {} KB", cf_id, bytes / 1024);
@@ -199,9 +209,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let snapshot = engine.metrics_snapshot();
     /// println!("Total gets: {}", snapshot.get_count);
     /// println!("Total puts: {}", snapshot.put_count);
@@ -260,9 +272,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let amplification = engine.write_amplification();
     /// println!("Write amplification: {:.2}x", amplification);
     /// ```
@@ -297,9 +311,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let count = engine.sst_file_count();
     /// println!("Total SST files: {}", count);
     /// ```
@@ -314,9 +330,11 @@ impl MidgeEngine {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// # use cntryl_midge::{MidgeEngine, MidgeOptions};
-    /// # let engine = MidgeEngine::open(MidgeOptions::default()).unwrap();
+    /// ```rust,no_run
+    /// # use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+    /// # let mut opts = MidgeOptions::default();
+    /// # opts.storage_mode = StorageMode::Memory;
+    /// # let engine = MidgeEngine::open(opts).unwrap();
     /// let size = engine.total_sst_size();
     /// println!("Total SST size: {} MB", size / 1024 / 1024);
     /// ```

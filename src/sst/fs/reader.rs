@@ -7,6 +7,7 @@ use tracing::{debug, trace};
 
 use crate::error::{MidgeError, MidgeResult};
 use crate::fs;
+use crate::sst::block_meta::BlockMeta;
 use crate::sst::block_cache::{BlockCache, BlockData, BlockKey, BlockKind};
 use crate::sst::bloom::BloomFilter;
 use crate::sst::encoding::{decode, decode_key_at_offset, TlvBlockIterator};
@@ -38,6 +39,8 @@ pub struct SstFile {
     /// Cached file handle for efficient repeated reads.
     /// Using Mutex for thread-safety when SstFile is shared.
     cached_file: Mutex<Option<File>>,
+    /// Cached block metadata (min/max fence pointers, tombstone coverage)
+    block_metas: Mutex<Option<Vec<BlockMeta>>>,
     /// Optional block cache for caching data blocks.
     block_cache: Option<Arc<dyn BlockCache>>,
     /// File number for block cache key construction.
@@ -76,6 +79,7 @@ impl SstFile {
             use_internal_keys: false,
             paranoid_checksums: false,
             cached_file: Mutex::new(None),
+            block_metas: Mutex::new(None),
             block_cache: None,
             file_number: 0,
             cf_id: 0,
@@ -93,6 +97,7 @@ impl SstFile {
             use_internal_keys: false,
             paranoid_checksums,
             cached_file: Mutex::new(None),
+            block_metas: Mutex::new(None),
             block_cache: None,
             file_number: 0,
             cf_id: 0,
@@ -350,42 +355,39 @@ impl SstFile {
             .as_ref()
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
 
-        let blocks: Vec<BlockHandle> = match (start, end) {
-            // Both bounds specified - use optimized range search
-            (Some(s), Some(e)) => sparse_index.find_blocks_in_range(s, e).copied().collect(),
+        let block_metas = self.block_metas()?;
+        let entries = sparse_index.entries();
+        let blocks: Vec<BlockMeta> = match (start, end) {
+            // Both bounds specified - use optimized range search over index keys
+            (Some(s), Some(e)) => {
+                let start_idx = entries.partition_point(|en| en.key.as_ref() < s);
+                let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
+                let end_idx = (end_idx + 1).min(entries.len());
+                let start_idx = start_idx.min(end_idx);
+                block_metas[start_idx..end_idx].to_vec()
+            }
 
             // Start bound only - find start position and take all blocks after
             (Some(s), None) => {
-                let entries = sparse_index.entries();
-                let start_idx = entries
-                    .binary_search_by(|en| en.key.as_ref().cmp(s))
-                    .unwrap_or_else(|i| i.saturating_sub(1));
-                entries[start_idx..]
-                    .iter()
-                    .map(|en| en.block_handle)
-                    .collect()
+                if entries.is_empty() {
+                    Vec::new()
+                } else {
+                    let start_idx = entries
+                        .binary_search_by(|en| en.key.as_ref().cmp(s))
+                        .unwrap_or_else(|i| i.saturating_sub(1));
+                    block_metas[start_idx..].to_vec()
+                }
             }
 
             // End bound only - take all blocks up to end position
             (None, Some(e)) => {
-                let entries = sparse_index.entries();
-                // Find first block where last_key >= e. Include that block too
-                // because it may contain keys < e (last_key is the max key in block)
                 let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
-                // Include block at end_idx if it exists
                 let end_idx = (end_idx + 1).min(entries.len());
-                entries[..end_idx]
-                    .iter()
-                    .map(|en| en.block_handle)
-                    .collect()
+                block_metas[..end_idx].to_vec()
             }
 
             // No bounds - return all blocks
-            (None, None) => sparse_index
-                .entries()
-                .iter()
-                .map(|en| en.block_handle)
-                .collect(),
+            (None, None) => block_metas,
         };
 
         Ok(SstRangeIter::new(
@@ -862,6 +864,87 @@ impl SstFile {
 
         trace!(entry_count, "key not found in block");
         Ok(KeyState::Absent)
+    }
+
+    fn block_metas(&self) -> MidgeResult<Vec<BlockMeta>> {
+        {
+            let cached = self.block_metas.lock();
+            if let Some(ref metas) = *cached {
+                return Ok(metas.clone());
+            }
+        }
+
+        let metas = self.compute_block_metas()?;
+        let mut cached = self.block_metas.lock();
+        *cached = Some(metas.clone());
+        Ok(metas)
+    }
+
+    fn compute_block_metas(&self) -> MidgeResult<Vec<BlockMeta>> {
+        let sparse_index = self
+            .sparse_index
+            .as_ref()
+            .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
+
+        let mut metas = Vec::with_capacity(sparse_index.entries().len());
+        for entry in sparse_index.entries() {
+            let min_key = self.block_min_key(entry.block_handle)?;
+            let mut meta = BlockMeta::new(min_key, entry.key.clone(), entry.block_handle);
+
+            let (has_tombstones, cover_min, cover_max) =
+                self.tombstone_bounds_for_block(meta.min_key.as_ref(), meta.max_key.as_ref());
+            if has_tombstones || cover_min.is_some() || cover_max.is_some() {
+                meta = meta.with_tombstones(has_tombstones, cover_min, cover_max);
+            }
+
+            metas.push(meta);
+        }
+
+        Ok(metas)
+    }
+
+    fn block_min_key(&self, handle: BlockHandle) -> MidgeResult<Bytes> {
+        let block = self.read_data_block(handle)?;
+        let mut iter = TlvBlockIterator::new(&block.data);
+        match iter.next() {
+            Some(Ok((key, _value, _seq, _entry_type, _expiration))) => {
+                if self.use_internal_keys {
+                    let (user_key, _seq, _tomb) = decode_internal_key_or_raw(&key);
+                    Ok(Bytes::from(user_key))
+                } else {
+                    Ok(Bytes::from(key))
+                }
+            }
+            Some(Err(e)) => Err(e),
+            None => Ok(Bytes::new()),
+        }
+    }
+
+    fn tombstone_bounds_for_block(
+        &self,
+        min_key: &[u8],
+        max_key: &[u8],
+    ) -> (bool, Option<Bytes>, Option<Bytes>) {
+        let mut has_overlap = false;
+        let mut covering: Option<(Bytes, Bytes)> = None;
+
+        for rt in &self.range_tombstones {
+            if rt.start.as_slice() < max_key && rt.end.as_slice() > min_key {
+                has_overlap = true;
+                if rt.start.as_slice() <= min_key && rt.end.as_slice() > max_key {
+                    covering = Some((
+                        Bytes::copy_from_slice(&rt.start),
+                        Bytes::copy_from_slice(&rt.end),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        match covering {
+            Some((start, end)) => (true, Some(start), Some(end)),
+            None => (has_overlap, None, None),
+        }
     }
 
     /// Log the start of a search operation

@@ -13,6 +13,7 @@
 //! - **File Manager**: File lifecycle and quota management
 
 pub mod block_cache;
+pub mod block_meta;
 pub mod bloom;
 pub mod bloom_cache;
 pub mod cache;
@@ -72,6 +73,7 @@ pub fn create_cache_with_options(options: BlockCacheOptions) -> std::sync::Arc<S
 }
 
 // ─── Other public re-exports ─────────────────────────────────────────────────
+pub use block_meta::{BlockMeta, IndexTable};
 pub use bloom::{BloomFilter, BloomFilterBuilder, Filter};
 pub use cloud::{
     ArchiveTier, CloudSst, CloudSstFactory, CloudSstManager, CloudSstManagerConfig,

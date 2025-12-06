@@ -4,7 +4,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use crate::error::MidgeResult;
-use crate::sst::format::BlockHandle;
+use crate::sst::block_meta::BlockMeta;
 
 use super::utils::decode_data_block;
 
@@ -14,7 +14,7 @@ use super::utils::decode_data_block;
 /// subsequent reads, avoiding the overhead of repeated file open/close.
 pub struct SstRangeIter {
     path: PathBuf,
-    blocks: Vec<BlockHandle>,
+    blocks: Vec<BlockMeta>,
     blk_idx: usize,
     data: Option<Vec<u8>>,
     cursor: usize,
@@ -30,7 +30,7 @@ pub struct SstRangeIter {
 impl SstRangeIter {
     pub(super) fn new(
         path: PathBuf,
-        blocks: Vec<BlockHandle>,
+        blocks: Vec<BlockMeta>,
         start: Option<Vec<u8>>,
         end: Option<Vec<u8>>,
         use_internal_keys: bool,
@@ -66,13 +66,13 @@ impl SstRangeIter {
         if self.blk_idx >= self.blocks.len() {
             return Ok(false);
         }
-        let bh = self.blocks[self.blk_idx];
+        let handle = self.blocks[self.blk_idx].handle;
         self.blk_idx += 1;
 
         // Use cached file handle instead of opening a new file each time
         let file = self.get_or_open_file()?;
-        file.seek(SeekFrom::Start(bh.offset))?;
-        let mut block_data = vec![0u8; bh.size as usize];
+        file.seek(SeekFrom::Start(handle.offset))?;
+        let mut block_data = vec![0u8; handle.size as usize];
         file.read_exact(&mut block_data)?;
 
         let block = decode_data_block(&block_data)?;
