@@ -617,26 +617,38 @@ fn should_return_none_given_missing_key() {
 
 But prefer separate sections when **any** complexity is involved.
 
-## Timeout Patterns
+## Timeout Patterns and Hang Detection
+
+### Preferred Helpers (Engine Tests)
+
+- Use `with_engine_timeout` / `with_engine_restart_timeout` to guard engine lifecycles (defaults ~60s) instead of ad-hoc sleeps.
+- These helpers keep code readable, apply consistent timeouts, and avoid `move` gymnastics around captured variables.
+
+### Manual Timeout Wrapper (Custom Cases)
+
+Wrap custom logic with `run_with_timeout` and an explicit `Duration` when helpers do not fit:
+
+```rust
+run_with_timeout(
+    || {
+        let eng = MidgeEngine::open(opts.clone()).unwrap();
+        eng.put(b"key", b"value").unwrap();
+    },
+    Duration::from_secs(30),
+)
+.expect("test should complete without hanging");
+```
 
 ### Use Explicit Waits, Not Arbitrary Sleeps
 
-❌ **Bad:** Arbitrary sleep
-
-```rust
-std::thread::sleep(Duration::from_secs(1));
-// Hope something happened...
-assert!(condition);
-```
-
-✅ **Good:** Explicit wait with condition
+- Prefer polling loops with a deadline over `std::thread::sleep` guesses.
+- Keep polling intervals small (e.g., 10ms) and bounded by a timeout.
 
 ```rust
 use std::time::{Duration, Instant};
 
 let start = Instant::now();
 let timeout = Duration::from_millis(200);
-
 while !condition_met() {
     if start.elapsed() > timeout {
         panic!("operation timed out");
@@ -645,12 +657,22 @@ while !condition_met() {
 }
 ```
 
-### Timeout Guidelines
+### Choosing Durations
 
-- **Fast tests:** Use 50-200ms timeouts for quick operations
-- **I/O operations:** Use minimal timeout needed + margin (e.g., 1s operation → 1.5s timeout)
-- **Comment delays:** If a `sleep()` is needed, explain why
-- **Prefer polling:** For eventual consistency, use retry loops with timeout
+- **Fast paths:** 50–200ms
+- **Disk/WAL/flush:** 1–2x the expected operation time (e.g., 1s op → 1.5s timeout)
+- **Compaction/bulk:** 60s+
+- **Stress/soak:** 120s+ or disable timeout and mark `#[ignore]`
+
+### When Not to Use Timeouts
+
+- Micro-benchmarks, long-running soak tests, or external service tests with highly variable latency.
+- Simple unit tests (<100ms) where timeout overhead is noise.
+
+### Error Clarity and Limits
+
+- Use descriptive `expect` messages so failures point to the scenario (e.g., cloud upload, restart path).
+- Rust cannot forcibly kill a hung thread; timeouts resume the test runner but the hung thread may persist until process exit.
 
 ## Trait Behavior Tests
 
