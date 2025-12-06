@@ -1,24 +1,6 @@
 # Test Guidelines
 
-These guidelines define how we write tests across the Midge repository to ensure consistency, readability, and reliability. **All 239+ tests follow these patterns** — this document reflects our actual validated practices.
-
-## Table of Contents
-
-- [Test Organization Philosophy](#test-organization-philosophy)
-- [Naming Convention](#naming-convention)
-- [File Organization](#file-organization)
-- [Single Behavior Principle](#single-behavior-principle)
-- [Test Structure (Arrange/Act/Assert)](#test-structure-arrangea ctassert)
-- [Async & Timeout Patterns](#async--timeout-patterns)
-- [Trait Behavior Tests](#trait-behavior-tests)
-- [Table-Driven Tests](#table-driven-tests)
-- [Determinism & Isolation](#determinism--isolation)
-- [Assertions](#assertions)
-- [Negative Testing](#negative-testing)
-- [CI Commands](#ci-commands)
-- [Quick Reference Checklist](#quick-reference-checklist)
-
----
+These guidelines define how we write tests across the Midge repository to ensure consistency, readability, and reliability. These patterns are validated across our extensive test suite.
 
 ## Test Organization Philosophy
 
@@ -90,15 +72,20 @@ fn should_persist_data_across_restart() {
 
 ```
 src/
-├── storage/
+├── core/
+│   ├── memtable/         → Contains #[cfg(test)] mod tests { ... }
+│   └── ...               → Contains #[cfg(test)] mod tests { ... }
+├── sst/
 │   ├── bloom.rs          → Contains #[cfg(test)] mod tests { ... }
-│   ├── skiplist.rs       → Contains #[cfg(test)] mod tests { ... }
-│   ├── memtable.rs       → Contains #[cfg(test)] mod tests { ... }
-│   └── sst.rs            → Contains #[cfg(test)] mod tests { ... }
+│   ├── range_tombstone.rs → Contains #[cfg(test)] mod tests { ... }
+│   └── ...               → Contains #[cfg(test)] mod tests { ... }
 ├── wal/
-│   ├── wal.rs            → Contains #[cfg(test)] mod tests { ... }
-│   ├── wal_fs.rs         → Contains #[cfg(test)] mod tests { ... }
-│   └── wal_mem.rs        → Contains #[cfg(test)] mod tests { ... }
+│   ├── mem/              → Contains #[cfg(test)] mod tests { ... }
+│   ├── fs/               → Contains #[cfg(test)] mod tests { ... }
+│   └── ...               → Contains #[cfg(test)] mod tests { ... }
+├── common/
+│   ├── tlv.rs            → Contains #[cfg(test)] mod tests { ... }
+│   └── codec.rs          → Contains #[cfg(test)] mod tests { ... }
 
 tests/                     (Integration tests only)
 ├── engine.rs             → Tests MidgeEngine (multiple modules)
@@ -125,7 +112,7 @@ Does the test use MidgeEngine or test multiple modules?
       ├─ YES → Unit test (src/ file)
       └─ NO → Could be either; prefer unit test for speed
 
----
+
 
 ## Naming Convention
 
@@ -193,8 +180,6 @@ Complex/Other → should_<behavior>_given_<context>_when_<action>
   Example: should_defer_deletion_given_grace_period_when_marked
 ```
 
----
-
 ## File Organization
 
 **Principle:** Unit tests live in `src/` files, integration tests in `tests/` directory.
@@ -202,7 +187,7 @@ Complex/Other → should_<behavior>_given_<context>_when_<action>
 ### Unit Test Pattern
 
 ```rust
-// src/storage/skiplist.rs
+// src/core/memtable/skiplist.rs
 
 pub struct SkipList {
     // ... implementation ...
@@ -287,25 +272,21 @@ fn should_persist_data_across_restart() {
 
 ```
 src/
-├── index/
-│   ├── bloom.rs              → 14 tests
-│   ├── merge_iterator.rs     → 10 tests
-│   └── range_tombstone.rs    → 21 tests
-├── storage/
-│   ├── skiplist.rs           → 4 tests
-│   ├── memtable.rs           → 13 tests
-│   ├── sparse_index.rs       → 5 tests
-│   ├── sst.rs                → 7 tests
-│   ├── mem.rs            → 11 tests
-│   ├── fs.rs             → 6 tests
-│   └── file_manager.rs       → 11 tests
+├── core/
+│   ├── memtable/             → Multiple tests
+│   └── ...                   → Tests throughout
+├── sst/
+│   ├── bloom.rs              → Multiple tests
+│   ├── range_tombstone.rs    → Multiple tests
+│   ├── sparse_index.rs       → Multiple tests
+│   └── ...                   → Tests throughout
 ├── wal/
-│   ├── wal.rs                → 4 tests
-│   ├── wal_fs.rs             → 12 tests
-│   └── wal_mem.rs            → 16 tests
-└── utils/
-    ├── tlv.rs                → 15 tests
-    └── codec.rs              → 20+ tests
+│   ├── mem/                  → Multiple tests
+│   ├── fs/                   → Multiple tests
+│   └── ...                   → Tests throughout
+└── common/
+    ├── tlv.rs                → Multiple tests
+    └── codec.rs              → Multiple tests
 ```
 
 **Integration Tests (in `tests/`):**
@@ -394,8 +375,6 @@ We recently migrated 70+ tests from `tests/` to `src/` following Rust convention
 - utils/cache.rs (uses MidgeEngine)
 - utils/metrics.rs (uses MidgeEngine)
 - utils/rate_limiter.rs (hybrid integration)
-
----
 
 ## Single Behavior Principle
 
@@ -540,8 +519,6 @@ When reviewing tests, verify:
 - [ ] If test fails, the **behavior** that broke is immediately clear
 - [ ] No "and" in the test name (usually indicates multiple behaviors)
 
----
-
 ## Test Structure (Arrange/Act/Assert)
 
 **Mandatory Pattern:** Every test must have clearly marked sections.
@@ -640,11 +617,9 @@ fn should_return_none_given_missing_key() {
 
 But prefer separate sections when **any** complexity is involved.
 
----
+## Timeout Patterns
 
-## Async & Timeout Patterns
-
-### Use Timeouts, Not Sleep
+### Use Explicit Waits, Not Arbitrary Sleeps
 
 ❌ **Bad:** Arbitrary sleep
 
@@ -654,61 +629,28 @@ std::thread::sleep(Duration::from_secs(1));
 assert!(condition);
 ```
 
-✅ **Good:** Timeout with fast failure
+✅ **Good:** Explicit wait with condition
 
 ```rust
-use tokio::time::{timeout, Duration};
+use std::time::{Duration, Instant};
 
-let result = timeout(Duration::from_millis(200), operation).await;
-assert!(result.is_ok(), "operation timed out");
-```
+let start = Instant::now();
+let timeout = Duration::from_millis(200);
 
-### Async Test Pattern
-
-```rust
-#[tokio::test]
-async fn should_complete_within_timeout() {
-    // Arrange
-    let service = Service::new();
-
-    // Act
-    let result = timeout(
-        Duration::from_millis(100),
-        service.async_operation()
-    ).await;
-
-    // Assert
-    assert!(result.is_ok(), "operation should complete quickly");
-    assert_eq!(result.unwrap(), expected_value);
+while !condition_met() {
+    if start.elapsed() > timeout {
+        panic!("operation timed out");
+    }
+    std::thread::sleep(Duration::from_millis(10));
 }
 ```
 
 ### Timeout Guidelines
 
-- **Fast tests:** Use 50-200ms timeouts for fast operations
-- **Slow operations:** Use minimal timeout needed + margin (e.g., 1s operation → 1.5s timeout)
-- **Comment delays:** If a `sleep()` is truly needed, explain why
+- **Fast tests:** Use 50-200ms timeouts for quick operations
+- **I/O operations:** Use minimal timeout needed + margin (e.g., 1s operation → 1.5s timeout)
+- **Comment delays:** If a `sleep()` is needed, explain why
 - **Prefer polling:** For eventual consistency, use retry loops with timeout
-
-### Example: Testing "No Message"
-
-```rust
-use tokio::time::{timeout, Duration};
-
-#[tokio::test]
-async fn should_receive_no_messages_given_no_publisher() {
-    // Arrange
-    let mut subscriber = create_subscriber();
-
-    // Act: Try to receive with timeout
-    let result = timeout(Duration::from_millis(100), subscriber.next()).await;
-
-    // Assert: Timeout means no message (expected)
-    assert!(result.is_err(), "unexpected message received");
-}
-```
-
----
 
 ## Trait Behavior Tests
 
@@ -830,8 +772,6 @@ behavior_tests_for!(lz4_codec, Lz4Codec, Lz4Codec::new);
 
 ❌ **Don't** copy-paste tests for each implementation — use the patterns above
 
----
-
 ## Table-Driven Tests
 
 For testing the same behavior with multiple inputs, use table-driven tests.
@@ -859,13 +799,11 @@ fn should_parse_valid_inputs() {
 }
 ```
 
-### Async Pattern
+### Pattern Example
 
 ```rust
-use tokio::time::{timeout, Duration};
-
-#[tokio::test]
-async fn should_handle_various_inputs() {
+#[test]
+fn should_handle_various_inputs() {
     // Arrange
     let cases = vec![
         ("small", vec![1, 2, 3], 6),
@@ -874,17 +812,11 @@ async fn should_handle_various_inputs() {
     ];
 
     for (name, input, expected) in cases {
-        let name = name.to_string();  // Move into async block
-
         // Act
-        let fut = async move {
-            let result = async_sum(&input).await;
-            assert_eq!(result, expected, "case: {}", name);
-        };
-
-        // Assert: Complete within timeout
-        let res = timeout(Duration::from_millis(100), fut).await;
-        assert!(res.is_ok(), "case '{}' timed out", name);
+        let result = sum(&input);
+        
+        // Assert
+        assert_eq!(result, expected, "case: {}", name);
     }
 }
 ```
@@ -902,8 +834,6 @@ async fn should_handle_various_inputs() {
 - Testing different behaviors (use separate tests instead)
 - Each case needs different setup or assertions
 - Failure diagnosis would be unclear
-
----
 
 ## Determinism & Isolation
 
@@ -966,8 +896,6 @@ fn should_track_metrics() {
 ❌ Singleton patterns without isolation
 ❌ Tests that depend on execution order
 ❌ Tests that modify shared file system paths
-
----
 
 ## Assertions
 
@@ -1036,8 +964,6 @@ match result {
     _ => panic!("Expected QuotaExceeded error"),
 }
 ```
-
----
 
 ## Negative Testing
 
@@ -1121,8 +1047,6 @@ Always test:
 - Missing keys
 - Duplicate keys
 - Concurrent operations (where applicable)
-
----
 
 ## CI Commands
 
@@ -1215,8 +1139,6 @@ cargo watch -x "test --lib"
 cargo watch -x "test --lib skiplist"
 ```
 
----
-
 ## Quick Reference Checklist
 
 Use this checklist when writing or reviewing tests:
@@ -1256,12 +1178,6 @@ Use this checklist when writing or reviewing tests:
 - [ ] No external dependencies (except localhost)
 - [ ] Can run in any order, including parallel
 
-### Async (if applicable)
-
-- [ ] Uses `#[tokio::test]` for async
-- [ ] Uses `timeout()` instead of `sleep()`
-- [ ] Timeout duration is justified (50-200ms for fast ops)
-
 ### Trait Tests (if applicable)
 
 - [ ] Factory pattern for fresh instances
@@ -1280,8 +1196,6 @@ Use this checklist when writing or reviewing tests:
 - [ ] Tests boundary conditions (empty, max, min)
 - [ ] Tests invalid input
 - [ ] Tests resource limits (where applicable)
-
----
 
 ## Examples Repository
 
@@ -1305,27 +1219,10 @@ See our actual test files for reference implementations:
 
 **For Specific Patterns:**
 
-- Async + Timeout: `tests/utils/rate_limiter.rs`
-- Trait Testing: `src/utils/codec.rs`
-- Negative Testing: `src/storage/fs.rs`
-- Table-Driven: `src/index/bloom.rs` (via macro)
-- Integration: `tests/compaction/compactor.rs`
-- Unit Tests: `src/storage/skiplist.rs`
+- Trait Testing: `src/common/codec.rs`
+- Negative Testing: `src/fs/` modules
+- Table-Driven: `src/sst/bloom.rs` (via macro)
+- Integration: `tests/compaction_basic.rs`
+- Unit Tests: Throughout `src/` modules
 
----
 
-## Document History
-
-- **2025-10-20:** Major update: Migrated to Rust unit test conventions
-  - Moved 70+ tests from `tests/` to `src/` in `#[cfg(test)]` modules
-  - Updated file organization to match Rust standards
-  - Added decision tree for unit vs integration tests
-  - Updated all examples to reflect new structure
-  - Test count: 239 tests (182 unit + 57 integration)
-- **2025-10-14:** Updated to reflect 214-test suite alignment
-- **2025-10-14:** Added real examples from Midge codebase
-- **2025-10-14:** Enhanced naming guidelines with decision tree
-- **2025-10-14:** Added comprehensive trait testing patterns
-- **2025-10-14:** Improved async/timeout guidance
-
-These guidelines evolve with the codebase. When patterns change, update this document to reflect our actual practices.

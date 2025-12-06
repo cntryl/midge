@@ -1,32 +1,6 @@
-Excellent — this is already a world-class test guide.
-Here’s the **matching “Idiomatic Code Guidelines”** document in the exact same structure, tone, and level of rigor:
-
----
-
 # Idiomatic Code Guidelines
 
 These guidelines define how we write **production Rust code** across the Midge repository to ensure clarity, safety, and performance. **All public modules follow these patterns** — this document reflects our actual validated practices in this repo: `tracing` for logs, `bytes::Bytes` for binary data, and `MidgeError`/`MidgeResult` for errors.
-
-## Table of Contents
-
-- [Code Organization Philosophy](#code-organization-philosophy)
-- [Naming Convention](#naming-convention)
-- [Error Handling](#error-handling)
-- [Ownership and Borrowing](#ownership-and-borrowing)
-- [Results, Options, and Panics](#results-options-and-panics)
-- [Concurrency](#concurrency)
-- [Performance and Memory](#performance-and-memory)
-- [Imports and Visibility](#imports-and-visibility)
-- [Logging and Instrumentation](#logging-and-instrumentation)
-- [Documentation and Comments](#documentation-and-comments)
-- [Formatting and Linting](#formatting-and-linting)
-- [Unsafe Code Policy](#unsafe-code-policy)
-- [Feature Flags & Public API](#feature-flags--public-api)
-- [Code Reviews](#code-reviews)
-- [Quick Reference Checklist](#quick-reference-checklist)
-- [Appendix: Common Code Smells → Fixes](#appendix-common-code-smells--fixes)
-
----
 
 ## Code Organization Philosophy
 
@@ -38,21 +12,17 @@ Each file defines one major concept or feature:
 
 ```
 src/
-├── storage/
-│   ├── memtable.rs
-│   ├── fs.rs
-│   └── file_manager.rs
-├── wal/
-│   ├── wal.rs
-│   ├── wal_fs.rs
-│   └── wal_mem.rs
-├── index/
-│   ├── bloom.rs
-│   ├── range_tombstone.rs
-│   └── merge_iterator.rs
-└── utils/
-    ├── codec.rs
-    └── tlv.rs
+├── api/              # Public KvStore trait and Engine
+├── core/             # Memtable, compaction, engine core
+├── wal/              # Write-ahead log (fs/, cloud/, mem/)
+├── sst/              # SSTable format and management
+├── cloud/            # Cloud storage backends
+├── common/           # Shared utilities (codec, tlv, internal_key)
+├── config/           # Configuration types
+├── fs/               # Filesystem abstractions
+├── health/           # Health monitoring
+├── metrics/          # Metrics collection
+└── lib.rs            # Public API exports
 ```
 
 ### Principles
@@ -63,8 +33,6 @@ src/
 - **Private-first** → All functions are private unless explicitly needed elsewhere.
 - **Stable APIs** → Internal refactors must not break public API contracts.
 - **Binary-first** → Keys/values are bytes (not strings). Respect internal key layout in storage paths.
-
----
 
 ## Naming Convention
 
@@ -96,8 +64,6 @@ pub const MAX_BLOCK_SIZE: usize = 4 * 1024;
 ### Module Names
 
 Snake case, short and descriptive → `memtable`, `fs`, `range_tombstone`
-
----
 
 ## Error Handling
 
@@ -134,8 +100,6 @@ let file = File::open(path).map_err(|e| MidgeError::IoWithPath(path.into(), e))?
 let file = File::open(path).unwrap(); // panics if missing
 ```
 
----
-
 ## Ownership and Borrowing
 
 ### Core Rules
@@ -151,8 +115,6 @@ let file = File::open(path).unwrap(); // panics if missing
 3. **Use `Arc` for shared ownership**. For mutable shared state, prefer minimizing lock scope and holding times.
 4. **Return owned data from APIs** — consumers should decide borrowing.
 5. **Binary data** — keys/values may be non-UTF8; avoid `String`/`&str` in storage/index paths. Internal keys encode `cf_id || user_key || inverted_seq || entry_type`.
-
----
 
 ## Results, Options, and Panics
 
@@ -184,8 +146,6 @@ fs::read_to_string("config.toml").unwrap(); // Crashes if missing
 - In **clearly unrecoverable states** (e.g., logic invariant broken)
 - When **asserting developer error**, not user input
 
----
-
 ## Concurrency
 
 ### Principles
@@ -216,8 +176,6 @@ async fn get_token(cache: Arc<Mutex<TokenCache>>) -> String {
 }
 ```
 
----
-
 ## Performance and Memory
 
 ### Guidelines
@@ -234,8 +192,6 @@ async fn get_token(cache: Arc<Mutex<TokenCache>>) -> String {
 ❌ Creating new `Vec<u8>` in tight loops
 ❌ Using `.clone()` when borrow suffices
 ❌ Using `String` for binary data
-
----
 
 ## Imports and Visibility
 
@@ -254,8 +210,6 @@ async fn get_token(cache: Arc<Mutex<TokenCache>>) -> String {
 - Keep everything **private by default**
 - Only expose items required by external crates
 - Re-export selectively from `lib.rs` for the public API
-
----
 
 ## Logging and Instrumentation
 
@@ -286,8 +240,6 @@ fn high_memory(usage: usize) {
   warn!(bytes = usage, "high memory usage");
 }
 ```
-
----
 
 ## Documentation and Comments
 
@@ -320,31 +272,22 @@ fn append_record(...) { ... }
   // Force WAL rotation after threshold to preserve durability guarantees
   ```
 
----
-
 ## Formatting and Linting
 
-- Use `rustfmt` (edition 2024). Keep diffs minimal; avoid reformatting unrelated code.
- - Use `rustfmt` (edition 2021). Keep diffs minimal; avoid reformatting unrelated code.
+- Use `rustfmt` (edition 2021). Keep diffs minimal; avoid reformatting unrelated code.
 - Fix clippy warnings in PRs; prefer denying `unwrap`/`expect` in production modules.
 - Build + tests must pass locally and in CI.
-
----
 
 ## Unsafe Code Policy
 
 - Unsafe is rare, localized, and documented with safety invariants.
 - Add unit tests and, where applicable, fuzzing around unsafe boundaries (e.g., TLV parsing, codecs).
 
----
-
 ## Feature Flags & Public API
 
 - Optional cloud providers are behind features: `cloud-aws`, `cloud-azure`, `cloud-gcp`, `cloud-all`.
 - Keep `lib.rs` re-exports minimal and stable; public API changes require tests and docs.
 - Do not leak internal key formats in public APIs; map to user-visible types.
-
----
 
 ## Code Reviews
 
@@ -356,8 +299,6 @@ fn append_record(...) { ... }
 - Ensure types and lifetimes are explicit and minimal
 - Encourage smaller, focused functions
 - Confirm structured logging for all I/O paths
-
----
 
 ## Quick Reference Checklist
 
@@ -389,9 +330,10 @@ fn append_record(...) { ... }
 
 ### Concurrency
 
-- [ ] No blocking calls in async functions
-- [ ] Use `tokio::fs`, `tokio::time`, `Mutex` for sync
-- [ ] Avoid deadlocks and shared mutability
+- [ ] Use `parking_lot` primitives for synchronization
+- [ ] Background workers use channels for event-driven processing
+- [ ] Avoid deadlocks and minimize shared mutability
+- [ ] Keep lock hold times minimal
 
 ### Logging
 
@@ -403,25 +345,13 @@ fn append_record(...) { ... }
 - [ ] Public items have meaningful Rustdoc
 - [ ] Inline comments explain _why_, not _what_
 
----
-
-## Document History
-
-- **2025-10-20:** Updated to align with Midge codebase
-
-  - Switched logging guidance to `tracing`; clarified sync core vs async cloud
-  - Added formatting/linting, unsafe policy, feature flags & public API
-  - Reinforced binary-first conventions (`Bytes`, `&[u8]`)
-
----
-
 ## Appendix: Common Code Smells → Fixes
 
-| Smell                                 | Fix                                                  |
-| ------------------------------------- | ---------------------------------------------------- |
-| `unwrap()`/`expect()` in production   | Propagate with `?`; `map_err()` into `MidgeError`    |
-| Using `String`/`&str` for binary data | Use `&[u8]`/`Bytes`                                  |
-| Unnecessary `clone()`                 | Borrow or move; if clone needed, comment why         |
-| Allocations in hot loops              | Reuse buffers; pre-allocate with `with_capacity()`   |
-| Blocking in async                     | Use `tokio` equivalents (`tokio::fs`, `tokio::time`) |
-| Long lock sections                    | Do heavy work outside critical sections              |
+| Smell                                 | Fix                                                |
+| ------------------------------------- | -------------------------------------------------- |
+| `unwrap()`/`expect()` in production   | Propagate with `?`; `map_err()` into `MidgeError`  |
+| Using `String`/`&str` for binary data | Use `&[u8]`/`Bytes`                                |
+| Unnecessary `clone()`                 | Borrow or move; if clone needed, comment why       |
+| Allocations in hot loops              | Reuse buffers; pre-allocate with `with_capacity()` |
+| Long lock sections                    | Do heavy work outside critical sections            |
+| Blocking operations in hot paths      | Use background workers with channels               |
