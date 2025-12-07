@@ -179,32 +179,38 @@ mod tests {
 
     #[test]
     fn should_increase_estimate_given_increments_when_queried() {
+        // Arrange
         let mut sketch = FrequencySketch::new(100);
 
+        // Act
         sketch.increment(12345);
-        assert!(sketch.estimate(12345) >= 1);
+        sketch.increment(12345);
+        sketch.increment(12345);
 
-        sketch.increment(12345);
-        sketch.increment(12345);
+        // Assert
         assert!(sketch.estimate(12345) >= 2);
     }
 
     #[test]
     fn should_saturate_at_15_given_many_increments_when_queried() {
+        // Arrange
         let mut sketch = FrequencySketch::new(100);
 
+        // Act
         for _ in 0..100 {
             sketch.increment(12345);
         }
 
+        // Assert
         assert!(sketch.estimate(12345) <= 15);
     }
 
     #[test]
     fn should_distinguish_hot_from_cold_given_different_access_patterns() {
+        // Arrange
         let mut sketch = FrequencySketch::new(1000);
 
-        // Hot key: many accesses
+        // Act - Hot key: many accesses
         for _ in 0..50 {
             sketch.increment(1);
         }
@@ -214,14 +220,16 @@ mod tests {
             sketch.increment(2);
         }
 
+        // Assert
         assert!(sketch.estimate(1) > sketch.estimate(2));
     }
 
     #[test]
     fn should_admit_hotter_candidate_given_admission_decision() {
+        // Arrange
         let mut controller = AdmissionController::new(1000);
 
-        // Make candidate hot
+        // Act - Make candidate hot
         for _ in 0..10 {
             controller.record_access(1);
         }
@@ -229,18 +237,23 @@ mod tests {
         // Make victim cold
         controller.record_access(2);
 
+        // Assert
         assert!(controller.should_admit(1, 2)); // hot beats cold
         assert!(!controller.should_admit(2, 1)); // cold loses to hot
     }
 
     #[test]
     fn should_clear_given_populated_sketch_when_cleared() {
+        // Arrange
         let mut sketch = FrequencySketch::new(100);
 
         sketch.increment(12345);
         assert!(sketch.estimate(12345) >= 1);
 
+        // Act
         sketch.clear();
+
+        // Assert
         assert_eq!(sketch.estimate(12345), 0);
     }
 

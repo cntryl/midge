@@ -342,7 +342,7 @@ fn should_count_tombstones_separately() {
 // ============================================================================
 
 #[test]
-fn should_compute_smallest_and_largest_keys_correctly() {
+fn should_compute_bounds_correctly_given_unordered_keys_when_flushing() {
     // Arrange - keys intentionally out of order
     let entries = vec![
         make_entry(b"key_m", b"val", 1), // middle

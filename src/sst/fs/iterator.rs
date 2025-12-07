@@ -63,6 +63,35 @@ impl SstRangeIter {
     }
 
     fn load_next_block(&mut self) -> MidgeResult<bool> {
+        // Skip blocks that don't intersect with the requested range
+        while self.blk_idx < self.blocks.len() {
+            let meta = &self.blocks[self.blk_idx];
+            
+            // Check if block can be skipped based on fence pointers
+            let should_skip = match (&self.start, &self.end) {
+                (Some(s), Some(e)) => {
+                    // Block is entirely before range start or after range end
+                    meta.max_key.as_ref() < s.as_slice() || meta.min_key.as_ref() >= e.as_slice()
+                }
+                (Some(s), None) => {
+                    // Block is entirely before range start
+                    meta.max_key.as_ref() < s.as_slice()
+                }
+                (None, Some(e)) => {
+                    // Block is entirely after range end
+                    meta.min_key.as_ref() >= e.as_slice()
+                }
+                (None, None) => false,
+            };
+
+            if should_skip {
+                self.blk_idx += 1;
+                continue;
+            }
+
+            break;
+        }
+
         if self.blk_idx >= self.blocks.len() {
             return Ok(false);
         }

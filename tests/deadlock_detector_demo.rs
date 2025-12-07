@@ -9,27 +9,33 @@ use std::time::Duration;
 
 #[test]
 fn should_detect_fast_completion() {
+    // Arrange
     let _detector = DeadlockDetector::new("fast_test", Duration::from_secs(5));
     
-    // Fast operation
+    // Act: Fast operation
     std::thread::sleep(Duration::from_millis(10));
     
-    // Detector is dropped here, test passes without warnings
+    // Assert: Detector is dropped here, test passes without warnings
 }
 
 #[test]
 fn should_use_with_timeout_assertion() {
-    // This will panic if operation takes >100ms
-    let result = assert_completes_within(Duration::from_millis(100), || {
+    // Arrange
+    let timeout = Duration::from_millis(100);
+    
+    // Act: Run operation with timeout assertion
+    let result = assert_completes_within(timeout, || {
         std::thread::sleep(Duration::from_millis(10));
         42
     });
     
+    // Assert
     assert_eq!(result, 42);
 }
 
 #[test]
 fn should_run_stress_test_without_deadlock() {
+    // Arrange
     let coordinator = StressTestCoordinator::new(
         "concurrent_counter",
         10, // 10 threads
@@ -39,12 +45,14 @@ fn should_run_stress_test_without_deadlock() {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
     
+    // Act
     coordinator.run_concurrent(10, move || {
         for _ in 0..1000 {
             counter_clone.fetch_add(1, Ordering::Relaxed);
         }
     });
     
+    // Assert
     assert_eq!(counter.load(Ordering::Relaxed), 10_000);
     println!("Stress test completed in {:?}", coordinator.elapsed());
 }

@@ -125,6 +125,9 @@ mod tests {
 
     #[test]
     fn should_handle_empty_inputs() {
+        // Arrange
+        // (no setup needed)
+
         // Act
         let stats = FlushStats::compute(&[], &[]);
 

@@ -569,18 +569,20 @@ mod tests {
     }
 
     #[test]
-    fn should_insert_and_get_given_single_block_when_cached() {
+    fn should_retrieve_block_given_cached_entry_when_queried() {
+        // Arrange
         let shard = make_shard(4096);
         let key = make_key(1, 0);
         let data = make_data(100);
-
         let handle = shard.insert(key, data);
         // Handle is now pinned with drop-based unpin
         assert!(handle.is_pinned());
 
+        // Act
         let retrieved = shard.get(&key);
-        assert!(retrieved.is_some());
 
+        // Assert
+        assert!(retrieved.is_some());
         let stats = shard.stats();
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.admissions, 1);
@@ -588,17 +590,21 @@ mod tests {
 
     #[test]
     fn should_return_none_given_missing_key_when_get_called() {
+        // Arrange
         let shard = make_shard(4096);
         let key = make_key(1, 0);
 
+        // Act
         let result = shard.get(&key);
 
+        // Assert
         assert!(result.is_none());
         assert_eq!(shard.stats().misses, 1);
     }
 
     #[test]
     fn should_evict_lru_given_full_shard_when_new_block_inserted() {
+        // Arrange
         let shard = make_shard(200); // Small capacity
         let key1 = make_key(1, 0);
         let key2 = make_key(2, 0);
@@ -614,9 +620,10 @@ mod tests {
             // Handle dropped here, unpin called automatically
         }
 
-        // This should trigger eviction of key1 (LRU)
+        // Act - This should trigger eviction of key1 (LRU)
         let _h3 = shard.insert(key3, make_data(80));
 
+        // Assert
         assert!(shard.get(&key3).is_some());
         // key1 may be evicted depending on policy
         let stats = shard.stats();
@@ -625,6 +632,7 @@ mod tests {
 
     #[test]
     fn should_not_evict_pinned_given_pinned_entry_when_eviction_needed() {
+        // Arrange
         let shard = make_shard(150);
         let key1 = make_key(1, 0);
         let key2 = make_key(2, 0);
@@ -633,10 +641,10 @@ mod tests {
         let _pinned_handle = shard.insert(key1, make_data(100));
         assert!(_pinned_handle.is_pinned());
 
-        // Try to insert another - eviction should skip pinned entry
+        // Act - Try to insert another - eviction should skip pinned entry
         let _h2 = shard.insert(key2, make_data(100));
 
-        // With our small capacity, one must be evicted unless both fit
+        // Assert - With our small capacity, one must be evicted unless both fit
         // Since key1 is pinned, key2 may fail to insert or key1 stays
         let stats = shard.stats();
         assert!(stats.admissions >= 1);
@@ -644,34 +652,40 @@ mod tests {
 
     #[test]
     fn should_dedup_given_concurrent_insert_when_insert_if_absent_called() {
+        // Arrange
         let shard = make_shard(4096);
         let key = make_key(1, 0);
 
+        // Act
         let h1 = shard.insert(key, make_data(100));
         let h2 = shard.insert_if_absent(key, make_data(200));
 
-        // Both should point to the same cached data (first insert wins)
+        // Assert - Both should point to the same cached data (first insert wins)
         assert_eq!(h1.data().bytes().len(), h2.data().bytes().len());
         assert_eq!(shard.stats().admissions, 1); // Only one admission
     }
 
     #[test]
     fn should_track_used_bytes_given_inserts_and_evictions_when_queried() {
+        // Arrange
         let shard = make_shard(1000);
 
+        // Act
         shard.insert(make_key(1, 0), make_data(100));
         shard.insert(make_key(2, 0), make_data(200));
 
+        // Assert
         let stats = shard.stats();
         assert_eq!(stats.used_bytes, 300);
     }
 
     #[test]
     fn should_unpin_on_handle_drop_given_pinned_handle_when_dropped() {
+        // Arrange
         let shard = make_shard(4096);
         let key = make_key(1, 0);
 
-        // Insert returns a pinned handle
+        // Act - Insert returns a pinned handle
         {
             let handle = shard.insert(key, make_data(100));
             assert!(handle.is_pinned());
@@ -682,18 +696,20 @@ mod tests {
             // Handle dropped here
         }
 
-        // After handle drop, pin count should be 0
+        // Assert - After handle drop, pin count should be 0
         let inner = shard.inner.lock();
         assert_eq!(inner.entries[0].as_ref().unwrap().pins, 0);
     }
 
     #[test]
     fn should_keep_entry_pinned_given_get_while_insert_handle_held() {
+        // Arrange
         let shard = make_shard(4096);
         let key = make_key(1, 0);
 
         let insert_handle = shard.insert(key, make_data(100));
         
+        // Act
         {
             // Get also returns a pinned handle
             let get_handle = shard.get(&key).unwrap();
@@ -706,7 +722,7 @@ mod tests {
             // get_handle dropped here
         }
         
-        // After get_handle drop, pin count should be 1
+        // Assert - After get_handle drop, pin count should be 1
         let inner = shard.inner.lock();
         assert_eq!(inner.entries[0].as_ref().unwrap().pins, 1);
         drop(inner);
@@ -721,7 +737,7 @@ mod tests {
 
     #[test]
     fn should_reject_cold_block_given_hot_cache_when_admission_control_active() {
-        // Create a small shard that will be full quickly
+        // Arrange - Create a small shard that will be full quickly
         let shard = make_shard(200);
         
         // Insert a "hot" block and access it many times to build frequency
@@ -734,24 +750,23 @@ mod tests {
             let _ = shard.get(&hot_key);
         }
         
-        // Now try to insert a "cold" block that we've never seen before
+        // Act - Now try to insert a "cold" block that we've never seen before
         let cold_key = make_key(999, 0);
         let _cold_handle = shard.insert(cold_key, make_data(100));
         
-        let stats = shard.stats();
-        
-        // The cold block should either be rejected (rejections > 0) 
+        // Assert - The cold block should either be rejected (rejections > 0) 
         // or admitted (if cache had room or frequency was high enough)
         // The key test is that the rejection tracking works
         // Note: With the current admission logic, this may or may not reject
         // depending on timing and frequency sketch state
+        let stats = shard.stats();
         assert!(stats.admissions + stats.rejections >= 2, 
             "Should have at least one admission and one rejection or two admissions");
     }
 
     #[test]
     fn should_track_rejections_given_scan_workload_when_full_cache() {
-        // Create a shard with room for just a few blocks
+        // Arrange - Create a shard with room for just a few blocks
         let shard = make_shard(500);
         
         // Fill with "hot" blocks and access them multiple times
@@ -766,12 +781,13 @@ mod tests {
             }
         }
         
-        // Now simulate a "scan" - insert many blocks we'll never access again
+        // Act - Now simulate a "scan" - insert many blocks we'll never access again
         for i in 100..110 {
             let scan_key = make_key(i, 0);
             let _h = shard.insert(scan_key, make_data(100));
         }
         
+        // Assert
         let stats = shard.stats();
         
         // With admission control, some scan blocks should be rejected
@@ -865,9 +881,11 @@ mod tests {
         
         let key = make_key(1, 0);
         let _h = shard.insert(key, make_data(100));
+
+        // Act
         let _ = shard.get(&key);
         
-        // Act & Assert: cf_stats should return None
+        // Assert: cf_stats should return None
         assert!(shard.cf_stats(0).is_none(), "CF stats should be None when disabled");
         assert!(shard.all_cf_stats().is_none(), "All CF stats should be None when disabled");
     }
@@ -888,7 +906,7 @@ mod tests {
             let _h2 = shard.insert(cf0_key2, make_data(100));
         } // Drop handle to allow eviction
         
-        // Insert a large block from CF1 that will force eviction of CF0 blocks
+        // Act - Insert a large block from CF1 that will force eviction of CF0 blocks
         let cf1_key = BlockKey::new(3, 0, BlockKind::Data, 1);
         let _h3 = shard.insert(cf1_key, make_data(200));
         

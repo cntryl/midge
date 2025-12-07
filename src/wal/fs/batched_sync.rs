@@ -208,9 +208,13 @@ mod tests {
 
     #[test]
     fn should_create_coordinator_with_default_config() {
+        // Arrange
         let config = BatchedSyncConfig::default();
+
+        // Act
         let coordinator = BatchedSyncCoordinator::new(config);
 
+        // Assert
         assert!(!coordinator.in_progress());
         assert_eq!(coordinator.epoch(), 0);
     }
@@ -315,6 +319,7 @@ mod tests {
 
     #[test]
     fn should_propagate_error_given_leader_fails_when_followers_wait() {
+        // Arrange
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
             wait_micros: 10,
         }));
@@ -344,6 +349,7 @@ mod tests {
 
     #[test]
     fn should_clear_error_after_failed_batch_when_new_batch_starts() {
+        // Arrange
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
             wait_micros: 10,
         }));
@@ -391,6 +397,7 @@ mod tests {
 
     #[test]
     fn should_allow_back_to_back_syncs_given_multiple_rounds_when_reused() {
+        // Arrange
         let coordinator = Arc::new(BatchedSyncCoordinator::new(BatchedSyncConfig {
             wait_micros: 0,
         }));

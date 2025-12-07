@@ -111,9 +111,13 @@ mod tests {
 
     #[test]
     fn should_report_correct_size_given_uncompressed_block_when_queried() {
+        // Arrange
         let data: Arc<[u8]> = vec![0u8; 4096].into();
+
+        // Act
         let block = BlockData::uncompressed(data, BlockKind::Data);
 
+        // Assert
         assert!(!block.is_compressed());
         assert_eq!(block.uncompressed_size(), 4096);
         assert_eq!(block.compressed_size(), 0);
@@ -122,9 +126,13 @@ mod tests {
 
     #[test]
     fn should_report_correct_sizes_given_compressed_block_when_queried() {
+        // Arrange
         let data: Arc<[u8]> = vec![0u8; 1024].into(); // compressed payload
+
+        // Act
         let block = BlockData::compressed(data, 4096, BlockKind::Data);
 
+        // Assert
         assert!(block.is_compressed());
         assert_eq!(block.uncompressed_size(), 4096);
         assert_eq!(block.compressed_size(), 1024);
@@ -133,10 +141,14 @@ mod tests {
 
     #[test]
     fn should_share_bytes_given_clone_when_bytes_arc_called() {
+        // Arrange
         let data: Arc<[u8]> = vec![1, 2, 3].into();
         let block = BlockData::uncompressed(Arc::clone(&data), BlockKind::Index);
+
+        // Act
         let cloned = block.bytes_arc();
 
+        // Assert
         assert!(Arc::ptr_eq(&data, &cloned));
     }
 }

@@ -107,34 +107,38 @@ mod tests {
 
     #[test]
     fn should_cleanup_directory_when_guard_dropped() {
+        // Arrange
         let temp_path = std::env::temp_dir().join(format!("midge_test_cleanup_{}", 
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
         
         std::fs::create_dir_all(&temp_path).unwrap();
         assert!(temp_path.exists());
 
+        // Act: Create and drop guard
         {
             let _guard = TestDirGuard::new(temp_path.clone());
             assert!(temp_path.exists());
         }
 
-        // Directory should be cleaned up after guard is dropped
+        // Assert: Directory should be cleaned up after guard is dropped
         assert!(!temp_path.exists());
     }
 
     #[test]
     fn should_keep_directory_when_requested() {
+        // Arrange
         let temp_path = std::env::temp_dir().join(format!("midge_test_keep_{}", 
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
         
         std::fs::create_dir_all(&temp_path).unwrap();
 
+        // Act: Create guard and mark for keeping
         {
             let mut guard = TestDirGuard::new(temp_path.clone());
             guard.keep();
         }
 
-        // Directory should still exist
+        // Assert: Directory should still exist
         assert!(temp_path.exists());
         
         // Clean up for the test

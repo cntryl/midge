@@ -203,24 +203,35 @@ mod tests {
 
     #[test]
     fn should_access_data_given_unpinned_handle_when_data_called() {
+        // Arrange
         let block = make_block();
         let handle = BlockHandle::unpinned(block);
 
-        assert_eq!(handle.data().bytes().len(), 100);
+        // Act
+        let data = handle.data();
+
+        // Assert
+        assert_eq!(data.bytes().len(), 100);
         assert!(!handle.is_pinned());
     }
 
     #[test]
     fn should_report_pinned_given_pinned_handle_when_is_pinned_called() {
+        // Arrange
         let block = make_block();
         let unpinner = Arc::new(MockUnpinner::new());
         let handle = BlockHandle::pinned(block, 42, Arc::downgrade(&unpinner) as WeakUnpinner);
 
-        assert!(handle.is_pinned());
+        // Act
+        let is_pinned = handle.is_pinned();
+
+        // Assert
+        assert!(is_pinned);
     }
 
     #[test]
     fn should_unpin_exactly_once_given_pinned_handle_and_clones_when_all_dropped() {
+        // Arrange
         let block = make_block();
         let unpinner = Arc::new(MockUnpinner::new());
 
@@ -235,62 +246,76 @@ mod tests {
         assert!(h3.is_pinned());
         assert_eq!(unpinner.unpin_count(), 0);
 
+        // Act
         drop(handle);
         assert_eq!(unpinner.unpin_count(), 0);
         drop(h2);
         assert_eq!(unpinner.unpin_count(), 0);
         drop(h3);
 
-        // Last pinned handle dropped → exactly one unpin call.
+        // Assert - Last pinned handle dropped → exactly one unpin call.
         assert_eq!(unpinner.unpin_count(), 1);
         assert_eq!(unpinner.last_entry(), 42);
     }
 
     #[test]
     fn should_not_unpin_given_unpinned_handle_when_dropped() {
+        // Arrange
         let block = make_block();
         let unpinner = Arc::new(MockUnpinner::new());
 
+        // Act
         {
             let _handle = BlockHandle::unpinned(block);
             assert_eq!(unpinner.unpin_count(), 0);
         }
 
-        // Unpinned handle does not interact with unpinner at all.
+        // Assert - Unpinned handle does not interact with unpinner at all.
         assert_eq!(unpinner.unpin_count(), 0);
     }
 
     #[test]
     fn should_produce_unpinned_handle_given_to_unpinned_when_called() {
+        // Arrange
         let block = make_block();
         let unpinner = Arc::new(MockUnpinner::new());
         let pinned = BlockHandle::pinned(block, 7, Arc::downgrade(&unpinner) as WeakUnpinner);
 
+        // Act
         let unpinned = pinned.to_unpinned();
 
+        // Assert
         assert!(pinned.is_pinned());
         assert!(!unpinned.is_pinned());
     }
 
     #[test]
     fn should_share_data_given_clone_when_data_arc_called() {
+        // Arrange
         let block = make_block();
         let handle = BlockHandle::unpinned(Arc::clone(&block));
+
+        // Act
         let arc = handle.data_arc();
 
+        // Assert
         assert!(Arc::ptr_eq(&block, &arc));
     }
 
     #[test]
     fn should_not_panic_given_dropped_shard_when_handle_dropped() {
+        // Arrange
         let block = make_block();
         let unpinner = Arc::new(MockUnpinner::new());
         let handle = BlockHandle::pinned(block, 99, Arc::downgrade(&unpinner) as WeakUnpinner);
 
-        // Drop the unpinner first (simulates shard being dropped).
+        // Act - Drop the unpinner first (simulates shard being dropped).
         drop(unpinner);
 
         // Now drop handle - should not panic and should not try to unpin.
         drop(handle);
+
+        // Assert
+        // (no panic = success)
     }
 }

@@ -14,16 +14,17 @@ mod sst_invariants {
 
     #[test]
     fn should_create_block_meta() {
-        // Arrange & Act
-        let meta = BlockMeta::new(
-            Bytes::from("apple"),
-            Bytes::from("apricot"),
-            BlockHandle::new(100, 1024),
-        );
+        // Arrange
+        let min_key = Bytes::from("apple");
+        let max_key = Bytes::from("apricot");
+        let handle = BlockHandle::new(100, 1024);
+
+        // Act
+        let meta = BlockMeta::new(min_key.clone(), max_key.clone(), handle);
 
         // Assert
-        assert_eq!(meta.min_key, Bytes::from("apple"));
-        assert_eq!(meta.max_key, Bytes::from("apricot"));
+        assert_eq!(meta.min_key, min_key);
+        assert_eq!(meta.max_key, max_key);
         assert!(!meta.has_tombstones);
     }
 
@@ -36,12 +37,19 @@ mod sst_invariants {
             BlockHandle::new(100, 1024),
         );
 
-        // Act & Assert
-        assert!(meta.contains_key(b"apple"));
-        assert!(meta.contains_key(b"apricot"));
-        assert!(meta.contains_key(b"banana"));
-        assert!(!meta.contains_key(b"aardvark"));
-        assert!(!meta.contains_key(b"cherry"));
+        // Act
+        let contains_apple = meta.contains_key(b"apple");
+        let contains_apricot = meta.contains_key(b"apricot");
+        let contains_banana = meta.contains_key(b"banana");
+        let contains_aardvark = meta.contains_key(b"aardvark");
+        let contains_cherry = meta.contains_key(b"cherry");
+
+        // Assert
+        assert!(contains_apple);
+        assert!(contains_apricot);
+        assert!(contains_banana);
+        assert!(!contains_aardvark);
+        assert!(!contains_cherry);
     }
 
     #[test]
@@ -53,12 +61,19 @@ mod sst_invariants {
             BlockHandle::new(100, 1024),
         );
 
-        // Act & Assert (range [start, end) intersects block [b, d])
-        assert!(meta.range_intersects(b"a", b"c")); // [a, c) intersects [b, d]
-        assert!(meta.range_intersects(b"c", b"e")); // [c, e) intersects [b, d]
-        assert!(meta.range_intersects(b"b", b"d")); // [b, d) intersects [b, d]
-        assert!(!meta.range_intersects(b"a", b"b")); // [a, b) doesn't intersect [b, d]
-        assert!(!meta.range_intersects(b"e", b"f")); // [e, f) doesn't intersect [b, d]
+        // Act: Check various range intersections
+        let intersects_ac = meta.range_intersects(b"a", b"c");
+        let intersects_ce = meta.range_intersects(b"c", b"e");
+        let intersects_bd = meta.range_intersects(b"b", b"d");
+        let intersects_ab = meta.range_intersects(b"a", b"b");
+        let intersects_ef = meta.range_intersects(b"e", b"f");
+
+        // Assert (range [start, end) intersects block [b, d])
+        assert!(intersects_ac); // [a, c) intersects [b, d]
+        assert!(intersects_ce); // [c, e) intersects [b, d]
+        assert!(intersects_bd); // [b, d) intersects [b, d]
+        assert!(!intersects_ab); // [a, b) doesn't intersect [b, d]
+        assert!(!intersects_ef); // [e, f) doesn't intersect [b, d]
     }
 
     #[test]
@@ -104,10 +119,15 @@ mod sst_invariants {
         ];
         let table = IndexTable::new(metas);
 
-        // Act & Assert
-        assert_eq!(table.find_block(b"b").unwrap().min_key, Bytes::from("a"));
-        assert_eq!(table.find_block(b"e").unwrap().min_key, Bytes::from("d"));
-        assert_eq!(table.find_block(b"x").unwrap().min_key, Bytes::from("g"));
+        // Act
+        let block_b = table.find_block(b"b");
+        let block_e = table.find_block(b"e");
+        let block_x = table.find_block(b"x");
+
+        // Assert
+        assert_eq!(block_b.unwrap().min_key, Bytes::from("a"));
+        assert_eq!(block_e.unwrap().min_key, Bytes::from("d"));
+        assert_eq!(block_x.unwrap().min_key, Bytes::from("g"));
     }
 
     #[test]
@@ -144,15 +164,11 @@ mod sst_invariants {
             BlockMeta::new(Bytes::from("cherry"), Bytes::from("date"), BlockHandle::new(200, 100)),
         ];
 
+        // Act: Check ordering
+        let all_ordered = (0..metas.len() - 1).all(|i| metas[i].max_key < metas[i + 1].min_key);
+
         // Assert: Non-overlapping blocks (all metas properly ordered)
-        for i in 0..metas.len() - 1 {
-            assert!(
-                metas[i].max_key < metas[i + 1].min_key,
-                "Blocks must not overlap: block {} max_key >= block {} min_key",
-                i,
-                i + 1
-            );
-        }
+        assert!(all_ordered, "All blocks must maintain fence pointer ordering");
     }
 
     #[test]
@@ -162,18 +178,22 @@ mod sst_invariants {
             Bytes::from("apple"),
             Bytes::from("cherry"),
             BlockHandle::new(100, 1024),
-        )
-        .with_tombstones(
+        );
+
+        // Act
+        let meta = meta.with_tombstones(
             true,
             Some(Bytes::from("apple")),
             Some(Bytes::from("cherry")),
         );
+        let has_tombstones = meta.has_tombstones;
+        let fully_covered = meta.might_be_fully_covered();
 
         // Assert
-        assert!(meta.has_tombstones);
+        assert!(has_tombstones);
         assert_eq!(meta.tombstone_min, Some(Bytes::from("apple")));
         assert_eq!(meta.tombstone_max, Some(Bytes::from("cherry")));
-        assert!(meta.might_be_fully_covered());
+        assert!(fully_covered);
     }
 
     #[test]
@@ -183,22 +203,31 @@ mod sst_invariants {
             Bytes::from("a"),
             Bytes::from("z"),
             BlockHandle::new(100, 1024),
-        )
-        .with_bloom_offset(5000);
+        );
+
+        // Act
+        let meta = meta.with_bloom_offset(5000);
+        let bloom_offset = meta.bloom_offset;
 
         // Assert
-        assert_eq!(meta.bloom_offset, Some(5000));
+        assert_eq!(bloom_offset, Some(5000));
     }
 
     #[test]
     fn should_handle_empty_index_table() {
-        // Arrange & Act
-        let table = IndexTable::new(vec![]);
+        // Arrange
+        let empty_table = IndexTable::new(vec![]);
+
+        // Act
+        let is_empty = empty_table.is_empty();
+        let len = empty_table.len();
+        let find_result = empty_table.find_block(b"key");
+        let range_results = empty_table.find_blocks_in_range(b"a", b"z");
 
         // Assert
-        assert!(table.is_empty());
-        assert_eq!(table.len(), 0);
-        assert!(table.find_block(b"key").is_none());
-        assert_eq!(table.find_blocks_in_range(b"a", b"z").len(), 0);
+        assert!(is_empty);
+        assert_eq!(len, 0);
+        assert!(find_result.is_none());
+        assert_eq!(range_results.len(), 0);
     }
 }

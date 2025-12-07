@@ -526,6 +526,9 @@ mod tests {
         // Arrange
         let config = LatencyConfig::same_region();
 
+        // Act
+        // (config is already created in Arrange)
+
         // Assert
         assert_eq!(config.base_rtt_us, 5_000);
         assert_eq!(config.write_penalty_us, 2_000);
@@ -538,6 +541,9 @@ mod tests {
         // Arrange
         let config = LatencyConfig::cross_region();
 
+        // Act
+        // (config is already created in Arrange)
+
         // Assert
         assert_eq!(config.base_rtt_us, 80_000);
         assert!(config.write_penalty_us > 0);
@@ -547,6 +553,9 @@ mod tests {
     fn should_use_fast_simulation_preset_without_sleeping() {
         // Arrange
         let config = LatencyConfig::fast_simulation();
+
+        // Act
+        // (config is already created in Arrange)
 
         // Assert
         assert_eq!(config.base_rtt_us, 100);

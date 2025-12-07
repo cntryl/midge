@@ -360,12 +360,17 @@ mod tests {
 
     #[test]
     fn should_create_block_meta() {
+        // Arrange
+        // (no setup needed)
+
+        // Act
         let meta = BlockMeta::new(
             Bytes::from("apple"),
             Bytes::from("apricot"),
             BlockHandle::new(100, 1024),
         );
 
+        // Assert
         assert_eq!(meta.min_key, Bytes::from("apple"));
         assert_eq!(meta.max_key, Bytes::from("apricot"));
         assert!(!meta.has_tombstones);
@@ -373,12 +378,17 @@ mod tests {
 
     #[test]
     fn should_check_key_containment() {
+        // Arrange
         let meta = BlockMeta::new(
             Bytes::from("apple"),
             Bytes::from("banana"),
             BlockHandle::new(100, 1024),
         );
 
+        // Act
+        // (assertions check containment)
+
+        // Assert
         assert!(meta.contains_key(b"apple"));
         assert!(meta.contains_key(b"apricot"));
         assert!(meta.contains_key(b"banana"));
@@ -388,12 +398,17 @@ mod tests {
 
     #[test]
     fn should_check_range_intersection() {
+        // Arrange
         let meta = BlockMeta::new(
             Bytes::from("b"),
             Bytes::from("d"),
             BlockHandle::new(100, 1024),
         );
 
+        // Act
+        // (assertions check intersections)
+
+        // Assert
         assert!(meta.range_intersects(b"a", b"c")); // [a, c) intersects [b, d]
         assert!(meta.range_intersects(b"c", b"e")); // [c, e) intersects [b, d]
         assert!(meta.range_intersects(b"b", b"d")); // [b, d) intersects [b, d]
@@ -403,6 +418,7 @@ mod tests {
 
     #[test]
     fn should_build_index_table() {
+        // Arrange
         let metas = vec![
             BlockMeta::new(Bytes::from("a"), Bytes::from("c"), BlockHandle::new(0, 100)),
             BlockMeta::new(
@@ -417,12 +433,16 @@ mod tests {
             ),
         ];
 
+        // Act
         let table = IndexTable::new(metas);
+
+        // Assert
         assert_eq!(table.len(), 3);
     }
 
     #[test]
     fn should_find_block_by_key() {
+        // Arrange
         let metas = vec![
             BlockMeta::new(Bytes::from("a"), Bytes::from("c"), BlockHandle::new(0, 100)),
             BlockMeta::new(
@@ -439,13 +459,20 @@ mod tests {
 
         let table = IndexTable::new(metas);
 
-        assert_eq!(table.find_block(b"b").unwrap().min_key, Bytes::from("a"));
-        assert_eq!(table.find_block(b"e").unwrap().min_key, Bytes::from("d"));
-        assert_eq!(table.find_block(b"x").unwrap().min_key, Bytes::from("g"));
+        // Act
+        let block_b = table.find_block(b"b");
+        let block_e = table.find_block(b"e");
+        let block_x = table.find_block(b"x");
+
+        // Assert
+        assert_eq!(block_b.unwrap().min_key, Bytes::from("a"));
+        assert_eq!(block_e.unwrap().min_key, Bytes::from("d"));
+        assert_eq!(block_x.unwrap().min_key, Bytes::from("g"));
     }
 
     #[test]
     fn should_find_blocks_in_range() {
+        // Arrange
         let metas = vec![
             BlockMeta::new(Bytes::from("a"), Bytes::from("c"), BlockHandle::new(0, 100)),
             BlockMeta::new(
@@ -461,26 +488,35 @@ mod tests {
         ];
 
         let table = IndexTable::new(metas);
+
+        // Act
         let blocks = table.find_blocks_in_range(b"b", b"h");
 
+        // Assert
         assert_eq!(blocks.len(), 3); // All blocks intersect [b, h)
     }
 
     // Phase 1: Per-block bloom invariant tests
     #[test]
     fn should_have_no_false_negatives_in_bloom() {
+        // Arrange
         let mut bloom = BlockBloom::new(1024);
         let key = b"test_key";
 
+        // Act
         bloom.add(key);
+
+        // Assert
         assert!(bloom.maybe_contains(key), "Bloom filter must not have false negatives");
     }
 
     #[test]
     fn should_query_bloom_from_block_meta() {
+        // Arrange
         let mut bloom = BlockBloom::new(512);
         bloom.add(b"key1");
 
+        // Act
         let meta = BlockMeta::new(
             Bytes::from("key1"),
             Bytes::from("key9"),
@@ -488,6 +524,7 @@ mod tests {
         )
         .with_bloom(bloom);
 
+        // Assert
         assert!(meta.bloom_maybe_contains(b"key1"));
         assert!(meta.has_loaded_bloom());
         assert!(meta.bloom().is_some());
@@ -495,26 +532,34 @@ mod tests {
 
     #[test]
     fn should_conservatively_answer_without_loaded_bloom() {
+        // Arrange
         let meta = BlockMeta::new(
             Bytes::from("a"),
             Bytes::from("z"),
             BlockHandle::new(0, 100),
         );
 
-        // Without a bloom, should conservatively return true (might be present)
-        assert!(meta.bloom_maybe_contains(b"key"));
-        assert!(!meta.has_loaded_bloom());
+        // Act
+        let maybe_contains = meta.bloom_maybe_contains(b"key");
+        let has_bloom = meta.has_loaded_bloom();
+
+        // Assert: Without a bloom, should conservatively return true (might be present)
+        assert!(maybe_contains);
+        assert!(!has_bloom);
     }
 
     #[test]
     fn should_preserve_bloom_through_encode_decode() {
+        // Arrange
         let mut bloom = BlockBloom::new(256);
         bloom.add(b"key1");
         bloom.add(b"key2");
 
+        // Act
         let encoded = bloom.encode();
         let decoded = BlockBloom::decode(&encoded).expect("decode failed");
 
+        // Assert
         assert_eq!(bloom.capacity_bytes(), decoded.capacity_bytes());
         assert!(decoded.maybe_contains(b"key1"));
         assert!(decoded.maybe_contains(b"key2"));
@@ -522,13 +567,17 @@ mod tests {
 
     #[test]
     fn should_track_bloom_offset_in_meta() {
+        // Arrange
         let mut meta = BlockMeta::new(
             Bytes::from("a"),
             Bytes::from("z"),
             BlockHandle::new(0, 100),
         );
 
+        // Act
         meta = meta.with_bloom_offset(512);
+
+        // Assert
         assert_eq!(meta.bloom_offset, Some(512));
     }
 }

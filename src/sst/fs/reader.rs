@@ -1004,6 +1004,10 @@ impl SstStateReader for SstFile {
     fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState> {
         self.get_state_internal(key)
     }
+
+    fn block_metadata(&self) -> Option<Vec<BlockMeta>> {
+        self.block_metas().ok()
+    }
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,
@@ -1105,12 +1109,11 @@ mod tests {
         let sst = SstFile::open(&sst_path)
             .unwrap()
             .with_block_cache(cache.clone(), 1, 0);
-
-        // Act - first read (cache miss)
+        // Prime the cache with first read
         let _ = sst.get(b"key_005").unwrap();
         let stats_after_first = cache.stats();
 
-        // Act - second read (cache hit)
+        // Act - second read should hit cache
         let result = sst.get(b"key_005").unwrap();
         let stats_after_second = cache.stats();
 

@@ -297,10 +297,15 @@ mod tests {
 
     #[test]
     fn should_merge_two_sources_with_deduplication() {
+        // Arrange
         let s0 = VecSource::new(vec![kv("k1", "v1_new", 2)]);
         let s1 = VecSource::new(vec![kv("k1", "v1_old", 1), kv("k2", "v2", 1)]);
+
+        // Act
         let it = MergingIterator::new(vec![Box::new(s0), Box::new(s1)], None);
         let res: Vec<_> = it.collect();
+
+        // Assert
         assert_eq!(
             res,
             vec![
@@ -311,48 +316,67 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_masks_older_value() {
+    fn should_mask_older_value_given_tombstone_when_merging() {
+        // Arrange
         let s0 = VecSource::new(vec![(Bytes::from("k1"), None, 2)]);
         let s1 = VecSource::new(vec![kv("k1", "v1", 1)]);
+
+        // Act
         let it = MergingIterator::new(vec![Box::new(s0), Box::new(s1)], None);
         let res: Vec<_> = it.collect();
+
+        // Assert
         assert!(res.is_empty());
     }
 
     #[test]
-    fn snapshot_sees_older_value_even_if_newer_tombstone_exists() {
+    fn should_see_older_value_given_snapshot_before_tombstone_when_reading() {
+        // Arrange
         let s0 = VecSource::new(vec![(Bytes::from("k1"), None, 200)]);
         let s1 = VecSource::new(vec![kv("k1", "v1", 100)]);
+
+        // Act
         let it = MergingIterator::with_reverse_and_snapshot(
             vec![Box::new(s0), Box::new(s1)],
             None,
             false,
             Some(150),
         );
-
         let res: Vec<_> = it.collect();
+
+        // Assert
         assert_eq!(res, vec![(Bytes::from("k1"), Bytes::from("v1"))]);
     }
 
     #[test]
     fn should_respect_limit() {
+        // Arrange
         let s = VecSource::new(vec![
             kv("k1", "v1", 1),
             kv("k2", "v2", 1),
             kv("k3", "v3", 1),
             kv("k4", "v4", 1),
         ]);
+
+        // Act
         let it = MergingIterator::new(vec![Box::new(s)], Some(2));
         let res: Vec<_> = it.collect();
+
+        // Assert
         assert_eq!(res.len(), 2);
     }
 
     #[test]
     fn should_merge_sorted_across_sources() {
+        // Arrange
         let s0 = VecSource::new(vec![kv("a", "a0", 3), kv("c", "c0", 3)]);
         let s1 = VecSource::new(vec![kv("b", "b1", 2), kv("d", "d1", 2)]);
+
+        // Act
         let it = MergingIterator::new(vec![Box::new(s0), Box::new(s1)], None);
         let keys: Vec<_> = it.map(|(k, _)| k).collect();
+
+        // Assert
         assert_eq!(
             keys,
             vec!["a", "b", "c", "d"]
@@ -363,14 +387,19 @@ mod tests {
     }
 
     #[test]
-    fn reverse_iteration() {
+    fn should_iterate_in_reverse_given_reverse_flag_when_merging() {
+        // Arrange
         let s = VecSource::new_reverse(vec![
             kv("k1", "v1", 1),
             kv("k2", "v2", 1),
             kv("k3", "v3", 1),
         ]);
+
+        // Act
         let it = MergingIterator::with_reverse(vec![Box::new(s)], None, true);
         let keys: Vec<_> = it.map(|(k, _)| k).collect();
+
+        // Assert
         assert_eq!(
             keys,
             vec!["k3", "k2", "k1"]
@@ -381,7 +410,8 @@ mod tests {
     }
 
     #[test]
-    fn reverse_with_dedup() {
+    fn should_deduplicate_given_reverse_iteration_when_merging() {
+        // Arrange
         let s0 = VecSource::new_reverse(vec![(Bytes::from("k3"), Some(Bytes::from("v3_new")), 2)]);
         let s1 = VecSource::new_reverse(vec![
             (Bytes::from("k3"), Some(Bytes::from("v3_old")), 1),
@@ -389,23 +419,32 @@ mod tests {
             (Bytes::from("k1"), Some(Bytes::from("v1")), 1),
         ]);
 
+        // Act
         let it = MergingIterator::with_reverse(vec![Box::new(s0), Box::new(s1)], None, true);
         let res: Vec<_> = it.collect();
 
+        // Assert
         assert_eq!(res[0], (Bytes::from("k3"), Bytes::from("v3_new")));
         assert_eq!(res[1].0, Bytes::from("k2"));
         assert_eq!(res[2].0, Bytes::from("k1"));
     }
 
     #[test]
-    fn empty_sources() {
+    fn should_return_empty_given_empty_sources_when_merging() {
+        // Arrange
+        // (no setup needed)
+
+        // Act
         let it = MergingIterator::new(vec![Box::new(VecSource::new(vec![]))], None);
         let res: Vec<_> = it.collect();
+
+        // Assert
         assert!(res.is_empty());
     }
 
     #[test]
-    fn limit_with_tombstones() {
+    fn should_respect_limit_given_tombstones_when_merging() {
+        // Arrange
         let s = VecSource::new(vec![
             kv("k1", "v1", 1),
             (Bytes::from("k2"), None, 2),
@@ -413,8 +452,12 @@ mod tests {
             (Bytes::from("k4"), None, 4),
             kv("k5", "v5", 5),
         ]);
+
+        // Act
         let it = MergingIterator::new(vec![Box::new(s)], Some(2));
         let res: Vec<_> = it.collect();
+
+        // Assert
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].0, Bytes::from("k1"));
         assert_eq!(res[1].0, Bytes::from("k3"));

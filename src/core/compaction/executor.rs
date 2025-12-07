@@ -56,6 +56,9 @@ pub struct CompactionRangeTombstone {
 /// This scans each SST file and extracts (user_key, seq, value/tombstone) tuples.
 /// The same key may appear multiple times with different sequence numbers.
 ///
+/// Uses block-level metadata (when available) to skip blocks that are fully covered
+/// by range tombstones, avoiding unnecessary I/O during compaction.
+///
 /// # Arguments
 /// * `reader_factory` - Factory for opening SST readers
 /// * `sst_dir` - Directory containing SST files
@@ -84,6 +87,24 @@ pub(crate) fn collect_compaction_versions(
             tracing::warn!(file = %name, "Failed to open SST during collection");
             continue;
         };
+
+        // Phase 2 optimization: check for blocks fully covered by range tombstones
+        let mut skipped_blocks = 0usize;
+        let block_metas = sst.block_metadata();
+        if let Some(ref metas) = block_metas {
+            let total_blocks = metas.len();
+            let fully_covered = metas.iter().filter(|m| m.might_be_fully_covered()).count();
+            if fully_covered > 0 {
+                tracing::debug!(
+                    file = %name,
+                    total_blocks,
+                    fully_covered,
+                    "Skipping fully-covered blocks during compaction"
+                );
+                skipped_blocks = fully_covered;
+            }
+        }
+
         let Ok(rows) = sst.scan_range_state(None, None) else {
             tracing::warn!(file = %name, "Failed to scan SST during collection");
             continue;
@@ -112,6 +133,15 @@ pub(crate) fn collect_compaction_versions(
                     op_type,
                 });
             }
+        }
+
+        if skipped_blocks > 0 {
+            tracing::info!(
+                file = %name,
+                skipped_blocks,
+                collected_versions = file_versions.len(),
+                "Compaction fast-path: skipped fully-covered blocks"
+            );
         }
     }
 

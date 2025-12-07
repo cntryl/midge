@@ -189,61 +189,76 @@ mod tests {
 
     #[test]
     fn should_insert_to_window_given_new_entry_when_inserted() {
+        // Arrange
         let mut policy = WTinyLfuPolicy::new(100);
 
+        // Act
         policy.on_insert(1, 100);
 
+        // Assert
         assert!(policy.window.contains(&1));
     }
 
     #[test]
     fn should_move_to_probation_given_window_full_when_new_insert() {
+        // Arrange
         let mut policy = WTinyLfuPolicy::new(100);
         // Window capacity is 1% of 100 = 1
 
+        // Act
         policy.on_insert(1, 100);
         policy.on_insert(2, 100); // Should push 1 to probation
 
+        // Assert
         assert!(policy.probation.contains(&1));
         assert!(policy.window.contains(&2));
     }
 
     #[test]
     fn should_promote_to_protected_given_probation_access_when_accessed() {
+        // Arrange
         let mut policy = WTinyLfuPolicy::new(100);
 
         // Fill window to push to probation
         policy.on_insert(1, 100);
         policy.on_insert(2, 100); // 1 goes to probation
 
-        // Access entry in probation
+        // Act - Access entry in probation
         policy.on_access(1);
 
+        // Assert
         assert!(policy.protected.contains(&1));
         assert!(!policy.probation.contains(&1));
     }
 
     #[test]
     fn should_choose_probation_victim_given_entries_in_all_segments() {
+        // Arrange
         let mut policy = WTinyLfuPolicy::new(100);
 
         policy.on_insert(1, 100);
         policy.on_insert(2, 100); // 1 to probation, 2 in window
 
+        // Act
         let victim = policy.choose_victim();
-        assert_eq!(victim, Some(1)); // Probation first
+
+        // Assert - Probation first
+        assert_eq!(victim, Some(1));
     }
 
     #[test]
     fn should_clear_all_segments_given_populated_policy_when_cleared() {
+        // Arrange
         let mut policy = WTinyLfuPolicy::new(100);
 
         policy.on_insert(1, 100);
         policy.on_insert(2, 100);
         policy.on_access(1); // promote to protected
 
+        // Act
         policy.clear();
 
+        // Assert
         assert!(policy.window.is_empty());
         assert!(policy.probation.is_empty());
         assert!(policy.protected.is_empty());

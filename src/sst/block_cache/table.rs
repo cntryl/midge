@@ -229,11 +229,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_insert_and_get_given_single_entry_when_queried() {
+    fn should_retrieve_entry_given_inserted_value_when_queried() {
+        // Arrange
         let mut table = HashTable::with_capacity(16);
         table.insert(12345, 0);
 
-        assert_eq!(table.get(12345), Some(0));
+        // Act
+        let result = table.get(12345);
+
+        // Assert
+        assert_eq!(result, Some(0));
         assert_eq!(table.len(), 1);
     }
 
@@ -245,14 +250,17 @@ mod tests {
 
     #[test]
     fn should_handle_collisions_given_same_bucket_when_inserted() {
+        // Arrange
         let mut table = HashTable::with_capacity(16);
         // These will collide (same lower bits)
         let h1 = 0x10;
         let h2 = 0x20; // different hash but may probe nearby
 
+        // Act
         table.insert(h1, 1);
         table.insert(h2, 2);
 
+        // Assert
         assert_eq!(table.get(h1), Some(1));
         assert_eq!(table.get(h2), Some(2));
         assert_eq!(table.len(), 2);
@@ -260,12 +268,15 @@ mod tests {
 
     #[test]
     fn should_remove_entry_given_existing_key_when_removed() {
+        // Arrange
         let mut table = HashTable::with_capacity(16);
         table.insert(111, 5);
         table.insert(222, 6);
 
+        // Act
         let removed = table.remove(111);
 
+        // Assert
         assert_eq!(removed, Some(5));
         assert_eq!(table.get(111), None);
         assert_eq!(table.get(222), Some(6));
@@ -274,37 +285,45 @@ mod tests {
 
     #[test]
     fn should_return_none_given_missing_key_when_removed() {
+        // Arrange
         let mut table = HashTable::with_capacity(16);
         table.insert(111, 5);
 
+        // Act
         let removed = table.remove(999);
 
+        // Assert
         assert_eq!(removed, None);
         assert_eq!(table.len(), 1);
     }
 
     #[test]
     fn should_clear_all_given_populated_table_when_cleared() {
+        // Arrange
         let mut table = HashTable::with_capacity(16);
         table.insert(1, 0);
         table.insert(2, 1);
         table.insert(3, 2);
 
+        // Act
         table.clear();
 
+        // Assert
         assert!(table.is_empty());
         assert_eq!(table.get(1), None);
     }
 
     #[test]
     fn should_handle_high_load_given_many_entries_when_inserted() {
+        // Arrange
         let mut table = HashTable::with_capacity(64);
 
-        // Insert 50 entries (load factor ~0.78)
+        // Act - Insert 50 entries (load factor ~0.78)
         for i in 1u64..=50 {
             table.insert(i * 1000 + 1, i as EntryId); // +1 to avoid hash=0
         }
 
+        // Assert
         assert_eq!(table.len(), 50);
 
         // Verify all are retrievable
@@ -315,17 +334,19 @@ mod tests {
 
     #[test]
     fn should_maintain_invariants_given_insert_remove_cycles_when_stressed() {
+        // Arrange
         let mut table = HashTable::with_capacity(32);
 
         for i in 1u64..=20 {
             table.insert(i, i as EntryId);
         }
 
-        // Remove odds
+        // Act - Remove odds
         for i in (1u64..=20).step_by(2) {
             table.remove(i);
         }
 
+        // Assert
         assert_eq!(table.len(), 10);
 
         // Evens should still be there

@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn should_support_concurrent_reads_and_writes() {
+    fn should_maintain_correctness_given_concurrent_access_when_reading_while_writing() {
         // Arrange
         let bloom = Arc::new(BloomHint::for_keys(1000));
 
@@ -328,7 +328,10 @@ mod tests {
 
     #[test]
     fn should_create_with_custom_bit_count() {
-        // Arrange & Act
+        // Arrange
+        // (no setup needed)
+
+        // Act
         let bloom = BloomHint::with_bits(1024);
 
         // Assert - should be at least 1024 bits (rounded to 64)
@@ -341,10 +344,12 @@ mod tests {
         // Arrange
         let bloom = BloomHint::with_bits(1024); // Power of two
 
-        // Act & Assert - should work correctly
+        // Act
         for i in 0..100 {
             bloom.add(format!("key_{}", i).as_bytes());
         }
+
+        // Assert
         for i in 0..100 {
             assert!(bloom.may_contain(format!("key_{}", i).as_bytes()));
         }

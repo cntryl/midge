@@ -80,6 +80,7 @@ mod tests {
 
     #[test]
     fn should_cleanup_directory_when_guard_dropped() {
+        // Arrange
         let temp_path = std::env::temp_dir().join(format!(
             "midge_test_cleanup_{}",
             std::time::SystemTime::now()
@@ -91,17 +92,19 @@ mod tests {
         std::fs::create_dir_all(&temp_path).unwrap();
         assert!(temp_path.exists());
 
+        // Act
         {
             let _guard = TempDirGuard::new(temp_path.clone());
             assert!(temp_path.exists());
         }
 
-        // Directory should be cleaned up after guard is dropped
+        // Assert - Directory should be cleaned up after guard is dropped
         assert!(!temp_path.exists());
     }
 
     #[test]
     fn should_register_directory_for_batch_cleanup() {
+        // Arrange
         let temp_path = std::env::temp_dir().join(format!(
             "midge_test_registry_{}",
             std::time::SystemTime::now()
@@ -115,9 +118,10 @@ mod tests {
 
         assert!(temp_path.exists());
 
+        // Act
         cleanup_registered_dirs();
 
-        // Directory should be cleaned up
+        // Assert - Directory should be cleaned up
         assert!(!temp_path.exists());
     }
 }

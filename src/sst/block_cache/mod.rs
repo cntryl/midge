@@ -310,44 +310,57 @@ mod tests {
 
     #[test]
     fn should_create_cache_given_options_when_new_called() {
+        // Arrange
+        // (no setup needed)
+
+        // Act
         let cache = ShardedBlockCache::new(BlockCacheOptions::with_capacity(1024 * 1024));
 
+        // Assert
         assert_eq!(cache.capacity_bytes(), 1024 * 1024);
         assert_eq!(cache.used_bytes(), 0);
     }
 
     #[test]
-    fn should_insert_and_get_given_block_when_cached() {
+    fn should_retrieve_block_given_cached_entry_when_queried() {
+        // Arrange
         let cache = ShardedBlockCache::new(BlockCacheOptions::with_capacity(1024 * 1024));
         let key = make_key(1, 0);
-
         let _handle = cache.insert(key, make_data(100));
+
+        // Act
         let retrieved = cache.get(&key);
 
+        // Assert
         assert!(retrieved.is_some());
     }
 
     #[test]
     fn should_return_none_given_missing_key_when_get_called() {
+        // Arrange
         let cache = ShardedBlockCache::new(BlockCacheOptions::with_capacity(1024 * 1024));
         let key = make_key(999, 0);
 
+        // Act
         let result = cache.get(&key);
 
+        // Assert
         assert!(result.is_none());
     }
 
     #[test]
     fn should_distribute_keys_given_multiple_inserts_when_sharded() {
+        // Arrange
         let cache = ShardedBlockCache::new(
             BlockCacheOptions::with_capacity(1024 * 1024).num_shards(4),
         );
 
-        // Insert keys that should land in different shards
+        // Act - Insert keys that should land in different shards
         for i in 0..100 {
             cache.insert(make_key(i, 0), make_data(100));
         }
 
+        // Assert
         let stats = cache.stats();
         assert_eq!(stats.admissions, 100);
         assert_eq!(stats.used_bytes, 100 * 100);
@@ -355,10 +368,12 @@ mod tests {
 
     #[test]
     fn should_aggregate_stats_given_multiple_shards_when_stats_called() {
+        // Arrange
         let cache = ShardedBlockCache::new(
             BlockCacheOptions::with_capacity(1024 * 1024).num_shards(4),
         );
 
+        // Act
         for i in 0..10 {
             let key = make_key(i, 0);
             cache.insert(key, make_data(100));
@@ -366,6 +381,7 @@ mod tests {
         }
         cache.get(&make_key(999, 0)); // Miss
 
+        // Assert
         let stats = cache.stats();
         assert_eq!(stats.hits, 10);
         assert_eq!(stats.misses, 1);
@@ -373,13 +389,15 @@ mod tests {
 
     #[test]
     fn should_dedup_given_concurrent_insert_when_insert_if_absent_called() {
+        // Arrange
         let cache = ShardedBlockCache::new(BlockCacheOptions::with_capacity(1024 * 1024));
         let key = make_key(1, 0);
 
+        // Act
         let h1 = cache.insert(key, make_data(100));
         let h2 = cache.insert_if_absent(key, make_data(200));
 
-        // Both should return the same data (first insert wins)
+        // Assert - Both should return the same data (first insert wins)
         assert_eq!(h1.data().bytes().len(), h2.data().bytes().len());
     }
 }

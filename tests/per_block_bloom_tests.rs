@@ -16,8 +16,11 @@ mod per_block_bloom_tests {
     /// Test: BlockBloom should be created with a capacity
     #[test]
     fn should_create_block_bloom_with_capacity() {
-        // Arrange & Act
-        let bloom = cntryl_midge::sst::block_meta::BlockBloom::new(1024);
+        // Arrange
+        let capacity = 1024;
+
+        // Act
+        let bloom = cntryl_midge::sst::block_meta::BlockBloom::new(capacity);
 
         // Assert
         assert_eq!(bloom.capacity_bytes(), 1024);
@@ -108,11 +111,13 @@ mod per_block_bloom_tests {
             Bytes::from("a"),
             Bytes::from("z"),
             BlockHandle::new(100, 1024),
-        )
-        .with_bloom_offset(5000);
+        );
+
+        // Act
+        let meta_with_offset = meta.with_bloom_offset(5000);
 
         // Assert
-        assert_eq!(meta.bloom_offset, Some(5000));
+        assert_eq!(meta_with_offset.bloom_offset, Some(5000));
     }
 
     /// Test: BlockMeta should support querying with cached bloom
@@ -130,10 +135,15 @@ mod per_block_bloom_tests {
         )
         .with_bloom(bloom.clone());
 
-        // Act & Assert
-        assert!(meta_with_bloom.bloom_maybe_contains(b"apple"));
-        assert!(meta_with_bloom.bloom_maybe_contains(b"banana"));
-        assert!(!meta_with_bloom.bloom_maybe_contains(b"cherry")); // False positive ok, false negative not ok
+        // Act
+        let contains_apple = meta_with_bloom.bloom_maybe_contains(b"apple");
+        let contains_banana = meta_with_bloom.bloom_maybe_contains(b"banana");
+        let contains_cherry = meta_with_bloom.bloom_maybe_contains(b"cherry");
+
+        // Assert
+        assert!(contains_apple);
+        assert!(contains_banana);
+        assert!(!contains_cherry); // False positive ok, false negative not ok
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -143,13 +153,20 @@ mod per_block_bloom_tests {
     /// Test: BlockIndexEntry should include bloom_offset
     #[test]
     fn should_create_block_index_entry_with_bloom_offset() {
-        // Arrange & Act
+        // Arrange
+        let min_key = Bytes::from("a");
+        let max_key = Bytes::from("z");
+        let block_offset = 100;
+        let block_len = 1024;
+        let bloom_offset = Some(5000);
+
+        // Act
         let entry = cntryl_midge::sst::block_meta::BlockIndexEntry {
-            min_key: Bytes::from("a"),
-            max_key: Bytes::from("z"),
-            block_offset: 100,
-            block_len: 1024,
-            bloom_offset: Some(5000),
+            min_key,
+            max_key,
+            block_offset,
+            block_len,
+            bloom_offset,
         };
 
         // Assert
@@ -159,10 +176,14 @@ mod per_block_bloom_tests {
     /// Test: BlockIndexEntry without bloom_offset should work
     #[test]
     fn should_create_block_index_entry_without_bloom() {
-        // Arrange & Act
+        // Arrange
+        let min_key = Bytes::from("a");
+        let max_key = Bytes::from("z");
+
+        // Act
         let entry = cntryl_midge::sst::block_meta::BlockIndexEntry {
-            min_key: Bytes::from("a"),
-            max_key: Bytes::from("z"),
+            min_key,
+            max_key,
             block_offset: 100,
             block_len: 1024,
             bloom_offset: None,
@@ -179,29 +200,35 @@ mod per_block_bloom_tests {
     /// Test: Footer should support version flag for per-block blooms
     #[test]
     fn should_detect_per_block_bloom_format() {
-        // Arrange & Act
+        // Arrange
         let footer = cntryl_midge::sst::block_meta::SstFooter {
             metaindex_handle: BlockHandle::new(0, 100),
             index_handle: BlockHandle::new(100, 200),
             has_per_block_blooms: true,
         };
 
+        // Act
+        let has_blooms = footer.has_per_block_blooms;
+
         // Assert
-        assert!(footer.has_per_block_blooms);
+        assert!(has_blooms);
     }
 
     /// Test: Old SSTs without per-block blooms should be readable
     #[test]
     fn should_read_old_sst_format_without_per_block_blooms() {
-        // Arrange & Act
+        // Arrange
         let footer = cntryl_midge::sst::block_meta::SstFooter {
             metaindex_handle: BlockHandle::new(0, 100),
             index_handle: BlockHandle::new(100, 200),
             has_per_block_blooms: false,
         };
 
+        // Act
+        let has_blooms = footer.has_per_block_blooms;
+
         // Assert
-        assert!(!footer.has_per_block_blooms);
+        assert!(!has_blooms);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -268,9 +295,13 @@ mod per_block_bloom_tests {
         bloom.add(b"exists1");
         bloom.add(b"exists2");
 
-        // Act & Assert
-        assert!(bloom.maybe_contains(b"exists1"));
-        assert!(bloom.maybe_contains(b"exists2"));
+        // Act
+        let contains_1 = bloom.maybe_contains(b"exists1");
+        let contains_2 = bloom.maybe_contains(b"exists2");
+
+        // Assert
+        assert!(contains_1);
+        assert!(contains_2);
         // (not_exists may or may not be found due to false positives)
     }
 
@@ -281,12 +312,15 @@ mod per_block_bloom_tests {
     /// Test: BlockBloom should handle empty bloom
     #[test]
     fn should_handle_empty_block_bloom() {
-        // Arrange & Act
+        // Arrange
         let bloom = cntryl_midge::sst::block_meta::BlockBloom::new(1024);
+
+        // Act
+        let contains_random = bloom.maybe_contains(b"unlikely_to_exist_random_key_12345");
 
         // Assert: Empty bloom should not find any keys (with high probability)
         // Note: Theoretically possible but extremely unlikely to find random keys
-        assert!(!bloom.maybe_contains(b"unlikely_to_exist_random_key_12345"));
+        assert!(!contains_random);
     }
 
     /// Test: BlockBloom should handle very large keys
@@ -306,14 +340,15 @@ mod per_block_bloom_tests {
     /// Test: BlockBloom should handle very small size
     #[test]
     fn should_handle_small_bloom_size() {
-        // Arrange & Act
+        // Arrange
         let mut bloom = cntryl_midge::sst::block_meta::BlockBloom::new(16); // 16 bytes
 
         // Act
         bloom.add(b"key");
+        let contains = bloom.maybe_contains(b"key");
 
         // Assert: Should still work, just with higher false positive rate
-        assert!(bloom.maybe_contains(b"key"));
+        assert!(contains);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

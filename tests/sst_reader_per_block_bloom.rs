@@ -152,7 +152,7 @@ fn should_load_per_block_blooms_on_sst_open() {
 }
 
 #[test]
-fn should_preserve_all_values_through_bloom_write_and_read() {
+fn should_preserve_all_values_given_bloom_roundtrip_when_reading() {
     // Arrange: Create SST with specific test values
     let temp_dir = create_temp_sst_dir();
     let mut writer = FsDynWriter::new(

@@ -72,6 +72,15 @@ pub trait SstStateReader {
     fn range_tombstones(&self) -> Vec<RangeTombstone> {
         Vec::new()
     }
+
+    /// Return block-level metadata (fence pointers, tombstone coverage) if available.
+    ///
+    /// Compaction can use this to skip blocks that are fully covered by range tombstones
+    /// without reading their data. Default implementation returns None, indicating
+    /// block-level metadata is not available for this reader.
+    fn block_metadata(&self) -> Option<Vec<crate::sst::BlockMeta>> {
+        None
+    }
 }
 
 /// Writer contract for SST implementations.

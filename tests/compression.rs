@@ -234,10 +234,11 @@ fn should_persist_compression_setting_given_reopen_when_using_same_options() {
         ..Default::default()
     };
 
-    // Act & Assert
+    // Act
     common::with_engine_restart(
         opts,
         |engine| {
+            // Write data before restart
             let cf = engine.default_column_family();
             for i in 0..1000 {
                 let key = format!("persist_key_{:04}", i);
@@ -249,6 +250,7 @@ fn should_persist_compression_setting_given_reopen_when_using_same_options() {
             engine.flush().expect("flush");
         },
         |engine| {
+            // Assert: Verify data after restart
             let cf = engine.default_column_family();
             for i in 0..1000 {
                 let key = format!("persist_key_{:04}", i);

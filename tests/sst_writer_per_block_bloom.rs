@@ -15,7 +15,7 @@ fn create_temp_sst_dir() -> PathBuf {
 }
 
 #[test]
-fn should_create_and_store_per_block_blooms_in_writer() {
+fn should_create_per_block_blooms_given_multi_block_write_when_finishing() {
     // Arrange: Create writer with moderate block size
     let temp_dir = create_temp_sst_dir();
     let mut writer = FsDynWriter::new(

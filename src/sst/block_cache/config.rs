@@ -105,8 +105,13 @@ mod tests {
 
     #[test]
     fn should_use_defaults_given_default_options_when_created() {
+        // Arrange
+        // (no setup needed)
+
+        // Act
         let opts = BlockCacheOptions::default();
 
+        // Assert
         assert_eq!(opts.capacity_bytes, 64 * 1024 * 1024);
         assert_eq!(opts.num_shards, 16);
         assert_eq!(opts.eviction_policy, EvictionPolicy::Clock);

@@ -152,8 +152,11 @@ mod tests {
         let manifest = Manifest::default();
         let error = MidgeError::internal("test");
 
-        // Act & Assert (no panic)
+        // Act
         output.on_flush_complete(&manifest);
         output.on_background_error(&error);
+
+        // Assert
+        // (no panic = success)
     }
 }

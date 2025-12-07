@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_many_keys_with_bloom_hint() {
+    fn should_retrieve_all_keys_given_many_inserts_with_bloom_hint_when_reading() {
         // Arrange
         let mt = MemTable::with_bloom_hint(1000);
         for i in 0..1000u32 {
@@ -876,20 +876,22 @@ mod tests {
             mt.put(key.as_bytes(), value.as_bytes());
         }
 
-        // Act & Assert - all inserted keys should be found
+        // Act - retrieve all inserted keys
+        let mut all_found = true;
         for i in 0..1000u32 {
             let key = format!("key_{:06}", i);
             let expected = format!("value_{}", i);
             let result = mt.get(key.as_bytes());
-            assert_eq!(
-                result,
-                Some(Bytes::from(expected)),
-                "Key {} should be found",
-                key
-            );
+            if result != Some(Bytes::from(expected)) {
+                all_found = false;
+                break;
+            }
         }
 
-        // Act & Assert - non-existent keys should not be found
+        // Assert
+        assert!(all_found, "All inserted keys should be found");
+
+        // Also verify non-existent keys are not found (part of same behavior: bloom hint accuracy)
         for i in 100_000..100_100u32 {
             let key = format!("key_{:06}", i);
             let result = mt.get(key.as_bytes());

@@ -161,41 +161,48 @@ mod tests {
 
     #[test]
     fn should_evict_oldest_given_lru_order_when_victim_chosen() {
+        // Arrange
         let mut policy = LruPolicy::new(100);
 
         policy.on_insert(0, 100);
         policy.on_insert(1, 100);
         policy.on_insert(2, 100);
 
-        // Entry 0 is LRU
-        assert_eq!(policy.choose_victim(), Some(0));
+        // Act
+        let victim = policy.choose_victim();
+
+        // Assert - Entry 0 is LRU
+        assert_eq!(victim, Some(0));
     }
 
     #[test]
     fn should_update_order_given_access_when_entry_touched() {
+        // Arrange
         let mut policy = LruPolicy::new(100);
 
         policy.on_insert(0, 100);
         policy.on_insert(1, 100);
         policy.on_insert(2, 100);
 
-        // Access entry 0, making it MRU
+        // Act - Access entry 0, making it MRU
         policy.on_access(0);
 
-        // Now entry 1 is LRU
+        // Assert - Now entry 1 is LRU
         assert_eq!(policy.choose_victim(), Some(1));
     }
 
     #[test]
     fn should_remove_from_order_given_eviction_when_entry_evicted() {
+        // Arrange
         let mut policy = LruPolicy::new(100);
 
         policy.on_insert(0, 100);
         policy.on_insert(1, 100);
 
+        // Act
         policy.on_evict(0);
 
-        // Entry 1 is now LRU (and only entry)
+        // Assert - Entry 1 is now LRU (and only entry)
         assert_eq!(policy.choose_victim(), Some(1));
     }
 
@@ -207,12 +214,15 @@ mod tests {
 
     #[test]
     fn should_clear_all_given_populated_policy_when_cleared() {
+        // Arrange
         let mut policy = LruPolicy::new(100);
         policy.on_insert(0, 100);
         policy.on_insert(1, 100);
 
+        // Act
         policy.clear();
 
+        // Assert
         assert_eq!(policy.choose_victim(), None);
     }
 }

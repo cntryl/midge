@@ -660,12 +660,15 @@ mod tests {
 
     #[test]
     fn should_perform_raw_byte_operations_correctly() {
+        // Arrange
         let mut f = BloomFilter::new(10, 0.01);
 
+        // Act
         f.add(b"key1");
         f.add(b"key2");
         f.add(b"key3");
 
+        // Assert
         assert!(f.may_contain(b"key1"));
         assert!(f.may_contain(b"key2"));
         assert!(f.may_contain(b"key3"));
@@ -674,22 +677,28 @@ mod tests {
 
     #[test]
     fn should_report_may_contain_for_added_key() {
+        // Arrange
         let mut f = BloomFilter::new(10, 0.01);
         let key = b"hello";
 
+        // Act
         f.add(key);
 
+        // Assert
         assert!(f.may_contain(key));
     }
 
     #[test]
     fn should_return_false_for_absent_key_most_of_the_time() {
+        // Arrange
         let mut f = BloomFilter::new(10, 0.01);
         f.add(b"a");
         f.add(b"b");
 
+        // Act
         let got = f.may_contain(b"z");
 
+        // Assert
         assert!(!got, "absent key should usually be reported absent");
     }
 
@@ -702,13 +711,16 @@ mod tests {
 
     #[test]
     fn should_roundtrip_encoded_filter_with_decode_block() {
+        // Arrange
         let mut f = BloomFilter::new(8, 0.01);
         f.add(b"k1");
         f.add(b"k2");
 
+        // Act
         let enc = f.encode();
         let other = BloomFilter::decode_block(&enc).unwrap();
 
+        // Assert
         assert!(other.may_contain(b"k1"));
         assert!(other.may_contain(b"k2"));
     }
@@ -736,8 +748,13 @@ mod tests {
 
     #[test]
     fn should_contain_keys_after_build() {
+        // Arrange
         let keys: Vec<(Bytes, usize)> = vec![(Bytes::from("kA"), 1), (Bytes::from("kB"), 1)];
+
+        // Act
         let f = BloomFilter::build(&keys);
+
+        // Assert
         assert!(f.may_contain(b"kA"));
         assert!(f.may_contain(b"kB"));
     }
@@ -758,28 +775,37 @@ mod tests {
 
     #[test]
     fn should_roundtrip_with_from_bytes_ok_path() {
+        // Arrange
         let mut f = BloomFilter::new(5, 0.02);
         f.add(b"alpha");
         f.add(b"beta");
 
+        // Act
         let enc = f.encode();
         let g = BloomFilter::decode_block(&enc).unwrap();
 
+        // Assert
         assert!(g.may_contain(b"alpha"));
         assert!(g.may_contain(b"beta"));
     }
 
     #[test]
     fn should_encode_length_match_ceiled_bit_count_over_8() {
+        // Arrange
         let f = BloomFilter::new(3, 0.20);
         let bit_count = f.bit_count();
+
+        // Act
         let enc = f.encode();
+
+        // Assert
         let expected_len = 1 + 4 + 4 + 4 + bit_count.div_ceil(8);
         assert_eq!(enc.len(), expected_len);
     }
 
     #[test]
     fn should_decode_small_bit_count_without_panic() {
+        // Arrange
         let mut raw = Vec::new();
         raw.push(BLOOM_FMT_VERSION);
         raw.extend_from_slice(&3u32.to_le_bytes());
@@ -787,12 +813,16 @@ mod tests {
         raw.extend_from_slice(&0u32.to_le_bytes());
         raw.push(0u8);
 
+        // Act
         let bf = BloomFilter::decode_block(&raw);
+
+        // Assert
         assert!(bf.is_ok());
     }
 
     #[test]
     fn should_report_absent_for_small_bit_count_filter() {
+        // Arrange
         let mut raw = Vec::new();
         raw.push(BLOOM_FMT_VERSION);
         raw.extend_from_slice(&3u32.to_le_bytes());
@@ -801,36 +831,46 @@ mod tests {
         raw.push(0u8);
         let bf = BloomFilter::decode_block(&raw).unwrap();
 
+        // Act
         let contains = bf.may_contain(b"anything");
+
+        // Assert
         assert!(!contains);
     }
 
     #[test]
     fn should_preserve_keys_count_after_finish() {
+        // Arrange
         let mut b = BloomFilterBuilder::new(0.05);
         b.add_key(b"x");
         b.add_key(b"y");
         let expected = b.keys_count();
 
+        // Act
         let f = b.finish();
+
+        // Assert
         assert_eq!(f.keys_count() as usize, expected);
     }
 
     #[test]
     fn should_contain_added_keys_after_finish() {
+        // Arrange
         let mut b = BloomFilterBuilder::new(0.05);
         b.add_key(b"x");
         b.add_key(b"y");
 
+        // Act
         let f = b.finish();
 
+        // Assert
         assert!(f.may_contain(b"x"));
         assert!(f.may_contain(b"y"));
     }
 
     #[test]
     fn should_bloom_filter_false_positive_rate_with_bounds() {
-        // Build a bloom filter with 1000 keys, target ~1% FPR (using 10 bits/key)
+        // Arrange: Build a bloom filter with 1000 keys, target ~1% FPR (using 10 bits/key)
         let mut builder = BloomFilterBuilder::with_expected_keys(1_000, 10);
         for i in 0..1_000u32 {
             let key = format!("key_{:06}", i);
@@ -838,7 +878,7 @@ mod tests {
         }
         let filter = builder.finish();
 
-        // Query 10,000 non-existent keys (offset range to avoid true positives)
+        // Act: Query 10,000 non-existent keys (offset range to avoid true positives)
         let mut false_positives = 0;
         for i in 100_000..110_000u32 {
             let key = format!("key_{:06}", i);
@@ -848,6 +888,7 @@ mod tests {
         }
         let fpr = false_positives as f64 / 10_000.0;
 
+        // Assert
         // Target is ~1%, allow tolerance up to 3%
         assert!(fpr <= 0.03, "False positive rate {} exceeds 3% bound", fpr);
 
@@ -864,16 +905,19 @@ mod tests {
 
     #[test]
     fn should_encode_decode_bloom_filter_block() {
+        // Arrange: Create and encode a bloom filter
         let mut builder = BloomFilterBuilder::with_expected_keys(500, 10);
         for i in 0..500u32 {
             let key = format!("bloom_test_key_{:08}", i);
             builder.add_key(key.as_bytes());
         }
         let original = builder.finish();
-
         let encoded = original.encode();
+
+        // Act: Decode the filter
         let decoded = BloomFilter::decode_block(&encoded).expect("decode should succeed");
 
+        // Assert
         assert_eq!(decoded.bit_count(), original.bit_count());
         assert_eq!(decoded.hash_count(), original.hash_count());
         assert_eq!(decoded.keys_count(), original.keys_count());
@@ -926,50 +970,68 @@ mod tests {
 
     #[test]
     fn should_use_default_builder_with_one_percent_fpr() {
+        // Arrange
         let builder = BloomFilterBuilder::default();
-        assert!(builder.is_empty());
+
+        // Act
+        let is_empty = builder.is_empty();
+        let bit_count = builder.bit_count();
+
+        // Assert
+        assert!(is_empty);
         // Default capacity is 1024, should have reasonable bit count
-        assert!(builder.bit_count() >= 64);
+        assert!(bit_count >= 64);
     }
 
     #[test]
     fn should_cap_filter_size_at_max_bits() {
-        // Request a large filter that would exceed MAX_FILTER_BITS
-        // MAX_FILTER_BITS = 256 * 1024 * 1024 * 8 = ~2 billion bits
-        // At 10 bits/key, that's ~200M keys; request more to trigger cap
+        // Arrange: Request a large filter that would exceed MAX_FILTER_BITS
+
+        // Act: Create filter with large capacity
         let filter = BloomFilter::new(500_000_000, 0.01);
 
-        // Should be capped at MAX_FILTER_BITS (256 MiB * 8)
+        // Assert: Should be capped at MAX_FILTER_BITS (256 MiB * 8)
         assert!(filter.bit_count() <= MAX_FILTER_BITS as usize);
     }
 
     #[test]
     fn should_derive_step_from_upper_hash_bits() {
-        // The step should be derived from the upper 32 bits, not a rotation
+        // Arrange: Hash a test key
+
+        // Act: Extract step and verify
         let (h, step) = BloomFilter::double_hash(b"test");
-
-        // Step should be ((h >> 32) as u32) | 1
         let expected_step = ((h >> 32) as u32) | 1;
-        assert_eq!(step, expected_step);
 
+        // Assert
+        assert_eq!(step, expected_step);
         // Step must always be odd
         assert_eq!(step & 1, 1);
     }
 
     #[test]
     fn should_expose_builder_accessors() {
+        // Arrange
         let mut builder = BloomFilterBuilder::with_expected_keys(500, 10);
-        assert!(builder.is_empty());
-        assert_eq!(builder.keys_count(), 0);
 
+        // Act: Check initial state, add key, check final state
+        let initial_empty = builder.is_empty();
+        let initial_count = builder.keys_count();
+        
         builder.add_key(b"hello");
-        assert!(!builder.is_empty());
-        assert_eq!(builder.keys_count(), 1);
+        
+        let after_add_empty = builder.is_empty();
+        let after_add_count = builder.keys_count();
+        let bit_count_val = builder.bit_count();
+        let fpr_val = builder.estimated_fpr();
 
+        // Assert
+        assert!(initial_empty);
+        assert_eq!(initial_count, 0);
+        assert!(!after_add_empty);
+        assert_eq!(after_add_count, 1);
         // bit_count should be positive
-        assert!(builder.bit_count() > 0);
-
+        assert!(bit_count_val > 0);
         // estimated_fpr should be very small with only 1 key in a large filter
-        assert!(builder.estimated_fpr() < 0.001);
+        assert!(fpr_val < 0.001);
     }
 }
