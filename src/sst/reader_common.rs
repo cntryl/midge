@@ -7,6 +7,7 @@
 
 use crate::error::MidgeResult;
 use crate::sst::bloom::BloomFilter;
+use crate::sst::block_meta::IndexTable;
 use crate::sst::format::{Block, BlockHandle, BlockType, Footer};
 use crate::sst::meta_index::{linear_search_meta_index, meta_index_contains};
 use crate::sst::range_tombstone::decode_range_tombstones;
@@ -82,6 +83,16 @@ impl SstMetadata {
             range_tombstones,
             use_internal_keys: use_internal,
         })
+    }
+
+    /// Build a compact IndexTable from sparse_index and metadata (Phase 3)
+    ///
+    /// Converts the sparse_index into a compact in-memory IndexTable that separates
+    /// search keys from full block metadata, minimizing memory footprint while
+    /// preserving all necessary information for lookups, iteration, and compaction.
+    pub fn build_index_table(&self) -> MidgeResult<IndexTable> {
+        let metas = self.sparse_index.build_block_metas();
+        Ok(IndexTable::new(metas))
     }
 }
 

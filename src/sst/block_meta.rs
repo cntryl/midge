@@ -254,37 +254,28 @@ impl IndexTable {
 
     /// Find the block that might contain a given key
     ///
-    /// Uses binary search on min_keys. Returns `Some(&BlockMeta)` for the candidate
-    /// block, or `None` if the key is definitely not in this SST.
+    /// Uses binary search on block max_keys to find candidate blocks,
+    /// then verifies key falls within [min_key, max_key] range.
+    /// Returns `Some(&BlockMeta)` for the candidate block, or `None` if definitely not present.
     #[inline]
     pub fn find_block(&self, key: &[u8]) -> Option<&BlockMeta> {
         if self.metas.is_empty() {
             return None;
         }
 
-        // Binary search: find the first block where min_key >= key
+        // Find the first block where max_key >= key
+        // This is the first block that could contain the key
         let idx = self
-            .search_keys
-            .partition_point(|k| k.as_ref() < key);
-
-        if idx == 0 {
-            // Key is less than all blocks; check first block
-            // (it might still contain the key if it falls before its min_key in iteration)
-            return Some(&self.metas[0]);
-        }
+            .metas
+            .partition_point(|m| m.max_key.as_ref() < key);
 
         if idx >= self.metas.len() {
-            // Key is beyond all blocks; might be in the last block
-            return Some(&self.metas[self.metas.len() - 1]);
+            // Key is beyond all blocks
+            return None;
         }
 
-        // idx points to the first block where min_key >= key
-        // Check both idx-1 (might contain key) and idx
-        if idx > 0 && key <= self.metas[idx - 1].max_key.as_ref() {
-            return Some(&self.metas[idx - 1]);
-        }
-
-        if key >= self.metas[idx].min_key.as_ref() {
+        // Check if the key falls within this block's range
+        if key >= self.metas[idx].min_key.as_ref() && key <= self.metas[idx].max_key.as_ref() {
             return Some(&self.metas[idx]);
         }
 

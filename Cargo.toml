@@ -284,6 +284,11 @@ name = "tier2_subsystem_wal_segment_rollover"
 path = "benches/tier2_subsystem/wal_segment_rollover.rs"
 harness = false
 
+[[bench]]
+name = "tier2_subsystem_index_table"
+path = "benches/tier2_subsystem/index_table.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 3: System (10-120s)
 # =============================================================================
