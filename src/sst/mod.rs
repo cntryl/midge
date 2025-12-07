@@ -19,6 +19,7 @@ pub mod bloom_cache;
 pub mod cache;
 pub mod cloud;
 pub mod encoding;
+pub mod fast_negative_filter;
 pub mod file_manager;
 pub mod format;
 pub mod fs;
@@ -28,6 +29,7 @@ pub mod meta_index;
 pub mod metadata_cache;
 pub mod range_tombstone;
 pub mod reader_common;
+pub mod sequential_access_optimizer;
 pub mod sparse_index;
 pub mod sparse_index_cache;
 pub mod table_cache;
@@ -76,6 +78,8 @@ pub fn create_cache_with_options(options: BlockCacheOptions) -> std::sync::Arc<S
 // ─── Other public re-exports ─────────────────────────────────────────────────
 pub use block_meta::{BlockMeta, IndexTable};
 pub use bloom::{BloomFilter, BloomFilterBuilder, Filter};
+pub use fast_negative_filter::FastNegativeFilter;
+pub use sequential_access_optimizer::{SequentialAccessOptimizer, SequentialAccessMetrics};
 pub use cloud::{
     ArchiveTier, CloudSst, CloudSstFactory, CloudSstManager, CloudSstManagerConfig,
     CloudSstReaderFactory, SstCloudReader, SstCloudWriter, SstLifecycleState, SstMetadata,

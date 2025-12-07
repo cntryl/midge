@@ -6,7 +6,10 @@
 
 use bytes::Bytes;
 use crate::sst::format::BlockHandle;
+use crate::sst::fast_negative_filter::FastNegativeFilter;
+use crate::sst::sequential_access_optimizer::SequentialAccessOptimizer;
 use crate::error::{MidgeError, MidgeResult};
+use std::cell::RefCell;
 use std::fmt;
 
 /// Per-block bloom filter (Phase 1)
@@ -243,13 +246,81 @@ pub struct IndexTable {
 
     /// Block metadata: offsets, lengths, fence pointers, tombstone info
     metas: Vec<BlockMeta>,
+
+    /// Optional fast negative filter for streaming optimization (Phase 1.5)
+    /// Provides L1-cached negative lookup acceleration
+    fast_negative_filter: Option<FastNegativeFilter>,
+
+    /// Optional sequential access optimizer for range scan acceleration (Phase 3.5)
+    /// Predicts sequential block access patterns and caches repeated lookups
+    sequential_optimizer: Option<RefCell<SequentialAccessOptimizer>>,
 }
 
 impl IndexTable {
     /// Create a new IndexTable from block metadata
     pub fn new(metas: Vec<BlockMeta>) -> Self {
         let search_keys = metas.iter().map(|m| m.min_key.clone()).collect();
-        Self { search_keys, metas }
+        Self {
+            search_keys,
+            metas,
+            fast_negative_filter: None,
+            sequential_optimizer: None,
+        }
+    }
+
+    /// Create a new IndexTable with a fast negative filter
+    pub fn with_fast_negative_filter(
+        metas: Vec<BlockMeta>,
+        filter: FastNegativeFilter,
+    ) -> Self {
+        let search_keys = metas.iter().map(|m| m.min_key.clone()).collect();
+        Self {
+            search_keys,
+            metas,
+            fast_negative_filter: Some(filter),
+            sequential_optimizer: None,
+        }
+    }
+
+    /// Attach a sequential access optimizer (Phase 3.5)
+    #[inline]
+    pub fn set_sequential_optimizer(&mut self, optimizer: SequentialAccessOptimizer) {
+        self.sequential_optimizer = Some(RefCell::new(optimizer));
+    }
+
+    /// Get the sequential access optimizer if present
+    #[inline]
+    pub fn sequential_optimizer(&self) -> Option<&RefCell<SequentialAccessOptimizer>> {
+        self.sequential_optimizer.as_ref()
+    }
+
+    /// Set the fast negative filter (for streaming optimization)
+    #[inline]
+    pub fn set_fast_negative_filter(&mut self, filter: FastNegativeFilter) {
+        self.fast_negative_filter = Some(filter);
+    }
+
+    /// Get the fast negative filter if present
+    #[inline]
+    pub fn fast_negative_filter(&self) -> Option<&FastNegativeFilter> {
+        self.fast_negative_filter.as_ref()
+    }
+
+    /// Check if a block might contain keys using the fast negative filter
+    ///
+    /// Returns `false` only if we're certain the block is empty.
+    /// Returns `true` if the block might contain keys (requires per-block bloom check).
+    ///
+    /// This is an optimization for the negative lookup path:
+    /// - If filter is present and bit is clear, return `false` (no keys possible)
+    /// - Otherwise, return `true` (proceed to per-block bloom or block read)
+    #[inline]
+    pub fn might_contain_block_via_fast_filter(&self, block_index: usize) -> bool {
+        if let Some(ref filter) = self.fast_negative_filter {
+            filter.might_contain_block(block_index)
+        } else {
+            true // No filter: conservatively assume block might have keys
+        }
     }
 
     /// Find the block that might contain a given key
@@ -261,6 +332,22 @@ impl IndexTable {
     pub fn find_block(&self, key: &[u8]) -> Option<&BlockMeta> {
         if self.metas.is_empty() {
             return None;
+        }
+
+        let key_hash = Self::hash_key(key);
+
+        // Fast path: use sequential predictor if present
+        if let Some(opt_cell) = &self.sequential_optimizer {
+            if let Ok(mut opt) = opt_cell.try_borrow_mut() {
+                if let Some(pred_idx) = opt.predict_next_block() {
+                    if let Some(meta) = self.metas.get(pred_idx) {
+                        if key >= meta.min_key.as_ref() && key <= meta.max_key.as_ref() {
+                            opt.record_lookup(key_hash, pred_idx);
+                            return Some(meta);
+                        }
+                    }
+                }
+            }
         }
 
         // Find the first block where max_key >= key
@@ -276,6 +363,11 @@ impl IndexTable {
 
         // Check if the key falls within this block's range
         if key >= self.metas[idx].min_key.as_ref() && key <= self.metas[idx].max_key.as_ref() {
+            if let Some(opt_cell) = &self.sequential_optimizer {
+                if let Ok(mut opt) = opt_cell.try_borrow_mut() {
+                    opt.record_lookup(key_hash, idx);
+                }
+            }
             return Some(&self.metas[idx]);
         }
 
@@ -321,6 +413,16 @@ impl IndexTable {
     /// Iterator over all blocks
     pub fn iter(&self) -> impl Iterator<Item = &BlockMeta> {
         self.metas.iter()
+    }
+
+    #[inline]
+    fn hash_key(key: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+        for &byte in key {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
     }
 
     /// Memory footprint estimate (for monitoring)

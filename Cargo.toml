@@ -210,6 +210,16 @@ name = "tier1_hotpath_per_block_bloom"
 path = "benches/tier1_hotpath/per_block_bloom.rs"
 harness = false
 
+[[bench]]
+name = "tier1_hotpath_streaming_filters"
+path = "benches/tier1_hotpath/streaming_filters.rs"
+harness = false
+
+[[bench]]
+name = "tier1_hotpath_streaming_bloom_bits"
+path = "benches/tier1_hotpath/streaming_bloom_bits.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 2: Subsystem (<8s)
 # =============================================================================
@@ -272,6 +282,21 @@ harness = false
 [[bench]]
 name = "tier2_subsystem_wal_io"
 path = "benches/tier2_subsystem/wal_io.rs"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_streaming_iterators"
+path = "benches/tier2_subsystem/streaming_iterators.rs"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_streaming_range_scan"
+path = "benches/tier2_subsystem/streaming_range_scan.rs"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_streaming_iterator_throughput"
+path = "benches/tier2_subsystem/streaming_iterator_throughput.rs"
 harness = false
 
 [[bench]]
