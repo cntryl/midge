@@ -289,6 +289,11 @@ name = "tier2_subsystem_index_table"
 path = "benches/tier2_subsystem/index_table.rs"
 harness = false
 
+[[bench]]
+name = "tier2_subsystem_tombstone_index"
+path = "benches/tier2_subsystem/tombstone_index.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 3: System (10-120s)
 # =============================================================================

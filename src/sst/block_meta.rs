@@ -225,9 +225,9 @@ impl BlockMeta {
         self.has_tombstones
             && self.tombstone_min.is_some()
             && self.tombstone_max.is_some()
-            && self.tombstone_min.as_ref().unwrap() <= &self.min_key
+            && self.tombstone_min.as_ref().expect("checked is_some") <= &self.min_key
             // Range tombstones are [start, end), so end must strictly exceed max_key
-            && self.tombstone_max.as_ref().unwrap() > &self.max_key
+            && self.tombstone_max.as_ref().expect("checked is_some") > &self.max_key
     }
 }
 

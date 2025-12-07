@@ -31,6 +31,7 @@ pub mod reader_common;
 pub mod sparse_index;
 pub mod sparse_index_cache;
 pub mod table_cache;
+pub mod tombstone_index;
 pub mod traits;
 pub mod writer_common;
 
@@ -84,6 +85,7 @@ pub use file_manager::FileManager;
 pub use format::{Block, BlockHandle, BlockType, DataBlockBuilder, Footer, IndexBlockBuilder};
 pub use sparse_index::{IndexEntry, SparseIndex, SparseIndexBuilder};
 pub use table_cache::{CachedTable, TableCache, TableCacheStats};
+pub use tombstone_index::{TombstoneIndex, TombstoneIndexBuilder, TombstoneIndexEntry};
 pub use traits::*;
 
 pub use manifest_cache::ManifestCache;

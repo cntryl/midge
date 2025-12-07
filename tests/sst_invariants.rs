@@ -181,10 +181,12 @@ mod sst_invariants {
         );
 
         // Act
+        // Range tombstones are [start, end), so to cover [apple, cherry] inclusive,
+        // we need a tombstone [apple, coconut) - i.e., end > max_key
         let meta = meta.with_tombstones(
             true,
             Some(Bytes::from("apple")),
-            Some(Bytes::from("cherry")),
+            Some(Bytes::from("coconut")),
         );
         let has_tombstones = meta.has_tombstones;
         let fully_covered = meta.might_be_fully_covered();
@@ -192,7 +194,7 @@ mod sst_invariants {
         // Assert
         assert!(has_tombstones);
         assert_eq!(meta.tombstone_min, Some(Bytes::from("apple")));
-        assert_eq!(meta.tombstone_max, Some(Bytes::from("cherry")));
+        assert_eq!(meta.tombstone_max, Some(Bytes::from("coconut")));
         assert!(fully_covered);
     }
 
