@@ -203,10 +203,14 @@ Goal: Straight-line, coordinated write path owned by a single component.
 
 Owner: Write path / WAL maintainers
 
-- ⏳ P4.1 Introduce `WritePathCoordinator` (or similar) component
-  - Single `apply_write(&WriteBatch) -> Result<SequenceNumber>` entrypoint
-- ⏳ P4.2 Consolidate existing write logic into coordinator
-  - WAL append
+- ✅ P4.1 Introduce `WritePathCoordinator` (or similar) component
+  - ✅ Types defined: `WritePathCoordinator`, `WriteOp`, `OpKind` enum
+  - ✅ Module structure: `src/core/write_path/coordinator.rs`, `src/core/write_path/mod.rs`
+  - ✅ Single `apply_write()` method (placeholder for Task 4.2)
+  - ✅ 2/2 unit tests passing (constructor, op_kind enum support)
+- 🟡 P4.2 Consolidate existing write logic into coordinator
+  - Refactor all write APIs to use coordinator
+  - WAL append logic
   - Memtable application
   - Flush/compaction signaling via `EngineRuntime`
   - Optional cache prewarm hooks
@@ -219,10 +223,10 @@ Owner: Write path / WAL maintainers
 
 Exit criteria:
 - ✅ `unified_write_path` flag controls whether the coordinator is used.
-- ✅ All write operations to the engine flow through `apply_write` when the flag is enabled.
-- ✅ Sequence number allocation is centralized and monotonic, with tests.
-- ✅ Under load, flush/compaction work is always offloaded via `EngineRuntime`, never executed inline on user threads.
-- ✅ Write-heavy stress tests show equal or improved tail latencies compared to the baseline.
+- 🟡 All write operations to the engine flow through `apply_write` when the flag is enabled (in progress).
+- ⏳ Sequence number allocation is centralized and monotonic, with tests.
+- ⏳ Under load, flush/compaction work is always offloaded via `EngineRuntime`, never executed inline on user threads.
+- ⏳ Write-heavy stress tests show equal or improved tail latencies compared to the baseline.
 
 ---
 

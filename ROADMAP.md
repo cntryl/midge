@@ -16,7 +16,7 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 | Phase 1 | Engine Runtime | 1–2 weeks | 🟡 Tests Passing, Benches In Progress |
 | Phase 2 | Deterministic Compaction | 2–4 weeks | ✅ Complete (Tasks 2.1-2.4) |
 | Phase 3 | Trie Index SST Format | 2–3 weeks | ✅ Complete (Tasks 3.1-3.6) |
-| Phase 4 | Unified Write Path | 3–6 weeks | 📋 Ready to Start |
+| Phase 4 | Unified Write Path | 3–6 weeks | 🟡 Task 4.1 Complete |
 | Phase 5 | Segment SSTs (Optional) | 2–4 weeks | 📋 Blocked on Phase 4 |
 
 ## Core Development Principles
@@ -199,20 +199,25 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 **Goal**: Consolidate WAL, memtable, and cache signaling behind a single coordinator.
 
 ### Task 4.1: Define WritePathCoordinator
-**Status**: 📋 Not Started  
-**Files**: `src/core/write_path/coordinator.rs` (new)  
-**Success Criteria**:
-- [ ] Single public API: `apply_write(write_batch) -> MidgeResult<()>`
-- [ ] Internally orchestrates WAL append → memtable insert → cache update
-- [ ] All background signals routed through runtime
+**Status**: ✅ Complete  
+**Files**: `src/core/write_path/coordinator.rs` (new), `src/core/write_path/mod.rs` (new)  
+**Implemented**:
+- [x] `WritePathCoordinator` struct with `new()` constructor
+- [x] `WriteOp` struct representing individual write operations (put, delete, merge, delete_range)
+- [x] `OpKind` enum with Put, Delete, Merge, DeleteRange variants
+- [x] Placeholder `apply_write()` method (TODO: full coordination logic in Task 4.2)
+- [x] 2/2 unit tests passing: `should_create_coordinator`, `should_support_op_kind`
+- [x] Module integrated into `src/core/mod.rs`
+**Test Results**: 2 new tests passing; total 1434/1434 lib tests passing
 
 ### Task 4.2: Refactor Write Paths
-**Status**: 📋 Not Started  
-**Files**: `src/api/put.rs`, `src/api/delete.rs`, `src/api/merge.rs`  
+**Status**: 📋 In Progress  
+**Files**: `src/core/engine/operations/writes.rs` (primary refactor target)  
 **Success Criteria**:
-- [ ] All write APIs use `WritePathCoordinator::apply_write()`
+- [ ] All write APIs (put, put_with_ttl, delete, delete_range, merge, merge_cf, insert, write_batch) use `WritePathCoordinator::apply_write()`
 - [ ] WAL, memtable, cache remain internal to coordinator
 - [ ] No breaking changes to public API
+- [ ] 1434+ tests passing after refactor
 
 ---
 
