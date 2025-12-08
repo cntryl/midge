@@ -11,8 +11,8 @@
 //! - Plans are ordered consistently (by level, then by key range)
 //! - No randomness or hash-based ordering
 
-use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
+use serde::{Deserialize, Serialize, Serializer, Deserializer};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 
 use crate::core::manifest::Manifest;
 use crate::manifest::FileMeta;
@@ -22,6 +22,24 @@ use super::CompactionPlan;
 
 /// Uniquely identifies a compaction task across restarts
 pub type TaskId = u64;
+
+/// Custom serializer for SystemTime (encode as seconds since UNIX_EPOCH)
+fn serialize_system_time<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let duration = time.duration_since(UNIX_EPOCH).map_err(serde::ser::Error::custom)?;
+    serializer.serialize_u64(duration.as_secs())
+}
+
+/// Custom deserializer for SystemTime (decode from seconds since UNIX_EPOCH)
+fn deserialize_system_time<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let secs = u64::deserialize(deserializer)?;
+    Ok(UNIX_EPOCH + Duration::from_secs(secs))
+}
 
 /// A single deterministic compaction operation
 /// Stores the plan details directly (serializable)
@@ -40,6 +58,7 @@ pub struct CompactionTask {
     /// Output file names (populated after execution)
     pub output_files: Vec<String>,
     /// When this task was created
+    #[serde(serialize_with = "serialize_system_time", deserialize_with = "deserialize_system_time")]
     pub created_at: SystemTime,
 }
 

@@ -53,6 +53,7 @@ type TaskFn = Box<dyn FnOnce() + Send + 'static>;
 pub enum RuntimeTaskKind {
     Flush,
     Compaction,
+    CompactionPlanExecution,
     Maintenance,
 }
 
