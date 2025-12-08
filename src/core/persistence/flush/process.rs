@@ -33,6 +33,12 @@ pub(crate) fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> Mi
     let entries = job.entries;
     let range_tombstones = job.range_tombstones;
 
+    // Phase 5.4: Create segment from entries (before moving entries into writer).
+    // This captures the metadata for tracking in the manifest.
+    let segment_id = crate::core::naming::allocate_sst_seq(cf_id);
+    let potential_segment =
+        crate::core::manifest::create_segment_from_entries(cf_id.as_u32(), segment_id, &entries);
+
     // Compute file metadata (bounds and seq range) from drained entries
     let (smallest_key, largest_key, smallest_seq, largest_seq) =
         compute_bounds(&entries, &range_tombstones);
@@ -137,6 +143,12 @@ pub(crate) fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> Mi
         range_tombstone_count: stats.range_tombstone_count,
         total_entries: stats.total_entries,
     });
+
+    // Phase 5.4: Track segment in manifest (created earlier from entries).
+    // This allows segments to coexist with SSTs during read path operations.
+    if let Some(segment) = potential_segment {
+        crate::core::manifest::update_manifest_with_segment(&mut m, segment);
+    }
 
     // Save manifest (skip in memory mode)
     // Update manifest with current sequence allocators before saving

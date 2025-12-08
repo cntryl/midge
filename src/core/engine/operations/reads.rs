@@ -44,9 +44,8 @@ fn open_sst_with_retries(
 /// Helper to collect sealed segments for a column family that contain a given key.
 /// Segments are returned in age order (oldest first).
 /// 
-/// Note: Used in Phase 5.4 (optional flush integration). Currently in read path as infrastructure
-/// but segment block access not yet implemented. Marked allow(dead_code) until Phase 5.4 work begins.
-#[allow(dead_code)]
+/// Note: Used in Phase 5.4 segment integration. Segments are now created during flush
+/// and available in manifest. This helper locates them for potential block-level access.
 fn collect_segments_for_key(manifest: &Manifest, cf_id: u32, key: &[u8]) -> Vec<Segment> {
     let mut matching = manifest
         .segments
@@ -68,8 +67,9 @@ fn collect_segments_for_key(manifest: &Manifest, cf_id: u32, key: &[u8]) -> Vec<
 /// Helper to collect sealed segments for a column family that overlap a key range.
 /// Segments are returned in age order (oldest first).
 /// 
-/// Note: Used in Phase 5.4 (optional flush integration). Currently in read path as infrastructure
-/// but segment block access not yet implemented. Marked allow(dead_code) until Phase 5.4 work begins.
+/// Note: Used in Phase 5.4 segment integration. Segments are now created during flush
+/// and available in manifest. This helper locates them for potential block-level access.
+/// Currently marked allow(dead_code) as range scan segment integration is not yet implemented.
 #[allow(dead_code)]
 fn collect_segments_for_range(
     manifest: &Manifest,
@@ -231,16 +231,16 @@ impl MidgeEngine {
         }
 
         // Check sealed segments (newest to oldest by age)
+        // Phase 5.4: Segments are now created during flush and tracked in manifest.
+        // For now, we collect sealed segments but don't yet read from them
+        // (segment block access requires additional infrastructure).
+        // Once implemented, this will check segment blocks for the key before
+        // falling through to SST files.
         {
             let version = self.version_set.load();
-            let segments = collect_segments_for_key(&version.manifest, cf_id.as_u32(), key);
-
-            for _segment in segments {
-                // Segments are block-based and don't directly expose a get() API yet.
-                // This read path integration is infrastructure for Phase 5.4 (optional).
-                // Phase 5.4: Implement segment block access and merge operand handling.
-                // For now, all reads fall through to SST files below.
-            }
+            let _segments = collect_segments_for_key(&version.manifest, cf_id.as_u32(), key);
+            // TODO: Implement segment block-level access and merge resolution
+            // For now, all reads fall through to SST files below
         }
 
         // Load version set once for consistent SST snapshot (lock-free)
