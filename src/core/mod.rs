@@ -38,6 +38,7 @@ pub mod naming;
 pub mod persistence;
 pub mod runtime;
 pub mod transaction;
+pub mod wal_upload_coordinator;
 pub mod write_path;
 
 /// Common entry metadata used across memtable/flush paths.

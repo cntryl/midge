@@ -24,6 +24,8 @@ use crate::core::compaction::CompactionPlan;
 pub struct MidgeEngine {
     /// WAL coordinator managing write-ahead log operations
     pub(crate) wal_coordinator: crate::wal::WalController,
+    /// Phase 6.3: WAL upload coordinator routing uploads through EngineRuntime
+    pub(crate) wal_upload_coordinator: Arc<crate::core::wal_upload_coordinator::WalUploadCoordinator>,
     pub(crate) cf_set: Arc<ColumnFamilySet>,
     pub(crate) seq: AtomicU64,
     pub(crate) txn_id: AtomicU64,

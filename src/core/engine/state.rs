@@ -360,8 +360,14 @@ pub fn open_with_factories(
 
     let runtime = Arc::new(runtime);
 
+    // Phase 6.3: Create WAL upload coordinator for routing uploads through runtime
+    let wal_upload_coordinator = Arc::new(
+        crate::core::wal_upload_coordinator::WalUploadCoordinator::new(),
+    );
+
     Ok(MidgeEngine {
         wal_coordinator,
+        wal_upload_coordinator,
         cf_set: cf_set_arc,
         seq: AtomicU64::new(max_replay_seq),
         txn_id: AtomicU64::new(0),
