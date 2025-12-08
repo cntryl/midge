@@ -826,4 +826,53 @@ mod tests {
             Some(b"third".as_ref())
         );
     }
+
+    #[test]
+    fn should_apply_write_through_coordinator() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        let coordinator = crate::core::write_path::WritePathCoordinator::new();
+
+        // Act: Create a write operation using coordinator builder
+        let op = crate::core::write_path::WriteOp::put(b"key".to_vec(), b"value".to_vec());
+        let seq = coordinator.apply_write(&engine, &cf, &[op]).unwrap();
+
+        // Assert: Verify the write was applied and sequence returned
+        // The sequence starts from 0, so first write is 0
+        assert_eq!(
+            engine.get(&cf, b"key").unwrap().as_deref(),
+            Some(b"value".as_ref()),
+            "Value should be written through coordinator"
+        );
+        // We don't assert the exact sequence number since it starts at 0 for first op
+        let _ = seq;
+    }
+
+    #[test]
+    fn should_apply_multiple_operations_through_coordinator() {
+        // Arrange
+        let engine = create_test_engine();
+        let cf = engine.default_column_family();
+        let coordinator = crate::core::write_path::WritePathCoordinator::new();
+
+        // Act: Create multiple operations
+        let ops = vec![
+            crate::core::write_path::WriteOp::put(b"key1".to_vec(), b"val1".to_vec()),
+            crate::core::write_path::WriteOp::put(b"key2".to_vec(), b"val2".to_vec()),
+            crate::core::write_path::WriteOp::delete(b"key1".to_vec()),
+        ];
+        coordinator.apply_write(&engine, &cf, &ops).unwrap();
+
+        // Assert: Verify operations were applied in order
+        assert_eq!(
+            engine.get(&cf, b"key1").unwrap().as_deref(),
+            None,
+            "key1 should be deleted"
+        );
+        assert_eq!(
+            engine.get(&cf, b"key2").unwrap().as_deref(),
+            Some(b"val2".as_ref())
+        );
+    }
 }

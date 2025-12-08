@@ -13,4 +13,4 @@
 
 pub mod coordinator;
 
-pub use coordinator::WritePathCoordinator;
+pub use coordinator::{WritePathCoordinator, WriteOp, OpKind};
