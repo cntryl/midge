@@ -11,7 +11,8 @@ mod tests {
 
     #[test]
     fn should_verify_blockmeta_size_for_cache_efficiency() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let size = std::mem::size_of::<BlockMeta>();
 
         // Assert

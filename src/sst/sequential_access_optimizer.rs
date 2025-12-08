@@ -214,7 +214,8 @@ mod tests {
 
     #[test]
     fn should_create_new_optimizer() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let opt = SequentialAccessOptimizer::new();
 
         // Assert

@@ -230,78 +230,99 @@ mod tests {
 
     #[test]
     fn should_build_trie_from_keys() {
+        // Arrange
         let mut builder = TrieIndexBuilder::new();
         builder.add_block(b"apple", b"apricot");
         builder.add_block(b"banana", b"berry");
         builder.add_block(b"cherry", b"date");
 
+        // Act
         let encoded = builder.finish();
+        
+        // Assert
         assert!(!encoded.is_empty());
     }
 
     #[test]
     fn should_find_candidate_blocks_for_key() {
+        // Arrange
         let mut builder = TrieIndexBuilder::new();
         builder.add_block(b"apple", b"apricot");
         builder.add_block(b"banana", b"berry");
-
         let encoded = builder.finish();
         let index = TrieIndex::decode(&encoded).unwrap();
 
+        // Act
         let blocks = index.find_candidate_blocks(b"apple");
+        
+        // Assert
         assert!(!blocks.is_empty());
     }
 
     #[test]
     fn should_find_blocks_in_range() {
+        // Arrange
         let mut builder = TrieIndexBuilder::new();
         builder.add_block(b"apple", b"apricot");
         builder.add_block(b"banana", b"berry");
         builder.add_block(b"cherry", b"date");
-
         let encoded = builder.finish();
         let index = TrieIndex::decode(&encoded).unwrap();
 
+        // Act
         let blocks = index.find_blocks_in_range(b"apricot", b"cherry");
+        
+        // Assert
         assert!(!blocks.is_empty());
     }
 
     #[test]
     fn should_roundtrip_encode_decode() {
+        // Arrange
         let mut builder = TrieIndexBuilder::new();
         builder.add_block(b"key_001", b"key_010");
         builder.add_block(b"key_020", b"key_030");
         builder.add_block(b"key_040", b"key_050");
-
         let encoded = builder.finish();
+
+        // Act
         let decoded = TrieIndex::decode(&encoded);
+        
+        // Assert
         assert!(decoded.is_ok());
     }
 
     #[test]
     fn should_handle_empty_trie() {
+        // Arrange
         let builder = TrieIndexBuilder::new();
         let encoded = builder.finish();
         let index = TrieIndex::decode(&encoded).unwrap();
 
+        // Act
         let blocks = index.find_candidate_blocks(b"any_key");
+        
+        // Assert
         assert_eq!(blocks.len(), 0);
     }
 
     #[test]
     fn should_handle_prefix_matching() {
+        // Arrange
         let mut builder = TrieIndexBuilder::new();
         builder.add_block(b"prefix_001", b"prefix_010");
 
         let encoded = builder.finish();
         let index = TrieIndex::decode(&encoded).unwrap();
 
+        // Act
         // Should find block when searching with full key
         let blocks1 = index.find_candidate_blocks(b"prefix_005");
-        assert!(!blocks1.is_empty());
-
-        // Should also find blocks for partial prefixes
         let blocks2 = index.find_candidate_blocks(b"prefix");
+
+        // Assert
+        assert!(!blocks1.is_empty());
+        // Should also find blocks for partial prefixes
         assert!(!blocks2.is_empty());
     }
 }

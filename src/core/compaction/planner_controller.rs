@@ -108,10 +108,9 @@ mod tests {
 
     #[test]
     fn should_recover_pending_tasks() {
+        // Arrange
         let temp_dir = TempDir::new().unwrap();
         let log_manager = CompactionLogManager::new(temp_dir.path());
-
-        // Create a dummy task
         use crate::core::compaction::CompactionPlan;
         let plan = CompactionPlan {
             source_level: 0,
@@ -122,11 +121,11 @@ mod tests {
         };
         let task = CompactionTask::new(1, &plan);
         
-        // Persist it
+        // Act
         log_manager.append(&task).unwrap();
-
-        // Verify recovery
         let recovered = log_manager.load().unwrap();
+        
+        // Assert
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].task_id, 1);
     }

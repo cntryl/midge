@@ -42,20 +42,19 @@ fn create_test_manifest(files: Vec<(u32, u32, u64)>) -> Manifest {
 /// Test: Deterministic plan generation from same manifest
 #[test]
 fn should_generate_deterministic_plans_given_same_manifest() {
+    // Arrange
     let planner = Planner::new();
-    
-    // Create a manifest with L0 files exceeding threshold
     let manifest = create_test_manifest(vec![
         (0, 0, 2 * 1024 * 1024),  // CF 0, L0, 2MB
         (0, 0, 2 * 1024 * 1024),  // CF 0, L0, 2MB (total 4MB > 4MB threshold)
         (0, 1, 10 * 1024 * 1024), // CF 0, L1, 10MB
     ]);
     
-    // Generate plans twice
+    // Act
     let plans1 = planner.plan(&manifest);
     let plans2 = planner.plan(&manifest);
     
-    // Both should be identical
+    // Assert
     assert_eq!(plans1.len(), plans2.len(), "Plan count must be deterministic");
     
     for (p1, p2) in plans1.iter().zip(plans2.iter()) {
@@ -68,11 +67,11 @@ fn should_generate_deterministic_plans_given_same_manifest() {
 
 /// Test: Compaction log persists and recovers tasks
 #[test]
-fn should_persist_and_recover_compaction_tasks() {
+fn should_persist_compaction_tasks_to_log() {
+    // Arrange
     let temp_dir = TempDir::new().unwrap();
     let log_manager = CompactionLogManager::new(temp_dir.path());
     
-    // Create multiple tasks
     let plan1 = CompactionPlan {
         source_level: 0,
         target_level: 1,
@@ -92,14 +91,12 @@ fn should_persist_and_recover_compaction_tasks() {
     let task1 = CompactionTask::new(1, &plan1);
     let task2 = CompactionTask::new(2, &plan2);
     
-    // Persist tasks
+    // Act
     log_manager.append(&task1).unwrap();
     log_manager.append(&task2).unwrap();
-    
-    // Recover tasks
     let recovered = log_manager.load().unwrap();
     
-    // Verify order and content
+    // Assert
     assert_eq!(recovered.len(), 2);
     assert_eq!(recovered[0].task_id, 1);
     assert_eq!(recovered[0].cf_id, 0);
@@ -115,6 +112,7 @@ fn should_persist_and_recover_compaction_tasks() {
 /// Test: Log can be cleared after successful checkpoint
 #[test]
 fn should_clear_log_after_successful_checkpoint() {
+    // Arrange
     let temp_dir = TempDir::new().unwrap();
     let log_manager = CompactionLogManager::new(temp_dir.path());
     
@@ -127,25 +125,22 @@ fn should_clear_log_after_successful_checkpoint() {
     };
     let task = CompactionTask::new(1, &plan);
     
-    // Append task
+    // Act
     log_manager.append(&task).unwrap();
     let recovered_before = log_manager.load().unwrap();
-    assert_eq!(recovered_before.len(), 1);
-    
-    // Clear (checkpoint)
     log_manager.clear().unwrap();
-    
-    // Log should be empty
     let recovered_after = log_manager.load().unwrap();
+    
+    // Assert
+    assert_eq!(recovered_before.len(), 1);
     assert_eq!(recovered_after.len(), 0);
 }
 
 /// Test: Multiple column families generate ordered plans
 #[test]
 fn should_generate_plans_in_cf_id_order_for_multi_cf_engine() {
+    // Arrange
     let planner = Planner::new();
-    
-    // Create a manifest with multiple CFs, each with L0 exceeding threshold
     let manifest = create_test_manifest(vec![
         // CF 2 files (should be processed last)
         (2, 0, 2 * 1024 * 1024),
@@ -160,37 +155,43 @@ fn should_generate_plans_in_cf_id_order_for_multi_cf_engine() {
         (1, 0, 2 * 1024 * 1024),
     ]);
     
+    // Act
     let plans = planner.plan(&manifest);
-    
-    // Verify CF ordering (CF 0 → 1 → 2)
     let cf_order: Vec<u32> = plans.iter().map(|p| p.cf_id).collect();
     let mut cf_order_sorted = cf_order.clone();
     cf_order_sorted.sort();
     
+    // Assert
     assert_eq!(cf_order, cf_order_sorted, "Plans must be ordered by CF ID");
 }
 
 /// Test: Empty manifest produces empty plan
 #[test]
 fn should_return_empty_plan_for_empty_manifest() {
+    // Arrange
     let planner = Planner::new();
     let manifest = Manifest::default();
     
+    // Act
     let plans = planner.plan(&manifest);
+    
+    // Assert
     assert_eq!(plans.len(), 0);
 }
 
 /// Test: Plans below threshold produce no compaction
 #[test]
 fn should_not_plan_compaction_when_below_thresholds() {
+    // Arrange
     let planner = Planner::new();
-    
-    // Create manifest with small L0 files (below 4MB threshold and < 4 files)
     let manifest = create_test_manifest(vec![
         (0, 0, 1024 * 1024),      // CF 0, L0, 1MB (below threshold)
         (0, 0, 1024 * 1024),      // CF 0, L0, 1MB (total 2MB < 4MB)
     ]);
     
+    // Act
     let plans = planner.plan(&manifest);
+    
+    // Assert
     assert_eq!(plans.len(), 0, "Should not plan L0 compaction when below threshold");
 }

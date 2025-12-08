@@ -319,12 +319,19 @@ mod tests {
             1,
         );
 
-        // Act & Assert
-        assert!(!entry.might_cover(b"a")); // Before range
-        assert!(entry.might_cover(b"b")); // Start boundary (inclusive)
-        assert!(entry.might_cover(b"c")); // Middle
-        assert!(!entry.might_cover(b"e")); // End boundary (exclusive)
-        assert!(!entry.might_cover(b"f")); // After range
+        // Act
+        let result_a = entry.might_cover(b"a");
+        let result_b = entry.might_cover(b"b");
+        let result_c = entry.might_cover(b"c");
+        let result_e = entry.might_cover(b"e");
+        let result_f = entry.might_cover(b"f");
+
+        // Assert
+        assert!(!result_a); // Before range
+        assert!(result_b); // Start boundary (inclusive)
+        assert!(result_c); // Middle
+        assert!(!result_e); // End boundary (exclusive)
+        assert!(!result_f); // After range
     }
 
     #[test]
@@ -337,12 +344,19 @@ mod tests {
             1,
         );
 
-        // Act & Assert
-        assert!(entry.range_intersects(b"a", b"d")); // Overlaps start
-        assert!(entry.range_intersects(b"e", b"h")); // Overlaps end
-        assert!(entry.range_intersects(b"c", b"f")); // Exact match
-        assert!(entry.range_intersects(b"d", b"e")); // Contained
-        assert!(!entry.range_intersects(b"a", b"c")); // Ends at start
+        // Act
+        let result_ad = entry.range_intersects(b"a", b"d");
+        let result_eh = entry.range_intersects(b"e", b"h");
+        let result_cf = entry.range_intersects(b"c", b"f");
+        let result_de = entry.range_intersects(b"d", b"e");
+        let result_ac = entry.range_intersects(b"a", b"c");
+
+        // Assert
+        assert!(result_ad); // Overlaps start
+        assert!(result_eh); // Overlaps end
+        assert!(result_cf); // Exact match
+        assert!(result_de); // Contained
+        assert!(!result_ac); // Ends at start
         assert!(!entry.range_intersects(b"f", b"h")); // Starts at end
     }
 

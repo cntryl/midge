@@ -1,0 +1,23 @@
+﻿cargo : warning: error finalizing incremental compilation session directory `\\?\D:\repos\cntryl\midge\target\debug\incremental\cntryl_midge-1zwvm089e6hyi\s-hdpxf7o6ht-1ml263q-working`: Access is denied. (os error 5)
+At line:1 char:1
++ cargo run --bin validate_tests -- --summary 2>&1 > summary_final.txt; ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: error ...d. (os error 5):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+warning: `cntryl-midge` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running `target\debug\validate_tests.exe --summary`
+[36mScanning all tests for guideline violations...[0m
+
+[33mSummary:[0m
+  Total tests: 2286
+  [32mCompliant: 2286 (100.0%)[0m
+  [31mNon-compliant: 0 (0.0%)[0m
+
+[33mIssue breakdown:[0m
+  Naming violations: 0
+  AAA structure violations: 0
+  Multi-behavior violations: 0
+

@@ -310,16 +310,21 @@ mod tests {
 
     #[test]
     fn should_return_empty_plan_given_empty_manifest() {
+        // Arrange
         let planner = Planner::new();
         let manifest = Manifest::default();
+        
+        // Act
         let plans = planner.plan(&manifest);
+        
+        // Assert
         assert!(plans.is_empty());
     }
 
     #[test]
     fn should_be_deterministic_given_same_manifest() {
+        // Arrange
         let planner = Planner::new();
-
         let mut manifest = Manifest::default();
         manifest.files.push(FileMeta {
             name: "sst_001.blob".to_string(),
@@ -344,10 +349,11 @@ mod tests {
             ..Default::default()
         });
 
+        // Act
         let plan1 = planner.plan(&manifest);
         let plan2 = planner.plan(&manifest);
 
-        // Same manifest should always produce identical plans
+        // Assert
         assert_eq!(plan1.len(), plan2.len());
         for (p1, p2) in plan1.iter().zip(plan2.iter()) {
             assert_eq!(p1.input_files, p2.input_files);
@@ -358,10 +364,9 @@ mod tests {
 
     #[test]
     fn should_not_plan_l0_compaction_when_below_threshold() {
+        // Arrange
         let planner = Planner::new();
-
         let mut manifest = Manifest::default();
-        // Add a single small L0 file
         manifest.files.push(FileMeta {
             name: "sst_001.blob".to_string(),
             level: 0,
@@ -371,16 +376,18 @@ mod tests {
             ..Default::default()
         });
 
+        // Act
         let plans = planner.plan(&manifest);
+        
+        // Assert
         assert!(plans.is_empty(), "Should not plan compaction when L0 is below threshold");
     }
 
     #[test]
     fn should_plan_l0_compaction_when_size_exceeds_threshold() {
+        // Arrange
         let planner = Planner::new();
-
         let mut manifest = Manifest::default();
-        // Add L0 files totaling 5MB (exceeds 4MB threshold)
         for i in 1..=5 {
             manifest.files.push(FileMeta {
                 name: format!("sst_{:03}.blob", i),
@@ -395,7 +402,10 @@ mod tests {
             });
         }
 
+        // Act
         let plans = planner.plan(&manifest);
+        
+        // Assert
         assert!(!plans.is_empty(), "Should plan L0 compaction when size exceeds threshold");
         assert_eq!(plans[0].source_level, 0);
         assert_eq!(plans[0].target_level, 1);
@@ -403,10 +413,9 @@ mod tests {
 
     #[test]
     fn should_order_l0_files_by_sublevel_then_key() {
+        // Arrange
         let planner = Planner::new();
-
         let mut manifest = Manifest::default();
-        // Add L0 files with specific sublevels and keys
         manifest.files.push(FileMeta {
             name: "sst_high_level.blob".to_string(),
             level: 0,
@@ -428,19 +437,20 @@ mod tests {
             ..Default::default()
         });
 
+        // Act
         let plans = planner.plan(&manifest);
+        
+        // Assert
         assert!(!plans.is_empty());
-        // Low sublevel (older) should come first
         assert_eq!(plans[0].input_files[0], "sst_low_level.blob");
         assert_eq!(plans[0].input_files[1], "sst_high_level.blob");
     }
 
     #[test]
     fn should_plan_multi_cf_compactions_in_cf_id_order() {
+        // Arrange
         let planner = Planner::new();
-
         let mut manifest = Manifest::default();
-        // Add files for CF 1
         manifest.files.push(FileMeta {
             name: "sst_cf1_001.blob".to_string(),
             level: 0,
@@ -450,7 +460,6 @@ mod tests {
             sublevel: 0,
             ..Default::default()
         });
-        // Add files for CF 0
         manifest.files.push(FileMeta {
             name: "sst_cf0_001.blob".to_string(),
             level: 0,
@@ -461,8 +470,10 @@ mod tests {
             ..Default::default()
         });
 
+        // Act
         let plans = planner.plan(&manifest);
-        // CF 0 should be processed before CF 1 (by ID order)
+        
+        // Assert
         assert_eq!(plans[0].cf_id, 0);
         assert_eq!(plans[1].cf_id, 1);
     }

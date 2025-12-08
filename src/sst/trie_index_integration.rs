@@ -123,38 +123,55 @@ mod tests {
 
     #[test]
     fn should_add_blocks_when_enabled() {
+        // Arrange
         let mut writer = OptionalTrieIndexWriter::new(true);
+
+        // Act
         writer.add_block(b"key_001", b"key_010");
         writer.add_block(b"key_020", b"key_030");
-
         let encoded = writer.finish();
+
+        // Assert
         assert!(!encoded.is_empty());
     }
 
     #[test]
     fn should_ignore_blocks_when_disabled() {
+        // Arrange
         let mut writer = OptionalTrieIndexWriter::new(false);
+
+        // Act
         writer.add_block(b"key_001", b"key_010");
         writer.add_block(b"key_020", b"key_030");
-
         let encoded = writer.finish();
+
+        // Assert
         assert!(encoded.is_empty());
     }
 
     #[test]
     fn should_create_optional_reader() {
+        // Arrange
+        // Act
         let reader = OptionalTrieIndexReader {
             index: None,
         };
+
+        // Assert
         assert!(!reader.is_available());
     }
 
     #[test]
     fn should_find_no_blocks_when_unavailable() {
+        // Arrange
         let reader = OptionalTrieIndexReader {
             index: None,
         };
+
+        // Act
         let blocks = reader.find_candidate_blocks(b"any_key");
+
+        // Assert
         assert_eq!(blocks.len(), 0);
     }
 }

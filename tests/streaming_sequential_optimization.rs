@@ -11,7 +11,9 @@ mod tests {
 
     #[test]
     fn should_create_optimizer_with_clean_state() {
-        // Arrange & Act
+        // Arrange
+        
+        // Act
         let opt = SequentialAccessOptimizer::new();
 
         // Assert
@@ -88,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_mixed_sequential_and_random_access() {
+    fn should_predict_mixed_sequential_patterns() {
         // Arrange
         let mut opt = SequentialAccessOptimizer::new();
 

@@ -391,6 +391,8 @@ mod tests {
                 .iter()
                 .filter(|b| b.range_intersects(start.as_bytes(), end.as_bytes()))
                 .collect();
+            
+            // Assert
             assert!(
                 intersecting.len() > 0,
                 "Query [{}, {}) should find blocks",

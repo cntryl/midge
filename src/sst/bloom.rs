@@ -1046,11 +1046,15 @@ mod tests {
 
     #[test]
     fn should_use_blocked_layout_for_large_filter() {
-        // Arrange: large filter should switch to blocked layout
+        // Arrange
         let mut f = BloomFilter::new(10_000, 0.01);
-        // Act + Assert: must be at least a block and multiple of BLOCK_BITS
-        assert!(f.bit_count() >= BLOCK_BITS as usize);
-        assert_eq!(f.bit_count() % BLOCK_BITS as usize, 0);
+        
+        // Act
+        let bit_count = f.bit_count();
+        
+        // Assert
+        assert!(bit_count >= BLOCK_BITS as usize);
+        assert_eq!(bit_count % BLOCK_BITS as usize, 0);
         f.add(b"large_key");
         assert!(f.may_contain(b"large_key"));
     }

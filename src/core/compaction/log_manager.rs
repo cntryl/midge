@@ -110,15 +110,20 @@ mod tests {
 
     #[test]
     fn should_create_empty_log_when_file_not_exists() {
+        // Arrange
         let temp_dir = TempDir::new().unwrap();
         let manager = CompactionLogManager::new(temp_dir.path());
         
+        // Act
         let tasks = manager.load().unwrap();
+        
+        // Assert
         assert!(tasks.is_empty());
     }
 
     #[test]
-    fn should_persist_and_recover_task() {
+    fn should_persist_task_to_log() {
+        // Arrange
         let temp_dir = TempDir::new().unwrap();
         let manager = CompactionLogManager::new(temp_dir.path());
 
@@ -133,9 +138,11 @@ mod tests {
             },
         );
 
+        // Act
         manager.append(&task).unwrap();
-        
         let recovered = manager.load().unwrap();
+        
+        // Assert
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].task_id, task.task_id);
         assert_eq!(recovered[0].cf_id, task.cf_id);
@@ -143,6 +150,7 @@ mod tests {
 
     #[test]
     fn should_support_multiple_appends() {
+        // Arrange
         let temp_dir = TempDir::new().unwrap();
         let manager = CompactionLogManager::new(temp_dir.path());
 
@@ -168,10 +176,12 @@ mod tests {
             },
         );
 
+        // Act
         manager.append(&task1).unwrap();
         manager.append(&task2).unwrap();
-        
         let recovered = manager.load().unwrap();
+        
+        // Assert
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0].task_id, 1);
         assert_eq!(recovered[1].task_id, 2);
@@ -179,6 +189,7 @@ mod tests {
 
     #[test]
     fn should_clear_log_successfully() {
+        // Arrange
         let temp_dir = TempDir::new().unwrap();
         let manager = CompactionLogManager::new(temp_dir.path());
 
@@ -197,7 +208,10 @@ mod tests {
         let path = manager.log_path();
         assert!(path.exists());
 
+        // Act
         manager.clear().unwrap();
+        
+        // Assert
         assert!(!path.exists());
     }
 }

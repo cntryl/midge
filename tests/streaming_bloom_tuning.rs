@@ -388,7 +388,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn should_integrate_bloom_filter_and_fast_negative_filter_for_read_path() {
+    fn should_identify_blocks_via_fast_negative_filter() {
         // Arrange: Create blocks with both per-block bloom and fast negative filter
         let blocks = vec![
             BlockMeta::new(

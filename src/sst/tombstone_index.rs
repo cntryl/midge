@@ -233,7 +233,8 @@ mod tests {
             3,
         );
 
-        // Act & Assert
+        // Act
+        // Assert
         assert!(entry.might_cover(b"apple"));
         assert!(entry.might_cover(b"banana"));
         assert!(!entry.might_cover(b"cherry")); // Exclusive end
@@ -251,7 +252,8 @@ mod tests {
             2,
         );
 
-        // Act & Assert
+        // Act
+        // Assert
         assert!(entry.range_intersects(b"a", b"c")); // Overlaps at start
         assert!(entry.range_intersects(b"d", b"f")); // Overlaps at end
         assert!(entry.range_intersects(b"b", b"e")); // Exact match

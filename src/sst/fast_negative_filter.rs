@@ -140,7 +140,8 @@ mod tests {
 
     #[test]
     fn should_initialize_empty_filter() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let filter = FastNegativeFilter::new();
 
         // Assert
@@ -150,15 +151,14 @@ mod tests {
     }
 
     #[test]
-    fn should_set_and_check_block_bits() {
+    fn should_check_block_bits_after_setting() {
         // Arrange
         let mut filter = FastNegativeFilter::new();
-
-        // Act
         filter.set_block(0);
         filter.set_block(5);
         filter.set_block(255);
 
+        // Act
         // Assert
         assert!(filter.might_contain_block(0));
         assert!(!filter.might_contain_block(1));
@@ -175,9 +175,9 @@ mod tests {
         filter.set_block(10);
         filter.set_block(100);
         filter.set_block(255);
+        let encoded = filter.encode();
 
         // Act
-        let encoded = filter.encode();
         let decoded = FastNegativeFilter::decode(&encoded).unwrap();
 
         // Assert
@@ -190,12 +190,14 @@ mod tests {
 
     #[test]
     fn should_reject_invalid_size() {
-        // Arrange & Act & Assert
-        let result = FastNegativeFilter::from_bytes(&[0u8; 16]);
-        assert!(result.is_err());
-
-        let result = FastNegativeFilter::from_bytes(&[0u8; 48]);
-        assert!(result.is_err());
+        // Arrange
+        // Act
+        let result1 = FastNegativeFilter::from_bytes(&[0u8; 16]);
+        let result2 = FastNegativeFilter::from_bytes(&[0u8; 48]);
+        
+        // Assert
+        assert!(result1.is_err());
+        assert!(result2.is_err());
     }
 
     #[test]
@@ -210,18 +212,15 @@ mod tests {
 
     #[test]
     fn should_use_lsb_first_layout() {
-        // Arrange: Test that bit layout matches LSB-first per byte
+        // Arrange
         let mut filter = FastNegativeFilter::new();
-
-        // Act: Set blocks 0-7 in first byte
         for i in 0..8 {
             filter.set_block(i);
         }
 
-        // Assert: First byte should be 0xFF (all bits set)
+        // Act
+        // Assert
         assert_eq!(filter.bitset[0], 0xFF);
-
-        // And other bytes should be 0
         for i in 1..FAST_NEGATIVE_FILTER_BYTES {
             assert_eq!(filter.bitset[i], 0);
         }
@@ -241,7 +240,8 @@ mod tests {
 
     #[test]
     fn should_default_to_empty_filter() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let filter = FastNegativeFilter::default();
 
         // Assert

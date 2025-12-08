@@ -304,14 +304,22 @@ mod tests {
 
     #[test]
     fn should_support_op_kind() {
+        // Arrange
         let put = OpKind::Put;
         let delete = OpKind::Delete;
+        
+        // Act
+        // Assert
         assert_ne!(put, delete);
     }
 
     #[test]
     fn should_build_put_operation() {
+        // Arrange
+        // Act
         let op = WriteOp::put(b"key".to_vec(), b"value".to_vec());
+        
+        // Assert
         assert_eq!(op.kind, OpKind::Put);
         assert_eq!(op.key, b"key");
         assert_eq!(op.value, Some(b"value".to_vec()));
@@ -321,14 +329,22 @@ mod tests {
 
     #[test]
     fn should_build_put_with_ttl_operation() {
+        // Arrange
+        // Act
         let op = WriteOp::put_with_ttl(b"key".to_vec(), b"value".to_vec(), 3600);
+        
+        // Assert
         assert_eq!(op.kind, OpKind::Put);
         assert_eq!(op.ttl_seconds, 3600);
     }
 
     #[test]
     fn should_build_delete_operation() {
+        // Arrange
+        // Act
         let op = WriteOp::delete(b"key".to_vec());
+        
+        // Assert
         assert_eq!(op.kind, OpKind::Delete);
         assert_eq!(op.key, b"key");
         assert_eq!(op.value, None);
@@ -337,7 +353,11 @@ mod tests {
 
     #[test]
     fn should_build_delete_range_operation() {
+        // Arrange
+        // Act
         let op = WriteOp::delete_range(b"start".to_vec(), b"end".to_vec());
+        
+        // Assert
         assert_eq!(op.kind, OpKind::DeleteRange);
         assert_eq!(op.key, b"start");
         assert_eq!(op.range_end, Some(b"end".to_vec()));
@@ -346,7 +366,11 @@ mod tests {
 
     #[test]
     fn should_build_merge_operation() {
+        // Arrange
+        // Act
         let op = WriteOp::merge(b"key".to_vec(), b"value".to_vec());
+        
+        // Assert
         assert_eq!(op.kind, OpKind::Merge);
         assert_eq!(op.value, Some(b"value".to_vec()));
     }
