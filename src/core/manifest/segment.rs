@@ -195,7 +195,7 @@ impl SegmentSequencer {
 
     /// Allocate next segment ID for the given column family
     pub fn next_id(&self, cf_id: u32) -> SegmentId {
-        let mut map = self.next_ids.lock().unwrap();
+        let mut map = self.next_ids.lock().expect("SegmentSequencer mutex poisoned");
         let counter = map
             .entry(cf_id)
             .or_insert_with(|| AtomicU64::new(1));
@@ -205,7 +205,7 @@ impl SegmentSequencer {
 
     /// Set next segment ID to at least the given value (for recovery)
     pub fn set_min_id(&self, cf_id: u32, min_id: SegmentId) {
-        let mut map = self.next_ids.lock().unwrap();
+        let mut map = self.next_ids.lock().expect("SegmentSequencer mutex poisoned");
         let counter = map
             .entry(cf_id)
             .or_insert_with(|| AtomicU64::new(min_id));
