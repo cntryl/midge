@@ -1,123 +1,253 @@
-# Midge Next-Gen Roadmap
+# Midge Next-Gen Roadmap – Copilot-Led Development Guide
 
-This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It translates the phased blueprint into a clear roadmap and a prioritized TODO list so the team can make progress incrementally while minimizing risk.
+This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It translates the phased blueprint into an actionable roadmap optimized for AI-assisted development.
 
-High-level goals
+## High-Level Goals
+
 - Centralize engine background work under `EngineRuntime` and enable deterministic compaction.
 - Ship innovations behind conservative feature flags and avoid breaking public API.
 - Maintain compatibility: old readers read new files; old engines read new data when possible.
 
-Milestones & Timeline (high-level estimate)
-- Phase 0 – Baseline & Guardrails: 1–2 days (complete)
-- Phase 1 – Engine Runtime: 1–2 weeks
-- Phase 2 – Deterministic Compaction: 2–4 weeks
-- Phase 3 – Trie Index SST Format: 2–3 weeks
-- Phase 4 – Unified Write Path: 3–6 weeks
-- Phase 5 – Segment SSTs (Optional): 2–4 weeks
+## Milestones & Timeline
 
-Developer workflows
-- All new paths appear behind `EngineFlags` and default to `false`.
-- Implement in small, testable steps: add types → add runtime plumbing → add tests → update docs/benchmarks.
-- Use feature-gates in master on green tests, then run a targeted bench suite to capture the impact.
+| Phase | Name | Effort | Status |
+|-------|------|--------|--------|
+| Phase 0 | Baseline & Guardrails | 1–2 days | ✅ Complete |
+| Phase 1 | Engine Runtime | 1–2 weeks | ⏳ In Progress |
+| Phase 2 | Deterministic Compaction | 2–4 weeks | 📋 Ready to Start |
+| Phase 3 | Trie Index SST Format | 2–3 weeks | 📋 Blocked on Phase 2 |
+| Phase 4 | Unified Write Path | 3–6 weeks | 📋 Blocked on Phase 2 |
+| Phase 5 | Segment SSTs (Optional) | 2–4 weeks | 📋 Blocked on Phase 4 |
 
-Phase-based TODOs
+## Core Development Principles
 
-Phase 0: (Done)
-- Implement `EngineFlags` (in `MidgeOptions`) and wire through `MidgeEngine`.
-- Add `MIDGE_TRACE_RUNTIME` toggle for instrumentation.
-- Validate via `cargo test` and `cargo run --bin validate_tests -- --summary`.
-
-Phase 1: Engine Runtime (current work)
-- Define `RuntimeTask`, `RuntimeTaskKind`, and `EngineRuntime` API (`submit`, `submit_and_wait`, optional trace logging).
-- Ensure `MidgeEngine` owns `Arc<EngineRuntime>`.
-- Route flush trigger through runtime `RuntimeTask` when `single_executor_runtime` is enabled.
-- Route compaction triggers through runtime `RuntimeTask` (manual and scheduled compaction).
-- Add `MIDGE_TRACE_RUNTIME` support to log queueing and execution decisions.
-- Add test hooks for task injection and gating.
-
-Phase 1 – Validation checklist
-- [ ] `cargo test` with `single_executor_runtime = true`.
-- [ ] Integration tests exercising flush/compaction behave identically when the flag is on/off.
-- [ ] Bench micro-traces showing scheduling events when runtime tracing is enabled.
-
-Phase 2: Deterministic Compaction
-- Build `CompactionPlan`, `CompactionTask`, `CompactionLog` types.
-- Implement a pure `planner(manifest)` that yields deterministic plans.
-- Add runtime task to accept `CompactionTask`s, write a log entry, and execute tasks.
-- Add manifest transition function for compaction results.
-- Add replay tests and validation that compaction logs re-play and reproduce the same plan.
-
-Phase 2 – Validation checklist
-- [ ] Planner determinism unit tests.
-- [ ] Compaction log replay tests.
-- [ ] Durability: `deterministic_compaction = true` passes durability/recovery tests.
-
-Phase 3: Trie SST Index
-- Add writer support for optional trie index block, controlled by `new_sst_index`.
-- Extend `SstReader` to detect the trie block and use it when present.
-- Add fans-out test coverage and micro benchmarks for prefix-heavy reads.
-
-Phase 4: Unified Write Path
-- Introduce `WritePathCoordinator` with a single `.apply_write()` API.
-- Refactor WAL + memtable + cache signaling to use the coordinator.
-- Wire `WritePathCoordinator` to runtime tasks for flush/compaction triggers.
-
-Phase 5: Mutable SST Segments
-- Design `segment SST` and track segments in manifest separately.
-- Add runtime logic to seal segments and promote them to normal SSTs.
-- Add read path that checks memtable → segments → sealed SSTs.
-
-Cross-cutting tasks
-- Add observability: metrics and runtime trace logs (queue depth, latencies).
-- Add gating and test-hooks for deterministic test cases (pause at gates and resume).
-- Ensure graceful error handling and safe-mode when background tasks fail.
-- Add docs to `docs/` and link to `NEXT_GEN.md` and `ACTOR_MODEL.md`.
-
-Suggested immediate actions
-- Formalize `RuntimeTask` types and `EngineRuntime` queue with a small PoC (done).
-- Route a single path (flush) through runtime and add trace logs to validate behavior. This gives confidence for broader refactor work.
-- Run unit / integration tests with `single_executor_runtime = true` and collect execution traces.
-
-Contributing guide
-- For each PR, include:
-  - The flag(s) you added or modified.
-  - Tests demonstrating both legacy and new behavior.
-  - A brief benchmark or performance sample if the change affects the write or read path.
-
-Contact / ownership
-- Core engine team: overall
-- Compaction & manifest: det. compaction owner
-- SST format & index: sst/format owner
+- **Flag-First**: All new paths appear behind `EngineFlags` and default to `false`.
+- **Small Steps**: Add types → add runtime plumbing → add tests → update docs/benchmarks.
+- **Test-Driven**: Each change has a minimal unit test and an integration test with the flag on/off.
+- **Observable**: Use `MIDGE_TRACE_RUNTIME` or metrics to validate behavior.
 
 ---
 
-This `ROADMAP.md` aims to transform the plan into a tactical checklist and to give the team a practical sequence of deliverables. We can refine further per subcomponent and add issue tracker links once work begins. 
+## Phase 1: Engine Runtime
+
+**Status**: ⏳ In Progress  
+**Goal**: Route flush and compaction operations through `EngineRuntime` executor when `single_executor_runtime` flag is enabled.
+
+### Task 1.1: Define RuntimeTask Types
+**Status**: ✅ Complete  
+**Files**: `src/core/runtime.rs` (new)
+
+### Task 1.2: Implement EngineRuntime Executor
+**Status**: ✅ Complete  
+**Files**: `src/core/runtime.rs`
+
+### Task 1.3: Wire EngineRuntime into MidgeEngine
+**Status**: ✅ Complete  
+**Files**: `src/core/engine/core.rs`, `src/core/engine/state.rs`, `src/core/engine/factory.rs`
+
+### Task 1.4: Route Flush Through Runtime
+**Status**: ✅ Complete  
+**Files**: `src/core/engine/flush_manager.rs`
+
+### Task 1.5: Route Compaction Through Runtime
+**Status**: ✅ Complete  
+**Files**: `src/core/engine/operations/maintenance.rs`
+
+### Task 1.6: Add Runtime Tracing Support
+**Status**: ✅ Complete  
+**Files**: `src/core/runtime.rs`
+
+### Phase 1 Validation Checklist
+
+**Unit Tests**:
+- [ ] `tests/runtime.rs`: Task creation, executor loop single-threaded execution, trace logging
+- [ ] `tests/runtime.rs`: `submit()` and `submit_and_wait()` APIs, completion notification
+
+**Integration Tests** (run with and without flag):
+- [ ] `tests/engine_runtime.rs`: Flush path with flag enabled matches flush path with flag disabled
+- [ ] `tests/engine_runtime.rs`: Manual compaction with flag enabled matches flag disabled
+- [ ] `tests/engine_runtime.rs`: Concurrent flush + compaction work correctly with runtime
+- [ ] `tests/engine_runtime.rs`: Graceful shutdown: pending tasks drain before executor thread exits
+
+**Bench Verification**:
+- [ ] Run `cargo bench --bench tier3_system` with `MIDGE_TRACE_RUNTIME=1` and verify trace logs are produced
+- [ ] Capture baseline latency/throughput for flush and compaction (p50/p99)
+- [ ] Verify no regressions vs. flag disabled
+
+**Trace Log Verification**:
+```bash
+MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
+```
 
 ---
 
-Short-term sprint (1–2 weeks) — Focused next steps
-- Finalize and land `EngineRuntime` PoC that offers `submit`/`submit_and_wait`.
-- Route a single path (flush) through runtime behind `single_executor_runtime` and add a simple trace when tasks are submitted and executed.
-- Add gating hooks to tests for deterministic flows (pause/resume compaction and flush paths in unit tests).
-- Add CI job to `validate_tests` that runs a subset of background-work tests with `single_executor_runtime = true` to guard regressions.
+## Phase 2: Deterministic Compaction
 
-Suggested PR breakdown (small, incremental commits)
-1) `runtime: add EngineRuntime task queue and executor` — Add task types, executor loop, and tracing environment variable handling. Keep API internal-only and feature-gated.
-2) `engine: change runtime ownership to Arc; return shared coordinators` — Change relevant types to `Arc` and update initialization paths.
-3) `flush: route through runtime task` — Replace direct flush coordinator call with runtime `RuntimeTask` enqueue when the flag is enabled; add unit and integration tests.
-4) `compaction: manual triggers through runtime` — Add compaction path and tests for `compact_level` and `compact_range` through runtime.
-5) `compaction: planner skeleton + compaction log` — Add pure `planner(manifest)` and simple compaction log append/replay tests.
-6) `sst: dual-index writer/read` — Add trie index writing and read-path detection behind flag and run compatibility tests.
-7) `write-path: introduce WritePathCoordinator` — Consolidate WAL+memtable+cache entrypoint and route signals through runtime.
+**Status**: 📋 Ready to Start  
+**Goal**: Make compaction outcomes deterministic and reproducible.
 
-Acceptance criteria & metrics (per PR)
-- Unit tests for the changed code are green.
-- Integration tests with the `single_executor_runtime` flag behave identically to legacy execution for correctness.
-- A targeted bench suite shows no regressions on baseline metrics (p50/p99 latency, throughput) or shows expected improvements where applicable.
-- Trace logs produced under `MIDGE_TRACE_RUNTIME=1` show ordered scheduling and task execution events (for both flush and compaction).
+### Task 2.1: Define CompactionPlan Types
+**Status**: 📋 Not Started  
+**Files**: `src/core/compaction/plan.rs` (new)  
+**Success Criteria**:
+- [ ] `CompactionPlan` struct with level, target_level, files_to_compact, output_files
+- [ ] `CompactionTask` struct with plan, task_id, created_at
+- [ ] `CompactionLog` struct with tasks, next_task_id
+- [ ] Serialization support (serde) for replaying logs from disk
 
-FAQ / Decisions
-- Q: Why keep the runtime single-threaded initially? A: Determinism and simpler debugging. We can add controlled lanes for parallelism later.
-- Q: What to do if we discover regressions? A: Revert or disable the flag, investigate with task traces, and add gating for the affected areas.
+### Task 2.2: Implement Deterministic Planner
+**Status**: 📋 Not Started  
+**Files**: `src/core/compaction/planner.rs` (new)  
+**Success Criteria**:
+- [ ] Pure function `planner(manifest: &Manifest) -> Vec<CompactionPlan>`
+- [ ] Plans sorted consistently (by level, then by file key ranges)
+- [ ] Same manifest input always produces same plan output
+- [ ] No randomness or hash-based ordering
 
-Next: create `docs/roadmap.md` based on this file and update any doc landing pages.
+### Task 2.3: Route Compaction Plans Through Runtime
+**Status**: 📋 Not Started  
+**Files**: `src/core/engine/operations/maintenance.rs` (extend), `src/core/runtime.rs` (extend)  
+**Success Criteria**:
+- [ ] Runtime accepts `RuntimeTaskKind::CompactionPlan` variant
+- [ ] Executor writes plan to compaction log before executing
+- [ ] Compaction log persisted to disk (WAL-style) for replay after crash
+- [ ] Integration with manifest transition to record completion
+
+### Task 2.4: Add Replay and Validation Tests
+**Status**: 📋 Not Started  
+**Files**: `tests/compaction_determinism.rs` (new)  
+**Success Criteria**:
+- [ ] Unit test: Same manifest always yields same plan
+- [ ] Integration test: Compaction log replay produces same manifest state
+- [ ] Durability test: Crash during compaction, replay log, verify consistency
+
+---
+
+## Phase 3: Trie Index SST Format
+
+**Status**: 📋 Blocked on Phase 2  
+**Goal**: Add optional trie-based index to SST files for faster prefix searches.
+
+### Task 3.1: Extend SST Writer
+**Status**: 📋 Not Started  
+**Files**: `src/sst/writer.rs`  
+**Success Criteria**:
+- [ ] Add optional `build_trie_index: bool` to writer config
+- [ ] When enabled, construct trie from all keys written and append to SST block
+- [ ] Trie block serialized and checksummed like other blocks
+
+### Task 3.2: Extend SST Reader
+**Status**: 📋 Not Started  
+**Files**: `src/sst/reader.rs`  
+**Success Criteria**:
+- [ ] Detect trie block presence in SST header
+- [ ] When present, load trie and use for prefix range queries
+- [ ] Fall back to linear scan if trie block absent (backward compatibility)
+
+### Task 3.3: Add Compatibility Tests
+**Status**: 📋 Not Started  
+**Files**: `tests/sst_trie_compat.rs` (new)  
+**Success Criteria**:
+- [ ] Old SST files (no trie) read correctly by new reader
+- [ ] New SST files (with trie) read correctly by old reader
+- [ ] Prefix query performance improvement measured
+
+---
+
+## Phase 4: Unified Write Path
+
+**Status**: 📋 Blocked on Phase 2  
+**Goal**: Consolidate WAL, memtable, and cache signaling behind a single coordinator.
+
+### Task 4.1: Define WritePathCoordinator
+**Status**: 📋 Not Started  
+**Files**: `src/core/write_path/coordinator.rs` (new)  
+**Success Criteria**:
+- [ ] Single public API: `apply_write(write_batch) -> MidgeResult<()>`
+- [ ] Internally orchestrates WAL append → memtable insert → cache update
+- [ ] All background signals routed through runtime
+
+### Task 4.2: Refactor Write Paths
+**Status**: 📋 Not Started  
+**Files**: `src/api/put.rs`, `src/api/delete.rs`, `src/api/merge.rs`  
+**Success Criteria**:
+- [ ] All write APIs use `WritePathCoordinator::apply_write()`
+- [ ] WAL, memtable, cache remain internal to coordinator
+- [ ] No breaking changes to public API
+
+---
+
+## Phase 5: Mutable SST Segments
+
+**Status**: 📋 Blocked on Phase 4  
+**Goal**: Allow SSTs to be mutable segments that are later sealed and promoted.
+
+### Task 5.1: Segment Design & Manifest Tracking
+**Status**: 📋 Not Started  
+**Files**: `src/core/manifest/segment.rs` (new)  
+**Success Criteria**:
+- [ ] Define `Segment` type with unique ID, mutable flag, size, key range
+- [ ] Extend manifest to track segments separately from sealed SSTs
+- [ ] Segment → SST promotion logic (seal, assign new layer)
+
+### Task 5.2: Read Path for Segments
+**Status**: 📋 Not Started  
+**Files**: `src/api/get.rs`, `src/api/scan.rs`  
+**Success Criteria**:
+- [ ] Check memtable → segments (in age order) → sealed SSTs
+- [ ] Segments treated as read-only after sealing
+- [ ] Performance: segment range query as fast as SST range query
+
+---
+
+## Cross-Cutting Tasks
+
+### Observability & Tracing
+- Add `tracing::info!` / `tracing::debug!` to key decision points
+- Use `MIDGE_TRACE_RUNTIME` to control verbosity
+- Capture latencies and queue depths in metrics where applicable
+
+### Test Coverage
+- Each feature has a minimal unit test (types, serialization, logic)
+- Integration test with flag on/off produces identical results
+- Durability/crash-recovery test for persistent features
+
+### Documentation Updates
+- Update `NEXT_GEN.md` as phases complete with code examples
+- Add notes to this roadmap as progress is made
+
+---
+
+## Development Workflow
+
+1. **Before starting a phase**: Review the Phase section for task breakdown and success criteria.
+2. **During implementation**: Iterate locally, run `cargo test` after each task, verify `cargo clippy`.
+3. **After implementation**: Run full suite with feature flag enabled and disabled.
+4. **Update this roadmap**: Add notes about decisions, blockers, and design changes.
+
+## Troubleshooting
+
+**Q: How do I know if a task is "done"?**  
+A: All items in the Success Criteria checklist are checked off, and integration tests pass both with flag enabled and disabled.
+
+**Q: What if I find a blocker or design issue?**  
+A: Document it in this roadmap under the relevant Phase section. Do not work around it; discuss with team and update task breakdown.
+
+**Q: Should I create a new file or extend an existing one?**  
+A: The task breakdown specifies "new" or "extend". If unclear, prefer new files for new concerns.
+
+**Q: What if tests fail with the flag enabled but pass with flag disabled?**  
+A: This indicates a routing or state management bug. Add tracing logs (`MIDGE_TRACE_RUNTIME=1`) and compare execution traces to identify the divergence.
+
+**Q: How should I handle performance regressions?**  
+A: Verify the regression is real (re-run bench to exclude noise). Profile with tracing enabled to identify bottleneck. Document findings and plan mitigation.
+
+---
+
+## Notes
+
+This roadmap is a living document. As we implement each phase, we'll update it with:
+- Actual implementation decisions and trade-offs
+- Lessons learned and design pivots
+- Refined task estimates based on real progress
+- Performance baseline results and regressions observed
