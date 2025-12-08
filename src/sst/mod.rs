@@ -36,6 +36,7 @@ pub mod table_cache;
 pub mod tombstone_index;
 pub mod traits;
 pub mod trie_index;
+pub mod trie_index_integration;
 pub mod writer_common;
 
 // ─── Block cache re-exports (temporary shims for existing code) ──────────────
