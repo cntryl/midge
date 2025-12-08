@@ -217,14 +217,14 @@ The end state is a **single-coordinated, deterministic, actor-driven engine** wh
 
 ## Phase 7: Hybrid Storage + Cloud Integration
 
-**Status**: 🟡 In Progress  
-**Progress**: CloudCoordinator infrastructure integrated, runtime-coordinated cloud operations ready  
+**Status**: 🟡 In Progress (Phase 7.1 Complete, 7.2-7.3 Next)  
+**Progress**: CloudCoordinator infrastructure integrated and documented, runtime-coordinated cloud operations ready  
 **Goal**: Fully integrate cloud storage as the primary durable layer with local NVMe as ephemeral cache.
 
 ### Task 7.1: Cloud Storage Coordination Foundation
-**Status**: 🟡 In Progress  
-**Completed**: CloudCoordinator created and integrated into MidgeEngine  
-**Files**: `src/core/cloud_coordinator.rs` (NEW), `src/core/engine/core.rs`, `src/core/engine/state.rs`  
+**Status**: ✅ Complete  
+**Completed**: CloudCoordinator created, integrated, and documented  
+**Files**: `src/core/cloud_coordinator.rs` (NEW), `src/core/engine/core.rs`, `src/core/engine/state.rs`, `docs/ARCHITECTURE.md`  
 **Implementation Summary**:
 - Created CloudCoordinator module for runtime-coordinated cloud operations
 - Integrated with MidgeEngine - cloud_coordinator initialized at startup
@@ -243,6 +243,16 @@ The end state is a **single-coordinated, deterministic, actor-driven engine** wh
 - Supports SST upload/download and cache eviction coordination
 - Task submission routes through EngineRuntime for deterministic ordering
 - Design maintains separation between coordination and cloud backend logic
+
+**Documentation**:
+- `docs/ARCHITECTURE.md`: Comprehensive actor model and determinism documentation
+  - Write/Read path architecture and flow diagrams
+  - Component ownership model (what MidgeEngine owns vs EngineRuntime)
+  - Concurrency model and thread safety guarantees
+  - Determinism guarantees and what varies between runs
+  - Error handling and shutdown sequences
+  - Performance characteristics by operation
+  - Alignment with NEXT_GEN.md specification
 
 **Testing**: 5 cloud coordinator tests, 2329 total tests at 100% compliance
 
