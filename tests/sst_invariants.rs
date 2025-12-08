@@ -3,7 +3,6 @@
 /// This test suite codifies and validates the invariants specified in INDEX_SPEC.md.
 /// These tests form the locked contract: all future SST enhancements must preserve
 /// these properties or explicitly update the format version.
-
 #[cfg(test)]
 mod sst_invariants {
     use bytes::Bytes;
@@ -158,7 +157,7 @@ mod sst_invariants {
     #[test]
     fn should_maintain_fence_pointer_invariants() {
         // Arrange: Create metas that respect fence pointer constraints
-        let metas = vec![
+        let metas = [
             BlockMeta::new(
                 Bytes::from("apple"),
                 Bytes::from("apricot"),

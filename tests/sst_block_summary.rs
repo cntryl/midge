@@ -36,8 +36,8 @@ fn should_persist_block_summary_in_meta_index() {
     // Assert: each block has non-empty min_key and min_key <= max_key
     assert!(!metas.is_empty());
     for m in metas {
-        assert!(m.min_key.len() > 0, "min_key must be non-empty");
-        assert!(m.max_key.len() > 0, "max_key must be non-empty");
+        assert!(!m.min_key.is_empty(), "min_key must be non-empty");
+        assert!(!m.max_key.is_empty(), "max_key must be non-empty");
         assert!(
             m.min_key.as_ref() <= m.max_key.as_ref(),
             "min_key <= max_key"

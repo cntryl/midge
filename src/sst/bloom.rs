@@ -1048,10 +1048,10 @@ mod tests {
     fn should_use_blocked_layout_for_large_filter() {
         // Arrange
         let mut f = BloomFilter::new(10_000, 0.01);
-        
+
         // Act
         let bit_count = f.bit_count();
-        
+
         // Assert
         assert!(bit_count >= BLOCK_BITS as usize);
         assert_eq!(bit_count % BLOCK_BITS as usize, 0);

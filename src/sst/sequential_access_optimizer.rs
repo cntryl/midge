@@ -307,17 +307,17 @@ mod tests {
             cache_ratio, predictor_ratio, efficiency
         );
         assert!(
-            cache_ratio >= 0.0 && cache_ratio <= 1.0,
+            (0.0..=1.0).contains(&cache_ratio),
             "cache_ratio {} out of bounds",
             cache_ratio
         );
         assert!(
-            predictor_ratio >= 0.0 && predictor_ratio <= 1.0,
+            (0.0..=1.0).contains(&predictor_ratio),
             "predictor_ratio {} out of bounds",
             predictor_ratio
         );
         assert!(
-            efficiency >= 0.0 && efficiency <= 1.0,
+            (0.0..=1.0).contains(&efficiency),
             "efficiency {} out of bounds",
             efficiency
         );

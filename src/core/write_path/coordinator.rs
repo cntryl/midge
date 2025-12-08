@@ -14,11 +14,11 @@
 //! - Clear error handling for all write paths
 
 use crate::api::column_family::ColumnFamilyHandle;
+use crate::common::timestamp;
 use crate::core::engine::MidgeEngine;
 use crate::error::{MidgeError, MidgeResult};
-use std::sync::atomic::Ordering;
 use bytes::Bytes;
-use crate::common::timestamp;
+use std::sync::atomic::Ordering;
 
 /// Unified write path coordinator.
 ///
@@ -307,7 +307,7 @@ mod tests {
         // Arrange
         let put = OpKind::Put;
         let delete = OpKind::Delete;
-        
+
         // Act
         // Assert
         assert_ne!(put, delete);
@@ -318,7 +318,7 @@ mod tests {
         // Arrange
         // Act
         let op = WriteOp::put(b"key".to_vec(), b"value".to_vec());
-        
+
         // Assert
         assert_eq!(op.kind, OpKind::Put);
         assert_eq!(op.key, b"key");
@@ -332,7 +332,7 @@ mod tests {
         // Arrange
         // Act
         let op = WriteOp::put_with_ttl(b"key".to_vec(), b"value".to_vec(), 3600);
-        
+
         // Assert
         assert_eq!(op.kind, OpKind::Put);
         assert_eq!(op.ttl_seconds, 3600);
@@ -343,7 +343,7 @@ mod tests {
         // Arrange
         // Act
         let op = WriteOp::delete(b"key".to_vec());
-        
+
         // Assert
         assert_eq!(op.kind, OpKind::Delete);
         assert_eq!(op.key, b"key");
@@ -356,7 +356,7 @@ mod tests {
         // Arrange
         // Act
         let op = WriteOp::delete_range(b"start".to_vec(), b"end".to_vec());
-        
+
         // Assert
         assert_eq!(op.kind, OpKind::DeleteRange);
         assert_eq!(op.key, b"start");
@@ -369,7 +369,7 @@ mod tests {
         // Arrange
         // Act
         let op = WriteOp::merge(b"key".to_vec(), b"value".to_vec());
-        
+
         // Assert
         assert_eq!(op.kind, OpKind::Merge);
         assert_eq!(op.value, Some(b"value".to_vec()));

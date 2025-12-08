@@ -12,7 +12,7 @@ mod tests {
     #[test]
     fn should_create_optimizer_with_clean_state() {
         // Arrange
-        
+
         // Act
         let opt = SequentialAccessOptimizer::new();
 
@@ -86,7 +86,7 @@ mod tests {
 
         // Assert
         let cache_ratio = opt.cache_hit_ratio();
-        assert!(cache_ratio >= 0.0 && cache_ratio <= 1.0);
+        assert!((0.0..=1.0).contains(&cache_ratio));
     }
 
     #[test]
@@ -113,7 +113,7 @@ mod tests {
         // Assert - predictor should work on sequential parts
         assert!(opt.predictor_hit_ratio() > 0.0);
         let efficiency = opt.efficiency_ratio();
-        assert!(efficiency >= 0.0 && efficiency <= 1.0);
+        assert!((0.0..=1.0).contains(&efficiency));
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
         let efficiency = opt.efficiency_ratio();
 
         // Assert
-        assert!(efficiency >= 0.0 && efficiency <= 1.0);
+        assert!((0.0..=1.0).contains(&efficiency));
         // Efficiency should be max of cache and predictor ratios
         let cache_ratio = opt.cache_hit_ratio();
         let pred_ratio = opt.predictor_hit_ratio();

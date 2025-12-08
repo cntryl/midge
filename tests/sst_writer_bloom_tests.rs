@@ -135,7 +135,7 @@ fn should_write_per_block_blooms_to_sst_file() {
         .expect("Failed to finish writing SST");
 
     // Assert
-    assert!(sst_bytes.len() > 0);
+    assert!(!sst_bytes.is_empty());
     println!("Finished writing SST with {} bytes", sst_bytes.len());
 
     // Cleanup

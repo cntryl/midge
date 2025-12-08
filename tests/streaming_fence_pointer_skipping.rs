@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn should_skip_all_blocks_for_range_before_all_blocks() {
         // Arrange: Blocks [100, 200], [200, 300], [300, 400]
-        let blocks = vec![
+        let blocks = [
             BlockMeta::new(
                 Bytes::from("100"),
                 Bytes::from("200"),
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn should_skip_all_blocks_for_range_after_all_blocks() {
         // Arrange: Blocks [100, 200], [200, 300], [300, 400]
-        let blocks = vec![
+        let blocks = [
             BlockMeta::new(
                 Bytes::from("100"),
                 Bytes::from("200"),
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn should_not_lose_keys_at_range_boundaries() {
         // Arrange: Create blocks with carefully chosen boundary keys
-        let blocks = vec![
+        let blocks = [
             BlockMeta::new(
                 Bytes::from("apple"),
                 Bytes::from("apricot"),
@@ -391,10 +391,10 @@ mod tests {
                 .iter()
                 .filter(|b| b.range_intersects(start.as_bytes(), end.as_bytes()))
                 .collect();
-            
+
             // Assert
             assert!(
-                intersecting.len() > 0,
+                !intersecting.is_empty(),
                 "Query [{}, {}) should find blocks",
                 start,
                 end

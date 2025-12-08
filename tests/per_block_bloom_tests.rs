@@ -2,7 +2,6 @@
 ///
 /// These tests define the contract for Phase 1: Per-Block Bloom Filters.
 /// Implementation follows after all tests are passing.
-
 #[cfg(test)]
 mod per_block_bloom_tests {
     use bytes::Bytes;

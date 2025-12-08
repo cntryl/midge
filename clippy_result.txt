@@ -1,0 +1,10 @@
+﻿cargo : warning: error finalizing incremental compilation session directory `\\?\D:\repos\cntryl\midge\target\debug\incremental\cntryl_midge-065k7h4jw1flc\s-hdpxt2lz4i-06qkwme-working`: Access is denied. (os error 5)
+At line:1 char:1
++ cargo clippy --all-targets 2>&1 > clippy_result.txt; Get-Content clip ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: error ...d. (os error 5):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+warning: `cntryl-midge` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s

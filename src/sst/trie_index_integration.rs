@@ -6,7 +6,7 @@
 
 use crate::error::MidgeResult;
 use crate::sst::meta_index;
-use crate::sst::trie_index::{TrieIndexBuilder, TrieIndex};
+use crate::sst::trie_index::{TrieIndex, TrieIndexBuilder};
 use bytes::Bytes;
 
 /// Constant key for trie index in meta_index
@@ -42,7 +42,7 @@ impl OptionalTrieIndexWriter {
         self.builder
             .as_ref()
             .map(|b| b.finish())
-            .unwrap_or_else(Bytes::new)
+            .unwrap_or_default()
     }
 
     /// Check if trie index was built
@@ -60,7 +60,12 @@ pub struct OptionalTrieIndexReader {
 impl OptionalTrieIndexReader {
     /// Create from meta_index data (returns Ok with None if trie not found)
     pub fn from_meta_index(meta_index_data: &[u8]) -> MidgeResult<Self> {
-        match meta_index::linear_search_meta_index(meta_index_data, 0, meta_index_data.len(), TRIE_INDEX_KEY) {
+        match meta_index::linear_search_meta_index(
+            meta_index_data,
+            0,
+            meta_index_data.len(),
+            TRIE_INDEX_KEY,
+        ) {
             Ok(Some(_handle)) => {
                 // Found trie index block handle, but we'd need the actual block data to decode it
                 // This is a placeholder - in real implementation, would read block from SST
@@ -153,9 +158,7 @@ mod tests {
     fn should_create_optional_reader() {
         // Arrange
         // Act
-        let reader = OptionalTrieIndexReader {
-            index: None,
-        };
+        let reader = OptionalTrieIndexReader { index: None };
 
         // Assert
         assert!(!reader.is_available());
@@ -164,9 +167,7 @@ mod tests {
     #[test]
     fn should_find_no_blocks_when_unavailable() {
         // Arrange
-        let reader = OptionalTrieIndexReader {
-            index: None,
-        };
+        let reader = OptionalTrieIndexReader { index: None };
 
         // Act
         let blocks = reader.find_candidate_blocks(b"any_key");

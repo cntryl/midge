@@ -11,12 +11,12 @@
 //! - Plans are ordered consistently (by level, then by key range)
 //! - No randomness or hash-based ordering
 
-use serde::{Deserialize, Serialize, Serializer, Deserializer};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::manifest::Manifest;
-use crate::manifest::FileMeta;
 use crate::error::MidgeResult;
+use crate::manifest::FileMeta;
 
 use super::CompactionPlan;
 
@@ -28,7 +28,9 @@ fn serialize_system_time<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S
 where
     S: Serializer,
 {
-    let duration = time.duration_since(UNIX_EPOCH).map_err(serde::ser::Error::custom)?;
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(serde::ser::Error::custom)?;
     serializer.serialize_u64(duration.as_secs())
 }
 
@@ -58,7 +60,10 @@ pub struct CompactionTask {
     /// Output file names (populated after execution)
     pub output_files: Vec<String>,
     /// When this task was created
-    #[serde(serialize_with = "serialize_system_time", deserialize_with = "deserialize_system_time")]
+    #[serde(
+        serialize_with = "serialize_system_time",
+        deserialize_with = "deserialize_system_time"
+    )]
     pub created_at: SystemTime,
 }
 
@@ -77,14 +82,19 @@ impl CompactionTask {
 
     /// Serialize for durable log storage
     pub fn to_bytes(&self) -> MidgeResult<Vec<u8>> {
-        serde_json::to_vec(self)
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to serialize CompactionTask: {}", e)))
+        serde_json::to_vec(self).map_err(|e| {
+            crate::error::MidgeError::internal(format!("Failed to serialize CompactionTask: {}", e))
+        })
     }
 
     /// Deserialize from durable log storage
     pub fn from_bytes(bytes: &[u8]) -> MidgeResult<Self> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to deserialize CompactionTask: {}", e)))
+        serde_json::from_slice(bytes).map_err(|e| {
+            crate::error::MidgeError::internal(format!(
+                "Failed to deserialize CompactionTask: {}",
+                e
+            ))
+        })
     }
 }
 
@@ -123,14 +133,19 @@ impl CompactionLog {
 
     /// Serialize for durable storage
     pub fn to_bytes(&self) -> MidgeResult<Vec<u8>> {
-        serde_json::to_vec(self)
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to serialize CompactionLog: {}", e)))
+        serde_json::to_vec(self).map_err(|e| {
+            crate::error::MidgeError::internal(format!("Failed to serialize CompactionLog: {}", e))
+        })
     }
 
     /// Deserialize from durable storage
     pub fn from_bytes(bytes: &[u8]) -> MidgeResult<Self> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to deserialize CompactionLog: {}", e)))
+        serde_json::from_slice(bytes).map_err(|e| {
+            crate::error::MidgeError::internal(format!(
+                "Failed to deserialize CompactionLog: {}",
+                e
+            ))
+        })
     }
 }
 
@@ -182,7 +197,7 @@ impl Planner {
             std::collections::HashMap::new();
 
         for file in &manifest.files {
-            files_by_cf.entry(file.cf_id).or_insert_with(Vec::new).push(file);
+            files_by_cf.entry(file.cf_id).or_default().push(file);
         }
 
         // Sort CFs by ID for deterministic ordering
@@ -221,10 +236,7 @@ impl Planner {
 
         // Check Ln levels (L1 through L_max-1)
         for level in 1..self.max_levels - 1 {
-            let level_size: u64 = levels[level]
-                .iter()
-                .map(|f| f.size_bytes)
-                .sum();
+            let level_size: u64 = levels[level].iter().map(|f| f.size_bytes).sum();
             let target_size = self.compute_level_target(level);
 
             if level_size > target_size {
@@ -247,21 +259,17 @@ impl Planner {
     fn create_l0_compaction_plan(&self, cf_id: u32, l0_files: &[&FileMeta]) -> CompactionPlan {
         // Sort L0 files deterministically: by sublevel (oldest first), then by smallest_key, then by sst_seq
         let mut sorted_files: Vec<&FileMeta> = l0_files.to_vec();
-        sorted_files.sort_by(|a, b| {
-            match a.sublevel.cmp(&b.sublevel) {
-                std::cmp::Ordering::Equal => {
-                    match (&a.smallest_key, &b.smallest_key) {
-                        (Some(ak), Some(bk)) => match ak.cmp(bk) {
-                            std::cmp::Ordering::Equal => a.sst_seq.cmp(&b.sst_seq),
-                            other => other,
-                        },
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => a.sst_seq.cmp(&b.sst_seq),
-                    }
-                }
-                other => other,
-            }
+        sorted_files.sort_by(|a, b| match a.sublevel.cmp(&b.sublevel) {
+            std::cmp::Ordering::Equal => match (&a.smallest_key, &b.smallest_key) {
+                (Some(ak), Some(bk)) => match ak.cmp(bk) {
+                    std::cmp::Ordering::Equal => a.sst_seq.cmp(&b.sst_seq),
+                    other => other,
+                },
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.sst_seq.cmp(&b.sst_seq),
+            },
+            other => other,
         });
 
         CompactionPlan {
@@ -282,16 +290,14 @@ impl Planner {
     ) -> CompactionPlan {
         // For level > 0, files don't overlap, so just sort by smallest_key then sst_seq
         let mut sorted_files: Vec<&FileMeta> = levels[level].to_vec();
-        sorted_files.sort_by(|a, b| {
-            match (&a.smallest_key, &b.smallest_key) {
-                (Some(ak), Some(bk)) => match ak.cmp(bk) {
-                    std::cmp::Ordering::Equal => a.sst_seq.cmp(&b.sst_seq),
-                    other => other,
-                },
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => a.sst_seq.cmp(&b.sst_seq),
-            }
+        sorted_files.sort_by(|a, b| match (&a.smallest_key, &b.smallest_key) {
+            (Some(ak), Some(bk)) => match ak.cmp(bk) {
+                std::cmp::Ordering::Equal => a.sst_seq.cmp(&b.sst_seq),
+                other => other,
+            },
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.sst_seq.cmp(&b.sst_seq),
         });
 
         CompactionPlan {
@@ -313,10 +319,10 @@ mod tests {
         // Arrange
         let planner = Planner::new();
         let manifest = Manifest::default();
-        
+
         // Act
         let plans = planner.plan(&manifest);
-        
+
         // Assert
         assert!(plans.is_empty());
     }
@@ -378,9 +384,12 @@ mod tests {
 
         // Act
         let plans = planner.plan(&manifest);
-        
+
         // Assert
-        assert!(plans.is_empty(), "Should not plan compaction when L0 is below threshold");
+        assert!(
+            plans.is_empty(),
+            "Should not plan compaction when L0 is below threshold"
+        );
     }
 
     #[test]
@@ -404,9 +413,12 @@ mod tests {
 
         // Act
         let plans = planner.plan(&manifest);
-        
+
         // Assert
-        assert!(!plans.is_empty(), "Should plan L0 compaction when size exceeds threshold");
+        assert!(
+            !plans.is_empty(),
+            "Should plan L0 compaction when size exceeds threshold"
+        );
         assert_eq!(plans[0].source_level, 0);
         assert_eq!(plans[0].target_level, 1);
     }
@@ -439,7 +451,7 @@ mod tests {
 
         // Act
         let plans = planner.plan(&manifest);
-        
+
         // Assert
         assert!(!plans.is_empty());
         assert_eq!(plans[0].input_files[0], "sst_low_level.blob");
@@ -472,7 +484,7 @@ mod tests {
 
         // Act
         let plans = planner.plan(&manifest);
-        
+
         // Assert
         assert_eq!(plans[0].cf_id, 0);
         assert_eq!(plans[1].cf_id, 1);

@@ -3,12 +3,12 @@
 //! This module bridges the deterministic planner with the runtime executor,
 //! ensuring compaction decisions are logged durably and replayed after crashes.
 
-use crate::core::compaction::{CompactionTask, CompactionLogManager, Planner};
+use crate::core::compaction::{CompactionLogManager, CompactionTask, Planner};
 use crate::core::manifest::Manifest;
 use crate::core::runtime::{EngineRuntime, RuntimeTaskKind};
 use crate::error::MidgeResult;
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Coordinates compaction planning and execution through the runtime
 pub struct PlannerController {
@@ -20,11 +20,7 @@ pub struct PlannerController {
 
 impl PlannerController {
     /// Create a new planner controller
-    pub fn new(
-        engine_dir: &Path,
-        planner: Planner,
-        runtime: Arc<EngineRuntime>,
-    ) -> Self {
+    pub fn new(engine_dir: &Path, planner: Planner, runtime: Arc<EngineRuntime>) -> Self {
         let log_manager = CompactionLogManager::new(engine_dir);
         Self {
             planner,
@@ -40,7 +36,10 @@ impl PlannerController {
         if !tasks.is_empty() {
             let max_id = tasks.iter().map(|t| t.task_id).max().unwrap_or(0);
             self.next_task_id = max_id + 1;
-            tracing::info!("Recovered {} pending compaction tasks from log", tasks.len());
+            tracing::info!(
+                "Recovered {} pending compaction tasks from log",
+                tasks.len()
+            );
         }
         Ok(tasks)
     }
@@ -49,7 +48,7 @@ impl PlannerController {
     pub fn submit_compaction_plans(&mut self, manifest: &Manifest) -> MidgeResult<()> {
         // Use pure planner to generate deterministic plans
         let plans = self.planner.plan(manifest);
-        
+
         for plan in plans {
             let task = CompactionTask::new(self.next_task_id, &plan);
             self.next_task_id += 1;
@@ -120,11 +119,11 @@ mod tests {
             output_files: Vec::new(),
         };
         let task = CompactionTask::new(1, &plan);
-        
+
         // Act
         log_manager.append(&task).unwrap();
         let recovered = log_manager.load().unwrap();
-        
+
         // Assert
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].task_id, 1);

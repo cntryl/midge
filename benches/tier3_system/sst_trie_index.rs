@@ -1,7 +1,7 @@
 //! Tier-3 System Benchmarks: SST Trie Index Performance
 //!
 //! Benchmarks core SST operations for baseline measurement.
-//! Note: Detailed trie vs legacy index comparison requires integration 
+//! Note: Detailed trie vs legacy index comparison requires integration
 //! with SST writer/reader flags (phase 3.6).
 //!
 //! This benchmark focuses on:
@@ -22,14 +22,11 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    make_key, precompute_kv, BenchEngineConfig, setup_engine,
-    BYTES_PER_OP, VALUE_SIZE,
+    make_key, precompute_kv, setup_engine, BenchEngineConfig, BYTES_PER_OP, VALUE_SIZE,
 };
 
 use cntryl_midge::Query;
-use criterion::{
-    criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput,
-};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 

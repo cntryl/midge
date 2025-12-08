@@ -3,8 +3,8 @@
 //! Handles reading/writing compaction logs to disk for crash recovery
 //! and deterministic replay of compaction decisions.
 
-use crate::error::MidgeResult;
 use crate::core::compaction::CompactionTask;
+use crate::error::MidgeResult;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -36,13 +36,14 @@ impl CompactionLogManager {
             return Ok(Vec::new());
         }
 
-        let file = File::open(&path)
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to open compaction log: {}", e)))?;
+        let file = File::open(&path).map_err(|e| {
+            crate::error::MidgeError::internal(format!("Failed to open compaction log: {}", e))
+        })?;
         let mut reader = BufReader::new(file);
         let mut contents = Vec::new();
-        reader
-            .read_to_end(&mut contents)
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to read compaction log: {}", e)))?;
+        reader.read_to_end(&mut contents).map_err(|e| {
+            crate::error::MidgeError::internal(format!("Failed to read compaction log: {}", e))
+        })?;
 
         if contents.is_empty() {
             return Ok(Vec::new());
@@ -64,11 +65,12 @@ impl CompactionLogManager {
     /// Append a compaction task to the log
     pub fn append(&self, task: &CompactionTask) -> MidgeResult<()> {
         let path = self.log_path();
-        
+
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| crate::error::MidgeError::internal(format!("Failed to create log directory: {}", e)))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                crate::error::MidgeError::internal(format!("Failed to create log directory: {}", e))
+            })?;
         }
 
         // Open file in append mode
@@ -76,18 +78,24 @@ impl CompactionLogManager {
             .create(true)
             .append(true)
             .open(&path)
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to open compaction log for append: {}", e)))?;
+            .map_err(|e| {
+                crate::error::MidgeError::internal(format!(
+                    "Failed to open compaction log for append: {}",
+                    e
+                ))
+            })?;
 
         let mut writer = BufWriter::new(file);
         let bytes = task.to_bytes()?;
-        writer
-            .write_all(&bytes)
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to write compaction log: {}", e)))?;
-        writer.write_all(b"\n")
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to write newline: {}", e)))?;
-        writer
-            .flush()
-            .map_err(|e| crate::error::MidgeError::internal(format!("Failed to flush compaction log: {}", e)))?;
+        writer.write_all(&bytes).map_err(|e| {
+            crate::error::MidgeError::internal(format!("Failed to write compaction log: {}", e))
+        })?;
+        writer.write_all(b"\n").map_err(|e| {
+            crate::error::MidgeError::internal(format!("Failed to write newline: {}", e))
+        })?;
+        writer.flush().map_err(|e| {
+            crate::error::MidgeError::internal(format!("Failed to flush compaction log: {}", e))
+        })?;
 
         Ok(())
     }
@@ -96,8 +104,9 @@ impl CompactionLogManager {
     pub fn clear(&self) -> MidgeResult<()> {
         let path = self.log_path();
         if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|e| crate::error::MidgeError::internal(format!("Failed to clear compaction log: {}", e)))?;
+            fs::remove_file(&path).map_err(|e| {
+                crate::error::MidgeError::internal(format!("Failed to clear compaction log: {}", e))
+            })?;
         }
         Ok(())
     }
@@ -113,10 +122,10 @@ mod tests {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
         let manager = CompactionLogManager::new(temp_dir.path());
-        
+
         // Act
         let tasks = manager.load().unwrap();
-        
+
         // Assert
         assert!(tasks.is_empty());
     }
@@ -141,7 +150,7 @@ mod tests {
         // Act
         manager.append(&task).unwrap();
         let recovered = manager.load().unwrap();
-        
+
         // Assert
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].task_id, task.task_id);
@@ -180,7 +189,7 @@ mod tests {
         manager.append(&task1).unwrap();
         manager.append(&task2).unwrap();
         let recovered = manager.load().unwrap();
-        
+
         // Assert
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0].task_id, 1);
@@ -210,7 +219,7 @@ mod tests {
 
         // Act
         manager.clear().unwrap();
-        
+
         // Assert
         assert!(!path.exists());
     }

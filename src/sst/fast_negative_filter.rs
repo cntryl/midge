@@ -194,7 +194,7 @@ mod tests {
         // Act
         let result1 = FastNegativeFilter::from_bytes(&[0u8; 16]);
         let result2 = FastNegativeFilter::from_bytes(&[0u8; 48]);
-        
+
         // Assert
         assert!(result1.is_err());
         assert!(result2.is_err());

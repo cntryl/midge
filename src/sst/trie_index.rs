@@ -11,8 +11,8 @@
 //! - Metadata about block boundaries and key ranges
 //! - CRC32C checksum for integrity verification
 
-use bytes::{Bytes, BytesMut, BufMut};
 use crate::error::{MidgeError, MidgeResult};
+use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::BTreeMap;
 
 /// Maximum prefix length stored in the trie index (optimization for cache locality)
@@ -47,7 +47,8 @@ impl TrieNode {
         }
 
         let next_byte = prefix[0];
-        let child = self.children
+        let child = self
+            .children
             .entry(next_byte)
             .or_insert_with(|| Box::new(TrieNode::new()));
         child.insert(&prefix[1..], block_offset);
@@ -88,8 +89,15 @@ impl TrieIndexBuilder {
             next_block_id: 0,
         }
     }
+}
 
-    /// Add a key range to the trie index
+impl Default for TrieIndexBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrieIndexBuilder {
     /// This is called for each data block with its min/max keys
     pub fn add_block(&mut self, min_key: &[u8], _max_key: &[u8]) {
         let block_offset = self.next_block_id;
@@ -111,11 +119,11 @@ impl TrieIndexBuilder {
     /// Finish building and encode the trie to bytes
     pub fn finish(&self) -> Bytes {
         let mut buf = BytesMut::new();
-        self.encode_node(&self.root, &mut buf);
+        Self::encode_node(&self.root, &mut buf);
         buf.freeze()
     }
 
-    fn encode_node(&self, node: &TrieNode, buf: &mut BytesMut) {
+    fn encode_node(node: &TrieNode, buf: &mut BytesMut) {
         // Write node header
         buf.put_u32_le(node.block_offsets.len() as u32);
         buf.put_u8(if node.is_terminal { 1 } else { 0 });
@@ -131,7 +139,7 @@ impl TrieIndexBuilder {
         // Write children
         for (&byte, child) in &node.children {
             buf.put_u8(byte);
-            self.encode_node(child, buf);
+            Self::encode_node(child, buf);
         }
     }
 }
@@ -150,12 +158,13 @@ impl TrieIndex {
 
     fn decode_node(data: &[u8], mut pos: usize) -> MidgeResult<(TrieNode, usize)> {
         if pos + 5 > data.len() {
-            return Err(MidgeError::InvalidData("Trie node header truncated".to_string()));
+            return Err(MidgeError::InvalidData(
+                "Trie node header truncated".to_string(),
+            ));
         }
 
-        let block_count = u32::from_le_bytes([
-            data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-        ]) as usize;
+        let block_count =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         let is_terminal = data[pos] != 0;
@@ -167,18 +176,21 @@ impl TrieIndex {
         // Read block offsets
         for _ in 0..block_count {
             if pos + 4 > data.len() {
-                return Err(MidgeError::InvalidData("Trie block offset truncated".to_string()));
+                return Err(MidgeError::InvalidData(
+                    "Trie block offset truncated".to_string(),
+                ));
             }
-            let offset = u32::from_le_bytes([
-                data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-            ]);
+            let offset =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
             node.block_offsets.push(offset);
             pos += 4;
         }
 
         // Read children
         if pos >= data.len() {
-            return Err(MidgeError::InvalidData("Trie children count missing".to_string()));
+            return Err(MidgeError::InvalidData(
+                "Trie children count missing".to_string(),
+            ));
         }
 
         let children_count = data[pos] as usize;
@@ -186,7 +198,9 @@ impl TrieIndex {
 
         for _ in 0..children_count {
             if pos >= data.len() {
-                return Err(MidgeError::InvalidData("Trie child byte missing".to_string()));
+                return Err(MidgeError::InvalidData(
+                    "Trie child byte missing".to_string(),
+                ));
             }
 
             let byte = data[pos];
@@ -238,7 +252,7 @@ mod tests {
 
         // Act
         let encoded = builder.finish();
-        
+
         // Assert
         assert!(!encoded.is_empty());
     }
@@ -254,7 +268,7 @@ mod tests {
 
         // Act
         let blocks = index.find_candidate_blocks(b"apple");
-        
+
         // Assert
         assert!(!blocks.is_empty());
     }
@@ -271,7 +285,7 @@ mod tests {
 
         // Act
         let blocks = index.find_blocks_in_range(b"apricot", b"cherry");
-        
+
         // Assert
         assert!(!blocks.is_empty());
     }
@@ -287,7 +301,7 @@ mod tests {
 
         // Act
         let decoded = TrieIndex::decode(&encoded);
-        
+
         // Assert
         assert!(decoded.is_ok());
     }
@@ -301,7 +315,7 @@ mod tests {
 
         // Act
         let blocks = index.find_candidate_blocks(b"any_key");
-        
+
         // Assert
         assert_eq!(blocks.len(), 0);
     }
