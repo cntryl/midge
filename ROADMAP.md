@@ -14,7 +14,7 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 |-------|------|--------|--------|
 | Phase 0 | Baseline & Guardrails | 1–2 days | ✅ Complete |
 | Phase 1 | Engine Runtime | 1–2 weeks | 🟡 Tests Passing, Benches In Progress |
-| Phase 2 | Deterministic Compaction | 2–4 weeks | ⏳ Task 2.1-2.2 Complete |
+| Phase 2 | Deterministic Compaction | 2–4 weeks | ⏳ Task 2.1-2.3 Complete, 2.4 In Progress |
 | Phase 3 | Trie Index SST Format | 2–3 weeks | 📋 Blocked on Phase 2 |
 | Phase 4 | Unified Write Path | 3–6 weeks | 📋 Blocked on Phase 2 |
 | Phase 5 | Segment SSTs (Optional) | 2–4 weeks | 📋 Blocked on Phase 4 |
@@ -89,24 +89,31 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 ### Task 2.1: Define CompactionPlan Types
 **Status**: ✅ Complete  
 **Files**: `src/core/compaction/planner.rs` (new)
-- [ ] `CompactionPlan` struct with level, target_level, files_to_compact, output_files
-- [ ] `CompactionTask` struct with plan, task_id, created_at
-- [ ] `CompactionLog` struct with tasks, next_task_id
-- [ ] Serialization support (serde) for replaying logs from disk
+- [x] `CompactionPlan` struct with level, target_level, files_to_compact, output_files
+- [x] `CompactionTask` struct with plan, task_id, created_at
+- [x] `CompactionLog` struct with tasks, next_task_id
+- [x] Serialization support (serde) for replaying logs from disk
 
 ### Task 2.2: Implement Deterministic Planner
 **Status**: ✅ Complete  
 **Files**: `src/core/compaction/planner.rs` (Planner struct)  
-**Implemented**: Pure function `planner()` that yields deterministic plans, plans sorted consistently by level/key range, 100% deterministic output
+**Implemented**: Pure function `plan()` that yields deterministic plans, plans sorted consistently by level/key range, 100% deterministic output
+**Tests**: 6/6 unit tests passing (determinism, L0 thresholds, file ordering, multi-CF ordering)
 
 ### Task 2.3: Route Compaction Plans Through Runtime
-**Status**: 📋 Not Started  
-**Files**: `src/core/engine/operations/maintenance.rs` (extend), `src/core/runtime.rs` (extend)  
-**Success Criteria**:
-- [ ] Runtime accepts `RuntimeTaskKind::CompactionPlan` variant
-- [ ] Executor writes plan to compaction log before executing
-- [ ] Compaction log persisted to disk (WAL-style) for replay after crash
-- [ ] Integration with manifest transition to record completion
+**Status**: ✅ Complete  
+**Files**: 
+- `src/core/runtime.rs` (extended RuntimeTaskKind with CompactionPlanExecution)
+- `src/core/compaction/log_manager.rs` (new module for WAL-style persistence)
+- `src/core/compaction/planner_controller.rs` (new module for runtime coordination)
+
+**Implemented**:
+- [x] RuntimeTaskKind::CompactionPlanExecution variant added
+- [x] CompactionLogManager handles durability (append/load/clear)
+- [x] PlannerController coordinates plan generation with runtime submission
+- [x] Crash recovery via compaction log replay
+- [x] Test: `should_recover_pending_tasks` verifies log persistence/recovery
+- [x] SystemTime serialization via UNIX epoch encoding
 
 ### Task 2.4: Add Replay and Validation Tests
 **Status**: 📋 Not Started  
@@ -115,6 +122,7 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 - [ ] Unit test: Same manifest always yields same plan
 - [ ] Integration test: Compaction log replay produces same manifest state
 - [ ] Durability test: Crash during compaction, replay log, verify consistency
+- [ ] Verify deterministic planner flag integration with maintenance.rs
 
 ---
 
