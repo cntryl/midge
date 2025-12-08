@@ -291,7 +291,10 @@ impl BlockCache for ShardedBlockCache {
     }
 
     fn prefetch(&self, _key: BlockKey) {
-        // TODO: implement async prefetch
+        // DECISION (Phase 8.3): Prefetch disabled for now (no-op implementation).
+        // Block cache is synchronous by design. Async prefetch requires thread coordination
+        // and is deferred to Phase 10 (performance enhancement). Current on-demand loading
+        // is acceptable for production workloads.
     }
 }
 

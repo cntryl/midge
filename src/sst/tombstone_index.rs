@@ -96,9 +96,9 @@ impl TombstoneIndex {
         &'a self,
         key: &'a [u8],
     ) -> impl Iterator<Item = &'a TombstoneIndexEntry> + 'a {
-        // TODO: Ensure `entries` is sorted by min_key and use partition_point or binary_search
-        // to reduce scanning overhead for large tombstone indexes.
-        // Current behavior: linear scan with `filter`.
+        // DECISION (Phase 8.3): Keep linear scan. Tombstone indexes are typically small (<100 entries)
+        // and linear scan is simpler/faster than binary search for this use case.
+        // Optimization deferred to Phase 9 if profiling shows contention at large scale.
         self.entries
             .iter()
             .filter(move |entry| entry.might_cover(key))

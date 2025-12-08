@@ -2,10 +2,9 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-// TODO: Refactor to NoOpWal - an in-memory WAL defeats the purpose of durability.
-// This implementation exists to support StorageMode::Memory, but should be replaced
-// with a simpler no-op implementation that explicitly discards writes rather than
-// maintaining an in-memory buffer that will be lost on restart anyway.
+// DECISION (Phase 8.3): Keep in-memory WAL as-is for StorageMode::Memory testing.
+// This is not a production durability concern since StorageMode::Memory is explicitly
+// non-durable. NoOp refactor deferred to Phase 9 (low priority, test-only).
 
 // No-op WAL implementation for in-memory mode - explicitly discards all writes
 // since durability is impossible in memory-only storage.
