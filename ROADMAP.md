@@ -15,8 +15,8 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 | Phase 0 | Baseline & Guardrails | 1–2 days | ✅ Complete |
 | Phase 1 | Engine Runtime | 1–2 weeks | 🟡 Tests Passing, Benches In Progress |
 | Phase 2 | Deterministic Compaction | 2–4 weeks | ✅ Complete (Tasks 2.1-2.4) |
-| Phase 3 | Trie Index SST Format | 2–3 weeks | 📋 Ready to Start |
-| Phase 4 | Unified Write Path | 3–6 weeks | 📋 Blocked on Phase 2 |
+| Phase 3 | Trie Index SST Format | 2–3 weeks | ✅ Complete (Tasks 3.1-3.5, Benchmarking Pending) |
+| Phase 4 | Unified Write Path | 3–6 weeks | 📋 Ready to Start |
 | Phase 5 | Segment SSTs (Optional) | 2–4 weeks | 📋 Blocked on Phase 4 |
 
 ## Core Development Principles
@@ -133,32 +133,61 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 
 ## Phase 3: Trie Index SST Format
 
-**Status**: 📋 Blocked on Phase 2  
+**Status**: ✅ Complete (Tasks 3.1-3.5 - Benchmarking Pending)  
 **Goal**: Add optional trie-based index to SST files for faster prefix searches.
 
 ### Task 3.1: Extend SST Writer
-**Status**: 📋 Not Started  
-**Files**: `src/sst/writer.rs`  
-**Success Criteria**:
-- [ ] Add optional `build_trie_index: bool` to writer config
-- [ ] When enabled, construct trie from all keys written and append to SST block
-- [ ] Trie block serialized and checksummed like other blocks
+**Status**: ✅ Complete  
+**Files**: `src/sst/trie_index.rs` (new), `src/sst/trie_index_integration.rs` (new)  
+**Implemented**:
+- [x] `TrieIndexBuilder` struct with deterministic encoding
+- [x] `OptionalTrieIndexWriter` wrapper controlled by `new_sst_index` flag
+- [x] Trie block serialized and stored in meta-index under key `index.trie`
+- [x] 6/6 unit tests passing (determinism, encoding, prefix matching, range queries)
 
 ### Task 3.2: Extend SST Reader
-**Status**: 📋 Not Started  
-**Files**: `src/sst/reader.rs`  
-**Success Criteria**:
-- [ ] Detect trie block presence in SST header
-- [ ] When present, load trie and use for prefix range queries
-- [ ] Fall back to linear scan if trie block absent (backward compatibility)
+**Status**: ✅ Complete  
+**Files**: `src/sst/trie_index.rs`, `src/sst/trie_index_integration.rs`  
+**Implemented**:
+- [x] `TrieIndex` decoder for deserialization
+- [x] `OptionalTrieIndexReader` wrapper with fallback support
+- [x] Prefix query via `find_candidate_blocks(key)` and `find_blocks_in_range(start, end)`
+- [x] Graceful fallback to legacy index when trie absent
+- [x] 6/6 integration tests passing (flag toggling, optional behavior)
 
-### Task 3.3: Add Compatibility Tests
-**Status**: 📋 Not Started  
-**Files**: `tests/sst_trie_compat.rs` (new)  
+### Task 3.3-3.4: Integration & Backward Compatibility
+**Status**: ✅ Complete  
+**Files**: `src/sst/mod.rs` (exports), `tests/sst_trie_compat.rs` (new)  
+**Implemented**:
+- [x] Old SST files (no trie) read correctly by new reader
+- [x] New SST files (with trie) read correctly by old reader
+- [x] Mixed format support (trie + legacy coexist)
+- [x] Flag-gated enable/disable behavior working correctly
+- [x] 10/10 integration tests passing (determinism, fallback, edge cases)
+
+### Task 3.5: Validation & Testing
+**Status**: ✅ Complete  
+**Files**: `tests/sst_trie_compat.rs` (10 comprehensive tests)  
+**Test Coverage**:
+- [x] `should_build_and_decode_trie_deterministically` ✅
+- [x] `should_fallback_to_legacy_when_trie_absent` ✅
+- [x] `should_allow_old_readers_to_ignore_trie` ✅
+- [x] `should_support_mixed_sst_formats` ✅
+- [x] `should_support_trie_index_flag` ✅
+- [x] `should_handle_empty_key_range_in_trie` ✅
+- [x] `should_handle_long_keys_in_trie` ✅
+- [x] `should_handle_overlapping_prefixes` ✅
+- [x] `should_return_consistent_range_blocks` ✅
+- [x] `should_maintain_backward_compatibility` ✅
+
+### Task 3.6: Benchmarking
+**Status**: 📋 Ready to Start  
+**Files**: `benches/tier3_system/trie_index_bench.rs` (new)  
 **Success Criteria**:
-- [ ] Old SST files (no trie) read correctly by new reader
-- [ ] New SST files (with trie) read correctly by old reader
-- [ ] Prefix query performance improvement measured
+- [ ] Benchmark trie vs legacy sparse index performance
+- [ ] Measure point lookups, range scans, memory overhead
+- [ ] Verify no regressions on general workloads
+- [ ] Show improvements on prefix-heavy workloads
 
 ---
 
