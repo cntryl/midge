@@ -13,7 +13,7 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 | Phase | Name | Effort | Status |
 |-------|------|--------|--------|
 | Phase 0 | Baseline & Guardrails | 1–2 days | ✅ Complete |
-| Phase 1 | Engine Runtime | 1–2 weeks | ⏳ In Progress |
+| Phase 1 | Engine Runtime | 1–2 weeks | 🟡 Tests Passing, Benches In Progress |
 | Phase 2 | Deterministic Compaction | 2–4 weeks | 📋 Ready to Start |
 | Phase 3 | Trie Index SST Format | 2–3 weeks | 📋 Blocked on Phase 2 |
 | Phase 4 | Unified Write Path | 3–6 weeks | 📋 Blocked on Phase 2 |

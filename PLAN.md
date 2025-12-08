@@ -64,23 +64,30 @@ Goal: Centralize engine background work behind an `EngineRuntime` without changi
 
 Owner: Core engine team
 
-- ⏳ P1.1 Create `core::runtime` (or `core::executor`) module
+- ✅ P1.1 Create `core::runtime` (or `core::executor`) module
   - Define `EngineRuntime` with task types for: flush, compaction, maintenance
   - Define `RuntimeTask` enum capturing these operations
-- ⏳ P1.2 Have `MidgeEngine` own an `Arc<EngineRuntime>`
-- ⏳ P1.3 Introduce a minimal `submit(task: RuntimeTask)` API
+- ✅ P1.2 Have `MidgeEngine` own an `Arc<EngineRuntime>`
+- ✅ P1.3 Introduce a minimal `submit(task: RuntimeTask)` API
   - For initial implementation, `submit` may be synchronous / in-thread
-- ⏳ P1.4 Route existing background-ish operations through `EngineRuntime` when `single_executor_runtime` is enabled
+- ✅ P1.4 Route existing background-ish operations through `EngineRuntime` when `single_executor_runtime` is enabled
   - Flush triggers
   - Compaction scheduling requests
   - Periodic maintenance tasks
-- ⏳ P1.5 Add structured logging for runtime scheduling decisions (honor `EngineFlags` / env toggles such as `MIDGE_TRACE_RUNTIME`)
+- ✅ P1.5 Add structured logging for runtime scheduling decisions (honor `EngineFlags` / env toggles such as `MIDGE_TRACE_RUNTIME`)
 
 Exit criteria:
-- ⏳ `EngineRuntime` and `RuntimeTask` are defined and owned by `MidgeEngine`.
-- ⏳ At least one flush and one compaction trigger path submit a `RuntimeTask` when `single_executor_runtime` is `true`.
-- ⏳ Enabling `MIDGE_TRACE_RUNTIME=1` logs ordered runtime decisions in a human-readable format.
-- ⏳ `cargo test` and `cargo run --bin validate_tests -- --summary` pass with `single_executor_runtime = true` in tests that exercise background work.
+- ✅ `EngineRuntime` and `RuntimeTask` are defined and owned by `MidgeEngine`.
+- ✅ At least one flush and one compaction trigger path submit a `RuntimeTask` when `single_executor_runtime` is `true`.
+- ✅ Enabling `MIDGE_TRACE_RUNTIME=1` logs ordered runtime decisions in a human-readable format.
+- 🟡 `cargo test` and `cargo run --bin validate_tests -- --summary` pass with `single_executor_runtime = true` in tests that exercise background work.
+
+**Phase 1 Validation Status (December 8, 2025)**:
+- ✅ All 1409 library tests pass
+- ✅ All 127 integration tests pass (across 12 test suites)
+- ⏳ Tier 3 benchmark run in progress for performance validation
+- ✅ Runtime code compiles and integrates without issues
+- ✅ MIDGE_TRACE_RUNTIME toggle functional for tracing executor decisions
 
 ---
 
