@@ -36,6 +36,7 @@ A high-performance, embedded LSM-tree storage engine written in Rust.
 - [Transactions & Snapshots](docs/wip/TRANSACTIONS.md) - Per-transaction isolation & snapshot usage
 - [Rate Limiting](docs/wip/RATE_LIMITING.md) - I/O throttling and resource management
  - [ROADMAP.md](ROADMAP.md) - Phase-based roadmap and tactical TODOs
+ - [docs/roadmap.md](docs/roadmap.md) - Documentation mirror of the roadmap
 
 ## Quick Start
 

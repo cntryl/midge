@@ -92,3 +92,32 @@ Contact / ownership
 ---
 
 This `ROADMAP.md` aims to transform the plan into a tactical checklist and to give the team a practical sequence of deliverables. We can refine further per subcomponent and add issue tracker links once work begins. 
+
+---
+
+Short-term sprint (1–2 weeks) — Focused next steps
+- Finalize and land `EngineRuntime` PoC that offers `submit`/`submit_and_wait`.
+- Route a single path (flush) through runtime behind `single_executor_runtime` and add a simple trace when tasks are submitted and executed.
+- Add gating hooks to tests for deterministic flows (pause/resume compaction and flush paths in unit tests).
+- Add CI job to `validate_tests` that runs a subset of background-work tests with `single_executor_runtime = true` to guard regressions.
+
+Suggested PR breakdown (small, incremental commits)
+1) `runtime: add EngineRuntime task queue and executor` — Add task types, executor loop, and tracing environment variable handling. Keep API internal-only and feature-gated.
+2) `engine: change runtime ownership to Arc; return shared coordinators` — Change relevant types to `Arc` and update initialization paths.
+3) `flush: route through runtime task` — Replace direct flush coordinator call with runtime `RuntimeTask` enqueue when the flag is enabled; add unit and integration tests.
+4) `compaction: manual triggers through runtime` — Add compaction path and tests for `compact_level` and `compact_range` through runtime.
+5) `compaction: planner skeleton + compaction log` — Add pure `planner(manifest)` and simple compaction log append/replay tests.
+6) `sst: dual-index writer/read` — Add trie index writing and read-path detection behind flag and run compatibility tests.
+7) `write-path: introduce WritePathCoordinator` — Consolidate WAL+memtable+cache entrypoint and route signals through runtime.
+
+Acceptance criteria & metrics (per PR)
+- Unit tests for the changed code are green.
+- Integration tests with the `single_executor_runtime` flag behave identically to legacy execution for correctness.
+- A targeted bench suite shows no regressions on baseline metrics (p50/p99 latency, throughput) or shows expected improvements where applicable.
+- Trace logs produced under `MIDGE_TRACE_RUNTIME=1` show ordered scheduling and task execution events (for both flush and compaction).
+
+FAQ / Decisions
+- Q: Why keep the runtime single-threaded initially? A: Determinism and simpler debugging. We can add controlled lanes for parallelism later.
+- Q: What to do if we discover regressions? A: Revert or disable the flag, investigate with task traces, and add gating for the affected areas.
+
+Next: create `docs/roadmap.md` based on this file and update any doc landing pages.
