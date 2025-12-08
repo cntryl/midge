@@ -51,8 +51,13 @@ impl MidgeEngine {
     ///   full sync including cloud uploads.
     /// - If `wal_sync == true` and `wait_for_cloud_wal_uploads_on_sync == false`:
     ///   only local WAL sync; cloud uploads are best-effort.
+    ///
+    /// # Internal Use
+    ///
+    /// This method is intended for use by the WritePathCoordinator and internal write operations.
+    /// External callers should not rely on this API.
     #[inline]
-    fn sync_wal_if_needed(&self) -> MidgeResult<()> {
+    pub(crate) fn sync_wal_if_needed(&self) -> MidgeResult<()> {
         if !self.wal_sync {
             return Ok(());
         }
@@ -68,7 +73,12 @@ impl MidgeEngine {
     /// Internal helper to manage write stalls caused by full immutable memtable queue.
     /// Attempts to proactively flush and waits (bounded) for stall condition to clear.
     /// Latency target: typically < 2s once background error is cleared and a flush drains.
-    fn handle_write_stall(
+    ///
+    /// # Internal Use
+    ///
+    /// This method is intended for use by the WritePathCoordinator and internal write operations.
+    /// External callers should not rely on this API.
+    pub(crate) fn handle_write_stall(
         &self,
         cf: &ColumnFamilyHandle,
         column_family: &Arc<crate::core::engine::column_family::ColumnFamily>,
