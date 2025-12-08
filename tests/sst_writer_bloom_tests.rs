@@ -1,11 +1,10 @@
+use cntryl_midge::common::codec::CompressionType;
+use cntryl_midge::sst::fs::FsDynWriter;
 /// Integration tests for Phase 1.1: Per-block bloom writer integration
 ///
 /// Tests that verify per-block blooms are correctly built and written
 /// during SST creation by FsDynWriter.
-
 use cntryl_midge::sst::DynSstWriter;
-use cntryl_midge::sst::fs::FsDynWriter;
-use cntryl_midge::common::codec::CompressionType;
 use std::path::PathBuf;
 
 /// Test helper: create a temporary directory for test SSTs
@@ -55,14 +54,8 @@ fn should_build_per_block_blooms_during_sst_write() {
 fn should_support_per_block_blooms_in_meta_index() {
     // Arrange: Create writer
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        2048,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 2048, false, None)
+        .expect("Failed to create writer");
 
     // Add some keys
     for i in 0..50 {
@@ -124,14 +117,8 @@ fn should_include_per_block_bloom_offsets_in_index() {
 fn should_write_per_block_blooms_to_sst_file() {
     // Arrange
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        1536,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 1536, false, None)
+        .expect("Failed to create writer");
 
     // Add keys that are guaranteed to span blocks
     for i in 0..75 {

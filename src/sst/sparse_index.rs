@@ -1,7 +1,7 @@
 use crate::error::{MidgeError, MidgeResult};
+use crate::sst::block_meta::BlockMeta;
 use crate::sst::encoding::TlvBlockIterator;
 use crate::sst::format::BlockHandle;
-use crate::sst::block_meta::BlockMeta;
 use bytes::Bytes;
 
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ impl SparseIndex {
     }
 
     /// Build BlockMeta entries for all blocks.
-    /// 
+    ///
     /// Note: This is conservative because the sparse index only stores max_key for each block.
     /// We use empty/None for fence pointers since we can't reliably determine min_key from the index alone.
     /// In Phase 2, we'll enhance this by extracting actual min_keys from block data during reads.

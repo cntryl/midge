@@ -1,11 +1,10 @@
+use cntryl_midge::common::codec::CompressionType;
+use cntryl_midge::sst::fs::{FsDynWriter, SstFile};
 /// TDD Tests for Phase 1.2: Per-block bloom reader integration
 ///
 /// Tests that per-block blooms are written to SST during finalization,
 /// and can be loaded and queried by the reader.
-
 use cntryl_midge::sst::DynSstWriter;
-use cntryl_midge::sst::fs::{FsDynWriter, SstFile};
-use cntryl_midge::common::codec::CompressionType;
 use std::path::PathBuf;
 
 fn create_temp_sst_dir() -> PathBuf {
@@ -18,14 +17,8 @@ fn create_temp_sst_dir() -> PathBuf {
 fn should_write_per_block_blooms_to_sst_during_finalization() {
     // Arrange: Create SST with multiple blocks
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        1024,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 1024, false, None)
+        .expect("Failed to create writer");
 
     // Add keys to create multiple blocks
     for i in 0..50 {
@@ -44,7 +37,7 @@ fn should_write_per_block_blooms_to_sst_during_finalization() {
 
     // Assert: SST file exists
     assert!(sst_path.exists(), "SST file should exist");
-    
+
     // Assert: SST should be readable
     let sst = SstFile::open(&sst_path).expect("Should open SST");
     let val = sst.get(b"key_0025").expect("Should read");
@@ -60,14 +53,8 @@ fn should_write_per_block_blooms_to_sst_during_finalization() {
 fn should_use_per_block_blooms_to_skip_blocks_in_negative_lookups() {
     // Arrange: Create SST with specific keys
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        768,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 768, false, None)
+        .expect("Failed to create writer");
 
     // Add keys in specific ranges to different blocks
     for i in 0..30 {
@@ -114,20 +101,12 @@ fn should_use_per_block_blooms_to_skip_blocks_in_negative_lookups() {
 fn should_load_per_block_blooms_on_sst_open() {
     // Arrange
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        1024,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 1024, false, None)
+        .expect("Failed to create writer");
 
     for i in 0..50 {
         let key = format!("data_{:04}", i);
-        writer
-            .add(key.as_bytes(), b"x")
-            .expect("Failed to add key");
+        writer.add(key.as_bytes(), b"x").expect("Failed to add key");
     }
 
     let sst_path = temp_dir.join("test.sst");
@@ -155,14 +134,8 @@ fn should_load_per_block_blooms_on_sst_open() {
 fn should_preserve_all_values_given_bloom_roundtrip_when_reading() {
     // Arrange: Create SST with specific test values
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        512,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 512, false, None)
+        .expect("Failed to create writer");
 
     // Store expected key-value pairs
     let test_data: Vec<(&str, &str)> = vec![
@@ -201,11 +174,7 @@ fn should_preserve_all_values_given_bloom_roundtrip_when_reading() {
         assert!(val.is_some(), "Should find {}", key);
         let actual_bytes = val.unwrap();
         let actual_value = std::str::from_utf8(&actual_bytes).unwrap();
-        assert_eq!(
-            actual_value, *expected_value,
-            "Value mismatch for {}",
-            key
-        );
+        assert_eq!(actual_value, *expected_value, "Value mismatch for {}", key);
     }
 
     println!("All values preserved through bloom write/read cycle");

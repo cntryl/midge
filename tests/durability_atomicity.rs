@@ -301,7 +301,7 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
     eng.flush().expect("flush should succeed");
     // Trigger manual compaction - it will fail due to FailMidway hook
     eng.compact_level(&cf, 0).expect("compact_level");
-    
+
     // Wait for at least one compaction failure to occur
     let deadline = std::time::Instant::now() + TEST_GATE_TIMEOUT;
     while hooks.compaction_failed_count() == 0 && std::time::Instant::now() < deadline {

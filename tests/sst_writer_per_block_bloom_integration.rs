@@ -1,8 +1,7 @@
-/// Tests for Phase 1.1: Verifying per-block blooms are written and readable
-
-use cntryl_midge::sst::DynSstWriter;
-use cntryl_midge::sst::fs::{FsDynWriter, SstFile};
 use cntryl_midge::common::codec::CompressionType;
+use cntryl_midge::sst::fs::{FsDynWriter, SstFile};
+/// Tests for Phase 1.1: Verifying per-block blooms are written and readable
+use cntryl_midge::sst::DynSstWriter;
 use std::path::PathBuf;
 
 fn create_temp_sst_dir() -> PathBuf {
@@ -18,7 +17,7 @@ fn should_track_per_block_blooms_during_write() {
     let mut writer = FsDynWriter::new(
         &temp_dir,
         CompressionType::None,
-        512,  // Very small to force many blocks
+        512, // Very small to force many blocks
         false,
         None,
     )
@@ -42,7 +41,7 @@ fn should_track_per_block_blooms_during_write() {
     // Assert: SST file exists and is readable
     assert!(sst_path.exists(), "SST file should exist");
     let sst = SstFile::open(&sst_path).expect("Should be able to open SST");
-    
+
     // Verify we can read back some keys
     let key = b"key_00050";
     let result = sst.get(key).expect("Should be able to read");
@@ -58,14 +57,8 @@ fn should_track_per_block_blooms_during_write() {
 fn should_preserve_per_block_bloom_data_through_write_cycle() {
     // Arrange
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        1024,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 1024, false, None)
+        .expect("Failed to create writer");
 
     // Add specific test keys
     let test_keys = vec!["apple", "banana", "cherry", "date", "elderberry"];
@@ -78,9 +71,7 @@ fn should_preserve_per_block_bloom_data_through_write_cycle() {
     // Add more keys to create multiple blocks
     for i in 0..50 {
         let key = format!("filler_{:03}", i);
-        writer
-            .add(key.as_bytes(), b"x")
-            .expect("Failed to add key");
+        writer.add(key.as_bytes(), b"x").expect("Failed to add key");
     }
 
     // Act: Write SST
@@ -104,14 +95,8 @@ fn should_preserve_per_block_bloom_data_through_write_cycle() {
 fn should_handle_large_sst_with_many_blocks() {
     // Arrange: Create SST with many blocks
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        768,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 768, false, None)
+        .expect("Failed to create writer");
 
     // Add many keys to create many blocks (each ~1KB should create ~50-100 keys per block)
     for i in 0..500 {
@@ -148,14 +133,8 @@ fn should_handle_large_sst_with_many_blocks() {
 fn should_include_per_block_bloom_in_sst_metadata() {
     // Arrange: Create a small SST
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        1024,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 1024, false, None)
+        .expect("Failed to create writer");
 
     // Add a few keys
     for i in 0..10 {
@@ -173,7 +152,7 @@ fn should_include_per_block_bloom_in_sst_metadata() {
 
     // Assert: File should be readable
     let sst = SstFile::open(&sst_path).expect("Should open SST");
-    
+
     // Verify metadata is accessible
     let result = sst.get(b"key_5").expect("Should read");
     assert!(result.is_some());

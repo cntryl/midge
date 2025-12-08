@@ -5,10 +5,10 @@
 
 #[cfg(test)]
 mod tests {
-    use cntryl_midge::sst::{TombstoneIndex, TombstoneIndexBuilder, TombstoneIndexEntry};
+    use bytes::Bytes;
     use cntryl_midge::sst::format::BlockHandle;
     use cntryl_midge::sst::traits::RangeTombstone;
-    use bytes::Bytes;
+    use cntryl_midge::sst::{TombstoneIndex, TombstoneIndexBuilder, TombstoneIndexEntry};
 
     fn create_tombstone(start: &[u8], end: &[u8], seq: u64) -> RangeTombstone {
         RangeTombstone {

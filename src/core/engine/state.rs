@@ -408,6 +408,7 @@ pub fn open_with_factories(
         sparse_index_cache,
         autotuner: opts.autotuner.clone(),
         test_hooks: opts.test_hooks.clone(),
+        engine_flags: opts.engine_flags,
         version_set: version_set_atomic,
         version_manager,
         background_error: background_error.clone(),

@@ -5,9 +5,9 @@
 //! - Registration of directories for cleanup on test suite exit
 //! - Manual cleanup of leaked test directories
 
+use once_cell::sync::Lazy;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
 
 /// Global registry of test directories that need cleanup
 static CLEANUP_REGISTRY: Lazy<Mutex<Vec<PathBuf>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -75,7 +75,7 @@ impl TestDirGuard {
     }
 
     /// Get the path to this directory
-        #[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
@@ -108,9 +108,14 @@ mod tests {
     #[test]
     fn should_cleanup_directory_when_guard_dropped() {
         // Arrange
-        let temp_path = std::env::temp_dir().join(format!("midge_test_cleanup_{}", 
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
-        
+        let temp_path = std::env::temp_dir().join(format!(
+            "midge_test_cleanup_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+
         std::fs::create_dir_all(&temp_path).unwrap();
         assert!(temp_path.exists());
 
@@ -127,9 +132,14 @@ mod tests {
     #[test]
     fn should_keep_directory_when_requested() {
         // Arrange
-        let temp_path = std::env::temp_dir().join(format!("midge_test_keep_{}", 
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
-        
+        let temp_path = std::env::temp_dir().join(format!(
+            "midge_test_keep_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+
         std::fs::create_dir_all(&temp_path).unwrap();
 
         // Act: Create guard and mark for keeping
@@ -140,7 +150,7 @@ mod tests {
 
         // Assert: Directory should still exist
         assert!(temp_path.exists());
-        
+
         // Clean up for the test
         let _ = std::fs::remove_dir_all(&temp_path);
     }

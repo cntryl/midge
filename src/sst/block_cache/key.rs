@@ -53,7 +53,12 @@ pub struct BlockKey {
 impl BlockKey {
     /// Create a new block key.
     #[inline]
-    pub const fn new(file_number: u64, block_offset: u64, block_kind: BlockKind, cf_id: u32) -> Self {
+    pub const fn new(
+        file_number: u64,
+        block_offset: u64,
+        block_kind: BlockKind,
+        cf_id: u32,
+    ) -> Self {
         Self {
             file_number,
             block_offset,
@@ -66,7 +71,7 @@ impl BlockKey {
     ///
     /// This uses a fast mixer rather than the full `Hash` trait to
     /// give a quick shard index without building a `Hasher`.
-    /// 
+    ///
     /// Note: Returns a non-zero hash (0 is reserved for empty buckets in the hash table).
     #[inline]
     pub fn shard_hash(&self) -> u64 {
@@ -77,7 +82,9 @@ impl BlockKey {
         h ^= (self.block_kind.as_u8() as u64).wrapping_mul(K);
         h ^= (self.cf_id as u64).wrapping_mul(K);
         // Ensure non-zero (0 is reserved for empty buckets)
-        if h == 0 { h = 1; }
+        if h == 0 {
+            h = 1;
+        }
         h
     }
 }

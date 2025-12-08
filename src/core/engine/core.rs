@@ -81,6 +81,9 @@ pub struct MidgeEngine {
     /// Optional test hooks for deterministic coordination in tests
     #[allow(dead_code)]
     pub(crate) test_hooks: Option<crate::common::test_hooks::TestHooks>,
+    /// Configuration flags gating next-gen runtime behavior
+    #[allow(dead_code)]
+    pub(crate) engine_flags: crate::EngineFlags,
     /// Atomic version set for lock-free reads of manifest state
     pub(crate) version_set: crate::core::manifest::AtomicVersionSet,
     /// Version manager actor for serialized manifest updates

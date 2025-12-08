@@ -7,8 +7,11 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::{block_meta::BlockMeta, block_meta::IndexTable, sequential_access_optimizer::SequentialAccessOptimizer};
 use cntryl_midge::sst::format::BlockHandle;
+use cntryl_midge::sst::{
+    block_meta::BlockMeta, block_meta::IndexTable,
+    sequential_access_optimizer::SequentialAccessOptimizer,
+};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 
@@ -34,7 +37,7 @@ fn bench_sequential_scan_throughput(c: &mut Criterion) {
     group.throughput(Throughput::Elements(BLOCK_COUNT as u64));
 
     let table = build_table_with_optimizer();
-    
+
     // Sequential keys
     let keys: Vec<Bytes> = (0..BLOCK_COUNT)
         .map(|i| Bytes::from(format!("key_{:08}", i * 100 + 50)))
@@ -58,7 +61,7 @@ fn bench_sequential_scan_throughput(c: &mut Criterion) {
 fn bench_predictor_hit_ratio(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_predictor_hit_ratio");
     group.sampling_mode(SamplingMode::Flat);
-    
+
     let table = build_table_with_optimizer();
     let keys: Vec<Bytes> = (0..BLOCK_COUNT)
         .map(|i| Bytes::from(format!("key_{:08}", i * 100 + 50)))
@@ -72,16 +75,20 @@ fn bench_predictor_hit_ratio(c: &mut Criterion) {
                     hits += 1;
                 }
             }
-            
+
             // Check optimizer metrics
             if let Some(opt_cell) = table.sequential_optimizer() {
                 if let Ok(opt) = opt_cell.try_borrow() {
                     let ratio = opt.predictor_hit_ratio();
                     // Should be >85% for sequential access
-                    assert!(ratio > 0.85 || hits == 0, "Predictor ratio too low: {}", ratio);
+                    assert!(
+                        ratio > 0.85 || hits == 0,
+                        "Predictor ratio too low: {}",
+                        ratio
+                    );
                 }
             }
-            
+
             black_box(hits)
         })
     });

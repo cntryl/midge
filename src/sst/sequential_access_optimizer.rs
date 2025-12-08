@@ -233,18 +233,18 @@ mod tests {
         opt.record_lookup(1, 0);
         // First prediction before any sequential data
         let pred1 = opt.predict_next_block();
-        
-        opt.record_lookup(2, 1);  // Sequential hit increments sequential_hits
-        // Now we can predict
+
+        opt.record_lookup(2, 1); // Sequential hit increments sequential_hits
+                                 // Now we can predict
         let pred2 = opt.predict_next_block();
-        
-        opt.record_lookup(3, 2);  // Sequential hit again
+
+        opt.record_lookup(3, 2); // Sequential hit again
         let pred3 = opt.predict_next_block();
 
         // Assert
-        assert_eq!(pred1, None);  // First lookup, no prediction yet
-        assert_eq!(pred2, Some(2));  // After one sequential hit, predict next
-        assert_eq!(pred3, Some(3));  // After another sequential, predict next
+        assert_eq!(pred1, None); // First lookup, no prediction yet
+        assert_eq!(pred2, Some(2)); // After one sequential hit, predict next
+        assert_eq!(pred3, Some(3)); // After another sequential, predict next
         assert_eq!(opt.predictor_hits, 2); // Two successful predictions
     }
 
@@ -255,15 +255,15 @@ mod tests {
 
         // Act: Record sequential lookups, then backward jump
         opt.record_lookup(1, 5);
-        opt.record_lookup(2, 6);  // Sequential hit
+        opt.record_lookup(2, 6); // Sequential hit
         let pred_before_jump = opt.predict_next_block();
-        
-        opt.record_lookup(3, 2);  // Jump backward to block 2
+
+        opt.record_lookup(3, 2); // Jump backward to block 2
         let pred_after_jump = opt.predict_next_block();
 
         // Assert
-        assert_eq!(pred_before_jump, Some(7));  // Expects next sequential block
-        assert_eq!(pred_after_jump, None);  // No prediction after backward jump
+        assert_eq!(pred_before_jump, Some(7)); // Expects next sequential block
+        assert_eq!(pred_after_jump, None); // No prediction after backward jump
     }
 
     #[test]
@@ -301,10 +301,25 @@ mod tests {
         let predictor_ratio = opt.predictor_hit_ratio();
         let efficiency = opt.efficiency_ratio();
 
-        println!("cache_ratio: {}, predictor_ratio: {}, efficiency: {}", cache_ratio, predictor_ratio, efficiency);
-        assert!(cache_ratio >= 0.0 && cache_ratio <= 1.0, "cache_ratio {} out of bounds", cache_ratio);
-        assert!(predictor_ratio >= 0.0 && predictor_ratio <= 1.0, "predictor_ratio {} out of bounds", predictor_ratio);
-        assert!(efficiency >= 0.0 && efficiency <= 1.0, "efficiency {} out of bounds", efficiency);
+        println!(
+            "cache_ratio: {}, predictor_ratio: {}, efficiency: {}",
+            cache_ratio, predictor_ratio, efficiency
+        );
+        assert!(
+            cache_ratio >= 0.0 && cache_ratio <= 1.0,
+            "cache_ratio {} out of bounds",
+            cache_ratio
+        );
+        assert!(
+            predictor_ratio >= 0.0 && predictor_ratio <= 1.0,
+            "predictor_ratio {} out of bounds",
+            predictor_ratio
+        );
+        assert!(
+            efficiency >= 0.0 && efficiency <= 1.0,
+            "efficiency {} out of bounds",
+            efficiency
+        );
     }
 
     #[test]

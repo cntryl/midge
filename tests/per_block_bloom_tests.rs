@@ -48,7 +48,12 @@ mod per_block_bloom_tests {
     fn should_not_have_false_negatives() {
         // Arrange
         let mut bloom = cntryl_midge::sst::block_meta::BlockBloom::new(1024);
-        let keys: Vec<&[u8]> = vec![b"apple".as_ref(), b"banana".as_ref(), b"cherry".as_ref(), b"date".as_ref()];
+        let keys: Vec<&[u8]> = vec![
+            b"apple".as_ref(),
+            b"banana".as_ref(),
+            b"cherry".as_ref(),
+            b"date".as_ref(),
+        ];
 
         // Act: Add all keys
         for key in &keys {
@@ -274,7 +279,13 @@ mod per_block_bloom_tests {
     fn should_add_batch_of_keys_to_bloom() {
         // Arrange
         let mut bloom = cntryl_midge::sst::block_meta::BlockBloom::new(1024);
-        let keys = vec![b"a".as_ref(), b"b".as_ref(), b"c".as_ref(), b"d".as_ref(), b"e".as_ref()];
+        let keys = vec![
+            b"a".as_ref(),
+            b"b".as_ref(),
+            b"c".as_ref(),
+            b"d".as_ref(),
+            b"e".as_ref(),
+        ];
 
         // Act
         for key in &keys {
@@ -360,7 +371,13 @@ mod per_block_bloom_tests {
     fn should_survive_encode_decode_round_trip() {
         // Arrange
         let mut bloom1 = cntryl_midge::sst::block_meta::BlockBloom::new(1024);
-        let keys: Vec<&[u8]> = vec![b"key1".as_ref(), b"key2".as_ref(), b"key3".as_ref(), b"key4".as_ref(), b"key5".as_ref()];
+        let keys: Vec<&[u8]> = vec![
+            b"key1".as_ref(),
+            b"key2".as_ref(),
+            b"key3".as_ref(),
+            b"key4".as_ref(),
+            b"key5".as_ref(),
+        ];
 
         for key in &keys {
             bloom1.add(key);

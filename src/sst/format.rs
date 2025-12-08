@@ -114,7 +114,12 @@ impl Block {
             4 => CompressionType::Zstd3,
             5 => CompressionType::Zstd5,
             6 => CompressionType::Zstd9,
-            _ => return Err(MidgeError::InvalidData(format!("Unknown compression byte: {}", byte))),
+            _ => {
+                return Err(MidgeError::InvalidData(format!(
+                    "Unknown compression byte: {}",
+                    byte
+                )))
+            }
         })
     }
 

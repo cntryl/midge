@@ -5,9 +5,9 @@
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use cntryl_midge::sst::block_meta::BlockMeta;
     use cntryl_midge::sst::format::BlockHandle;
-    use bytes::Bytes;
 
     #[test]
     fn should_verify_blockmeta_size_for_cache_efficiency() {
@@ -28,9 +28,9 @@ mod tests {
         //
         // Total: ~169 bytes without bloom, fits in 3 cache lines
         // With small bloom: ~193 bytes, fits in 3-4 cache lines
-        
+
         println!("BlockMeta size: {} bytes", size);
-        
+
         // Relaxed threshold: accept up to 256 bytes (4 cache lines)
         // This is reasonable given the fields we need
         assert!(
@@ -38,7 +38,7 @@ mod tests {
             "BlockMeta size {} exceeds 256 bytes (4 cache lines); consider field reordering or packing",
             size
         );
-        
+
         // Ideally, we'd like to be under 192 bytes (3 cache lines)
         if size > 192 {
             println!(
@@ -80,10 +80,14 @@ mod tests {
         println!(
             "BlockMeta: {} bytes, {} metas per 64-byte cache line, {} metas per 128 bytes",
             meta_size,
-            if metas_per_line == 0 { 0 } else { metas_per_line },
+            if metas_per_line == 0 {
+                0
+            } else {
+                metas_per_line
+            },
             128 / meta_size
         );
-        
+
         // As long as we're under 4 cache lines, sequential access will be efficient
         assert!(meta_size <= 256);
     }

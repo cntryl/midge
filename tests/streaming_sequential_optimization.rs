@@ -28,19 +28,19 @@ mod tests {
 
         // Act: Simulate sequential block access (0 → 1 → 2 → 3)
         opt.record_lookup(1000, 0);
-        assert_eq!(opt.predict_next_block(), None);  // No prediction yet
+        assert_eq!(opt.predict_next_block(), None); // No prediction yet
 
         opt.record_lookup(1001, 1);
-        assert_eq!(opt.predict_next_block(), Some(2));  // Predict next
+        assert_eq!(opt.predict_next_block(), Some(2)); // Predict next
 
         opt.record_lookup(1002, 2);
-        assert_eq!(opt.predict_next_block(), Some(3));  // Still sequential
+        assert_eq!(opt.predict_next_block(), Some(3)); // Still sequential
 
         opt.record_lookup(1003, 3);
-        assert_eq!(opt.predict_next_block(), Some(4));  // Continue sequential
+        assert_eq!(opt.predict_next_block(), Some(4)); // Continue sequential
 
         // Assert
-        assert!(opt.predictor_hit_ratio() > 0.5);  // Should have reasonable predictor accuracy
+        assert!(opt.predictor_hit_ratio() > 0.5); // Should have reasonable predictor accuracy
     }
 
     #[test]
@@ -60,7 +60,7 @@ mod tests {
 
         // Assert
         assert_eq!(pred_sequential, Some(3));
-        assert_eq!(pred_after_jump, None);  // No prediction after backward jump
+        assert_eq!(pred_after_jump, None); // No prediction after backward jump
     }
 
     #[test]
@@ -70,7 +70,7 @@ mod tests {
 
         // Act: Record some lookups to populate cache
         for i in 0..50 {
-            opt.record_lookup(i as u64, i % 10);  // Only 10 unique blocks
+            opt.record_lookup(i as u64, i % 10); // Only 10 unique blocks
         }
 
         // Now query the cache for keys we've seen
@@ -78,7 +78,7 @@ mod tests {
             let result = opt.cache_lookup(i as u64);
             // Some should hit depending on hash collisions
             if result.is_some() {
-                assert!(result.unwrap() < 10);  // All entries should be in blocks 0-9
+                assert!(result.unwrap() < 10); // All entries should be in blocks 0-9
             }
         }
 
@@ -127,7 +127,10 @@ mod tests {
 
         // Assert
         let predictor_ratio = opt.predictor_hit_ratio();
-        assert!(predictor_ratio > 0.5, "Range scans should have high predictor accuracy");
+        assert!(
+            predictor_ratio > 0.5,
+            "Range scans should have high predictor accuracy"
+        );
     }
 
     #[test]
@@ -169,8 +172,8 @@ mod tests {
 
         // Assert
         assert_eq!(pred_before, Some(3));
-        assert_eq!(pred_after, Some(3));  // Predictor state preserved
-        assert_eq!(opt.cache_hit_ratio(), 0.0);  // Metrics reset
+        assert_eq!(pred_after, Some(3)); // Predictor state preserved
+        assert_eq!(opt.cache_hit_ratio(), 0.0); // Metrics reset
         assert_eq!(opt.predictor_hit_ratio(), 0.0);
     }
 
@@ -194,8 +197,8 @@ mod tests {
 
         // Act: Generate predictable access pattern
         opt.record_lookup(1, 0);
-        opt.record_lookup(2, 1);  // Sequential hit
-        opt.record_lookup(3, 2);  // Sequential hit
+        opt.record_lookup(2, 1); // Sequential hit
+        opt.record_lookup(3, 2); // Sequential hit
 
         let metrics = opt.metrics();
 
@@ -234,12 +237,12 @@ mod tests {
         // Act: Sequential then large forward jump
         opt.record_lookup(1, 0);
         opt.record_lookup(2, 1);
-        opt.record_lookup(3, 100);  // Large jump forward
+        opt.record_lookup(3, 100); // Large jump forward
         let pred = opt.predict_next_block();
 
         // Assert
-        assert_eq!(pred, Some(101));  // Should still predict (considered sequential)
-        // This is acceptable since the predictor handles fence pointers optimistically
+        assert_eq!(pred, Some(101)); // Should still predict (considered sequential)
+                                     // This is acceptable since the predictor handles fence pointers optimistically
     }
 
     #[test]
@@ -281,7 +284,7 @@ mod tests {
 
         // Second range scan (same blocks, different keys)
         for i in 0..10 {
-            opt.record_lookup((i + 100) as u64, i);  // Different keys, same blocks
+            opt.record_lookup((i + 100) as u64, i); // Different keys, same blocks
         }
 
         let efficiency_second = opt.efficiency_ratio();

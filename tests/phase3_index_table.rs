@@ -5,9 +5,9 @@
 
 #[cfg(test)]
 mod tests {
-    use cntryl_midge::sst::{BlockMeta, IndexTable};
-    use cntryl_midge::sst::format::BlockHandle;
     use bytes::Bytes;
+    use cntryl_midge::sst::format::BlockHandle;
+    use cntryl_midge::sst::{BlockMeta, IndexTable};
 
     fn build_test_blocks() -> Vec<BlockMeta> {
         vec![
@@ -248,11 +248,7 @@ mod tests {
     fn should_handle_adjacent_key_ranges() {
         // Arrange
         let metas = vec![
-            BlockMeta::new(
-                Bytes::from("a"),
-                Bytes::from("b"),
-                BlockHandle::new(0, 100),
-            ),
+            BlockMeta::new(Bytes::from("a"), Bytes::from("b"), BlockHandle::new(0, 100)),
             BlockMeta::new(
                 Bytes::from("c"),
                 Bytes::from("d"),

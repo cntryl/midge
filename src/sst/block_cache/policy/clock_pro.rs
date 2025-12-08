@@ -127,7 +127,7 @@ impl ClockProPolicy {
 impl Policy for ClockProPolicy {
     fn on_access(&mut self, entry_id: EntryId) {
         self.ensure_capacity(entry_id);
-        
+
         let idx = entry_id as usize;
         let slot = &mut self.slots[idx];
 
@@ -175,7 +175,7 @@ impl Policy for ClockProPolicy {
 
     fn on_evict(&mut self, entry_id: EntryId) {
         self.ensure_capacity(entry_id);
-        
+
         let idx = entry_id as usize;
         let (was_resident, was_hot) = {
             let slot = &self.slots[idx];
@@ -321,7 +321,11 @@ mod tests {
         let victim = policy.choose_victim();
 
         // Assert
-        assert_eq!(victim, Some(1), "Should skip referenced entry 0 and return unreferenced entry 1");
+        assert_eq!(
+            victim,
+            Some(1),
+            "Should skip referenced entry 0 and return unreferenced entry 1"
+        );
     }
 
     #[test]

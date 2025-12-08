@@ -117,7 +117,10 @@ impl WriterState {
         }
         let last_key = self.last_key_in_block.clone().unwrap_or_default();
         // Capture block summary using first and last keys
-        let min_key = self.first_key_in_block.clone().unwrap_or_else(|| last_key.clone());
+        let min_key = self
+            .first_key_in_block
+            .clone()
+            .unwrap_or_else(|| last_key.clone());
         let summary = crate::sst::block_meta::BlockSummary::new(
             min_key.clone(),
             last_key.clone(),
@@ -344,7 +347,8 @@ impl SstImageBuilder {
         // Persist block summaries (min/max/key_count/bloom_offset) to meta index
         let mut block_summary_handle = BlockHandle { offset: 0, size: 0 };
         if !self.state.block_summaries.is_empty() {
-            let bs_bytes = crate::sst::block_meta::BlockSummary::encode_all(&self.state.block_summaries);
+            let bs_bytes =
+                crate::sst::block_meta::BlockSummary::encode_all(&self.state.block_summaries);
             let bs_block = Block::new(bs_bytes, BlockType::Filter, CompressionType::None);
             let bs_encoded = bs_block.encode()?;
             block_summary_handle.offset = current_offset;

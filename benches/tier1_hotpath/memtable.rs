@@ -70,7 +70,10 @@ fn bench_put_single(c: &mut Criterion) {
         b.iter(|| {
             let idx = counter % keys.len();
             counter = counter.wrapping_add(1);
-            memtable.put(black_box(keys[idx].as_ref()), black_box(medium_val.as_ref()));
+            memtable.put(
+                black_box(keys[idx].as_ref()),
+                black_box(medium_val.as_ref()),
+            );
         })
     });
 

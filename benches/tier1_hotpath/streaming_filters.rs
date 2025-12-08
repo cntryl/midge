@@ -10,7 +10,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::{fast_negative_filter::FastNegativeFilter, bloom::BloomFilterBuilder};
+use cntryl_midge::sst::{bloom::BloomFilterBuilder, fast_negative_filter::FastNegativeFilter};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 

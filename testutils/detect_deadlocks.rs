@@ -108,9 +108,7 @@ fn has_enclosing_loop(lines: &[String], idx: usize) -> bool {
                         }
                         // If it's another construct (if/while/for/match), keep looking
                         // but only if we're at the same brace level
-                        if t.starts_with("if ")
-                            || t.starts_with("while ")
-                            || t.starts_with("for ")
+                        if t.starts_with("if ") || t.starts_with("while ") || t.starts_with("for ")
                         {
                             return false;
                         }
@@ -139,13 +137,8 @@ struct LockRegion {
 }
 
 /// Try to extract `let guard = mutex.lock()` pattern.
-fn extract_lock_region(
-    lines: &[String],
-    idx: usize,
-    line: &str,
-) -> Option<LockRegion> {
-    let re =
-        Regex::new(r"let\s+mut?\s*(\w+)\s*=\s*(\w+)\.lock\(").unwrap();
+fn extract_lock_region(lines: &[String], idx: usize, line: &str) -> Option<LockRegion> {
+    let re = Regex::new(r"let\s+mut?\s*(\w+)\s*=\s*(\w+)\.lock\(").unwrap();
     let caps = re.captures(line)?;
     let guard_name = caps.get(1)?.as_str().to_string();
     let mutex_name = caps.get(2)?.as_str().to_string();
@@ -209,10 +202,7 @@ fn is_empty_atomic_spin(lines: &[String], idx: usize, line: &str) -> bool {
                 seen_open = true;
                 // If the same line also closes, check body.
                 if l.ends_with('}') {
-                    let body = l
-                        .trim_start_matches('{')
-                        .trim_end_matches('}')
-                        .trim();
+                    let body = l.trim_start_matches('{').trim_end_matches('}').trim();
                     return body.is_empty() || body.starts_with("//");
                 }
                 j += 1;
@@ -258,10 +248,8 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
     let condvar_re = Regex::new(r"\bcondvar\b|\bcond\b|\bcv\b").unwrap();
     let lock_call_re = Regex::new(r"(\w+)\.lock\(").unwrap();
     let await_re = Regex::new(r"\.await\b").unwrap();
-    let io_re = Regex::new(
-        r"(read|write|fsync|flush|recv|send|accept|connect|sleep|park_timeout)",
-    )
-    .unwrap();
+    let io_re = Regex::new(r"(read|write|fsync|flush|recv|send|accept|connect|sleep|park_timeout)")
+        .unwrap();
 
     // A small pre-scan for while lines (atomic spin)
     for (i, line) in lines.iter().enumerate() {
@@ -278,12 +266,10 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
                 line: i + 1,
                 pattern: "condvar.wait() without loop".into(),
                 severity: Severity::High,
-                description:
-                    "Condvar.wait() outside a loop can miss notifications and deadlock."
-                        .into(),
-                fix_suggestion:
-                    "Wrap condvar.wait() in a loop or use wait_while with a predicate."
-                        .into(),
+                description: "Condvar.wait() outside a loop can miss notifications and deadlock."
+                    .into(),
+                fix_suggestion: "Wrap condvar.wait() in a loop or use wait_while with a predicate."
+                    .into(),
             });
         }
 
@@ -310,10 +296,7 @@ fn scan_file(file_path: &Path) -> Vec<DeadlockIssue> {
     // Lock-region based analysis (A, B, C)
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("let ")
-            && trimmed.contains(".lock(")
-            && trimmed.contains('=')
-        {
+        if trimmed.starts_with("let ") && trimmed.contains(".lock(") && trimmed.contains('=') {
             if let Some(region) = extract_lock_region(&lines, i, line) {
                 // A-2: Double-lock same mutex in same region
                 let mut double_lock_reported = false;
@@ -573,9 +556,18 @@ fn print_summary() {
         return;
     }
 
-    let high = issues.iter().filter(|i| i.severity == Severity::High).count();
-    let medium = issues.iter().filter(|i| i.severity == Severity::Medium).count();
-    let low = issues.iter().filter(|i| i.severity == Severity::Low).count();
+    let high = issues
+        .iter()
+        .filter(|i| i.severity == Severity::High)
+        .count();
+    let medium = issues
+        .iter()
+        .filter(|i| i.severity == Severity::Medium)
+        .count();
+    let low = issues
+        .iter()
+        .filter(|i| i.severity == Severity::Low)
+        .count();
 
     println!("\x1b[33mSummary:\x1b[0m");
     println!("  Total issues: {}", issues.len());
@@ -623,7 +615,10 @@ fn print_file_results(path: &Path) {
         return;
     }
 
-    println!("\x1b[33mFound {} potential issue(s):\x1b[0m\n", issues.len());
+    println!(
+        "\x1b[33mFound {} potential issue(s):\x1b[0m\n",
+        issues.len()
+    );
 
     for issue in issues {
         println!(

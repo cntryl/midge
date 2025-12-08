@@ -7,8 +7,8 @@ use tracing::{debug, trace};
 
 use crate::error::{MidgeError, MidgeResult};
 use crate::fs;
-use crate::sst::block_meta::BlockMeta;
 use crate::sst::block_cache::{BlockCache, BlockData, BlockKey, BlockKind};
+use crate::sst::block_meta::BlockMeta;
 use crate::sst::bloom::BloomFilter;
 use crate::sst::encoding::{decode, decode_key_at_offset, TlvBlockIterator};
 use crate::sst::format::{Block, BlockHandle, BlockType, Footer};
@@ -462,12 +462,8 @@ impl SstFile {
     fn read_data_block(&self, handle: BlockHandle) -> MidgeResult<Block> {
         // Try block cache first if configured
         if let Some(ref cache) = self.block_cache {
-            let cache_key = BlockKey::new(
-                self.file_number,
-                handle.offset,
-                BlockKind::Data,
-                self.cf_id,
-            );
+            let cache_key =
+                BlockKey::new(self.file_number, handle.offset, BlockKind::Data, self.cf_id);
 
             // Cache hit: decode the cached raw bytes
             if let Some(cached_handle) = cache.get(&cache_key) {
@@ -917,12 +913,16 @@ impl SstFile {
             if summaries.len() == sparse_index.entries().len() {
                 let mut metas = Vec::with_capacity(sparse_index.entries().len());
                 for (entry, summary) in sparse_index.entries().iter().zip(summaries.iter()) {
-                    let mut meta = BlockMeta::new(summary.min_key.clone(), entry.key.clone(), entry.block_handle);
+                    let mut meta = BlockMeta::new(
+                        summary.min_key.clone(),
+                        entry.key.clone(),
+                        entry.block_handle,
+                    );
                     if let Some(bloom_offset) = summary.bloom_offset {
                         meta = meta.with_bloom_offset(bloom_offset);
                     }
-                    let (has_tombstones, cover_min, cover_max) =
-                        self.tombstone_bounds_for_block(meta.min_key.as_ref(), meta.max_key.as_ref());
+                    let (has_tombstones, cover_min, cover_max) = self
+                        .tombstone_bounds_for_block(meta.min_key.as_ref(), meta.max_key.as_ref());
                     if has_tombstones || cover_min.is_some() || cover_max.is_some() {
                         meta = meta.with_tombstones(has_tombstones, cover_min, cover_max);
                     }
@@ -1126,9 +1126,9 @@ mod tests {
         // Arrange
         let dir = TempDir::new().unwrap();
         let sst_path = create_test_sst(&dir);
-        let cache = Arc::new(ShardedBlockCache::new(
-            BlockCacheOptions::with_capacity(1024 * 1024),
-        ));
+        let cache = Arc::new(ShardedBlockCache::new(BlockCacheOptions::with_capacity(
+            1024 * 1024,
+        )));
         let sst = SstFile::open(&sst_path)
             .unwrap()
             .with_block_cache(cache.clone(), 1, 0);
@@ -1148,9 +1148,9 @@ mod tests {
         // Arrange
         let dir = TempDir::new().unwrap();
         let sst_path = create_test_sst(&dir);
-        let cache = Arc::new(ShardedBlockCache::new(
-            BlockCacheOptions::with_capacity(1024 * 1024),
-        ));
+        let cache = Arc::new(ShardedBlockCache::new(BlockCacheOptions::with_capacity(
+            1024 * 1024,
+        )));
         let sst = SstFile::open(&sst_path)
             .unwrap()
             .with_block_cache(cache.clone(), 1, 0);
@@ -1174,9 +1174,9 @@ mod tests {
         // Arrange
         let dir = TempDir::new().unwrap();
         let sst_path = create_test_sst(&dir);
-        let cache = Arc::new(ShardedBlockCache::new(
-            BlockCacheOptions::with_capacity(1024 * 1024),
-        ));
+        let cache = Arc::new(ShardedBlockCache::new(BlockCacheOptions::with_capacity(
+            1024 * 1024,
+        )));
         let sst = SstFile::open(&sst_path)
             .unwrap()
             .with_block_cache(cache.clone(), 1, 0);

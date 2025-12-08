@@ -51,9 +51,9 @@ pub use block_cache::{
 /// Uses the new `ShardedBlockCache` implementation with WTinyLFU eviction
 /// policy for scan resistance and high hit rates.
 pub fn create_basic_cache(max_size_bytes: usize) -> std::sync::Arc<dyn BlockCacheTrait> {
-    std::sync::Arc::new(ShardedBlockCache::new(
-        BlockCacheOptions::with_capacity(max_size_bytes),
-    ))
+    std::sync::Arc::new(ShardedBlockCache::new(BlockCacheOptions::with_capacity(
+        max_size_bytes,
+    )))
 }
 
 /// Create a block cache with full configuration options.
@@ -78,15 +78,15 @@ pub fn create_cache_with_options(options: BlockCacheOptions) -> std::sync::Arc<S
 // ─── Other public re-exports ─────────────────────────────────────────────────
 pub use block_meta::{BlockMeta, IndexTable};
 pub use bloom::{BloomFilter, BloomFilterBuilder, Filter};
-pub use fast_negative_filter::FastNegativeFilter;
-pub use sequential_access_optimizer::{SequentialAccessOptimizer, SequentialAccessMetrics};
 pub use cloud::{
     ArchiveTier, CloudSst, CloudSstFactory, CloudSstManager, CloudSstManagerConfig,
     CloudSstReaderFactory, SstCloudReader, SstCloudWriter, SstLifecycleState, SstMetadata,
     SstUploadMeta,
 };
+pub use fast_negative_filter::FastNegativeFilter;
 pub use file_manager::FileManager;
 pub use format::{Block, BlockHandle, BlockType, DataBlockBuilder, Footer, IndexBlockBuilder};
+pub use sequential_access_optimizer::{SequentialAccessMetrics, SequentialAccessOptimizer};
 pub use sparse_index::{IndexEntry, SparseIndex, SparseIndexBuilder};
 pub use table_cache::{CachedTable, TableCache, TableCacheStats};
 pub use tombstone_index::{TombstoneIndex, TombstoneIndexBuilder, TombstoneIndexEntry};

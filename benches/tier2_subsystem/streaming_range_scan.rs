@@ -7,8 +7,10 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::{block_meta::BlockMeta, block_meta::IndexTable, fast_negative_filter::FastNegativeFilter};
 use cntryl_midge::sst::format::BlockHandle;
+use cntryl_midge::sst::{
+    block_meta::BlockMeta, block_meta::IndexTable, fast_negative_filter::FastNegativeFilter,
+};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 
@@ -54,7 +56,8 @@ fn bench_range_scan_negative_mix(c: &mut Criterion) {
         b.iter(|| {
             let mut touched = 0usize;
             for (s, e) in &ranges {
-                let blocks = table.find_blocks_in_range(black_box(s.as_ref()), black_box(e.as_ref()));
+                let blocks =
+                    table.find_blocks_in_range(black_box(s.as_ref()), black_box(e.as_ref()));
                 touched += blocks.len();
             }
             black_box(touched)

@@ -17,8 +17,8 @@ mod common;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions};
 use common::{
-    assert_get_equals, create_storage_mode, disk_storage_modes,
-    manual_compaction_test_opts, populate_multi_level_data,
+    assert_get_equals, create_storage_mode, disk_storage_modes, manual_compaction_test_opts,
+    populate_multi_level_data,
 };
 
 // ============================================================================

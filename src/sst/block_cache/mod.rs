@@ -151,8 +151,8 @@ pub trait BlockCache: Send + Sync {
 // ─── Sharded Block Cache ─────────────────────────────────────────────────────
 
 use policy::{ClockProPolicy, LruPolicy, Policy};
-use shard::{BlockCacheShard, ShardStats};
 pub use shard::CfCacheStats;
+use shard::{BlockCacheShard, ShardStats};
 
 /// A sharded block cache that distributes entries across multiple shards.
 ///
@@ -176,9 +176,7 @@ impl ShardedBlockCache {
         let shards: Vec<BlockCacheShard> = (0..num_shards)
             .map(|i| {
                 let policy: Box<dyn Policy + Send> = match options.eviction_policy {
-                    EvictionPolicy::Lru => {
-                        Box::new(LruPolicy::new(expected_entries_per_shard))
-                    }
+                    EvictionPolicy::Lru => Box::new(LruPolicy::new(expected_entries_per_shard)),
                     EvictionPolicy::Clock | EvictionPolicy::WTinyLfu => {
                         // CLOCK-Pro is the default high-performance policy
                         // It provides O(1) operations with scan resistance
@@ -250,7 +248,8 @@ impl ShardedBlockCache {
         if !self.per_cf_stats_enabled {
             return None;
         }
-        let mut total: std::collections::HashMap<u32, CfCacheStats> = std::collections::HashMap::new();
+        let mut total: std::collections::HashMap<u32, CfCacheStats> =
+            std::collections::HashMap::new();
         for shard in self.shards.iter() {
             if let Some(shard_cf_stats) = shard.all_cf_stats() {
                 for (cf_id, stats) in shard_cf_stats {
@@ -351,9 +350,8 @@ mod tests {
     #[test]
     fn should_distribute_keys_given_multiple_inserts_when_sharded() {
         // Arrange
-        let cache = ShardedBlockCache::new(
-            BlockCacheOptions::with_capacity(1024 * 1024).num_shards(4),
-        );
+        let cache =
+            ShardedBlockCache::new(BlockCacheOptions::with_capacity(1024 * 1024).num_shards(4));
 
         // Act - Insert keys that should land in different shards
         for i in 0..100 {
@@ -369,9 +367,8 @@ mod tests {
     #[test]
     fn should_aggregate_stats_given_multiple_shards_when_stats_called() {
         // Arrange
-        let cache = ShardedBlockCache::new(
-            BlockCacheOptions::with_capacity(1024 * 1024).num_shards(4),
-        );
+        let cache =
+            ShardedBlockCache::new(BlockCacheOptions::with_capacity(1024 * 1024).num_shards(4));
 
         // Act
         for i in 0..10 {

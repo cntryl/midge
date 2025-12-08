@@ -154,7 +154,7 @@ impl ShardInner {
         // Track attempts to detect when all remaining entries are pinned
         let mut attempts = 0;
         let max_attempts = self.entries.len().max(1);
-        
+
         while self.used_bytes + needed > self.capacity_bytes {
             if let Some(victim_id) = self.policy.choose_victim() {
                 // Check if entry is pinned
@@ -303,8 +303,10 @@ impl BlockCacheShard {
             policy,
             enable_cf_stats,
         )));
-        let unpinner: SharedUnpinner = Arc::new(ShardUnpinnerImpl { inner: Arc::clone(&inner) });
-        
+        let unpinner: SharedUnpinner = Arc::new(ShardUnpinnerImpl {
+            inner: Arc::clone(&inner),
+        });
+
         Self { inner, unpinner }
     }
 
@@ -708,28 +710,28 @@ mod tests {
         let key = make_key(1, 0);
 
         let insert_handle = shard.insert(key, make_data(100));
-        
+
         // Act
         {
             // Get also returns a pinned handle
             let get_handle = shard.get(&key).unwrap();
             assert!(get_handle.is_pinned());
-            
+
             // Both handles exist, pin count should be 2
             let inner = shard.inner.lock();
             assert_eq!(inner.entries[0].as_ref().unwrap().pins, 2);
             drop(inner);
             // get_handle dropped here
         }
-        
+
         // Assert - After get_handle drop, pin count should be 1
         let inner = shard.inner.lock();
         assert_eq!(inner.entries[0].as_ref().unwrap().pins, 1);
         drop(inner);
-        
+
         // Drop insert_handle
         drop(insert_handle);
-        
+
         // Now pin count should be 0
         let inner = shard.inner.lock();
         assert_eq!(inner.entries[0].as_ref().unwrap().pins, 0);
@@ -739,7 +741,7 @@ mod tests {
     fn should_reject_cold_block_given_hot_cache_when_admission_control_active() {
         // Arrange - Create a small shard that will be full quickly
         let shard = make_shard(200);
-        
+
         // Insert a "hot" block and access it many times to build frequency
         let hot_key = make_key(1, 0);
         {
@@ -749,26 +751,28 @@ mod tests {
         for _ in 0..10 {
             let _ = shard.get(&hot_key);
         }
-        
+
         // Act - Now try to insert a "cold" block that we've never seen before
         let cold_key = make_key(999, 0);
         let _cold_handle = shard.insert(cold_key, make_data(100));
-        
-        // Assert - The cold block should either be rejected (rejections > 0) 
+
+        // Assert - The cold block should either be rejected (rejections > 0)
         // or admitted (if cache had room or frequency was high enough)
         // The key test is that the rejection tracking works
         // Note: With the current admission logic, this may or may not reject
         // depending on timing and frequency sketch state
         let stats = shard.stats();
-        assert!(stats.admissions + stats.rejections >= 2, 
-            "Should have at least one admission and one rejection or two admissions");
+        assert!(
+            stats.admissions + stats.rejections >= 2,
+            "Should have at least one admission and one rejection or two admissions"
+        );
     }
 
     #[test]
     fn should_track_rejections_given_scan_workload_when_full_cache() {
         // Arrange - Create a shard with room for just a few blocks
         let shard = make_shard(500);
-        
+
         // Fill with "hot" blocks and access them multiple times
         for i in 0..3 {
             let key = make_key(i, 0);
@@ -780,49 +784,51 @@ mod tests {
                 let _ = shard.get(&key);
             }
         }
-        
+
         // Act - Now simulate a "scan" - insert many blocks we'll never access again
         for i in 100..110 {
             let scan_key = make_key(i, 0);
             let _h = shard.insert(scan_key, make_data(100));
         }
-        
+
         // Assert
         let stats = shard.stats();
-        
+
         // With admission control, some scan blocks should be rejected
         // because they're colder than the hot blocks
         // The exact number depends on the frequency sketch and policy
-        assert!(stats.rejections > 0 || stats.evictions > 0,
-            "Scan workload should trigger either rejections or evictions");
+        assert!(
+            stats.rejections > 0 || stats.evictions > 0,
+            "Scan workload should trigger either rejections or evictions"
+        );
     }
 
     #[test]
     fn should_track_per_kind_stats_given_mixed_block_types_when_accessed() {
         // Arrange: cache with enough room for multiple blocks
         let shard = make_shard(8192);
-        
+
         // Insert blocks of different kinds
         let data_key = BlockKey::new(1, 0, BlockKind::Data, 0);
         let index_key = BlockKey::new(2, 0, BlockKind::Index, 0);
         let filter_key = BlockKey::new(3, 0, BlockKind::Filter, 0);
-        
+
         let _data_h = shard.insert(data_key, make_data(100));
         let _index_h = shard.insert(index_key, make_data(100));
         let _filter_h = shard.insert(filter_key, make_data(100));
-        
+
         // Act: access data block twice, index block once
         let _ = shard.get(&data_key);
         let _ = shard.get(&data_key);
         let _ = shard.get(&index_key);
-        
+
         // Miss on a non-existent meta key
         let meta_key = BlockKey::new(4, 0, BlockKind::Meta, 0);
         let _ = shard.get(&meta_key);
-        
+
         // Assert: per-kind stats should reflect accesses
         let stats = shard.stats();
-        
+
         // Data: 2 hits (both get() calls hit)
         assert_eq!(stats.hits_by_kind[BlockKind::Data.as_u8() as usize], 2);
         // Index: 1 hit
@@ -840,34 +846,34 @@ mod tests {
     fn should_track_per_cf_stats_given_multiple_column_families_when_enabled() {
         // Arrange: cache with per-CF stats enabled
         let shard = make_shard_with_cf_stats(8192);
-        
+
         // Insert blocks from two different column families
         let cf0_key1 = BlockKey::new(1, 0, BlockKind::Data, 0);
         let cf0_key2 = BlockKey::new(2, 0, BlockKind::Data, 0);
         let cf1_key1 = BlockKey::new(3, 0, BlockKind::Data, 1);
         let cf2_key1 = BlockKey::new(4, 0, BlockKind::Data, 2);
-        
+
         let _h1 = shard.insert(cf0_key1, make_data(100));
         let _h2 = shard.insert(cf0_key2, make_data(100));
         let _h3 = shard.insert(cf1_key1, make_data(200));
-        
+
         // Act: access CF0 blocks (2 hits), miss on CF2
         let _ = shard.get(&cf0_key1);
         let _ = shard.get(&cf0_key2);
         let _ = shard.get(&cf2_key1); // miss
-        
+
         // Assert: per-CF stats should reflect accesses
         let cf0_stats = shard.cf_stats(0).expect("CF0 should have stats");
         assert_eq!(cf0_stats.hits, 2, "CF0 should have 2 hits");
         assert_eq!(cf0_stats.misses, 0, "CF0 should have 0 misses");
         assert_eq!(cf0_stats.entry_count, 2, "CF0 should have 2 entries");
         assert_eq!(cf0_stats.used_bytes, 200, "CF0 should use 200 bytes");
-        
+
         let cf1_stats = shard.cf_stats(1).expect("CF1 should have stats");
         assert_eq!(cf1_stats.hits, 0, "CF1 should have 0 hits");
         assert_eq!(cf1_stats.entry_count, 1, "CF1 should have 1 entry");
         assert_eq!(cf1_stats.used_bytes, 200, "CF1 should use 200 bytes");
-        
+
         let cf2_stats = shard.cf_stats(2).expect("CF2 should have stats");
         assert_eq!(cf2_stats.misses, 1, "CF2 should have 1 miss");
         assert_eq!(cf2_stats.hits, 0, "CF2 should have 0 hits");
@@ -878,44 +884,52 @@ mod tests {
     fn should_return_none_for_cf_stats_given_disabled_when_queried() {
         // Arrange: cache without per-CF stats
         let shard = make_shard(8192);
-        
+
         let key = make_key(1, 0);
         let _h = shard.insert(key, make_data(100));
 
         // Act
         let _ = shard.get(&key);
-        
+
         // Assert: cf_stats should return None
-        assert!(shard.cf_stats(0).is_none(), "CF stats should be None when disabled");
-        assert!(shard.all_cf_stats().is_none(), "All CF stats should be None when disabled");
+        assert!(
+            shard.cf_stats(0).is_none(),
+            "CF stats should be None when disabled"
+        );
+        assert!(
+            shard.all_cf_stats().is_none(),
+            "All CF stats should be None when disabled"
+        );
     }
 
     #[test]
     fn should_update_per_cf_stats_on_eviction_given_cf_stats_enabled() {
         // Arrange: small cache that will need to evict
         let shard = make_shard_with_cf_stats(300);
-        
+
         // Insert two blocks from CF0 (200 bytes each)
         let cf0_key1 = BlockKey::new(1, 0, BlockKind::Data, 0);
         let cf0_key2 = BlockKey::new(2, 0, BlockKind::Data, 0);
-        
+
         {
             let _h1 = shard.insert(cf0_key1, make_data(100));
         } // Drop handle to allow eviction
         {
             let _h2 = shard.insert(cf0_key2, make_data(100));
         } // Drop handle to allow eviction
-        
+
         // Act - Insert a large block from CF1 that will force eviction of CF0 blocks
         let cf1_key = BlockKey::new(3, 0, BlockKind::Data, 1);
         let _h3 = shard.insert(cf1_key, make_data(200));
-        
+
         // Assert: CF0 should have fewer entries/bytes due to eviction
         let cf0_stats = shard.cf_stats(0).expect("CF0 should have stats");
         let cf1_stats = shard.cf_stats(1).expect("CF1 should have stats");
-        
+
         // At least one CF0 block should have been evicted
-        assert!(cf0_stats.entry_count < 2 || cf1_stats.entry_count == 1,
-            "Eviction should update per-CF stats");
+        assert!(
+            cf0_stats.entry_count < 2 || cf1_stats.entry_count == 1,
+            "Eviction should update per-CF stats"
+        );
     }
 }

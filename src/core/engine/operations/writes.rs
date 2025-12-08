@@ -1,4 +1,4 @@
-﻿//! Write Operations Module
+//! Write Operations Module
 //!
 //! This module contains all write operations for MidgeEngine, including:
 //! - Point writes (put, put_with_ttl)
@@ -339,10 +339,9 @@ impl MidgeEngine {
         self.sync_wal_if_needed()?;
 
         // Apply to memtable
-        let cf_arc = self
-            .cf_set
-            .get_cf(cf_id)
-            .ok_or_else(|| MidgeError::invalid_config(format!("Column family '{}' does not exist", cf.name())))?;
+        let cf_arc = self.cf_set.get_cf(cf_id).ok_or_else(|| {
+            MidgeError::invalid_config(format!("Column family '{}' does not exist", cf.name()))
+        })?;
 
         {
             let mt = cf_arc.memtable.load();
@@ -818,4 +817,3 @@ mod tests {
         );
     }
 }
-

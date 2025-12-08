@@ -1,11 +1,10 @@
+use cntryl_midge::common::codec::CompressionType;
+use cntryl_midge::sst::fs::{FsDynWriter, SstFile};
 /// TDD Test: Per-block bloom implementation in writer
 ///
 /// This test verifies that the writer correctly builds per-block blooms
 /// and stores them in the SST file with proper metadata.
-
 use cntryl_midge::sst::DynSstWriter;
-use cntryl_midge::sst::fs::{FsDynWriter, SstFile};
-use cntryl_midge::common::codec::CompressionType;
 use std::path::PathBuf;
 
 fn create_temp_sst_dir() -> PathBuf {
@@ -18,14 +17,8 @@ fn create_temp_sst_dir() -> PathBuf {
 fn should_create_per_block_blooms_given_multi_block_write_when_finishing() {
     // Arrange: Create writer with moderate block size
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        1024,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 1024, false, None)
+        .expect("Failed to create writer");
 
     // Add keys that will definitely span multiple blocks
     for i in 0..50 {
@@ -50,8 +43,7 @@ fn should_create_per_block_blooms_given_multi_block_write_when_finishing() {
     assert!(file_size > 0, "SST file should not be empty");
 
     // Try to open and read back
-    let _sst = SstFile::open(&sst_path)
-        .expect("Failed to open SST for reading");
+    let _sst = SstFile::open(&sst_path).expect("Failed to open SST for reading");
 
     println!("SST file created: {} bytes", file_size);
 
@@ -63,14 +55,8 @@ fn should_create_per_block_blooms_given_multi_block_write_when_finishing() {
 fn should_verify_per_block_blooms_are_queryable() {
     // Arrange
     let temp_dir = create_temp_sst_dir();
-    let mut writer = FsDynWriter::new(
-        &temp_dir,
-        CompressionType::None,
-        768,
-        false,
-        None,
-    )
-    .expect("Failed to create writer");
+    let mut writer = FsDynWriter::new(&temp_dir, CompressionType::None, 768, false, None)
+        .expect("Failed to create writer");
 
     // Add specific keys
     let test_keys = vec!["aaa", "bbb", "ccc", "ddd", "eee"];
@@ -83,9 +69,7 @@ fn should_verify_per_block_blooms_are_queryable() {
     // Add more keys to create multiple blocks
     for i in 0..30 {
         let key = format!("filler_{:03}", i);
-        writer
-            .add(key.as_bytes(), b"x")
-            .expect("Failed to add key");
+        writer.add(key.as_bytes(), b"x").expect("Failed to add key");
     }
 
     // Act

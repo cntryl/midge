@@ -12,11 +12,13 @@
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
-use cntryl_midge::sst::{TombstoneIndex, TombstoneIndexBuilder};
 use cntryl_midge::sst::format::BlockHandle;
 use cntryl_midge::sst::traits::RangeTombstone;
+use cntryl_midge::sst::{TombstoneIndex, TombstoneIndexBuilder};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
+use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -29,17 +31,24 @@ fn create_tombstone(start: Vec<u8>, end: Vec<u8>, seq: u64) -> RangeTombstone {
 /// Build tombstone index (precomputed for benchmarks)
 fn build_tombstone_index(num_blocks: usize, tombstones_per_block: usize) -> TombstoneIndex {
     let mut builder = TombstoneIndexBuilder::new();
-    
+
     for block_idx in 0..num_blocks {
         let mut tombstones = Vec::new();
         for tomb_idx in 0..tombstones_per_block {
             let start = format!("key_{:06}_{:03}_start", block_idx, tomb_idx).into_bytes();
             let end = format!("key_{:06}_{:03}_end", block_idx, tomb_idx).into_bytes();
-            tombstones.push(create_tombstone(start, end, (block_idx * 1000 + tomb_idx) as u64));
+            tombstones.push(create_tombstone(
+                start,
+                end,
+                (block_idx * 1000 + tomb_idx) as u64,
+            ));
         }
-        builder.add_block(&tombstones, BlockHandle::new((block_idx as u64) * 4096, 4096));
+        builder.add_block(
+            &tombstones,
+            BlockHandle::new((block_idx as u64) * 4096, 4096),
+        );
     }
-    
+
     builder.finish()
 }
 
@@ -54,12 +63,12 @@ fn tombstone_index_point_lookup(c: &mut Criterion) {
     for num_blocks in [10, 100, 500].iter() {
         // Precompute index outside benchmark loop
         let index = build_tombstone_index(*num_blocks, 10);
-        
+
         // Precompute search keys to avoid allocation in hot path
         let search_keys: Vec<Vec<u8>> = (0..1000)
             .map(|i| format!("key_{:06}_005_middle", i % num_blocks).into_bytes())
             .collect();
-        
+
         group.bench_with_input(
             BenchmarkId::from_parameter(num_blocks),
             num_blocks,
@@ -87,7 +96,7 @@ fn tombstone_index_range_scan(c: &mut Criterion) {
     for num_blocks in [10, 100, 500].iter() {
         // Precompute index outside benchmark loop
         let index = build_tombstone_index(*num_blocks, 10);
-        
+
         // Precompute range keys to avoid allocation in hot path
         let ranges: Vec<(Vec<u8>, Vec<u8>)> = (0..100)
             .map(|i| {
@@ -96,7 +105,7 @@ fn tombstone_index_range_scan(c: &mut Criterion) {
                 (start, end)
             })
             .collect();
-        
+
         group.bench_with_input(
             BenchmarkId::from_parameter(num_blocks),
             num_blocks,
@@ -104,7 +113,9 @@ fn tombstone_index_range_scan(c: &mut Criterion) {
                 b.iter(|| {
                     let mut total_blocks = 0;
                     for (start, end) in &ranges {
-                        let blocks: Vec<_> = index.find_blocks_in_range(black_box(start), black_box(end)).collect();
+                        let blocks: Vec<_> = index
+                            .find_blocks_in_range(black_box(start), black_box(end))
+                            .collect();
                         total_blocks += blocks.len();
                     }
                     black_box(total_blocks)
@@ -124,12 +135,12 @@ fn tombstone_index_might_be_deleted(c: &mut Criterion) {
     for num_blocks in [10, 100, 500].iter() {
         // Precompute index outside benchmark loop
         let index = build_tombstone_index(*num_blocks, 10);
-        
+
         // Precompute query keys to avoid allocation in hot path
         let query_keys: Vec<Vec<u8>> = (0..10000)
             .map(|i| format!("key_{:06}_005_middle", i % (num_blocks * 2)).into_bytes())
             .collect();
-        
+
         group.bench_with_input(
             BenchmarkId::from_parameter(num_blocks),
             num_blocks,
@@ -158,11 +169,7 @@ fn tombstone_index_build(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter(num_blocks),
             num_blocks,
-            |b, n| {
-                b.iter(|| {
-                    black_box(build_tombstone_index(*n, 10))
-                })
-            },
+            |b, n| b.iter(|| black_box(build_tombstone_index(*n, 10))),
         );
     }
     group.finish();
@@ -171,7 +178,7 @@ fn tombstone_index_build(c: &mut Criterion) {
 criterion_group!(
     name = benches;
     config = criterion_config_for_tier(BenchTier::Tier2Subsystem);
-    targets = 
+    targets =
         tombstone_index_point_lookup,
         tombstone_index_range_scan,
         tombstone_index_might_be_deleted,

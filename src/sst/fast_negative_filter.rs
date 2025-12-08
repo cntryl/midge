@@ -21,8 +21,8 @@
 //!
 //! Each byte holds 8 block bits (LSB-first). Bit position = block index.
 
-use bytes::Bytes;
 use crate::error::{MidgeError, MidgeResult};
+use bytes::Bytes;
 
 /// Maximum blocks per SST (limiting factor for dense 256-bit bitset).
 pub const MAX_BLOCKS_PER_SST: usize = 256;
@@ -53,13 +53,11 @@ impl FastNegativeFilter {
     #[inline]
     pub fn from_bytes(bytes: &[u8]) -> MidgeResult<Self> {
         if bytes.len() != FAST_NEGATIVE_FILTER_BYTES {
-            return Err(MidgeError::InvalidData(
-                format!(
-                    "FastNegativeFilter: expected {} bytes, got {}",
-                    FAST_NEGATIVE_FILTER_BYTES,
-                    bytes.len()
-                ),
-            ));
+            return Err(MidgeError::InvalidData(format!(
+                "FastNegativeFilter: expected {} bytes, got {}",
+                FAST_NEGATIVE_FILTER_BYTES,
+                bytes.len()
+            )));
         }
         let mut bitset = [0u8; FAST_NEGATIVE_FILTER_BYTES];
         bitset.copy_from_slice(bytes);

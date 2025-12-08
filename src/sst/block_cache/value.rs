@@ -43,11 +43,7 @@ impl BlockData {
     ///
     /// `uncompressed_size` should be the size after decompression (for accounting).
     #[inline]
-    pub fn compressed(
-        bytes: Arc<[u8]>,
-        uncompressed_size: u32,
-        block_kind: BlockKind,
-    ) -> Self {
+    pub fn compressed(bytes: Arc<[u8]>, uncompressed_size: u32, block_kind: BlockKind) -> Self {
         let compressed_size = bytes.len() as u32;
         Self {
             bytes,

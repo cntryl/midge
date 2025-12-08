@@ -22,7 +22,10 @@ struct Bucket {
 }
 
 impl Bucket {
-    const EMPTY: Self = Self { hash: 0, entry_id: INVALID_ENTRY };
+    const EMPTY: Self = Self {
+        hash: 0,
+        entry_id: INVALID_ENTRY,
+    };
 
     #[inline]
     fn is_empty(&self) -> bool {

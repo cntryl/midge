@@ -65,7 +65,7 @@ pub use crate::api::{
     WriteOptions, DEFAULT_CF_ID, DEFAULT_CF_NAME,
 };
 pub use crate::config::{
-    CloudStorageBuilder, CompactionStyle, CompressionType, MidgeOptions, StorageMode,
+    CloudStorageBuilder, CompactionStyle, CompressionType, EngineFlags, MidgeOptions, StorageMode,
     WalRecoveryMode,
 };
 // Export EngineTransaction as the public Transaction type

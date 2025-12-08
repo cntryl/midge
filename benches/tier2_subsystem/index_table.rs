@@ -1,7 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use cntryl_midge::sst::{BlockMeta, IndexTable};
-use cntryl_midge::sst::format::BlockHandle;
 use bytes::Bytes;
+use cntryl_midge::sst::format::BlockHandle;
+use cntryl_midge::sst::{BlockMeta, IndexTable};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 fn build_index_table(num_blocks: usize) -> IndexTable {
     let mut metas = Vec::with_capacity(num_blocks);
@@ -24,7 +24,7 @@ fn index_table_find_block(c: &mut Criterion) {
 
     for num_blocks in [10, 100, 1000].iter() {
         let table = black_box(build_index_table(*num_blocks));
-        
+
         group.bench_with_input(
             BenchmarkId::from_parameter(num_blocks),
             num_blocks,
@@ -51,7 +51,7 @@ fn index_table_find_blocks_in_range(c: &mut Criterion) {
 
     for num_blocks in [10, 100, 1000].iter() {
         let table = black_box(build_index_table(*num_blocks));
-        
+
         group.bench_with_input(
             BenchmarkId::from_parameter(num_blocks),
             num_blocks,
@@ -77,15 +77,11 @@ fn index_table_memory_footprint(c: &mut Criterion) {
 
     for num_blocks in [100, 1000, 10000].iter() {
         let table = build_index_table(*num_blocks);
-        
+
         group.bench_with_input(
             BenchmarkId::from_parameter(num_blocks),
             num_blocks,
-            |b, _| {
-                b.iter(|| {
-                    black_box(table.memory_usage())
-                })
-            },
+            |b, _| b.iter(|| black_box(table.memory_usage())),
         );
     }
     group.finish();

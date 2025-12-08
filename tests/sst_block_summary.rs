@@ -1,7 +1,7 @@
-use cntryl_midge::sst::DynSstWriter;
+use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::fs::FsDynWriter;
 use cntryl_midge::sst::fs::SstFile;
-use cntryl_midge::common::codec::CompressionType;
+use cntryl_midge::sst::DynSstWriter;
 use std::path::PathBuf;
 
 fn create_temp_sst_dir() -> PathBuf {
@@ -25,16 +25,23 @@ fn should_persist_block_summary_in_meta_index() {
 
     // Act
     let path = temp_dir.join("summary_test.sst");
-    (Box::new(writer) as Box<dyn DynSstWriter>).finish_to_path(&path).unwrap();
+    (Box::new(writer) as Box<dyn DynSstWriter>)
+        .finish_to_path(&path)
+        .unwrap();
     let sst = SstFile::open(&path).unwrap();
-    let metas = sst.persisted_block_metadata().expect("Should produce block metadata");
+    let metas = sst
+        .persisted_block_metadata()
+        .expect("Should produce block metadata");
 
     // Assert: each block has non-empty min_key and min_key <= max_key
     assert!(!metas.is_empty());
     for m in metas {
         assert!(m.min_key.len() > 0, "min_key must be non-empty");
         assert!(m.max_key.len() > 0, "max_key must be non-empty");
-        assert!(m.min_key.as_ref() <= m.max_key.as_ref(), "min_key <= max_key");
+        assert!(
+            m.min_key.as_ref() <= m.max_key.as_ref(),
+            "min_key <= max_key"
+        );
     }
 
     // Cleanup

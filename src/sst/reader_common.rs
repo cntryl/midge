@@ -17,8 +17,8 @@
 //!   the conservative sparse-index–only pipeline.
 
 use crate::error::MidgeResult;
-use crate::sst::bloom::BloomFilter;
 use crate::sst::block_meta::{BlockMeta, BlockSummary, IndexTable};
+use crate::sst::bloom::BloomFilter;
 use crate::sst::format::{Block, BlockHandle, BlockType, Footer};
 use crate::sst::meta_index::{linear_search_meta_index, meta_index_contains};
 use crate::sst::range_tombstone::decode_range_tombstones;
@@ -61,8 +61,8 @@ impl SstMetadata {
         // Optionally read meta index, bloom filter, and range tombstones
         let mut bloom_filter: Option<BloomFilter> = None;
         let mut range_tombstones: Vec<RangeTombstone> = Vec::new();
-            let mut block_summaries: Option<Vec<BlockSummary>> = None;
-            let mut use_internal = false;
+        let mut block_summaries: Option<Vec<BlockSummary>> = None;
+        let mut use_internal = false;
 
         if footer.meta_index_handle.size > 0 {
             let meta_raw = safe_slice(raw, &footer.meta_index_handle, "meta index block")?;

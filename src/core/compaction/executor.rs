@@ -587,11 +587,13 @@ pub(crate) fn execute_compaction_plan(
     let mut bytes_read: u64 = 0;
     let mut _bytes_written: u64 = 0;
     // 1) Collect
-    let mut versions = collect_compaction_versions(&cfg.sst_reader_factory, sst_dir, &plan.input_files);
+    let mut versions =
+        collect_compaction_versions(&cfg.sst_reader_factory, sst_dir, &plan.input_files);
     if versions.is_empty() {
         return Ok(None);
     }
-    let range_tombs = collect_compaction_range_tombstones(&cfg.sst_reader_factory, sst_dir, &plan.input_files);
+    let range_tombs =
+        collect_compaction_range_tombstones(&cfg.sst_reader_factory, sst_dir, &plan.input_files);
 
     // 2) Sort
     sort_versions_for_output(&mut versions);
@@ -601,7 +603,8 @@ pub(crate) fn execute_compaction_plan(
 
     // 4) Snapshot-aware tombstone filtering
     let min_snapshot_seq = cfg.snapshot_registry.min_active_seq();
-    let (versions_after_tomb_filter, _removed) = filter_safe_tombstones(&versions, min_snapshot_seq);
+    let (versions_after_tomb_filter, _removed) =
+        filter_safe_tombstones(&versions, min_snapshot_seq);
 
     // 5) Apply compaction filter
     // Apply compaction filter if present (NoOp otherwise).
@@ -635,7 +638,9 @@ pub(crate) fn execute_compaction_plan(
     // 8) Update manifest and cleanup
     if let Some((_path, meta)) = &write_res {
         if let Some(ref hooks) = cfg.test_hooks {
-            hooks.maybe_pause_compaction(crate::common::test_hooks::CompactionGatePoint::BeforeManifestUpdate);
+            hooks.maybe_pause_compaction(
+                crate::common::test_hooks::CompactionGatePoint::BeforeManifestUpdate,
+            );
         }
 
         let combined = crate::core::manifest::VersionEdit::CombinedAddRemove {
@@ -646,7 +651,9 @@ pub(crate) fn execute_compaction_plan(
         cfg.version_manager.apply_edit_sync(combined)?;
 
         if let Some(ref hooks) = cfg.test_hooks {
-            hooks.maybe_pause_compaction(crate::common::test_hooks::CompactionGatePoint::AfterManifestUpdate);
+            hooks.maybe_pause_compaction(
+                crate::common::test_hooks::CompactionGatePoint::AfterManifestUpdate,
+            );
         }
 
         // Remove old SSTs after manifest update

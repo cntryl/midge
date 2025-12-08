@@ -11,11 +11,11 @@
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use cntryl_midge::sst::block_meta::{BlockMeta, IndexTable};
     use cntryl_midge::sst::bloom::{BloomFilter, BloomFilterBuilder};
     use cntryl_midge::sst::fast_negative_filter::{FastNegativeFilter, FAST_NEGATIVE_FILTER_BYTES};
-    use cntryl_midge::sst::block_meta::{BlockMeta, IndexTable};
     use cntryl_midge::sst::format::BlockHandle;
-    use bytes::Bytes;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 1.5.1: Bloom Filter Bits/Key Configuration Tests
@@ -37,7 +37,11 @@ mod tests {
         assert_eq!(filter.keys_count(), 1_000);
         // 8 bits/key should give ~3-5% FPR
         let fpr = filter.estimated_fpr();
-        assert!(fpr > 0.01 && fpr < 0.15, "FPR {} should be in range [1%, 15%]", fpr);
+        assert!(
+            fpr > 0.01 && fpr < 0.15,
+            "FPR {} should be in range [1%, 15%]",
+            fpr
+        );
     }
 
     #[test]
@@ -56,7 +60,11 @@ mod tests {
         assert_eq!(filter.keys_count(), 1_000);
         // 12 bits/key should give ~0.1-0.5% FPR
         let fpr = filter.estimated_fpr();
-        assert!(fpr > 0.0001 && fpr < 0.01, "FPR {} should be in range [0.01%, 1%]", fpr);
+        assert!(
+            fpr > 0.0001 && fpr < 0.01,
+            "FPR {} should be in range [0.01%, 1%]",
+            fpr
+        );
     }
 
     #[test]
@@ -77,7 +85,12 @@ mod tests {
         // Assert: 12 bits/key should have lower FPR
         let fpr_8 = filter_8.estimated_fpr();
         let fpr_12 = filter_12.estimated_fpr();
-        assert!(fpr_12 < fpr_8, "12 bits/key FPR {} should be < 8 bits/key FPR {}", fpr_12, fpr_8);
+        assert!(
+            fpr_12 < fpr_8,
+            "12 bits/key FPR {} should be < 8 bits/key FPR {}",
+            fpr_12,
+            fpr_8
+        );
     }
 
     #[test]
@@ -86,9 +99,7 @@ mod tests {
         let mut bloom_8 = BloomFilterBuilder::with_bits_per_key(8);
         let mut bloom_12 = BloomFilterBuilder::with_bits_per_key(12);
 
-        let test_keys: Vec<String> = (0..500u32)
-            .map(|i| format!("key_{:06}", i))
-            .collect();
+        let test_keys: Vec<String> = (0..500u32).map(|i| format!("key_{:06}", i)).collect();
 
         // Act: Add keys and verify no false negatives
         for key_str in &test_keys {
@@ -180,7 +191,11 @@ mod tests {
 
         // Assert: With sparse keys, even with 12 bits/key, FPR should be very low
         let fpr = false_positives as f64 / test_keys.len() as f64;
-        assert!(fpr < 0.2, "FPR for negative lookups {} should be < 20%", fpr);
+        assert!(
+            fpr < 0.2,
+            "FPR for negative lookups {} should be < 20%",
+            fpr
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -268,7 +283,10 @@ mod tests {
         let block_1_might_contain = table.might_contain_block_via_fast_filter(1);
 
         // Assert
-        assert!(block_0_might_contain, "Block 0 should be marked as potentially containing keys");
+        assert!(
+            block_0_might_contain,
+            "Block 0 should be marked as potentially containing keys"
+        );
         assert!(!block_1_might_contain, "Block 1 should be marked as empty");
     }
 
@@ -395,7 +413,10 @@ mod tests {
         let should_not_have_block_1 = !table.might_contain_block_via_fast_filter(1);
 
         // Assert: Fast filter should allow us to skip block 1
-        assert!(should_have_block_0, "Block 0 should be marked as containing keys");
+        assert!(
+            should_have_block_0,
+            "Block 0 should be marked as containing keys"
+        );
         assert!(should_not_have_block_1, "Block 1 should be marked as empty");
     }
 
@@ -410,7 +431,7 @@ mod tests {
         let inserted_keys: Vec<String> = (0..10_000u32)
             .map(|i| format!("inserted_key_{:08}", i))
             .collect();
-        
+
         for key_str in &inserted_keys {
             bloom_8.add_key(key_str.as_bytes());
             bloom_12.add_key(key_str.as_bytes());
@@ -441,13 +462,22 @@ mod tests {
             fpr_8 * 100.0,
             fpr_12 * 100.0
         );
-        
-        assert!(fpr_8 > 0.001, "8 bits/key FPR {} should be measurable", fpr_8);
-        assert!(fpr_12 >= 0.0, "12 bits/key FPR {} should be non-negative", fpr_12);
+
+        assert!(
+            fpr_8 > 0.001,
+            "8 bits/key FPR {} should be measurable",
+            fpr_8
+        );
+        assert!(
+            fpr_12 >= 0.0,
+            "12 bits/key FPR {} should be non-negative",
+            fpr_12
+        );
         assert!(
             fpr_12 <= fpr_8,
             "12 bits/key should have FPR <= 8 bits/key (actual: {} vs {})",
-            fpr_12, fpr_8
+            fpr_12,
+            fpr_8
         );
         // Verify no false negatives (all inserted keys must be found)
         for key_str in inserted_keys.iter().take(100) {

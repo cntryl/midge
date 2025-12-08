@@ -2,7 +2,6 @@
 ///
 /// Tests that BlockMeta fence pointers and tombstone awareness are properly
 /// used throughout the read path and compaction logic.
-
 use bytes::Bytes;
 use cntryl_midge::sst::block_meta::BlockMeta;
 use cntryl_midge::sst::format::BlockHandle;
@@ -60,11 +59,7 @@ fn should_detect_block_fully_covered_by_tombstones() {
         Bytes::from("d"),
         BlockHandle::new(100, 1024),
     )
-    .with_tombstones(
-        true,
-        Some(Bytes::from("a")),
-        Some(Bytes::from("e")),
-    );
+    .with_tombstones(true, Some(Bytes::from("a")), Some(Bytes::from("e")));
 
     // Act
     let is_covered = meta.might_be_fully_covered();
@@ -82,11 +77,7 @@ fn should_detect_partial_tombstone_coverage() {
         Bytes::from("d"),
         BlockHandle::new(100, 1024),
     )
-    .with_tombstones(
-        true,
-        Some(Bytes::from("c")),
-        Some(Bytes::from("e")),
-    );
+    .with_tombstones(true, Some(Bytes::from("c")), Some(Bytes::from("e")));
 
     // Act
     let is_covered = meta.might_be_fully_covered();
@@ -157,8 +148,16 @@ fn should_use_fence_pointers_to_skip_blocks_in_range_scan() {
     // Arrange: Three blocks
     let blocks = vec![
         BlockMeta::new(Bytes::from("a"), Bytes::from("c"), BlockHandle::new(0, 100)),
-        BlockMeta::new(Bytes::from("d"), Bytes::from("f"), BlockHandle::new(100, 100)),
-        BlockMeta::new(Bytes::from("g"), Bytes::from("z"), BlockHandle::new(200, 100)),
+        BlockMeta::new(
+            Bytes::from("d"),
+            Bytes::from("f"),
+            BlockHandle::new(100, 100),
+        ),
+        BlockMeta::new(
+            Bytes::from("g"),
+            Bytes::from("z"),
+            BlockHandle::new(200, 100),
+        ),
     ];
 
     // Act: Find blocks for range [e, h)
@@ -181,9 +180,17 @@ fn should_skip_blocks_fully_covered_by_tombstones_in_compaction() {
     // Arrange: Three blocks, middle one fully covered by tombstones
     let mut blocks_to_compact = vec![
         BlockMeta::new(Bytes::from("a"), Bytes::from("c"), BlockHandle::new(0, 100)),
-        BlockMeta::new(Bytes::from("d"), Bytes::from("f"), BlockHandle::new(100, 100))
-            .with_tombstones(true, Some(Bytes::from("c")), Some(Bytes::from("g"))),
-        BlockMeta::new(Bytes::from("h"), Bytes::from("z"), BlockHandle::new(200, 100)),
+        BlockMeta::new(
+            Bytes::from("d"),
+            Bytes::from("f"),
+            BlockHandle::new(100, 100),
+        )
+        .with_tombstones(true, Some(Bytes::from("c")), Some(Bytes::from("g"))),
+        BlockMeta::new(
+            Bytes::from("h"),
+            Bytes::from("z"),
+            BlockHandle::new(200, 100),
+        ),
     ];
 
     // Act: Filter out blocks that don't need reading (fully covered by tombstones)
@@ -201,8 +208,16 @@ fn should_use_fence_pointers_in_iterator_next_block() {
     // Arrange: Simulate iterator state with blocks
     let blocks = vec![
         BlockMeta::new(Bytes::from("a"), Bytes::from("c"), BlockHandle::new(0, 100)),
-        BlockMeta::new(Bytes::from("d"), Bytes::from("f"), BlockHandle::new(100, 100)),
-        BlockMeta::new(Bytes::from("g"), Bytes::from("z"), BlockHandle::new(200, 100)),
+        BlockMeta::new(
+            Bytes::from("d"),
+            Bytes::from("f"),
+            BlockHandle::new(100, 100),
+        ),
+        BlockMeta::new(
+            Bytes::from("g"),
+            Bytes::from("z"),
+            BlockHandle::new(200, 100),
+        ),
     ];
 
     // Act: Find next block given current key "e"
@@ -229,8 +244,12 @@ fn should_track_multiple_tombstone_ranges() {
         .with_tombstones(true, Some(Bytes::from("a")), Some(Bytes::from("d")));
 
     // Block2: [d, f] with tombstone [e, g) - NOT fully covered (e > d, so min not covered)
-    let block2 = BlockMeta::new(Bytes::from("d"), Bytes::from("f"), BlockHandle::new(100, 100))
-        .with_tombstones(true, Some(Bytes::from("e")), Some(Bytes::from("g")));
+    let block2 = BlockMeta::new(
+        Bytes::from("d"),
+        Bytes::from("f"),
+        BlockHandle::new(100, 100),
+    )
+    .with_tombstones(true, Some(Bytes::from("e")), Some(Bytes::from("g")));
 
     // Act
     let block1_covered = block1.might_be_fully_covered();
@@ -269,8 +288,16 @@ fn should_handle_block_meta_without_tombstones() {
 fn should_maintain_fence_pointer_ordering() {
     // Arrange: Three blocks in order
     let block1 = BlockMeta::new(Bytes::from("a"), Bytes::from("c"), BlockHandle::new(0, 100));
-    let block2 = BlockMeta::new(Bytes::from("d"), Bytes::from("f"), BlockHandle::new(100, 100));
-    let block3 = BlockMeta::new(Bytes::from("g"), Bytes::from("z"), BlockHandle::new(200, 100));
+    let block2 = BlockMeta::new(
+        Bytes::from("d"),
+        Bytes::from("f"),
+        BlockHandle::new(100, 100),
+    );
+    let block3 = BlockMeta::new(
+        Bytes::from("g"),
+        Bytes::from("z"),
+        BlockHandle::new(200, 100),
+    );
 
     // Act: Check ordering relationships
     let order_12 = block1.max_key <= block2.min_key;

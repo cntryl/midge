@@ -79,6 +79,22 @@ pub enum WalRecoveryMode {
     SkipAnyCorruptedRecord,
 }
 
+/// Flags that gate next-generation runtime behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EngineFlags {
+    /// Enable the deterministic compaction planner/log path.
+    pub deterministic_compaction: bool,
+
+    /// Route background scheduling through the centralized runtime executor.
+    pub single_executor_runtime: bool,
+
+    /// Write SSTs with the new trie index structure beside the legacy index.
+    pub new_sst_index: bool,
+
+    /// Use the unified write path that coordinates WAL, memtables, and cache.
+    pub unified_write_path: bool,
+}
+
 /// Midge database configuration options - low-level fine-grained control
 ///
 /// For most users, [`crate::config::ConfigBuilder`] (high-level API) is recommended.
@@ -257,6 +273,9 @@ pub struct MidgeOptions {
     /// Set to `None` to disable autotuning (default).
     pub autotuner: Option<Arc<crate::config::Autotuner>>,
 
+    /// Runtime feature gates and guardrail toggles.
+    pub engine_flags: EngineFlags,
+
     /// Enable paranoid checksum verification on every SST block read.
     ///
     /// When enabled, checksums are verified on every SST block read, not just
@@ -302,6 +321,7 @@ impl Default for MidgeOptions {
             test_hooks: None,              // No test hooks by default
             autotuner: None,               // No autotuner by default
             paranoid_checksums: false,     // Disabled by default for performance
+            engine_flags: EngineFlags::default(),
         }
     }
 }

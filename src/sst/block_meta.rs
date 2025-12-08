@@ -4,14 +4,14 @@
 //! iterator, and compaction logic. It encapsulates all block-level metadata needed
 //! for efficient operations without recomputation.
 
-use bytes::Bytes;
-use crate::sst::format::BlockHandle;
-use crate::sst::fast_negative_filter::FastNegativeFilter;
-use crate::sst::sequential_access_optimizer::SequentialAccessOptimizer;
 use crate::error::{MidgeError, MidgeResult};
-use xxhash_rust::xxh3::xxh3_64_with_seed;
+use crate::sst::fast_negative_filter::FastNegativeFilter;
+use crate::sst::format::BlockHandle;
+use crate::sst::sequential_access_optimizer::SequentialAccessOptimizer;
+use bytes::Bytes;
 use std::cell::RefCell;
 use std::fmt;
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 /// Per-block bloom filter (Phase 1)
 ///
@@ -190,26 +190,78 @@ impl BlockSummary {
 
     pub fn decode_all(data: &[u8]) -> MidgeResult<Vec<BlockSummary>> {
         if data.len() < 4 {
-            return Err(MidgeError::InvalidData("BlockSummary data too short".into()));
+            return Err(MidgeError::InvalidData(
+                "BlockSummary data too short".into(),
+            ));
         }
         let mut offset = 0usize;
         let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         offset += 4;
         let mut result = Vec::with_capacity(count);
         for _ in 0..count {
-            if offset + 4 > data.len() { return Err(MidgeError::InvalidData("BlockSummary truncated".into())); }
-            let min_len = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize; offset += 4;
-            if offset + min_len > data.len() { return Err(MidgeError::InvalidData("BlockSummary min_key truncated".into())); }
-            let min_key = Bytes::copy_from_slice(&data[offset..offset+min_len]); offset += min_len;
-            if offset + 4 > data.len() { return Err(MidgeError::InvalidData("BlockSummary truncated".into())); }
-            let max_len = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize; offset += 4;
-            if offset + max_len > data.len() { return Err(MidgeError::InvalidData("BlockSummary max_key truncated".into())); }
-            let max_key = Bytes::copy_from_slice(&data[offset..offset+max_len]); offset += max_len;
-            if offset + 4 > data.len() { return Err(MidgeError::InvalidData("BlockSummary truncated".into())); }
-            let key_count = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]); offset += 4;
-            if offset + 8 > data.len() { return Err(MidgeError::InvalidData("BlockSummary truncated".into())); }
-            let bloom_offset = u64::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3], data[offset+4], data[offset+5], data[offset+6], data[offset+7]]); offset += 8;
-            let bloom_offset = if bloom_offset == 0 { None } else { Some(bloom_offset) };
+            if offset + 4 > data.len() {
+                return Err(MidgeError::InvalidData("BlockSummary truncated".into()));
+            }
+            let min_len = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+            if offset + min_len > data.len() {
+                return Err(MidgeError::InvalidData(
+                    "BlockSummary min_key truncated".into(),
+                ));
+            }
+            let min_key = Bytes::copy_from_slice(&data[offset..offset + min_len]);
+            offset += min_len;
+            if offset + 4 > data.len() {
+                return Err(MidgeError::InvalidData("BlockSummary truncated".into()));
+            }
+            let max_len = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+            if offset + max_len > data.len() {
+                return Err(MidgeError::InvalidData(
+                    "BlockSummary max_key truncated".into(),
+                ));
+            }
+            let max_key = Bytes::copy_from_slice(&data[offset..offset + max_len]);
+            offset += max_len;
+            if offset + 4 > data.len() {
+                return Err(MidgeError::InvalidData("BlockSummary truncated".into()));
+            }
+            let key_count = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            offset += 4;
+            if offset + 8 > data.len() {
+                return Err(MidgeError::InvalidData("BlockSummary truncated".into()));
+            }
+            let bloom_offset = u64::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
+            ]);
+            offset += 8;
+            let bloom_offset = if bloom_offset == 0 {
+                None
+            } else {
+                Some(bloom_offset)
+            };
             result.push(BlockSummary::new(min_key, max_key, key_count, bloom_offset));
         }
         Ok(result)
@@ -377,10 +429,7 @@ impl IndexTable {
     }
 
     /// Create a new IndexTable with a fast negative filter
-    pub fn with_fast_negative_filter(
-        metas: Vec<BlockMeta>,
-        filter: FastNegativeFilter,
-    ) -> Self {
+    pub fn with_fast_negative_filter(metas: Vec<BlockMeta>, filter: FastNegativeFilter) -> Self {
         let search_keys = metas.iter().map(|m| m.min_key.clone()).collect();
         Self {
             search_keys,
@@ -460,9 +509,7 @@ impl IndexTable {
 
         // Find the first block where max_key >= key
         // This is the first block that could contain the key
-        let idx = self
-            .metas
-            .partition_point(|m| m.max_key.as_ref() < key);
+        let idx = self.metas.partition_point(|m| m.max_key.as_ref() < key);
 
         if idx >= self.metas.len() {
             // Key is beyond all blocks
@@ -708,7 +755,10 @@ mod tests {
         bloom.add(key);
 
         // Assert
-        assert!(bloom.maybe_contains(key), "Bloom filter must not have false negatives");
+        assert!(
+            bloom.maybe_contains(key),
+            "Bloom filter must not have false negatives"
+        );
     }
 
     #[test]
@@ -734,11 +784,7 @@ mod tests {
     #[test]
     fn should_conservatively_answer_without_loaded_bloom() {
         // Arrange
-        let meta = BlockMeta::new(
-            Bytes::from("a"),
-            Bytes::from("z"),
-            BlockHandle::new(0, 100),
-        );
+        let meta = BlockMeta::new(Bytes::from("a"), Bytes::from("z"), BlockHandle::new(0, 100));
 
         // Act
         let maybe_contains = meta.bloom_maybe_contains(b"key");
@@ -769,11 +815,7 @@ mod tests {
     #[test]
     fn should_track_bloom_offset_in_meta() {
         // Arrange
-        let mut meta = BlockMeta::new(
-            Bytes::from("a"),
-            Bytes::from("z"),
-            BlockHandle::new(0, 100),
-        );
+        let mut meta = BlockMeta::new(Bytes::from("a"), Bytes::from("z"), BlockHandle::new(0, 100));
 
         // Act
         meta = meta.with_bloom_offset(512);

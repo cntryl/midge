@@ -10,9 +10,9 @@
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use cntryl_midge::sst::block_meta::{BlockMeta, IndexTable};
     use cntryl_midge::sst::format::BlockHandle;
-    use bytes::Bytes;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 2.5.1: Fence Pointer Logic Tests
@@ -97,7 +97,10 @@ mod tests {
         }
 
         // Act: Find blocks in range [3500, 6500] (should include blocks 3, 4, 5, 6)
-        let range_blocks = blocks.iter().filter(|b| b.range_intersects(b"3500", b"6500")).collect::<Vec<_>>();
+        let range_blocks = blocks
+            .iter()
+            .filter(|b| b.range_intersects(b"3500", b"6500"))
+            .collect::<Vec<_>>();
 
         // Assert: Should find exactly 4 blocks
         assert_eq!(range_blocks.len(), 4);
@@ -125,7 +128,8 @@ mod tests {
         }
 
         // Act: Query range [45000, 55000) (covers blocks 45-54, 10 blocks)
-        let intersecting: Vec<_> = blocks.iter()
+        let intersecting: Vec<_> = blocks
+            .iter()
             .filter(|b| b.range_intersects(b"key_045000", b"key_055000"))
             .collect();
 
@@ -133,7 +137,10 @@ mod tests {
 
         // Assert: Should skip 90 blocks, hit 10
         assert_eq!(intersecting.len(), 10);
-        assert!(skip_ratio > 0.85 && skip_ratio < 0.95, "Skip ratio should be ~90%");
+        assert!(
+            skip_ratio > 0.85 && skip_ratio < 0.95,
+            "Skip ratio should be ~90%"
+        );
     }
 
     #[test]
@@ -151,7 +158,8 @@ mod tests {
         }
 
         // Act: Query range [25, 75) which should hit blocks 25-74
-        let intersecting: Vec<_> = blocks.iter()
+        let intersecting: Vec<_> = blocks
+            .iter()
             .filter(|b| b.range_intersects(b"025", b"075"))
             .collect();
 
@@ -162,10 +170,13 @@ mod tests {
             "Expected ~50 blocks to intersect, got {}",
             intersecting.len()
         );
-        
+
         // Verify skip ratio
         let skip_ratio = (100 - intersecting.len()) as f64 / 100.0;
-        assert!(skip_ratio > 0.40 && skip_ratio < 0.60, "Skip ratio should be ~50%");
+        assert!(
+            skip_ratio > 0.40 && skip_ratio < 0.60,
+            "Skip ratio should be ~50%"
+        );
     }
 
     #[test]
@@ -190,7 +201,8 @@ mod tests {
         ];
 
         // Act: Query range [001, 050] (entirely before all blocks)
-        let intersecting: Vec<_> = blocks.iter()
+        let intersecting: Vec<_> = blocks
+            .iter()
             .filter(|b| b.range_intersects(b"001", b"050"))
             .collect();
 
@@ -220,7 +232,8 @@ mod tests {
         ];
 
         // Act: Query range [500, 600] (entirely after all blocks)
-        let intersecting: Vec<_> = blocks.iter()
+        let intersecting: Vec<_> = blocks
+            .iter()
             .filter(|b| b.range_intersects(b"500", b"600"))
             .collect();
 
@@ -259,7 +272,8 @@ mod tests {
         //   apricot <= apricot? YES. apple < coconut? YES. Intersects!
         // Block 1: [banana, blueberry] - intersects
         // Block 2: [cherry, coconut] - intersects
-        let intersecting: Vec<_> = blocks.iter()
+        let intersecting: Vec<_> = blocks
+            .iter()
             .filter(|b| b.range_intersects(b"apricot", b"coconut"))
             .collect();
 
@@ -326,18 +340,22 @@ mod tests {
         let min_query = format!("ts_{:06}:00", start_hour * 3600);
         let max_query = format!("ts_{:06}:59", (end_hour) * 3600 - 1);
 
-        let intersecting: Vec<_> = blocks.iter()
+        let intersecting: Vec<_> = blocks
+            .iter()
             .filter(|b| b.range_intersects(min_query.as_bytes(), max_query.as_bytes()))
             .collect();
 
         // Assert: Should include 4-5 blocks (hours 100-103/104)
-        println!("Streaming window: intersecting {} blocks", intersecting.len());
+        println!(
+            "Streaming window: intersecting {} blocks",
+            intersecting.len()
+        );
         assert!(
             intersecting.len() >= 4 && intersecting.len() <= 5,
             "Should include 4-5 blocks for 4-hour window, got {}",
             intersecting.len()
         );
-        
+
         // Verify skip ratio
         let skip_ratio = (256 - intersecting.len()) as f64 / 256.0;
         assert!(
@@ -369,10 +387,16 @@ mod tests {
         ];
 
         for (start, end) in queries {
-            let intersecting: Vec<_> = blocks.iter()
+            let intersecting: Vec<_> = blocks
+                .iter()
                 .filter(|b| b.range_intersects(start.as_bytes(), end.as_bytes()))
                 .collect();
-            assert!(intersecting.len() > 0, "Query [{}, {}) should find blocks", start, end);
+            assert!(
+                intersecting.len() > 0,
+                "Query [{}, {}) should find blocks",
+                start,
+                end
+            );
         }
     }
 
@@ -391,7 +415,8 @@ mod tests {
         }
 
         // Act: Query middle range
-        let intersecting: Vec<_> = blocks.iter()
+        let intersecting: Vec<_> = blocks
+            .iter()
             .filter(|b| b.range_intersects(b"003", b"007"))
             .collect();
 

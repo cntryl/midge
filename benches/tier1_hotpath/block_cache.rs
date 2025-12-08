@@ -172,7 +172,9 @@ fn bench_get_batch_miss(c: &mut Criterion) {
 
     // Create miss keys in different file range (100-199)
     let miss_keys: Vec<BlockKey> = (0..num_blocks)
-        .map(|i| make_block_key_with_file((100 + i / 100) as u64, (i % 100) as u64 * block_size as u64))
+        .map(|i| {
+            make_block_key_with_file((100 + i / 100) as u64, (i % 100) as u64 * block_size as u64)
+        })
         .collect();
 
     group.bench_function("1000_lookups", |b| {

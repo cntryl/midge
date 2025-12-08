@@ -540,7 +540,7 @@ pub fn compaction_test_opts(storage_mode: StorageMode) -> MidgeOptions {
     MidgeOptions {
         storage_mode,
         memtable_size: 1024,         // Small memtable to trigger flushes easily
-        enable_compaction: true, // Enable background compaction for tests using compact_range()
+        enable_compaction: true,     // Enable background compaction for tests using compact_range()
         compaction_sst_threshold: 2, // Trigger compaction after 2 SSTs
         ..Default::default()
     }
@@ -563,7 +563,7 @@ pub fn compaction_test_opts(storage_mode: StorageMode) -> MidgeOptions {
 pub fn manual_compaction_test_opts(storage_mode: StorageMode) -> MidgeOptions {
     MidgeOptions {
         storage_mode,
-        memtable_size: 1024,         // Small memtable to trigger flushes easily
+        memtable_size: 1024,      // Small memtable to trigger flushes easily
         enable_compaction: false, // Disable background compaction for manual compact_all() tests
         ..Default::default()
     }

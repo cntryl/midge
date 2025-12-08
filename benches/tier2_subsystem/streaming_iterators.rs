@@ -10,8 +10,11 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::{block_meta::BlockMeta, block_meta::IndexTable, fast_negative_filter::FastNegativeFilter, sequential_access_optimizer::SequentialAccessOptimizer};
 use cntryl_midge::sst::format::BlockHandle;
+use cntryl_midge::sst::{
+    block_meta::BlockMeta, block_meta::IndexTable, fast_negative_filter::FastNegativeFilter,
+    sequential_access_optimizer::SequentialAccessOptimizer,
+};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 

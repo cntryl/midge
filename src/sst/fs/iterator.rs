@@ -88,7 +88,7 @@ impl SstRangeIter {
         while self.blk_idx < self.blocks.len() {
             let meta = &self.blocks[self.blk_idx];
             self.examined_blocks += 1;
-            
+
             // Check if block can be skipped based on fence pointers (min_key, max_key)
             let should_skip = match (&self.start, &self.end) {
                 (Some(s), Some(e)) => {
@@ -118,10 +118,10 @@ impl SstRangeIter {
         if self.blk_idx >= self.blocks.len() {
             return Ok(false);
         }
-        
+
         // Record last hit block for sequential resume optimization
         self.last_hit_block_idx = Some(self.blk_idx);
-        
+
         let handle = self.blocks[self.blk_idx].handle;
         self.blk_idx += 1;
 

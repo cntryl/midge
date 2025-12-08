@@ -1,4 +1,4 @@
-﻿//! Perfect compaction controller for Midge.
+//! Perfect compaction controller for Midge.
 //!
 //! Deadlock-free. Deterministic. Pebble-style scheduling. Clean idle semantics.
 
@@ -13,19 +13,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
+use crate::api::snapshot::SnapshotRegistry;
+use crate::common::codec::CompressionType;
+use crate::core::engine::column_family::ColumnFamilySet;
 use crate::core::manifest::VersionManager;
 use crate::metrics::Metrics;
-use crate::sst::{SstFactory, SstReaderFactory};
-use crate::api::snapshot::SnapshotRegistry;
-use crate::core::engine::column_family::ColumnFamilySet;
 use crate::sst::cloud::CloudSstManager;
-use crate::common::codec::CompressionType;
+use crate::sst::{SstFactory, SstReaderFactory};
 
 /// Messages handled by the compaction worker.
 pub enum CompactionMsg {
-    CompactLevel { cf_id: u32, level: u32 },
-    CompactRange { cf_id: u32, start_key: Option<Vec<u8>>, end_key: Option<Vec<u8>> },
-    Barrier { reply: channel::Sender<()> },
+    CompactLevel {
+        cf_id: u32,
+        level: u32,
+    },
+    CompactRange {
+        cf_id: u32,
+        start_key: Option<Vec<u8>>,
+        end_key: Option<Vec<u8>>,
+    },
+    Barrier {
+        reply: channel::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -127,8 +136,9 @@ impl CompactionController {
         self.tx
             .send(CompactionMsg::Barrier { reply: s })
             .map_err(|_| MidgeError::internal("Compaction worker channel closed"))?;
-        r.recv_timeout(timeout)
-            .map_err(|_| MidgeError::internal("Timed out waiting for compaction worker to become idle"))
+        r.recv_timeout(timeout).map_err(|_| {
+            MidgeError::internal("Timed out waiting for compaction worker to become idle")
+        })
     }
 
     /// Graceful shutdown.
@@ -185,7 +195,9 @@ impl CompactionController {
             max_tombstone_compaction_files: 10,
             check_interval_ms: 100,
             cloud_sst_manager: cloud_sst_manager.clone(),
-            compactor: Compactor::with_config(crate::core::compaction::LeveledCompactionConfig::default()),
+            compactor: Compactor::with_config(
+                crate::core::compaction::LeveledCompactionConfig::default(),
+            ),
             cf_set: Arc::clone(cf_set),
             test_hooks: test_hooks.as_ref().map(|h| Arc::new(h.clone())),
             version_manager: Arc::clone(version_manager),
@@ -213,7 +225,7 @@ fn run_worker_loop(
 
     loop {
         // Optional failure backoff state
-            // Backoff removed for simplicity and to avoid idle sleeps
+        // Backoff removed for simplicity and to avoid idle sleeps
         enum Event {
             Msg(CompactionMsg),
             Tick,
@@ -257,7 +269,11 @@ fn run_worker_loop(
                     work_queue.push_back(WorkItem { plan });
                 }
             }
-            Event::Msg(CompactionMsg::CompactRange { cf_id, start_key, end_key }) => {
+            Event::Msg(CompactionMsg::CompactRange {
+                cf_id,
+                start_key,
+                end_key,
+            }) => {
                 let manifest = Manifest::load(&db_path).unwrap_or_default();
                 let cf_config = manifest
                     .column_families
@@ -332,12 +348,8 @@ fn run_worker_loop(
                 }
 
                 // Delegate full pipeline to orchestrator
-                let write_res = super::executor::execute_compaction_plan(
-                    &cfg,
-                    &db_path,
-                    &sst_dir,
-                    plan,
-                )?;
+                let write_res =
+                    super::executor::execute_compaction_plan(&cfg, &db_path, &sst_dir, plan)?;
 
                 // Rate limit writes based on output
                 if let Some((_path, ref meta)) = write_res {

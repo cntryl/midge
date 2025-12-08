@@ -53,7 +53,7 @@ pub use autotune::{Autotuner, ObservedMetrics};
 pub use builder::ConfigBuilder;
 pub use cloud_builder::CloudConfigBuilder;
 pub use column_family::{CompactionStyle, CompressionType};
-pub use options::{MidgeOptions, WalRecoveryMode};
+pub use options::{EngineFlags, MidgeOptions, WalRecoveryMode};
 pub use storage_mode::{CloudStorageBuilder, StorageMode};
 
 /// Performance optimization goal.
@@ -373,6 +373,7 @@ impl Config {
             },
             paranoid_checksums: false, // Default to false for performance
             compaction_rate_limiter: None, // No rate limiting when using Config API
+            engine_flags: EngineFlags::default(),
         }
     }
 

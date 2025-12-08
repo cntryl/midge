@@ -14,9 +14,7 @@ fn create_cache(capacity: usize) -> ShardedBlockCache {
 }
 
 fn create_sharded_cache(capacity: usize, num_shards: usize) -> ShardedBlockCache {
-    ShardedBlockCache::new(
-        BlockCacheOptions::with_capacity(capacity).num_shards(num_shards),
-    )
+    ShardedBlockCache::new(BlockCacheOptions::with_capacity(capacity).num_shards(num_shards))
 }
 
 fn make_block_data(data: &[u8]) -> BlockData {
@@ -83,8 +81,14 @@ fn should_distinguish_block_types_given_same_file_and_offset_when_caching() {
 
     // Assert - each block type stored separately
     assert_eq!(cache.get(&data_key).unwrap().data().bytes(), b"data block");
-    assert_eq!(cache.get(&index_key).unwrap().data().bytes(), b"index block");
-    assert_eq!(cache.get(&filter_key).unwrap().data().bytes(), b"filter block");
+    assert_eq!(
+        cache.get(&index_key).unwrap().data().bytes(),
+        b"index block"
+    );
+    assert_eq!(
+        cache.get(&filter_key).unwrap().data().bytes(),
+        b"filter block"
+    );
 }
 
 #[test]
@@ -104,8 +108,16 @@ fn should_track_stats_given_cache_operations_when_querying_stats() {
     let stats = cache.stats();
 
     // Assert - stats should reflect operations
-    assert!(stats.hits >= 2, "should have at least 2 hits, got {}", stats.hits);
-    assert!(stats.misses >= 1, "should have at least 1 miss, got {}", stats.misses);
+    assert!(
+        stats.hits >= 2,
+        "should have at least 2 hits, got {}",
+        stats.hits
+    );
+    assert!(
+        stats.misses >= 1,
+        "should have at least 1 miss, got {}",
+        stats.misses
+    );
 }
 
 // =============================================================================
@@ -163,11 +175,8 @@ fn should_handle_concurrent_access_given_multiple_threads_when_using_sharded_cac
             thread::spawn(move || {
                 for i in 0..entries_per_thread {
                     // Use unique file_num per thread to avoid collisions
-                    let key = make_block_key(
-                        (t * 1000 + i) as u64,
-                        i as u64 * 1000,
-                        BlockKind::Data,
-                    );
+                    let key =
+                        make_block_key((t * 1000 + i) as u64, i as u64 * 1000, BlockKind::Data);
                     let data: Arc<[u8]> = format!("thread {} entry {}", t, i).into_bytes().into();
                     let block = BlockData::uncompressed(data, BlockKind::Data);
                     cache.insert(key, block);

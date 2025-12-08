@@ -7,8 +7,8 @@
 #[cfg(test)]
 mod sst_invariants {
     use bytes::Bytes;
-    use cntryl_midge::sst::{BlockMeta, IndexTable};
     use cntryl_midge::sst::format::BlockHandle;
+    use cntryl_midge::sst::{BlockMeta, IndexTable};
 
     /// Test BlockMeta struct
 
@@ -159,16 +159,31 @@ mod sst_invariants {
     fn should_maintain_fence_pointer_invariants() {
         // Arrange: Create metas that respect fence pointer constraints
         let metas = vec![
-            BlockMeta::new(Bytes::from("apple"), Bytes::from("apricot"), BlockHandle::new(0, 100)),
-            BlockMeta::new(Bytes::from("banana"), Bytes::from("blueberry"), BlockHandle::new(100, 100)),
-            BlockMeta::new(Bytes::from("cherry"), Bytes::from("date"), BlockHandle::new(200, 100)),
+            BlockMeta::new(
+                Bytes::from("apple"),
+                Bytes::from("apricot"),
+                BlockHandle::new(0, 100),
+            ),
+            BlockMeta::new(
+                Bytes::from("banana"),
+                Bytes::from("blueberry"),
+                BlockHandle::new(100, 100),
+            ),
+            BlockMeta::new(
+                Bytes::from("cherry"),
+                Bytes::from("date"),
+                BlockHandle::new(200, 100),
+            ),
         ];
 
         // Act: Check ordering
         let all_ordered = (0..metas.len() - 1).all(|i| metas[i].max_key < metas[i + 1].min_key);
 
         // Assert: Non-overlapping blocks (all metas properly ordered)
-        assert!(all_ordered, "All blocks must maintain fence pointer ordering");
+        assert!(
+            all_ordered,
+            "All blocks must maintain fence pointer ordering"
+        );
     }
 
     #[test]
