@@ -6,15 +6,15 @@
 use crate::common::codec::CompressionType;
 use crate::error::{MidgeError, MidgeResult};
 use bytes::{BufMut, Bytes, BytesMut};
-use tracing::error;
+use tracing::{error, trace};
 
 // Constants for the SST format
 const BLOCK_TRAILER_SIZE: usize = 5; // 1 byte compression + 4 bytes CRC32C
 const FOOTER_SIZE: usize = 48; // Fixed footer size compatible with RocksDB
-const MAGIC_NUMBER: u64 = 0xdb4775248b80fb57; // RocksDB magic number
+const MAGIC_NUMBER: u64 = 0xdb47_7524_8b80_fb57; // RocksDB magic
 
 /// Block types (logical, not encoded in the trailer)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BlockType {
     Data = 0,
@@ -41,7 +41,7 @@ impl TryFrom<u8> for BlockType {
 }
 
 /// Represents a handle to a block (offset and size)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockHandle {
     pub offset: u64,
     pub size: u64,
@@ -93,20 +93,38 @@ impl Block {
         }
     }
 
-    /// Encode block with trailer per spec:
-    /// - compression applies to data block body only
-    /// - trailer layout: [compression_byte][crc32c_le]
-    /// - checksum covers: compressed_body || restart_array || restart_count || compression_byte
-    pub fn encode(&self) -> MidgeResult<Bytes> {
-        use crc32c::crc32c;
-        let comp_byte = match self.compression {
+    #[inline]
+    fn compression_to_byte(compression: CompressionType) -> u8 {
+        match compression {
             CompressionType::None => 0u8,
             CompressionType::Lz4 => 2u8,
             CompressionType::Zstd1 => 3u8,
             CompressionType::Zstd3 => 4u8,
             CompressionType::Zstd5 => 5u8,
             CompressionType::Zstd9 => 6u8,
-        };
+        }
+    }
+
+    #[inline]
+    fn byte_to_compression(byte: u8) -> MidgeResult<CompressionType> {
+        Ok(match byte {
+            0 => CompressionType::None,
+            2 => CompressionType::Lz4,
+            3 => CompressionType::Zstd1,
+            4 => CompressionType::Zstd3,
+            5 => CompressionType::Zstd5,
+            6 => CompressionType::Zstd9,
+            _ => return Err(MidgeError::InvalidData(format!("Unknown compression byte: {}", byte))),
+        })
+    }
+
+    /// Encode block with trailer per spec:
+    /// - compression applies to data block body only
+    /// - trailer layout: [compression_byte][crc32c_le]
+    /// - checksum covers: compressed_body || restart_array || restart_count || compression_byte
+    pub fn encode(&self) -> MidgeResult<Bytes> {
+        use crc32c::crc32c;
+        let comp_byte = Self::compression_to_byte(self.compression);
         match self.block_type {
             BlockType::Data => {
                 let total_len = self.data.len();
@@ -227,15 +245,7 @@ impl Block {
             return Err(MidgeError::InvalidData("Block CRC mismatch".into()));
         }
 
-        let compression = match comp_byte {
-            0 => CompressionType::None,
-            2 => CompressionType::Lz4,
-            3 => CompressionType::Zstd1,
-            4 => CompressionType::Zstd3,
-            5 => CompressionType::Zstd5,
-            6 => CompressionType::Zstd9,
-            _ => return Err(MidgeError::InvalidData("Unknown compression".into())),
-        };
+        let compression = Self::byte_to_compression(comp_byte)?;
         match block_type {
             BlockType::Data => {
                 // Split payload into [compressed_body][restarts]
@@ -282,7 +292,7 @@ impl Block {
                 if paranoid {
                     let verify_crc = crc32c::crc32c(&final_data);
                     // Store verification checksum in tracing for debugging
-                    tracing::trace!(
+                    trace!(
                         "Paranoid checksum verification: block_type={:?}, size={}, crc=0x{:08x}",
                         block_type,
                         final_data.len(),
@@ -312,7 +322,7 @@ impl Block {
                 // Paranoid mode: verify decompressed data integrity
                 if paranoid {
                     let verify_crc = crc32c::crc32c(&body_decompressed);
-                    tracing::trace!(
+                    trace!(
                         "Paranoid checksum verification: block_type={:?}, size={}, crc=0x{:08x}",
                         block_type,
                         body_decompressed.len(),
