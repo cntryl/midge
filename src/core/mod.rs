@@ -28,6 +28,7 @@
 //! Use `crate::metrics::*` instead of `crate::core::metrics::*`.
 
 pub mod backup;
+pub mod cloud_coordinator;
 pub mod compaction;
 pub mod data_structures;
 pub mod engine;

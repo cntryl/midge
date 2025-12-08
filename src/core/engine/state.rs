@@ -365,9 +365,15 @@ pub fn open_with_factories(
         crate::core::wal_upload_coordinator::WalUploadCoordinator::new(),
     );
 
+    // Phase 7: Create cloud coordinator for deterministic cloud operations
+    let cloud_coordinator = Arc::new(
+        crate::core::cloud_coordinator::CloudCoordinator::new(),
+    );
+
     Ok(MidgeEngine {
         wal_coordinator,
         wal_upload_coordinator,
+        cloud_coordinator,
         cf_set: cf_set_arc,
         seq: AtomicU64::new(max_replay_seq),
         txn_id: AtomicU64::new(0),
