@@ -388,6 +388,11 @@ name = "tier3_system_startup_wal"
 path = "benches/tier3_system/startup_wal.rs"
 harness = false
 
+[[bench]]
+name = "tier3_system_sst_trie_index"
+path = "benches/tier3_system/sst_trie_index.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 4: Integration (YCSB)
 # =============================================================================
