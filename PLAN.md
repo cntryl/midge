@@ -186,7 +186,14 @@ Exit criteria (all met):
 - `src/sst/trie_index.rs` (new, 300+ lines) - Core trie implementation
 - `src/sst/trie_index_integration.rs` (new, 160+ lines) - Optional wrappers
 - `tests/sst_trie_compat.rs` (new, 200+ lines) - Compatibility test suite
-- `src/sst/mod.rs` (modified) - Added module exports
+- `src/sst/mod.rs` (modified) - Added module exports**Pending: Phase 3 Task 3.6 - Benchmarking**
+- ✅ `benches/tier3_system/sst_trie_index.rs` created (100 lines)
+- ✅ Benchmarks implemented:
+  - Point lookup: 1000 lookups on 10k keys (~950 KiB/s throughput)
+  - Full range scan: 10k key sequential read (~305 MiB/s throughput)
+  - Prefix range scan: 1k key subset (~204 MiB/s throughput)
+- ✅ All benchmarks compile and run successfully via `cargo bench --bench tier3_system_sst_trie_index`
+- 📋 Next: Flag-based trie vs legacy comparison when SST writer/reader flag support added
 
 ---
 
