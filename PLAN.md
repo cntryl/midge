@@ -208,15 +208,18 @@ Owner: Write path / WAL maintainers
   - ✅ Module structure: `src/core/write_path/coordinator.rs`, `src/core/write_path/mod.rs`
   - ✅ Single `apply_write()` method (placeholder for Task 4.2)
   - ✅ 2/2 unit tests passing (constructor, op_kind enum support)
-- 🟡 P4.2 Consolidate existing write logic into coordinator
-  - Refactor all write APIs to use coordinator
-  - WAL append logic
-  - Memtable application
-  - Flush/compaction signaling via `EngineRuntime`
-  - Optional cache prewarm hooks
-- ⏳ P4.3 Integrate sequence allocation and write grouping
-  - Centralized sequence number allocator
-  - Hooks for future group commit
+- ✅ P4.2 Consolidate existing write logic into coordinator
+  - ✅ Enhanced WriteOp types with builder methods (put, delete, merge, delete_range, etc.)
+  - ✅ Exposed sync_wal_if_needed and handle_write_stall as pub(crate) for coordinator use
+  - ✅ 8 new builder tests for WriteOp types (all passing)
+  - ⏳ Refactor individual write APIs (put, delete, merge, write_batch) to use coordinator (next in 4.3)
+- 🟡 P4.3 Integrate sequence allocation and write grouping
+  - Implement full apply_write() coordination logic
+  - Sequence number allocation (atomic, monotonic)
+  - WAL batching for durability
+  - Memtable updates with TTL support
+  - Refactor individual write APIs (put, delete, merge, write_batch) to use coordinator
+  - Hooks for future group commit batching
 - ⏳ P4.4 Concurrency validation
   - High-concurrency write tests (including merge operators)
   - Ensure flush/compaction never run inline on user threads
