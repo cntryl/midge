@@ -15,7 +15,10 @@
 
 use crate::api::column_family::ColumnFamilyHandle;
 use crate::core::engine::MidgeEngine;
-use crate::error::MidgeResult;
+use crate::error::{MidgeError, MidgeResult};
+use std::sync::atomic::Ordering;
+use bytes::Bytes;
+use crate::common::timestamp;
 
 /// Unified write path coordinator.
 ///
@@ -44,36 +47,147 @@ impl WritePathCoordinator {
     /// This is the unified entry point for all write operations (put, delete, merge, etc.).
     ///
     /// **Order of operations (critical for crash safety):**
-    /// 1. Allocate monotonically increasing sequence number
-    /// 2. Append all operations to WAL (before state change)
-    /// 3. Apply mutations to memtable(s)
-    /// 4. Signal background work if thresholds crossed (flush/compaction)
-    /// 5. Return sequence number for MVCC visibility
+    /// 1. Allocate monotonically increasing sequence numbers
+    /// 2. Build WAL records (before any state change)
+    /// 3. Append to WAL (durable, atomic)
+    /// 4. Apply mutations to memtable(s)
+    /// 5. Handle stalls and signal flush/compaction
+    /// 6. Return first sequence number for MVCC visibility
     ///
     /// # Errors
     ///
     /// Returns error if WAL fails, memtable is full, or background coordination fails.
-    ///
-    /// # Note
-    ///
-    /// This is a framework method. Full implementation will be completed in Task 4.3
-    /// when we have proper access to engine internals. For now, callers should use
-    /// the individual write APIs (put, delete, merge, etc.) on MidgeEngine.
     pub fn apply_write(
         &self,
-        _engine: &MidgeEngine,
-        _cf_handle: &ColumnFamilyHandle,
-        _ops: &[WriteOp],
+        engine: &MidgeEngine,
+        cf_handle: &ColumnFamilyHandle,
+        ops: &[WriteOp],
     ) -> MidgeResult<u64> {
-        // TODO: Full implementation in Task 4.3
-        // For now, this demonstrates the interface
-        // The actual coordination logic will:
-        // 1. Allocate sequences for all ops
-        // 2. Build WAL records
-        // 3. Append to WAL
-        // 4. Apply to memtable(s)
-        // 5. Handle stalls and flush signaling
-        Ok(0)
+        if ops.is_empty() {
+            return Ok(0);
+        }
+
+        // Validate preconditions
+        if engine.read_only {
+            return Err(MidgeError::invalid_config("Cannot write in read-only mode"));
+        }
+
+        let cf_id = cf_handle.id();
+
+        // Get column family
+        let cf_arc = engine.cf_set.cfs.get(&cf_id.as_u32()).ok_or_else(|| {
+            MidgeError::invalid_config(format!(
+                "Column family '{}' does not exist",
+                cf_handle.name()
+            ))
+        })?;
+
+        // Allocate sequences for all operations
+        let mut sequences = Vec::with_capacity(ops.len());
+        let now_millis = timestamp::now_millis();
+
+        for op in ops {
+            let seq = engine.seq.fetch_add(1, Ordering::SeqCst);
+
+            let expiration = if op.ttl_seconds > 0 {
+                Some(now_millis + op.ttl_seconds * 1000)
+            } else {
+                None
+            };
+
+            sequences.push((op, seq, expiration));
+        }
+
+        // Build WAL records (critical: before state change)
+        let mut wal_records = Vec::with_capacity(ops.len());
+        for (op, seq, _expiration) in &sequences {
+            let wal_op_kind = match op.kind {
+                OpKind::Put => crate::wal::WalOpKind::Put,
+                OpKind::Delete => crate::wal::WalOpKind::Delete,
+                OpKind::Merge => crate::wal::WalOpKind::Merge,
+                OpKind::DeleteRange => crate::wal::WalOpKind::DeleteRange,
+            };
+
+            let record = if let Some(range_end) = &op.range_end {
+                // DeleteRange operation
+                crate::wal::WalRecord::new_delete_range(
+                    cf_id,
+                    Bytes::from(op.key.clone()),
+                    Bytes::from(range_end.clone()),
+                    *seq,
+                )
+            } else {
+                // Regular operation
+                let rec = crate::wal::WalRecord {
+                    cf_id: cf_id.as_u32(),
+                    op: wal_op_kind,
+                    key: Bytes::from(op.key.clone()),
+                    value: op.value.as_ref().map(|v| Bytes::from(v.clone())),
+                    seq: *seq,
+                    expiration: if op.ttl_seconds > 0 {
+                        Some(now_millis + op.ttl_seconds * 1000)
+                    } else {
+                        None
+                    },
+                    range_end: None,
+                    txn_id: None,
+                    compression: None,
+                };
+                rec
+            };
+
+            wal_records.push(record);
+        }
+
+        // Append to WAL (before memtable, for durability)
+        if wal_records.len() == 1 {
+            engine.wal_coordinator.append_record(&wal_records[0])?;
+        } else {
+            engine.wal_coordinator.append_batch(&wal_records)?;
+        }
+        engine.sync_wal_if_needed()?;
+
+        // Apply to memtable(s)
+        let mut first_seq = 0u64;
+        for (i, (op, seq, expiration)) in sequences.iter().enumerate() {
+            if i == 0 {
+                first_seq = *seq;
+            }
+
+            let mt = cf_arc.memtable.load();
+            match op.kind {
+                OpKind::Put => {
+                    if let Some(value) = &op.value {
+                        mt.put_with_seq_and_exp(&op.key, value, *seq, *expiration);
+                    }
+                }
+                OpKind::Delete => {
+                    mt.delete_with_seq(&op.key, *seq);
+                }
+                OpKind::Merge => {
+                    if let Some(value) = &op.value {
+                        mt.merge_with_seq_and_exp(&op.key, value, *seq, *expiration);
+                    }
+                }
+                OpKind::DeleteRange => {
+                    if let Some(range_end) = &op.range_end {
+                        mt.delete_range_with_seq(&op.key, range_end, *seq);
+                    }
+                }
+            }
+        }
+
+        // Handle memtable full / stalls
+        if cf_arc.is_full() {
+            let frozen = cf_arc.try_freeze_memtable();
+            if frozen && cf_id == crate::api::column_family::DEFAULT_CF_ID {
+                let _ = engine.flush();
+            }
+        }
+
+        engine.handle_write_stall(cf_handle, &cf_arc)?;
+
+        Ok(first_seq)
     }
 }
 
