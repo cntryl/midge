@@ -243,16 +243,17 @@ where
 /// 4. Sends a flush job to the background worker
 ///
 /// Returns the sequence number of the rotated WAL segment.
-pub fn rollover_and_queue_flush<F>(
+pub fn rollover_and_queue_flush<F, R>(
     cf_id: crate::api::column_family::ColumnFamilyId,
     wal: &parking_lot::RwLock<Box<dyn crate::wal::WalWriter>>,
     wal_factory: &Arc<dyn crate::wal::WalFactory>,
     wal_dir: &Path,
     memtable_drain: F,
-    flush_coordinator: &crate::core::FlushCoordinator,
+    request_flush: R,
 ) -> MidgeResult<u64>
 where
     F: FnOnce() -> (Vec<crate::core::EntryMeta>, Vec<(Vec<u8>, Vec<u8>, u64)>),
+    R: FnOnce(super::worker::FlushJob) -> MidgeResult<()>,
 {
     use super::worker::FlushJob;
 
@@ -277,7 +278,7 @@ where
     };
 
     // Best-effort send
-    let _ = flush_coordinator.request_flush(job);
+    request_flush(job)?;
 
     Ok(seq)
 }

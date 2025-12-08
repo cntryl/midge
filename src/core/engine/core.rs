@@ -53,9 +53,9 @@ pub struct MidgeEngine {
     /// Performance metrics for real-time monitoring and optimization
     pub(crate) performance_metrics: Arc<crate::metrics::PerformanceMetrics>,
     /// Background flush coordinator
-    pub(crate) flush_coordinator: crate::core::FlushCoordinator,
+    pub(crate) flush_coordinator: Arc<crate::core::FlushCoordinator>,
     /// Background compaction coordinator (optional - may be disabled)
-    pub(crate) compaction_coordinator: Option<crate::core::CompactionController>,
+    pub(crate) compaction_coordinator: Option<Arc<crate::core::CompactionController>>,
     pub(crate) merge_operators: RwLock<HashMap<u32, crate::api::DynMergeOperator>>,
     pub(crate) cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
     /// Database lock to prevent concurrent writers. Held for RAII - released on drop.
@@ -95,7 +95,7 @@ pub struct MidgeEngine {
     /// Ownership is maintained here for Drop-based cleanup; explicit shutdown
     /// happens via the Drop trait implementation of EngineRuntime.
     #[allow(dead_code)]
-    pub(crate) runtime: crate::core::runtime::EngineRuntime,
+    pub(crate) runtime: Arc<crate::core::runtime::EngineRuntime>,
 }
 
 impl MidgeEngine {

@@ -31,20 +31,20 @@ Goal: Make it safe to do surgery without breaking users.
 Owner: Core engine team
 
 - ⏳ P0.1 Freeze public `MidgeEngine` + `kv::KV` behavior (additive-only changes)
-- ⏳ P0.2 Introduce `EngineFlags` / `DebugMode` (wired from `MidgeOptions`)
+- ✅ P0.2 Introduce `EngineFlags` / `DebugMode` (wired from `MidgeOptions`)
   - Flags: `deterministic_compaction`, `single_executor_runtime`, `new_sst_index`, `unified_write_path`
   - Defaults: all `false` in production configs
 - ⏳ P0.3 Add basic runtime tracing toggle (e.g. `MIDGE_TRACE_RUNTIME`) for internal task decisions
-- ⏳ P0.4 Capture baseline performance + behavior
-  - Full `cargo test`
-  - Representative YCSB-style benches (Tier 3)
-  - Compaction/flush trace snapshots for a few workloads
+- 🟡 P0.4 Capture baseline performance + behavior
+  - ✅ Full `cargo test`
+  - ✅ `cargo run --bin validate_tests -- --summary`
+  - ⏳ Representative YCSB-style benches (Tier 3) + trace snapshots
 
 Exit criteria:
 - ✅ `EngineFlags` type exists and is plumbed from `MidgeOptions` into `MidgeEngine` internals.
 - ✅ Default configs leave all next-gen flags disabled.
 - ✅ `cargo test` and `cargo run --bin validate_tests -- --summary` pass.
-- ✅ At least one documented benchmark run stored (even informally) as the “pre-surgery” baseline.
+- ⏳ At least one documented benchmark run stored (even informally) as the “pre-surgery” baseline.
 
 ---
 
@@ -67,10 +67,10 @@ Owner: Core engine team
 - ⏳ P1.5 Add structured logging for runtime scheduling decisions (honor `EngineFlags` / env toggles such as `MIDGE_TRACE_RUNTIME`)
 
 Exit criteria:
-- ✅ `EngineRuntime` and `RuntimeTask` are defined and owned by `MidgeEngine`.
-- ✅ At least one flush and one compaction trigger path submit a `RuntimeTask` when `single_executor_runtime` is `true`.
-- ✅ Enabling `MIDGE_TRACE_RUNTIME=1` logs ordered runtime decisions in a human-readable format.
-- ✅ `cargo test` and `cargo run --bin validate_tests -- --summary` pass with `single_executor_runtime = true` in tests that exercise background work.
+- ⏳ `EngineRuntime` and `RuntimeTask` are defined and owned by `MidgeEngine`.
+- ⏳ At least one flush and one compaction trigger path submit a `RuntimeTask` when `single_executor_runtime` is `true`.
+- ⏳ Enabling `MIDGE_TRACE_RUNTIME=1` logs ordered runtime decisions in a human-readable format.
+- ⏳ `cargo test` and `cargo run --bin validate_tests -- --summary` pass with `single_executor_runtime = true` in tests that exercise background work.
 
 ---
 

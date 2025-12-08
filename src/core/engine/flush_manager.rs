@@ -4,7 +4,10 @@
 //! - Memtable rollover and flush queueing
 
 use crate::api::column_family::{ColumnFamilyId, DEFAULT_CF_ID};
+use crate::core::runtime::{RuntimeTask, RuntimeTaskKind};
 use crate::error::MidgeResult;
+use std::sync::Arc;
+use tracing::error;
 
 use super::MidgeEngine;
 
@@ -22,6 +25,26 @@ impl MidgeEngine {
     ///
     /// Sequence number at rollover time for tracking flush progress
     pub(crate) fn rollover_and_queue_flush(&self, cf_id: ColumnFamilyId) -> MidgeResult<u64> {
+        let cf_target = cf_id.as_u32();
+        let request_flush = |job| {
+            if self.engine_flags.single_executor_runtime {
+                let runtime = Arc::clone(&self.runtime);
+                let flush_coord = Arc::clone(&self.flush_coordinator);
+                let description = format!("flush_cf({cf_target})");
+                runtime.submit(RuntimeTask::new(
+                    RuntimeTaskKind::Flush,
+                    description,
+                    Box::new(move || {
+                        if let Err(err) = flush_coord.request_flush(job) {
+                            error!(%err, "runtime flush task failed");
+                        }
+                    }),
+                ))
+            } else {
+                self.flush_coordinator.request_flush(job)
+            }
+        };
+
         crate::core::persistence::flush::rollover_and_queue_flush(
             cf_id,
             self.wal_coordinator.writer_lock(),
@@ -45,7 +68,7 @@ impl MidgeEngine {
                     (entries, range_tombstones)
                 }
             },
-            &self.flush_coordinator,
+            request_flush,
         )
     }
 }

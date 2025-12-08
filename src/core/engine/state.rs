@@ -347,8 +347,8 @@ pub fn open_with_factories(
     let wal_coordinator = crate::wal::WalController::new(wal_writer_box, wal_factory_arc);
 
     // Create centralized runtime for background workers
-    let (shutdown_tx, _shutdown_rx) = crossbeam::channel::unbounded();
-    let mut runtime = crate::core::runtime::EngineRuntime::new(shutdown_tx);
+    let (shutdown_tx, shutdown_rx) = crossbeam::channel::unbounded();
+    let mut runtime = crate::core::runtime::EngineRuntime::new(shutdown_tx, shutdown_rx);
 
     // Register flush coordinator with runtime
     runtime.set_flush_coordinator(flush_handle);
@@ -357,6 +357,8 @@ pub fn open_with_factories(
     if let Some(handle) = compaction_handle {
         runtime.set_compaction(handle);
     }
+
+    let runtime = Arc::new(runtime);
 
     Ok(MidgeEngine {
         wal_coordinator,

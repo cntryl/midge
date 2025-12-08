@@ -310,7 +310,7 @@ pub(crate) fn setup_flush_coordinator(
     manifest_update_callback: Option<Arc<dyn Fn(crate::core::manifest::Manifest) + Send + Sync>>,
     background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
 ) -> MidgeResult<(
-    crate::core::FlushCoordinator,
+    Arc<crate::core::FlushCoordinator>,
     crate::core::runtime::WorkerHandle,
 )> {
     let config = FlushWorkerConfig {
@@ -328,6 +328,7 @@ pub(crate) fn setup_flush_coordinator(
         background_error,
     };
     crate::core::FlushCoordinator::spawn(config)
+        .map(|(coordinator, handle)| (Arc::new(coordinator), handle))
 }
 
 /// Setup compaction coordinator if compaction is enabled and not in read-only mode.
@@ -346,7 +347,7 @@ pub(crate) fn setup_compaction_coordinator(
     background_error: Option<Arc<parking_lot::RwLock<Option<crate::error::MidgeError>>>>,
 ) -> MidgeResult<
     Option<(
-        crate::core::CompactionController,
+        Arc<crate::core::CompactionController>,
         crate::core::runtime::WorkerHandle,
     )>,
 > {
@@ -405,7 +406,8 @@ pub(crate) fn setup_compaction_coordinator(
             rate_limiter: opts.compaction_rate_limiter.clone(),
         };
 
-        Ok(Some(crate::core::CompactionController::spawn(config)?))
+        let (controller, handle) = crate::core::CompactionController::spawn(config)?;
+        Ok(Some((Arc::new(controller), handle)))
     } else {
         Ok(None)
     }
