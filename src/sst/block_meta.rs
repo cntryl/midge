@@ -1,8 +1,8 @@
-/// Block metadata and index table structures
-///
-/// This module defines the core `BlockMeta` struct that threads through the read path,
-/// iterator, and compaction logic. It encapsulates all block-level metadata needed
-/// for efficient operations without recomputation.
+//! Block metadata and index table structures
+//!
+//! This module defines the core `BlockMeta` struct that threads through the read path,
+//! iterator, and compaction logic. It encapsulates all block-level metadata needed
+//! for efficient operations without recomputation.
 
 use bytes::Bytes;
 use crate::sst::format::BlockHandle;
@@ -120,7 +120,7 @@ impl BlockBloom {
         let h_lo = h as u32;
         let mut h_hi = (h >> 32) as u32;
         // Force odd to avoid cycles
-        if h_hi % 2 == 0 {
+        if h_hi.is_multiple_of(2) {
             h_hi |= 1;
         }
         (h_lo, h_hi)

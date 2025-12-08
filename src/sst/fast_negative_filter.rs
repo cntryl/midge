@@ -124,6 +124,7 @@ impl FastNegativeFilter {
 
     /// Get mutable reference to the underlying bitset (for builder).
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn bitset_mut(&mut self) -> &mut [u8; FAST_NEGATIVE_FILTER_BYTES] {
         &mut self.bitset
     }

@@ -1,7 +1,7 @@
-/// Phase 4: Range Tombstone Index
-///
-/// Provides efficient tombstone lookup without reading data blocks.
-/// Tombstones are stored in separate blocks and indexed by their start/end ranges.
+//! Phase 4: Range Tombstone Index
+//!
+//! Provides efficient tombstone lookup without reading data blocks.
+//! Tombstones are stored in separate blocks and indexed by their start/end ranges.
 
 use bytes::Bytes;
 use crate::sst::traits::RangeTombstone;
@@ -149,14 +149,14 @@ impl TombstoneIndexBuilder {
             .iter()
             .map(|t| t.start.as_slice())
             .min()
-            .unwrap()
+            .unwrap_or(&[])
             .to_vec();
         
         let max_key = tombstones
             .iter()
             .map(|t| t.end.as_slice())
             .max()
-            .unwrap()
+            .unwrap_or(&[])
             .to_vec();
         
         let entry = TombstoneIndexEntry::new(
