@@ -75,12 +75,8 @@ impl PlannerController {
             task_id, cf_id, source_level, target_level
         );
 
-        // DECISION (Phase 8.3): Remove PlannerController - unused dead code.
-        // CompactionController is the real implementation (in maintenance.rs).
-        // PlannerController is vestigial placeholder from earlier design.
         let action = Box::new(move || {
             tracing::debug!("Executing compaction task {}", task_id);
-            // Placeholder: compaction is handled by CompactionController in maintenance.rs
         });
 
         let runtime_task = crate::core::runtime::RuntimeTask::new(

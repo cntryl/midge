@@ -239,10 +239,6 @@ impl MidgeEngine {
         {
             let version = self.version_set.load();
             let _segments = collect_segments_for_key(&version.manifest, cf_id.as_u32(), key);
-            // DECISION (Phase 8.3): Segment block-level reads deferred to Phase 5.5 (optional).
-            // Current segment implementation provides write-amplification reduction.
-            // Block-level read access is optional performance enhancement (can merge from
-            // segments without block I/O). Falls through to SST files for now (still correct).
         }
 
         // Load version set once for consistent SST snapshot (lock-free)

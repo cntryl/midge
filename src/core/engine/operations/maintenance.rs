@@ -957,11 +957,6 @@ impl MidgeEngine {
 
         debug!("check_cloud: found {} inconsistencies", inconsistencies);
 
-        // DECISION (Phase 8.3): Reconciliation deferred to Phase 7.2-7.3 implementation.
-        // check_cloud() currently reports inconsistencies but doesn't repair.
-        // Auto-reconciliation (download, manifest update) blocked on Phase 7.2 wiring.
-        // For now, inconsistencies are logged for operator investigation.
-
         Ok(inconsistencies)
     }
 }

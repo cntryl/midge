@@ -349,11 +349,6 @@ pub struct Footer {
     pub magic: u64,
 }
 
-// DECISION (Phase 8.3): Defer persisted BlockSummary to Phase 10 (format evolution).
-// Current sparse index provides adequate range estimation. Adding per-block metadata
-// requires format version negotiation and is a breaking change. Deferred pending
-// Phase 8.4 performance analysis of range scan efficiency.
-
 impl Footer {
     pub fn new(index_handle: BlockHandle, meta_index_handle: BlockHandle) -> Self {
         Self {

@@ -32,11 +32,6 @@ impl BloomCache {
         }
     }
 
-    // DECISION (Phase 8.3): Defer warm_bloom_cache() to Phase 8.4 performance work.
-    // Cold-start bloom misses are acceptable (lazy load). Warming heuristics require
-    // profiling to justify implementation. Can be added as optional tuning if Phase 8.4
-    // benchmarks show cold-start latency as critical path.
-
     /// Populate the cache from all SST files listed in the manifest
     ///
     /// Reads each SST file, extracts the bloom filter, and caches it.

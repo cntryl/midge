@@ -31,10 +31,6 @@ impl WriterConfig {
         }
     }
 
-    // DECISION (Phase 8.3): Defer level-aware bloom tuning to Phase 9.
-    // Current fixed 10 bits_per_key is acceptable. Adaptive policy is performance optimization,
-    // not correctness. Deferred pending profiling data from Phase 8.4 benchmarks.
-
     pub fn with_internal_keys(mut self, use_internal: bool) -> Self {
         self.use_internal_keys = use_internal;
         self
