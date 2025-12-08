@@ -8,11 +8,13 @@ mod cloud;
 mod column_families;
 mod io;
 mod queries;
+mod segment;
 mod types;
 mod version_manager;
 mod version_set;
 
 // Re-export public API
+pub use segment::{Segment, SegmentId, SegmentRef, SegmentSequencer, SegmentState};
 pub use types::{CloudCheckpoint, ColumnFamilyMeta, FileMeta, Manifest};
 pub use version_manager::VersionManager;
 pub use version_set::{AtomicVersionSet, VersionEdit, VersionSet};

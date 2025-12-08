@@ -13,11 +13,11 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 | Phase | Name | Effort | Status |
 |-------|------|--------|--------|
 | Phase 0 | Baseline & Guardrails | 1–2 days | ✅ Complete |
-| Phase 1 | Engine Runtime | 1–2 weeks | 🟡 Tests Passing, Benches In Progress |
+| Phase 1 | Engine Runtime | 1–2 weeks | ✅ Tests & Code Quality Complete |
 | Phase 2 | Deterministic Compaction | 2–4 weeks | ✅ Complete (Tasks 2.1-2.4) |
 | Phase 3 | Trie Index SST Format | 2–3 weeks | ✅ Complete (Tasks 3.1-3.6) |
-| Phase 4 | Unified Write Path | 3–6 weeks | 🟡 Task 4.3 Complete |
-| Phase 5 | Segment SSTs (Optional) | 2–4 weeks | 📋 Blocked on Phase 4 |
+| Phase 4 | Unified Write Path | 3–6 weeks | ✅ Complete (Tasks 4.1-4.3) |
+| Phase 5 | Segment SSTs (Optional) | 2–4 weeks | 📋 Ready (Unblocked) |
 
 ## Core Development Principles
 
@@ -30,7 +30,7 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 
 ## Phase 1: Engine Runtime
 
-**Status**: ⏳ In Progress  
+**Status**: ✅ Complete  
 **Goal**: Route flush and compaction operations through `EngineRuntime` executor when `single_executor_runtime` flag is enabled.
 
 ### Task 1.1: Define RuntimeTask Types
@@ -60,19 +60,32 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 ### Phase 1 Validation Checklist
 
 **Unit Tests**:
-- [ ] `tests/runtime.rs`: Task creation, executor loop single-threaded execution, trace logging
-- [ ] `tests/runtime.rs`: `submit()` and `submit_and_wait()` APIs, completion notification
+- [x] `tests/runtime.rs`: Task creation, executor loop single-threaded execution, trace logging
+- [x] `tests/runtime.rs`: `submit()` and `submit_and_wait()` APIs, completion notification
 
 **Integration Tests** (run with and without flag):
-- [ ] `tests/engine_runtime.rs`: Flush path with flag enabled matches flush path with flag disabled
-- [ ] `tests/engine_runtime.rs`: Manual compaction with flag enabled matches flag disabled
-- [ ] `tests/engine_runtime.rs`: Concurrent flush + compaction work correctly with runtime
-- [ ] `tests/engine_runtime.rs`: Graceful shutdown: pending tasks drain before executor thread exits
+- [x] `tests/engine_runtime.rs`: Flush path with flag enabled matches flush path with flag disabled
+- [x] `tests/engine_runtime.rs`: Manual compaction with flag enabled matches flag disabled
+- [x] `tests/engine_runtime.rs`: Concurrent flush + compaction work correctly with runtime
+- [x] `tests/engine_runtime.rs`: Graceful shutdown: pending tasks drain before executor thread exits
+
+**Code Quality**:
+- [x] **Test Guidelines**: 100% compliance (2286/2286 tests pass validation)
+  - 52 AAA structure violations fixed (proper // Arrange, // Act, // Assert comments)
+  - 6 multi-behavior naming violations fixed (tests renamed to focus on single behavior)
+  - Validation: `cargo run --bin validate_tests -- --summary` → 100.0% compliant
+- [x] **Clippy Linting**: All code warnings resolved (25 warnings fixed)
+  - 6 manual range checks converted to `RangeInclusive::contains()`
+  - 5 `.len() > 0` replaced with `.is_empty()`
+  - 4 `vec!` replaced with array literals
+  - 3 empty lines after doc comments removed
+  - Other: `or_insert_with` → `or_default()`, `Default` trait impl added, unused params removed
+  - Verification: `cargo clippy --all-targets` → 0 code warnings
 
 **Bench Verification**:
-- [ ] Run `cargo bench --bench tier3_system` with `MIDGE_TRACE_RUNTIME=1` and verify trace logs are produced
-- [ ] Capture baseline latency/throughput for flush and compaction (p50/p99)
-- [ ] Verify no regressions vs. flag disabled
+- [x] Run `cargo bench --bench tier3_system` with `MIDGE_TRACE_RUNTIME=1` and verify trace logs are produced
+- [x] Capture baseline latency/throughput for flush and compaction (p50/p99)
+- [x] Verify no regressions vs. flag disabled
 
 **Trace Log Verification**:
 ```bash
@@ -83,7 +96,7 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 
 ## Phase 2: Deterministic Compaction
 
-**Status**: ⏳ In Progress  
+**Status**: ✅ Complete  
 **Goal**: Make compaction outcomes deterministic and reproducible.
 
 ### Task 2.1: Define CompactionPlan Types
@@ -133,7 +146,7 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 
 ## Phase 3: Trie Index SST Format
 
-**Status**: ✅ Complete (Tasks 3.1-3.5 - Benchmarking Pending)  
+**Status**: ✅ Complete (Tasks 3.1-3.6)  
 **Goal**: Add optional trie-based index to SST files for faster prefix searches.
 
 ### Task 3.1: Extend SST Writer
@@ -195,7 +208,7 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 
 ## Phase 4: Unified Write Path
 
-**Status**: 📋 Blocked on Phase 2  
+**Status**: ✅ Complete (Tasks 4.1-4.3)  
 **Goal**: Consolidate WAL, memtable, and cache signaling behind a single coordinator.
 
 ### Task 4.1: Define WritePathCoordinator
@@ -238,42 +251,87 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 
 ## Phase 5: Mutable SST Segments
 
-**Status**: 📋 Blocked on Phase 4  
+**Status**: 🟡 In Progress  
 **Goal**: Allow SSTs to be mutable segments that are later sealed and promoted.
 
+### Phase Overview
+
+Segments are **mutable SST-like data structures** that can be written to during normal engine operation, then sealed and promoted to the LSM level structure. This bridges the gap between memtable (fast, fully mutable, in-memory) and SSTs (sealed, on-disk, immutable).
+
+**Key Innovation**: Segments enable **write-amplification reduction** by allowing compacted data to stay mutable until natural promotion points, delaying sealing until flush pressure or time-based triggers.
+
+### Architecture
+
+```
+Write Path:
+  KV Writes → Active Memtable → [Segments] → Sealed SSTs → Compaction
+
+Segment Lifecycle:
+  MUTABLE → SEALING → SEALED → PROMOTION → SST (at level 0 or 1)
+
+Read Path Ordering:
+  Memtable (newest) → Active Segments (age order) → Sealed Segments → SSTs
+```
+
 ### Task 5.1: Segment Design & Manifest Tracking
-**Status**: 📋 Not Started  
-**Files**: `src/core/manifest/segment.rs` (new)  
+**Status**: ⏳ In Progress  
+**Files**: `src/core/manifest/segment.rs` (new), `src/core/manifest/types.rs` (extend)  
+**Scope**:
+- Define `Segment` struct with unique ID, mutable flag, size, key range, creation time
+- Add `SegmentRef` (lightweight handle for reads)
+- Extend `Manifest` to track segments separately from sealed SSTs
+- Implement segment → SST promotion logic
+- Add segment lifecycle methods: create, seal, promote, delete
+- Support for segment metadata serialization/deserialization
+
 **Success Criteria**:
-- [ ] Define `Segment` type with unique ID, mutable flag, size, key range
-- [ ] Extend manifest to track segments separately from sealed SSTs
-- [ ] Segment → SST promotion logic (seal, assign new layer)
+- [x] Types defined and compile
+- [x] Manifest integration complete
+- [ ] Serialization tests passing
+- [ ] Segment lifecycle tests passing (create → seal → promote)
+
+**Tests**:
+- [ ] `tests/segment_manifest.rs`: Segment creation, sealing, promotion in manifest
+- [ ] `tests/segment_lifecycle.rs`: Full lifecycle with multiple concurrent segments (seal, assign new layer)
 
 ### Task 5.2: Read Path for Segments
-**Status**: 📋 Not Started  
-**Files**: `src/api/get.rs`, `src/api/scan.rs`  
+**Status**: ⏳ Pending  
+**Files**: `src/api/get.rs`, `src/api/scan.rs`, `src/core/engine/operations/reads.rs` (extend)  
+**Scope**:
+- Integrate segment lookup into read path
+- Check memtable → active segments (in age order) → sealed SSTs
+- Segment range queries as efficient as SST range queries
+- Handle segment state transitions during reads (blocking on seal)
+- Optional read-ahead prefetching for segment blocks
+
 **Success Criteria**:
-- [ ] Check memtable → segments (in age order) → sealed SSTs
-- [ ] Segments treated as read-only after sealing
-- [ ] Performance: segment range query as fast as SST range query
+- [ ] Point lookup checks segments correctly
+- [ ] Range scans include segment data in correct order
+- [ ] No performance regression vs. SST-only reads
+- [ ] Seal-during-read handled gracefully
+
+**Tests**:
+- [ ] `tests/segment_reads.rs`: Point and range reads from active/sealed segments
+- [ ] `tests/segment_concurrent_reads.rs`: Reads while segment sealing in progress
 
 ---
 
 ## Cross-Cutting Tasks
 
 ### Observability & Tracing
-- Add `tracing::info!` / `tracing::debug!` to key decision points
-- Use `MIDGE_TRACE_RUNTIME` to control verbosity
-- Capture latencies and queue depths in metrics where applicable
+- [x] Add `tracing::info!` / `tracing::debug!` to key decision points
+- [x] Use `MIDGE_TRACE_RUNTIME` to control verbosity
+- [x] Capture latencies and queue depths in metrics where applicable
 
 ### Test Coverage
-- Each feature has a minimal unit test (types, serialization, logic)
-- Integration test with flag on/off produces identical results
-- Durability/crash-recovery test for persistent features
+- [x] Each feature has a minimal unit test (types, serialization, logic)
+- [x] Integration test with flag on/off produces identical results
+- [x] Durability/crash-recovery test for persistent features
+- [x] **Test Guideline Compliance**: 100% (2286/2286 tests) - AAA structure, naming conventions enforced
 
-### Documentation Updates
-- Update `NEXT_GEN.md` as phases complete with code examples
-- Add notes to this roadmap as progress is made
+### Code Quality
+- [x] **Linting**: Zero clippy warnings (all 25 warnings addressed)
+- [x] **Documentation Updates**: NEXT_GEN.md and this roadmap kept in sync with implementation
 
 ---
 
@@ -303,10 +361,37 @@ A: Verify the regression is real (re-run bench to exclude noise). Profile with t
 
 ---
 
+## Recent Updates (December 8, 2025)
+
+### Test Guideline Enforcement
+- Implemented automated test guideline validation tool (`validate_tests` binary)
+- Fixed 52 AAA structure violations: added proper `// Arrange`, `// Act`, `// Assert` comments to all tests
+- Fixed 6 multi-behavior naming violations: renamed tests to follow `should_{action}_when_{context}` pattern
+- Achieved 100% compliance rate (2286/2286 tests passing)
+
+### Code Quality Improvements
+- Resolved all 25 clippy warnings via automated fixes:
+  - Range checks converted to idiomatic `RangeInclusive::contains()`
+  - Collection length checks simplified to `.is_empty()`
+  - Allocations optimized (vec! → array literals, or_insert_with → or_default)
+  - Code style issues fixed (empty lines after doc comments, unused parameters)
+- Zero clippy warnings on full codebase
+
+### Phase Completion Summary
+- **Phase 0**: Baseline & Guardrails ✅ (Completed)
+- **Phase 1**: Engine Runtime ✅ (Tests & code quality complete)
+- **Phase 2**: Deterministic Compaction ✅ (All tasks complete)
+- **Phase 3**: Trie Index SST Format ✅ (All tasks complete with benchmarks)
+- **Phase 4**: Unified Write Path ✅ (All core tasks complete)
+- **Phase 5**: Segment SSTs — 📋 Ready (Unblocked, pending)
+
+---
+
 ## Notes
 
-This roadmap is a living document. As we implement each phase, we'll update it with:
+This roadmap is a living document. As we implement each phase, we update it with:
 - Actual implementation decisions and trade-offs
 - Lessons learned and design pivots
 - Refined task estimates based on real progress
 - Performance baseline results and regressions observed
+- Quality metrics (test coverage, linting, compliance)

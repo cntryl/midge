@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::api::column_family::ColumnFamilyConfig;
+use super::segment::Segment;
 
 /// The manifest tracks all SSTs, column families, and checkpoint state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +27,9 @@ pub struct Manifest {
     /// Key is cf_id, value is next available sst_seq for that CF
     #[serde(default)]
     pub next_sst_seqs: std::collections::HashMap<u32, u64>,
+    /// Mutable SST segments tracked in manifest (Phase 5)
+    #[serde(default)]
+    pub segments: Vec<Segment>,
 }
 
 impl Default for Manifest {
@@ -38,6 +42,7 @@ impl Default for Manifest {
             cloud_checkpoint: None,
             next_wal_seq: default_next_wal_seq(),
             next_sst_seqs: std::collections::HashMap::new(),
+            segments: Vec::new(),
         }
     }
 }
