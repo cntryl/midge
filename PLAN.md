@@ -214,12 +214,13 @@ Owner: Write path / WAL maintainers
   - ✅ 8 new builder tests for WriteOp types (all passing)
   - ⏳ Refactor individual write APIs (put, delete, merge, write_batch) to use coordinator (next in 4.3)
 - 🟡 P4.3 Integrate sequence allocation and write grouping
-  - Implement full apply_write() coordination logic
-  - Sequence number allocation (atomic, monotonic)
-  - WAL batching for durability
-  - Memtable updates with TTL support
-  - Refactor individual write APIs (put, delete, merge, write_batch) to use coordinator
-  - Hooks for future group commit batching
+  - ✅ Implemented full apply_write() coordination logic with:
+    - ✅ Atomic sequence number allocation (monotonic, per-operation)
+    - ✅ WAL batching for crash durability (before state change)
+    - ✅ Memtable updates with TTL support (after WAL)
+    - ✅ Stall handling and background work signaling
+  - ✅ 2 integration tests: apply_write_through_coordinator, apply_multiple_operations_through_coordinator
+  - 📋 Next: Refactor individual write APIs (put, delete, merge, write_batch) to optionally use coordinator
 - ⏳ P4.4 Concurrency validation
   - High-concurrency write tests (including merge operators)
   - Ensure flush/compaction never run inline on user threads

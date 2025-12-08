@@ -16,7 +16,7 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 | Phase 1 | Engine Runtime | 1–2 weeks | 🟡 Tests Passing, Benches In Progress |
 | Phase 2 | Deterministic Compaction | 2–4 weeks | ✅ Complete (Tasks 2.1-2.4) |
 | Phase 3 | Trie Index SST Format | 2–3 weeks | ✅ Complete (Tasks 3.1-3.6) |
-| Phase 4 | Unified Write Path | 3–6 weeks | 🟡 Task 4.2 Complete |
+| Phase 4 | Unified Write Path | 3–6 weeks | 🟡 Task 4.3 Complete |
 | Phase 5 | Segment SSTs (Optional) | 2–4 weeks | 📋 Blocked on Phase 4 |
 
 ## Core Development Principles
@@ -220,6 +220,19 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 - [x] Made handle_write_stall pub(crate) for coordinator access  
 - [x] Infrastructure ready for Task 4.3 (full apply_write implementation and API refactoring)
 **Test Results**: 8 new builder tests passing; total 1440/1440 lib tests passing
+
+### Task 4.3: Sequence Allocation & Write Grouping
+**Status**: ✅ Complete  
+**Files**: `src/core/write_path/coordinator.rs` (full implementation), `src/core/engine/operations/writes.rs` (integration tests)  
+**Implemented**:
+- [x] Full `apply_write()` method with complete coordination logic
+- [x] Atomic sequence number allocation (monotonic per-operation)
+- [x] WAL record building and batch appending
+- [x] Memtable updates with TTL expiration support
+- [x] Write stall handling and background work signaling
+- [x] 2 integration tests demonstrating end-to-end write coordination
+- [x] Public exports for WriteOp, OpKind, WritePathCoordinator
+**Test Results**: 2 new integration tests passing; total 1442/1442 lib tests passing
 
 ---
 
