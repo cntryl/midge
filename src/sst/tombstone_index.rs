@@ -93,6 +93,9 @@ impl TombstoneIndex {
     ///
     /// Uses binary search for efficient lookup. Returns an iterator over candidate blocks.
     pub fn find_blocks_for_key<'a>(&'a self, key: &'a [u8]) -> impl Iterator<Item = &'a TombstoneIndexEntry> + 'a {
+        // TODO: Ensure `entries` is sorted by min_key and use partition_point or binary_search
+        // to reduce scanning overhead for large tombstone indexes.
+        // Current behavior: linear scan with `filter`.
         self.entries.iter().filter(move |entry| entry.might_cover(key))
     }
     

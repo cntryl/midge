@@ -9,10 +9,16 @@ use crate::sst::format::BlockHandle;
 use crate::sst::fast_negative_filter::FastNegativeFilter;
 use crate::sst::sequential_access_optimizer::SequentialAccessOptimizer;
 use crate::error::{MidgeError, MidgeResult};
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 use std::cell::RefCell;
 use std::fmt;
 
 /// Per-block bloom filter (Phase 1)
+///
+/// TODO:
+/// - Upgrade hashing to `xxh3_64` with double-hashing and `k` probes (k=5..7)
+/// - Keep the on-disk wire-format stable; only change in-memory semantics.
+/// - Add unit/integration tests to validate FPR and backward compatibility.
 ///
 /// A bloom filter associated with a single data block.
 /// Provides fast negative lookups: if `maybe_contains` returns false, the key is definitely not in the block.
@@ -22,31 +28,48 @@ pub struct BlockBloom {
     bits: Vec<u8>,
     /// Capacity in bytes
     capacity_bytes: usize,
+    /// Number of probes (k)
+    k: u8,
 }
 
 impl BlockBloom {
-    /// Create a new BlockBloom with the specified capacity in bytes
+    /// Create a new BlockBloom with the specified capacity in bytes and default k=5
     pub fn new(capacity_bytes: usize) -> Self {
+        Self::new_with_k(capacity_bytes, 5)
+    }
+
+    /// Create a new BlockBloom with specified probe count `k`.
+    pub fn new_with_k(capacity_bytes: usize, k: u8) -> Self {
         Self {
             bits: vec![0u8; capacity_bytes],
             capacity_bytes,
+            k,
         }
     }
 
-    /// Add a key to the bloom filter
+    /// Add a key to the bloom filter using double hashing (Kirsch-Mitzenmacher)
     pub fn add(&mut self, key: &[u8]) {
-        let hash = Self::hash(key);
-        let byte_idx = (hash as usize) % self.bits.len();
-        let bit_idx = ((hash >> 8) as usize) % 8;
-        self.bits[byte_idx] |= 1 << bit_idx;
+        let (h_lo, h_hi) = Self::double_hash(key);
+        let m_bits = (self.capacity_bytes * 8) as u32;
+        for i in 0..self.k as u32 {
+            let probe = h_lo.wrapping_add(i.wrapping_mul(h_hi));
+            let idx = (probe % m_bits) as usize;
+            Self::set_bit(&mut self.bits, idx);
+        }
     }
 
     /// Check if a key might be in the bloom filter (no false negatives, possible false positives)
     pub fn maybe_contains(&self, key: &[u8]) -> bool {
-        let hash = Self::hash(key);
-        let byte_idx = (hash as usize) % self.bits.len();
-        let bit_idx = ((hash >> 8) as usize) % 8;
-        (self.bits[byte_idx] & (1 << bit_idx)) != 0
+        let (h_lo, h_hi) = Self::double_hash(key);
+        let m_bits = (self.capacity_bytes * 8) as u32;
+        for i in 0..self.k as u32 {
+            let probe = h_lo.wrapping_add(i.wrapping_mul(h_hi));
+            let idx = (probe % m_bits) as usize;
+            if !Self::get_bit(&self.bits, idx) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Return the capacity in bytes
@@ -84,17 +107,37 @@ impl BlockBloom {
         Ok(Self {
             bits,
             capacity_bytes,
+            k: 5, // default to 5 probes for backward compatibility
         })
     }
 
     /// Simple hash function for bloom filter
     #[inline]
-    fn hash(key: &[u8]) -> u64 {
-        let mut hash: u64 = 0;
-        for &byte in key {
-            hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+    fn double_hash(key: &[u8]) -> (u32, u32) {
+        // Use xxh3_64 as a source of randomness and split
+        const HASH_SEED: u64 = 0x9E37_79B1_85EB_CA87;
+        let h = xxh3_64_with_seed(key, HASH_SEED);
+        let h_lo = h as u32;
+        let mut h_hi = (h >> 32) as u32;
+        // Force odd to avoid cycles
+        if h_hi % 2 == 0 {
+            h_hi |= 1;
         }
-        hash
+        (h_lo, h_hi)
+    }
+
+    #[inline]
+    fn set_bit(bits: &mut [u8], idx: usize) {
+        let byte_idx = idx / 8;
+        let bit_idx = idx % 8;
+        bits[byte_idx] |= 1 << bit_idx;
+    }
+
+    #[inline]
+    fn get_bit(bits: &[u8], idx: usize) -> bool {
+        let byte_idx = idx / 8;
+        let bit_idx = idx % 8;
+        (bits[byte_idx] & (1 << bit_idx)) != 0
     }
 }
 
@@ -106,6 +149,71 @@ pub struct BlockIndexEntry {
     pub block_offset: u64,
     pub block_len: u32,
     pub bloom_offset: Option<u64>,
+}
+
+/// Persisted block summary; intended for inclusion in the SST meta index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockSummary {
+    pub min_key: Bytes,
+    pub max_key: Bytes,
+    pub key_count: u32,
+    pub bloom_offset: Option<u64>,
+}
+
+impl BlockSummary {
+    pub fn new(min_key: Bytes, max_key: Bytes, key_count: u32, bloom_offset: Option<u64>) -> Self {
+        Self {
+            min_key,
+            max_key,
+            key_count,
+            bloom_offset,
+        }
+    }
+
+    /// Simple encode format for block summaries.
+    /// Layout: [count: u32LE][entry...]
+    /// entry: [min_len:u32LE][min_key][max_len:u32LE][max_key][key_count:u32LE][bloom_offset:u64LE (0=none)]
+    pub fn encode_all(summaries: &[BlockSummary]) -> Bytes {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(summaries.len() as u32).to_le_bytes());
+        for s in summaries {
+            buf.extend_from_slice(&(s.min_key.len() as u32).to_le_bytes());
+            buf.extend_from_slice(s.min_key.as_ref());
+            buf.extend_from_slice(&(s.max_key.len() as u32).to_le_bytes());
+            buf.extend_from_slice(s.max_key.as_ref());
+            buf.extend_from_slice(&s.key_count.to_le_bytes());
+            let off = s.bloom_offset.unwrap_or(0);
+            buf.extend_from_slice(&off.to_le_bytes());
+        }
+        Bytes::from(buf)
+    }
+
+    pub fn decode_all(data: &[u8]) -> MidgeResult<Vec<BlockSummary>> {
+        if data.len() < 4 {
+            return Err(MidgeError::InvalidData("BlockSummary data too short".into()));
+        }
+        let mut offset = 0usize;
+        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        offset += 4;
+        let mut result = Vec::with_capacity(count);
+        for _ in 0..count {
+            if offset + 4 > data.len() { return Err(MidgeError::InvalidData("BlockSummary truncated".into())); }
+            let min_len = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize; offset += 4;
+            if offset + min_len > data.len() { return Err(MidgeError::InvalidData("BlockSummary min_key truncated".into())); }
+            let min_key = Bytes::copy_from_slice(&data[offset..offset+min_len]); offset += min_len;
+            if offset + 4 > data.len() { return Err(MidgeError::InvalidData("BlockSummary truncated".into())); }
+            let max_len = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize; offset += 4;
+            if offset + max_len > data.len() { return Err(MidgeError::InvalidData("BlockSummary max_key truncated".into())); }
+            let max_key = Bytes::copy_from_slice(&data[offset..offset+max_len]); offset += max_len;
+            if offset + 4 > data.len() { return Err(MidgeError::InvalidData("BlockSummary truncated".into())); }
+            let key_count = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]); offset += 4;
+            if offset + 8 > data.len() { return Err(MidgeError::InvalidData("BlockSummary truncated".into())); }
+            let bloom_offset = u64::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3], data[offset+4], data[offset+5], data[offset+6], data[offset+7]]); offset += 8;
+            let bloom_offset = if bloom_offset == 0 { None } else { Some(bloom_offset) };
+            result.push(BlockSummary::new(min_key, max_key, key_count, bloom_offset));
+        }
+        Ok(result)
+    }
 }
 
 /// SST Footer with per-block bloom support

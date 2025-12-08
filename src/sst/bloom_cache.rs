@@ -32,6 +32,11 @@ impl BloomCache {
         }
     }
 
+    // TODO: Consider adding `warm_bloom_cache(&self, ssts: &[SstId]) -> ()`
+    // to pre-load blooms for L0/L1 SST files during engine open. This would reduce
+    // cold-start latency spikes for hot SSTs. Use heuristics (manifest level) to
+    // decide which SSTs to warm.
+
     /// Populate the cache from all SST files listed in the manifest
     ///
     /// Reads each SST file, extracts the bloom filter, and caches it.

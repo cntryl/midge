@@ -31,6 +31,9 @@ impl WriterConfig {
         }
     }
 
+    // TODO: Add a level-aware adaptive `bloom_bits_per_key` policy.
+    // Provide helpers to compute bits_per_key based on SST level and expected workload.
+
     pub fn with_internal_keys(mut self, use_internal: bool) -> Self {
         self.use_internal_keys = use_internal;
         self
@@ -50,6 +53,12 @@ pub struct WriterState {
     pub index: IndexBlockBuilder,
     pub bloom_builder: BloomFilterBuilder,
     pub range_tombstones: Vec<RangeTombstone>,
+    // Min key of current block; used for block summary footer
+    pub first_key_in_block: Option<Bytes>,
+    // Number of entries in the current block
+    pub cur_block_entry_count: u32,
+    // Persisted block summary list collected during flush
+    pub block_summaries: Vec<crate::sst::block_meta::BlockSummary>,
     /// Cache for decoded user key to avoid redundant decode_internal_key() calls.
     last_internal_key: Option<Bytes>,
     last_user_key_cache: Option<Bytes>,
@@ -62,6 +71,9 @@ impl WriterState {
             config,
             cur_block: DataBlockBuilder::new(16),
             last_key_in_block: None,
+            first_key_in_block: None,
+            cur_block_entry_count: 0,
+            block_summaries: Vec::new(),
             index: IndexBlockBuilder::new(),
             bloom_builder,
             range_tombstones: Vec::new(),
@@ -78,6 +90,9 @@ impl WriterState {
             config,
             cur_block: DataBlockBuilder::new(16),
             last_key_in_block: None,
+            first_key_in_block: None,
+            cur_block_entry_count: 0,
+            block_summaries: Vec::new(),
             index: IndexBlockBuilder::new(),
             bloom_builder,
             range_tombstones: Vec::new(),
@@ -101,11 +116,22 @@ impl WriterState {
             return None;
         }
         let last_key = self.last_key_in_block.clone().unwrap_or_default();
+        // Capture block summary using first and last keys
+        let min_key = self.first_key_in_block.clone().unwrap_or_else(|| last_key.clone());
+        let summary = crate::sst::block_meta::BlockSummary::new(
+            min_key.clone(),
+            last_key.clone(),
+            self.cur_block_entry_count,
+            None,
+        );
+        self.block_summaries.push(summary);
         let builder = std::mem::replace(&mut self.cur_block, DataBlockBuilder::new(16));
         let payload = builder.finish();
         let block = Block::new(payload, BlockType::Data, self.config.compression);
         let encoded = block.encode().expect("encode block");
         self.last_key_in_block = None;
+        self.first_key_in_block = None;
+        self.cur_block_entry_count = 0;
         Some((last_key, encoded))
     }
 
@@ -189,6 +215,10 @@ impl WriterState {
                 .add_with_meta(key, value, seq, op_type, true, expiration)?;
             self.last_key_in_block = Some(Bytes::copy_from_slice(key));
             self.bloom_builder.add_key(&user_key_bytes);
+            if self.first_key_in_block.is_none() {
+                self.first_key_in_block = Some(Bytes::copy_from_slice(key));
+            }
+            self.cur_block_entry_count = self.cur_block_entry_count.saturating_add(1);
         } else {
             // Plain user key - encode it
             let ik = crate::common::internal_key::encode_internal_key(key, seq, tombstone);
@@ -196,6 +226,10 @@ impl WriterState {
                 .add_with_meta(&ik, value, seq, op_type, true, expiration)?;
             self.last_key_in_block = Some(Bytes::copy_from_slice(&ik));
             self.bloom_builder.add_key(key);
+            if self.first_key_in_block.is_none() {
+                self.first_key_in_block = Some(Bytes::copy_from_slice(&ik));
+            }
+            self.cur_block_entry_count = self.cur_block_entry_count.saturating_add(1);
         }
         Ok(())
     }
@@ -212,6 +246,10 @@ impl WriterState {
             .add_with_meta(key, value, seq, op_type, false, expiration)?;
         self.last_key_in_block = Some(Bytes::copy_from_slice(key));
         self.bloom_builder.add_key(key);
+        if self.first_key_in_block.is_none() {
+            self.first_key_in_block = Some(Bytes::copy_from_slice(key));
+        }
+        self.cur_block_entry_count = self.cur_block_entry_count.saturating_add(1);
         Ok(())
     }
 
@@ -302,6 +340,21 @@ impl SstImageBuilder {
         if self.state.config.use_internal_keys {
             meta_builder.add(b"format.internal_keys", b"1")?;
         }
+        // Defer tombstones meta entry until after block summaries so entries are sorted:
+        // Persist block summaries (min/max/key_count/bloom_offset) to meta index
+        let mut block_summary_handle = BlockHandle { offset: 0, size: 0 };
+        if !self.state.block_summaries.is_empty() {
+            let bs_bytes = crate::sst::block_meta::BlockSummary::encode_all(&self.state.block_summaries);
+            let bs_block = Block::new(bs_bytes, BlockType::Filter, CompressionType::None);
+            let bs_encoded = bs_block.encode()?;
+            block_summary_handle.offset = current_offset;
+            block_summary_handle.size = bs_encoded.len() as u64;
+            buf.put_slice(&bs_encoded);
+            current_offset += bs_encoded.len() as u64;
+            meta_builder.add(b"index.block_summary", &block_summary_handle.encode())?;
+        }
+        // Tombstones meta entry comes after index.block_summary to preserve lexicographic
+        // ordering of meta index keys (index.* then tombstones.*)
         if tombstone_handle.size > 0 {
             meta_builder.add(b"tombstones.range", &tombstone_handle.encode())?;
         }

@@ -8,6 +8,7 @@
 use crate::error::MidgeResult;
 use crate::sst::bloom::BloomFilter;
 use crate::sst::block_meta::IndexTable;
+use crate::sst::block_meta::BlockSummary;
 use crate::sst::format::{Block, BlockHandle, BlockType, Footer};
 use crate::sst::meta_index::{linear_search_meta_index, meta_index_contains};
 use crate::sst::range_tombstone::decode_range_tombstones;
@@ -21,6 +22,7 @@ pub struct SstMetadata {
     pub sparse_index: SparseIndex,
     pub bloom_filter: Option<BloomFilter>,
     pub range_tombstones: Vec<RangeTombstone>,
+    pub block_summaries: Option<Vec<BlockSummary>>,
     pub use_internal_keys: bool,
 }
 
@@ -49,7 +51,8 @@ impl SstMetadata {
         // Optionally read meta index, bloom filter, and range tombstones
         let mut bloom_filter: Option<BloomFilter> = None;
         let mut range_tombstones: Vec<RangeTombstone> = Vec::new();
-        let mut use_internal = false;
+            let mut block_summaries: Option<Vec<BlockSummary>> = None;
+            let mut use_internal = false;
 
         if footer.meta_index_handle.size > 0 {
             let meta_raw = safe_slice(raw, &footer.meta_index_handle, "meta index block")?;
@@ -67,6 +70,12 @@ impl SstMetadata {
                 range_tombstones = decode_range_tombstones(&tomb_block.data)?;
             }
 
+            if let Some(bh) = find_block_summary_handle(&meta_block.data)? {
+                let bs_raw = safe_slice(raw, &bh, "block summary block")?;
+                let bs_block = Block::decode(bs_raw, BlockType::Filter)?;
+                block_summaries = Some(BlockSummary::decode_all(&bs_block.data)?);
+            }
+
             // Detect internal-key format flag
             use_internal = meta_index_contains(
                 &meta_block.data,
@@ -82,6 +91,7 @@ impl SstMetadata {
             bloom_filter,
             range_tombstones,
             use_internal_keys: use_internal,
+            block_summaries,
         })
     }
 
@@ -91,7 +101,17 @@ impl SstMetadata {
     /// search keys from full block metadata, minimizing memory footprint while
     /// preserving all necessary information for lookups, iteration, and compaction.
     pub fn build_index_table(&self) -> MidgeResult<IndexTable> {
-        let metas = self.sparse_index.build_block_metas();
+        let mut metas = self.sparse_index.build_block_metas();
+        if let Some(ref summaries) = self.block_summaries {
+            if summaries.len() == metas.len() {
+                // Use persisted min_keys and key_count to fill metas
+                for (m, s) in metas.iter_mut().zip(summaries.iter()) {
+                    m.min_key = s.min_key.clone();
+                    m.max_key = s.max_key.clone();
+                    // We currently store key_count in summary for stats only
+                }
+            }
+        }
         Ok(IndexTable::new(metas))
     }
 }
@@ -128,6 +148,16 @@ pub fn find_range_tombstones_handle(meta_index_data: &[u8]) -> MidgeResult<Optio
         0,
         meta_index_data.len(),
         b"tombstones.range",
+    )
+}
+
+/// Find block summary handle (index.block_summary) in meta index
+pub fn find_block_summary_handle(meta_index_data: &[u8]) -> MidgeResult<Option<BlockHandle>> {
+    linear_search_meta_index(
+        meta_index_data,
+        0,
+        meta_index_data.len(),
+        b"index.block_summary",
     )
 }
 

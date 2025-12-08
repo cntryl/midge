@@ -122,24 +122,20 @@ impl BloomFilter {
 
         // Cap total bits to prevent OOM.
         let bits = cmp::min(num_blocks * BLOCK_BITS, MAX_FILTER_BITS);
-        let num_blocks = bits / BLOCK_BITS;
         let byte_len = (bits as usize).div_ceil(8);
         let hashes = Self::optimal_hash_count(bits_per_key);
 
-        let block_mask = if num_blocks.is_power_of_two() {
-            num_blocks - 1
-        } else {
-            0
-        };
+        // Compute block layout using helper for consistent mask/blocked computation
+        let (blocks, block_mask, blocked) = Self::compute_block_layout(bits);
 
         Self {
             bytes: vec![0u8; byte_len],
             bits,
             hashes,
             keys: 0,
-            blocks: num_blocks,
+            blocks,
             block_mask,
-            blocked: true,
+            blocked,
         }
     }
 
@@ -247,6 +243,7 @@ impl BloomFilter {
 
     #[inline]
     fn add_blocked(&mut self, h: u64, step: u32) {
+        debug_assert!(self.blocked && self.blocks > 0);
         let block_idx = Self::block_index(h, self.blocks, self.block_mask) as usize;
         let base_bit = block_idx * BLOCK_BITS as usize;
 
@@ -262,7 +259,7 @@ impl BloomFilter {
     fn add_linear(&mut self, h: u64, step: u32) {
         let m = self.bits;
         let mask = m.wrapping_sub(1);
-        let use_mask = m & mask == 0; // power-of-two
+        let use_mask = (m & mask) == 0; // power-of-two
 
         let mut probe = h as u32;
         for _ in 0..self.hashes {
@@ -301,6 +298,7 @@ impl BloomFilter {
 
     #[inline]
     fn query_blocked(&self, h: u64, step: u32) -> bool {
+        debug_assert!(self.blocked && self.blocks > 0);
         let block_idx = Self::block_index(h, self.blocks, self.block_mask) as usize;
         let base_bit = block_idx * BLOCK_BITS as usize;
 
@@ -319,7 +317,7 @@ impl BloomFilter {
     fn query_linear(&self, h: u64, step: u32) -> bool {
         let m = self.bits;
         let mask = m.wrapping_sub(1);
-        let use_mask = m & mask == 0;
+        let use_mask = (m & mask) == 0;
 
         let mut probe = h as u32;
         for _ in 0..self.hashes {
@@ -1016,9 +1014,9 @@ mod tests {
         // Act: Check initial state, add key, check final state
         let initial_empty = builder.is_empty();
         let initial_count = builder.keys_count();
-        
+
         builder.add_key(b"hello");
-        
+
         let after_add_empty = builder.is_empty();
         let after_add_count = builder.keys_count();
         let bit_count_val = builder.bit_count();
@@ -1033,5 +1031,27 @@ mod tests {
         assert!(bit_count_val > 0);
         // estimated_fpr should be very small with only 1 key in a large filter
         assert!(fpr_val < 0.001);
+    }
+
+    #[test]
+    fn should_blocked_layout_for_tiny_filter() {
+        // Arrange: tiny filter will still use at least one block (blocked layout)
+        let mut f = BloomFilter::new(1, 0.01);
+        // Act: a tiny filter is rounded up to one block
+        assert!(f.bit_count() >= BLOCK_BITS as usize);
+        f.add(b"tiny");
+        // Assert: added key is possibly present
+        assert!(f.may_contain(b"tiny"));
+    }
+
+    #[test]
+    fn should_use_blocked_layout_for_large_filter() {
+        // Arrange: large filter should switch to blocked layout
+        let mut f = BloomFilter::new(10_000, 0.01);
+        // Act + Assert: must be at least a block and multiple of BLOCK_BITS
+        assert!(f.bit_count() >= BLOCK_BITS as usize);
+        assert_eq!(f.bit_count() % BLOCK_BITS as usize, 0);
+        f.add(b"large_key");
+        assert!(f.may_contain(b"large_key"));
     }
 }

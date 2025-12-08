@@ -41,6 +41,8 @@ pub struct SstFile {
     cached_file: Mutex<Option<File>>,
     /// Cached block metadata (min/max fence pointers, tombstone coverage)
     block_metas: Mutex<Option<Vec<BlockMeta>>>,
+    /// Optional per-block summaries persisted in SST footer/meta index
+    block_summaries: Option<Vec<crate::sst::block_meta::BlockSummary>>,
     /// Optional block cache for caching data blocks.
     block_cache: Option<Arc<dyn BlockCache>>,
     /// File number for block cache key construction.
@@ -80,6 +82,7 @@ impl SstFile {
             paranoid_checksums: false,
             cached_file: Mutex::new(None),
             block_metas: Mutex::new(None),
+            block_summaries: None,
             block_cache: None,
             file_number: 0,
             cf_id: 0,
@@ -98,6 +101,7 @@ impl SstFile {
             paranoid_checksums,
             cached_file: Mutex::new(None),
             block_metas: Mutex::new(None),
+            block_summaries: None,
             block_cache: None,
             file_number: 0,
             cf_id: 0,
@@ -120,6 +124,12 @@ impl SstFile {
         }
         debug!("SST file metadata loaded successfully");
         Ok(sst)
+    }
+
+    /// Return persisted block metadata if available (utility wrapper).
+    /// This allows consumers to access block metadata without invoking private helpers.
+    pub fn persisted_block_metadata(&self) -> Option<Vec<BlockMeta>> {
+        self.block_metas().ok()
     }
 
     /// Set the block cache for this SST reader.
@@ -260,6 +270,22 @@ impl SstFile {
                 )?;
                 let tomb_block = Block::decode(&tomb_data, BlockType::Filter)?;
                 range_tombstones = decode_range_tombstones(&tomb_block.data)?;
+            }
+            // Find block_summary handle
+            if let Some(bs_handle) = linear_search_meta_index(
+                &meta_index_block.data,
+                0,
+                meta_index_block.data.len(),
+                b"index.block_summary",
+            )? {
+                let bs_data = fs::read_range(
+                    &mut file,
+                    bs_handle.offset,
+                    bs_handle.offset + bs_handle.size,
+                )?;
+                let bs_block = Block::decode(&bs_data, BlockType::Filter)?;
+                let summaries = crate::sst::block_meta::BlockSummary::decode_all(&bs_block.data)?;
+                self.block_summaries = Some(summaries);
             }
             // detect internal key meta flag using presence check (value may not be a BlockHandle)
             use_internal = meta_index_contains(
@@ -886,6 +912,25 @@ impl SstFile {
             .as_ref()
             .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
 
+        // Prefer persisted block summaries when available to avoid reading data blocks.
+        if let Some(ref summaries) = self.block_summaries {
+            if summaries.len() == sparse_index.entries().len() {
+                let mut metas = Vec::with_capacity(sparse_index.entries().len());
+                for (entry, summary) in sparse_index.entries().iter().zip(summaries.iter()) {
+                    let mut meta = BlockMeta::new(summary.min_key.clone(), entry.key.clone(), entry.block_handle);
+                    if let Some(bloom_offset) = summary.bloom_offset {
+                        meta = meta.with_bloom_offset(bloom_offset);
+                    }
+                    let (has_tombstones, cover_min, cover_max) =
+                        self.tombstone_bounds_for_block(meta.min_key.as_ref(), meta.max_key.as_ref());
+                    if has_tombstones || cover_min.is_some() || cover_max.is_some() {
+                        meta = meta.with_tombstones(has_tombstones, cover_min, cover_max);
+                    }
+                    metas.push(meta);
+                }
+                return Ok(metas);
+            }
+        }
         let mut metas = Vec::with_capacity(sparse_index.entries().len());
         for entry in sparse_index.entries() {
             let min_key = self.block_min_key(entry.block_handle)?;

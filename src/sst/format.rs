@@ -334,6 +334,11 @@ pub struct Footer {
     pub magic: u64,
 }
 
+// TODO: Consider adding persisted BlockSummary metadata per block to the footer.
+// This will contain min_key, max_key, key_count, and bloom_offset for each data block
+// and enable efficient zero-read range estimation. Backwards compatibility must
+// be preserved via optional meta-index entries and footer versioning.
+
 impl Footer {
     pub fn new(index_handle: BlockHandle, meta_index_handle: BlockHandle) -> Self {
         Self {
