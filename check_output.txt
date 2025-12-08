@@ -1,0 +1,11 @@
+﻿cargo :     Checking cntryl-midge v0.1.0 (D:\repos\cntryl\midge)
+At line:1 char:1
++ cargo check 2>&1 > check_output.txt; Write-Host "Check complete"; if  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking cn...s\cntryl\midge):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: error finalizing incremental compilation session directory `\\?\D:\repos\cntryl\midge\target\debug\incremental\cntryl_midge-3smw1778jel71\s-hdptwkmoxc-0wrwy81-working`: Access is denied. (os error 5)
+
+warning: `cntryl-midge` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.12s

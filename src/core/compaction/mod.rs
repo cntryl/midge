@@ -3,12 +3,14 @@
 pub mod controller;
 pub mod executor;
 pub mod filter;
+pub mod planner;
 pub mod strategy;
 
 // Public API
 pub use controller::{CompactionController, CompactionMsg, CompactionWorkerConfig};
 pub use executor::CompactionVersion;
 pub use filter::CompactionFilter;
+pub use planner::{CompactionLog, CompactionTask, Planner};
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 // Crate-internal executor functions

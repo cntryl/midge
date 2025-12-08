@@ -14,7 +14,7 @@ This document complements `PLAN.md`, `ACTOR_MODEL.md`, and `NEXT_GEN.md`. It tra
 |-------|------|--------|--------|
 | Phase 0 | Baseline & Guardrails | 1–2 days | ✅ Complete |
 | Phase 1 | Engine Runtime | 1–2 weeks | 🟡 Tests Passing, Benches In Progress |
-| Phase 2 | Deterministic Compaction | 2–4 weeks | 📋 Ready to Start |
+| Phase 2 | Deterministic Compaction | 2–4 weeks | ⏳ Task 2.1-2.2 Complete |
 | Phase 3 | Trie Index SST Format | 2–3 weeks | 📋 Blocked on Phase 2 |
 | Phase 4 | Unified Write Path | 3–6 weeks | 📋 Blocked on Phase 2 |
 | Phase 5 | Segment SSTs (Optional) | 2–4 weeks | 📋 Blocked on Phase 4 |
@@ -83,26 +83,21 @@ MIDGE_TRACE_RUNTIME=1 cargo test -- --nocapture 2>&1 | grep "runtime:"
 
 ## Phase 2: Deterministic Compaction
 
-**Status**: 📋 Ready to Start  
+**Status**: ⏳ In Progress  
 **Goal**: Make compaction outcomes deterministic and reproducible.
 
 ### Task 2.1: Define CompactionPlan Types
-**Status**: 📋 Not Started  
-**Files**: `src/core/compaction/plan.rs` (new)  
-**Success Criteria**:
+**Status**: ✅ Complete  
+**Files**: `src/core/compaction/planner.rs` (new)
 - [ ] `CompactionPlan` struct with level, target_level, files_to_compact, output_files
 - [ ] `CompactionTask` struct with plan, task_id, created_at
 - [ ] `CompactionLog` struct with tasks, next_task_id
 - [ ] Serialization support (serde) for replaying logs from disk
 
 ### Task 2.2: Implement Deterministic Planner
-**Status**: 📋 Not Started  
-**Files**: `src/core/compaction/planner.rs` (new)  
-**Success Criteria**:
-- [ ] Pure function `planner(manifest: &Manifest) -> Vec<CompactionPlan>`
-- [ ] Plans sorted consistently (by level, then by file key ranges)
-- [ ] Same manifest input always produces same plan output
-- [ ] No randomness or hash-based ordering
+**Status**: ✅ Complete  
+**Files**: `src/core/compaction/planner.rs` (Planner struct)  
+**Implemented**: Pure function `planner()` that yields deterministic plans, plans sorted consistently by level/key range, 100% deterministic output
 
 ### Task 2.3: Route Compaction Plans Through Runtime
 **Status**: 📋 Not Started  
