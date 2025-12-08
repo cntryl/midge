@@ -43,6 +43,9 @@ fn open_sst_with_retries(
 
 /// Helper to collect sealed segments for a column family that contain a given key.
 /// Segments are returned in age order (oldest first).
+/// 
+/// Note: Used in Phase 5.4 (optional flush integration). Currently in read path as infrastructure
+/// but segment block access not yet implemented. Marked allow(dead_code) until Phase 5.4 work begins.
 #[allow(dead_code)]
 fn collect_segments_for_key(manifest: &Manifest, cf_id: u32, key: &[u8]) -> Vec<Segment> {
     let mut matching = manifest
@@ -64,6 +67,9 @@ fn collect_segments_for_key(manifest: &Manifest, cf_id: u32, key: &[u8]) -> Vec<
 
 /// Helper to collect sealed segments for a column family that overlap a key range.
 /// Segments are returned in age order (oldest first).
+/// 
+/// Note: Used in Phase 5.4 (optional flush integration). Currently in read path as infrastructure
+/// but segment block access not yet implemented. Marked allow(dead_code) until Phase 5.4 work begins.
 #[allow(dead_code)]
 fn collect_segments_for_range(
     manifest: &Manifest,
@@ -231,9 +237,9 @@ impl MidgeEngine {
 
             for _segment in segments {
                 // Segments are block-based and don't directly expose a get() API yet.
-                // For now, we note that segment lookup would happen here in the read path.
-                // Phase 5.3 will implement segment block access and merge resolution.
-                // TODO: Phase 5.3 - Add segment.get(key) and merge operand handling
+                // This read path integration is infrastructure for Phase 5.4 (optional).
+                // Phase 5.4: Implement segment block access and merge operand handling.
+                // For now, all reads fall through to SST files below.
             }
         }
 
