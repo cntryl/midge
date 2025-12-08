@@ -4,13 +4,19 @@
 //! - Point reads (get)
 //! - Range scans (scan, scan_streaming)
 //! - Snapshot reads (get_at, scan_at)
+//!
+//! Read path ordering:
+//!   1. Active memtable
+//!   2. Immutable memtables (newest to oldest)
+//!   3. Active segments (sealed, in age order)
+//!   4. SST files (newest to oldest by sequence)
 
 use bytes::Bytes;
 
 use crate::{
     api::{column_family::ColumnFamilyHandle, query::Query, snapshot::Snapshot},
     common::timestamp,
-    core::manifest::Manifest,
+    core::manifest::{Manifest, Segment, SegmentState},
     error::MidgeResult,
     sst::range_tombstone::is_covered_by_range_tombstone,
 };
@@ -33,6 +39,52 @@ fn open_sst_with_retries(
         }
     }
     None
+}
+
+/// Helper to collect sealed segments for a column family that contain a given key.
+/// Segments are returned in age order (oldest first).
+#[allow(dead_code)]
+fn collect_segments_for_key(manifest: &Manifest, cf_id: u32, key: &[u8]) -> Vec<Segment> {
+    let mut matching = manifest
+        .segments
+        .iter()
+        .filter(|seg| {
+            seg.cf_id == cf_id
+                && seg.state == SegmentState::Sealed
+                && seg.min_key.as_ref() <= key
+                && key <= seg.max_key.as_ref()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // Sort by creation time (oldest first)
+    matching.sort_by_key(|seg| seg.created_at);
+    matching
+}
+
+/// Helper to collect sealed segments for a column family that overlap a key range.
+/// Segments are returned in age order (oldest first).
+#[allow(dead_code)]
+fn collect_segments_for_range(
+    manifest: &Manifest,
+    cf_id: u32,
+    range_start: &[u8],
+    range_end: &[u8],
+) -> Vec<Segment> {
+    let mut matching = manifest
+        .segments
+        .iter()
+        .filter(|seg| {
+            seg.cf_id == cf_id
+                && seg.state == SegmentState::Sealed
+                && seg.overlaps(range_start, range_end)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // Sort by creation time (oldest first)
+    matching.sort_by_key(|seg| seg.created_at);
+    matching
 }
 
 impl MidgeEngine {
@@ -169,6 +221,19 @@ impl MidgeEngine {
                 } else if let Some(v) = immutable_mt.get(key) {
                     return Ok(Some(v));
                 }
+            }
+        }
+
+        // Check sealed segments (newest to oldest by age)
+        {
+            let version = self.version_set.load();
+            let segments = collect_segments_for_key(&version.manifest, cf_id.as_u32(), key);
+
+            for _segment in segments {
+                // Segments are block-based and don't directly expose a get() API yet.
+                // For now, we note that segment lookup would happen here in the read path.
+                // Phase 5.3 will implement segment block access and merge resolution.
+                // TODO: Phase 5.3 - Add segment.get(key) and merge operand handling
             }
         }
 
