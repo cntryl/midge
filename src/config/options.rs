@@ -80,12 +80,13 @@ pub enum WalRecoveryMode {
 }
 
 /// Flags that gate next-generation runtime behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineFlags {
     /// Enable the deterministic compaction planner/log path.
     pub deterministic_compaction: bool,
 
     /// Route background scheduling through the centralized runtime executor.
+    /// Enabled by default in Phase 6: all flush, compaction, and WAL work routes through EngineRuntime.
     pub single_executor_runtime: bool,
 
     /// Write SSTs with the new trie index structure beside the legacy index.
@@ -93,6 +94,17 @@ pub struct EngineFlags {
 
     /// Use the unified write path that coordinates WAL, memtables, and cache.
     pub unified_write_path: bool,
+}
+
+impl Default for EngineFlags {
+    fn default() -> Self {
+        Self {
+            deterministic_compaction: false,
+            single_executor_runtime: true, // Phase 6: Enable by default
+            new_sst_index: false,
+            unified_write_path: false,
+        }
+    }
 }
 
 /// Midge database configuration options - low-level fine-grained control

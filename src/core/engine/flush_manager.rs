@@ -27,22 +27,19 @@ impl MidgeEngine {
     pub(crate) fn rollover_and_queue_flush(&self, cf_id: ColumnFamilyId) -> MidgeResult<u64> {
         let cf_target = cf_id.as_u32();
         let request_flush = |job| {
-            if self.engine_flags.single_executor_runtime {
-                let runtime = Arc::clone(&self.runtime);
-                let flush_coord = Arc::clone(&self.flush_coordinator);
-                let description = format!("flush_cf({cf_target})");
-                runtime.submit(RuntimeTask::new(
-                    RuntimeTaskKind::Flush,
-                    description,
-                    Box::new(move || {
-                        if let Err(err) = flush_coord.request_flush(job) {
-                            error!(%err, "runtime flush task failed");
-                        }
-                    }),
-                ))
-            } else {
-                self.flush_coordinator.request_flush(job)
-            }
+            // Phase 6: All flushes now routed through EngineRuntime for unified coordination
+            let runtime = Arc::clone(&self.runtime);
+            let flush_coord = Arc::clone(&self.flush_coordinator);
+            let description = format!("flush_cf({cf_target})");
+            runtime.submit(RuntimeTask::new(
+                RuntimeTaskKind::Flush,
+                description,
+                Box::new(move || {
+                    if let Err(err) = flush_coord.request_flush(job) {
+                        error!(%err, "runtime flush task failed");
+                    }
+                }),
+            ))
         };
 
         crate::core::persistence::flush::rollover_and_queue_flush(

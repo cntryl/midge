@@ -381,22 +381,19 @@ impl MidgeEngine {
     pub fn compact_level(&self, cf: &ColumnFamilyHandle, level: u32) -> MidgeResult<()> {
         if let Some(ref coordinator) = self.compaction_coordinator {
             let cf_id = cf.id().as_u32();
-            if self.engine_flags.single_executor_runtime {
-                let runtime = Arc::clone(&self.runtime);
-                let controller = Arc::clone(coordinator);
-                let description = format!("compact_level(cf={},level={})", cf_id, level);
-                runtime.submit(RuntimeTask::new(
-                    RuntimeTaskKind::Compaction,
-                    description,
-                    Box::new(move || {
-                        if let Err(err) = controller.compact_level(cf_id, level) {
-                            error!(%err, "runtime compact_level task failed");
-                        }
-                    }),
-                ))
-            } else {
-                coordinator.compact_level(cf_id, level)
-            }
+            // Phase 6: All compactions now routed through EngineRuntime for unified coordination
+            let runtime = Arc::clone(&self.runtime);
+            let controller = Arc::clone(coordinator);
+            let description = format!("compact_level(cf={},level={})", cf_id, level);
+            runtime.submit(RuntimeTask::new(
+                RuntimeTaskKind::Compaction,
+                description,
+                Box::new(move || {
+                    if let Err(err) = controller.compact_level(cf_id, level) {
+                        error!(%err, "runtime compact_level task failed");
+                    }
+                }),
+            ))
         } else {
             Err(MidgeError::invalid_config(
                 "Manual compaction requested but compaction is disabled",
@@ -426,29 +423,26 @@ impl MidgeEngine {
             let cf_id = cf.id().as_u32();
             let start_vec = start_key.map(|k| k.to_vec());
             let end_vec = end_key.map(|k| k.to_vec());
-            if self.engine_flags.single_executor_runtime {
-                let runtime = Arc::clone(&self.runtime);
-                let controller = Arc::clone(coordinator);
-                let start_desc = start_vec.clone();
-                let end_desc = end_vec.clone();
-                let description = format!(
-                    "compact_range(cf={},start={:?},end={:?})",
-                    cf_id, start_desc, end_desc
-                );
-                runtime.submit_and_wait(RuntimeTask::new(
-                    RuntimeTaskKind::Compaction,
-                    description,
-                    Box::new(move || {
-                        if let Err(err) =
-                            controller.compact_range(cf_id, start_vec.clone(), end_vec.clone())
-                        {
-                            error!(%err, "runtime compact_range task failed");
-                        }
-                    }),
-                ))?;
-            } else {
-                coordinator.compact_range(cf_id, start_vec.clone(), end_vec.clone())?;
-            }
+            // Phase 6: All compactions now routed through EngineRuntime for unified coordination
+            let runtime = Arc::clone(&self.runtime);
+            let controller = Arc::clone(coordinator);
+            let start_desc = start_vec.clone();
+            let end_desc = end_vec.clone();
+            let description = format!(
+                "compact_range(cf={},start={:?},end={:?})",
+                cf_id, start_desc, end_desc
+            );
+            runtime.submit_and_wait(RuntimeTask::new(
+                RuntimeTaskKind::Compaction,
+                description,
+                Box::new(move || {
+                    if let Err(err) =
+                        controller.compact_range(cf_id, start_vec.clone(), end_vec.clone())
+                    {
+                        error!(%err, "runtime compact_range task failed");
+                    }
+                }),
+            ))?;
             // Wait deterministically for completion to ensure consistent reads in tests
             coordinator.wait_until_idle(std::time::Duration::from_secs(5))
         } else {

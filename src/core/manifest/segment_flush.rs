@@ -163,6 +163,8 @@ mod tests {
 
     #[test]
     fn should_return_none_for_empty_entries() {
+        // Arrange (test with empty entries)
+
         // Act
         let segment = create_segment_from_entries(0, 1, &[]);
 

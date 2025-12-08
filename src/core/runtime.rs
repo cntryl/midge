@@ -55,6 +55,8 @@ pub enum RuntimeTaskKind {
     Compaction,
     CompactionPlanExecution,
     Maintenance,
+    /// Phase 6: WAL upload/sync operations
+    WalUpload,
 }
 
 /// Work item submitted to the engine runtime executor.
