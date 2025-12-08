@@ -1,14 +1,24 @@
 //! Common utilities for SST readers shared across fs, mem, and cloud implementations.
 //!
-//! This module extracts duplicated logic from the three reader implementations to:
-//! - Reduce code duplication
-//! - Simplify maintenance
-//! - Ensure consistent behavior across all reader types
+//! This module centralizes shared SST read-path logic so that:
+//! - All reader variants behave identically.
+//! - Metadata parsing is robust and bounds-checked.
+//! - Index + bloom + tombstone behavior is consistent across backends.
+//!
+//! ## Block-summary–first pipeline (Option A)
+//!
+//! When block summaries are present, they are treated as the **source of truth** for
+//! block-level metadata (min/max keys, key counts, optional bloom offsets).
+//!
+//! - `SparseIndex` is still decoded and used to obtain `BlockHandle`s.
+//! - If the number of summaries matches the sparse index entries, we build
+//!   `BlockMeta` entries directly from summaries + handles.
+//! - If summaries are missing or the counts don't match, we fall back to
+//!   the conservative sparse-index–only pipeline.
 
 use crate::error::MidgeResult;
 use crate::sst::bloom::BloomFilter;
-use crate::sst::block_meta::IndexTable;
-use crate::sst::block_meta::BlockSummary;
+use crate::sst::block_meta::{BlockMeta, BlockSummary, IndexTable};
 use crate::sst::format::{Block, BlockHandle, BlockType, Footer};
 use crate::sst::meta_index::{linear_search_meta_index, meta_index_contains};
 use crate::sst::range_tombstone::decode_range_tombstones;
@@ -95,23 +105,44 @@ impl SstMetadata {
         })
     }
 
-    /// Build a compact IndexTable from sparse_index and metadata (Phase 3)
+    /// Build a compact `IndexTable` from sparse index and optional block summaries.
     ///
-    /// Converts the sparse_index into a compact in-memory IndexTable that separates
-    /// search keys from full block metadata, minimizing memory footprint while
-    /// preserving all necessary information for lookups, iteration, and compaction.
+    /// ### Block-summary–first behavior (Option A)
+    ///
+    /// - If `block_summaries` is present and its length matches the sparse index
+    ///   entry count, we build `BlockMeta` directly from those summaries plus
+    ///   the corresponding `BlockHandle`s.
+    /// - If summaries are missing or mismatched, we fall back to a conservative
+    ///   sparse-index–only pipeline (`SparseIndex::build_block_metas`).
     pub fn build_index_table(&self) -> MidgeResult<IndexTable> {
-        let mut metas = self.sparse_index.build_block_metas();
+        // Prefer block summaries when they line up with sparse index entries.
         if let Some(ref summaries) = self.block_summaries {
-            if summaries.len() == metas.len() {
-                // Use persisted min_keys and key_count to fill metas
-                for (m, s) in metas.iter_mut().zip(summaries.iter()) {
-                    m.min_key = s.min_key.clone();
-                    m.max_key = s.max_key.clone();
-                    // We currently store key_count in summary for stats only
-                }
+            let entries = self.sparse_index.entries();
+            if !entries.is_empty() && summaries.len() == entries.len() {
+                let metas: Vec<BlockMeta> = summaries
+                    .iter()
+                    .zip(entries.iter())
+                    .map(|(summary, idx)| {
+                        let mut meta = BlockMeta::new(
+                            summary.min_key.clone(),
+                            summary.max_key.clone(),
+                            idx.block_handle,
+                        );
+                        if let Some(off) = summary.bloom_offset {
+                            meta = meta.with_bloom_offset(off);
+                        }
+                        // `key_count` currently used for stats only; compaction/iterators
+                        // can consult `BlockSummary` directly when needed.
+                        meta
+                    })
+                    .collect();
+
+                return Ok(IndexTable::new(metas));
             }
         }
+
+        // Fallback: conservative sparse-index–only path.
+        let metas = self.sparse_index.build_block_metas();
         Ok(IndexTable::new(metas))
     }
 }
