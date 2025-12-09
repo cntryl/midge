@@ -55,14 +55,16 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] Integrated memtable (SkipListMemtable) with SST module for flush operations
 - [x] Verified clean compilation with zero errors (10 warnings, all benign)
 
-## 5. Metadata 🟡 (IN PROGRESS)
+## 5. Metadata ✅ (COMPLETED)
 - [x] Create FileMeta, ColumnFamilyMeta, CloudCheckpoint, Manifest types
 - [x] Wire ManifestActor with add_sst, compaction_complete, persist handlers
 - [x] **NEW:** Implement manifest persistence (YAML serialization to disk)
 - [x] **NEW:** Add 5 comprehensive persistence tests (save/load, file metadata, missing file handling)
 - [x] **NEW:** Integrate manifest loading on engine startup
-- [ ] Implement version_set and version_manager for lock-free manifest reads
-- [ ] Port manifest I/O, serialization, and versioning from `src_old/core/manifest`
+- [x] **NEW:** Implement Version and VersionSet for lock-free snapshot isolation reads
+- [x] **NEW:** Implement VersionManager with VersionEdit enum for atomic manifest updates
+- [x] **NEW:** Add 10 comprehensive VersionSet tests (creation, indexing, installation, retrieval, concurrent reads)
+- [x] **NEW:** Add 10 comprehensive VersionManager tests (edit submission, atomic batching, version publication)
 
 ## 6. Compaction ✅ (COMPLETED)
 - [x] Create CompactionActor with check_compaction, run_compaction, handle_complete
@@ -175,13 +177,21 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Engine.snapshot() → point-in-time consistent read at sequence number
 - Engine.transaction() → multi-key ACID with state machine
 - Engine startup → RuntimeState::new() → replay_wal() → restore memtable state
+- VersionSet/VersionManager → lock-free manifest reads + atomic versioning
+
+**Test Status (110 tests passing):**
+- Transaction API: 9 tests ✅
+- Cloud Storage: 10 tests ✅
+- Cloud WAL: 9 tests ✅
+- Version Set: 10 tests ✅
+- Version Manager: 10 tests ✅
+- Plus 62 existing tests from prior implementation ✅
 
 **What's Next (Priority Order):**
-1. **Version Set/Manager** — Lock-free manifest reads with versioning for concurrent readers
-2. **Merge Iterator** — Blend memtable + SST + immutable memtables for range scans
-3. **S3/GCS/Azure Providers** — Real cloud provider implementations with AWS/Google/Azure SDKs
-4. **Integration Tests** — End-to-end tests of write→flush→compact→recover→cloud pipeline
-5. **Metrics** — Port metrics modules from src_old for performance monitoring
+1. **Merge Iterator** — Blend memtable + SST + immutable memtables for range scans
+2. **S3/GCS/Azure Providers** — Real cloud provider implementations with AWS/Google/Azure SDKs
+3. **Integration Tests** — End-to-end tests of write→flush→compact→recover→cloud pipeline
+4. **Metrics** — Port metrics modules from src_old for performance monitoring
 
 **Development Guidelines:**
 - Keep the original `src_old/` tree unchanged; use it purely for reference and diffing.
