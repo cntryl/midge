@@ -182,16 +182,42 @@ pub(crate) fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> Mi
         tracing::warn!("no manifest update callback configured!");
     }
 
-    // Upload SST to cloud if cloud manager is configured
-    if let Some(cloud_manager) = &config.cloud_sst_manager {
-        spawn_cloud_upload(
-            cloud_manager.clone(),
+    // Phase 7.2: Submit SST upload to cloud via runtime if coordinator is available
+    // This ensures cloud uploads are ordered deterministically with other background work
+    let coordinator_opt = config.cloud_coordinator.read().clone();
+    let runtime_opt = config.runtime.read().clone();
+
+    if let (Some(cloud_manager), Some(coordinator), Some(runtime)) =
+        (&config.cloud_sst_manager, &coordinator_opt, &runtime_opt)
+    {
+        let cloud_mgr = cloud_manager.clone();
+        let sst_path_clone = sst_path.clone();
+        let seq_min = seq_range_for_upload.0.unwrap_or(0);
+        let seq_max = seq_range_for_upload.1.unwrap_or(0);
+
+        let task_result = coordinator.submit_sst_upload_task(
+            &runtime,
             sst_name.clone(),
-            sst_path.clone(),
-            seq_range_for_upload,
-            key_range_for_upload,
-            config.test_hooks.clone(),
+            move || {
+                if let Err(e) = cloud_mgr.upload_sst_async(
+                    sst_name.clone(),
+                    sst_path_clone.clone(),
+                    (seq_min, seq_max),
+                    key_range_for_upload.clone(),
+                    None,
+                ) {
+                    tracing::error!("Failed to upload SST to cloud: {}", e);
+                }
+            },
         );
+
+        if let Err(e) = task_result {
+            tracing::error!("Failed to submit cloud upload task: {}", e);
+        }
+    } else if let Some(_cloud_manager) = &config.cloud_sst_manager {
+        // Note: coordinator/runtime should always be available in normal operation (Phase 7.2)
+        // If they're missing, it's likely a test or edge case scenario
+        tracing::warn!("Cloud upload requested but coordinator/runtime not available");
     }
 
     // Prune old WAL files AFTER manifest is updated (fs mode only)
@@ -211,46 +237,6 @@ pub(crate) fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> Mi
         .record_flush_throughput(stats.total_bytes, flush_duration_us);
 
     Ok(())
-}
-
-/// Spawn cloud upload in a separate guarded thread.
-///
-/// This is extracted from process_flush_job to:
-/// - Keep the core correctness path clean
-/// - Isolate cloud upload concerns
-/// - Enable easier testing of upload behavior
-fn spawn_cloud_upload(
-    cloud_manager: std::sync::Arc<crate::sst::cloud::CloudSstManager>,
-    sst_id: String,
-    sst_path: std::path::PathBuf,
-    seq_range: (Option<u64>, Option<u64>),
-    key_range: (Option<Vec<u8>>, Option<Vec<u8>>),
-    test_hooks: Option<crate::common::test_hooks::TestHooks>,
-) {
-    let sequence_range = (seq_range.0.unwrap_or(0), seq_range.1.unwrap_or(0));
-    let key_range_vec = (
-        key_range.0.map(|k| k.to_vec()),
-        key_range.1.map(|k| k.to_vec()),
-    );
-
-    // Use the centralized guarded spawn helper so panics are converted to
-    // TestHooks notifications instead of unwinding into the test harness.
-    let _handle = crate::common::worker::spawn_guarded(
-        "cloud-upload",
-        test_hooks,
-        move || {
-            if let Err(e) = cloud_manager.upload_sst_async(
-                sst_id,
-                sst_path,
-                sequence_range,
-                key_range_vec,
-                None,
-            ) {
-                tracing::error!("Failed to upload SST to cloud: {}", e);
-            }
-        },
-        None::<fn(Box<dyn std::any::Any + Send>)>,
-    );
 }
 
 /// Determine the safe sequence number for WAL pruning.

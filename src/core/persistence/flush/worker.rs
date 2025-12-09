@@ -50,6 +50,12 @@ pub struct FlushWorkerConfig {
     pub mem_mode: bool,
     /// Optional cloud SST manager for uploading SSTs to cloud storage
     pub cloud_sst_manager: Option<Arc<crate::sst::cloud::CloudSstManager>>,
+    /// Optional cloud coordinator for submitting cloud uploads as runtime tasks (Phase 7.2)
+    /// Shared via Arc<RwLock<...>> so it can be set after worker thread is spawned
+    pub cloud_coordinator: Arc<parking_lot::RwLock<Option<Arc<crate::core::cloud_coordinator::CloudCoordinator>>>>,
+    /// Optional runtime for submitting cloud upload tasks (Phase 7.2)
+    /// Shared via Arc<RwLock<...>> so it can be set after worker thread is spawned
+    pub runtime: Arc<parking_lot::RwLock<Option<std::sync::Arc<crate::core::runtime::EngineRuntime>>>>,
     /// Metrics collector to record memtable flushes from background worker
     pub metrics: Arc<Metrics>,
     /// Optional test hooks for deterministic coordination

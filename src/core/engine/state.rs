@@ -370,6 +370,10 @@ pub fn open_with_factories(
         crate::core::cloud_coordinator::CloudCoordinator::new(),
     );
 
+    // Phase 7.2: Set cloud coordinator and runtime on flush coordinator for cloud upload sequencing
+    flush_coordinator.set_cloud_coordinator(cloud_coordinator.clone());
+    flush_coordinator.set_runtime(runtime.clone());
+
     Ok(MidgeEngine {
         wal_coordinator,
         wal_upload_coordinator,
