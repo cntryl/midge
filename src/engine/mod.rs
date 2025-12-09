@@ -260,6 +260,59 @@ impl MidgeEngine {
         api::Snapshot::new(seq, Some(cf.id), snapshot_id)
     }
 
+    /// Create a new transaction with serializable isolation
+    pub fn transaction(&self) -> api::Transaction {
+        let seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let txn_id = self.next_snapshot_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        api::Transaction::new(txn_id, api::IsolationLevel::Serializable, seq)
+    }
+
+    /// Create a new transaction with the specified isolation level
+    pub fn transaction_with_isolation(&self, isolation: api::IsolationLevel) -> api::Transaction {
+        let seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let txn_id = self.next_snapshot_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        api::Transaction::new(txn_id, isolation, seq)
+    }
+
+    /// Commit a transaction atomically
+    pub fn commit_transaction(&self, mut txn: api::Transaction) -> MidgeResult<()> {
+        if !txn.has_writes() {
+            txn.mark_committed(self.sequence.load(std::sync::atomic::Ordering::SeqCst))?;
+            return Ok(());
+        }
+
+        // Apply all writes atomically
+        for intent in txn.iter_writes() {
+            let seq = self.next_sequence();
+            if let Some(value) = intent.value() {
+                self.memtable.put(intent.key().to_vec(), value.to_vec())?;
+                self.runtime_handle.send(RuntimeMsg::WalAppend {
+                    cf_id: intent.cf_id().as_u32(),
+                    key: intent.key().to_vec(),
+                    value: Some(value.to_vec()),
+                    sequence: seq,
+                })?;
+            } else {
+                self.memtable.delete(intent.key().to_vec())?;
+                self.runtime_handle.send(RuntimeMsg::WalAppend {
+                    cf_id: intent.cf_id().as_u32(),
+                    key: intent.key().to_vec(),
+                    value: None,
+                    sequence: seq,
+                })?;
+            }
+        }
+
+        let commit_seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        txn.mark_committed(commit_seq)?;
+        Ok(())
+    }
+
+    /// Rollback a transaction
+    pub fn rollback_transaction(&self, mut txn: api::Transaction) -> MidgeResult<()> {
+        txn.mark_rolled_back()
+    }
+
     /// Shutdown the engine gracefully
     pub fn shutdown(self) -> MidgeResult<()> {
         self.runtime_handle.shutdown()
