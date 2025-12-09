@@ -548,7 +548,7 @@ pub(crate) fn write_compacted_sst(
             let sst_id_clone = sst_id.clone();
 
             let task_result = coordinator.submit_sst_upload_task(
-                &rt,
+                rt,
                 sst_id.clone(),
                 move || {
                     if let Err(e) = cloud_mgr.upload_sst_async(

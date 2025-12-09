@@ -32,6 +32,7 @@ pub mod cloud_coordinator;
 pub mod compaction;
 pub mod data_structures;
 pub mod engine;
+pub mod intent_log;
 pub mod locking;
 pub mod manifest;
 pub mod memtable;

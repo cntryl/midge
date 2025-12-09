@@ -129,7 +129,7 @@ mod tests {
         // Arrange (using default trait implementation)
 
         // Act
-        let _coordinator = CloudCoordinator::default();
+        let _coordinator = CloudCoordinator;
 
         // Assert - creation should succeed
     }

@@ -25,6 +25,8 @@ pub struct MidgeEngine {
     /// WAL coordinator managing write-ahead log operations
     pub(crate) wal_coordinator: crate::wal::WalController,
     /// Phase 6.3: WAL upload coordinator routing uploads through EngineRuntime
+    /// Kept as Arc for future integration; currently coordinated via flush worker
+    #[allow(dead_code)]
     pub(crate) wal_upload_coordinator: Arc<crate::core::wal_upload_coordinator::WalUploadCoordinator>,
     /// Phase 7: Cloud storage coordinator for deterministic cloud operations
     pub(crate) cloud_coordinator: Arc<crate::core::cloud_coordinator::CloudCoordinator>,

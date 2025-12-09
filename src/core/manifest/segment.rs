@@ -146,7 +146,7 @@ impl Segment {
     pub fn overlaps(&self, start: &[u8], end: &[u8]) -> bool {
         // [start, end) overlaps [min_key, max_key] if:
         // start <= max_key AND end > min_key
-        start.as_ref() <= self.max_key.as_ref() && Bytes::from(end.to_vec()) > self.min_key
+        start <= self.max_key.as_ref() && end.to_vec() > self.min_key
     }
 
     /// Check if key is within this segment's range

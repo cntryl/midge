@@ -36,12 +36,14 @@ fn create_test_segment(
 #[test]
 fn should_collect_sealed_segments_for_point_key() {
     // Arrange
-    let mut manifest = Manifest::default();
-    manifest.segments = vec![
-        create_test_segment(1, 0, b"aaa", b"bbb", 100),
-        create_test_segment(2, 0, b"bbb", b"ddd", 200), // "bee" is between "bbb" and "ddd"
-        create_test_segment(3, 0, b"xxx", b"zzz", 300),
-    ];
+    let manifest = Manifest {
+        segments: vec![
+            create_test_segment(1, 0, b"aaa", b"bbb", 100),
+            create_test_segment(2, 0, b"bbb", b"ddd", 200), // "bee" is between "bbb" and "ddd"
+            create_test_segment(3, 0, b"xxx", b"zzz", 300),
+        ],
+        ..Default::default()
+    };
 
     // Act: Collect segments containing key "bee" (should match segment 2 only)
     let matching: Vec<_> = manifest
@@ -63,11 +65,13 @@ fn should_collect_sealed_segments_for_point_key() {
 #[test]
 fn should_not_collect_segments_for_key_outside_range() {
     // Arrange
-    let mut manifest = Manifest::default();
-    manifest.segments = vec![
-        create_test_segment(1, 0, b"aaa", b"bbb", 100),
-        create_test_segment(2, 0, b"ddd", b"fff", 200),
-    ];
+    let manifest = Manifest {
+        segments: vec![
+            create_test_segment(1, 0, b"aaa", b"bbb", 100),
+            create_test_segment(2, 0, b"ddd", b"fff", 200),
+        ],
+        ..Default::default()
+    };
 
     // Act: Try to collect segments containing key "zzz" (outside all ranges)
     let matching: Vec<_> = manifest
@@ -88,13 +92,15 @@ fn should_not_collect_segments_for_key_outside_range() {
 #[test]
 fn should_preserve_segment_age_order_for_read_ordering() {
     // Arrange
-    let mut manifest = Manifest::default();
     // Create segments out of insertion order to test sorting by creation time
-    manifest.segments = vec![
-        create_test_segment(2, 0, b"bbb", b"eee", 200), // Oldest semantically
-        create_test_segment(1, 0, b"aaa", b"ddd", 100), // Newest semantically (created first)
-        create_test_segment(3, 0, b"ccc", b"fff", 300), // Middle
-    ];
+    let manifest = Manifest {
+        segments: vec![
+            create_test_segment(2, 0, b"bbb", b"eee", 200), // Oldest semantically
+            create_test_segment(1, 0, b"aaa", b"ddd", 100), // Newest semantically (created first)
+            create_test_segment(3, 0, b"ccc", b"fff", 300), // Middle
+        ],
+        ..Default::default()
+    };
 
     // Act: Collect and sort segments by age
     let mut segments: Vec<_> = manifest
@@ -115,12 +121,14 @@ fn should_preserve_segment_age_order_for_read_ordering() {
 #[test]
 fn should_filter_segments_by_column_family() {
     // Arrange
-    let mut manifest = Manifest::default();
-    manifest.segments = vec![
-        create_test_segment(1, 0, b"aaa", b"bbb", 100),
-        create_test_segment(2, 1, b"aaa", b"bbb", 101), // Different CF
-        create_test_segment(3, 0, b"ddd", b"fff", 200),
-    ];
+    let manifest = Manifest {
+        segments: vec![
+            create_test_segment(1, 0, b"aaa", b"bbb", 100),
+            create_test_segment(2, 1, b"aaa", b"bbb", 101), // Different CF
+            create_test_segment(3, 0, b"ddd", b"fff", 200),
+        ],
+        ..Default::default()
+    };
 
     // Act: Collect only segments for CF 0 containing key "bee"
     let matching: Vec<_> = manifest
@@ -141,18 +149,20 @@ fn should_filter_segments_by_column_family() {
 #[test]
 fn should_only_include_sealed_segments() {
     // Arrange
-    let mut manifest = Manifest::default();
-    manifest.segments = vec![
-        Segment {
-            state: SegmentState::Mutable,
-            ..create_test_segment(1, 0, b"aaa", b"bbb", 100)
-        },
-        create_test_segment(2, 0, b"aaa", b"bbb", 101),
-        Segment {
-            state: SegmentState::Promoted,
-            ..create_test_segment(3, 0, b"aaa", b"bbb", 102)
-        },
-    ];
+    let manifest = Manifest {
+        segments: vec![
+            Segment {
+                state: SegmentState::Mutable,
+                ..create_test_segment(1, 0, b"aaa", b"bbb", 100)
+            },
+            create_test_segment(2, 0, b"aaa", b"bbb", 101),
+            Segment {
+                state: SegmentState::Promoted,
+                ..create_test_segment(3, 0, b"aaa", b"bbb", 102)
+            },
+        ],
+        ..Default::default()
+    };
 
     // Act: Collect only sealed segments
     let sealed: Vec<_> = manifest
@@ -225,11 +235,13 @@ fn should_allocate_segment_ids_sequentially_per_cf() {
 #[test]
 fn should_integrate_segments_into_read_path_conceptually() {
     // Arrange: Create a manifest with segments and SST files (segments come before SSTs)
-    let mut manifest = Manifest::default();
-    manifest.segments = vec![
-        create_test_segment(1, 0, b"a", b"l", 100),    // "k" is in this range
-        create_test_segment(2, 0, b"m", b"z", 200),
-    ];
+    let manifest = Manifest {
+        segments: vec![
+            create_test_segment(1, 0, b"a", b"l", 100),    // "k" is in this range
+            create_test_segment(2, 0, b"m", b"z", 200),
+        ],
+        ..Default::default()
+    };
 
     // Act: Simulate read path ordering: memtable → segments → SSTs
     // For a key "k", we would:

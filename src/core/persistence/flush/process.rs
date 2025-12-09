@@ -196,7 +196,7 @@ pub(crate) fn process_flush_job(config: &FlushWorkerConfig, job: FlushJob) -> Mi
         let seq_max = seq_range_for_upload.1.unwrap_or(0);
 
         let task_result = coordinator.submit_sst_upload_task(
-            &runtime,
+            runtime,
             sst_name.clone(),
             move || {
                 if let Err(e) = cloud_mgr.upload_sst_async(

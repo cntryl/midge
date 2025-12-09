@@ -5,6 +5,7 @@
 //! and cloud upload state.
 
 mod cloud;
+mod cloud_recovery;
 mod column_families;
 mod io;
 mod queries;

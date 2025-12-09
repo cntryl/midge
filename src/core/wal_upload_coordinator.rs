@@ -87,7 +87,7 @@ mod tests {
         // Arrange (using default trait implementation)
 
         // Act
-        let _coordinator = WalUploadCoordinator::default();
+        let _coordinator = WalUploadCoordinator;
 
         // Assert - creation should succeed
     }

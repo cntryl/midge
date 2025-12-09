@@ -47,7 +47,16 @@ pub(crate) fn acquire_db_lock(
 }
 
 /// Initialize manifest, ensuring default CF exists.
+/// 
+/// **Deprecated**: Use `init_manifest_cloud_first()` instead for cloud-first recovery.
+/// This function is filesystem-only and will be removed in a future version.
+/// 
 /// Returns the manifest and the maximum CF ID for next_cf_id tracking.
+#[deprecated(
+    since = "0.2.0",
+    note = "use init_manifest_cloud_first() for cloud-first recovery instead"
+)]
+#[allow(dead_code)]
 pub(crate) fn init_manifest(
     db_path: &Path,
     read_only: bool,
@@ -79,6 +88,77 @@ pub(crate) fn init_manifest(
                     tracing::debug!("manifest.save_atomic failed: {:?}", e);
                     return Err(e);
                 }
+            }
+        }
+    }
+
+    let max_cf_id = manifest
+        .column_families
+        .iter()
+        .map(|cf| cf.id)
+        .max()
+        .unwrap_or(0);
+
+    Ok((manifest, max_cf_id))
+}
+
+/// Initialize manifest with cloud-first recovery (Phase 2A).
+/// 
+/// Attempts to load manifest from cloud checkpoint first, then falls back to local,
+/// then uses default. This implements THE_BIG_IDEA principle: "recovery driven by
+/// manifest + WAL + compaction log, not whatever's on the local FS."
+///
+/// # Arguments
+///
+/// * `db_path` - Local database path
+/// * `cloud_backend` - Optional cloud storage backend
+/// * `cloud_prefix` - Optional cloud object prefix (defaults to "midge")
+/// * `read_only` - Whether database is in read-only mode
+/// * `memtable_size` - Memtable size limit for default CF
+/// * `mem_mode` - Whether running in memory-only mode
+///
+/// # Returns
+///
+/// The manifest and maximum CF ID for next_cf_id tracking
+pub(crate) fn init_manifest_cloud_first(
+    db_path: &Path,
+    cloud_backend: Option<&dyn crate::cloud::StorageBackend>,
+    cloud_prefix: Option<&str>,
+    read_only: bool,
+    memtable_size: usize,
+    mem_mode: bool,
+) -> MidgeResult<(Manifest, u32)> {
+    // Cloud-first loading with local and default fallback
+    let mut manifest = Manifest::load_with_cloud_fallback(
+        db_path,
+        cloud_backend,
+        cloud_prefix,
+    )?;
+
+    // Initialize sequence allocators from manifest
+    crate::core::naming::initialize_sequences(&manifest);
+
+    // Ensure default CF is in manifest (for new DBs)
+    if !manifest.has_cf(DEFAULT_CF_ID) {
+        let default_cf_config = ColumnFamilyConfig {
+            memtable_max_bytes: memtable_size,
+            ..ColumnFamilyConfig::default()
+        };
+        manifest.add_cf(
+            DEFAULT_CF_ID,
+            DEFAULT_CF_NAME.to_string(),
+            Some(default_cf_config),
+        );
+
+        // Save manifest with default CF to both local and cloud
+        if !read_only && !mem_mode {
+            tracing::debug!("saving new manifest to local storage: {}", db_path.display());
+            manifest.save_atomic(db_path)?;
+
+            // Also save to cloud if backend available
+            if let Some(backend) = cloud_backend {
+                tracing::debug!("saving new manifest to cloud");
+                manifest.save_to_cloud(backend, cloud_prefix)?;
             }
         }
     }

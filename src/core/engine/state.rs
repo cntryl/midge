@@ -171,9 +171,15 @@ pub fn open_with_factories(
     let db_lock =
         crate::core::engine::factory::acquire_db_lock(&db_path, opts.read_only, mem_mode)?;
     tracing::debug!("acquired db lock (or running read-only/mem)");
-    tracing::debug!("initializing manifest...");
-    let (manifest, max_cf_id) = crate::core::engine::factory::init_manifest(
+    
+    // Phase 2A: Use cloud-first manifest recovery
+    tracing::debug!("initializing manifest with cloud-first recovery...");
+    let cloud_backend = opts.storage_mode.cloud_backend();
+    let cloud_prefix = opts.storage_mode.cloud_prefix();
+    let (manifest, max_cf_id) = crate::core::engine::factory::init_manifest_cloud_first(
         &db_path,
+        cloud_backend.as_deref(),
+        cloud_prefix.as_deref(),
         opts.read_only,
         opts.memtable_size,
         mem_mode,

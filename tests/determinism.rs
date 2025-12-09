@@ -507,9 +507,4 @@ fn should_validate_all_determinism_invariants() {
     //
     // All tests above validate these invariants individually.
     // This test documents their importance for production correctness.
-
-    assert!(
-        true,
-        "All determinism invariants documented and validated by test suite"
-    );
 }

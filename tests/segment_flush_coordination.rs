@@ -96,12 +96,14 @@ fn should_fail_to_promote_mutable_segment() {
 #[test]
 fn should_track_segments_by_state_in_manifest() {
     // Arrange
-    let mut manifest = Manifest::default();
-    manifest.segments = vec![
-        create_test_segment(1, 0, b"aaa", b"bbb", 100, SegmentState::Mutable),
-        create_test_segment(2, 0, b"bbb", b"ccc", 200, SegmentState::Sealed),
-        create_test_segment(3, 0, b"ccc", b"ddd", 300, SegmentState::Promoted),
-    ];
+    let manifest = Manifest {
+        segments: vec![
+            create_test_segment(1, 0, b"aaa", b"bbb", 100, SegmentState::Mutable),
+            create_test_segment(2, 0, b"bbb", b"ccc", 200, SegmentState::Sealed),
+            create_test_segment(3, 0, b"ccc", b"ddd", 300, SegmentState::Promoted),
+        ],
+        ..Default::default()
+    };
 
     // Act
     let mutable_count = manifest
@@ -150,11 +152,13 @@ fn should_preserve_segment_metadata_through_state_transitions() {
 #[test]
 fn should_handle_flush_triggers_segment_sealing_conceptually() {
     // Arrange: Simulate manifest state before flush
-    let mut manifest = Manifest::default();
-    manifest.segments = vec![
-        create_test_segment(1, 0, b"aaa", b"bbb", 100, SegmentState::Mutable),
-        create_test_segment(2, 0, b"bbb", b"ccc", 200, SegmentState::Sealed),
-    ];
+    let mut manifest = Manifest {
+        segments: vec![
+            create_test_segment(1, 0, b"aaa", b"bbb", 100, SegmentState::Mutable),
+            create_test_segment(2, 0, b"bbb", b"ccc", 200, SegmentState::Sealed),
+        ],
+        ..Default::default()
+    };
 
     // Act: On flush trigger, seal the mutable segment and promote the sealed one
     // Phase 5.3 will implement this in flush_manager.rs

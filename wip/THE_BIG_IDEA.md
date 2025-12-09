@@ -1,4 +1,7 @@
-Let’s design an actor-based LSM with a cloud-native WAL and cloud-native SST persistence layer that’s embeddable and predictable
+Let's design an actor-based LSM with a cloud-native WAL and cloud-native SST persistence layer that's embeddable and predictable.
+
+Embeddability:
+The database is embedded in other applications as a library that shares the application's process. No separate server or RPC layer—just in-process API calls.
 
 Actor core:
 A central runtime/actor that owns all engine state and sequences every background action (flush, compaction, WAL upload, manifest sync, eviction).

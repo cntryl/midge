@@ -81,6 +81,7 @@ pub enum WalRecoveryMode {
 
 /// Flags that gate next-generation runtime behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub struct EngineFlags {
     /// Enable the deterministic compaction planner/log path.
     pub deterministic_compaction: bool,
@@ -92,15 +93,6 @@ pub struct EngineFlags {
     pub unified_write_path: bool,
 }
 
-impl Default for EngineFlags {
-    fn default() -> Self {
-        Self {
-            deterministic_compaction: false,
-            new_sst_index: false,
-            unified_write_path: false,
-        }
-    }
-}
 
 /// Midge database configuration options - low-level fine-grained control
 ///
