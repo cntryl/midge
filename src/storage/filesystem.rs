@@ -1,13 +1,17 @@
-﻿//! Filesystem storage backend implementation
+//! Filesystem storage backend implementation
 //!
-//! Provides local filesystem storage with basic read/write/delete operations.
+//! Provides local filesystem storage with callback-based operations.
+//! Executes immediately (synchronously) but conforms to the async-compatible trait.
 
 use crate::common::MidgeResult;
-use crate::storage::StorageBackend;
+use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Filesystem-based storage backend
+///
+/// Implements StorageBackend synchronously. Suitable for local file storage.
+/// All operations execute immediately and send completion events via callback.
 pub struct FileSystem {
     base_path: PathBuf,
 }
@@ -27,49 +31,75 @@ impl FileSystem {
 }
 
 impl StorageBackend for FileSystem {
-    fn read(&self, path: &str) -> MidgeResult<Vec<u8>> {
-        let full_path = self.full_path(path);
-        fs::read(&full_path).map_err(|e| {
-            crate::common::MidgeError::Io(e)
-        })
+    fn submit_read(&self, path: String, callback: StorageCallback) {
+        let full_path = self.full_path(&path);
+        let result = fs::read(&full_path).map_err(|e| MidgeError::Io(e));
+
+        let event = StorageEvent::ReadComplete {
+            path,
+            result: StorageOutcome::from_result(result),
+        };
+        let _ = callback.send(event);
     }
 
-    fn write(&mut self, path: &str, data: &[u8]) -> MidgeResult<()> {
-        let full_path = self.full_path(path);
+    fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
+        let full_path = self.full_path(&path);
+
         // Ensure parent directory exists
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&full_path, data).map_err(|e| {
-            crate::common::MidgeError::Io(e)
-        })
-    }
-
-    fn delete(&mut self, path: &str) -> MidgeResult<()> {
-        let full_path = self.full_path(path);
-        fs::remove_file(&full_path).map_err(|e| {
-            crate::common::MidgeError::Io(e)
-        })
-    }
-
-    fn list(&self, prefix: &str) -> MidgeResult<Vec<String>> {
-        let mut results = Vec::new();
-        let prefix_path = self.full_path(prefix);
-
-        // If prefix is a directory, list its contents
-        if prefix_path.is_dir() {
-            for entry in fs::read_dir(&prefix_path)? {
-                let entry = entry?;
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    results.push(name.to_string());
-                }
-            }
+        let result = if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent)
+                .and_then(|_| fs::write(&full_path, data))
+                .map_err(|e| MidgeError::Io(e))
         } else {
-            // If prefix is a file pattern, we could implement glob matching here
-            // For now, just return empty list
-        }
+            Ok(())
+        };
 
-        Ok(results)
+        let event = StorageEvent::WriteComplete {
+            path,
+            result: StorageOutcome::from_result(result),
+        };
+        let _ = callback.send(event);
+    }
+
+    fn submit_delete(&self, path: String, callback: StorageCallback) {
+        let full_path = self.full_path(&path);
+        let result = fs::remove_file(&full_path).map_err(|e| MidgeError::Io(e));
+
+        let event = StorageEvent::DeleteComplete {
+            path,
+            result: StorageOutcome::from_result(result),
+        };
+        let _ = callback.send(event);
+    }
+
+    fn submit_list(&self, prefix: String, callback: StorageCallback) {
+        let prefix_path = self.full_path(&prefix);
+
+        let result = if prefix_path.is_dir() {
+            fs::read_dir(&prefix_path)
+                .and_then(|iter| {
+                    Ok(iter
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            e.path()
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect())
+                })
+                .map_err(|e| MidgeError::Io(e))
+        } else {
+            Ok(Vec::new())
+        };
+
+        let event = StorageEvent::ListComplete {
+            prefix,
+            result: StorageOutcome::from_result(result),
+        };
+        let _ = callback.send(event);
     }
 }
+
+// Use local imports for MidgeError to avoid conflicts
+use crate::common::MidgeError;

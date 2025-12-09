@@ -1,12 +1,12 @@
-﻿//! GC Actor - handles garbage collection
+//! GC Actor - handles garbage collection
 //!
 //! Responsible for:
 //! - Identifying obsolete SST files
 //! - Deleting files that are no longer referenced
 //! - Coordinating with snapshots to avoid deleting live data
 
-use crate::common::MidgeResult;
 use super::super::state::RuntimeState;
+use crate::common::MidgeResult;
 
 /// Actor handling garbage collection
 pub struct GcActor {
@@ -16,15 +16,15 @@ pub struct GcActor {
 
 impl GcActor {
     pub fn new() -> Self {
-        Self {
-            last_gc_run: None,
-        }
+        Self { last_gc_run: None }
     }
 
     /// Check for garbage collection opportunities
     pub fn check(&self, state: &RuntimeState) {
         // Find SST files that are no longer in the manifest
-        let manifest_ssts: std::collections::HashSet<_> = state.manifest.files
+        let manifest_ssts: std::collections::HashSet<_> = state
+            .manifest
+            .files
             .iter()
             .map(|f| f.name.as_str())
             .collect();
@@ -32,14 +32,15 @@ impl GcActor {
         // TODO: List actual files on disk and compare
         // Files on disk but not in manifest are candidates for deletion
 
-        tracing::debug!(
-            manifest_sst_count = manifest_ssts.len(),
-            "GC check"
-        );
+        tracing::debug!(manifest_sst_count = manifest_ssts.len(), "GC check");
     }
 
     /// Delete obsolete SST files
-    pub fn delete_ssts(&mut self, state: &mut RuntimeState, sst_names: &[String]) -> MidgeResult<()> {
+    pub fn delete_ssts(
+        &mut self,
+        state: &mut RuntimeState,
+        sst_names: &[String],
+    ) -> MidgeResult<()> {
         for sst_name in sst_names {
             let sst_path = state.sst_dir.join(sst_name);
 

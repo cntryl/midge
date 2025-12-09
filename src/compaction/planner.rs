@@ -1,4 +1,4 @@
-﻿//! Compaction task planning and persistence
+//! Compaction task planning and persistence
 //!
 //! Converts compaction plans into deterministic tasks and logs them for durability.
 
@@ -50,16 +50,14 @@ impl CompactionTask {
 
     /// Serialize task to bytes
     pub fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })
+        serde_json::to_vec(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 
     /// Deserialize task from bytes
     pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
-        serde_json::from_slice(data).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })
+        serde_json::from_slice(data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 }
 
@@ -116,16 +114,14 @@ impl CompactionLog {
 
     /// Serialize log to bytes
     pub fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })
+        serde_json::to_vec(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 
     /// Deserialize log from bytes
     pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
-        serde_json::from_slice(data).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })
+        serde_json::from_slice(data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 }
 

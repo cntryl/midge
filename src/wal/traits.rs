@@ -1,4 +1,4 @@
-﻿//! WAL trait definitions
+//! WAL trait definitions
 //!
 //! Clean trait contracts for WAL implementations.
 
@@ -128,4 +128,3 @@ pub trait WalFactory: Send + Sync {
     /// and return a new writer for the active WAL.
     fn rotate_writer(&self, dir: &Path, seq: u64) -> MidgeResult<Box<dyn WalWriter>>;
 }
-

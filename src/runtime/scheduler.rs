@@ -1,9 +1,9 @@
-﻿//! Scheduler - prioritizes and batches work
+//! Scheduler - prioritizes and batches work
 //!
 //! Orders tasks by priority and batches related operations for efficiency.
 
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 use super::task::{Task, TaskId, TaskKind};
 

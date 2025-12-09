@@ -1,15 +1,15 @@
 //! Engine API - Public interfaces
-pub mod kv;
 pub mod cf;
-pub mod write_batch;
-pub mod snapshot;
-pub mod iterator;
-pub mod transaction;
-pub mod options;
 pub mod errors;
+pub mod iterator;
+pub mod kv;
+pub mod options;
+pub mod snapshot;
+pub mod transaction;
 pub mod types;
+pub mod write_batch;
 
-pub use write_batch::WriteBatch;
+pub use iterator::{Direction, Iterator, IteratorBuilder};
 pub use snapshot::Snapshot;
-pub use iterator::{Iterator, IteratorBuilder, Direction};
-pub use transaction::{Transaction, IsolationLevel, TransactionState, WriteIntent};
+pub use transaction::{IsolationLevel, Transaction, TransactionState, WriteIntent};
+pub use write_batch::WriteBatch;

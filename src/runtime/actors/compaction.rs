@@ -1,14 +1,14 @@
-﻿//! Compaction Actor - handles SST compaction
+//! Compaction Actor - handles SST compaction
 //!
 //! Responsible for:
 //! - Detecting when compaction is needed
 //! - Planning and executing compaction jobs
 //! - Merging SST files across levels
 
-use crate::common::MidgeResult;
-use crate::compaction::{Compactor, LeveledCompactionConfig, execute_compaction};
-use crate::sst::SstFactory;
 use super::super::state::RuntimeState;
+use crate::common::MidgeResult;
+use crate::compaction::{execute_compaction, Compactor, LeveledCompactionConfig};
+use crate::sst::SstFactory;
 use std::sync::Arc;
 
 /// Actor handling SST compaction
@@ -31,7 +31,10 @@ impl CompactionActor {
     }
 
     /// Check if compaction is needed based on current state and pick a plan if so
-    pub fn check_compaction(&mut self, state: &RuntimeState) -> Option<crate::compaction::CompactionPlan> {
+    pub fn check_compaction(
+        &mut self,
+        state: &RuntimeState,
+    ) -> Option<crate::compaction::CompactionPlan> {
         if self.compaction_running {
             return None;
         }
@@ -65,14 +68,17 @@ impl CompactionActor {
     ) -> MidgeResult<Vec<String>> {
         if self.compaction_running {
             return Err(crate::common::MidgeError::Internal(
-                "Compaction already in progress".to_string()
+                "Compaction already in progress".to_string(),
             ));
         }
 
         self.compaction_running = true;
 
         // Mark input files as being compacted
-        state.compaction.compacting_ssts.extend(plan.input_files.clone());
+        state
+            .compaction
+            .compacting_ssts
+            .extend(plan.input_files.clone());
 
         tracing::info!(
             input_count = plan.input_files.len(),
@@ -102,7 +108,10 @@ impl CompactionActor {
         output_ssts: Vec<String>,
     ) {
         // Remove input files from compacting set
-        state.compaction.compacting_ssts.retain(|s| !input_ssts.contains(s));
+        state
+            .compaction
+            .compacting_ssts
+            .retain(|s| !input_ssts.contains(s));
 
         self.compaction_running = false;
 

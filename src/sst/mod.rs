@@ -9,9 +9,9 @@
 //! - **fs**: Filesystem-backed SST implementation
 
 use crate::common::MidgeResult;
-use std::sync::Arc;
 use crate::iterators::SkipList;
 use bytes::Bytes;
+use std::sync::Arc;
 
 pub mod encoding;
 pub mod fs;
@@ -62,7 +62,8 @@ impl SkipListMemtable {
     /// Iterate over all entries in the memtable
     /// Returns (key, value, sequence) tuples in sorted order
     pub fn iter_all(&self, _max_seq: u64) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
-        self.skiplist.drain_with_meta_with_exp()
+        self.skiplist
+            .drain_with_meta_with_exp()
             .into_iter()
             .map(|(key, value, seq, _, _, _)| (key.to_vec(), value.map(|vb| vb.to_vec()), seq))
             .collect()
@@ -79,8 +80,10 @@ impl Memtable for SkipListMemtable {
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()> {
         let seq = self.next_seq();
         let size_delta = key.len() + value.len() + 16;
-        self.skiplist.upsert(Bytes::from(key), Some(Bytes::from(value)), seq);
-        self.size_bytes.fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        self.skiplist
+            .upsert(Bytes::from(key), Some(Bytes::from(value)), seq);
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -92,7 +95,8 @@ impl Memtable for SkipListMemtable {
         let seq = self.next_seq();
         let size_delta = key.len() + 16;
         self.skiplist.delete(Bytes::from(key), seq);
-        self.size_bytes.fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

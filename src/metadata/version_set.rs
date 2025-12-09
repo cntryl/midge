@@ -1,13 +1,13 @@
-﻿//! Version Set - lock-free snapshot-isolated manifest reads
+//! Version Set - lock-free snapshot-isolated manifest reads
 //!
 //! Provides snapshot isolation for concurrent readers while writers update the manifest.
 //! Uses atomic versioning to avoid locks on the read path.
 
 use crate::common::MidgeResult;
-use crate::metadata::manifest::{Manifest, FileMeta, ColumnFamilyMeta};
+use crate::metadata::manifest::{ColumnFamilyMeta, FileMeta, Manifest};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::collections::HashMap;
 
 /// A version of the manifest at a specific point in time
 #[derive(Debug, Clone)]
@@ -27,7 +27,10 @@ impl Version {
         // Build level index
         let mut level_files: HashMap<u32, Vec<FileMeta>> = HashMap::new();
         for file in &manifest.files {
-            level_files.entry(file.level).or_insert_with(Vec::new).push(file.clone());
+            level_files
+                .entry(file.level)
+                .or_insert_with(Vec::new)
+                .push(file.clone());
         }
 
         // Build CF index
@@ -59,7 +62,9 @@ impl Version {
 
     /// Get all files for a specific column family
     pub fn cf_files(&self, cf_id: u32) -> Vec<FileMeta> {
-        self.manifest.files.iter()
+        self.manifest
+            .files
+            .iter()
             .filter(|f| f.cf_id == cf_id)
             .cloned()
             .collect()
@@ -94,7 +99,7 @@ impl VersionSet {
         let version_id = initial_version.version_id();
         let mut versions = Vec::new();
         versions.push(initial_version);
-        
+
         Self {
             current_version: AtomicU64::new(version_id),
             versions: Arc::new(std::sync::Mutex::new(versions)),
@@ -109,7 +114,8 @@ impl VersionSet {
     /// Get a specific version by ID
     pub fn get_version(&self, version_id: u64) -> MidgeResult<Arc<Version>> {
         let versions = self.versions.lock().unwrap();
-        versions.iter()
+        versions
+            .iter()
             .find(|v| v.version_id() == version_id)
             .cloned()
             .ok_or_else(|| crate::common::MidgeError::NotFound)
@@ -125,7 +131,8 @@ impl VersionSet {
     pub fn install_version(&self, version: Arc<Version>) -> MidgeResult<()> {
         let mut versions = self.versions.lock().unwrap();
         versions.push(version.clone());
-        self.current_version.store(version.version_id(), Ordering::SeqCst);
+        self.current_version
+            .store(version.version_id(), Ordering::SeqCst);
         Ok(())
     }
 
@@ -141,7 +148,11 @@ impl VersionSet {
 
     /// Check if a version exists
     pub fn has_version(&self, version_id: u64) -> bool {
-        self.versions.lock().unwrap().iter().any(|v| v.version_id() == version_id)
+        self.versions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v.version_id() == version_id)
     }
 }
 
@@ -341,7 +352,7 @@ mod tests {
         // Act - simulate concurrent reads
         let vs1 = version_set.clone();
         let vs2 = version_set.clone();
-        
+
         let id1 = vs1.current_version_id();
         let id2 = vs2.current_version_id();
 

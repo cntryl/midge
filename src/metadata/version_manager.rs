@@ -1,4 +1,4 @@
-﻿//! Version Manager - coordinates manifest updates and version transitions
+//! Version Manager - coordinates manifest updates and version transitions
 //!
 //! Responsible for:
 //! - Accepting manifest updates from writers (compaction, flush, WAL recovery)
@@ -9,9 +9,9 @@
 use crate::common::MidgeResult;
 use crate::metadata::manifest::Manifest;
 use crate::metadata::version_set::{Version, VersionSet};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
 
 /// Edit operation for version updates
 #[derive(Debug, Clone)]
@@ -34,16 +34,26 @@ pub enum VersionEdit {
     /// Update sequence number
     UpdateSequence(u64),
     /// Add column family
-    AddColumnFamily {
-        id: u32,
-        name: String,
-    },
+    AddColumnFamily { id: u32, name: String },
 }
 
 impl VersionEdit {
-    pub fn add_file(cf_id: u32, level: u32, name: String, size_bytes: u64,
-                    smallest_key: Vec<u8>, largest_key: Vec<u8>) -> Self {
-        Self::AddFile { cf_id, level, name, size_bytes, smallest_key, largest_key }
+    pub fn add_file(
+        cf_id: u32,
+        level: u32,
+        name: String,
+        size_bytes: u64,
+        smallest_key: Vec<u8>,
+        largest_key: Vec<u8>,
+    ) -> Self {
+        Self::AddFile {
+            cf_id,
+            level,
+            name,
+            size_bytes,
+            smallest_key,
+            largest_key,
+        }
     }
 
     pub fn delete_file(cf_id: u32, level: u32, name: String) -> Self {
@@ -92,7 +102,9 @@ impl VersionManager {
     pub fn apply_edits(&self) -> MidgeResult<Arc<Version>> {
         let mut edits = self.pending_edits.lock().unwrap();
         if edits.is_empty() {
-            return Err(crate::common::MidgeError::InvalidArgument("No edits to apply".to_string()));
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "No edits to apply".to_string(),
+            ));
         }
 
         let mut manifest = self.current_manifest.lock().unwrap();
@@ -100,7 +112,14 @@ impl VersionManager {
         // Apply all edits
         while let Some(edit) = edits.pop_front() {
             match edit {
-                VersionEdit::AddFile { cf_id, level, name, size_bytes, smallest_key, largest_key } => {
+                VersionEdit::AddFile {
+                    cf_id,
+                    level,
+                    name,
+                    size_bytes,
+                    smallest_key,
+                    largest_key,
+                } => {
                     manifest.files.push(crate::metadata::manifest::FileMeta {
                         name,
                         level,
@@ -111,14 +130,29 @@ impl VersionManager {
                         ..Default::default()
                     });
                 }
-                VersionEdit::DeleteFile { cf_id: _, level: _, name } => {
+                VersionEdit::DeleteFile {
+                    cf_id: _,
+                    level: _,
+                    name,
+                } => {
                     manifest.files.retain(|f| f.name != name);
                 }
                 VersionEdit::UpdateSequence(seq) => {
                     manifest.last_persisted_sequence = seq;
                 }
                 VersionEdit::AddColumnFamily { id, name } => {
-                    manifest.column_families.push(crate::metadata::manifest::ColumnFamilyMeta { id, name });
+                    let created_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    manifest
+                        .column_families
+                        .push(crate::metadata::manifest::ColumnFamilyMeta {
+                            id,
+                            name,
+                            created_at,
+                            deleted_at: None,
+                        });
                 }
             }
         }
@@ -197,10 +231,16 @@ mod tests {
     fn should_apply_multiple_edits_when_apply_edits_called() {
         // Arrange
         let manager = create_test_version_manager();
-        manager.add_edit(VersionEdit::add_file(
-            0, 0, "file1.sst".to_string(), 1024,
-            vec![1], vec![10]
-        )).unwrap();
+        manager
+            .add_edit(VersionEdit::add_file(
+                0,
+                0,
+                "file1.sst".to_string(),
+                1024,
+                vec![1],
+                vec![10],
+            ))
+            .unwrap();
         manager.add_edit(VersionEdit::update_sequence(50)).unwrap();
 
         // Act
@@ -216,10 +256,16 @@ mod tests {
     fn should_create_new_version_when_edits_applied() {
         // Arrange
         let manager = create_test_version_manager();
-        manager.add_edit(VersionEdit::add_file(
-            0, 0, "file1.sst".to_string(), 2048,
-            vec![5], vec![15]
-        )).unwrap();
+        manager
+            .add_edit(VersionEdit::add_file(
+                0,
+                0,
+                "file1.sst".to_string(),
+                2048,
+                vec![5],
+                vec![15],
+            ))
+            .unwrap();
 
         // Act
         manager.apply_edits().unwrap();
@@ -246,15 +292,23 @@ mod tests {
     fn should_delete_file_when_delete_edit_applied() {
         // Arrange
         let manager = create_test_version_manager();
-        manager.add_edit(VersionEdit::add_file(
-            0, 0, "file1.sst".to_string(), 1024,
-            vec![1], vec![10]
-        )).unwrap();
+        manager
+            .add_edit(VersionEdit::add_file(
+                0,
+                0,
+                "file1.sst".to_string(),
+                1024,
+                vec![1],
+                vec![10],
+            ))
+            .unwrap();
         let v1 = manager.apply_edits().unwrap();
         assert_eq!(v1.file_count(), 1);
 
         // Act
-        manager.add_edit(VersionEdit::delete_file(0, 0, "file1.sst".to_string())).unwrap();
+        manager
+            .add_edit(VersionEdit::delete_file(0, 0, "file1.sst".to_string()))
+            .unwrap();
         let v2 = manager.apply_edits().unwrap();
 
         // Assert
@@ -268,7 +322,9 @@ mod tests {
         let manager = create_test_version_manager();
 
         // Act
-        manager.add_edit(VersionEdit::add_column_family(1, "secondary".to_string())).unwrap();
+        manager
+            .add_edit(VersionEdit::add_column_family(1, "secondary".to_string()))
+            .unwrap();
         let version = manager.apply_edits().unwrap();
 
         // Assert
@@ -294,10 +350,16 @@ mod tests {
     fn should_publish_versions_to_set_when_edits_applied() {
         // Arrange
         let manager = create_test_version_manager();
-        manager.add_edit(VersionEdit::add_file(
-            0, 0, "file1.sst".to_string(), 1024,
-            vec![1], vec![10]
-        )).unwrap();
+        manager
+            .add_edit(VersionEdit::add_file(
+                0,
+                0,
+                "file1.sst".to_string(),
+                1024,
+                vec![1],
+                vec![10],
+            ))
+            .unwrap();
 
         // Act
         manager.apply_edits().unwrap();
@@ -311,8 +373,26 @@ mod tests {
     fn should_apply_batched_edits_atomically() {
         // Arrange
         let manager = create_test_version_manager();
-        manager.add_edit(VersionEdit::add_file(0, 0, "file1.sst".to_string(), 1024, vec![1], vec![10])).unwrap();
-        manager.add_edit(VersionEdit::add_file(0, 1, "file2.sst".to_string(), 2048, vec![11], vec![20])).unwrap();
+        manager
+            .add_edit(VersionEdit::add_file(
+                0,
+                0,
+                "file1.sst".to_string(),
+                1024,
+                vec![1],
+                vec![10],
+            ))
+            .unwrap();
+        manager
+            .add_edit(VersionEdit::add_file(
+                0,
+                1,
+                "file2.sst".to_string(),
+                2048,
+                vec![11],
+                vec![20],
+            ))
+            .unwrap();
         manager.add_edit(VersionEdit::update_sequence(75)).unwrap();
 
         // Act

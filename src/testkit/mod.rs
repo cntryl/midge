@@ -2,18 +2,19 @@
 //!
 //! Mock implementations for testing
 
-use crate::storage::StorageBackend;
-use crate::common::MidgeResult;
+use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Mock storage backend for testing
 pub struct MockStorage {
-    data: std::collections::HashMap<String, Vec<u8>>,
+    data: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 impl MockStorage {
     pub fn new() -> Self {
         Self {
-            data: std::collections::HashMap::new(),
+            data: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -25,22 +26,54 @@ impl Default for MockStorage {
 }
 
 impl StorageBackend for MockStorage {
-    fn read(&self, key: &str) -> MidgeResult<Vec<u8>> {
-        self.data
-            .get(key)
+    fn submit_read(&self, path: String, callback: StorageCallback) {
+        let data = self.data.lock().unwrap();
+        let result = data
+            .get(&path)
             .cloned()
-            .ok_or(crate::common::MidgeError::NotFound)
+            .ok_or(crate::common::MidgeError::NotFound);
+
+        let event = StorageEvent::ReadComplete {
+            path,
+            result: StorageOutcome::from_result(result),
+        };
+        let _ = callback.send(event);
     }
 
-    fn write(&mut self, _key: &str, _data: &[u8]) -> MidgeResult<()> {
-        todo!()
+    fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
+        let mut storage = self.data.lock().unwrap();
+        storage.insert(path.clone(), data);
+
+        let event = StorageEvent::WriteComplete {
+            path,
+            result: StorageOutcome::Ok(()),
+        };
+        let _ = callback.send(event);
     }
 
-    fn delete(&mut self, _key: &str) -> MidgeResult<()> {
-        todo!()
+    fn submit_delete(&self, path: String, callback: StorageCallback) {
+        let mut storage = self.data.lock().unwrap();
+        storage.remove(&path);
+
+        let event = StorageEvent::DeleteComplete {
+            path,
+            result: StorageOutcome::Ok(()),
+        };
+        let _ = callback.send(event);
     }
 
-    fn list(&self, _prefix: &str) -> MidgeResult<Vec<String>> {
-        todo!()
+    fn submit_list(&self, prefix: String, callback: StorageCallback) {
+        let data = self.data.lock().unwrap();
+        let results: Vec<_> = data
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+
+        let event = StorageEvent::ListComplete {
+            prefix,
+            result: StorageOutcome::Ok(results),
+        };
+        let _ = callback.send(event);
     }
 }

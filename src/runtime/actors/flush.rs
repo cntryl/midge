@@ -1,12 +1,12 @@
-﻿//! Flush Actor - handles memtable to SST flushes
+//! Flush Actor - handles memtable to SST flushes
 //!
 //! Responsible for:
 //! - Freezing active memtables
 //! - Writing immutable memtables to SST files
 //! - Coordinating with manifest actor for metadata updates
 
-use crate::common::{MidgeResult, MidgeError};
 use super::super::state::RuntimeState;
+use crate::common::{MidgeError, MidgeResult};
 use std::path::Path;
 
 /// Actor handling memtable flushes
@@ -20,7 +20,7 @@ pub struct FlushActor {
 impl FlushActor {
     pub fn new(sst_dir: &Path) -> MidgeResult<Self> {
         let sst_factory = std::sync::Arc::new(
-            crate::sst::FsSstFactory::new(sst_dir, 64 * 1024) // 64KB block size
+            crate::sst::FsSstFactory::new(sst_dir, 64 * 1024), // 64KB block size
         );
         Ok(Self {
             in_progress: 0,
@@ -34,22 +34,26 @@ impl FlushActor {
     /// Returns the name of the SST file that will be created.
     pub fn handle_flush(&mut self, state: &mut RuntimeState, cf_id: u32) -> MidgeResult<String> {
         // Get the column family
-        let cf = state.get_cf_mut(cf_id)
-            .ok_or_else(|| MidgeError::Internal(
-                format!("Column family {} not found", cf_id)
-            ))?;
+        let cf = state
+            .get_cf_mut(cf_id)
+            .ok_or_else(|| MidgeError::Internal(format!("Column family {} not found", cf_id)))?;
 
         // Freeze current memtable and create new one
         let frozen = std::mem::replace(
             &mut cf.memtable,
-            std::sync::Arc::new(crate::sst::SkipListMemtable::new())
+            std::sync::Arc::new(crate::sst::SkipListMemtable::new()),
         );
 
         // Add to immutable list
         cf.immutable_memtables.push(frozen.clone());
 
         // Generate SST filename
-        let sst_seq = state.manifest.next_sst_seqs.get(&cf_id).copied().unwrap_or(1);
+        let sst_seq = state
+            .manifest
+            .next_sst_seqs
+            .get(&cf_id)
+            .copied()
+            .unwrap_or(1);
         let sst_name = format!("sst_{:06}_{:06}.sst", cf_id, sst_seq);
         let sst_path = state.sst_dir.join(&sst_name);
 
@@ -79,11 +83,11 @@ impl FlushActor {
 
         // Get all entries from memtable and write to SST
         let entries = memtable.iter_all(u64::MAX);
-        
+
         for (key, value, seq) in entries {
             // Determine op_type: 0=Put, 2=Delete
             let op_type = if value.is_some() { 0 } else { 2 };
-            
+
             writer.add_with_meta(&key, value.as_deref(), seq, op_type, None)?;
         }
 

@@ -10,20 +10,20 @@
 //! - Transactions
 //! - Snapshots
 
-use crate::common::MidgeResult;
-use crate::runtime::{Runtime, RuntimeHandle, RuntimeMsg, RuntimeState};
+use crate::common::{MidgeError, MidgeResult};
+use crate::runtime::{Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse, RuntimeState};
 use crate::sst::{Memtable, SkipListMemtable};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod api;
+pub mod context;
 pub mod engine;
 pub mod open;
-pub mod context;
-pub mod api;
 
-pub use open::open_engine;
-pub use context::Context;
 pub use api::*;
+pub use context::Context;
+pub use open::open_engine;
 
 /// Column family identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,13 +139,33 @@ impl MidgeEngine {
 
     /// Get a value from a specific column family
     pub fn get_cf(&self, _cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
-        // First check local memtable
+        // First check local memtable (write cache)
         if let Some(value) = self.memtable.get(key)? {
             return Ok(Some(value));
         }
 
-        // TODO: Check immutable memtables and SST files via runtime
-        Ok(None)
+        // Query runtime for immutable memtables and SST files
+        let response = self.runtime_handle.send_and_wait_filtered(
+            RuntimeMsg::Read {
+                cf_id: _cf.id.0,
+                key: key.to_vec(),
+                sequence: self.sequence.load(std::sync::atomic::Ordering::SeqCst),
+            },
+            |resp| {
+                matches!(
+                    resp,
+                    RuntimeResponse::ReadValue(_) | RuntimeResponse::Error(_)
+                )
+            },
+        )?;
+
+        match response {
+            RuntimeResponse::ReadValue(value) => Ok(value),
+            RuntimeResponse::Error(e) => Err(MidgeError::Internal(e)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to read".to_string(),
+            )),
+        }
     }
 
     /// Delete a key from the default column family
@@ -199,7 +219,8 @@ impl MidgeEngine {
 
     /// Force a flush of a specific column family
     pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
-        self.runtime_handle.send(RuntimeMsg::FlushMemtable { cf_id: cf.id.0 })
+        self.runtime_handle
+            .send(RuntimeMsg::FlushMemtable { cf_id: cf.id.0 })
     }
 
     /// Get current memtable size in bytes
@@ -249,28 +270,36 @@ impl MidgeEngine {
     /// Create a snapshot of the current database state
     pub fn snapshot(&self) -> api::Snapshot {
         let seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let snapshot_id = self.next_snapshot_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let snapshot_id = self
+            .next_snapshot_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         api::Snapshot::new(seq, None, snapshot_id)
     }
 
     /// Create a snapshot of a specific column family
     pub fn snapshot_cf(&self, cf: &ColumnFamilyHandle) -> api::Snapshot {
         let seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let snapshot_id = self.next_snapshot_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let snapshot_id = self
+            .next_snapshot_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         api::Snapshot::new(seq, Some(cf.id), snapshot_id)
     }
 
     /// Create a new transaction with serializable isolation
     pub fn transaction(&self) -> api::Transaction {
         let seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let txn_id = self.next_snapshot_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let txn_id = self
+            .next_snapshot_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         api::Transaction::new(txn_id, api::IsolationLevel::Serializable, seq)
     }
 
     /// Create a new transaction with the specified isolation level
     pub fn transaction_with_isolation(&self, isolation: api::IsolationLevel) -> api::Transaction {
         let seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let txn_id = self.next_snapshot_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let txn_id = self
+            .next_snapshot_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         api::Transaction::new(txn_id, isolation, seq)
     }
 
@@ -318,10 +347,64 @@ impl MidgeEngine {
         self.runtime_handle.shutdown()
     }
 
+    // === Column Family Lifecycle ===
+
+    /// Create a new column family with the given name
+    pub fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
+        let response = self.runtime_handle.send_and_wait_filtered(
+            RuntimeMsg::ManifestCreateColumnFamily {
+                name: name.to_string(),
+            },
+            |resp| {
+                matches!(
+                    resp,
+                    RuntimeResponse::ColumnFamilyCreated { .. } | RuntimeResponse::Error(_)
+                )
+            },
+        )?;
+
+        match response {
+            RuntimeResponse::ColumnFamilyCreated { cf_id } => Ok(ColumnFamilyHandle::new(
+                ColumnFamilyId(cf_id),
+                name.to_string(),
+            )),
+            RuntimeResponse::Error(e) => Err(MidgeError::Internal(e)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to create_column_family".to_string(),
+            )),
+        }
+    }
+
+    /// Drop a column family by ID
+    pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
+        let response = self.runtime_handle.send_and_wait_filtered(
+            RuntimeMsg::ManifestDropColumnFamily {
+                cf_id: cf_id.as_u32(),
+            },
+            |resp| matches!(resp, RuntimeResponse::Ok | RuntimeResponse::Error(_)),
+        )?;
+
+        match response {
+            RuntimeResponse::Ok => Ok(()),
+            RuntimeResponse::Error(e) => Err(MidgeError::Internal(e)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to drop_column_family".to_string(),
+            )),
+        }
+    }
+
+    /// List all active column families
+    pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
+        // Get the runtime state to access the manifest
+        // For now, return the default CF + a placeholder for others
+        // TODO: Wire to RuntimeMsg to query all active CFs from manifest
+        Ok(vec![self.default_cf.clone()])
+    }
+
     // === Internal helpers ===
 
     fn next_sequence(&self) -> u64 {
-        self.sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        self.sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 }
-

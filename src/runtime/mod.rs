@@ -11,19 +11,19 @@
 //! - **Scheduler**: Prioritizes and batches work
 //! - **Dispatcher**: Routes messages to appropriate actors
 
+pub mod actors;
+pub mod dispatch;
 pub mod event_loop;
+pub mod scheduler;
 pub mod state;
 pub mod task;
-pub mod scheduler;
-pub mod dispatch;
-pub mod actors;
 
+pub use actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
+pub use dispatch::Dispatcher;
 pub use event_loop::EventLoop;
+pub use scheduler::Scheduler;
 pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
-pub use scheduler::Scheduler;
-pub use dispatch::Dispatcher;
-pub use actors::{FlushActor, CompactionActor, WalActor, CloudActor, GcActor, ManifestActor};
 
 use crate::common::{MidgeError, MidgeResult};
 use crossbeam::channel::{self, Receiver, Sender};
@@ -36,7 +36,11 @@ pub enum RuntimeMsg {
     /// Request memtable flush for a column family
     FlushMemtable { cf_id: u32 },
     /// Memtable flush completed
-    FlushComplete { cf_id: u32, sst_name: String, sequence: u64 },
+    FlushComplete {
+        cf_id: u32,
+        sst_name: String,
+        sequence: u64,
+    },
 
     // === Compaction Actor ===
     /// Trigger compaction check
@@ -44,11 +48,19 @@ pub enum RuntimeMsg {
     /// Execute a specific compaction plan
     RunCompaction { plan: CompactionPlan },
     /// Compaction completed
-    CompactionComplete { input_ssts: Vec<String>, output_ssts: Vec<String> },
+    CompactionComplete {
+        input_ssts: Vec<String>,
+        output_ssts: Vec<String>,
+    },
 
     // === WAL Actor ===
     /// Append record to WAL
-    WalAppend { cf_id: u32, key: Vec<u8>, value: Option<Vec<u8>>, sequence: u64 },
+    WalAppend {
+        cf_id: u32,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+        sequence: u64,
+    },
     /// Sync WAL to disk
     WalSync,
     /// Rotate WAL segment
@@ -74,9 +86,26 @@ pub enum RuntimeMsg {
     /// Update manifest with new SST
     ManifestAddSst { file_meta: FileMeta },
     /// Update manifest after compaction
-    ManifestCompactionComplete { removed: Vec<String>, added: Vec<FileMeta> },
+    ManifestCompactionComplete {
+        removed: Vec<String>,
+        added: Vec<FileMeta>,
+    },
     /// Persist manifest to disk
     ManifestPersist,
+
+    // === Column Family Lifecycle ===
+    /// Create a new column family
+    ManifestCreateColumnFamily { name: String },
+    /// Drop a column family (soft delete)
+    ManifestDropColumnFamily { cf_id: u32 },
+
+    // === Read Path ===
+    /// Query a value from memtables and SST files
+    Read {
+        cf_id: u32,
+        key: Vec<u8>,
+        sequence: u64, // Read at this sequence number or earlier
+    },
 
     // === Control ===
     /// Shutdown the runtime
@@ -112,8 +141,10 @@ pub struct FileMeta {
 pub enum RuntimeResponse {
     Ok,
     Error(String),
+    ReadValue(Option<Vec<u8>>),
     FlushComplete { sst_name: String },
     CompactionComplete { output_ssts: Vec<String> },
+    ColumnFamilyCreated { cf_id: u32 },
 }
 
 /// Handle for submitting work to the runtime
@@ -137,6 +168,32 @@ impl RuntimeHandle {
         self.response_rx
             .recv()
             .map_err(|_| MidgeError::Internal("Runtime response channel closed".to_string()))
+    }
+
+    /// Submit a message and wait until a response matches the predicate
+    pub fn send_and_wait_filtered<F>(
+        &self,
+        msg: RuntimeMsg,
+        mut predicate: F,
+    ) -> MidgeResult<RuntimeResponse>
+    where
+        F: FnMut(&RuntimeResponse) -> bool,
+    {
+        self.send(msg)?;
+        loop {
+            match self.response_rx.recv() {
+                Ok(resp) => {
+                    if predicate(&resp) {
+                        return Ok(resp);
+                    }
+                }
+                Err(_) => {
+                    return Err(MidgeError::Internal(
+                        "Runtime response channel closed".to_string(),
+                    ));
+                }
+            }
+        }
     }
 
     /// Request shutdown
@@ -205,14 +262,12 @@ impl Runtime {
 
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
-            .spawn(move || {
-                match EventLoop::new(state, trace_enabled) {
-                    Ok(mut event_loop) => {
-                        event_loop.run(msg_rx, response_tx);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to create event loop: {}", e);
-                    }
+            .spawn(move || match EventLoop::new(state, trace_enabled) {
+                Ok(mut event_loop) => {
+                    event_loop.run(msg_rx, response_tx);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create event loop: {}", e);
                 }
             })
             .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {}", e)))?;

@@ -1,7 +1,7 @@
-﻿//! Engine opening and initialization
+//! Engine opening and initialization
 
-use crate::common::MidgeResult;
 use super::MidgeEngine;
+use crate::common::MidgeResult;
 use std::path::PathBuf;
 
 /// Open a Midge database at the given path

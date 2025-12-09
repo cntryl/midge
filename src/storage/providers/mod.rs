@@ -9,13 +9,13 @@
 //! - Azure Blob Storage: Direct REST API with SAS tokens
 //! - Oracle Cloud Infrastructure: Direct REST API with signature-based auth
 
-pub mod s3;
-pub mod gcs;
 pub mod azure;
+pub mod gcs;
 pub mod oci;
+pub mod s3;
 
 // Re-export for convenience
-pub use s3::S3Provider;
-pub use gcs::GcsProvider;
 pub use azure::AzureProvider;
+pub use gcs::GcsProvider;
 pub use oci::OciProvider;
+pub use s3::S3Provider;

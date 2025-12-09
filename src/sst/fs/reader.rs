@@ -1,14 +1,14 @@
 //! Filesystem-backed SST reader
 
+use bytes::Bytes;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use bytes::Bytes;
 
-use crate::common::{MidgeResult, MidgeError};
+use crate::common::{MidgeError, MidgeResult};
 use crate::sst::encoding;
-use crate::sst::types::{BlockHandle, Footer};
 use crate::sst::traits::SstReader;
+use crate::sst::types::{BlockHandle, Footer};
 
 /// SST file reader
 pub struct SstFile {
@@ -253,8 +253,8 @@ impl crate::sst::SstStateReader for SstFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::sst::traits::DynSstWriter;
+    use std::fs;
 
     #[test]
     fn should_retrieve_written_entries_when_reading_sst_file() -> MidgeResult<()> {

@@ -1,4 +1,4 @@
-﻿//! Cloud Actor - handles cloud storage operations
+//! Cloud Actor - handles cloud storage operations
 //!
 //! Responsible for:
 //! - Uploading SST files to cloud storage
@@ -6,8 +6,8 @@
 //! - Tracking upload progress and checkpoints
 //! - Coordinating with manifest for cloud state
 
-use crate::common::MidgeResult;
 use super::super::state::RuntimeState;
+use crate::common::MidgeResult;
 
 /// Actor handling cloud storage operations
 pub struct CloudActor {

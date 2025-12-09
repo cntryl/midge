@@ -4,10 +4,9 @@
 //! For now, this is a stub. MockCloud is used for testing and integration.
 
 use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
-use std::sync::Arc;
 
 /// Google Cloud Storage provider stub
-/// 
+///
 /// Full implementation will use:
 /// - Direct REST API calls (no Google Cloud SDK)
 /// - OAuth2 authentication with service account
@@ -21,16 +20,13 @@ pub struct GcsProvider {
 
 impl GcsProvider {
     /// Create a new GCS provider
-    /// 
+    ///
     /// # Arguments
     /// * `bucket` - GCS bucket name
     /// * `project_id` - GCP project ID
     /// * `service_account_key` - Path or JSON string for service account key
     pub fn new(bucket: String, project_id: String) -> Self {
-        Self {
-            bucket,
-            project_id,
-        }
+        Self { bucket, project_id }
     }
 
     /// Submit a PUT operation (stub)

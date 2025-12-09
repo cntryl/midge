@@ -18,10 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 // Helper to create cloud storage options
-fn cloud_storage_opts(
-    dir: &std::path::Path,
-    backend: Arc<MockCloudBackend>,
-) -> MidgeOptions {
+fn cloud_storage_opts(dir: &std::path::Path, backend: Arc<MockCloudBackend>) -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
             local_cache_path: dir.to_path_buf(),
@@ -55,10 +52,7 @@ fn should_submit_cloud_upload_task_during_flush_when_cloud_backed() {
 
     // Baseline: count initial uploads (should be none)
     let baseline_uploads = mock_backend.upload_count();
-    assert_eq!(
-        baseline_uploads, 0,
-        "Initial state should have no uploads"
-    );
+    assert_eq!(baseline_uploads, 0, "Initial state should have no uploads");
 
     // Act: Write data and flush
     for i in 0..10 {
@@ -81,7 +75,10 @@ fn should_submit_cloud_upload_task_during_flush_when_cloud_backed() {
         let result = eng
             .get(&cf, format!("key{:02}", i).as_bytes())
             .expect("get");
-        assert!(result.is_some(), "Data should be accessible after cloud upload");
+        assert!(
+            result.is_some(),
+            "Data should be accessible after cloud upload"
+        );
     }
 }
 
@@ -126,10 +123,7 @@ fn should_sequence_cloud_uploads_across_multiple_flushes_when_cloud_backed() {
     for batch in 0..3 {
         for i in 0..5 {
             let result = eng
-                .get(
-                    &cf,
-                    format!("batch{}_key{:02}", batch, i).as_bytes(),
-                )
+                .get(&cf, format!("batch{}_key{:02}", batch, i).as_bytes())
                 .expect("get");
             assert!(
                 result.is_some(),

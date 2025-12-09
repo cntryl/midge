@@ -1,7 +1,7 @@
 //! SST factory implementations
 
-use std::path::Path;
 use crate::common::MidgeResult;
+use std::path::Path;
 
 /// Filesystem-backed SST factory
 pub struct FsSstFactory {

@@ -294,9 +294,7 @@ fn should_recover_to_identical_state_after_engine_restart() {
     // Verify data is readable after restart
     {
         let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir_path,
-            },
+            storage_mode: StorageMode::LocalDisk { db_path: dir_path },
             ..Default::default()
         };
         let engine = MidgeEngine::open(opts).expect("open for verification");
@@ -335,7 +333,9 @@ fn should_maintain_read_order_after_flush_recovery() {
         engine.flush().expect("flush");
 
         // Flush 2: key_001 -> value_v1_updated (overwrite)
-        engine.put(&cf, b"key_001", b"value_v1_updated").expect("put");
+        engine
+            .put(&cf, b"key_001", b"value_v1_updated")
+            .expect("put");
         engine.flush().expect("flush");
 
         // Snapshot state
@@ -482,7 +482,8 @@ fn should_produce_identical_sst_contents_for_same_flush_sequence() {
         let v1 = engine1.get(&cf1, key).expect("get e1");
         let v2 = engine2.get(&cf2, key).expect("get e2");
         assert_eq!(
-            v1, v2,
+            v1,
+            v2,
             "Data integrity across identical workloads (key: {:?})",
             String::from_utf8_lossy(key)
         );

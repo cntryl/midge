@@ -1,4 +1,4 @@
-﻿//! Runtime state - centralized mutable state owned by the runtime
+//! Runtime state - centralized mutable state owned by the runtime
 //!
 //! All engine state that can change at runtime lives here.
 //! Actors read from and propose updates to this state.
@@ -121,8 +121,19 @@ impl RuntimeState {
     ///
     /// This also performs manifest loading and WAL recovery if they exist.
     pub fn new(db_path: PathBuf) -> Self {
+        if let Err(e) = std::fs::create_dir_all(&db_path) {
+            tracing::warn!(error = %e, path = ?db_path, "failed to create database directory");
+        }
+
         let wal_dir = db_path.join("wal");
+        if let Err(e) = std::fs::create_dir_all(&wal_dir) {
+            tracing::warn!(error = %e, path = ?wal_dir, "failed to create WAL directory");
+        }
+
         let sst_dir = db_path.join("sst");
+        if let Err(e) = std::fs::create_dir_all(&sst_dir) {
+            tracing::warn!(error = %e, path = ?sst_dir, "failed to create SST directory");
+        }
 
         // Load manifest from disk if it exists
         let manifest = match crate::metadata::ManifestPersistence::load(&db_path) {
@@ -143,7 +154,10 @@ impl RuntimeState {
         // Create any other column families from the manifest
         for cf_meta in &manifest.column_families {
             if cf_meta.id != 0 {
-                column_families.insert(cf_meta.id, ColumnFamilyState::new(cf_meta.id, cf_meta.name.clone()));
+                column_families.insert(
+                    cf_meta.id,
+                    ColumnFamilyState::new(cf_meta.id, cf_meta.name.clone()),
+                );
             }
         }
 
@@ -220,7 +234,8 @@ impl RuntimeState {
     /// Create a new column family
     pub fn create_cf(&mut self, name: String) -> MidgeResult<u32> {
         let id = self.column_families.len() as u32;
-        self.column_families.insert(id, ColumnFamilyState::new(id, name));
+        self.column_families
+            .insert(id, ColumnFamilyState::new(id, name));
         Ok(id)
     }
 

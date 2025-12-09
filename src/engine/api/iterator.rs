@@ -1,4 +1,4 @@
-﻿//! Iterator API - Range scanning and sequential reads
+//! Iterator API - Range scanning and sequential reads
 //!
 //! Iterators provide efficient sequential access to key-value pairs,
 //! including full range scans, prefix scans, and reverse iteration.
@@ -233,7 +233,11 @@ mod tests {
     #[test]
     fn should_iterate_forward_when_calling_next() {
         // Arrange
-        let results = vec![(vec![1], vec![10]), (vec![2], vec![20]), (vec![3], vec![30])];
+        let results = vec![
+            (vec![1], vec![10]),
+            (vec![2], vec![20]),
+            (vec![3], vec![30]),
+        ];
         let mut iter = Iterator::forward(results);
 
         // Act
@@ -253,7 +257,11 @@ mod tests {
     #[test]
     fn should_reverse_order_when_creating_reverse_iterator() {
         // Arrange
-        let results = vec![(vec![1], vec![10]), (vec![2], vec![20]), (vec![3], vec![30])];
+        let results = vec![
+            (vec![1], vec![10]),
+            (vec![2], vec![20]),
+            (vec![3], vec![30]),
+        ];
 
         // Act
         let mut iter = Iterator::reverse(results);
@@ -268,7 +276,11 @@ mod tests {
     #[test]
     fn should_track_remaining_count_when_iterating() {
         // Arrange
-        let results = vec![(vec![1], vec![10]), (vec![2], vec![20]), (vec![3], vec![30])];
+        let results = vec![
+            (vec![1], vec![10]),
+            (vec![2], vec![20]),
+            (vec![3], vec![30]),
+        ];
         let mut iter = Iterator::forward(results);
 
         // Act & Assert
@@ -284,7 +296,11 @@ mod tests {
     #[test]
     fn should_collect_all_remaining_pairs_when_calling_collect_all() {
         // Arrange
-        let results = vec![(vec![1], vec![10]), (vec![2], vec![20]), (vec![3], vec![30])];
+        let results = vec![
+            (vec![1], vec![10]),
+            (vec![2], vec![20]),
+            (vec![3], vec![30]),
+        ];
         let mut iter = Iterator::forward(results);
         iter.next(); // Skip first
 
@@ -309,9 +325,7 @@ mod tests {
         ];
 
         // Act
-        let builder = IteratorBuilder::new()
-            .start(vec![2])
-            .end(vec![4]);
+        let builder = IteratorBuilder::new().start(vec![2]).end(vec![4]);
         let mut iter = builder.build(results);
 
         // Assert - inclusive on both ends
@@ -333,8 +347,7 @@ mod tests {
         ];
 
         // Act
-        let builder = IteratorBuilder::new()
-            .range(vec![2], vec![4]);
+        let builder = IteratorBuilder::new().range(vec![2], vec![4]);
         let mut iter = builder.build(results);
 
         // Assert - [2, 4)

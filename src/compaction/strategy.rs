@@ -1,4 +1,4 @@
-﻿//! Compaction strategy and planning
+//! Compaction strategy and planning
 //!
 //! Implements leveled compaction for LSM-tree maintenance.
 //! Strategy:
@@ -71,20 +71,13 @@ impl Compactor {
     }
 
     /// Pick a compaction based on leveled compaction strategy
-    pub fn pick_compaction(
-        &self,
-        files: &[FileMeta],
-        cf_id: u32,
-    ) -> Option<CompactionPlan> {
+    pub fn pick_compaction(&self, files: &[FileMeta], cf_id: u32) -> Option<CompactionPlan> {
         if files.is_empty() {
             return None;
         }
 
         // Filter files for this CF
-        let cf_files: Vec<&FileMeta> = files
-            .iter()
-            .filter(|f| f.cf_id == cf_id)
-            .collect();
+        let cf_files: Vec<&FileMeta> = files.iter().filter(|f| f.cf_id == cf_id).collect();
 
         if cf_files.is_empty() {
             return None;
@@ -103,10 +96,12 @@ impl Compactor {
         let l0_size: u64 = levels[0].iter().map(|f| f.size_bytes).sum();
         let l0_file_count = levels[0].len();
 
-        if l0_size > self.config.l0_compaction_threshold || l0_file_count >= self.config.l0_file_count_threshold {
+        if l0_size > self.config.l0_compaction_threshold
+            || l0_file_count >= self.config.l0_file_count_threshold
+        {
             // Compact all L0 files to L1
             let input_files: Vec<String> = levels[0].iter().map(|f| f.name.clone()).collect();
-            
+
             if input_files.is_empty() {
                 return None;
             }
@@ -156,7 +151,8 @@ impl Compactor {
 
             if level_size > target_size {
                 // Compact this level to next level
-                let input_files: Vec<String> = levels[level].iter().map(|f| f.name.clone()).collect();
+                let input_files: Vec<String> =
+                    levels[level].iter().map(|f| f.name.clone()).collect();
 
                 // Find overlapping files in next level
                 let level_smallest = levels[level]

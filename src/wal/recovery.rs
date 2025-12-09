@@ -4,13 +4,13 @@
 //! memtables for each column family. This ensures durability: any operation
 //! written to WAL before crash is recovered.
 
+use super::traits::WalReader;
+use super::types::WalRecord;
 use crate::common::MidgeResult;
 use crate::sst::{Memtable, SkipListMemtable};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use super::types::WalRecord;
-use super::traits::WalReader;
 
 /// Statistics from WAL recovery
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ pub fn replay_wal(
 
     // List all WAL files
     let wal_files = list_wal_files(wal_dir)?;
-    
+
     if wal_files.is_empty() {
         tracing::debug!("No WAL files found, recovery complete");
         return Ok(stats);
@@ -153,7 +153,7 @@ fn list_wal_files(wal_dir: &Path) -> MidgeResult<Vec<String>> {
     for entry in std::fs::read_dir(wal_dir)? {
         let entry = entry?;
         let path = entry.path();
-        
+
         // Only include .wal or .log files
         if let Some(extension) = path.extension() {
             if extension == "wal" || extension == "log" {
@@ -175,10 +175,10 @@ fn list_wal_files(wal_dir: &Path) -> MidgeResult<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use crate::wal::fs::FsWalWriter;
     use crate::wal::types::WalOpKind;
     use crate::wal::WalWriter;
-    use crate::wal::fs::FsWalWriter;
+    use bytes::Bytes;
 
     #[test]
     fn should_initialize_stats_with_zeros_when_created() {
@@ -197,7 +197,7 @@ mod tests {
         // Arrange
         let mut memtables = HashMap::new();
         let non_existent = std::env::temp_dir().join("midge_nonexistent_wal_dir_12345");
-        
+
         // Act
         let stats = replay_wal(&non_existent, &mut memtables).unwrap();
 
@@ -240,7 +240,8 @@ mod tests {
     #[test]
     fn should_recover_delete_operations_when_replaying_wal() {
         // Arrange
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_delete_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_delete_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -256,12 +257,8 @@ mod tests {
             );
             writer.append_record(&put_record).unwrap();
 
-            let delete_record = WalRecord::new(
-                WalOpKind::Delete,
-                Bytes::from_static(b"test_key"),
-                None,
-                2,
-            );
+            let delete_record =
+                WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
             writer.append_record(&delete_record).unwrap();
             writer.sync().unwrap();
         }
@@ -271,7 +268,10 @@ mod tests {
         let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
         // Assert
-        assert_eq!(stats.records_recovered, 2, "Should recover exactly 2 records");
+        assert_eq!(
+            stats.records_recovered, 2,
+            "Should recover exactly 2 records"
+        );
         let recovered_memtable = &memtables[&0];
         let value = recovered_memtable.get(b"test_key").unwrap();
         assert_eq!(value, None); // Key should be deleted
@@ -280,7 +280,8 @@ mod tests {
     #[test]
     fn should_handle_multiple_column_families_when_recovering() {
         // Arrange
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_cf_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_cf_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -288,7 +289,7 @@ mod tests {
         // Write WAL with records for multiple CFs
         {
             let writer = FsWalWriter::new(&wal_dir).unwrap();
-            
+
             let record_cf0 = WalRecord::new_cf(
                 0,
                 WalOpKind::Put,
@@ -314,7 +315,10 @@ mod tests {
         let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
         // Assert
-        assert_eq!(stats.records_recovered, 2, "Should recover exactly 2 records");
+        assert_eq!(
+            stats.records_recovered, 2,
+            "Should recover exactly 2 records"
+        );
         assert_eq!(memtables.len(), 2, "Should have 2 column families");
         assert!(memtables[&0].get(b"key0").unwrap().is_some());
         assert!(memtables[&1].get(b"key1").unwrap().is_some());

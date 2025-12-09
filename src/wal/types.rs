@@ -2,9 +2,9 @@
 //!
 //! This module defines the fundamental types used across all WAL implementations.
 
+use crate::common::MidgeResult;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use crate::common::MidgeResult;
 
 /// Position/offset in the WAL file/stream.
 pub type WalPos = u64;
@@ -107,9 +107,10 @@ impl WalOpKind {
             4 => Ok(WalOpKind::TxnBegin),
             5 => Ok(WalOpKind::TxnCommit),
             6 => Ok(WalOpKind::Merge),
-            _ => Err(crate::common::MidgeError::Corruption(
-                format!("Invalid WAL operation type: {}", byte)
-            )),
+            _ => Err(crate::common::MidgeError::Corruption(format!(
+                "Invalid WAL operation type: {}",
+                byte
+            ))),
         }
     }
 }
@@ -254,4 +255,3 @@ impl WalRecord {
         4 + 1 + 8 + 4 + key_size + 4 + value_size + range_end_size + 20
     }
 }
-

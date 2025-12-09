@@ -1,4 +1,4 @@
-﻿//! Manifest data structures and operations
+//! Manifest data structures and operations
 //!
 //! The manifest is the source of truth for all SST files, column families,
 //! and database metadata.
@@ -62,6 +62,12 @@ pub struct CloudCheckpoint {
 pub struct ColumnFamilyMeta {
     pub id: u32,
     pub name: String,
+    /// Timestamp when column family was created (milliseconds since epoch)
+    #[serde(default)]
+    pub created_at: u64,
+    /// Timestamp when column family was deleted (None if active)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<u64>,
 }
 
 /// File metadata for an SST
@@ -104,10 +110,7 @@ impl Manifest {
 
     /// Get all files at a specific level
     pub fn files_at_level(&self, level: u32) -> Vec<&FileMeta> {
-        self.files
-            .iter()
-            .filter(|f| f.level == level)
-            .collect()
+        self.files.iter().filter(|f| f.level == level).collect()
     }
 
     /// Add a file to the manifest
@@ -118,5 +121,76 @@ impl Manifest {
     /// Remove a file from the manifest
     pub fn remove_file(&mut self, name: &str) {
         self.files.retain(|f| f.name != name);
+    }
+
+    // === Column Family Lifecycle ===
+
+    /// Get next available column family ID
+    pub fn next_cf_id(&self) -> u32 {
+        self.column_families
+            .iter()
+            .map(|cf| cf.id)
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    /// Create a new column family
+    pub fn create_column_family(&mut self, name: String) -> u32 {
+        let id = self.next_cf_id();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        self.column_families.push(ColumnFamilyMeta {
+            id,
+            name,
+            created_at,
+            deleted_at: None,
+        });
+
+        id
+    }
+
+    /// Get an active column family by name
+    pub fn get_column_family_by_name(&self, name: &str) -> Option<&ColumnFamilyMeta> {
+        self.column_families
+            .iter()
+            .find(|cf| cf.name == name && cf.deleted_at.is_none())
+    }
+
+    /// Get an active column family by ID
+    pub fn get_column_family_by_id(&self, id: u32) -> Option<&ColumnFamilyMeta> {
+        self.column_families
+            .iter()
+            .find(|cf| cf.id == id && cf.deleted_at.is_none())
+    }
+
+    /// Get all active column families
+    pub fn active_column_families(&self) -> Vec<&ColumnFamilyMeta> {
+        self.column_families
+            .iter()
+            .filter(|cf| cf.deleted_at.is_none())
+            .collect()
+    }
+
+    /// Mark a column family as deleted (soft delete for durability)
+    pub fn delete_column_family(&mut self, cf_id: u32) -> bool {
+        if let Some(cf) = self
+            .column_families
+            .iter_mut()
+            .find(|cf| cf.id == cf_id && cf.deleted_at.is_none())
+        {
+            cf.deleted_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            );
+            true
+        } else {
+            false
+        }
     }
 }

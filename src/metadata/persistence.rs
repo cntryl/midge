@@ -144,20 +144,22 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.next_wal_seq = 42;
         manifest.last_persisted_sequence = 100;
-        manifest.column_families.push(crate::metadata::ColumnFamilyMeta {
-            id: 0,
-            name: "default".to_string(),
-        });
-        manifest.column_families.push(crate::metadata::ColumnFamilyMeta {
-            id: 1,
-            name: "secondary".to_string(),
-        });
+        manifest
+            .column_families
+            .push(crate::metadata::ColumnFamilyMeta {
+                id: 0,
+                name: "default".to_string(),
+            });
+        manifest
+            .column_families
+            .push(crate::metadata::ColumnFamilyMeta {
+                id: 1,
+                name: "secondary".to_string(),
+            });
 
         // Act
-        ManifestPersistence::save(&test_dir, &manifest)
-            .expect("save should succeed");
-        let loaded = ManifestPersistence::load(&test_dir)
-            .expect("load should succeed");
+        ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
 
         // Assert
         assert_eq!(loaded.next_wal_seq, 42);
@@ -173,8 +175,7 @@ mod tests {
         let test_dir = create_test_dir();
 
         // Act
-        let loaded = ManifestPersistence::load(&test_dir)
-            .expect("load should succeed");
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
 
         // Assert
         assert_eq!(loaded.next_wal_seq, 1);
@@ -201,10 +202,8 @@ mod tests {
         });
 
         // Act
-        ManifestPersistence::save(&test_dir, &manifest)
-            .expect("save should succeed");
-        let loaded = ManifestPersistence::load(&test_dir)
-            .expect("load should succeed");
+        ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
+        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
 
         // Assert
         assert_eq!(loaded.files.len(), 1);
@@ -220,17 +219,21 @@ mod tests {
         // Arrange
         let test_dir = create_test_dir();
         let manifest = Manifest::default();
-        ManifestPersistence::save(&test_dir, &manifest)
-            .expect("save should succeed");
+        ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
         let manifest_path = ManifestPersistence::manifest_path(&test_dir);
-        assert!(manifest_path.exists(), "manifest file should exist before delete");
+        assert!(
+            manifest_path.exists(),
+            "manifest file should exist before delete"
+        );
 
         // Act
-        ManifestPersistence::delete(&test_dir)
-            .expect("delete should succeed");
+        ManifestPersistence::delete(&test_dir).expect("delete should succeed");
 
         // Assert
-        assert!(!manifest_path.exists(), "manifest file should not exist after delete");
+        assert!(
+            !manifest_path.exists(),
+            "manifest file should not exist after delete"
+        );
     }
 
     #[test]
@@ -239,7 +242,6 @@ mod tests {
         let test_dir = create_test_dir();
 
         // Act & Assert
-        ManifestPersistence::delete(&test_dir)
-            .expect("delete should succeed even if file missing");
+        ManifestPersistence::delete(&test_dir).expect("delete should succeed even if file missing");
     }
 }

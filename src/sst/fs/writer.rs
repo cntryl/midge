@@ -122,11 +122,7 @@ impl crate::sst::DynSstWriter for FsSstWriter {
 
         // Flush block if needed
         if self.should_flush(key.len(), value_len) {
-            let last_key = self
-                .current_entries
-                .last()
-                .cloned()
-                .unwrap_or_default();
+            let last_key = self.current_entries.last().cloned().unwrap_or_default();
             self.flush_block(last_key)?;
         }
 
@@ -189,8 +185,8 @@ impl crate::sst::DynSstWriter for FsSstWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::sst::DynSstWriter;
+    use std::fs;
 
     #[test]
     fn should_write_entries_when_creating_sst() -> MidgeResult<()> {

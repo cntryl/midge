@@ -157,7 +157,7 @@ impl SstEntry {
 #[derive(Debug, Clone)]
 pub enum KeyState {
     Absent,
-    Tombstone(u64), // sequence number
+    Tombstone(u64),                     // sequence number
     Value(Bytes, u64, Option<u64>, u8), // value, seq, expiration, op_type
 }
 

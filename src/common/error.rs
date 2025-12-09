@@ -11,19 +11,19 @@ pub type MidgeResult<T> = Result<T, MidgeError>;
 pub enum MidgeError {
     /// IO error
     Io(std::io::Error),
-    
+
     /// Key not found
     NotFound,
-    
+
     /// Invalid argument
     InvalidArgument(String),
-    
+
     /// Corruption detected
     Corruption(String),
-    
+
     /// Operation not supported
     NotSupported(String),
-    
+
     /// Internal error (should not happen)
     Internal(String),
 }

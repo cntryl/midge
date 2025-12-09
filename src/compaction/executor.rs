@@ -1,4 +1,4 @@
-﻿//! Compaction execution: version collection, merging, and output
+//! Compaction execution: version collection, merging, and output
 //!
 //! Collects versions from input SSTs, deduplicates, filters tombstones,
 //! and writes merged output to new SST file.
@@ -35,7 +35,7 @@ pub fn collect_versions(
     for filename in input_files {
         let path = Path::new(filename);
         let _reader = sst_factory.open(path)?;
-        
+
         // Need to downcast to SstStateReader
         // For now, skip to avoid complexity with dynamic dispatch
         // TODO: Wire SstStateReader into factory trait
@@ -63,7 +63,7 @@ pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVer
         }
 
         let key = version.key.clone();
-        
+
         // Keep if this is the first version of this key, or if it has higher sequence
         match key_map.get(&key) {
             None => {

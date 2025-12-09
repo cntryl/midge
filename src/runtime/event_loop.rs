@@ -1,12 +1,13 @@
-﻿//! Event loop - main message processing loop
+//! Event loop - main message processing loop
 //!
 //! Receives messages from the RuntimeHandle and dispatches to actors.
 
 use crossbeam::channel::{Receiver, Sender};
 
+use super::actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
 use super::state::RuntimeState;
 use super::{RuntimeMsg, RuntimeResponse};
-use super::actors::{FlushActor, CompactionActor, WalActor, CloudActor, GcActor, ManifestActor};
+use crate::sst::Memtable;
 
 /// The main event loop that processes runtime messages
 pub struct EventLoop {
@@ -28,11 +29,11 @@ impl EventLoop {
     pub fn new(state: RuntimeState, trace_enabled: bool) -> crate::common::MidgeResult<Self> {
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
-        
+
         let sst_factory = std::sync::Arc::new(
-            super::super::sst::FsSstFactory::new(&sst_dir, 64 * 1024) // 64KB block size
+            super::super::sst::FsSstFactory::new(&sst_dir, 64 * 1024), // 64KB block size
         );
-        
+
         Ok(Self {
             state,
             flush_actor: FlushActor::new(&sst_dir)?,
@@ -62,7 +63,7 @@ impl EventLoop {
                         RuntimeMsg::Noop => {
                             let _ = response_tx.send(RuntimeResponse::Ok);
                         }
-                        
+
                         // === Flush Actor ===
                         RuntimeMsg::FlushMemtable { cf_id } => {
                             let result = self.flush_actor.handle_flush(&mut self.state, cf_id);
@@ -71,24 +72,37 @@ impl EventLoop {
                                 Err(e) => RuntimeResponse::Error(e.to_string()),
                             });
                         }
-                        RuntimeMsg::FlushComplete { cf_id, sst_name, sequence } => {
-                            self.flush_actor.handle_flush_complete(&mut self.state, cf_id, &sst_name, sequence);
+                        RuntimeMsg::FlushComplete {
+                            cf_id,
+                            sst_name,
+                            sequence,
+                        } => {
+                            self.flush_actor.handle_flush_complete(
+                                &mut self.state,
+                                cf_id,
+                                &sst_name,
+                                sequence,
+                            );
                             let _ = response_tx.send(RuntimeResponse::Ok);
                         }
 
                         // === Compaction Actor ===
                         RuntimeMsg::CheckCompaction => {
                             // Try to pick a compaction
-                            if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                            if let Some(plan) = self.compaction_actor.check_compaction(&self.state)
+                            {
                                 tracing::info!(
                                     input_count = plan.input_files.len(),
                                     source_level = plan.source_level,
                                     target_level = plan.target_level,
                                     "Triggering compaction"
                                 );
-                                let result = self.compaction_actor.run_compaction(&mut self.state, plan);
+                                let result =
+                                    self.compaction_actor.run_compaction(&mut self.state, plan);
                                 let _ = response_tx.send(match result {
-                                    Ok(output_ssts) => RuntimeResponse::CompactionComplete { output_ssts },
+                                    Ok(output_ssts) => {
+                                        RuntimeResponse::CompactionComplete { output_ssts }
+                                    }
                                     Err(e) => RuntimeResponse::Error(e.to_string()),
                                 });
                             } else {
@@ -104,22 +118,44 @@ impl EventLoop {
                                 target_level: plan.target_level,
                                 cf_id: plan.cf_id,
                             };
-                            let result = self.compaction_actor.run_compaction(&mut self.state, compaction_plan);
+                            let result = self
+                                .compaction_actor
+                                .run_compaction(&mut self.state, compaction_plan);
                             let _ = response_tx.send(match result {
-                                Ok(output_ssts) => RuntimeResponse::CompactionComplete { output_ssts },
+                                Ok(output_ssts) => {
+                                    RuntimeResponse::CompactionComplete { output_ssts }
+                                }
                                 Err(e) => RuntimeResponse::Error(e.to_string()),
                             });
                         }
-                        RuntimeMsg::CompactionComplete { input_ssts, output_ssts } => {
-                            self.compaction_actor.handle_complete(&mut self.state, input_ssts, output_ssts);
+                        RuntimeMsg::CompactionComplete {
+                            input_ssts,
+                            output_ssts,
+                        } => {
+                            self.compaction_actor.handle_complete(
+                                &mut self.state,
+                                input_ssts,
+                                output_ssts,
+                            );
                             let _ = response_tx.send(RuntimeResponse::Ok);
                         }
 
                         // === WAL Actor ===
-                        RuntimeMsg::WalAppend { cf_id, key, value, sequence } => {
+                        RuntimeMsg::WalAppend {
+                            cf_id,
+                            key,
+                            value,
+                            sequence,
+                        } => {
                             let key_bytes = bytes::Bytes::from(key);
                             let value_bytes = value.map(bytes::Bytes::from);
-                            let result = self.wal_actor.append(&mut self.state, cf_id, key_bytes, value_bytes, sequence);
+                            let result = self.wal_actor.append(
+                                &mut self.state,
+                                cf_id,
+                                key_bytes,
+                                value_bytes,
+                                sequence,
+                            );
                             let _ = response_tx.send(match result {
                                 Ok(()) => RuntimeResponse::Ok,
                                 Err(e) => RuntimeResponse::Error(e.to_string()),
@@ -140,7 +176,8 @@ impl EventLoop {
                             });
                         }
                         RuntimeMsg::WalSyncComplete { segment_id } => {
-                            self.wal_actor.handle_sync_complete(&mut self.state, segment_id);
+                            self.wal_actor
+                                .handle_sync_complete(&mut self.state, segment_id);
                             let _ = response_tx.send(RuntimeResponse::Ok);
                         }
 
@@ -160,7 +197,8 @@ impl EventLoop {
                             });
                         }
                         RuntimeMsg::CloudUploadComplete { resource } => {
-                            self.cloud_actor.handle_upload_complete(&mut self.state, &resource);
+                            self.cloud_actor
+                                .handle_upload_complete(&mut self.state, &resource);
                             let _ = response_tx.send(RuntimeResponse::Ok);
                         }
 
@@ -186,7 +224,11 @@ impl EventLoop {
                             });
                         }
                         RuntimeMsg::ManifestCompactionComplete { removed, added } => {
-                            let result = self.manifest_actor.compaction_complete(&mut self.state, removed, added);
+                            let result = self.manifest_actor.compaction_complete(
+                                &mut self.state,
+                                removed,
+                                added,
+                            );
                             let _ = response_tx.send(match result {
                                 Ok(()) => RuntimeResponse::Ok,
                                 Err(e) => RuntimeResponse::Error(e.to_string()),
@@ -199,6 +241,36 @@ impl EventLoop {
                                 Err(e) => RuntimeResponse::Error(e.to_string()),
                             });
                         }
+
+                        // === Column Family Lifecycle ===
+                        RuntimeMsg::ManifestCreateColumnFamily { name } => {
+                            let result = self
+                                .manifest_actor
+                                .create_column_family(&mut self.state, name.clone());
+                            let _ = response_tx.send(match result {
+                                Ok(cf_id) => RuntimeResponse::ColumnFamilyCreated { cf_id },
+                                Err(e) => RuntimeResponse::Error(e.to_string()),
+                            });
+                        }
+                        RuntimeMsg::ManifestDropColumnFamily { cf_id } => {
+                            let result = self
+                                .manifest_actor
+                                .drop_column_family(&mut self.state, cf_id);
+                            let _ = response_tx.send(match result {
+                                Ok(()) => RuntimeResponse::Ok,
+                                Err(e) => RuntimeResponse::Error(e.to_string()),
+                            });
+                        }
+
+                        // === Read Path ===
+                        RuntimeMsg::Read {
+                            cf_id,
+                            key,
+                            sequence,
+                        } => {
+                            let value = self.handle_read(cf_id, &key, sequence);
+                            let _ = response_tx.send(RuntimeResponse::ReadValue(value));
+                        }
                     }
                 }
                 Err(_) => {
@@ -208,5 +280,31 @@ impl EventLoop {
                 }
             }
         }
+    }
+
+    /// Handle read operation by checking memtables and SST files
+    fn handle_read(&self, cf_id: u32, key: &[u8], _sequence: u64) -> Option<Vec<u8>> {
+        // Get column family state
+        let cf_state = match self.state.column_families.get(&cf_id) {
+            Some(cf) => cf,
+            None => return None,
+        };
+
+        // Check active memtable first
+        if let Ok(Some(value)) = cf_state.memtable.get(key) {
+            return Some(value);
+        }
+
+        // Check immutable memtables (in reverse order - newest first)
+        for immutable in cf_state.immutable_memtables.iter().rev() {
+            if let Ok(Some(value)) = immutable.get(key) {
+                return Some(value);
+            }
+        }
+
+        // TODO: Check SST files via manifest
+        // Temporarily disabled due to Windows file locking issues
+        // SST file reading will be re-enabled after architectural changes
+        None
     }
 }

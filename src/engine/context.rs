@@ -1,4 +1,4 @@
-﻿//! Engine execution context
+//! Engine execution context
 
 /// Execution context for operations
 #[derive(Clone, Debug)]
@@ -17,4 +17,3 @@ impl Default for Context {
         Self { operation_id: 0 }
     }
 }
-

@@ -4,17 +4,17 @@
 //! into a single sorted stream, respecting MVCC snapshot isolation.
 
 use crate::common::MidgeResult;
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 /// A single source iterator that can be heap-based merged
 pub trait SourceIterator: Send + Sync {
     /// Get the current key-value pair without advancing
     fn current(&mut self) -> MidgeResult<Option<(Vec<u8>, Vec<u8>)>>;
-    
+
     /// Move to the next key-value pair
     fn next(&mut self) -> MidgeResult<Option<(Vec<u8>, Vec<u8>)>>;
-    
+
     /// Seek to a specific key
     fn seek(&mut self, key: &[u8]) -> MidgeResult<()>;
 }
@@ -226,7 +226,11 @@ mod tests {
 
         fn seek(&mut self, key: &[u8]) -> MidgeResult<()> {
             // Find position of first key >= search key
-            self.position = self.data.iter().position(|(k, _)| k.as_slice() >= key).unwrap_or(self.data.len());
+            self.position = self
+                .data
+                .iter()
+                .position(|(k, _)| k.as_slice() >= key)
+                .unwrap_or(self.data.len());
             Ok(())
         }
     }
@@ -234,12 +238,8 @@ mod tests {
     #[test]
     fn should_merge_multiple_sources() {
         // Arrange
-        let source1 = Box::new(MockIterator::new(vec![
-            (b"a".to_vec(), b"val1".to_vec()),
-        ]));
-        let source2 = Box::new(MockIterator::new(vec![
-            (b"b".to_vec(), b"val2".to_vec()),
-        ]));
+        let source1 = Box::new(MockIterator::new(vec![(b"a".to_vec(), b"val1".to_vec())]));
+        let source2 = Box::new(MockIterator::new(vec![(b"b".to_vec(), b"val2".to_vec())]));
 
         let mut merge = MergeIterator::new(vec![source1, source2]);
 
@@ -254,9 +254,7 @@ mod tests {
     #[test]
     fn should_return_none_when_exhausted() {
         // Arrange
-        let source1 = Box::new(MockIterator::new(vec![
-            (b"a".to_vec(), b"val1".to_vec()),
-        ]));
+        let source1 = Box::new(MockIterator::new(vec![(b"a".to_vec(), b"val1".to_vec())]));
 
         let mut merge = MergeIterator::new(vec![source1]);
 

@@ -1,8 +1,8 @@
 //! SST entry encoding/decoding in TLV format
 
-use crate::common::MidgeResult;
 use crate::common::MidgeError;
-use bytes::{Bytes, BufMut, BytesMut};
+use crate::common::MidgeResult;
+use bytes::{BufMut, Bytes, BytesMut};
 
 /// TLV tags for SST entries
 pub mod tags {
@@ -123,8 +123,14 @@ pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(TlvEntry, usize)> {
             tags::SEQUENCE => {
                 if tag_data.len() == 8 {
                     sequence = u64::from_be_bytes([
-                        tag_data[0], tag_data[1], tag_data[2], tag_data[3], tag_data[4],
-                        tag_data[5], tag_data[6], tag_data[7],
+                        tag_data[0],
+                        tag_data[1],
+                        tag_data[2],
+                        tag_data[3],
+                        tag_data[4],
+                        tag_data[5],
+                        tag_data[6],
+                        tag_data[7],
                     ]);
                 }
             }
@@ -136,8 +142,14 @@ pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(TlvEntry, usize)> {
             tags::EXPIRATION => {
                 if tag_data.len() == 8 {
                     expiration = Some(u64::from_be_bytes([
-                        tag_data[0], tag_data[1], tag_data[2], tag_data[3], tag_data[4],
-                        tag_data[5], tag_data[6], tag_data[7],
+                        tag_data[0],
+                        tag_data[1],
+                        tag_data[2],
+                        tag_data[3],
+                        tag_data[4],
+                        tag_data[5],
+                        tag_data[6],
+                        tag_data[7],
                     ]));
                 }
             }
@@ -148,7 +160,9 @@ pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(TlvEntry, usize)> {
     }
 
     if key_delta.is_empty() {
-        return Err(MidgeError::Corruption("Missing key_delta in TLV entry".into()));
+        return Err(MidgeError::Corruption(
+            "Missing key_delta in TLV entry".into(),
+        ));
     }
 
     Ok((

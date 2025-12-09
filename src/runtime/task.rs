@@ -1,4 +1,4 @@
-﻿//! Task definitions for the runtime scheduler
+//! Task definitions for the runtime scheduler
 //!
 //! Tasks represent units of work that can be scheduled and prioritized.
 

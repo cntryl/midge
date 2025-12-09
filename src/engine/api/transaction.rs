@@ -1,4 +1,4 @@
-﻿//! Transaction API for multi-key ACID operations
+//! Transaction API for multi-key ACID operations
 //!
 //! Provides transaction support with:
 //! - Multi-key atomic operations
@@ -164,22 +164,31 @@ impl Transaction {
     }
 
     /// Add a read to the transaction's read set
-    pub fn read(&mut self, cf_id: ColumnFamilyId, key: &[u8], value: Option<Vec<u8>>, sequence: u64) -> MidgeResult<()> {
+    pub fn read(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        key: &[u8],
+        value: Option<Vec<u8>>,
+        sequence: u64,
+    ) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                format!("Cannot read in {:?} state", self.state)
-            ));
+            return Err(crate::common::MidgeError::InvalidArgument(format!(
+                "Cannot read in {:?} state",
+                self.state
+            )));
         }
-        self.read_set.insert((cf_id, key.to_vec()), (value, sequence));
+        self.read_set
+            .insert((cf_id, key.to_vec()), (value, sequence));
         Ok(())
     }
 
     /// Add a put to the transaction's write set
     pub fn put(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                format!("Cannot write in {:?} state", self.state)
-            ));
+            return Err(crate::common::MidgeError::InvalidArgument(format!(
+                "Cannot write in {:?} state",
+                self.state
+            )));
         }
         self.write_set.push(WriteIntent::put(cf_id, key, value));
         Ok(())
@@ -188,9 +197,10 @@ impl Transaction {
     /// Add a delete to the transaction's write set
     pub fn delete(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                format!("Cannot write in {:?} state", self.state)
-            ));
+            return Err(crate::common::MidgeError::InvalidArgument(format!(
+                "Cannot write in {:?} state",
+                self.state
+            )));
         }
         self.write_set.push(WriteIntent::delete(cf_id, key));
         Ok(())
@@ -234,9 +244,10 @@ impl Transaction {
     /// Mark transaction as committed
     pub fn mark_committed(&mut self, commit_seq: u64) -> MidgeResult<()> {
         if self.state != TransactionState::Committing {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                format!("Cannot commit from {:?} state", self.state)
-            ));
+            return Err(crate::common::MidgeError::InvalidArgument(format!(
+                "Cannot commit from {:?} state",
+                self.state
+            )));
         }
         self.state = TransactionState::Committed;
         self.commit_sequence = Some(commit_seq);
@@ -262,9 +273,10 @@ impl Transaction {
     /// Transition to read phase
     pub fn enter_read_phase(&mut self) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                format!("Cannot enter read phase from {:?} state", self.state)
-            ));
+            return Err(crate::common::MidgeError::InvalidArgument(format!(
+                "Cannot enter read phase from {:?} state",
+                self.state
+            )));
         }
         self.state = TransactionState::ReadPhase;
         Ok(())
@@ -273,9 +285,10 @@ impl Transaction {
     /// Transition to commit phase
     pub fn enter_commit_phase(&mut self) -> MidgeResult<()> {
         if self.state != TransactionState::ReadPhase {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                format!("Cannot enter commit phase from {:?} state", self.state)
-            ));
+            return Err(crate::common::MidgeError::InvalidArgument(format!(
+                "Cannot enter commit phase from {:?} state",
+                self.state
+            )));
         }
         self.state = TransactionState::Committing;
         Ok(())
@@ -360,15 +373,17 @@ mod tests {
         // Assert
         assert_eq!(txn.read_count(), 1);
         assert!(txn.has_reads());
-        assert_eq!(txn.read_set().get(&(cf_id, key)).map(|r| r.1), Some(sequence));
+        assert_eq!(
+            txn.read_set().get(&(cf_id, key)).map(|r| r.1),
+            Some(sequence)
+        );
     }
 
     #[test]
     fn should_transition_through_states_when_commit_sequence_executed() {
         // Arrange
         let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
-        txn.put(ColumnFamilyId::DEFAULT, vec![1], vec![2])
-            .unwrap();
+        txn.put(ColumnFamilyId::DEFAULT, vec![1], vec![2]).unwrap();
 
         // Act
         txn.enter_read_phase().unwrap();

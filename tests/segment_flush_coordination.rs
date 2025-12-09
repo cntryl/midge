@@ -5,8 +5,8 @@
 //! - Sealed segments are promoted to Level 0
 //! - Flush coordinates segment lifecycle changes
 
-use cntryl_midge::core::manifest::{Manifest, Segment, SegmentState};
 use bytes::Bytes;
+use cntryl_midge::core::manifest::{Manifest, Segment, SegmentState};
 
 /// Helper to create a test segment
 fn create_test_segment(

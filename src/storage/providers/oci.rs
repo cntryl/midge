@@ -4,10 +4,9 @@
 //! For now, this is a stub. MockCloud is used for testing and integration.
 
 use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
-use std::sync::Arc;
 
 /// Oracle Cloud Infrastructure Object Storage provider stub
-/// 
+///
 /// Full implementation will use:
 /// - Direct REST API calls (no OCI SDK)
 /// - Signature-based authentication (OCI auth headers)
@@ -22,7 +21,7 @@ pub struct OciProvider {
 
 impl OciProvider {
     /// Create a new OCI Object Storage provider
-    /// 
+    ///
     /// # Arguments
     /// * `namespace` - OCI namespace
     /// * `bucket` - Object Storage bucket name

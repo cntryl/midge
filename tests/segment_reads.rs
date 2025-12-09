@@ -6,8 +6,8 @@
 //! - Segment lookups don't interfere with SST lookups
 //! - Range scans include segment data
 
-use cntryl_midge::core::manifest::{Manifest, Segment, SegmentId, SegmentSequencer, SegmentState};
 use bytes::Bytes;
+use cntryl_midge::core::manifest::{Manifest, Segment, SegmentId, SegmentSequencer, SegmentState};
 
 /// Helper to create a test segment
 fn create_test_segment(
@@ -204,7 +204,8 @@ fn should_handle_empty_segment_list_gracefully() {
         .segments
         .iter()
         .filter(|seg| {
-            seg.cf_id == 0 && seg.state == SegmentState::Sealed
+            seg.cf_id == 0
+                && seg.state == SegmentState::Sealed
                 && seg.min_key.as_ref() <= b"key".as_ref()
                 && b"key".as_ref() <= seg.max_key.as_ref()
         })
@@ -237,7 +238,7 @@ fn should_integrate_segments_into_read_path_conceptually() {
     // Arrange: Create a manifest with segments and SST files (segments come before SSTs)
     let manifest = Manifest {
         segments: vec![
-            create_test_segment(1, 0, b"a", b"l", 100),    // "k" is in this range
+            create_test_segment(1, 0, b"a", b"l", 100), // "k" is in this range
             create_test_segment(2, 0, b"m", b"z", 200),
         ],
         ..Default::default()

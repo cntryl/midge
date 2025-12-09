@@ -1,4 +1,4 @@
-﻿//! Write batch API - batched writes for efficiency
+//! Write batch API - batched writes for efficiency
 //!
 //! WriteBatch collects multiple operations and applies them atomically
 //! to reduce WAL I/O overhead and improve throughput.
@@ -23,10 +23,7 @@ enum BatchOp {
         value: Vec<u8>,
     },
     /// Delete operation
-    Delete {
-        cf_id: ColumnFamilyId,
-        key: Vec<u8>,
-    },
+    Delete { cf_id: ColumnFamilyId, key: Vec<u8> },
 }
 
 impl WriteBatch {
@@ -215,7 +212,7 @@ mod tests {
     fn should_support_builder_pattern_with_chaining() {
         // Arrange
         let cf1 = ColumnFamilyId(1);
-        
+
         // Act
         let batch = {
             let mut b = WriteBatch::new();

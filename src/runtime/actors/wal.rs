@@ -1,4 +1,4 @@
-﻿//! WAL Actor - handles write-ahead log operations
+//! WAL Actor - handles write-ahead log operations
 //!
 //! Responsible for:
 //! - Appending records to WAL
@@ -6,10 +6,10 @@
 //! - Rotating WAL segments
 //! - Coordinating with cloud actor for WAL uploads
 
-use crate::common::MidgeResult;
-use crate::wal::{WalWriter, WalRecord, WalOpKind, FsWalFactory, WalFactory};
-use bytes::Bytes;
 use super::super::state::RuntimeState;
+use crate::common::MidgeResult;
+use crate::wal::{FsWalFactory, WalFactory, WalOpKind, WalRecord, WalWriter};
+use bytes::Bytes;
 use std::path::PathBuf;
 
 /// Actor handling WAL operations
@@ -25,13 +25,12 @@ pub struct WalActor {
 impl WalActor {
     pub fn new(wal_dir: PathBuf) -> MidgeResult<Self> {
         // Create WAL directory if needed
-        std::fs::create_dir_all(&wal_dir)
-            .map_err(|e| crate::common::MidgeError::Io(e))?;
-        
+        std::fs::create_dir_all(&wal_dir).map_err(|e| crate::common::MidgeError::Io(e))?;
+
         // Create writer via factory
         let factory = FsWalFactory;
         let writer = factory.create_writer(&wal_dir)?;
-        
+
         Ok(Self {
             writer: Some(writer),
             wal_dir,
@@ -50,21 +49,17 @@ impl WalActor {
     ) -> MidgeResult<()> {
         // Create WAL record
         let record = WalRecord::new_cf(cf_id, WalOpKind::Put, key, value, sequence);
-        
+
         // Append to WAL
         if let Some(writer) = &self.writer {
             writer.append_record(&record)?;
         }
-        
+
         // Update state tracking
         state.wal.pending_writes += 1;
         self.pending_sync_count += 1;
 
-        tracing::trace!(
-            cf_id,
-            sequence,
-            "WAL append"
-        );
+        tracing::trace!(cf_id, sequence, "WAL append");
 
         Ok(())
     }
@@ -77,7 +72,7 @@ impl WalActor {
         if let Some(writer) = &self.writer {
             writer.sync()?;
         }
-        
+
         // Update state
         state.wal.last_synced_seq = state.sequence;
         state.wal.pending_writes = 0;
@@ -95,11 +90,11 @@ impl WalActor {
     /// Rotate to a new WAL segment
     pub fn rotate(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         let old_segment = state.wal.current_segment_id;
-        
+
         // Rotate via factory
         let factory = FsWalFactory;
         self.writer = Some(factory.rotate_writer(&self.wal_dir, old_segment)?);
-        
+
         state.wal.current_segment_id += 1;
 
         tracing::info!(

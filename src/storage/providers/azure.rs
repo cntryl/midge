@@ -4,10 +4,9 @@
 //! For now, this is a stub. MockCloud is used for testing and integration.
 
 use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
-use std::sync::Arc;
 
 /// Azure Blob Storage provider stub
-/// 
+///
 /// Full implementation will use:
 /// - Direct REST API calls (no Azure SDK)
 /// - SAS token or shared key authentication
@@ -21,7 +20,7 @@ pub struct AzureProvider {
 
 impl AzureProvider {
     /// Create a new Azure Blob Storage provider
-    /// 
+    ///
     /// # Arguments
     /// * `account_name` - Azure storage account name
     /// * `container` - Blob container name

@@ -1,9 +1,9 @@
 //! Filesystem-backed WAL implementation
 
-mod writer;
-mod reader;
 mod factory;
+mod reader;
+mod writer;
 
-pub use writer::FsWalWriter;
-pub use reader::FsWalReader;
 pub use factory::FsWalFactory;
+pub use reader::FsWalReader;
+pub use writer::FsWalWriter;
