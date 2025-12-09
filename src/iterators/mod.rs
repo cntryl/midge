@@ -3,8 +3,10 @@
 //! Generic iterator traits for traversing key-value data
 
 pub mod skiplist;
+pub mod merge;
 
 pub use skiplist::SkipList;
+pub use merge::{MergeIterator, SourceIterator};
 
 use crate::sst::KvPair;
 use crate::common::MidgeResult;
