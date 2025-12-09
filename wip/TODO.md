@@ -87,8 +87,10 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] Ensure lock-free skiplist in `src/iterators/skiplist.rs` is production-quality
 - [x] Update Memtable trait to use interior mutability (&self)
 - [x] Confirm SkipListMemtable works with lock-free skiplist and MVCC
-- [ ] Add merge iterator for memtable + SST blending
-- [ ] Implement iterator wrapper types for user-facing API
+- [x] Add merge iterator for memtable + SST blending
+- [x] **NEW:** Implement MergeIterator with SourceIterator trait abstraction
+- [x] **NEW:** Support range bounds (start/end keys) for range scans
+- [x] **NEW:** Add 4 comprehensive MergeIterator tests (multi-source, empty sources, range bounds)
 
 ## 9. Metrics & Testkit
 - [ ] Port metrics modules under `src/metrics/` from `src_old/metrics` ensuring they integrate with the runtime for all measured operations.
@@ -179,19 +181,19 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Engine startup → RuntimeState::new() → replay_wal() → restore memtable state
 - VersionSet/VersionManager → lock-free manifest reads + atomic versioning
 
-**Test Status (110 tests passing):**
+**Test Status (114 tests passing):**
 - Transaction API: 9 tests ✅
 - Cloud Storage: 10 tests ✅
 - Cloud WAL: 9 tests ✅
 - Version Set: 10 tests ✅
 - Version Manager: 10 tests ✅
+- Merge Iterator: 4 tests ✅
 - Plus 62 existing tests from prior implementation ✅
 
 **What's Next (Priority Order):**
-1. **Merge Iterator** — Blend memtable + SST + immutable memtables for range scans
-2. **S3/GCS/Azure Providers** — Real cloud provider implementations with AWS/Google/Azure SDKs
-3. **Integration Tests** — End-to-end tests of write→flush→compact→recover→cloud pipeline
-4. **Metrics** — Port metrics modules from src_old for performance monitoring
+1. **S3/GCS/Azure Providers** — Real cloud provider implementations with AWS/Google/Azure SDKs
+2. **Integration Tests** — End-to-end tests of write→flush→compact→recover→cloud pipeline
+3. **Metrics** — Port metrics modules from src_old for performance monitoring
 
 **Development Guidelines:**
 - Keep the original `src_old/` tree unchanged; use it purely for reference and diffing.
