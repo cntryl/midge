@@ -1,6 +1,15 @@
-//! Runtime - background task execution
+//! Runtime - Actor-based background task execution
 //!
-//! Actor-based task coordination for compaction, flushing, cloud ops, etc.
+//! Deterministic actor framework for compaction, flushing, WAL, cloud ops, GC, and manifest.
+//! All engine state mutations flow through actors via message passing.
+//!
+//! # Architecture
+//!
+//! - **EventLoop**: Receives messages and dispatches to actors
+//! - **State**: Centralized mutable state owned by runtime
+//! - **Actors**: Stateless handlers that process messages and return state updates
+//! - **Scheduler**: Prioritizes and batches work
+//! - **Dispatcher**: Routes messages to appropriate actors
 
 pub mod event_loop;
 pub mod state;
@@ -10,39 +19,220 @@ pub mod dispatch;
 pub mod actors;
 
 pub use event_loop::EventLoop;
-pub use state::State;
-pub use task::Task;
+pub use state::RuntimeState;
+pub use task::{Task, TaskId, TaskKind, TaskPriority};
 pub use scheduler::Scheduler;
 pub use dispatch::Dispatcher;
 pub use actors::{FlushActor, CompactionActor, WalActor, CloudActor, GcActor, ManifestActor};
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
+use crossbeam::channel::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 
-/// Runtime task
-pub enum RuntimeTask {
-    Flush,
-    Compact,
+/// Messages that can be sent to the runtime
+#[derive(Debug)]
+pub enum RuntimeMsg {
+    // === Flush Actor ===
+    /// Request memtable flush for a column family
+    FlushMemtable { cf_id: u32 },
+    /// Memtable flush completed
+    FlushComplete { cf_id: u32, sst_name: String, sequence: u64 },
+
+    // === Compaction Actor ===
+    /// Trigger compaction check
+    CheckCompaction,
+    /// Execute a specific compaction plan
+    RunCompaction { plan: CompactionPlan },
+    /// Compaction completed
+    CompactionComplete { input_ssts: Vec<String>, output_ssts: Vec<String> },
+
+    // === WAL Actor ===
+    /// Append record to WAL
+    WalAppend { cf_id: u32, key: Vec<u8>, value: Option<Vec<u8>>, sequence: u64 },
+    /// Sync WAL to disk
     WalSync,
-    CloudUpload,
+    /// Rotate WAL segment
+    WalRotate,
+    /// WAL sync completed
+    WalSyncComplete { segment_id: u64 },
+
+    // === Cloud Actor ===
+    /// Upload SST to cloud
+    CloudUploadSst { sst_name: String },
+    /// Upload WAL segment to cloud
+    CloudUploadWal { segment_id: u64 },
+    /// Cloud upload completed
+    CloudUploadComplete { resource: String },
+
+    // === GC Actor ===
+    /// Check for garbage collection opportunities
+    CheckGc,
+    /// Delete obsolete SST files
+    DeleteObsoleteSsts { sst_names: Vec<String> },
+
+    // === Manifest Actor ===
+    /// Update manifest with new SST
+    ManifestAddSst { file_meta: FileMeta },
+    /// Update manifest after compaction
+    ManifestCompactionComplete { removed: Vec<String>, added: Vec<FileMeta> },
+    /// Persist manifest to disk
+    ManifestPersist,
+
+    // === Control ===
+    /// Shutdown the runtime
+    Shutdown,
+    /// No-op for testing
+    Noop,
+}
+
+/// Simplified compaction plan for message passing
+#[derive(Debug, Clone)]
+pub struct CompactionPlan {
+    pub input_files: Vec<String>,
+    pub source_level: u32,
+    pub target_level: u32,
+    pub cf_id: u32,
+}
+
+/// Simplified file metadata for message passing
+#[derive(Debug, Clone)]
+pub struct FileMeta {
+    pub name: String,
+    pub level: u32,
+    pub size_bytes: u64,
+    pub cf_id: u32,
+    pub smallest_key: Option<Vec<u8>>,
+    pub largest_key: Option<Vec<u8>>,
+    pub smallest_seq: Option<u64>,
+    pub largest_seq: Option<u64>,
+}
+
+/// Response from runtime operations
+#[derive(Debug)]
+pub enum RuntimeResponse {
+    Ok,
+    Error(String),
+    FlushComplete { sst_name: String },
+    CompactionComplete { output_ssts: Vec<String> },
+}
+
+/// Handle for submitting work to the runtime
+#[derive(Clone)]
+pub struct RuntimeHandle {
+    msg_tx: Sender<RuntimeMsg>,
+    response_rx: Receiver<RuntimeResponse>,
+}
+
+impl RuntimeHandle {
+    /// Submit a message to the runtime (non-blocking)
+    pub fn send(&self, msg: RuntimeMsg) -> MidgeResult<()> {
+        self.msg_tx
+            .send(msg)
+            .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))
+    }
+
+    /// Submit a message and wait for response
+    pub fn send_and_wait(&self, msg: RuntimeMsg) -> MidgeResult<RuntimeResponse> {
+        self.send(msg)?;
+        self.response_rx
+            .recv()
+            .map_err(|_| MidgeError::Internal("Runtime response channel closed".to_string()))
+    }
+
+    /// Request shutdown
+    pub fn shutdown(&self) -> MidgeResult<()> {
+        self.send(RuntimeMsg::Shutdown)
+    }
 }
 
 /// Main runtime for background operations
+///
+/// Owns all mutable engine state and coordinates actors via message passing.
+/// No direct thread spawning outside the runtime - all background work flows through here.
 pub struct Runtime {
-    // Will be populated in backfill phase
+    /// Message channel for receiving work
+    msg_rx: Receiver<RuntimeMsg>,
+    /// Response channel for sending results
+    response_tx: Sender<RuntimeResponse>,
+    /// Event loop thread handle
+    event_loop_handle: Option<JoinHandle<()>>,
+    /// Whether tracing is enabled
+    trace_enabled: bool,
 }
 
 impl Runtime {
-    pub fn new() -> MidgeResult<Self> {
-        Ok(Self {})
+    /// Create a new runtime and return a handle for submitting work
+    pub fn new() -> MidgeResult<(Self, RuntimeHandle)> {
+        let (msg_tx, msg_rx) = channel::unbounded();
+        let (response_tx, response_rx) = channel::unbounded();
+
+        let trace_enabled = std::env::var("MIDGE_TRACE_RUNTIME")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+
+        let handle = RuntimeHandle {
+            msg_tx,
+            response_rx,
+        };
+
+        let runtime = Self {
+            msg_rx,
+            response_tx,
+            event_loop_handle: None,
+            trace_enabled,
+        };
+
+        Ok((runtime, handle))
     }
 
-    pub fn submit_task(&mut self, _task: RuntimeTask) -> MidgeResult<()> {
-        todo!("Implement task submission")
+    /// Start the runtime event loop in a background thread
+    pub fn start(mut self, state: RuntimeState) -> MidgeResult<RuntimeHandle> {
+        let msg_rx = self.msg_rx.clone();
+        let response_tx = self.response_tx.clone();
+        let trace_enabled = self.trace_enabled;
+
+        // Create a new handle before moving self
+        let (new_msg_tx, _) = channel::unbounded();
+        let (_, new_response_rx) = channel::unbounded();
+
+        let handle = RuntimeHandle {
+            msg_tx: new_msg_tx,
+            response_rx: new_response_rx,
+        };
+
+        let event_loop_handle = thread::Builder::new()
+            .name("midge-runtime".to_string())
+            .spawn(move || {
+                match EventLoop::new(state, trace_enabled) {
+                    Ok(mut event_loop) => {
+                        event_loop.run(msg_rx, response_tx);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create event loop: {}", e);
+                    }
+                }
+            })
+            .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {}", e)))?;
+
+        self.event_loop_handle = Some(event_loop_handle);
+
+        Ok(handle)
+    }
+
+    /// Shutdown the runtime and wait for completion
+    pub fn shutdown(self) {
+        if let Some(handle) = self.event_loop_handle {
+            // Event loop will exit when channel is dropped
+            drop(self.msg_rx);
+            if handle.join().is_err() {
+                tracing::warn!("Runtime thread panicked during shutdown");
+            }
+        }
     }
 }
 
 impl Default for Runtime {
     fn default() -> Self {
-        Self::new().expect("Failed to create default runtime")
+        Self::new().expect("Failed to create default runtime").0
     }
 }

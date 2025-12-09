@@ -1,23 +1,25 @@
-//! Write-ahead logging abstraction
+//! Write-Ahead Log (WAL) subsystem
 //!
-//! Traits for different WAL implementations
+//! Provides durable write-ahead logging with filesystem implementations.
 
 pub mod traits;
-pub mod segment;
-pub mod writer;
-pub mod reader;
-pub mod index;
-pub mod backends;
+pub mod types;
+pub mod encoding;
+pub mod fs;
+pub mod recovery;
 
-pub use traits::{WalReader, WalWriter, WalRecord, WalOpKind, WalPos};
-pub use segment::Segment;
-pub use index::Index;
-pub use backends::{LocalWal, HybridWal, BatchedSyncWal, CloudWal};
+// Re-export main WAL types
+pub use types::{WalOpKind, WalPos, WalRecord, WalRecoveryStats, WalSyncMode, ColumnFamilyId};
 
-/// WAL entry - legacy type for compatibility
-#[derive(Clone, Debug)]
-pub struct WalEntry {
-    pub sequence: u64,
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
-}
+// Re-export traits
+pub use traits::{WalFactory, WalReader, WalReaderDyn, WalWriter};
+
+// Re-export encoding functions
+pub use encoding::{encode, decode};
+
+// Re-export filesystem implementations
+pub use fs::{FsWalFactory, FsWalWriter, FsWalReader};
+
+// Re-export recovery
+pub use recovery::{replay_wal, RecoveryStats};
+
