@@ -40,8 +40,10 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] Integrate WAL into runtime with proper error handling
 - [x] **NEW:** Implement WAL recovery - replay on startup to restore memtable state
 - [x] **NEW:** Add 5 comprehensive recovery tests (basic, delete ops, multi-CF)
+- [x] **NEW:** Implement Cloud WAL backend (CloudWalWriter, CloudWalReader, CloudWalFactory)
+- [x] **NEW:** Add 9 comprehensive CloudWAL tests (writer, append ops, batching, flush, reader, factory)
 - [ ] Add batched sync coordination for group commits
-- [ ] Implement cloud WAL backend for durability
+- [ ] Implement cloud WAL segment rotation and cleanup
 
 ## 4. SST Port ✅ (COMPLETED)
 - [x] Created `src/sst/` with types, traits, encoding, and fs modules
@@ -70,10 +72,14 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] Wire compaction actor to actual level-based compaction logic via execute_compaction()
 - [x] Refactor all 13 compaction tests to follow `should_{action}_when_{context}` naming convention
 
-## 7. Storage Backends 🟡 (PARTIALLY DONE)
+## 7. Storage Backends 🟡 (IN PROGRESS)
 - [x] Implement `src/storage/filesystem.rs` with read/write/delete/list
-- [ ] Flesh out `src/storage/cloud.rs` and `src/storage/hybrid.rs`
+- [x] **NEW:** Implement cloud storage backend with CloudProvider trait abstraction
+- [x] **NEW:** Add MockCloud provider for testing with in-memory storage
+- [x] **NEW:** 10 comprehensive CloudStorage tests (creation, upload, download, 404, delete, exists, list, metadata, wrapper, history)
+- [ ] Implement S3/GCS/Azure specific providers using cloud SDKs
 - [ ] Wire storage backends into flush and compaction actors
+- [ ] Flesh out `src/storage/hybrid.rs` for local+cloud coordination
 
 ## 8. Iterators / Memtables ✅ (MOSTLY DONE)
 - [x] Ensure lock-free skiplist in `src/iterators/skiplist.rs` is production-quality
@@ -95,19 +101,18 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 
 **Build Health:**
 - ✅ `cargo build --workspace` passes with zero errors (0 errors, 10+ benign warnings)
-- ✅ All components compiling: runtime, engine, WAL, SST, compaction, recovery, manifest persistence, transactions
-- ✅ **NEW:** Transaction API with state machine and isolation levels added
-- ✅ **NEW:** 9 transaction tests passing (creation, puts, deletes, reads, state transitions, mixed ops, error handling, rollback)
-- ✅ WAL recovery integrated and tested (5 tests passing)
-- ✅ Compaction module complete with strategy, planner, executor (13 unit tests passing)
-- ✅ CompactionActor integrated with actual compaction logic via execute_compaction()
-- ✅ EventLoop wires check_compaction to pick and run compactions automatically
-- ✅ **ALL src/ tests fully compliant (70 total passing, 3 transient SST fs failures)**
+- ✅ All components compiling: runtime, engine, WAL, SST, compaction, recovery, manifest persistence, transactions, cloud storage
+- ✅ **NEW (Session 8):** Transaction API with state machine and isolation levels added
+- ✅ **NEW (Session 8):** Cloud Storage backend with multi-cloud provider abstraction
+- ✅ **NEW (Session 8):** Cloud WAL backend for remote durability
+- ✅ **NEW (Session 8):** 29 new tests added (9 Transaction + 10 Cloud Storage + 9 Cloud WAL + 1 misc)
 - ⚠️ 3 temp directory file I/O tests occasionally fail due to test isolation (SST fs tests)
 
 **Test Status:**
-- ✅ 70 lib tests passing (was 64, added 9 Transaction tests minus stub = 8 new tests)
-- ✅ All 9 Transaction tests passing (new, read, put, delete, mixed ops, state transitions, rejection, rollback, clear)
+- ✅ 90 lib tests passing (was 64 at session start)
+- ✅ All 9 Transaction tests passing (creation, puts, deletes, reads, state transitions, mixed ops, error handling, rollback, clear)
+- ✅ All 10 Cloud Storage tests passing (creation, upload, download, 404, delete, exists, list, metadata, backend wrapper, history)
+- ✅ All 9 Cloud WAL tests passing (writer creation, append ops, batching, flush, reader creation, segment loading, factory, shutdown)
 - ✅ All 8 Iterator tests passing (forward, reverse, remaining, collect, builder, range bounds, exclusive end, chaining)
 - ✅ All 5 Snapshot tests passing
 - ✅ All 7 WriteBatch tests passing
@@ -132,6 +137,10 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 3. WAL with TLV encoding and filesystem backend (writes to wal.log)
    - Recovery integrated on startup to replay write operations
    - 5 recovery tests covering puts, deletes, multi-CF scenarios
+   - **NEW (Session 8):** Cloud WAL backend for remote durability
+     - CloudWalWriter buffers records, flushes to cloud storage
+     - CloudWalReader loads and replays segments from cloud
+     - 9 comprehensive tests
 4. SST with TLV entry encoding and filesystem reader/writer (block-based)
 5. Compaction module with leveled compaction strategy
    - Compactor picks compaction plans based on L0/level thresholds
@@ -144,12 +153,19 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 9. WriteBatch API for batched multi-key operations
 10. Snapshot API for point-in-time consistent reads
 11. Iterator API with range scanning and forward/reverse iteration
-12. **NEW:** Transaction API for multi-key ACID operations
+12. **NEW (Session 8):** Transaction API for multi-key ACID operations
     - State machine: Active → ReadPhase → Committing → Committed/RolledBack
     - 3 isolation levels: ReadUncommitted, ReadCommitted, Serializable
     - Write intents tracking for conflict detection
     - commit_transaction() and rollback_transaction() on MidgeEngine
-13. Core infrastructure ready for cloud and recovery
+    - 9 comprehensive tests
+13. **NEW (Session 8):** Cloud Storage with multi-cloud abstraction
+    - CloudProvider trait: upload, download, delete, list, exists, metadata
+    - MockCloud provider for testing with in-memory storage
+    - CloudStorage wrapper implementing StorageBackend
+    - 10 comprehensive tests
+    - Ready for S3/GCS/Azure implementations
+14. Core infrastructure ready for cloud and recovery
 
 **Write Path + Recovery (Complete):**
 - Engine.put() → RuntimeMsg::WalAppend → WalActor.append() → wal.log
@@ -161,10 +177,11 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Engine startup → RuntimeState::new() → replay_wal() → restore memtable state
 
 **What's Next (Priority Order):**
-1. **Cloud Storage** — Cloud WAL and SST backends for remote durability (s3/gcs/azure)
-2. **Version Set/Manager** — Lock-free manifest reads with versioning
-3. **Merge Iterator** — Blend memtable + SST + immutable memtables
-4. **Integration Tests** — End-to-end tests of write→flush→compact→recover pipeline
+1. **Version Set/Manager** — Lock-free manifest reads with versioning for concurrent readers
+2. **Merge Iterator** — Blend memtable + SST + immutable memtables for range scans
+3. **S3/GCS/Azure Providers** — Real cloud provider implementations with AWS/Google/Azure SDKs
+4. **Integration Tests** — End-to-end tests of write→flush→compact→recover→cloud pipeline
+5. **Metrics** — Port metrics modules from src_old for performance monitoring
 
 **Development Guidelines:**
 - Keep the original `src_old/` tree unchanged; use it purely for reference and diffing.
