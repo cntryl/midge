@@ -6,4 +6,4 @@ pub mod cloud;
 pub use local::LocalWal;
 pub use hybrid::HybridWal;
 pub use batched_sync::BatchedSyncWal;
-pub use cloud::CloudWal;
+pub use cloud::{CloudWalWriter, CloudWalReader, CloudWalFactory};

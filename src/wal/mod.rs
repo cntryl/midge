@@ -7,6 +7,7 @@ pub mod types;
 pub mod encoding;
 pub mod fs;
 pub mod recovery;
+pub mod backends;
 
 // Re-export main WAL types
 pub use types::{WalOpKind, WalPos, WalRecord, WalRecoveryStats, WalSyncMode, ColumnFamilyId};
@@ -22,4 +23,7 @@ pub use fs::{FsWalFactory, FsWalWriter, FsWalReader};
 
 // Re-export recovery
 pub use recovery::{replay_wal, RecoveryStats};
+
+// Re-export cloud backend
+pub use backends::cloud::{CloudWalWriter, CloudWalReader, CloudWalFactory};
 
