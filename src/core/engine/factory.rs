@@ -322,6 +322,8 @@ pub(crate) fn setup_flush_coordinator(
         block_size: opts.block_size,
         mem_mode,
         cloud_sst_manager,
+        cloud_coordinator: Arc::new(parking_lot::RwLock::new(None)),  // Will be set by caller after runtime is created
+        runtime: Arc::new(parking_lot::RwLock::new(None)),  // Will be set by caller after runtime is created
         metrics: metrics_arc,
         test_hooks: opts.test_hooks.clone(),
         manifest_update_callback,
@@ -398,6 +400,8 @@ pub(crate) fn setup_compaction_coordinator(
             max_tombstone_compaction_files: opts.max_tombstone_compaction_files,
             check_interval_ms: opts.compaction_check_interval_ms,
             cloud_sst_manager: cloud_sst_manager_c,
+            cloud_coordinator: Arc::new(parking_lot::RwLock::new(None)), // Phase 7.2: Set by runtime
+            runtime: Arc::new(parking_lot::RwLock::new(None)), // Phase 7.2: Set by runtime
             compactor,
             cf_set: cf_set_arc,
             test_hooks: opts.test_hooks.as_ref().map(|h| Arc::new(h.clone())),

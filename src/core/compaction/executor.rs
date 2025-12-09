@@ -398,6 +398,10 @@ pub(crate) struct SstWriterContext<'a> {
     pub block_size: usize,
     pub sst_dir: &'a std::path::Path,
     pub cloud_sst_manager: Option<&'a Arc<crate::sst::cloud::CloudSstManager>>,
+    /// Phase 7.2: Cloud coordinator for submitting uploads as runtime tasks (if available)
+    pub cloud_coordinator: Option<Arc<crate::core::cloud_coordinator::CloudCoordinator>>,
+    /// Phase 7.2: Runtime for submitting cloud upload tasks (if available)
+    pub runtime: Option<Arc<crate::core::runtime::EngineRuntime>>,
 }
 
 /// Write a compacted SST file from the given versions.
@@ -425,6 +429,8 @@ pub(crate) fn write_compacted_sst(
         block_size,
         sst_dir,
         cloud_sst_manager,
+        cloud_coordinator,
+        runtime,
     } = ctx;
     if versions.is_empty() {
         return Ok(None);
@@ -527,36 +533,45 @@ pub(crate) fn write_compacted_sst(
         total_entries,
     };
 
-    // Upload SST to cloud if cloud manager is configured
+    // Phase 7.2: Submit SST upload to cloud via runtime if coordinator is available
+    // This ensures cloud uploads are ordered deterministically with other background work
     if let Some(cloud_manager) = cloud_sst_manager {
-        let sst_id = sst_name.clone();
-        let sequence_range = (smallest_seq.unwrap_or(0), largest_seq.unwrap_or(0));
-        let key_range = (
-            meta.smallest_key.clone().map(|k| k.to_vec()),
-            meta.largest_key.clone().map(|k| k.to_vec()),
-        );
+        if let (Some(coordinator), Some(rt)) = (cloud_coordinator, runtime) {
+            let sst_id = sst_name.clone();
+            let sequence_range = (smallest_seq.unwrap_or(0), largest_seq.unwrap_or(0));
+            let key_range = (
+                meta.smallest_key.clone(),
+                meta.largest_key.clone(),
+            );
+            let cloud_mgr = Arc::clone(cloud_manager);
+            let file_path_clone = file_path.clone();
+            let sst_id_clone = sst_id.clone();
 
-        // Spawn async upload (non-blocking)
-        let cloud_manager_clone = Arc::clone(cloud_manager);
-        let file_path_clone = file_path.clone();
-        let sst_id_clone = sst_id.clone();
+            let task_result = coordinator.submit_sst_upload_task(
+                &rt,
+                sst_id.clone(),
+                move || {
+                    if let Err(e) = cloud_mgr.upload_sst_async(
+                        sst_id_clone,
+                        file_path_clone,
+                        sequence_range,
+                        key_range,
+                        None,
+                    ) {
+                        tracing::error!("Failed to upload compacted SST to cloud: {}", e);
+                    }
+                },
+            );
 
-        let _handle = crate::common::worker::spawn_guarded(
-            "compaction-cloud-upload",
-            None,
-            move || {
-                if let Err(e) = cloud_manager_clone.upload_sst_async(
-                    sst_id_clone,
-                    file_path_clone,
-                    sequence_range,
-                    key_range,
-                    None,
-                ) {
-                    tracing::error!("Failed to upload compacted SST to cloud: {}", e);
-                }
-            },
-            None::<fn(Box<dyn std::any::Any + Send>)>,
-        );
+            if let Err(e) = task_result {
+                tracing::error!("Failed to submit compaction cloud upload task: {}", e);
+            }
+        } else {
+            // Cloud manager is available but coordinator/runtime are not
+            // Note: coordinator/runtime should always be available in normal operation (Phase 7.2)
+            // If they're missing, it's likely a test or edge case scenario
+            tracing::warn!("Cloud upload requested but coordinator/runtime not available for SST: {}", sst_name);
+        }
     }
 
     Ok(Some((file_path, meta)))
@@ -626,12 +641,18 @@ pub(crate) fn execute_compaction_plan(
     let deduped = deduplicate_versions(&versions_after_cf, min_snapshot_seq);
 
     // 7) Write SST
+    // Read coordinators from RwLock - they may be None if not initialized yet
+    let coordinator_opt = cfg.cloud_coordinator.read().clone();
+    let runtime_opt = cfg.runtime.read().clone();
+    
     let ctx = SstWriterContext {
         sst_factory: &cfg.sst_factory,
         compression: cfg.compression,
         block_size: cfg.block_size,
         sst_dir,
         cloud_sst_manager: cfg.cloud_sst_manager.as_ref(),
+        cloud_coordinator: coordinator_opt,
+        runtime: runtime_opt,
     };
     let write_res = write_compacted_sst(&ctx, &deduped, plan.cf_id)?;
 
@@ -1026,6 +1047,8 @@ mod tests {
             block_size: 4096,
             sst_dir,
             cloud_sst_manager: None,
+            cloud_coordinator: None,
+            runtime: None,
         }
     }
 

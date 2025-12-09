@@ -61,6 +61,10 @@ pub struct CompactionWorkerConfig {
     pub max_tombstone_compaction_files: usize,
     pub check_interval_ms: u64,
     pub cloud_sst_manager: Option<Arc<CloudSstManager>>,
+    /// Phase 7.2: Cloud coordinator for submitting SST uploads as runtime tasks
+    pub cloud_coordinator: Arc<parking_lot::RwLock<Option<Arc<crate::core::cloud_coordinator::CloudCoordinator>>>>,
+    /// Phase 7.2: Runtime for submitting cloud upload tasks
+    pub runtime: Arc<parking_lot::RwLock<Option<std::sync::Arc<crate::core::runtime::EngineRuntime>>>>,
     pub compactor: Compactor,
     pub cf_set: Arc<ColumnFamilySet>,
     pub test_hooks: Option<Arc<crate::common::test_hooks::TestHooks>>,
@@ -195,6 +199,8 @@ impl CompactionController {
             max_tombstone_compaction_files: 10,
             check_interval_ms: 100,
             cloud_sst_manager: cloud_sst_manager.clone(),
+            cloud_coordinator: Arc::new(parking_lot::RwLock::new(None)), // Phase 7.2: Not set in sync mode
+            runtime: Arc::new(parking_lot::RwLock::new(None)), // Phase 7.2: Not set in sync mode
             compactor: Compactor::with_config(
                 crate::core::compaction::LeveledCompactionConfig::default(),
             ),
@@ -460,6 +466,8 @@ mod tests {
             max_tombstone_compaction_files: 10,
             check_interval_ms: 10,
             cloud_sst_manager: None,
+            cloud_coordinator: Arc::new(parking_lot::RwLock::new(None)), // Phase 7.2: Not set in tests
+            runtime: Arc::new(parking_lot::RwLock::new(None)), // Phase 7.2: Not set in tests
             compactor: Compactor::with_config(LeveledCompactionConfig {
                 l0_compaction_threshold: 4 * 1024 * 1024,
                 level_multiplier: 10,

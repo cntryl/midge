@@ -700,6 +700,8 @@ impl MidgeEngine {
             block_size: self.block_size,
             sst_dir: &self.sst_dir,
             cloud_sst_manager: self.cloud_sst_manager.as_ref(),
+            cloud_coordinator: Some(Arc::clone(&self.cloud_coordinator)),
+            runtime: Some(Arc::clone(&self.runtime)),
         };
 
         // compact_all operates on the default CF

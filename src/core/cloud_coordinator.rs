@@ -40,7 +40,7 @@ impl CloudCoordinator {
         upload_fn: F,
     ) -> MidgeResult<()>
     where
-        F: Fn() + Send + 'static,
+        F: FnOnce() + Send + 'static,
     {
         let description = format!("cloud_upload_sst({})", sst_id);
 
@@ -66,7 +66,7 @@ impl CloudCoordinator {
         download_fn: F,
     ) -> MidgeResult<()>
     where
-        F: Fn() + Send + 'static,
+        F: FnOnce() + Send + 'static,
     {
         let description = format!("cloud_download_sst({})", sst_id);
 
@@ -90,7 +90,7 @@ impl CloudCoordinator {
         evict_fn: F,
     ) -> MidgeResult<()>
     where
-        F: Fn() + Send + 'static,
+        F: FnOnce() + Send + 'static,
     {
         let description = "cloud_evict_cache".to_string();
 

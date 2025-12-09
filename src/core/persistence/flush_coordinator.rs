@@ -17,6 +17,10 @@ pub struct FlushCoordinator {
     tx: channel::Sender<FlushMsg>,
     /// Handle to the background flush worker thread
     handle: Option<JoinHandle<()>>,
+    /// Phase 7.2: Shared cloud coordinator reference (set after runtime is created)
+    cloud_coordinator: std::sync::Arc<parking_lot::RwLock<Option<std::sync::Arc<crate::core::cloud_coordinator::CloudCoordinator>>>>,
+    /// Phase 7.2: Shared runtime reference (set after runtime is created)
+    runtime: std::sync::Arc<parking_lot::RwLock<Option<std::sync::Arc<crate::core::runtime::EngineRuntime>>>>,
 }
 
 impl FlushCoordinator {
@@ -30,15 +34,29 @@ impl FlushCoordinator {
     pub fn spawn(
         config: FlushWorkerConfig,
     ) -> MidgeResult<(Self, crate::core::runtime::WorkerHandle)> {
+        let cloud_coordinator = config.cloud_coordinator.clone();
+        let runtime = config.runtime.clone();
         let (tx, handle) = spawn_flush_worker(config)?;
         let worker_handle = crate::core::runtime::WorkerHandle::new(handle, "midge-flush-worker");
         Ok((
             Self {
                 tx,
                 handle: None, // Handle ownership transferred to runtime
+                cloud_coordinator,
+                runtime,
             },
             worker_handle,
         ))
+    }
+
+    /// Phase 7.2: Set the cloud coordinator reference (called by engine after runtime is created)
+    pub fn set_cloud_coordinator(&self, coordinator: std::sync::Arc<crate::core::cloud_coordinator::CloudCoordinator>) {
+        *self.cloud_coordinator.write() = Some(coordinator);
+    }
+
+    /// Phase 7.2: Set the runtime reference (called by engine after runtime is created)
+    pub fn set_runtime(&self, runtime: std::sync::Arc<crate::core::runtime::EngineRuntime>) {
+        *self.runtime.write() = Some(runtime);
     }
 
     /// Request a flush of memtable entries to an SST file.
@@ -151,6 +169,8 @@ mod tests {
             block_size: 4096,
             mem_mode: true,
             cloud_sst_manager: None,
+            cloud_coordinator: Arc::new(parking_lot::RwLock::new(None)),
+            runtime: Arc::new(parking_lot::RwLock::new(None)),
             metrics: Arc::new(Metrics::new()),
             test_hooks: None,
             manifest_update_callback: None,

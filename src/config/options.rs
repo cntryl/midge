@@ -85,10 +85,6 @@ pub struct EngineFlags {
     /// Enable the deterministic compaction planner/log path.
     pub deterministic_compaction: bool,
 
-    /// Route background scheduling through the centralized runtime executor.
-    /// Enabled by default in Phase 6: all flush, compaction, and WAL work routes through EngineRuntime.
-    pub single_executor_runtime: bool,
-
     /// Write SSTs with the new trie index structure beside the legacy index.
     pub new_sst_index: bool,
 
@@ -100,7 +96,6 @@ impl Default for EngineFlags {
     fn default() -> Self {
         Self {
             deterministic_compaction: false,
-            single_executor_runtime: true, // Phase 6: Enable by default
             new_sst_index: false,
             unified_write_path: false,
         }
