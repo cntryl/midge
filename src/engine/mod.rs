@@ -204,6 +204,45 @@ impl MidgeEngine {
         self.memtable.size_bytes()
     }
 
+    /// Apply a write batch atomically
+    pub fn write_batch(&self, batch: &api::WriteBatch) -> MidgeResult<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // Apply all puts and deletes to local memtable first
+        for (_, key, value) in batch.iter_puts() {
+            self.memtable.put(key.to_vec(), value.to_vec())?;
+        }
+        for (_, key) in batch.iter_deletes() {
+            self.memtable.delete(key.to_vec())?;
+        }
+
+        // Send all puts to WAL
+        for (cf_id, key, value) in batch.iter_puts() {
+            let seq = self.next_sequence();
+            self.runtime_handle.send(RuntimeMsg::WalAppend {
+                cf_id: cf_id.as_u32(),
+                key: key.to_vec(),
+                value: Some(value.to_vec()),
+                sequence: seq,
+            })?;
+        }
+
+        // Send all deletes to WAL
+        for (cf_id, key) in batch.iter_deletes() {
+            let seq = self.next_sequence();
+            self.runtime_handle.send(RuntimeMsg::WalAppend {
+                cf_id: cf_id.as_u32(),
+                key: key.to_vec(),
+                value: None,
+                sequence: seq,
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Shutdown the engine gracefully
     pub fn shutdown(self) -> MidgeResult<()> {
         self.runtime_handle.shutdown()

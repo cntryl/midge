@@ -8,7 +8,10 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] Create basic `MidgeEngine` with open, put, get, delete, flush, sync, shutdown
 - [x] Wire engine operations to send messages to runtime actors (put → WAL, get → memtable, etc.)
 - [x] Add column family support with `ColumnFamilyHandle` and CF-scoped operations
-- [ ] Expand with write_batch, snapshot, transaction, and iterator APIs
+- [x] **NEW:** Implement WriteBatch API for batched writes
+- [x] **NEW:** Add write_batch() method to MidgeEngine for atomic batched operations
+- [x] **NEW:** 7 comprehensive WriteBatch tests (create, put, delete, mixed, CF-scoped, clear, builder pattern)
+- [ ] Expand with snapshot, transaction, and iterator APIs
 - [ ] Implement full CF lifecycle (create, drop, list) via manifest actor
 
 ## 2. Runtime Skeleton ✅ (COMPLETED)
@@ -94,13 +97,14 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - ⚠️ 3 temp directory file I/O tests occasionally fail due to test isolation (SST fs tests)
 
 **Test Status:**
-- ✅ 44+ lib tests passing (was 39, added 5 persistence tests)
-- ✅ All 5 persistence tests passing (save/load/delete/file metadata/missing file)
+- ✅ 51 lib tests passing (was 44, added 7 WriteBatch tests)
+- ✅ All 7 WriteBatch tests passing (empty, puts, deletes, mixed, CF-scoped, clear, builder)
+- ✅ All 5 persistence tests passing
 - ✅ All 5 recovery tests passing
 - ✅ All 13 compaction tests passing
 - ✅ 100% test naming compliance in src/
 - ✅ 0 naming violations
-- ⚠️ SST fs tests occasionally fail with temp directory issues when run in parallel
+- ⚠️ SST fs tests occasionally fail with temp directory issues (3 failures when run in parallel)
 
 **Architecture Summary:**
 1. RuntimeState with manifest persistence integrated on startup

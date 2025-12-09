@@ -8,3 +8,5 @@ pub mod transaction;
 pub mod options;
 pub mod errors;
 pub mod types;
+
+pub use write_batch::WriteBatch;
