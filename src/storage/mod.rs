@@ -2,11 +2,13 @@
 pub mod cloud;
 pub mod hybrid;
 pub mod paths;
+pub mod providers;
 
 pub use filesystem::FileSystem;
 pub use cloud::CloudStorage;
 pub use hybrid::HybridStorage;
 pub use paths::Paths;
+pub use providers::{S3Provider, GcsProvider, AzureProvider, OciProvider};
 
 use crate::common::MidgeResult;
 

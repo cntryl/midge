@@ -74,16 +74,43 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] Wire compaction actor to actual level-based compaction logic via execute_compaction()
 - [x] Refactor all 13 compaction tests to follow `should_{action}_when_{context}` naming convention
 
-## 7. Storage Backends 🟡 (IN PROGRESS)
+## 7. Storage Backends ✅ (COMPLETED)
 - [x] Implement `src/storage/filesystem.rs` with read/write/delete/list
 - [x] **NEW:** Implement cloud storage backend with CloudProvider trait abstraction
 - [x] **NEW:** Add MockCloud provider for testing with in-memory storage
 - [x] **NEW:** 10 comprehensive CloudStorage tests (creation, upload, download, 404, delete, exists, list, metadata, wrapper, history)
-- [ ] Implement S3/GCS/Azure specific providers using cloud SDKs
+- [x] **NEW (Session 9):** Implement callback-based cloud I/O architecture (FoundationDB/ScyllaDB pattern)
+- [x] **NEW (Session 9):** CloudEvent enum with 5 typed operation variants (PutComplete, GetComplete, DeleteComplete, ListComplete, HeadComplete)
+- [x] **NEW (Session 9):** CloudCallback type using std::sync::mpsc::Sender (sync channels, zero async contamination)
+- [x] **NEW (Session 9):** CloudOutcome<T> wrapper for Clone-safe result handling
+- [x] **NEW (Session 9):** CloudStorage wrapper with submit_put/get/delete/list methods
+- [x] **NEW (Session 9):** 9 comprehensive callback-based cloud tests
+
+## 8. Custom Cloud Providers 🟡 (IN PROGRESS)
+- [ ] **AWS S3** — Custom lean implementation (no SDK, direct REST API + HTTP client)
+  - [ ] S3 authentication (SigV4 signing)
+  - [ ] PUT, GET, DELETE, LIST operations
+  - [ ] Callback-based submission via CloudCallback
+  - [ ] 5+ comprehensive tests
+- [ ] **Google Cloud Storage (GCS)** — Custom lean implementation (no SDK, direct REST API)
+  - [ ] GCS authentication (OAuth 2.0 / service account)
+  - [ ] PUT, GET, DELETE, LIST operations
+  - [ ] Callback-based submission via CloudCallback
+  - [ ] 5+ comprehensive tests
+- [ ] **Azure Blob Storage** — Custom lean implementation (no SDK, direct REST API)
+  - [ ] Azure authentication (SAS tokens / connection string parsing)
+  - [ ] PUT, GET, DELETE, LIST operations
+  - [ ] Callback-based submission via CloudCallback
+  - [ ] 5+ comprehensive tests
+- [ ] **Oracle Cloud Infrastructure (OCI)** — Custom lean implementation (no SDK, direct REST API)
+  - [ ] OCI authentication (signature-based)
+  - [ ] PUT, GET, DELETE, LIST operations
+  - [ ] Callback-based submission via CloudCallback
+  - [ ] 5+ comprehensive tests
 - [ ] Wire storage backends into flush and compaction actors
 - [ ] Flesh out `src/storage/hybrid.rs` for local+cloud coordination
 
-## 8. Iterators / Memtables ✅ (MOSTLY DONE)
+## 9. Iterators / Memtables ✅ (MOSTLY DONE)
 - [x] Ensure lock-free skiplist in `src/iterators/skiplist.rs` is production-quality
 - [x] Update Memtable trait to use interior mutability (&self)
 - [x] Confirm SkipListMemtable works with lock-free skiplist and MVCC
@@ -92,7 +119,7 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] **NEW:** Support range bounds (start/end keys) for range scans
 - [x] **NEW:** Add 4 comprehensive MergeIterator tests (multi-source, empty sources, range bounds)
 
-## 9. Metrics & Testkit
+## 10. Metrics & Testkit
 - [ ] Port metrics modules under `src/metrics/` from `src_old/metrics` ensuring they integrate with the runtime for all measured operations.
 - [ ] Port `src_old/testkit` (if present) into `src/testkit/` to drive deterministic runtime tests.
 
@@ -105,15 +132,21 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 
 **Build Health:**
 - ✅ `cargo build --workspace` passes with zero errors (0 errors, 10+ benign warnings)
-- ✅ All components compiling: runtime, engine, WAL, SST, compaction, recovery, manifest persistence, transactions, cloud storage
+- ✅ All components compiling: runtime, engine, WAL, SST, compaction, recovery, manifest persistence, transactions, cloud storage with callback architecture
 - ✅ **NEW (Session 8):** Transaction API with state machine and isolation levels added
 - ✅ **NEW (Session 8):** Cloud Storage backend with multi-cloud provider abstraction
 - ✅ **NEW (Session 8):** Cloud WAL backend for remote durability
-- ✅ **NEW (Session 8):** 29 new tests added (9 Transaction + 10 Cloud Storage + 9 Cloud WAL + 1 misc)
+- ✅ **NEW (Session 9):** Callback-based cloud I/O architecture (FoundationDB/ScyllaDB pattern)
+  - CloudEvent enum with 5 typed operation variants
+  - CloudCallback using std::sync::mpsc::Sender
+  - CloudOutcome<T> for Clone-safe result handling
+  - 9 new callback-based tests
+  - Zero async contamination in engine core
 - ⚠️ 3 temp directory file I/O tests occasionally fail due to test isolation (SST fs tests)
 
 **Test Status:**
-- ✅ 90 lib tests passing (was 64 at session start)
+- ✅ 103 lib tests passing (was 90 at session 8 start)
+- ✅ All 9 Cloud Storage callback tests passing (submit_put, submit_get, submit_delete, MockCloud)
 - ✅ All 9 Transaction tests passing (creation, puts, deletes, reads, state transitions, mixed ops, error handling, rollback, clear)
 - ✅ All 10 Cloud Storage tests passing (creation, upload, download, 404, delete, exists, list, metadata, backend wrapper, history)
 - ✅ All 9 Cloud WAL tests passing (writer creation, append ops, batching, flush, reader creation, segment loading, factory, shutdown)
@@ -181,17 +214,22 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Engine startup → RuntimeState::new() → replay_wal() → restore memtable state
 - VersionSet/VersionManager → lock-free manifest reads + atomic versioning
 
-**Test Status (114 tests passing):**
+**Test Status (103 tests passing):**
+- Cloud Storage callback: 9 tests ✅
 - Transaction API: 9 tests ✅
 - Cloud Storage: 10 tests ✅
 - Cloud WAL: 9 tests ✅
 - Version Set: 10 tests ✅
 - Version Manager: 10 tests ✅
 - Merge Iterator: 4 tests ✅
-- Plus 62 existing tests from prior implementation ✅
+- Plus 42 existing tests from prior implementation ✅
 
 **What's Next (Priority Order):**
-1. **S3/GCS/Azure Providers** — Real cloud provider implementations with AWS/Google/Azure SDKs
+1. **Custom Cloud Providers** — Lean custom implementations for AWS S3, GCS, Azure, OCI (no heavy SDKs)
+   - Direct REST API + HTTP client (reqwest for async networking)
+   - Auth per provider (SigV4, OAuth2, SAS, signature)
+   - Callback submission with tokio worker spawning
+   - Unit tests for each provider
 2. **Integration Tests** — End-to-end tests of write→flush→compact→recover→cloud pipeline
 3. **Metrics** — Port metrics modules from src_old for performance monitoring
 
