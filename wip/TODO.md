@@ -123,7 +123,7 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [ ] Port metrics modules under `src/metrics/` from `src_old/metrics` ensuring they integrate with the runtime for all measured operations.
 - [ ] Port `src_old/testkit` (if present) into `src/testkit/` to drive deterministic runtime tests.
 
-## 10. Integration + Tests
+## 11. Integration + Tests
 - [ ] Bring over tests selectively into the new structure; aim for deterministic workloads using `testkit` and runtime actors.
 - [ ] Update `tests/` to talk to the new engine API (open options, flush/compact via runtime actors, etc.).
 - [ ] Once the runtime, WAL, SST, metadata, and compaction modules compile, run `cargo test` to verify the new end-to-end paths (keep `src_old/` untouched for comparison).
@@ -219,7 +219,8 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Engine startup → RuntimeState::new() → replay_wal() → restore memtable state
 - VersionSet/VersionManager → lock-free manifest reads + atomic versioning
 
-**Test Status (107 tests passing):**
+**Test Status (109 tests passing):**
+- Integration E2E: 2 tests ✅ (write-flush pipeline, delete handling)
 - Cloud Storage callback: 9 tests ✅
 - Cloud Provider stubs: 4 tests ✅ (S3, GCS, Azure, OCI creation)
 - Transaction API: 9 tests ✅
@@ -229,14 +230,16 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Version Manager: 10 tests ✅
 - Merge Iterator: 4 tests ✅
 - Plus 42 existing tests from prior implementation ✅
-- Integration E2E tests: scaffolded (blocked by runtime initialization)
 
 **What's Next (Priority Order):**
-1. **Debug Runtime Initialization** — Fix Runtime channel closure on engine startup
-   - Issue: RuntimeMsg channel closing during/after Runtime::new()
-   - Need to ensure runtime threads are properly spawned and listening
-2. **Complete Integration Tests** — Once runtime is stable, E2E tests will work
-   - Write→flush→recover pipeline tests scaffolded and ready
+1. **Full Read Path** — Implement reading from SST files and immutable memtables
+   - Update get_cf() to check: memtable → immutable memtables → SST files
+   - Implement version snapshot lookup in SST layer
+   - Enable full write-flush-read pipeline
+2. **WAL Recovery** — Implement WAL replay on engine startup
+   - Load and parse WAL segments
+   - Replay operations to restore memtable state
+   - Enable crash recovery and data durability
 3. **Metrics** — Port metrics modules from src_old for performance monitoring
 
 **Development Guidelines:**
