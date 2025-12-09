@@ -18,12 +18,10 @@ pub use traits::{WalFactory, WalReader, WalReaderDyn, WalWriter};
 // Re-export encoding functions
 pub use encoding::{encode, decode};
 
+
 // Re-export filesystem implementations
 pub use fs::{FsWalFactory, FsWalWriter, FsWalReader};
 
 // Re-export recovery
 pub use recovery::{replay_wal, RecoveryStats};
-
-// Re-export cloud backend
-pub use backends::cloud::{CloudWalWriter, CloudWalReader, CloudWalFactory};
 

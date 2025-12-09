@@ -10,7 +10,7 @@ pub type MidgeResult<T> = Result<T, MidgeError>;
 #[derive(Debug)]
 pub enum MidgeError {
     /// IO error
-    Io(io::Error),
+    Io(std::io::Error),
     
     /// Key not found
     NotFound,
