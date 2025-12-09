@@ -7,12 +7,14 @@ pub mod version_set;
 pub mod version_manager;
 pub mod sst_catalog;
 pub mod invariants;
+pub mod persistence;
 
 pub use manifest::{Manifest, FileMeta, ColumnFamilyMeta, CloudCheckpoint};
 pub use version_set::VersionSet;
 pub use version_manager::VersionManager;
 pub use sst_catalog::SstCatalog;
 pub use invariants::Invariants;
+pub use persistence::ManifestPersistence;
 
 /// Version identifier
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]

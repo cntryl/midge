@@ -1,0 +1,128 @@
+﻿cargo : warning: unused import: `Bytes`
+At line:1 char:1
++ cargo test --lib metadata::persistence::tests::should_save_and_load_m ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused import: `Bytes`:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ --> src\sst\encoding.rs:5:13
+  |
+5 | use bytes::{Bytes, BufMut, BytesMut};
+  |             ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `SstReader`
+  --> src\sst\fs\factory.rs:41:48
+   |
+41 |     use crate::sst::{DynSstWriter, SstFactory, SstReader};
+   |                                                ^^^^^^^^^
+
+warning: unused import: `DynSstWriter`
+  --> src\sst\fs\factory.rs:41:22
+   |
+41 |     use crate::sst::{DynSstWriter, SstFactory, SstReader};
+   |                      ^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> src\wal\fs\writer.rs:82:13
+   |
+82 |         let mut file = self.file.lock().unwrap();
+   |             ----^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `val`
+  --> src\sst\traits.rs:38:43
+   |
+38 |             super::types::KeyState::Value(val, seq, exp, op) if seq > snapshot_seq => {
+   |                                           ^^^ help: if this is intentional, prefix it with an underscore: `_val`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `exp`
+  --> src\sst\traits.rs:38:53
+   |
+38 |             super::types::KeyState::Value(val, seq, exp, op) if seq > snapshot_seq => {
+   |                                                     ^^^ help: if this is intentional, prefix it with an underscore: `_exp`
+
+warning: unused variable: `op`
+  --> src\sst\traits.rs:38:58
+   |
+38 |             super::types::KeyState::Value(val, seq, exp, op) if seq > snapshot_seq => {
+   |                                                          ^^
+   |
+help: if this is intentional, prefix it with an underscore
+   |
+38 |             super::types::KeyState::Value(val, seq, exp, _op) if seq > snapshot_seq => {
+   |                                                          +
+help: you might have meant to pattern match on the similarly named constant `EXPIRATION`
+   |
+38 -             super::types::KeyState::Value(val, seq, exp, op) if seq > snapshot_seq => {
+38 +             super::types::KeyState::Value(val, seq, exp, sst::encoding::tags::EXPIRATION) if seq > snapshot_seq => {
+   |
+
+warning: unused variable: `seq`
+  --> src\sst\traits.rs:76:9
+   |
+76 |         seq: u64,
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_seq`
+
+warning: unused variable: `op_type`
+  --> src\sst\traits.rs:77:9
+   |
+77 |         op_type: u8,
+   |         ^^^^^^^
+   |
+help: if this is intentional, prefix it with an underscore
+   |
+77 |         _op_type: u8,
+   |         +
+help: you might have meant to pattern match on the similarly named constant `EXPIRATION`
+   |
+77 -         op_type: u8,
+77 +         sst::encoding::tags::EXPIRATION: u8,
+   |
+
+warning: field `file_path` is never read
+  --> src\wal\fs\writer.rs:14:5
+   |
+13 | pub struct FsWalWriter {
+   |            ----------- field in this struct
+14 |     file_path: String,
+   |     ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `temp_path` and `index_entries` are never read
+  --> src\sst\fs\writer.rs:13:5
+   |
+11 | pub struct FsSstWriter {
+   |            ----------- fields in this struct
+12 |     file: std::fs::File,
+13 |     temp_path: PathBuf,
+   |     ^^^^^^^^^
+...
+23 |     index_entries: Vec<(Vec<u8>, BlockHandle)>,
+   |     ^^^^^^^^^^^^^
+
+warning: field `db_path` is never read
+  --> src\engine\mod.rs:75:5
+   |
+71 | pub struct MidgeEngine {
+   |            ----------- field in this struct
+...
+75 |     db_path: PathBuf,
+   |     ^^^^^^^
+
+warning: `cntryl-midge` (lib test) generated 12 warnings (run `cargo fix --lib -p cntryl-midge --tests` to apply 5 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src\lib.rs (target\debug\deps\cntryl_midge-a003e55b28d629c1.exe)
+
+running 1 test
+test metadata::persistence::tests::should_save_and_load_manifest_when_persisting ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.00s
+

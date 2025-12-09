@@ -119,14 +119,33 @@ pub struct RuntimeState {
 impl RuntimeState {
     /// Create new runtime state with the given database path
     ///
-    /// This also performs WAL recovery if WAL files exist.
+    /// This also performs manifest loading and WAL recovery if they exist.
     pub fn new(db_path: PathBuf) -> Self {
         let wal_dir = db_path.join("wal");
         let sst_dir = db_path.join("sst");
 
+        // Load manifest from disk if it exists
+        let manifest = match crate::metadata::ManifestPersistence::load(&db_path) {
+            Ok(m) => {
+                tracing::info!("manifest loaded from disk");
+                m
+            }
+            Err(e) => {
+                tracing::warn!("failed to load manifest, using default: {}", e);
+                Manifest::default()
+            }
+        };
+
         let mut column_families = HashMap::new();
         // Always create the default column family (id=0)
         column_families.insert(0, ColumnFamilyState::new(0, "default".to_string()));
+
+        // Create any other column families from the manifest
+        for cf_meta in &manifest.column_families {
+            if cf_meta.id != 0 {
+                column_families.insert(cf_meta.id, ColumnFamilyState::new(cf_meta.id, cf_meta.name.clone()));
+            }
+        }
 
         // Perform WAL recovery if WAL directory exists
         if wal_dir.exists() {
@@ -167,7 +186,7 @@ impl RuntimeState {
             sequence: 0,
             next_txn_id: 0,
             column_families,
-            manifest: Manifest::default(),
+            manifest,
             wal: WalState::default(),
             compaction: CompactionState::default(),
             cloud: CloudState::default(),
