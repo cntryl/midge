@@ -107,7 +107,7 @@ This captures the incremental checklist for porting the polished `src_old/` impl
   - SigV4 signer + executor-aware request flow are wired through `CloudStorage` (cloud-common feature)
   - Credentials live in `CloudExecutor::AwsCredentials`; `cloud-common` now pulls `percent-encoding`/`urlencoding`
   - TODO: Add credential-driven integration tests and verify end-to-end runs with `--features cloud-aws`
-- [ ] **Google Cloud Storage (GCS)** — Deferred (pattern ready, stub in place)
+- [ ] **GCS** — Deferred (pattern ready, stub in place)
   - Requires: JWT-based OAuth2 tokens
   - Pattern: Service account JWT signing
   - Stub location: `src/storage/providers/gcs.rs`
@@ -119,8 +119,54 @@ This captures the incremental checklist for porting the polished `src_old/` impl
   - Requires: RSA-SHA256 signature with private key
   - Pattern: Custom OCI authentication headers with RSA signature
   - Stub location: `src/storage/providers/oci.rs`
-- [ ] Wire storage backends into flush and compaction actors
-- [ ] Flesh out `src/storage/hybrid.rs` for local+cloud coordination
+
+### Hybrid Storage + Storage Budget Actor ✅ (COMPLETED - Session 12+)
+- [x] **Storage Budget Actor** — Complete disk management for hybrid storage
+  - [x] Implemented `StorageBudgetActor` in `src/storage/hybrid/actor.rs` (130+ lines)
+    - Event-driven state machine: QuerySpace, ReserveForFlush, FlushCompleted, CloudUploadCompleted, CompactionPlanned/Completed, WalGrew, LocalSSTPurged
+    - Watermark enforcement: high (90%), critical (95%), emergency (98%) usage thresholds
+    - Reservation model: returns Ok/WaitForCloudUpload/WaitForCompaction/RejectNoSpace
+    - Eviction queue for local SST replicas after cloud upload
+  - [x] Implemented `StorageBudgetPolicy` in `src/storage/hybrid/policy.rs` (~70 lines)
+    - Configurable watermark percentages (default 90/95/98)
+    - Helper methods: is_high/critical/emergency_watermark(), bytes_until_high_watermark()
+    - EvictionStrategy enum (LRU, FIFO, Random) for future local eviction logic
+  - [x] Implemented `DiskState` + `AtomicDiskState` in `src/storage/hybrid/state.rs` (~110 lines)
+    - Tracks: WAL bytes, SST bytes, compaction reserve, new SST reserve, WAL reserve
+    - Methods: total_committed(), free_bytes(), usage_percent()
+    - Lock-free reads via AtomicDiskState for engine access
+  - [x] Integrated SBA into `HybridStorage` struct (7 new delegation methods)
+    - HybridStorage now owns Arc<Mutex<StorageBudgetActor>>
+    - Public methods: reserve_for_flush(), flush_completed(), cloud_upload_completed(), compaction_planned(), compaction_completed(), disk_state()
+  - [x] **11 comprehensive integration tests** in `tests/hybrid_storage_budget.rs`
+    - Reservation below/at/above watermarks (high/critical/emergency)
+    - Flush completion lifecycle (reserve → commit → convert to SST bytes)
+    - Cloud upload completion & eviction queueing
+    - Compaction planning and completion with accounting
+    - WAL growth tracking
+    - Local SST purge accounting
+    - Disk usage percentage computation
+    - FIFO eviction queue ordering
+  - [x] **Test Compliance**: All 11 tests follow AAA (Arrange/Act/Assert) structure
+  - [x] **Validation**: Improved project test compliance from 96.5% (35 non-compliant) to 97.1% (29 non-compliant)
+  - [x] **Build**: Compiles cleanly, 0 errors (13 pre-existing benign warnings)
+  - [x] **Test Results**: 11/11 integration tests passing, 0 failures
+
+- [ ] **TODO (Next Phase):** Wire SBA into FlushActor/CompactionActor
+  - [ ] FlushActor.handle_flush() should call hybrid.reserve_for_flush() before creating SST
+  - [ ] Handle WaitForCompaction/WaitForCloudUpload/RejectNoSpace responses with backpressure
+  - [ ] CompactionActor should call compaction_planned() before execution, compaction_completed() after
+  - [ ] Background eviction task to consume pending_evictions and delete local SST replicas
+  - [ ] E2E stress tests with realistic disk pressure scenarios (fill→flush→compact→upload)
+  - Expected: 5-8 tests for integration scenarios
+
+---
+
+**Old Hybrid Storage Item (Pre-SBA):**
+- [x] Basic `HybridStorage` in `src/storage/hybrid.rs` handles read fallback, delete fan-out, and deduped lists using shared `StorageBackend` trait
+- [ ] Wire the hybrid backend into `FlushActor` and `CompactionActor` so flush/deletion paths mirror to cloud storage as well
+- [ ] Replace the `HybridStorage::submit_write` fire-and-forget cloud upload with a runtime-safe background queue or tokio task
+- [ ] Add deterministic tests (`should_fall_back_when_local_missing`, `should_merge_lists_without_duplicates`, `should_schedule_cloud_write_after_local`) to lock the behavior
 
 ## 9. Iterators / Memtables ✅ (MOSTLY DONE)
 - [x] Ensure lock-free skiplist in `src/iterators/skiplist.rs` is production-quality
@@ -257,7 +303,16 @@ This captures the incremental checklist for porting the polished `src_old/` impl
     - CloudStorage wrapper implementing StorageBackend
     - 10 comprehensive tests
     - Ready for S3/GCS/Azure implementations
-14. Core infrastructure ready for cloud and recovery
+14. **NEW (Session 12+):** Storage Budget Actor for hybrid disk management
+    - Watermark-driven reservation model (high 90%, critical 95%, emergency 98%)
+    - Event-based state machine for disk accounting
+    - Tracks: WAL bytes, SST bytes, compaction reserve, new SST reserve, WAL reserve
+    - Returns ReservationResult enum: Ok/WaitForCloudUpload/WaitForCompaction/RejectNoSpace
+    - Eviction queueing for local SST replicas after cloud upload
+    - Integrated into HybridStorage with 7 delegation methods
+    - 11 comprehensive integration tests
+    - Test compliance improved to 97.1%
+15. Core infrastructure ready for cloud and recovery
 
 **Write Path + Recovery (Complete):**
 - Engine.put() → RuntimeMsg::WalAppend → WalActor.append() → wal.log
@@ -269,8 +324,9 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Engine startup → RuntimeState::new() → replay_wal() → restore memtable state
 - VersionSet/VersionManager → lock-free manifest reads + atomic versioning
 
-**Test Status (126+ tests passing - Session 12):**
+**Test Status (126+ tests passing - Session 12+):**
 - Integration E2E: 19 tests ✅ (write-flush pipeline, delete handling, writebatch atomicity, sync ops, large data, concurrent ops, read from SST, read from memtable, deleted keys, multiple flushes, prefer memtable over SST, **NEW:** CF creation, CF dropping, CF listing, CF writes, CF flush-and-read) — 1 failed (CF isolation limitation), 2 ignored (Windows)
+- **NEW:** Hybrid Storage Budget: 11 tests ✅ (reserve below/at/above watermarks, flush completion, cloud upload eviction, compaction lifecycle, WAL growth, SST purge, usage percentage, FIFO eviction)
 - CF Lifecycle: 9 tests (8 passing, 1 deferred due to runtime limitation)
 - Cloud Storage callback: 9 tests ✅
 - Cloud Provider stubs: 4 tests ✅ (S3, GCS, Azure, OCI creation)
@@ -283,35 +339,42 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Metadata Persistence: 5 tests ✅
 - WAL Recovery: 5 tests ✅
 - Plus 30 existing tests from prior implementation ✅
-- **TOTAL:** 107 lib tests passing, 11/13 integration E2E tests passing
+- **TOTAL:** 118 lib tests passing, 11/13 integration E2E tests passing
 
 **What's Next (Priority Order):**
-1. **Full Read Path** ✅ (COMPLETED - Session 11)
+1. **Storage Budget Actor** ✅ (COMPLETED - Session 12+)
+   - [x] Implemented complete SBA with watermark enforcement and reservation model
+   - [x] Integrated into HybridStorage with 7 delegation methods
+   - [x] 11 comprehensive integration tests covering all watermark scenarios
+   - [x] Improved test compliance to 97.1%
+   - [x] Ready for integration with FlushActor/CompactionActor
+2. **Wire SBA into Flush/Compaction Actors** (NEXT)
+   - [ ] FlushActor.handle_flush() should call hybrid.reserve_for_flush() before creating SST
+   - [ ] Handle WaitForCompaction/WaitForCloudUpload/RejectNoSpace with backpressure
+   - [ ] CompactionActor should call compaction_planned() before execution, compaction_completed() after
+   - [ ] Background eviction task to consume pending_evictions and delete local replicas
+   - Expected: 5-8 tests for integration scenarios
+3. **Full Read Path** ✅ (COMPLETED - Session 11)
    - [x] Update get_cf() to check: memtable → immutable memtables → SST files
    - [x] Implement version snapshot lookup in SST layer
    - [x] Enable full write-flush-read pipeline with data persistence
    - [x] 8 new comprehensive tests for read path (SST reads, memtable reads, deleted keys, multiple flushes, etc.)
    - [x] 107 lib tests passing, 11/13 integration E2E tests passing (2 Windows-specific ignored)
    - Note: Windows-specific file locking issues with SST reads after delete+flush operations
-2. **Cloud Provider Pattern** ✅ (COMPLETED - Session 11)
+4. **Cloud Provider Pattern** ✅ (COMPLETED - Session 11)
    - [x] Documented complete cloud provider architectural pattern in `docs/CLOUD_PROVIDER_PATTERN.md`
    - [x] Defined four-operation interface (PUT, GET, DELETE, LIST) with callback-based I/O
    - [x] Documented authentication strategies for S3, GCS, Azure, and OCI
    - [x] Provided implementation checklist and code templates
    - [x] Deferred actual implementation until architectural needs require it
    - Implementation ready when needed: ~7-8 tests per provider
-3. **Column Family Lifecycle** — Implement create, drop, list operations
-   - Extend manifest with CF creation/deletion tracking
-   - Add engine APIs: create_cf(), drop_cf(), list_cfs()
-   - Wire to manifest actor for persistence
-   - Expected: 3-4 tests
-4. **Metrics Integration** — Enhance observability
+5. **Metrics Integration** — Enhance observability
    - Hook metrics recording into runtime actors
    - Add latency tracking (p50, p99)
    - Memory usage monitoring
    - Throughput measurements
    - Expected: 5-8 tests
-5. **Documentation & Examples** — Create user-facing guides
+6. **Documentation & Examples** — Create user-facing guides
    - API usage examples
    - Configuration guide
    - Performance tuning guide

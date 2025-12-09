@@ -5,22 +5,87 @@
 //! - Writes go to local, with background cloud upload scheduled
 //! - Deletes remove from both
 //! - Lists merge results from both
+//! - Storage Budget Actor manages disk constraints, watermarks, and backpressure
+
+pub mod actor;
+pub mod policy;
+pub mod state;
 
 use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use std::sync::Arc;
 
 /// Hybrid storage combining local filesystem and cloud backends
+///
+/// Managed by a Storage Budget Actor to enforce disk constraints, watermarks,
+/// and coordination between local caching and cloud durability.
 pub struct HybridStorage {
     /// Local storage backend (usually filesystem)
     local: Arc<dyn StorageBackend>,
     /// Cloud storage backend (S3, GCS, Azure, etc.)
     cloud: Arc<dyn StorageBackend>,
+    /// Storage Budget Actor for disk management
+    budget_actor: Arc<std::sync::Mutex<actor::StorageBudgetActor>>,
 }
 
 impl HybridStorage {
-    /// Create a new hybrid storage with local and cloud backends
+    /// Create a new hybrid storage with local and cloud backends and default policy
     pub fn new(local: Arc<dyn StorageBackend>, cloud: Arc<dyn StorageBackend>) -> Self {
-        Self { local, cloud }
+        Self::with_policy(local, cloud, policy::StorageBudgetPolicy::default())
+    }
+
+    /// Create a new hybrid storage with a custom storage budget policy
+    pub fn with_policy(
+        local: Arc<dyn StorageBackend>,
+        cloud: Arc<dyn StorageBackend>,
+        policy: policy::StorageBudgetPolicy,
+    ) -> Self {
+        let budget_actor = actor::StorageBudgetActor::new(policy);
+        Self {
+            local,
+            cloud,
+            budget_actor: Arc::new(std::sync::Mutex::new(budget_actor)),
+        }
+    }
+
+    /// Try to reserve space for a flush; returns the reservation result
+    pub fn reserve_for_flush(&self, est_size: u64) -> actor::ReservationResult {
+        let mut actor = self.budget_actor.lock().unwrap();
+        actor
+            .handle_event(actor::StorageBudgetEvent::ReserveForFlush { est_size })
+            .unwrap_or(actor::ReservationResult::Ok)
+    }
+
+    /// Signal that a flush completed with actual size
+    pub fn flush_completed(&self, actual_size: u64) {
+        let mut actor = self.budget_actor.lock().unwrap();
+        let _ = actor.handle_event(actor::StorageBudgetEvent::FlushCompleted { actual_size });
+    }
+
+    /// Signal that a cloud upload completed
+    pub fn cloud_upload_completed(&self, sst_id: u64, actual_size: u64) {
+        let mut actor = self.budget_actor.lock().unwrap();
+        let _ = actor.handle_event(actor::StorageBudgetEvent::CloudUploadCompleted {
+            sst_id,
+            actual_size,
+        });
+    }
+
+    /// Signal that compaction is starting
+    pub fn compaction_planned(&self, input_sizes: Vec<u64>) {
+        let mut actor = self.budget_actor.lock().unwrap();
+        let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionPlanned { input_sizes });
+    }
+
+    /// Signal that compaction completed
+    pub fn compaction_completed(&self, output_sizes: Vec<u64>) {
+        let mut actor = self.budget_actor.lock().unwrap();
+        let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionCompleted { output_sizes });
+    }
+
+    /// Get current disk state snapshot
+    pub fn disk_state(&self) -> state::DiskState {
+        let actor = self.budget_actor.lock().unwrap();
+        actor.disk_state()
     }
 }
 
