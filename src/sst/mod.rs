@@ -1,105 +1,97 @@
-//! Top-level SST module
+//! SST (Sorted String Table) abstraction
 //!
-//! This module contains all SST (Sorted String Table) related functionality:
-//!
-//! - **Format**: SST file format (blocks, footer, high-level structure)
-//! - **Encoding**: TLV entry encoding/decoding (symmetric operations)
-//! - **Traits**: Generic reader/writer contracts
-//! - **Implementations**: Filesystem (`fs`), in-memory (`mem`), and cloud-backend (`cloud`) backends
-//! - **Bloom Filters**: Fast key presence checks
-//! - **Sparse Index**: Block-level index for efficient lookups
-//! - **Cache**: Block-level and table-level LRU caching
-//! - **Cloud**: Cloud storage backend and lifecycle management
-//! - **File Manager**: File lifecycle and quota management
+//! Includes memtables, immutable SSTs, bloom filters, indexes
 
-pub mod block_cache;
-pub mod block_meta;
-pub mod bloom;
-pub mod bloom_cache;
+pub mod mutable;
+pub mod immutable;
 pub mod cache;
-pub mod cloud;
-pub mod encoding;
-pub mod fast_negative_filter;
-pub mod file_manager;
-pub mod format;
-pub mod fs;
-pub mod manifest_cache;
-pub mod mem;
-pub mod meta_index;
-pub mod metadata_cache;
-pub mod range_tombstone;
-pub mod reader_common;
-pub mod sequential_access_optimizer;
+pub mod bloom;
+pub mod trie;
 pub mod sparse_index;
-pub mod sparse_index_cache;
-pub mod table_cache;
-pub mod tombstone_index;
-pub mod traits;
-pub mod trie_index;
-pub mod trie_index_integration;
-pub mod writer_common;
 
-// ─── Block cache re-exports (temporary shims for existing code) ──────────────
-// These re-export names from the new block_cache module so call-sites like
-// `crate::sst::BlockCacheTrait` keep compiling while we finish the new impl.
-pub use block_cache::{BlockCache as BlockCacheTrait, BlockCacheStats as CacheStats};
-pub use block_cache::{
-    BlockCacheOptions, BlockData, BlockHandle as CacheBlockHandle, BlockKey, BlockKind,
-    CfCacheStats, EvictionPolicy, ShardedBlockCache, SizeAccounting,
-};
+use crate::common::MidgeResult;
+use std::sync::Arc;
+use crate::iterators::SkipList;
+use bytes::Bytes;
 
-/// Create a block cache with the specified capacity.
-///
-/// Uses the new `ShardedBlockCache` implementation with WTinyLFU eviction
-/// policy for scan resistance and high hit rates.
-pub fn create_basic_cache(max_size_bytes: usize) -> std::sync::Arc<dyn BlockCacheTrait> {
-    std::sync::Arc::new(ShardedBlockCache::new(BlockCacheOptions::with_capacity(
-        max_size_bytes,
-    )))
+/// Key-value pair
+#[derive(Clone, Debug)]
+pub struct KvPair {
+    pub key: Vec<u8>,
+    pub value: Option<Vec<u8>>,
+    pub sequence: u64,
 }
 
-/// Create a block cache with full configuration options.
-///
-/// Allows customizing shards, eviction policy, size accounting, and per-CF stats.
-///
-/// # Example
-/// ```ignore
-/// use midge::sst::{create_cache_with_options, BlockCacheOptions, EvictionPolicy};
-///
-/// let cache = create_cache_with_options(
-///     BlockCacheOptions::with_capacity(128 * 1024 * 1024)
-///         .num_shards(32)
-///         .eviction_policy(EvictionPolicy::WTinyLfu)
-///         .per_cf_stats(true)
-/// );
-/// ```
-pub fn create_cache_with_options(options: BlockCacheOptions) -> std::sync::Arc<ShardedBlockCache> {
-    std::sync::Arc::new(ShardedBlockCache::new(options))
+/// Memtable trait
+pub trait Memtable: Send + Sync {
+    fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()>;
+    fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>>;
+    fn delete(&mut self, key: Vec<u8>) -> MidgeResult<()>;
+    fn size_bytes(&self) -> usize;
 }
 
-// ─── Other public re-exports ─────────────────────────────────────────────────
-pub use block_meta::{BlockMeta, IndexTable};
-pub use bloom::{BloomFilter, BloomFilterBuilder, Filter};
-pub use cloud::{
-    ArchiveTier, CloudSst, CloudSstFactory, CloudSstManager, CloudSstManagerConfig,
-    CloudSstReaderFactory, SstCloudReader, SstCloudWriter, SstLifecycleState, SstMetadata,
-    SstUploadMeta,
-};
-pub use fast_negative_filter::FastNegativeFilter;
-pub use file_manager::FileManager;
-pub use format::{Block, BlockHandle, BlockType, DataBlockBuilder, Footer, IndexBlockBuilder};
-pub use sequential_access_optimizer::{SequentialAccessMetrics, SequentialAccessOptimizer};
-pub use sparse_index::{IndexEntry, SparseIndex, SparseIndexBuilder};
-pub use table_cache::{CachedTable, TableCache, TableCacheStats};
-pub use tombstone_index::{TombstoneIndex, TombstoneIndexBuilder, TombstoneIndexEntry};
-pub use traits::*;
+/// SkipList-based Memtable (lock-free, MVCC-aware)
+pub struct SkipListMemtable {
+    skiplist: Arc<SkipList>,
+    seq_generator: std::sync::atomic::AtomicU64,
+    size_bytes: std::sync::atomic::AtomicUsize,
+}
 
-pub use manifest_cache::ManifestCache;
+impl SkipListMemtable {
+    pub fn new() -> Self {
+        Self {
+            skiplist: Arc::new(SkipList::new()),
+            seq_generator: std::sync::atomic::AtomicU64::new(1),
+            size_bytes: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
 
-pub use bloom_cache::BloomCache;
-pub use cache::SstCache;
-pub use metadata_cache::SstMetadataCache;
-pub use sparse_index_cache::SparseIndexCache;
+    fn next_seq(&self) -> u64 {
+        self.seq_generator
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
-pub use fs::*;
-pub use mem::*;
+impl Default for SkipListMemtable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Memtable for SkipListMemtable {
+    fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()> {
+        let seq = self.next_seq();
+        let size_delta = key.len() + value.len() + 16;
+        self.skiplist.upsert(Bytes::from(key), Some(Bytes::from(value)), seq);
+        self.size_bytes.fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
+        Ok(self.skiplist.get(key, u64::MAX).map(|b| b.to_vec()))
+    }
+
+    fn delete(&mut self, key: Vec<u8>) -> MidgeResult<()> {
+        let seq = self.next_seq();
+        let size_delta = key.len() + 16;
+        self.skiplist.delete(Bytes::from(key), seq);
+        self.size_bytes.fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn size_bytes(&self) -> usize {
+        self.size_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Immutable SST reader
+pub trait SstReader: Send + Sync {
+    fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>>;
+    fn range(&self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<KvPair>>;
+}
+
+/// Immutable SST writer
+pub trait SstWriter: Send + Sync {
+    fn add(&mut self, pair: KvPair) -> MidgeResult<()>;
+    fn finish(&mut self) -> MidgeResult<()>;
+}
