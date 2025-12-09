@@ -10,3 +10,4 @@ pub mod errors;
 pub mod types;
 
 pub use write_batch::WriteBatch;
+pub use snapshot::Snapshot;

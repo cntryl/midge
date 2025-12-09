@@ -80,6 +80,8 @@ pub struct MidgeEngine {
     memtable: Arc<SkipListMemtable>,
     /// Current sequence number (for local tracking)
     sequence: std::sync::atomic::AtomicU64,
+    /// Next snapshot ID counter
+    next_snapshot_id: std::sync::atomic::AtomicU64,
 }
 
 impl MidgeEngine {
@@ -98,6 +100,7 @@ impl MidgeEngine {
             default_cf: ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string()),
             memtable: Arc::new(SkipListMemtable::new()),
             sequence: std::sync::atomic::AtomicU64::new(0),
+            next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -241,6 +244,20 @@ impl MidgeEngine {
         }
 
         Ok(())
+    }
+
+    /// Create a snapshot of the current database state
+    pub fn snapshot(&self) -> api::Snapshot {
+        let seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let snapshot_id = self.next_snapshot_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        api::Snapshot::new(seq, None, snapshot_id)
+    }
+
+    /// Create a snapshot of a specific column family
+    pub fn snapshot_cf(&self, cf: &ColumnFamilyHandle) -> api::Snapshot {
+        let seq = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let snapshot_id = self.next_snapshot_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        api::Snapshot::new(seq, Some(cf.id), snapshot_id)
     }
 
     /// Shutdown the engine gracefully

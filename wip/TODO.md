@@ -11,7 +11,10 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] **NEW:** Implement WriteBatch API for batched writes
 - [x] **NEW:** Add write_batch() method to MidgeEngine for atomic batched operations
 - [x] **NEW:** 7 comprehensive WriteBatch tests (create, put, delete, mixed, CF-scoped, clear, builder pattern)
-- [ ] Expand with snapshot, transaction, and iterator APIs
+- [x] **NEW:** Implement Snapshot API for point-in-time reads
+- [x] **NEW:** Add snapshot() and snapshot_cf() methods to MidgeEngine
+- [x] **NEW:** 5 Snapshot tests (creation, sequence capture, CF-specific, equality, multiple snapshots)
+- [ ] Expand with transaction and iterator APIs
 - [ ] Implement full CF lifecycle (create, drop, list) via manifest actor
 
 ## 2. Runtime Skeleton ✅ (COMPLETED)
@@ -97,7 +100,8 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - ⚠️ 3 temp directory file I/O tests occasionally fail due to test isolation (SST fs tests)
 
 **Test Status:**
-- ✅ 51 lib tests passing (was 44, added 7 WriteBatch tests)
+- ✅ 56 lib tests passing (was 48, added 5 Snapshot tests + 7 WriteBatch tests)
+- ✅ All 5 Snapshot tests passing (creation, sequence, CF-specific, equality, multiple)
 - ✅ All 7 WriteBatch tests passing (empty, puts, deletes, mixed, CF-scoped, clear, builder)
 - ✅ All 5 persistence tests passing
 - ✅ All 5 recovery tests passing
