@@ -150,10 +150,14 @@ impl RuntimeHandle {
 /// Owns all mutable engine state and coordinates actors via message passing.
 /// No direct thread spawning outside the runtime - all background work flows through here.
 pub struct Runtime {
-    /// Message channel for receiving work
+    /// Message channel sender (for handle)
+    msg_tx: Sender<RuntimeMsg>,
+    /// Message channel receiver (for event loop)
     msg_rx: Receiver<RuntimeMsg>,
-    /// Response channel for sending results
+    /// Response channel sender (for event loop)
     response_tx: Sender<RuntimeResponse>,
+    /// Response channel receiver (for handle)
+    response_rx: Receiver<RuntimeResponse>,
     /// Event loop thread handle
     event_loop_handle: Option<JoinHandle<()>>,
     /// Whether tracing is enabled
@@ -171,13 +175,15 @@ impl Runtime {
             .unwrap_or(false);
 
         let handle = RuntimeHandle {
-            msg_tx,
-            response_rx,
+            msg_tx: msg_tx.clone(),
+            response_rx: response_rx.clone(),
         };
 
         let runtime = Self {
+            msg_tx,
             msg_rx,
             response_tx,
+            response_rx,
             event_loop_handle: None,
             trace_enabled,
         };
@@ -187,17 +193,14 @@ impl Runtime {
 
     /// Start the runtime event loop in a background thread
     pub fn start(mut self, state: RuntimeState) -> MidgeResult<RuntimeHandle> {
-        let msg_rx = self.msg_rx.clone();
-        let response_tx = self.response_tx.clone();
+        let msg_rx = self.msg_rx;
+        let response_tx = self.response_tx;
         let trace_enabled = self.trace_enabled;
 
-        // Create a new handle before moving self
-        let (new_msg_tx, _) = channel::unbounded();
-        let (_, new_response_rx) = channel::unbounded();
-
+        // Create handle with the channels that are connected to the event loop
         let handle = RuntimeHandle {
-            msg_tx: new_msg_tx,
-            response_rx: new_response_rx,
+            msg_tx: self.msg_tx.clone(),
+            response_rx: self.response_rx.clone(),
         };
 
         let event_loop_handle = thread::Builder::new()
@@ -220,9 +223,10 @@ impl Runtime {
     }
 
     /// Shutdown the runtime and wait for completion
-    pub fn shutdown(self) {
-        if let Some(handle) = self.event_loop_handle {
+    pub fn shutdown(mut self) {
+        if let Some(handle) = self.event_loop_handle.take() {
             // Event loop will exit when channel is dropped
+            drop(self.msg_tx);
             drop(self.msg_rx);
             if handle.join().is_err() {
                 tracing::warn!("Runtime thread panicked during shutdown");
