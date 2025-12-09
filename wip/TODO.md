@@ -10,11 +10,14 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] Add column family support with `ColumnFamilyHandle` and CF-scoped operations
 - [x] **NEW:** Implement WriteBatch API for batched writes
 - [x] **NEW:** Add write_batch() method to MidgeEngine for atomic batched operations
-- [x] **NEW:** 7 comprehensive WriteBatch tests (create, put, delete, mixed, CF-scoped, clear, builder pattern)
+- [x] **NEW:** 7 comprehensive WriteBatch tests
 - [x] **NEW:** Implement Snapshot API for point-in-time reads
 - [x] **NEW:** Add snapshot() and snapshot_cf() methods to MidgeEngine
-- [x] **NEW:** 5 Snapshot tests (creation, sequence capture, CF-specific, equality, multiple snapshots)
-- [ ] Expand with transaction and iterator APIs
+- [x] **NEW:** 5 Snapshot tests
+- [x] **NEW:** Implement Iterator API with forward/reverse range scanning
+- [x] **NEW:** Add IteratorBuilder for flexible iteration options
+- [x] **NEW:** 8 Iterator tests covering all features
+- [ ] Expand with transaction APIs
 - [ ] Implement full CF lifecycle (create, drop, list) via manifest actor
 
 ## 2. Runtime Skeleton ✅ (COMPLETED)
@@ -100,9 +103,10 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - ⚠️ 3 temp directory file I/O tests occasionally fail due to test isolation (SST fs tests)
 
 **Test Status:**
-- ✅ 56 lib tests passing (was 48, added 5 Snapshot tests + 7 WriteBatch tests)
-- ✅ All 5 Snapshot tests passing (creation, sequence, CF-specific, equality, multiple)
-- ✅ All 7 WriteBatch tests passing (empty, puts, deletes, mixed, CF-scoped, clear, builder)
+- ✅ 64 lib tests passing (was 56, added 8 Iterator tests)
+- ✅ All 8 Iterator tests passing (forward, reverse, remaining, collect, builder, range bounds, exclusive end, chaining)
+- ✅ All 5 Snapshot tests passing
+- ✅ All 7 WriteBatch tests passing
 - ✅ All 5 persistence tests passing
 - ✅ All 5 recovery tests passing
 - ✅ All 13 compaction tests passing

@@ -11,3 +11,4 @@ pub mod types;
 
 pub use write_batch::WriteBatch;
 pub use snapshot::Snapshot;
+pub use iterator::{Iterator, IteratorBuilder, Direction};
