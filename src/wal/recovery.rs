@@ -214,7 +214,7 @@ mod tests {
 
         // Write WAL with a put operation
         {
-            let mut writer = FsWalWriter::new(&wal_dir).unwrap();
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
             let record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"test_key"),
@@ -240,13 +240,14 @@ mod tests {
     #[test]
     fn should_recover_delete_operations_when_replaying_wal() {
         // Arrange
-        let temp_dir = std::env::temp_dir().join("midge_recovery_test_delete");
+        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_delete_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
 
         // Write WAL with put then delete
         {
-            let mut writer = FsWalWriter::new(&wal_dir).unwrap();
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
             let put_record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"test_key"),
@@ -270,7 +271,7 @@ mod tests {
         let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
         // Assert
-        assert_eq!(stats.records_recovered, 2);
+        assert_eq!(stats.records_recovered, 2, "Should recover exactly 2 records");
         let recovered_memtable = &memtables[&0];
         let value = recovered_memtable.get(b"test_key").unwrap();
         assert_eq!(value, None); // Key should be deleted
@@ -279,13 +280,14 @@ mod tests {
     #[test]
     fn should_handle_multiple_column_families_when_recovering() {
         // Arrange
-        let temp_dir = std::env::temp_dir().join("midge_recovery_test_cf");
+        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_cf_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
 
         // Write WAL with records for multiple CFs
         {
-            let mut writer = FsWalWriter::new(&wal_dir).unwrap();
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
             
             let record_cf0 = WalRecord::new_cf(
                 0,
@@ -312,8 +314,8 @@ mod tests {
         let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
         // Assert
-        assert_eq!(stats.records_recovered, 2);
-        assert_eq!(memtables.len(), 2);
+        assert_eq!(stats.records_recovered, 2, "Should recover exactly 2 records");
+        assert_eq!(memtables.len(), 2, "Should have 2 column families");
         assert!(memtables[&0].get(b"key0").unwrap().is_some());
         assert!(memtables[&1].get(b"key1").unwrap().is_some());
     }
