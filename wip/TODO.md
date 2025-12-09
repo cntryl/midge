@@ -142,6 +142,11 @@ This captures the incremental checklist for porting the polished `src_old/` impl
   - CloudOutcome<T> for Clone-safe result handling
   - 9 new callback-based tests
   - Zero async contamination in engine core
+- ✅ **NEW (Session 9):** Custom cloud provider stubs scaffolded (S3, GCS, Azure, OCI)
+  - Lean stub implementations with no heavy SDKs
+  - Ready for direct REST API + tokio implementations
+  - 4 provider creation tests
+  - All stubs follow callback-based architecture
 - ⚠️ 3 temp directory file I/O tests occasionally fail due to test isolation (SST fs tests)
 
 **Test Status:**
@@ -214,8 +219,9 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Engine startup → RuntimeState::new() → replay_wal() → restore memtable state
 - VersionSet/VersionManager → lock-free manifest reads + atomic versioning
 
-**Test Status (103 tests passing):**
+**Test Status (107 tests passing):**
 - Cloud Storage callback: 9 tests ✅
+- Cloud Provider stubs: 4 tests ✅ (S3, GCS, Azure, OCI creation)
 - Transaction API: 9 tests ✅
 - Cloud Storage: 10 tests ✅
 - Cloud WAL: 9 tests ✅
@@ -223,14 +229,14 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Version Manager: 10 tests ✅
 - Merge Iterator: 4 tests ✅
 - Plus 42 existing tests from prior implementation ✅
+- Integration E2E tests: scaffolded (blocked by runtime initialization)
 
 **What's Next (Priority Order):**
-1. **Custom Cloud Providers** — Lean custom implementations for AWS S3, GCS, Azure, OCI (no heavy SDKs)
-   - Direct REST API + HTTP client (reqwest for async networking)
-   - Auth per provider (SigV4, OAuth2, SAS, signature)
-   - Callback submission with tokio worker spawning
-   - Unit tests for each provider
-2. **Integration Tests** — End-to-end tests of write→flush→compact→recover→cloud pipeline
+1. **Debug Runtime Initialization** — Fix Runtime channel closure on engine startup
+   - Issue: RuntimeMsg channel closing during/after Runtime::new()
+   - Need to ensure runtime threads are properly spawned and listening
+2. **Complete Integration Tests** — Once runtime is stable, E2E tests will work
+   - Write→flush→recover pipeline tests scaffolded and ready
 3. **Metrics** — Port metrics modules from src_old for performance monitoring
 
 **Development Guidelines:**
