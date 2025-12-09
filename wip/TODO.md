@@ -31,14 +31,21 @@ This captures the incremental checklist for porting the polished `src_old/` impl
   - [x] Added 9 comprehensive CF lifecycle tests (creation, duplication, drop, list, isolation, flush)
   - **STATUS (Session 12):** CF lifecycle fully implemented. 19/22 tests passing (86%). 1 test deferred (CF data isolation requires per-CF memtables). 2 Windows-specific ignored.
 
-## 2. Runtime Skeleton ✅ (COMPLETED)
+## 2. Runtime Skeleton ✅ (MOSTLY COMPLETED, 4/6 ACTORS FULLY WIRED)
 - [x] Define the runtime actor framework (mod.rs, event_loop.rs, state.rs, task.rs, scheduler.rs, dispatch.rs)
 - [x] Create all 6 actor implementations with message handlers (Flush, Compaction, WAL, Cloud, GC, Manifest)
 - [x] Wire runtime state into `engine::open` with all mutable state owned by EventLoop
 - [x] Implement EventLoop message dispatch and RuntimeHandle for work submission
 - [x] Verify clean compilation with `cargo check --workspace`
+- **Actors Implementation Status:**
+  - [x] **WalActor** — Fully wired: append_record, sync, rotate
+  - [x] **FlushActor** — Fully wired: handle_flush with SST creation
+  - [x] **CompactionActor** — Fully wired: pick_compaction, execute_compaction
+  - [x] **ManifestActor** — Fully wired: add_sst, compaction_complete, persist
+  - [~] **CloudActor** — Exists but incomplete (TODO: integrate actual upload, wire into FlushActor)
+  - [~] **GcActor** — Exists but incomplete (TODO: list files, implement deletion logic)
 
-## 3. WAL Port ✅ (COMPLETED)
+## 3. WAL Port ✅ (COMPLETED - CORE + RECOVERY, DEFERRED OPTIMIZATIONS)
 - [x] Create `src/wal/` with types, traits, encoding modules
 - [x] Implement WAL types: WalOpKind, WalRecord, WalPos, WalRecoveryStats, WalSyncMode
 - [x] Create WAL traits: WalWriter, WalReader, WalReaderDyn, WalFactory
@@ -50,8 +57,10 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] **NEW:** Add 5 comprehensive recovery tests (basic, delete ops, multi-CF)
 - [x] **NEW:** Implement Cloud WAL backend (CloudWalWriter, CloudWalReader, CloudWalFactory)
 - [x] **NEW:** Add 9 comprehensive CloudWAL tests (writer, append ops, batching, flush, reader, factory)
-- [ ] Add batched sync coordination for group commits
-- [ ] Implement cloud WAL segment rotation and cleanup
+- **Deferred (Performance Optimizations):**
+  - [ ] Add batched sync coordination for group commits (impact: ~30% write latency reduction)
+  - [ ] Implement cloud WAL segment rotation and cleanup (impact: storage management)
+  - [ ] Delete range and merge operator support in recovery (note: TODOs in recovery.rs lines 117, 126)
 
 ## 4. SST Port ✅ (COMPLETED)
 - [x] Created `src/sst/` with types, traits, encoding, and fs modules
@@ -94,7 +103,7 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] **NEW (Session 9):** CloudStorage wrapper with submit_put/get/delete/list methods
 - [x] **NEW (Session 9):** 9 comprehensive callback-based cloud tests
 
-## 8. Custom Cloud Providers 📋 (PATTERN DEFINED, PROVIDER ROLL-OUT)
+## 8. Custom Cloud Providers 📋 (PATTERN DEFINED, PARTIAL S3, OTHER STUBS)
 - [x] **Pattern Documentation** — Created `docs/CLOUD_PROVIDER_PATTERN.md` with:
   - [x] Complete architectural pattern for callback-based cloud providers
   - [x] Four-operation interface (PUT, GET, DELETE, LIST)
@@ -103,22 +112,28 @@ This captures the incremental checklist for porting the polished `src_old/` impl
   - [x] Provider-specific notes (endpoints, headers, required libraries)
   - [x] Complete code template for future implementation
   - [x] Testing requirements (7-8 tests per provider = 28-32 total)
-- [x] **AWS S3** — Implemented via `src/storage/providers/s3.rs` using `CloudExecutor` + callback pipeline
-  - SigV4 signer + executor-aware request flow are wired through `CloudStorage` (cloud-common feature)
-  - Credentials live in `CloudExecutor::AwsCredentials`; `cloud-common` now pulls `percent-encoding`/`urlencoding`
-  - TODO: Add credential-driven integration tests and verify end-to-end runs with `--features cloud-aws`
-- [ ] **GCS** — Deferred (pattern ready, stub in place)
+- [~] **AWS S3** — Partially Implemented (`src/storage/providers/s3.rs`)
+  - [x] SigV4 signer + CloudExecutor wired through CloudStorage (cloud-common feature)
+  - [x] AwsCredentials struct in executor
+  - [x] percent-encoding/urlencoding dependencies added
+  - [ ] Credential-driven integration tests (blocking: requires actual AWS test account or moto-like mock)
+  - [ ] End-to-end validation with `--features cloud-aws`
+  - **Next**: Add mock S3 responses and credential tests (~4-5 tests)
+- [ ] **GCS** — Stubbed (pattern ready, implementation ready)
   - Requires: JWT-based OAuth2 tokens
   - Pattern: Service account JWT signing
   - Stub location: `src/storage/providers/gcs.rs`
-- [ ] **Azure Blob Storage** — Deferred (pattern ready, stub in place)
+  - Status: Placeholder structure exists, not implemented
+- [ ] **Azure Blob Storage** — Stubbed (pattern ready, implementation ready)
   - Requires: Shared key HMAC-SHA256 signatures
   - Pattern: SharedKey authentication with signature calculation
   - Stub location: `src/storage/providers/azure.rs`
-- [ ] **Oracle Cloud Infrastructure (OCI)** — Deferred (pattern ready, stub in place)
+  - Status: Placeholder structure exists, not implemented
+- [ ] **Oracle Cloud Infrastructure (OCI)** — Stubbed (pattern ready, implementation ready)
   - Requires: RSA-SHA256 signature with private key
   - Pattern: Custom OCI authentication headers with RSA signature
   - Stub location: `src/storage/providers/oci.rs`
+  - Status: Placeholder structure exists, not implemented
 
 ### Hybrid Storage + Storage Budget Actor ✅ (COMPLETED - Session 12+)
 - [x] **Storage Budget Actor** — Complete disk management for hybrid storage
@@ -177,9 +192,20 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - [x] **NEW:** Support range bounds (start/end keys) for range scans
 - [x] **NEW:** Add 4 comprehensive MergeIterator tests (multi-source, empty sources, range bounds)
 
-## 10. Metrics & Testkit
-- [ ] Port metrics modules under `src/metrics/` from `src_old/metrics` ensuring they integrate with the runtime for all measured operations.
-- [ ] Port `src_old/testkit` (if present) into `src/testkit/` to drive deterministic runtime tests.
+## 10. Metrics & Testkit 🔧 (PARTIAL - STUBS EXIST, INTEGRATION PENDING)
+- [~] **Metrics** (`src/metrics/mod.rs` exists with PerformanceMetrics struct)
+  - [x] Basic metric types: read_ops, write_ops, delete_ops, compactions counters
+  - [ ] Integration into runtime actors for automatic recording
+  - [ ] Latency tracking (p50, p99) with timing instrumentation
+  - [ ] Memory usage monitoring
+  - [ ] Throughput measurements
+  - [ ] Expected: 5-8 tests for metrics collection
+- [~] **Testkit** (`src/testkit/mod.rs` exists with MockStorage)
+  - [x] Mock storage backend for unit testing
+  - [ ] Integration with deterministic runtime tests
+  - [ ] Test scenario builders (write/flush/read pipelines)
+  - [ ] Chaos/fault injection utilities
+  - [ ] Expected: 3-5 test utilities
 
 ## 11. Integration + Tests
 - [x] **NEW (Session 10):** Scaffolded integration E2E test file (engine_integration_e2e.rs)
@@ -348,37 +374,56 @@ This captures the incremental checklist for porting the polished `src_old/` impl
    - [x] 11 comprehensive integration tests covering all watermark scenarios
    - [x] Improved test compliance to 97.1%
    - [x] Ready for integration with FlushActor/CompactionActor
-2. **Wire SBA into Flush/Compaction Actors** (NEXT)
+
+2. **Complete GC and Cloud Actors** (IMMEDIATE BLOCKER FOR SBA INTEGRATION)
+   - **GcActor** — Finish garbage collection implementation
+     - [ ] List actual files on disk from manifest (TODO: gc.rs line 32)
+     - [ ] Implement file deletion for marked SSTs (TODO: gc.rs line 62)
+     - [ ] Hook into eviction queue from SBA
+     - Expected: 3-4 tests
+   - **CloudActor** — Finish background upload implementation
+     - [ ] Integrate with CloudStorage backends for actual upload (TODO: cloud.rs line 33)
+     - [ ] Wire into FlushActor for SST upload coordination
+     - [ ] Track upload status and notify SBA on completion
+     - Expected: 3-4 tests
+
+3. **Wire SBA into Flush/Compaction Actors** (NEXT AFTER ACTORS)
    - [ ] FlushActor.handle_flush() should call hybrid.reserve_for_flush() before creating SST
    - [ ] Handle WaitForCompaction/WaitForCloudUpload/RejectNoSpace with backpressure
    - [ ] CompactionActor should call compaction_planned() before execution, compaction_completed() after
    - [ ] Background eviction task to consume pending_evictions and delete local replicas
+   - [ ] E2E stress tests with realistic disk pressure scenarios (fill→flush→compact→upload)
    - Expected: 5-8 tests for integration scenarios
-3. **Full Read Path** ✅ (COMPLETED - Session 11)
-   - [x] Update get_cf() to check: memtable → immutable memtables → SST files
-   - [x] Implement version snapshot lookup in SST layer
-   - [x] Enable full write-flush-read pipeline with data persistence
-   - [x] 8 new comprehensive tests for read path (SST reads, memtable reads, deleted keys, multiple flushes, etc.)
-   - [x] 107 lib tests passing, 11/13 integration E2E tests passing (2 Windows-specific ignored)
-   - Note: Windows-specific file locking issues with SST reads after delete+flush operations
-4. **Cloud Provider Pattern** ✅ (COMPLETED - Session 11)
-   - [x] Documented complete cloud provider architectural pattern in `docs/CLOUD_PROVIDER_PATTERN.md`
-   - [x] Defined four-operation interface (PUT, GET, DELETE, LIST) with callback-based I/O
-   - [x] Documented authentication strategies for S3, GCS, Azure, and OCI
-   - [x] Provided implementation checklist and code templates
-   - [x] Deferred actual implementation until architectural needs require it
-   - Implementation ready when needed: ~7-8 tests per provider
-5. **Metrics Integration** — Enhance observability
-   - Hook metrics recording into runtime actors
-   - Add latency tracking (p50, p99)
-   - Memory usage monitoring
-   - Throughput measurements
+
+4. **S3 Credential Integration Tests** (NEAR-TERM, NO BLOCKER)
+   - [ ] Add mock S3 responses for testing without AWS account
+   - [ ] Test SigV4 signer with actual AWS credentials
+   - [ ] End-to-end validation with `--features cloud-aws`
+   - Expected: 4-5 tests
+
+5. **Metrics Integration** (ENHANCED OBSERVABILITY, NO BLOCKER)
+   - [ ] Hook metrics recording into runtime actors (put/get/delete/flush/compaction)
+   - [ ] Add latency tracking (p50, p99) with timing instrumentation
+   - [ ] Memory usage monitoring
+   - [ ] Throughput measurements
    - Expected: 5-8 tests
-6. **Documentation & Examples** — Create user-facing guides
-   - API usage examples
-   - Configuration guide
-   - Performance tuning guide
-   - Cloud provider integration guide
+
+6. **Testkit Expansion** (TESTING INFRASTRUCTURE, NO BLOCKER)
+   - [ ] Deterministic runtime test scenario builders (write/flush/read pipelines)
+   - [ ] Chaos/fault injection utilities for integration tests
+   - [ ] Expected: 3-5 utility enhancements
+
+7. **WAL Performance Optimizations** (DEFERRED, LOW PRIORITY)
+   - [ ] Batched sync coordination for group commits (~30% write latency reduction, TODO: recovery.rs lines 117, 126)
+   - [ ] Cloud WAL segment rotation and cleanup
+   - [ ] Delete range and merge operator support in recovery
+   - Expected: 3-4 tests
+
+8. **Documentation & Examples** (FINAL POLISH)
+   - [ ] API usage examples
+   - [ ] Configuration guide
+   - [ ] Performance tuning guide
+   - [ ] Cloud provider integration guide
 
 **Development Guidelines:**
 - Keep the original `src_old/` tree unchanged; use it purely for reference and diffing.
