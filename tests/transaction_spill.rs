@@ -290,9 +290,7 @@ fn should_cleanup_spill_files_given_transaction_rollback() {
             .expect("commit");
 
         let value = engine.get(&cf, b"final_key").expect("get");
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"final_value")),
+        assert_eq!(value.as_deref(), Some(b"final_value"),
             "[{}] Engine should work after multiple rollbacks",
             name
         );

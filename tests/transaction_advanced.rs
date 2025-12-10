@@ -106,15 +106,11 @@ fn should_read_own_writes_given_nested_gets_within_transaction() {
             .expect("commit");
 
         // Assert
-        assert_eq!(
-            read1,
-            Some(Bytes::from_static(b"nested_value")),
+        assert_eq!(read1.as_deref(), Some(b"nested_value"),
             "[{}] First read should see own write",
             name
         );
-        assert_eq!(
-            read2,
-            Some(Bytes::from_static(b"nested_value")),
+        assert_eq!(read2.as_deref(), Some(b"nested_value"),
             "[{}] Second read should see own write",
             name
         );
@@ -685,9 +681,7 @@ fn should_allow_sequential_puts_to_same_key_without_conflict() {
         );
 
         let value = engine.get(&cf, b"put_key").expect("get");
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"second")),
+        assert_eq!(value.as_deref(), Some(b"second"),
             "[{}] Second put should win",
             name
         );
@@ -737,9 +731,7 @@ fn should_allow_concurrent_puts_to_same_key_with_last_writer_wins() {
 
         // Final value should be from txn2 (last to commit)
         let value = engine.get(&cf, b"concurrent_put").expect("get");
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"from_txn2")),
+        assert_eq!(value.as_deref(), Some(b"from_txn2"),
             "[{}] Last committed put should win",
             name
         );
@@ -787,9 +779,7 @@ fn should_conflict_on_insert_given_key_already_exists() {
 
         // Original value preserved
         let value = engine.get(&cf, b"insert_key").expect("get");
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"first")),
+        assert_eq!(value.as_deref(), Some(b"first"),
             "[{}] First insert should be preserved",
             name
         );

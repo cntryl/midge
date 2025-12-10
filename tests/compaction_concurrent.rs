@@ -556,9 +556,7 @@ fn should_preserve_snapshot_view_given_compaction_in_progress_when_snapshot_read
         for i in 0..10 {
             let key = format!("key{:02}", i);
             let result = engine.get(&cf, key.as_bytes()).unwrap();
-            assert_eq!(
-                result,
-                Some(Bytes::from_static(b"new_value")),
+            assert_eq!(result.as_deref(), Some(b"new_value"),
                 "Current read should return new value after compaction"
             );
         }
