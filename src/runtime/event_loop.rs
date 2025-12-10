@@ -57,7 +57,7 @@ impl EventLoop {
             state,
             flush_actor: FlushActor::new(&sst_dir)?,
             compaction_actor: CompactionActor::new(sst_factory),
-            wal_actor: WalActor::new(wal_dir)?,
+            wal_actor: WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched)?,
             cloud_actor: CloudActor::new(),
             gc_actor: GcActor::new(),
             manifest_actor: ManifestActor::new(),

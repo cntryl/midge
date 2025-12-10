@@ -2,9 +2,9 @@
 //!
 //! Provides durable write-ahead logging with filesystem implementations.
 
-pub mod backends;
 pub mod encoding;
 pub mod fs;
+pub mod policy;
 pub mod recovery;
 pub mod traits;
 pub mod types;
@@ -23,3 +23,6 @@ pub use fs::{FsWalFactory, FsWalReader, FsWalWriter};
 
 // Re-export recovery
 pub use recovery::{replay_wal, RecoveryStats};
+
+// Re-export policy types
+pub use policy::{BatchConfig, DurabilityPolicy};

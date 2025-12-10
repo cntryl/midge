@@ -18,6 +18,10 @@ pub struct RecoveryStats {
     pub records_recovered: usize,
     pub bytes_recovered: u64,
     pub had_corruption: bool,
+    /// Maximum sequence number encountered during recovery.
+    /// The runtime should restore its sequence counter from this value.
+    /// None if no records were recovered.
+    pub max_sequence: Option<u64>,
 }
 
 impl RecoveryStats {
@@ -26,6 +30,7 @@ impl RecoveryStats {
             records_recovered: 0,
             bytes_recovered: 0,
             had_corruption: false,
+            max_sequence: None,
         }
     }
 }
@@ -98,6 +103,11 @@ fn replay_wal_file(
 
     // Replay all records from start of file
     reader.replay(0, |record: &WalRecord| {
+        // Track maximum sequence number for runtime restoration
+        stats.max_sequence = Some(
+            stats.max_sequence.map_or(record.seq, |max| max.max(record.seq))
+        );
+
         // Get or create memtable for this column family
         let memtable = memtables
             .entry(record.cf_id)
@@ -114,7 +124,9 @@ fn replay_wal_file(
                 memtable.delete(record.key.to_vec())?;
             }
             super::types::WalOpKind::DeleteRange => {
-                // TODO: Implement delete range in memtable
+                return Err(crate::common::MidgeError::NotSupported(
+                    "DeleteRange operation found in WAL but not yet implemented in memtable recovery".to_string()
+                ));
             }
             super::types::WalOpKind::Insert => {
                 // Insert is treated same as Put in recovery
@@ -123,7 +135,9 @@ fn replay_wal_file(
                 }
             }
             super::types::WalOpKind::Merge => {
-                // TODO: Implement merge operator in memtable
+                return Err(crate::common::MidgeError::NotSupported(
+                    "Merge operation found in WAL but not yet implemented in memtable recovery".to_string()
+                ));
             }
             super::types::WalOpKind::TxnBegin => {
                 // Transaction markers are metadata only
@@ -322,5 +336,94 @@ mod tests {
         assert_eq!(memtables.len(), 2, "Should have 2 column families");
         assert!(memtables[&0].get(b"key0").unwrap().is_some());
         assert!(memtables[&1].get(b"key1").unwrap().is_some());
+    }
+
+    #[test]
+    fn should_track_max_sequence_when_recovering() {
+        // Arrange
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_seq_{}",
+            std::process::id()
+        ));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        // Write WAL with records having different sequence numbers
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+
+            let record1 = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key1"),
+                Some(Bytes::from_static(b"value1")),
+                5,
+            );
+            writer.append_record(&record1).unwrap();
+
+            let record2 = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key2"),
+                Some(Bytes::from_static(b"value2")),
+                10,
+            );
+            writer.append_record(&record2).unwrap();
+
+            let record3 = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key3"),
+                Some(Bytes::from_static(b"value3")),
+                7,
+            );
+            writer.append_record(&record3).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.records_recovered, 3);
+        assert_eq!(
+            stats.max_sequence,
+            Some(10),
+            "max_sequence should be 10 (highest sequence number)"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_return_none_max_sequence_when_no_records() {
+        // Arrange
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_empty_{}",
+            std::process::id()
+        ));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        // Create empty WAL file
+        {
+            let _writer = FsWalWriter::new(&wal_dir).unwrap();
+            // Don't write any records
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.records_recovered, 0);
+        assert_eq!(
+            stats.max_sequence, None,
+            "max_sequence should be None when no records"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

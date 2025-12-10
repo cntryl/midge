@@ -34,10 +34,14 @@ impl ColumnFamilyState {
 pub struct WalState {
     /// Current WAL segment ID
     pub current_segment_id: u64,
-    /// Last synced sequence number
+    /// Last synced sequence number (local durability)
     pub last_synced_seq: u64,
     /// Pending writes waiting for sync
     pub pending_writes: usize,
+    /// Local durability frontier - highest sequence number fsynced locally
+    pub local_durable_seq: u64,
+    /// Cloud durability frontier - highest sequence number confirmed by cloud
+    pub cloud_durable_seq: u64,
 }
 
 impl Default for WalState {
@@ -46,6 +50,8 @@ impl Default for WalState {
             current_segment_id: 1,
             last_synced_seq: 0,
             pending_writes: 0,
+            local_durable_seq: 0,
+            cloud_durable_seq: 0,
         }
     }
 }
@@ -163,13 +169,14 @@ impl RuntimeState {
         }
 
         // WAL recovery
-        if wal_dir.exists() {
+        let recovered_sequence = if wal_dir.exists() {
             let mut recovery_memtables = HashMap::new();
             match crate::wal::recovery::replay_wal(&wal_dir, &mut recovery_memtables) {
                 Ok(stats) => {
                     tracing::info!(
                         records_recovered = stats.records_recovered,
                         bytes_recovered = stats.bytes_recovered,
+                        max_sequence = ?stats.max_sequence,
                         "WAL recovery completed successfully"
                     );
                     for (cf_id, recovered_memtable) in recovery_memtables {
@@ -182,18 +189,23 @@ impl RuntimeState {
                             column_families.insert(cf_id, cf_state);
                         }
                     }
+                    // Restore sequence counter from recovery
+                    stats.max_sequence.unwrap_or(0)
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "WAL recovery failed, continuing without recovered state");
+                    0
                 }
             }
-        }
+        } else {
+            0
+        };
 
         Self {
             db_path,
             wal_dir,
             sst_dir,
-            sequence: 0,
+            sequence: recovered_sequence,
             next_txn_id: 0,
             column_families,
             manifest,
