@@ -1,4 +1,4 @@
-use cntryl_midge::common::codec::CompressionType;
+﻿use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::fs::FsDynWriter;
 /// Integration tests for Phase 1.1: Per-block bloom writer integration
 ///

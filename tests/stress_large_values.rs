@@ -1,11 +1,11 @@
-//! Stress tests for large value handling.
+﻿//! Stress tests for large value handling.
 //!
 //! These tests verify that the engine correctly handles large values across
 //! all storage modes, including mixed value sizes, backpressure, crash recovery,
 //! and snapshot visibility.
 
 mod common;
-use common::*;
+use cntryl_midge::testkit::*;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query};
@@ -35,7 +35,7 @@ fn should_store_large_value_given_16kb_payload_when_put() {
         // Assert
         assert_eq!(result, Some(large.clone()), "Failed for {}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -71,7 +71,7 @@ fn should_flush_memtable_given_mixed_value_sizes_when_small_with_large_present()
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -111,7 +111,7 @@ fn should_apply_backpressure_given_flood_of_large_writes_when_memtable_fills() {
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -148,7 +148,7 @@ fn should_handle_burst_of_large_values_given_100_writes_when_8kb_each() {
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -211,7 +211,7 @@ fn should_recover_large_values_given_crash_after_put_when_reopening() {
             );
         }
         drop(eng2);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -275,7 +275,7 @@ fn should_recover_mixed_sizes_given_crash_after_flush_when_reopening() {
             name
         );
         drop(eng2);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -316,7 +316,7 @@ fn should_preserve_snapshot_view_given_large_value_overwrite_when_reading_snapsh
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -364,7 +364,7 @@ fn should_isolate_snapshot_given_multiple_large_overwrites_when_reading() {
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -401,7 +401,7 @@ fn should_scan_correctly_given_mixed_size_values_when_iterating() {
         assert_eq!(results[3].0.as_ref(), b"d_large", "Key order for {}", name);
         assert_eq!(results[3].1.len(), 1024 * 16, "Size mismatch for {}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -435,7 +435,7 @@ fn should_delete_large_value_given_existing_key_when_delete() {
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -485,6 +485,6 @@ fn should_reclaim_space_given_large_value_deletion_when_compacting() {
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }

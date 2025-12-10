@@ -1,4 +1,4 @@
-//! Concurrent Flush Tests
+﻿//! Concurrent Flush Tests
 //!
 //! Tests for flush coordination under high concurrency.
 //! Verifies that writes can proceed during flush, backpressure is applied correctly,
@@ -9,7 +9,7 @@
 mod common;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query};
-use common::*;
+use cntryl_midge::testkit::*;
 use std::sync::Arc;
 use std::thread;
 

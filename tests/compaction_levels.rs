@@ -1,4 +1,4 @@
-//! Multi-level Compaction Tests
+﻿//! Multi-level Compaction Tests
 //!
 //! Tests for LSM-tree level management and multi-level compaction behavior.
 //!
@@ -16,7 +16,7 @@
 mod common;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions};
-use common::{
+use cntryl_midge::testkit::{
     assert_get_equals, create_storage_mode, disk_storage_modes, manual_compaction_test_opts,
     populate_multi_level_data,
 };
@@ -60,7 +60,7 @@ fn should_organize_l0_into_sublevels_given_overlapping_files_when_flushing() {
             assert_get_equals(&eng, format!("key{:03}", i).as_bytes(), b"v1");
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -101,7 +101,7 @@ fn should_compact_oldest_sublevel_first_given_incremental_strategy_when_compacti
             }
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -138,7 +138,7 @@ fn should_compact_all_sublevels_given_high_file_count_when_aggressive_compaction
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -174,7 +174,7 @@ fn should_maintain_sublevel_ordering_given_sequential_flushes_when_reading() {
             }
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -226,7 +226,7 @@ fn should_trigger_compaction_given_level_exceeds_target_size_when_sst_threshold_
             }
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -281,7 +281,7 @@ fn should_compact_largest_file_given_varying_sizes_when_level_too_large() {
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -328,7 +328,7 @@ fn should_respect_level_multiplier_given_cascading_compaction_when_levels_fill()
             }
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -356,7 +356,7 @@ fn should_not_exceed_target_size_given_completed_compaction_when_data_consolidat
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -406,7 +406,7 @@ fn should_trigger_l2_compaction_given_l1_exceeds_capacity_when_compacting() {
             }
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -454,7 +454,7 @@ fn should_propagate_compaction_to_deeper_levels_given_overflow_when_incremental_
             }
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -490,7 +490,7 @@ fn should_handle_cascading_compaction_to_max_level_given_deep_structure_when_com
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -524,7 +524,7 @@ fn should_not_trigger_cascade_given_sufficient_capacity_when_modest_data() {
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -566,7 +566,7 @@ fn should_report_sst_count_given_multiple_flushes_when_querying_stats() {
             sst_count
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -616,7 +616,7 @@ fn should_reduce_sst_count_given_compaction_when_merging_files() {
             assert_get_equals(&eng, key.as_bytes(), b"v4"); // Latest value
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -653,6 +653,6 @@ fn should_report_total_sst_size_given_data_written_when_querying_stats() {
             total_size
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }

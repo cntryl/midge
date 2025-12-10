@@ -1,4 +1,4 @@
-use cntryl_midge::common::codec::CompressionType;
+﻿use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::fs::{FsDynWriter, SstFile};
 /// TDD Test: Per-block bloom implementation in writer
 ///

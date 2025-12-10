@@ -1,4 +1,4 @@
-//! Compaction Concurrent Tests
+﻿//! Compaction Concurrent Tests
 //!
 //! These tests verify that concurrent operations work correctly during compaction:
 //! - Reads during compaction (point reads and scans)
@@ -14,7 +14,7 @@ mod common;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query};
-use common::{
+use cntryl_midge::testkit::{
     assert_get_equals, assert_key_absent, compaction_test_opts, create_storage_mode,
     disk_storage_modes, manual_compaction_test_opts, populate_multi_level_data,
     test_helpers::wait_for_signal_default,

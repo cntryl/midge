@@ -85,7 +85,7 @@ pub struct MidgeEngine {
 }
 
 impl MidgeEngine {
-    /// Open a database at the given path
+    /// Open a database at the given path (internal use)
     pub fn open(db_path: PathBuf) -> MidgeResult<Self> {
         // Create runtime state
         let state = RuntimeState::new(db_path.clone());
@@ -102,6 +102,23 @@ impl MidgeEngine {
             sequence: std::sync::atomic::AtomicU64::new(0),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
         })
+    }
+
+    /// Open a database with test configuration options
+    pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
+        let db_path = match &opts.storage_mode {
+            crate::testkit::StorageMode::Memory => {
+                PathBuf::from(":memory:")
+            }
+            crate::testkit::StorageMode::LocalDisk { db_path } => {
+                db_path.clone()
+            }
+            crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
+                local_cache_path.clone()
+            }
+        };
+        
+        Self::open(db_path)
     }
 
     /// Get the default column family

@@ -1,4 +1,4 @@
-//! Concurrent WAL Tests
+﻿//! Concurrent WAL Tests
 //!
 //! Tests for WAL concurrency handling including serialization, ordering,
 //! and rotation during concurrent writes.
@@ -8,7 +8,7 @@
 mod common;
 use bytes::Bytes;
 use cntryl_midge::MidgeEngine;
-use common::*;
+use cntryl_midge::testkit::*;
 use std::sync::Arc;
 use std::thread;
 

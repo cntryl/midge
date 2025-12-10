@@ -1,4 +1,4 @@
-//! Concurrent Delete Range Tests
+﻿//! Concurrent Delete Range Tests
 //!
 //! Tests for concurrent delete range operations including non-overlapping ranges,
 //! overlapping ranges, and interleaved point writes with delete ranges.
@@ -8,7 +8,7 @@
 mod common;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions};
-use common::*;
+use cntryl_midge::testkit::*;
 use std::sync::Arc;
 use std::thread;
 

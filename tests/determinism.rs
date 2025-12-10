@@ -1,4 +1,4 @@
-//! End-to-end Determinism Validation Tests
+﻿//! End-to-end Determinism Validation Tests
 //!
 //! These tests validate that identical workloads produce identical operation sequences
 //! across multiple engine runs, ensuring the actor-driven runtime provides deterministic
@@ -6,15 +6,15 @@
 //!
 //! Key invariants tested:
 //! - Two engines with identical operations produce identical manifest state
-//! - Flush sequences are deterministic (same key order → same SST structure)
-//! - Compaction plans are deterministic (same manifest → same compaction sequence)
+//! - Flush sequences are deterministic (same key order â†’ same SST structure)
+//! - Compaction plans are deterministic (same manifest â†’ same compaction sequence)
 //! - WAL ordering is preserved across restarts
 //! - Multi-CF workloads maintain deterministic ordering
 
 mod common;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use common::test_temp_dir;
+use cntryl_midge::testkit::test_temp_dir;
 use std::collections::BTreeMap;
 
 // ============================================================================

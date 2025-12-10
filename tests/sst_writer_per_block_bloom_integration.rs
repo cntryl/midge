@@ -1,4 +1,4 @@
-use cntryl_midge::common::codec::CompressionType;
+﻿use cntryl_midge::common::codec::CompressionType;
 use cntryl_midge::sst::fs::{FsDynWriter, SstFile};
 /// Tests for Phase 1.1: Verifying per-block blooms are written and readable
 use cntryl_midge::sst::DynSstWriter;

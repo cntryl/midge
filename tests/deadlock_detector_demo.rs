@@ -1,8 +1,8 @@
-//! Test demonstrating deadlock detector usage
+﻿//! Test demonstrating deadlock detector usage
 
 mod common;
 
-use common::deadlock_detector::{assert_completes_within, DeadlockDetector, StressTestCoordinator};
+use cntryl_midge::testkit::deadlock_detector::{assert_completes_within, DeadlockDetector, StressTestCoordinator};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,4 +1,4 @@
-//! Snapshot Tests
+﻿//! Snapshot Tests
 //!
 //! These tests verify point-in-time consistent read views:
 //! - Isolation: Snapshots hide writes that occur after creation
@@ -10,7 +10,7 @@ mod common;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query, StorageMode};
-use common::{all_storage_modes, create_storage_mode, test_temp_dir};
+use cntryl_midge::testkit::{all_storage_modes, create_storage_mode, test_temp_dir};
 
 // ============================================================================
 // Basic Snapshot Operations

@@ -1,11 +1,11 @@
-//! Stress tests for various workload patterns.
+﻿//! Stress tests for various workload patterns.
 //!
 //! These tests verify that the engine handles different access patterns correctly
 //! across all storage modes, including hot partitions, high-throughput writes,
 //! TTL-like semantics, and append-only workloads.
 
 mod common;
-use common::*;
+use cntryl_midge::testkit::*;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query};
 
@@ -45,7 +45,7 @@ fn should_handle_hot_partition_given_100_overwrites_to_same_key_when_compacting(
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -85,7 +85,7 @@ fn should_maintain_correctness_given_hot_partition_with_concurrent_reads_when_wr
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -118,7 +118,7 @@ fn should_handle_high_throughput_given_10000_small_writes_when_sequential() {
             assert!(value.is_some(), "Key {} missing for {}", key, name);
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -155,7 +155,7 @@ fn should_maintain_order_given_high_throughput_writes_when_scanning() {
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -208,7 +208,7 @@ fn should_handle_ttl_pattern_given_bulk_delete_of_old_keys_when_compacting() {
             assert!(value.is_some(), "Key {} should exist for {}", key, name);
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -258,7 +258,7 @@ fn should_handle_rolling_window_given_delete_oldest_insert_newest_when_steady_st
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -294,7 +294,7 @@ fn should_handle_append_only_given_sequential_inserts_when_compacting() {
             assert!(value.is_some(), "Key {} missing for {}", key, name);
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -340,7 +340,7 @@ fn should_recover_append_only_data_given_crash_after_bulk_insert_when_reopening(
             );
         }
         drop(eng2);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -422,7 +422,7 @@ fn should_handle_mixed_workload_given_reads_writes_deletes_when_interleaved() {
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -460,7 +460,7 @@ fn should_handle_burst_then_idle_given_writes_followed_by_reads_when_pattern_cha
         let results = eng.scan(&cf, Query::new()).expect("scan");
         assert_eq!(results.len(), 500, "Count mismatch for {}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -510,6 +510,6 @@ fn should_handle_prefix_partitioned_data_given_multiple_prefixes_when_scanning()
             );
         }
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }

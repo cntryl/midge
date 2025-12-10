@@ -1,4 +1,4 @@
-/// SST Index Baseline Invariant Tests
+﻿/// SST Index Baseline Invariant Tests
 ///
 /// This test suite codifies and validates the invariants specified in INDEX_SPEC.md.
 /// These tests form the locked contract: all future SST enhancements must preserve

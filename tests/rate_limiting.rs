@@ -1,4 +1,4 @@
-//! Tests for rate limiting functionality.
+﻿//! Tests for rate limiting functionality.
 //!
 //! These tests verify the token bucket rate limiter used for controlling
 //! I/O throughput during cloud uploads and compaction operations.

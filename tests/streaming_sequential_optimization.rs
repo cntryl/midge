@@ -1,4 +1,4 @@
-//! Phase 3.5: Index Sequential Access Optimization Tests
+﻿//! Phase 3.5: Index Sequential Access Optimization Tests
 //!
 //! Tests for the sequential access optimizer, which predicts sequential block
 //! access patterns and caches repeated lookups for range scans.
@@ -28,7 +28,7 @@ mod tests {
         // Arrange
         let mut opt = SequentialAccessOptimizer::new();
 
-        // Act: Simulate sequential block access (0 → 1 → 2 → 3)
+        // Act: Simulate sequential block access (0 â†’ 1 â†’ 2 â†’ 3)
         opt.record_lookup(1000, 0);
         assert_eq!(opt.predict_next_block(), None); // No prediction yet
 

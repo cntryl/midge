@@ -1,4 +1,4 @@
-//! Tests for Cloud and GC Actors
+﻿//! Tests for Cloud and GC Actors
 //!
 //! This test suite validates:
 //! 1. CloudActor SST and WAL upload tracking

@@ -1,4 +1,4 @@
-/// Phase 2 TDD Tests: Fence Pointers & Tombstone Awareness
+﻿/// Phase 2 TDD Tests: Fence Pointers & Tombstone Awareness
 ///
 /// Tests that BlockMeta fence pointers and tombstone awareness are properly
 /// used throughout the read path and compaction logic.

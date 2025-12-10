@@ -1,4 +1,4 @@
-//! Compatibility tests for trie index SST format.
+﻿//! Compatibility tests for trie index SST format.
 //!
 //! Validates that:
 //! - Old SST files (without trie) remain readable by new readers
