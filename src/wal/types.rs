@@ -12,58 +12,7 @@ pub type WalPos = u64;
 /// Column family ID type
 pub type ColumnFamilyId = u32;
 
-/// Statistics collected during WAL recovery.
-#[derive(Debug, Clone, Default)]
-pub struct WalRecoveryStats {
-    /// Total number of WAL files processed
-    pub files_processed: usize,
-    /// Number of records successfully recovered
-    pub records_recovered: usize,
-    /// Number of corrupted records skipped
-    pub records_skipped: usize,
-    /// Total bytes successfully read
-    pub bytes_recovered: u64,
-    /// Total bytes skipped due to corruption
-    pub bytes_skipped: u64,
-    /// Locations where corruption was detected (file_path, position)
-    pub corruption_locations: Vec<(String, u64)>,
-    /// Whether recovery encountered any corruption
-    pub had_corruption: bool,
-}
 
-impl WalRecoveryStats {
-    /// Create new empty recovery stats
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Merge stats from another recovery operation
-    pub fn merge(&mut self, other: &WalRecoveryStats) {
-        self.files_processed += other.files_processed;
-        self.records_recovered += other.records_recovered;
-        self.records_skipped += other.records_skipped;
-        self.bytes_recovered += other.bytes_recovered;
-        self.bytes_skipped += other.bytes_skipped;
-        self.corruption_locations
-            .extend(other.corruption_locations.clone());
-        self.had_corruption |= other.had_corruption;
-    }
-
-    /// Record a corruption event
-    pub fn record_corruption(&mut self, file_path: &str, position: u64, bytes_lost: u64) {
-        self.had_corruption = true;
-        self.records_skipped += 1;
-        self.bytes_skipped += bytes_lost;
-        self.corruption_locations
-            .push((file_path.to_string(), position));
-    }
-
-    /// Record a successful record recovery
-    pub fn record_success(&mut self, record_bytes: u64) {
-        self.records_recovered += 1;
-        self.bytes_recovered += record_bytes;
-    }
-}
 
 /// WAL operation kinds
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -115,19 +64,7 @@ impl WalOpKind {
     }
 }
 
-/// WAL synchronization modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WalSyncMode {
-    /// No explicit sync - let OS decide (fastest, least durable)
-    NoSync,
 
-    /// Sync after every write (slowest, most durable)
-    EveryWrite,
-
-    /// Batched sync - group commits together (balanced, default)
-    #[default]
-    BatchedSync,
-}
 
 /// A single WAL record using TLV encoding format.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -10,7 +10,7 @@ pub mod traits;
 pub mod types;
 
 // Re-export main WAL types
-pub use types::{ColumnFamilyId, WalOpKind, WalPos, WalRecord, WalRecoveryStats, WalSyncMode};
+pub use types::{ColumnFamilyId, WalOpKind, WalPos, WalRecord};
 
 // Re-export traits
 pub use traits::{WalFactory, WalReader, WalReaderDyn, WalWriter};

@@ -83,12 +83,13 @@ impl WalActor {
     /// Append a record to the WAL
     ///
     /// Always appends locally first. Durability behavior depends on policy:
-    /// - Strict: fsync immediately
-    /// - Batched: batch and fsync periodically
-    /// - CloudMirrored: fsync + schedule cloud upload
-    /// - CloudFirst: schedule cloud upload (caller must wait for cloud ack)
+    /// - Strict: fsync immediately + apply to memtable + respond
+    /// - Batched: batch writes + apply to memtable immediately + respond
+    /// - CloudMirrored: fsync + apply to memtable + schedule cloud upload + respond
+    /// - CloudFirst: local write (cache) + queue for cloud + DO NOT apply to memtable yet
     ///
-    /// Returns the assigned sequence number for CloudFirst tracking.
+    /// In CloudFirst mode, writes are NOT visible until cloud acknowledges.
+    /// Returns the assigned sequence number.
     pub fn append(
         &mut self,
         state: &mut RuntimeState,
@@ -111,15 +112,6 @@ impl WalActor {
             writer.append_record(&record)?;
         }
 
-        // Update memtable - reads must see writes immediately
-        if let Some(cf_state) = state.column_families.get(&cf_id) {
-            if let Some(val) = &value {
-                cf_state.memtable.as_ref().put(key.to_vec(), val.to_vec())?;
-            } else {
-                cf_state.memtable.as_ref().delete(key.to_vec())?;
-            }
-        }
-
         // Update state tracking
         state.wal.pending_writes += 1;
         self.pending_sync_count += 1;
@@ -128,28 +120,57 @@ impl WalActor {
         // Apply durability policy
         match self.durability_policy {
             DurabilityPolicy::Strict => {
-                // Fsync immediately
+                // Fsync immediately, then apply to memtable
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = sequence;
+                
+                // Apply to memtable - write is now visible
+                self.apply_to_memtable(state, cf_id, &key, &value)?;
             }
             DurabilityPolicy::Batched => {
+                // Apply to memtable immediately (no cloud wait)
+                self.apply_to_memtable(state, cf_id, &key, &value)?;
                 // Sync if batch thresholds exceeded (handled by caller/timer)
             }
             DurabilityPolicy::CloudMirrored => {
-                // Fsync locally, schedule cloud upload in background
+                // Fsync locally, apply to memtable, schedule cloud upload in background
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = sequence;
+                
+                // Apply to memtable - local durability sufficient
+                self.apply_to_memtable(state, cf_id, &key, &value)?;
+                
                 // TODO: Send CloudUploadWal message to CloudActor
             }
             DurabilityPolicy::CloudFirst => {
-                // Append locally but don't consider durable until cloud confirms
-                // Caller must track request_id and wait for CloudUploadComplete
+                // DO NOT apply to memtable yet!
+                // Queue write for cloud durability confirmation
+                // Memtable update happens in handle_cloud_upload_complete
+                // No response sent yet (caller must wait for cloud ACK)
             }
         }
 
         tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL append");
 
         Ok(sequence)
+    }
+
+    /// Apply a write to the memtable
+    fn apply_to_memtable(
+        &self,
+        state: &RuntimeState,
+        cf_id: u32,
+        key: &[u8],
+        value: &Option<Bytes>,
+    ) -> MidgeResult<()> {
+        if let Some(cf_state) = state.column_families.get(&cf_id) {
+            if let Some(val) = value {
+                cf_state.memtable.as_ref().put(key.to_vec(), val.to_vec())?;
+            } else {
+                cf_state.memtable.as_ref().delete(key.to_vec())?;
+            }
+        }
+        Ok(())
     }
 
     /// Internal sync helper - fsyncs the writer
@@ -211,16 +232,16 @@ impl WalActor {
 
     /// Handle cloud upload completion (CloudFirst durability)
     ///
-    /// Updates cloud_durable_seq and completes any pending requests
-    /// that are now durable.
+    /// Updates cloud_durable_seq and completes any pending writes
+    /// by applying them to memtable and returning request_ids to complete.
     pub fn handle_cloud_upload_complete(
         &mut self,
         state: &mut RuntimeState,
         segment_id: u64,
-    ) -> Vec<u64> {
+        max_seq_in_segment: u64,
+    ) -> MidgeResult<Vec<u64>> {
         // Update cloud durability frontier
-        // TODO: Track per-segment max sequence to update cloud_durable_seq precisely
-        // For now, assume segment upload means all records in that segment are durable
+        state.wal.cloud_durable_seq = state.wal.cloud_durable_seq.max(max_seq_in_segment);
         
         tracing::debug!(
             segment_id,
@@ -228,29 +249,51 @@ impl WalActor {
             "Cloud upload complete"
         );
 
-        // Return request_ids that can now be completed
+        // Apply pending writes to memtable and collect completed request_ids
         let mut completed_requests = Vec::new();
         
-        while let Some(pending) = self.pending_cloud_requests.front() {
+        while let Some(pending) = self.pending_cloud_writes.front() {
             if pending.sequence <= state.wal.cloud_durable_seq {
-                let req = self.pending_cloud_requests.pop_front().unwrap();
-                completed_requests.push(req.request_id);
+                let write = self.pending_cloud_writes.pop_front().unwrap();
+                
+                // NOW apply to memtable - write becomes visible
+                let key_bytes = Bytes::from(write.key);
+                let value_bytes = write.value.map(Bytes::from);
+                self.apply_to_memtable(state, write.cf_id, &key_bytes, &value_bytes)?;
+                
+                completed_requests.push(write.request_id);
+                
+                tracing::trace!(
+                    request_id = write.request_id,
+                    sequence = write.sequence,
+                    "Applied cloud-durable write to memtable"
+                );
             } else {
                 break;
             }
         }
 
-        completed_requests
+        Ok(completed_requests)
     }
 
-    /// Queue a request waiting for cloud durability
-    pub fn queue_cloud_request(&mut self, request_id: u64, sequence: u64) {
-        self.pending_cloud_requests.push_back(PendingCloudRequest {
+    /// Queue a write waiting for cloud durability (CloudFirst mode)
+    pub fn queue_cloud_write(
+        &mut self,
+        request_id: u64,
+        cf_id: u32,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+        sequence: u64,
+    ) {
+        self.pending_cloud_writes.push_back(PendingCloudWrite {
             request_id,
+            cf_id,
+            key,
+            value,
             sequence,
         });
 
-        tracing::trace!(request_id, sequence, "Queued cloud durability request");
+        tracing::trace!(request_id, sequence, "Queued write for cloud durability");
     }
 
     /// Handle sync completion notification
