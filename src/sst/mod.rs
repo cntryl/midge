@@ -14,13 +14,17 @@ use bytes::Bytes;
 use std::sync::Arc;
 
 pub mod bloom;
+pub mod cache;
 pub mod encoding;
 pub mod fs;
+pub mod sparse_index;
 pub mod traits;
 pub mod types;
 
 pub use bloom::{BloomFactory, BloomFilterFactory, BloomReader, BloomTestResult, BloomWriter};
+pub use cache::{BlockCache, CacheKey, CacheMetrics, CachePolicyType, CacheValue};
 pub use fs::FsSstFactory;
+pub use sparse_index::{BlockRange, IndexEntry, SparseIndexReader, SparseIndexWriter};
 pub use traits::{DynSstWriter, SstFactory, SstReader, SstStateReader, SstWriter};
 pub use types::{Block, BlockHandle, BlockType, Footer, KeyState, RangeTombstone, SstEntry};
 
