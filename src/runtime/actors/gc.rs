@@ -7,6 +7,7 @@
 
 use super::super::state::RuntimeState;
 use crate::common::MidgeResult;
+use std::collections::HashSet;
 
 /// Actor handling garbage collection
 pub struct GcActor {
@@ -21,18 +22,50 @@ impl GcActor {
 
     /// Check for garbage collection opportunities
     pub fn check(&self, state: &RuntimeState) {
-        // Find SST files that are no longer in the manifest
-        let manifest_ssts: std::collections::HashSet<_> = state
+        // Find SST files that are still referenced in the manifest
+        let manifest_ssts: HashSet<String> = state
             .manifest
             .files
             .iter()
-            .map(|f| f.name.as_str())
+            .map(|f| f.name.clone())
             .collect();
 
-        // TODO: List actual files on disk and compare
-        // Files on disk but not in manifest are candidates for deletion
+        // List actual files on disk
+        let disk_ssts = match std::fs::read_dir(&state.sst_dir) {
+            Ok(entries) => entries
+                .filter_map(|entry| {
+                    entry
+                        .ok()
+                        .and_then(|e| e.file_name().into_string().ok())
+                        .filter(|name| name.ends_with(".sst") || name.ends_with(".sst.tmp"))
+                })
+                .collect::<HashSet<_>>(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to read SST directory for GC check");
+                return;
+            }
+        };
 
-        tracing::debug!(manifest_sst_count = manifest_ssts.len(), "GC check");
+        // Files on disk but not in manifest are candidates for deletion
+        let orphaned: Vec<_> = disk_ssts
+            .iter()
+            .filter(|name| !manifest_ssts.contains(*name))
+            .cloned()
+            .collect();
+
+        tracing::debug!(
+            manifest_sst_count = manifest_ssts.len(),
+            disk_sst_count = disk_ssts.len(),
+            orphaned_count = orphaned.len(),
+            "GC check complete"
+        );
+
+        if !orphaned.is_empty() {
+            tracing::info!(
+                orphaned_files = ?orphaned,
+                "Found orphaned SST files eligible for deletion"
+            );
+        }
     }
 
     /// Delete obsolete SST files
@@ -41,6 +74,9 @@ impl GcActor {
         state: &mut RuntimeState,
         sst_names: &[String],
     ) -> MidgeResult<()> {
+        let mut deleted_count = 0;
+        let mut skipped_count = 0;
+
         for sst_name in sst_names {
             let sst_path = state.sst_dir.join(sst_name);
 
@@ -48,24 +84,51 @@ impl GcActor {
             let is_active = state.manifest.files.iter().any(|f| f.name == *sst_name);
             if is_active {
                 tracing::warn!(sst_name, "Skipping delete of active SST file");
+                skipped_count += 1;
                 continue;
             }
 
             // Check that file is not being compacted
             if state.compaction.compacting_ssts.contains(sst_name) {
                 tracing::warn!(sst_name, "Skipping delete of SST being compacted");
+                skipped_count += 1;
                 continue;
             }
 
-            tracing::info!(sst_name, path = %sst_path.display(), "Deleting obsolete SST");
-
-            // TODO: Actually delete the file
-            // std::fs::remove_file(&sst_path)?;
+            // Actually delete the file
+            match std::fs::remove_file(&sst_path) {
+                Ok(_) => {
+                    tracing::info!(sst_name, path = %sst_path.display(), "Deleted obsolete SST");
+                    deleted_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        sst_name,
+                        path = %sst_path.display(),
+                        error = %e,
+                        "Failed to delete SST file"
+                    );
+                    skipped_count += 1;
+                }
+            }
         }
 
         self.last_gc_run = Some(std::time::Instant::now());
 
+        if deleted_count > 0 || skipped_count > 0 {
+            tracing::info!(
+                deleted = deleted_count,
+                skipped = skipped_count,
+                "GC deletion batch complete"
+            );
+        }
+
         Ok(())
+    }
+
+    /// Get timestamp of last GC run
+    pub fn last_gc_run(&self) -> Option<std::time::Instant> {
+        self.last_gc_run
     }
 }
 

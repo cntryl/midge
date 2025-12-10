@@ -119,20 +119,20 @@ impl MockCloudBackend {
     }
 
     pub fn object_count(&self) -> usize {
-        self.storage.lock().unwrap().len()
+        self.storage.lock().expect("storage mutex poisoned").len()
     }
 
     pub fn get_uploads(&self) -> Vec<(String, u64)> {
-        self.uploads.lock().unwrap().clone()
+        self.uploads.lock().expect("uploads mutex poisoned").clone()
     }
 
     pub fn get_downloads(&self) -> Vec<String> {
-        self.downloads.lock().unwrap().clone()
+        self.downloads.lock().expect("downloads mutex poisoned").clone()
     }
 
     pub fn clear_history(&self) {
-        self.uploads.lock().unwrap().clear();
-        self.downloads.lock().unwrap().clear();
+        self.uploads.lock().expect("uploads mutex poisoned").clear();
+        self.downloads.lock().expect("downloads mutex poisoned").clear();
     }
 }
 
@@ -146,11 +146,11 @@ impl CloudBackend for MockCloudBackend {
     fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
         self.storage
             .lock()
-            .unwrap()
+            .expect("storage mutex poisoned")
             .insert(key.clone(), data.clone());
         self.uploads
             .lock()
-            .unwrap()
+            .expect("uploads mutex poisoned")
             .push((key.clone(), data.len() as u64));
         let event = CloudEvent::PutComplete {
             key,
@@ -163,11 +163,11 @@ impl CloudBackend for MockCloudBackend {
         let result = self
             .storage
             .lock()
-            .unwrap()
+            .expect("storage mutex poisoned")
             .get(&key)
             .cloned()
             .ok_or_else(|| MidgeError::NotFound);
-        self.downloads.lock().unwrap().push(key.clone());
+        self.downloads.lock().expect("downloads mutex poisoned").push(key.clone());
         let event = CloudEvent::GetComplete {
             key,
             result: CloudOutcome::from_result(result),
@@ -179,7 +179,7 @@ impl CloudBackend for MockCloudBackend {
         let result = self
             .storage
             .lock()
-            .unwrap()
+            .expect("storage mutex poisoned")
             .get(&key)
             .map(|data| {
                 let end_idx = end.unwrap_or(data.len() as u64) as usize;
@@ -197,7 +197,7 @@ impl CloudBackend for MockCloudBackend {
     }
 
     fn submit_delete(&self, key: String, callback: CloudCallback) {
-        self.storage.lock().unwrap().remove(&key);
+        self.storage.lock().expect("storage mutex poisoned").remove(&key);
         let event = CloudEvent::DeleteComplete {
             key,
             result: CloudOutcome::Ok(()),
@@ -209,7 +209,7 @@ impl CloudBackend for MockCloudBackend {
         let results: Vec<_> = self
             .storage
             .lock()
-            .unwrap()
+            .expect("storage mutex poisoned")
             .keys()
             .filter(|k| k.starts_with(&prefix))
             .cloned()
@@ -225,7 +225,7 @@ impl CloudBackend for MockCloudBackend {
         let result = self
             .storage
             .lock()
-            .unwrap()
+            .expect("storage mutex poisoned")
             .get(&key)
             .map(|data| ObjectMetadata::new(data.len() as u64, format!("mock-{}", data.len()), 0))
             .ok_or_else(|| MidgeError::NotFound);

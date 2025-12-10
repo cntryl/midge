@@ -27,7 +27,7 @@ impl Default for MockStorage {
 
 impl StorageBackend for MockStorage {
     fn submit_read(&self, path: String, callback: StorageCallback) {
-        let data = self.data.lock().unwrap();
+        let data = self.data.lock().expect("storage mutex poisoned");
         let result = data
             .get(&path)
             .cloned()
@@ -41,7 +41,7 @@ impl StorageBackend for MockStorage {
     }
 
     fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
-        let mut storage = self.data.lock().unwrap();
+        let mut storage = self.data.lock().expect("storage mutex poisoned");
         storage.insert(path.clone(), data);
 
         let event = StorageEvent::WriteComplete {
@@ -52,7 +52,7 @@ impl StorageBackend for MockStorage {
     }
 
     fn submit_delete(&self, path: String, callback: StorageCallback) {
-        let mut storage = self.data.lock().unwrap();
+        let mut storage = self.data.lock().expect("storage mutex poisoned");
         storage.remove(&path);
 
         let event = StorageEvent::DeleteComplete {
@@ -63,7 +63,7 @@ impl StorageBackend for MockStorage {
     }
 
     fn submit_list(&self, prefix: String, callback: StorageCallback) {
-        let data = self.data.lock().unwrap();
+        let data = self.data.lock().expect("storage mutex poisoned");
         let results: Vec<_> = data
             .keys()
             .filter(|k| k.starts_with(&prefix))

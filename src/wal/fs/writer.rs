@@ -49,14 +49,14 @@ impl WalWriter for FsWalWriter {
         let encoded = encoding::encode(record)?;
 
         // Write with length prefix (4 bytes)
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock().expect("file mutex poisoned");
         file.write_all(&(encoded.len() as u32).to_le_bytes())
             .map_err(|e| crate::common::MidgeError::Io(e))?;
         file.write_all(&encoded)
             .map_err(|e| crate::common::MidgeError::Io(e))?;
 
         // Update position
-        let mut pos = self.current_pos.lock().unwrap();
+        let mut pos = self.current_pos.lock().expect("position mutex poisoned");
         let prev_pos = *pos;
         *pos += 4 + encoded.len() as u64;
 
@@ -74,12 +74,12 @@ impl WalWriter for FsWalWriter {
     }
 
     fn flush(&self) -> MidgeResult<()> {
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock().expect("file mutex poisoned");
         file.flush().map_err(|e| crate::common::MidgeError::Io(e))
     }
 
     fn sync(&self) -> MidgeResult<()> {
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file.lock().expect("file mutex poisoned");
         file.sync_all()
             .map_err(|e| crate::common::MidgeError::Io(e))
     }
