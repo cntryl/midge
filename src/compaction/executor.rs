@@ -135,30 +135,25 @@ pub fn collect_versions(
     sst_factory: &dyn SstFactory,
     input_files: &[String],
 ) -> MidgeResult<Vec<CompactionVersion>> {
-    let _ = sst_factory;
-
-    // Placeholder collection; keeps the function total and panic-free.
-    // Callers rely on the empty case being handled gracefully.
     let versions = Vec::new();
 
     for filename in input_files {
-        let _path = Path::new(filename);
+        let path = Path::new(filename);
 
-        // Once the SST reader API is ready, this will look roughly like:
+        // Use the generic SstReader API from the factory to open the file.
+        let _reader = sst_factory.open(path)?;
+
+        // **Note**: The current SstFactory trait returns `Box<dyn SstReader>`, which
+        // doesn't directly expose `SstStateReader` methods (seq, tombstone, expiration).
+        // To properly wire this, we would need either:
+        //   1. An extended trait combining both interfaces, or
+        //   2. A separate factory method for stateful readers, or
+        //   3. Open directly via `SstFile::open()` within compaction.
         //
-        //   let mut reader = sst_factory.open(_path)?;
-        //   while let Some(entry) = reader.next()? {
-        //       versions.push(CompactionVersion {
-        //           key: entry.key().to_vec(),
-        //           seq: entry.seq(),
-        //           is_tombstone: entry.is_tombstone(),
-        //           value: entry.value().map(|v| v.to_vec()),
-        //           expiration: entry.expiration(),
-        //       });
-        //   }
-        //
-        // For now we intentionally do nothing to avoid incorrect partial
-        // implementations that might silently corrupt data.
+        // For now, we keep the function signature for compatibility with the architecture,
+        // but the real implementation requires SST trait extension. The streaming pipeline
+        // (MergeIterator + StreamDeduplicate) is ready and tested; this is the remaining
+        // integration point.
     }
 
     Ok(versions)
@@ -375,5 +370,177 @@ mod tests {
 
         assert!(!is_expired(&v_future, now));
         assert!(!is_expired(&v_none, now));
+    }
+
+    #[test]
+    fn should_stream_deduplicate_multiple_versions_when_using_iterator() {
+        use crate::compaction::merge::{MergeIterator, MergeEntry};
+        use bytes::Bytes;
+
+        // Arrange: Create two input iterators (simulating SST readers)
+        let stream1 = vec![
+            MergeEntry {
+                key: Bytes::from(b"a".to_vec()),
+                value: Bytes::from(b"a3".to_vec()),
+                seq: 3,
+            },
+            MergeEntry {
+                key: Bytes::from(b"a".to_vec()),
+                value: Bytes::from(b"a1".to_vec()),
+                seq: 1,
+            },
+            MergeEntry {
+                key: Bytes::from(b"c".to_vec()),
+                value: Bytes::from(b"c2".to_vec()),
+                seq: 2,
+            },
+        ];
+
+        let stream2 = vec![
+            MergeEntry {
+                key: Bytes::from(b"a".to_vec()),
+                value: Bytes::from(b"a2".to_vec()),
+                seq: 2,
+            },
+            MergeEntry {
+                key: Bytes::from(b"b".to_vec()),
+                value: Bytes::from(b"b5".to_vec()),
+                seq: 5,
+            },
+        ];
+
+        // Act: Create merge iterator from both streams
+        let merge_iter = MergeIterator::from_iterators(vec![
+            stream1.into_iter(),
+            stream2.into_iter(),
+        ]);
+
+        // Convert MergeEntry to CompactionVersion
+        let version_iter = merge_iter.map(|entry| CompactionVersion {
+            key: entry.key.to_vec(),
+            seq: entry.seq,
+            is_tombstone: false,
+            value: Some(entry.value.to_vec()),
+            expiration: None,
+        });
+
+        // Stream deduplicate (keeps only first/highest-seq per key)
+        let dedup_iter = StreamDeduplicate::new(version_iter);
+
+        // Collect results
+        let deduped: Vec<_> = dedup_iter.collect();
+
+        // Assert
+        // Should have 3 unique keys: a (seq 3), b (seq 5), c (seq 2)
+        assert_eq!(deduped.len(), 3);
+
+        // Check order: keys should be in ascending order
+        assert_eq!(deduped[0].key, b"a".to_vec());
+        assert_eq!(deduped[0].seq, 3); // Highest seq for 'a'
+
+        assert_eq!(deduped[1].key, b"b".to_vec());
+        assert_eq!(deduped[1].seq, 5);
+
+        assert_eq!(deduped[2].key, b"c".to_vec());
+        assert_eq!(deduped[2].seq, 2);
+    }
+
+    #[test]
+    fn should_handle_empty_streams_in_merge() {
+        use crate::compaction::merge::{MergeIterator, MergeEntry};
+        use bytes::Bytes;
+
+        let stream1: Vec<MergeEntry> = vec![];
+        let stream2 = vec![MergeEntry {
+            key: Bytes::from(b"k".to_vec()),
+            value: Bytes::from(b"v".to_vec()),
+            seq: 10,
+        }];
+
+        let merge_iter = MergeIterator::from_iterators(vec![
+            stream1.into_iter(),
+            stream2.into_iter(),
+        ]);
+
+        let version_iter = merge_iter.map(|entry| CompactionVersion {
+            key: entry.key.to_vec(),
+            seq: entry.seq,
+            is_tombstone: false,
+            value: Some(entry.value.to_vec()),
+            expiration: None,
+        });
+
+        let dedup_iter = StreamDeduplicate::new(version_iter);
+        let result: Vec<_> = dedup_iter.collect();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key, b"k".to_vec());
+        assert_eq!(result[0].seq, 10);
+    }
+
+    #[test]
+    fn should_deduplicate_correctly_across_streams_with_overlapping_keys() {
+        use crate::compaction::merge::{MergeIterator, MergeEntry};
+        use bytes::Bytes;
+
+        // Stream 1: a(5), a(3), b(4)
+        let stream1 = vec![
+            MergeEntry {
+                key: Bytes::from(b"a".to_vec()),
+                value: Bytes::from(b"a5".to_vec()),
+                seq: 5,
+            },
+            MergeEntry {
+                key: Bytes::from(b"a".to_vec()),
+                value: Bytes::from(b"a3".to_vec()),
+                seq: 3,
+            },
+            MergeEntry {
+                key: Bytes::from(b"b".to_vec()),
+                value: Bytes::from(b"b4".to_vec()),
+                seq: 4,
+            },
+        ];
+
+        // Stream 2: a(4), b(6), c(2)
+        let stream2 = vec![
+            MergeEntry {
+                key: Bytes::from(b"a".to_vec()),
+                value: Bytes::from(b"a4".to_vec()),
+                seq: 4,
+            },
+            MergeEntry {
+                key: Bytes::from(b"b".to_vec()),
+                value: Bytes::from(b"b6".to_vec()),
+                seq: 6,
+            },
+            MergeEntry {
+                key: Bytes::from(b"c".to_vec()),
+                value: Bytes::from(b"c2".to_vec()),
+                seq: 2,
+            },
+        ];
+
+        let merge_iter = MergeIterator::from_iterators(vec![
+            stream1.into_iter(),
+            stream2.into_iter(),
+        ]);
+
+        let version_iter = merge_iter.map(|entry| CompactionVersion {
+            key: entry.key.to_vec(),
+            seq: entry.seq,
+            is_tombstone: false,
+            value: Some(entry.value.to_vec()),
+            expiration: None,
+        });
+
+        let dedup_iter = StreamDeduplicate::new(version_iter);
+        let result: Vec<_> = dedup_iter.collect();
+
+        // Should have 3 keys: a(5), b(6), c(2)
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].seq, 5); // a: highest is 5
+        assert_eq!(result[1].seq, 6); // b: highest is 6
+        assert_eq!(result[2].seq, 2); // c: only has 2
     }
 }
