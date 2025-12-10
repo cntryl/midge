@@ -174,8 +174,8 @@ impl RuntimeState {
             match crate::wal::recovery::replay_wal(&wal_dir, &mut recovery_memtables) {
                 Ok(stats) => {
                     tracing::info!(
-                        records_recovered = stats.records_recovered,
-                        bytes_recovered = stats.bytes_recovered,
+                        records_recovered = stats.record_count,
+                        bytes_recovered = stats.bytes,
                         max_sequence = ?stats.max_sequence,
                         "WAL recovery completed successfully"
                     );
