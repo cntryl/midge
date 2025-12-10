@@ -10,6 +10,7 @@ use crate::sst::types::{BlockHandle, Footer};
 /// Simple filesystem SST writer that streams blocks to disk
 pub struct FsSstWriter {
     file: std::fs::File,
+    #[allow(dead_code)]
     temp_path: PathBuf,
     block_size: usize,
 
@@ -20,6 +21,7 @@ pub struct FsSstWriter {
 
     // Metadata for footer
     data_block_offsets: Vec<(Vec<u8>, BlockHandle)>,
+    #[allow(dead_code)]
     index_entries: Vec<(Vec<u8>, BlockHandle)>,
 }
 

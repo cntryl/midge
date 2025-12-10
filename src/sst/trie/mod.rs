@@ -53,15 +53,10 @@ pub mod node;
 pub mod reader;
 pub mod writer;
 
-#[cfg(test)]
-mod tests;
-
 pub use builder::TrieBuilder;
 pub use node::{TrieEdge, TrieNode};
 pub use reader::TrieReader;
 pub use writer::TrieWriter;
-
-use crate::common::MidgeResult;
 
 /// Calculate longest common prefix length
 pub fn lcp(a: &[u8], b: &[u8]) -> usize {

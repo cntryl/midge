@@ -35,7 +35,7 @@ pub trait SstStateReader {
     fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<super::types::KeyState> {
         let state = self.get_state(key)?;
         match state {
-            super::types::KeyState::Value(val, seq, exp, op) if seq > snapshot_seq => {
+            super::types::KeyState::Value(_val, seq, _exp, _op) if seq > snapshot_seq => {
                 Ok(super::types::KeyState::Absent)
             }
             super::types::KeyState::Tombstone(seq) if seq > snapshot_seq => {
@@ -73,8 +73,8 @@ pub trait DynSstWriter: Send {
         &mut self,
         key: &[u8],
         value: Option<&[u8]>,
-        seq: u64,
-        op_type: u8,
+        _seq: u64,
+        _op_type: u8,
         _expiration: Option<u64>,
     ) -> MidgeResult<()> {
         match value {

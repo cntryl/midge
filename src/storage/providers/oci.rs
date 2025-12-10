@@ -13,8 +13,11 @@ use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 /// - reqwest for async HTTP client
 /// - tokio for async task spawning
 pub struct OciProvider {
+    #[allow(dead_code)]
     namespace: String,
+    #[allow(dead_code)]
     bucket: String,
+    #[allow(dead_code)]
     region: String,
     // tenancy_id, user_id, fingerprint, private_key
 }
@@ -87,7 +90,6 @@ impl OciProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     #[test]
     fn should_create_oci_provider() {

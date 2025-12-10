@@ -1,7 +1,5 @@
 //! Trie node structures
 
-use bytes::Bytes;
-
 /// Trie node representing a prefix-compressed edge
 #[derive(Debug, Clone)]
 pub struct TrieNode {

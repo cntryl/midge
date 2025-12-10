@@ -46,6 +46,7 @@ pub struct BloomWriter {
     /// Number of bits in the filter
     num_bits: usize,
     /// False positive rate (default 1% = 0.01)
+    #[allow(dead_code)]
     fpr: f64,
     /// Number of keys added
     key_count: usize,

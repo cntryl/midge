@@ -39,14 +39,14 @@ impl TrieBuilder {
         }
 
         // Calculate prefix overlap with last key
-        let common_len = if self.last_key.is_empty() {
+        let _common_len = if self.last_key.is_empty() {
             0
         } else {
             lcp(&self.last_key, key)
         };
 
         // Insert key into trie
-        self.insert_key(key, block_id, common_len);
+        self.insert_key(key, block_id);
 
         // Update last key
         self.last_key = key.to_vec();
@@ -54,7 +54,7 @@ impl TrieBuilder {
         Ok(())
     }
 
-    fn insert_key(&mut self, key: &[u8], block_id: u32, common_prefix: usize) {
+    fn insert_key(&mut self, key: &[u8], block_id: u32) {
         let mut current_index = self.root_index;
         let mut matched_len = 0;
 

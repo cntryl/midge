@@ -2,7 +2,7 @@
 
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 
 /// Restart point interval for block building
 /// Every RESTART_INTERVAL entries, a restart point is stored
@@ -271,147 +271,118 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_roundtrip_entry_when_encoding_and_decoding_simple() {
-        // Arrange
-        // Act
-        let encoded = encode(b"key", 0, Some(b"value"), 42, 0, None);
+    fn should_encode_key_delta() {
+        let encoded = encode(b"mykey", 0, None, 0, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.key_delta, b"mykey");
+    }
 
-        // Assert
-        assert_eq!(entry.key_delta, b"key");
-        assert_eq!(entry.value, Some(b"value".to_vec()));
-        assert_eq!(entry.sequence, 42);
+    #[test]
+    fn should_encode_value() {
+        let encoded = encode(b"key", 0, Some(b"myvalue"), 0, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.value, Some(b"myvalue".to_vec()));
+    }
+
+    #[test]
+    fn should_encode_empty_value() {
+        let encoded = encode(b"key", 0, Some(b""), 0, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.value, Some(Vec::new()));
+    }
+
+    #[test]
+    fn should_encode_sequence() {
+        let encoded = encode(b"key", 0, None, 12345, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.sequence, 12345);
+    }
+
+    #[test]
+    fn should_encode_max_sequence() {
+        let encoded = encode(b"key", 0, None, u64::MAX, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.sequence, u64::MAX);
+    }
+
+    #[test]
+    fn should_encode_entry_type_put() {
+        let encoded = encode(b"key", 0, Some(b"val"), 0, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
         assert_eq!(entry.entry_type, 0);
-        assert_eq!(entry.expiration, None);
     }
 
     #[test]
-    fn should_preserve_expiration_when_encoding_and_decoding() {
-        // Arrange
-        // Act
-        let encoded = encode(b"key", 0, Some(b"val"), 10, 0, Some(1234567890));
+    fn should_encode_entry_type_insert() {
+        let encoded = encode(b"key", 0, Some(b"val"), 0, 1, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry.sequence, 10);
-        assert_eq!(entry.expiration, Some(1234567890));
+        assert_eq!(entry.entry_type, 1);
     }
 
     #[test]
-    fn should_preserve_tombstone_when_encoding_and_decoding() {
-        // Arrange
-        // Act
+    fn should_encode_entry_type_delete() {
+        let encoded = encode(b"key", 0, None, 0, 2, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.entry_type, 2);
+    }
+
+    #[test]
+    fn should_encode_entry_type_merge() {
+        let encoded = encode(b"key", 0, Some(b"val"), 0, 3, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.entry_type, 3);
+    }
+
+    #[test]
+    fn should_encode_expiration() {
+        let exp = 1234567890u64;
+        let encoded = encode(b"key", 0, None, 0, 0, Some(exp));
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.expiration, Some(exp));
+    }
+
+    #[test]
+    fn should_encode_shared_prefix_len() {
+        let encoded = encode(b"suffix", 42, Some(b"val"), 0, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.shared_len, 42);
+    }
+
+    #[test]
+    fn should_decode_tombstone() {
         let encoded = encode(b"key", 0, None, 5, 2, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
         assert_eq!(entry.entry_type, 2);
         assert_eq!(entry.value, None);
     }
 
     #[test]
-    fn should_compute_shared_prefix_when_encoding() {
-        // Arrange
-        let key1 = b"user:12345:name";
-        let key2 = b"user:12345:email";
-
-        // Act - key2 shares "user:12345:" prefix (12 bytes)
-        let encoded1 = encode(key1, 0, Some(b"Alice"), 1, 0, None);
-        let encoded2 = encode(&key2[12..], 12, Some(b"alice@example.com"), 2, 0, None);
-        
-        let (entry1, _) = decode(&encoded1, 0).unwrap();
-        let (entry2, _) = decode(&encoded2, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry1.shared_len, 0);
-        assert_eq!(entry1.key_delta, b"user:12345:name");
-        
-        assert_eq!(entry2.shared_len, 12);
-        // Note: key_delta is just the suffix after shared prefix
-        assert_eq!(entry2.key_delta, b"mail"); // "email" without "e" from shared boundary
+    fn should_return_bytes_consumed() {
+        let encoded = encode(b"key", 0, Some(b"val"), 42, 0, None);
+        let (_entry, consumed) = decode(&encoded, 0).unwrap();
+        assert_eq!(consumed, encoded.len());
     }
 
     #[test]
-    fn should_encode_suffix_correctly_when_prefix_compressed() {
+    fn should_roundtrip_all_fields() {
         // Arrange
-        let full_key = b"prefix_suffix";
-        let shared_len = 7; // "prefix_"
-        let suffix = &full_key[shared_len..]; // "suffix"
+        let key = b"test_key";
+        let value = Some(b"test_value" as &[u8]);
+        let seq = 999u64;
+        let op_type = 1u8;
+        let exp = Some(5555u64);
+        let shared = 5u32;
 
         // Act
-        let encoded = encode(suffix, shared_len as u32, Some(b"val"), 100, 0, None);
+        let encoded = encode(key, shared, value, seq, op_type, exp);
         let (entry, _) = decode(&encoded, 0).unwrap();
 
         // Assert
-        assert_eq!(entry.shared_len, 7);
-        assert_eq!(entry.key_delta, b"suffix");
-        assert_eq!(entry.value, Some(b"val".to_vec()));
-    }
-
-    #[test]
-    fn should_handle_multiple_entry_types_when_encoding() {
-        // Arrange
-        // Act
-        let put = encode(b"k1", 0, Some(b"v1"), 1, 0, None); // Put
-        let insert = encode(b"k2", 0, Some(b"v2"), 2, 1, None); // Insert
-        let delete = encode(b"k3", 0, None, 3, 2, None); // Delete
-        let merge = encode(b"k4", 0, Some(b"v4"), 4, 3, None); // Merge
-
-        let (e_put, _) = decode(&put, 0).unwrap();
-        let (e_insert, _) = decode(&insert, 0).unwrap();
-        let (e_delete, _) = decode(&delete, 0).unwrap();
-        let (e_merge, _) = decode(&merge, 0).unwrap();
-
-        // Assert
-        assert_eq!(e_put.entry_type, 0);
-        assert_eq!(e_insert.entry_type, 1);
-        assert_eq!(e_delete.entry_type, 2);
-        assert_eq!(e_merge.entry_type, 3);
-    }
-
-    #[test]
-    fn should_encode_sequence_correctly_when_encoding() {
-        // Arrange
-        // Act
-        let low_seq = encode(b"key", 0, Some(b"val"), 0, 0, None);
-        let mid_seq = encode(b"key", 0, Some(b"val"), 65536, 0, None);
-        let high_seq = encode(b"key", 0, Some(b"val"), u64::MAX, 0, None);
-
-        let (e_low, _) = decode(&low_seq, 0).unwrap();
-        let (e_mid, _) = decode(&mid_seq, 0).unwrap();
-        let (e_high, _) = decode(&high_seq, 0).unwrap();
-
-        // Assert
-        assert_eq!(e_low.sequence, 0);
-        assert_eq!(e_mid.sequence, 65536);
-        assert_eq!(e_high.sequence, u64::MAX);
-    }
-
-    #[test]
-    fn should_preserve_empty_value_when_encoding() {
-        // Arrange
-        // Act
-        let encoded = encode(b"key", 0, Some(b""), 10, 0, None);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry.value, Some(Vec::new()));
-    }
-
-    #[test]
-    fn should_calculate_bytes_consumed_when_decoding() {
-        // Arrange
-        let encoded1 = encode(b"key1", 0, Some(b"value1"), 1, 0, None);
-        let encoded2 = encode(b"key2", 0, Some(b"value2"), 2, 0, None);
-        
-        // Act - decode each separately since TLV doesn't have built-in entry separators
-        let (entry1, consumed1) = decode(&encoded1, 0).unwrap();
-        let (entry2, consumed2) = decode(&encoded2, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry1.key_delta, b"key1");
-        assert_eq!(entry2.key_delta, b"key2");
-        assert_eq!(consumed1, encoded1.len());
-        assert_eq!(consumed2, encoded2.len());
+        assert_eq!(entry.key_delta, key);
+        assert_eq!(entry.value, value.map(|v| v.to_vec()));
+        assert_eq!(entry.sequence, seq);
+        assert_eq!(entry.entry_type, op_type);
+        assert_eq!(entry.expiration, exp);
+        assert_eq!(entry.shared_len, shared);
     }
 }

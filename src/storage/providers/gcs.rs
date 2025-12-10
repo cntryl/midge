@@ -13,7 +13,9 @@ use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 /// - reqwest for async HTTP client
 /// - tokio for async task spawning
 pub struct GcsProvider {
+    #[allow(dead_code)]
     bucket: String,
+    #[allow(dead_code)]
     project_id: String,
     // service_account_key: String,
 }
@@ -81,7 +83,6 @@ impl GcsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     #[test]
     fn should_create_gcs_provider() {

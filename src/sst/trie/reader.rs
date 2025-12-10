@@ -3,7 +3,6 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::trie::{encoding, lcp};
 use crate::sst::trie::node::TrieNode;
-use crate::sst::types::BlockHandle;
 
 /// Reader for trie index lookups
 pub struct TrieReader {

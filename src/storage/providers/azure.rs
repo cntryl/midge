@@ -13,7 +13,9 @@ use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 /// - reqwest for async HTTP client
 /// - tokio for async task spawning
 pub struct AzureProvider {
+    #[allow(dead_code)]
     account_name: String,
+    #[allow(dead_code)]
     container: String,
     // account_key or sas_token
 }
@@ -84,7 +86,6 @@ impl AzureProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     #[test]
     fn should_create_azure_provider() {

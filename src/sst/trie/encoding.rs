@@ -2,7 +2,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::trie::node::{TrieEdge, TrieNode};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 
 /// Encode trie nodes to compact binary format
 ///
