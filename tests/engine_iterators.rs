@@ -1,4 +1,4 @@
-//! Iterator and Scan Operation Tests
+﻿//! Iterator and Scan Operation Tests
 //!
 //! Tests for iterator behavior, scanning, and streaming operations.
 //!
@@ -19,7 +19,7 @@ mod common;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query};
-use common::{create_storage_mode, disk_storage_modes, test_temp_dir};
+use cntryl_midge::testkit::{create_storage_mode, disk_storage_modes, test_temp_dir};
 use std::sync::Arc;
 
 // ============================================================================
@@ -59,7 +59,7 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
         assert_eq!(results[1].0, Bytes::from("key2"), "{}: second key", name);
         assert_eq!(results[2].0, Bytes::from("key3"), "{}: third key", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -92,7 +92,7 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
         assert_eq!(results[1].0, Bytes::from("key2"), "{}: second (key2)", name);
         assert_eq!(results[2].0, Bytes::from("key1"), "{}: third (key1)", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -121,7 +121,7 @@ fn should_limit_results_given_limit_query_when_scanning() {
         // Assert
         assert_eq!(results.len(), 5, "{}: expected 5 results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -143,7 +143,7 @@ fn should_return_empty_given_empty_db_when_scanning() {
         // Assert
         assert!(results.is_empty(), "{}: expected empty results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -185,7 +185,7 @@ fn should_return_next_key_given_seek_to_missing_key_when_scanning() {
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -217,7 +217,7 @@ fn should_return_empty_given_seek_past_end_when_scanning() {
         // Assert
         assert!(results.is_empty(), "{}: expected empty results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -249,7 +249,7 @@ fn should_return_empty_given_invalid_range_when_start_greater_than_end() {
         // Assert
         assert!(results.is_empty(), "{}: expected empty results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -288,7 +288,7 @@ fn should_continue_safely_given_compaction_when_iterating_with_snapshot() {
         // Assert - should get consistent results despite compaction
         assert_eq!(results.len(), 100, "{}: expected 100 results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -328,7 +328,7 @@ fn should_handle_gracefully_given_sst_removed_when_iterating_with_snapshot() {
         // Assert - snapshot should still work
         assert_eq!(results.len(), 50, "{}: expected 50 results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -357,7 +357,7 @@ fn should_iterate_consistently_given_data_spans_sst_boundaries_when_scanning() {
         // Assert
         assert_eq!(results.len(), 50, "{}: expected 50 results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -436,7 +436,7 @@ fn should_skip_deleted_keys_given_tombstones_when_scanning() {
         assert_eq!(results[0].0, Bytes::from("key1"));
         assert_eq!(results[1].0, Bytes::from("key3"));
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -475,7 +475,7 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
         assert_eq!(results[2].0, Bytes::from("key02"));
         assert_eq!(results[3].0, Bytes::from("key07"));
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -512,7 +512,7 @@ fn should_return_latest_value_given_interleaved_puts_deletes_when_scanning() {
         assert_eq!(results[1].0, Bytes::from("key2"));
         assert_eq!(results[1].1, Bytes::from("v2_new"));
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -566,7 +566,7 @@ fn should_match_regular_scan_given_streaming_scan_when_comparing() {
         assert_eq!(regular.len(), streaming.len(), "{}: lengths match", name);
         assert_eq!(regular, streaming, "{}: results match", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -595,7 +595,7 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
         // Assert
         assert_eq!(results.len(), 5, "{}: expected 5 results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -622,7 +622,7 @@ fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
         assert_eq!(results.len(), 1, "{}: expected 1 result", name);
         assert_eq!(results[0].0, Bytes::from_static(b"k2"));
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -710,7 +710,7 @@ fn should_paginate_results_given_chunked_queries_when_iterating() {
         assert_eq!(chunk2[0].0, Bytes::from("key10"));
         assert_eq!(chunk2[9].0, Bytes::from("key19"));
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -747,7 +747,7 @@ fn should_produce_identical_results_given_repeated_scans_when_rewinding() {
         assert_eq!(results2.len(), 10, "{}: second scan", name);
         assert_eq!(results1, results2, "{}: results match", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -787,7 +787,7 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
         // Assert
         assert_eq!(results.len(), 10000, "{}: expected 10000 results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -818,6 +818,6 @@ fn should_handle_large_streaming_scan_given_multiple_ssts_when_spanning() {
         // Assert
         assert_eq!(results.len(), 100, "{}: expected 100 results", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }

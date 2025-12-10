@@ -1,4 +1,4 @@
-//! Tests for block cache functionality.
+﻿//! Tests for block cache functionality.
 //!
 //! These tests verify the block cache behavior including basic operations,
 //! sharded caching, and eviction policies.

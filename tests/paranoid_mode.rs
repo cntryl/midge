@@ -1,4 +1,4 @@
-//! Paranoid checksum mode tests
+﻿//! Paranoid checksum mode tests
 //!
 //! Tests for paranoid checksum verification which validates data integrity
 //! on every block read from SST files.

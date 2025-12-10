@@ -1,4 +1,4 @@
-//! Metrics and Observability Integration Tests
+﻿//! Metrics and Observability Integration Tests
 //!
 //! Tests for metrics accessors, statistics, and observability features.
 //! Verifies that Midge correctly tracks and reports operational metrics.
@@ -17,7 +17,7 @@
 mod common;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions};
-use common::{all_storage_modes, create_storage_mode, disk_storage_modes};
+use cntryl_midge::testkit::{all_storage_modes, create_storage_mode, disk_storage_modes};
 
 // =============================================================================
 // Sequence Number Tracking

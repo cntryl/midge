@@ -1,4 +1,4 @@
-//! Delete Range Operation Tests
+﻿//! Delete Range Operation Tests
 //!
 //! Tests for range deletion (range tombstone) functionality.
 //!
@@ -19,7 +19,7 @@ mod common;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, Query};
-use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
+use cntryl_midge::testkit::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
 
 // ============================================================================
 // BASIC RANGE DELETION TESTS
@@ -63,7 +63,7 @@ fn should_delete_keys_in_range_given_delete_range_when_querying() {
         assert_eq!(eng.get(&cf, b"d").expect("get"), Some(Bytes::from("4")));
         assert_eq!(eng.get(&cf, b"e").expect("get"), Some(Bytes::from("5")));
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -113,7 +113,7 @@ fn should_delete_keys_across_levels_given_flushed_data_when_delete_range() {
         );
         assert!(eng.get(&cf, b"key5").expect("get").is_some());
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -140,7 +140,7 @@ fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
         assert!(eng.get(&cf, b"key1").expect("get").is_some(), "{}", name);
         assert!(eng.get(&cf, b"key2").expect("get").is_some(), "{}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -191,7 +191,7 @@ fn should_hide_deleted_range_in_scan_given_delete_range_when_scanning() {
         ];
         assert_eq!(results, expected, "{}: results match", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -234,7 +234,7 @@ fn should_handle_large_range_deletion_given_many_keys_when_deleting() {
             name
         );
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -298,7 +298,7 @@ fn should_persist_delete_range_given_wal_when_recovering() {
             name
         );
         drop(eng2);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -339,7 +339,7 @@ fn should_recover_range_tombstone_given_no_flush_when_restarting() {
         assert!(eng2.get(&cf2, b"key2").expect("get").is_none(), "{}", name);
         assert!(eng2.get(&cf2, b"key3").expect("get").is_some(), "{}", name);
         drop(eng2);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -392,7 +392,7 @@ fn should_apply_delete_range_after_crash_given_flushed_tombstone_when_recovering
         // 100 - 60 deleted = 40 remaining
         assert_eq!(results.len(), 40, "{}", name);
         drop(eng2);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -431,7 +431,7 @@ fn should_apply_range_tombstone_during_compaction_given_flushed_data_when_compac
         assert!(eng.get(&cf, b"key010").expect("get").is_none(), "{}", name);
         assert!(eng.get(&cf, b"key015").expect("get").is_some(), "{}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -463,7 +463,7 @@ fn should_not_resurrect_deleted_keys_given_compaction_when_range_delete_applied(
         // Assert - key should not resurrect
         assert!(eng.get(&cf, b"key5").expect("get").is_none(), "{}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -505,7 +505,7 @@ fn should_preserve_snapshot_view_given_delete_range_after_snapshot_when_reading(
         // Current view doesn't see deleted keys
         assert!(eng.get(&cf, b"key1").expect("get").is_none(), "{}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -547,7 +547,7 @@ fn should_include_deleted_range_in_snapshot_scan_given_delete_after_snapshot_whe
         // Assert - snapshot should see all 100 original keys
         assert_eq!(results.len(), 100, "{}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -586,7 +586,7 @@ fn should_merge_overlapping_ranges_given_multiple_delete_ranges_when_deleting() 
         assert!(eng.get(&cf, b"key07").expect("get").is_none(), "{}", name);
         assert!(eng.get(&cf, b"key08").expect("get").is_some(), "{}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -621,7 +621,7 @@ fn should_allow_put_after_delete_range_given_interleaved_ops_when_writing() {
         );
         assert!(eng.get(&cf, b"key3").expect("get").is_some(), "{}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -658,7 +658,7 @@ fn should_apply_memtable_and_sst_tombstones_given_mixed_sources_when_reading() {
         );
         assert!(eng.get(&cf, b"key2").expect("get").is_some(), "{}", name);
         drop(eng);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }
 
@@ -704,6 +704,6 @@ fn should_reject_delete_range_given_read_only_mode_when_attempting() {
             name
         );
         drop(eng_ro);
-        eprintln!("✓ {}", name);
+        eprintln!("âœ“ {}", name);
     }
 }

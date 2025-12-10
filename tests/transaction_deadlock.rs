@@ -1,4 +1,4 @@
-//! Transaction Concurrency Tests (INSERT Conflict Detection)
+﻿//! Transaction Concurrency Tests (INSERT Conflict Detection)
 //!
 //! Tests for INSERT conflict detection under concurrent transactions.
 //!
@@ -27,7 +27,7 @@ use cntryl_midge::{KvTransaction, MidgeEngine, MidgeOptions, WriteOptions};
 use std::sync::Arc;
 
 mod common;
-use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
+use cntryl_midge::testkit::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
 
 // ============================================================================
 // INSERT Conflict Detection (one wins, one fails)
@@ -254,7 +254,7 @@ fn should_allow_all_concurrent_puts_given_lww_semantics() {
             .map(|h| h.join().expect("Thread panicked"))
             .sum();
 
-        // Assert: With LWW, ALL 50 commits (10 threads × 5 iterations) should succeed
+        // Assert: With LWW, ALL 50 commits (10 threads Ã— 5 iterations) should succeed
         assert_eq!(
             total_successes, 50,
             "[{}] All PUT commits should succeed with LWW",
@@ -367,9 +367,7 @@ fn should_handle_self_conflict_given_same_key_multiple_writes() {
         );
 
         let value = engine.get(&cf, b"key").unwrap();
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"value3")),
+        assert_eq!(value.as_deref(), Some(b"value3"),
             "[{}] Last write should win",
             name
         );
@@ -552,9 +550,7 @@ fn should_persist_last_committed_value_given_concurrent_puts_when_lww() {
 
         // Assert: Last committed value (txn2) should persist
         let value = engine.get(&cf, b"contested_key").unwrap();
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"txn2_value")),
+        assert_eq!(value.as_deref(), Some(b"txn2_value"),
             "[{}] Last committed PUT value should persist after restart",
             ctx.name()
         );

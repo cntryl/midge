@@ -1,4 +1,4 @@
-//! Read path caching tests
+﻿//! Read path caching tests
 //!
 //! Tests for block cache behavior, LRU eviction, bloom filters,
 //! and read amplification under various access patterns.
@@ -8,7 +8,7 @@ mod common;
 use bytes::Bytes;
 use cntryl_midge::Query;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use common::{assert_get_equals, new_engine};
+use cntryl_midge::testkit::{assert_get_equals, new_engine};
 use std::sync::Arc;
 use tempfile::TempDir;
 

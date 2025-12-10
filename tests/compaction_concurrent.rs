@@ -1,4 +1,4 @@
-//! Compaction Concurrent Tests
+﻿//! Compaction Concurrent Tests
 //!
 //! These tests verify that concurrent operations work correctly during compaction:
 //! - Reads during compaction (point reads and scans)
@@ -14,7 +14,7 @@ mod common;
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, Query};
-use common::{
+use cntryl_midge::testkit::{
     assert_get_equals, assert_key_absent, compaction_test_opts, create_storage_mode,
     disk_storage_modes, manual_compaction_test_opts, populate_multi_level_data,
     test_helpers::wait_for_signal_default,
@@ -556,9 +556,7 @@ fn should_preserve_snapshot_view_given_compaction_in_progress_when_snapshot_read
         for i in 0..10 {
             let key = format!("key{:02}", i);
             let result = engine.get(&cf, key.as_bytes()).unwrap();
-            assert_eq!(
-                result,
-                Some(Bytes::from_static(b"new_value")),
+            assert_eq!(result.as_deref(), Some(b"new_value"),
                 "Current read should return new value after compaction"
             );
         }

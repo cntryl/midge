@@ -1,4 +1,4 @@
-//! Transaction Conflict Tests
+﻿//! Transaction Conflict Tests
 //!
 //! These tests verify transaction conflict detection and resolution.
 //!
@@ -29,7 +29,7 @@ mod common;
 
 use bytes::Bytes;
 use cntryl_midge::{KvTransaction, MidgeEngine, MidgeOptions, WriteOptions};
-use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
+use cntryl_midge::testkit::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
 use std::sync::Arc;
 
 // ============================================================================

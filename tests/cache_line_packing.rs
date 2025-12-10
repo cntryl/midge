@@ -1,4 +1,4 @@
-//! Unit test for BlockMeta size validation (cache-line packing)
+﻿//! Unit test for BlockMeta size validation (cache-line packing)
 //!
 //! Validates that BlockMeta fits efficiently within cache lines for optimal
 //! sequential access performance.
@@ -16,7 +16,7 @@ mod tests {
         let size = std::mem::size_of::<BlockMeta>();
 
         // Assert
-        // Target: ≤128 bytes (2 cache lines on typical x86-64)
+        // Target: â‰¤128 bytes (2 cache lines on typical x86-64)
         // BlockMeta includes:
         // - min_key: Bytes (24 bytes)
         // - max_key: Bytes (24 bytes)

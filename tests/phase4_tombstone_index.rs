@@ -1,4 +1,4 @@
-//! Phase 4: Range Tombstone Indexing Tests
+﻿//! Phase 4: Range Tombstone Indexing Tests
 //!
 //! Validates that tombstone indexes enable efficient tombstone lookups
 //! without reading data blocks, and properly handle compaction scenarios.

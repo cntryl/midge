@@ -1,4 +1,4 @@
-//! Configuration Validation Integration Tests
+﻿//! Configuration Validation Integration Tests
 //!
 //! Tests for configuration validation, bounds checking, and config persistence.
 //! Verifies that Midge correctly validates and applies configuration options.
@@ -15,7 +15,7 @@
 mod common;
 
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
-use common::{assert_get_equals, new_engine, test_temp_dir};
+use cntryl_midge::testkit::{assert_get_equals, new_engine, test_temp_dir};
 use std::sync::Arc;
 
 // =============================================================================

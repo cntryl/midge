@@ -1,4 +1,4 @@
-//! Administrative Operations Integration Tests
+﻿//! Administrative Operations Integration Tests
 //!
 //! Tests for administrative operations like column family management, backups, and concurrent admin queries.
 //! Verifies that admin operations work correctly and don't interfere with data operations.
@@ -17,7 +17,7 @@
 mod common;
 
 use cntryl_midge::MidgeEngine;
-use common::{bulk_put_fn, create_storage_mode, disk_storage_modes, DurabilityTestContext};
+use cntryl_midge::testkit::{bulk_put_fn, create_storage_mode, disk_storage_modes, DurabilityTestContext};
 use std::sync::Arc;
 use std::thread;
 

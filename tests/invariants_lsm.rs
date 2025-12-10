@@ -1,6 +1,6 @@
-mod common;
+﻿mod common;
 use cntryl_midge::MidgeOptions;
-use common::*;
+use cntryl_midge::testkit::*;
 
 // LSM-tree invariants - observable outcomes only
 

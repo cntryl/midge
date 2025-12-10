@@ -1,4 +1,4 @@
-//! Compaction metrics tests
+﻿//! Compaction metrics tests
 //!
 //! Tests for measuring and tracking read, write, and space amplification
 //! during compaction operations.
@@ -6,7 +6,7 @@
 mod common;
 
 use cntryl_midge::Query;
-use common::{
+use cntryl_midge::testkit::{
     compaction_test_opts, create_storage_mode, disk_storage_modes, populate_multi_level_data,
 };
 

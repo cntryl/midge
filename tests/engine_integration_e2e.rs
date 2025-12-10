@@ -1,4 +1,4 @@
-//! End-to-end integration tests: write → flush → operations
+﻿//! End-to-end integration tests: write â†’ flush â†’ operations
 //!
 //! This test suite validates the complete engine operation pipeline:
 //! 1. Write operations to memtable via WAL

@@ -1,4 +1,4 @@
-//! Phase 3: Compact Sparse Index integration tests
+﻿//! Phase 3: Compact Sparse Index integration tests
 //!
 //! Validates that IndexTable provides the same query semantics as SparseIndex
 //! while minimizing memory footprint through separated search keys and metadata.

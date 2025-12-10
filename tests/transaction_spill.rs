@@ -1,4 +1,4 @@
-//! Transaction Spill-to-Disk Tests
+﻿//! Transaction Spill-to-Disk Tests
 //!
 //! Tests for large transaction memory management through spill-to-disk mechanism.
 //! When a transaction's in-memory buffer exceeds its configured limit, data is
@@ -20,7 +20,7 @@ use bytes::Bytes;
 use cntryl_midge::{IsolationLevel, KvTransaction, MidgeEngine, MidgeOptions, Query, WriteOptions};
 
 mod common;
-use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
+use cntryl_midge::testkit::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
 
 // ============================================================================
 // Large Transaction Commit
@@ -43,7 +43,7 @@ fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
             .begin_transaction_with_options(&cf, None, 1024 * 1024, IsolationLevel::default())
             .expect("begin");
 
-        // Act - Add 2MB of data (2000 keys × 1024 bytes each)
+        // Act - Add 2MB of data (2000 keys Ã— 1024 bytes each)
         for i in 0..2000 {
             large_txn
                 .put(format!("key{:06}", i).as_bytes(), &vec![0u8; 1024])
@@ -290,9 +290,7 @@ fn should_cleanup_spill_files_given_transaction_rollback() {
             .expect("commit");
 
         let value = engine.get(&cf, b"final_key").expect("get");
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"final_value")),
+        assert_eq!(value.as_deref(), Some(b"final_value"),
             "[{}] Engine should work after multiple rollbacks",
             name
         );
