@@ -200,6 +200,7 @@ impl EventLoop {
                     key,
                     value,
                     sequence,
+                    ttl_seconds,
                 } => {
                     let result = self.wal_actor.append(
                         &mut self.state,

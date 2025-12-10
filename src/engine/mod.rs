@@ -171,6 +171,12 @@ impl MidgeEngine {
 
     /// Put a key-value pair into a specific column family
     pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+        self.put_with_ttl(cf, key, value, 0)
+    }
+
+    /// Put a key-value pair with TTL (time-to-live in seconds)
+    /// TTL of 0 means no expiration
+    pub fn put_with_ttl(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8], ttl_seconds: u64) -> MidgeResult<()> {
         // CRITICAL: Use send_and_wait to ensure durability before returning.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
@@ -178,6 +184,7 @@ impl MidgeEngine {
             key: key.to_vec(),
             value: Some(value.to_vec()),
             sequence: self.next_sequence(),
+            ttl_seconds: if ttl_seconds == 0 { None } else { Some(ttl_seconds) },
         })?;
 
         // Check for errors from runtime
@@ -225,6 +232,7 @@ impl MidgeEngine {
             key: key.to_vec(),
             value: None, // Tombstone
             sequence: self.next_sequence(),
+            ttl_seconds: None,
         })?;
 
         match response {
@@ -312,6 +320,12 @@ impl MidgeEngine {
     /// Insert a key-value pair (fails if key exists)
     /// Returns true if insert succeeded, false if key already existed
     pub fn insert(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<bool> {
+        self.insert_with_ttl(cf, key, value, 0)
+    }
+
+    /// Insert a key-value pair with TTL (fails if key exists)
+    /// Returns true if insert succeeded, false if key already existed
+    pub fn insert_with_ttl(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8], ttl_seconds: u64) -> MidgeResult<bool> {
         // Check if key already exists
         if self.get(cf, key)?.is_some() {
             // Key exists - cannot insert
@@ -319,12 +333,17 @@ impl MidgeEngine {
         }
         
         // Key doesn't exist - do the insert
-        self.put(cf, key, value)?;
+        self.put_with_ttl(cf, key, value, ttl_seconds)?;
         Ok(true)
     }
 
     /// Insert with value return (returns existing value if key exists)
     pub fn insert_with_value(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<api::InsertResult> {
+        self.insert_with_value_and_ttl(cf, key, value, 0)
+    }
+
+    /// Insert with value return and TTL (returns existing value if key exists)
+    pub fn insert_with_value_and_ttl(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8], ttl_seconds: u64) -> MidgeResult<api::InsertResult> {
         // Check if key already exists
         if let Some(existing) = self.get(cf, key)? {
             // Key exists - return existing value
@@ -332,7 +351,7 @@ impl MidgeEngine {
         }
         
         // Key doesn't exist - do the insert
-        self.put(cf, key, value)?;
+        self.put_with_ttl(cf, key, value, ttl_seconds)?;
         Ok(api::InsertResult::Ok)
     }
 
@@ -414,6 +433,7 @@ impl MidgeEngine {
                 key: key.to_vec(),
                 value: Some(value.to_vec()),
                 sequence: self.next_sequence(),
+                ttl_seconds: None,
             })?;
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
@@ -427,6 +447,7 @@ impl MidgeEngine {
                 key: key.to_vec(),
                 value: None,
                 sequence: self.next_sequence(),
+                ttl_seconds: None,
             })?;
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
@@ -530,6 +551,7 @@ impl MidgeEngine {
                     key: intent.key().to_vec(),
                     value: Some(value.to_vec()),
                     sequence: self.next_sequence(),
+                    ttl_seconds: None,
                 })?  
             } else {
                 self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
@@ -538,6 +560,7 @@ impl MidgeEngine {
                     key: intent.key().to_vec(),
                     value: None,
                     sequence: self.next_sequence(),
+                    ttl_seconds: None,
                 })?
             };
             
@@ -615,6 +638,17 @@ impl MidgeEngine {
         // For now, return the default CF + a placeholder for others
         // TODO: Wire to RuntimeMsg to query all active CFs from manifest
         Ok(vec![self.default_cf.clone()])
+    }
+
+    /// Compact all data (stub - not implemented)
+    pub fn compact_all(&self) -> MidgeResult<()> {
+        Err(MidgeError::Internal("compact_all not yet implemented".to_string()))
+    }
+
+    /// Get a value at a specific snapshot (stub)
+    pub fn get_at(&self, cf: &ColumnFamilyHandle, key: &[u8], _snapshot: &api::Snapshot) -> MidgeResult<Option<bytes::Bytes>> {
+        // TODO: Wire to RuntimeMsg::Read with snapshot sequence
+        self.get(cf, key)
     }
 
     // === Internal helpers ===

@@ -25,6 +25,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::testkit::{test_temp_dir, with_engine_restart};
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;

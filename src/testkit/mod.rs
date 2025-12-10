@@ -107,6 +107,8 @@ pub struct MidgeOptions {
     pub memtable_size: usize,
     /// Compression enabled
     pub compression: bool,
+    /// Enable automatic background compaction
+    pub enable_compaction: bool,
 }
 
 impl Default for MidgeOptions {
@@ -116,6 +118,7 @@ impl Default for MidgeOptions {
             wal_sync: false,
             memtable_size: 64 * 1024 * 1024, // 64 MB
             compression: false,
+            enable_compaction: true,
         }
     }
 }
@@ -225,13 +228,8 @@ pub fn assert_key_absent(engine: &crate::MidgeEngine, cf: &ColumnFamilyHandle, k
 }
 
 /// Create a temporary directory for tests
-pub fn test_temp_dir() -> PathBuf {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_millis();
-    let pid = std::process::id();
-    PathBuf::from(format!("target/test_data/tmp_{}_{}", pid, timestamp))
+pub fn test_temp_dir() -> tempfile::TempDir {
+    tempfile::TempDir::new().expect("Failed to create temp dir")
 }
 
 /// Durability test context (stub for compatibility)
@@ -255,11 +253,12 @@ impl Default for DurabilityTestContext {
 pub fn compaction_test_opts() -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
-            db_path: test_temp_dir(),
+            db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
         memtable_size: 1024 * 1024, // 1 MB for faster flushing in tests
         compression: false,
+        enable_compaction: true,
     }
 }
 
@@ -267,11 +266,12 @@ pub fn compaction_test_opts() -> MidgeOptions {
 pub fn manual_compaction_test_opts() -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
-            db_path: test_temp_dir(),
+            db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
         memtable_size: 512 * 1024, // 512 KB for even faster flushing
         compression: false,
+        enable_compaction: false,
     }
 }
 
@@ -307,15 +307,36 @@ pub mod test_helpers {
     }
 }
 
+/// Helper for testing engine restart scenarios
+pub fn with_engine_restart<F1, F2>(opts: MidgeOptions, before_restart: F1, after_restart: F2)
+where
+    F1: FnOnce(&crate::MidgeEngine),
+    F2: FnOnce(&crate::MidgeEngine),
+{
+    // First engine instance
+    {
+        let engine = crate::MidgeEngine::open_with_options(opts.clone()).expect("open");
+        before_restart(&engine);
+        drop(engine); // Explicit close
+    }
+    
+    // Second engine instance (restart)
+    {
+        let engine = crate::MidgeEngine::open_with_options(opts).expect("reopen");
+        after_restart(&engine);
+    }
+}
+
 /// Options for durability tests
 pub fn durability_opts() -> MidgeOptions {
     MidgeOptions {
         storage_mode: StorageMode::LocalDisk {
-            db_path: test_temp_dir(),
+            db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
-        memtable_size: 2 * 1024 * 1024, // 2 MB
+        memtable_size: 64 * 1024,
         compression: false,
+        enable_compaction: false,
     }
 }
 

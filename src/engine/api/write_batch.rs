@@ -21,6 +21,7 @@ enum BatchOp {
         cf_id: ColumnFamilyId,
         key: Vec<u8>,
         value: Vec<u8>,
+        ttl_seconds: Option<u64>,
     },
     /// Delete operation
     Delete { cf_id: ColumnFamilyId, key: Vec<u8> },
@@ -42,7 +43,18 @@ impl WriteBatch {
 
     /// Add a put operation to the batch for a specific column family
     pub fn put_cf(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>) -> &mut Self {
-        self.operations.push(BatchOp::Put { cf_id, key, value });
+        self.operations.push(BatchOp::Put { cf_id, key, value, ttl_seconds: None });
+        self
+    }
+
+    /// Add a put operation with TTL to the batch
+    pub fn put_with_ttl(&mut self, cf_id: ColumnFamilyId, key: bytes::Bytes, value: bytes::Bytes, ttl_seconds: u64) -> &mut Self {
+        self.operations.push(BatchOp::Put { 
+            cf_id, 
+            key: key.to_vec(), 
+            value: value.to_vec(), 
+            ttl_seconds: if ttl_seconds == 0 { None } else { Some(ttl_seconds) }
+        });
         self
     }
 
@@ -77,7 +89,7 @@ impl WriteBatch {
     #[allow(dead_code)] // Used by runtime when processing batch
     pub(crate) fn iter_puts(&self) -> impl Iterator<Item = (ColumnFamilyId, &[u8], &[u8])> {
         self.operations.iter().filter_map(|op| match op {
-            BatchOp::Put { cf_id, key, value } => Some((*cf_id, key.as_slice(), value.as_slice())),
+            BatchOp::Put { cf_id, key, value, .. } => Some((*cf_id, key.as_slice(), value.as_slice())),
             _ => None,
         })
     }

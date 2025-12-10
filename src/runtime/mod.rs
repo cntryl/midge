@@ -101,6 +101,7 @@ pub enum RuntimeMsg {
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         sequence: u64,
+        ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
