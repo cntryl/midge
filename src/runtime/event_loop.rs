@@ -165,6 +165,7 @@ impl EventLoop {
                         source_level: plan.source_level,
                         target_level: plan.target_level,
                         cf_id: plan.cf_id,
+                        output_seq: self.state.next_sequence(),
                     };
 
                     let resp = self

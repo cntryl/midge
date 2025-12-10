@@ -26,6 +26,9 @@ pub enum MidgeError {
 
     /// Internal error (should not happen)
     Internal(String),
+
+    /// Invalid path
+    InvalidPath,
 }
 
 impl fmt::Display for MidgeError {
@@ -37,6 +40,7 @@ impl fmt::Display for MidgeError {
             MidgeError::Corruption(msg) => write!(f, "Corruption: {}", msg),
             MidgeError::NotSupported(msg) => write!(f, "Not supported: {}", msg),
             MidgeError::Internal(msg) => write!(f, "Internal error: {}", msg),
+            MidgeError::InvalidPath => write!(f, "Invalid path"),
         }
     }
 }

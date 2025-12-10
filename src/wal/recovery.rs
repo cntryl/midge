@@ -12,6 +12,7 @@ use crate::sst::{Memtable, SkipListMemtable};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use tracing::instrument;
 
 /// Statistics from WAL recovery
 #[derive(Debug, Clone)]
@@ -59,6 +60,7 @@ impl RecoveryStats {
 ///
 /// Returns aggregated recovery statistics. Caller is responsible for attaching
 /// the recovered memtables to the runtime state.
+#[instrument(level = "info", skip(memtables), fields(wal_dir = ?wal_dir))]
 pub fn replay_wal(
     wal_dir: &Path,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
@@ -68,6 +70,8 @@ pub fn replay_wal(
     if !wal_dir.exists() {
         return Ok(stats);
     }
+
+    tracing::info!(dir = ?wal_dir, "starting wal replay");
 
     let mut reader = match FsWalReader::new(wal_dir) {
         Ok(r) => r,
@@ -82,15 +86,34 @@ pub fn replay_wal(
     });
 
     match result {
-        Ok(()) => Ok(stats),
+        Ok(()) => {
+            tracing::info!(
+                dir = ?wal_dir,
+                records = stats.record_count,
+                bytes = stats.bytes,
+                max_sequence = ?stats.max_sequence,
+                had_corruption = stats.had_corruption,
+                "wal replay completed"
+            );
+            Ok(stats)
+        }
         Err(MidgeError::Corruption(e)) => {
             stats.mark_corruption();
+            tracing::warn!(dir = ?wal_dir, error = %e, "wal replay encountered corruption");
             Err(MidgeError::Corruption(e))
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            tracing::error!(dir = ?wal_dir, error = %e, "wal replay failed");
+            Err(e)
+        }
     }
 }
 
+#[instrument(
+    level = "debug",
+    skip(memtables, record),
+    fields(cf_id = record.cf_id, seq = record.seq, op = ?record.op)
+)]
 fn apply_record(
     record: &WalRecord,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,

@@ -15,6 +15,8 @@ pub struct CompactionPlan {
     pub source_level: u32,
     pub target_level: u32,
     pub cf_id: u32,
+    /// Output SST sequence number (assigned by sequence allocator)
+    pub output_seq: u64,
 }
 
 impl CompactionPlan {
@@ -25,7 +27,13 @@ impl CompactionPlan {
             source_level,
             target_level,
             cf_id,
+            output_seq: 0,
         }
+    }
+    
+    pub fn with_output_seq(mut self, output_seq: u64) -> Self {
+        self.output_seq = output_seq;
+        self
     }
 }
 
@@ -141,6 +149,7 @@ impl Compactor {
                 source_level: 0,
                 target_level: 1,
                 cf_id,
+                output_seq: 0,
             });
         }
 
@@ -189,6 +198,7 @@ impl Compactor {
                     source_level: level as u32,
                     target_level: (level + 1) as u32,
                     cf_id,
+                    output_seq: 0,
                 });
             }
         }
