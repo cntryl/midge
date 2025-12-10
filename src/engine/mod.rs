@@ -150,15 +150,15 @@ impl MidgeEngine {
     }
 
     /// Get a value from the default column family
-    pub fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
+    pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
         self.get_cf(&self.default_cf, key)
     }
 
     /// Get a value from a specific column family
-    pub fn get_cf(&self, _cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
+    pub fn get_cf(&self, _cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
         // First check local memtable (write cache)
         if let Some(value) = self.memtable.get(key)? {
-            return Ok(Some(value));
+            return Ok(Some(bytes::Bytes::from(value)));
         }
 
         // Query runtime for immutable memtables and SST files
@@ -177,7 +177,7 @@ impl MidgeEngine {
         )?;
 
         match response {
-            RuntimeResponse::ReadValue(value) => Ok(value),
+            RuntimeResponse::ReadValue(value) => Ok(value.map(bytes::Bytes::from)),
             RuntimeResponse::Error(e) => Err(MidgeError::Internal(e)),
             _ => Err(MidgeError::Internal(
                 "Unexpected response to read".to_string(),
@@ -209,7 +209,7 @@ impl MidgeEngine {
     }
 
     /// Range scan in the default column family
-    pub fn range(&self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub fn range(&self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
         self.range_cf(&self.default_cf, start, end)
     }
 
@@ -219,9 +219,75 @@ impl MidgeEngine {
         _cf: &ColumnFamilyHandle,
         _start: &[u8],
         _end: &[u8],
-    ) -> MidgeResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
         // TODO: Implement range scan via memtable + SST merge iterator
         Ok(Vec::new())
+    }
+
+    /// Scan with Query parameters
+    pub fn scan(&self, cf: &ColumnFamilyHandle, _query: &api::Query) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+        // TODO: Implement query-based scan
+        self.range_cf(cf, &[], &[])
+    }
+
+    /// Delete a range of keys (exclusive end)
+    pub fn delete_range(&self, cf: &ColumnFamilyHandle, start: &[u8], end: &[u8]) -> MidgeResult<()> {
+        // For now, scan and delete each key
+        // TODO: Implement efficient range deletion
+        let keys = self.range_cf(cf, start, end)?;
+        for (key, _) in keys {
+            self.delete_cf(cf, &key)?;
+        }
+        Ok(())
+    }
+
+    /// Insert a key-value pair (fails if key exists)
+    /// Returns true if insert succeeded, false if key already existed
+    pub fn insert(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<bool> {
+        // Check if key already exists
+        if self.get_cf(cf, key)?.is_some() {
+            // Key exists - cannot insert
+            return Ok(false);
+        }
+        
+        // Key doesn't exist - do the insert
+        self.put_cf(cf, key, value)?;
+        Ok(true)
+    }
+
+    /// Insert with value return (returns existing value if key exists)
+    pub fn insert_with_value(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<api::InsertResult> {
+        // Check if key already exists
+        if let Some(existing) = self.get_cf(cf, key)? {
+            // Key exists - return existing value
+            return Ok(api::InsertResult::AlreadyExists(bytes::Bytes::from(existing)));
+        }
+        
+        // Key doesn't exist - do the insert
+        self.put_cf(cf, key, value)?;
+        Ok(api::InsertResult::Ok)
+    }
+
+    /// Compare-and-swap operation
+    pub fn compare_and_swap(&self, cf: &ColumnFamilyHandle, key: &[u8], expected: Option<bytes::Bytes>, new_value: &[u8]) -> MidgeResult<api::CasResult> {
+        // Get current value
+        let current = self.get_cf(cf, key)?;
+        
+        // Check if current matches expected
+        let matches = match (&current, &expected) {
+            (None, None) => true,
+            (Some(curr), Some(exp)) => curr == exp,
+            _ => false,
+        };
+        
+        if matches {
+            // Swap succeeded
+            self.put_cf(cf, key, new_value)?;
+            Ok(api::CasResult::Swapped)
+        } else {
+            // Swap failed - return current value
+            Ok(api::CasResult::Mismatch(current))
+        }
     }
 
     /// Sync all pending writes to disk

@@ -52,5 +52,6 @@ pub mod testkit;
 // Re-export key types
 pub use common::{MidgeError, MidgeResult};
 pub use engine::{MidgeEngine, ColumnFamilyHandle};
+pub use engine::api::{Query, CasResult, InsertResult, WriteBatch};
 pub use metrics::PerformanceMetrics;
 pub use testkit::{MidgeOptions, StorageMode, MockStorage};
