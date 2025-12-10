@@ -46,8 +46,11 @@ impl WalActor {
         cf_id: u32,
         key: Bytes,
         value: Option<Bytes>,
-        sequence: u64,
+        _sequence: u64, // Ignored - runtime assigns
     ) -> MidgeResult<()> {
+        // Assign sequence number from runtime state
+        let sequence = state.next_sequence();
+
         // Create WAL record
         let record = WalRecord::new_cf(cf_id, WalOpKind::Put, key.clone(), value.clone(), sequence);
 
