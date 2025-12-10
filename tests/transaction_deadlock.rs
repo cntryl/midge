@@ -367,9 +367,7 @@ fn should_handle_self_conflict_given_same_key_multiple_writes() {
         );
 
         let value = engine.get(&cf, b"key").unwrap();
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"value3")),
+        assert_eq!(value.as_deref(), Some(b"value3"),
             "[{}] Last write should win",
             name
         );
@@ -552,9 +550,7 @@ fn should_persist_last_committed_value_given_concurrent_puts_when_lww() {
 
         // Assert: Last committed value (txn2) should persist
         let value = engine.get(&cf, b"contested_key").unwrap();
-        assert_eq!(
-            value,
-            Some(Bytes::from_static(b"txn2_value")),
+        assert_eq!(value.as_deref(), Some(b"txn2_value"),
             "[{}] Last committed PUT value should persist after restart",
             ctx.name()
         );

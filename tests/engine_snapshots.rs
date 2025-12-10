@@ -37,15 +37,11 @@ fn should_hide_writes_given_snapshot_created_before_write_when_get_at() {
         let current = engine.get(&cf, b"key").expect("get");
 
         // Assert
-        assert_eq!(
-            at_snapshot,
-            Some(Bytes::from_static(b"v1")),
+        assert_eq!(at_snapshot.as_deref(), Some(b"v1"),
             "Failed for {}",
             name
         );
-        assert_eq!(
-            current,
-            Some(Bytes::from_static(b"v2")),
+        assert_eq!(current.as_deref(), Some(b"v2"),
             "Failed for {}",
             name
         );
@@ -73,9 +69,7 @@ fn should_return_none_given_snapshot_before_key_exists_when_get_at() {
 
         // Assert
         assert_eq!(at_snapshot, None, "Failed for {}", name);
-        assert_eq!(
-            current,
-            Some(Bytes::from_static(b"value")),
+        assert_eq!(current.as_deref(), Some(b"value"),
             "Failed for {}",
             name
         );
@@ -101,9 +95,7 @@ fn should_see_value_given_snapshot_after_write_when_get_at() {
         let at_snapshot = engine.get_at(&cf, b"key", &snapshot).expect("get_at");
 
         // Assert
-        assert_eq!(
-            at_snapshot,
-            Some(Bytes::from_static(b"value")),
+        assert_eq!(at_snapshot.as_deref(), Some(b"value"),
             "Failed for {}",
             name
         );
@@ -131,9 +123,7 @@ fn should_see_deleted_key_given_snapshot_before_delete_when_get_at() {
         let current = engine.get(&cf, b"key").expect("get");
 
         // Assert
-        assert_eq!(
-            at_snapshot,
-            Some(Bytes::from_static(b"value")),
+        assert_eq!(at_snapshot.as_deref(), Some(b"value"),
             "Failed for {}",
             name
         );
@@ -299,27 +289,19 @@ fn should_maintain_separate_views_given_multiple_snapshots_when_reading() {
         let r_current = engine.get(&cf, b"key").expect("get");
 
         // Assert - each snapshot sees correct version
-        assert_eq!(
-            r1,
-            Some(Bytes::from_static(b"v1")),
+        assert_eq!(r1.as_deref(), Some(b"v1"),
             "snap1 failed for {}",
             name
         );
-        assert_eq!(
-            r2,
-            Some(Bytes::from_static(b"v2")),
+        assert_eq!(r2.as_deref(), Some(b"v2"),
             "snap2 failed for {}",
             name
         );
-        assert_eq!(
-            r3,
-            Some(Bytes::from_static(b"v3")),
+        assert_eq!(r3.as_deref(), Some(b"v3"),
             "snap3 failed for {}",
             name
         );
-        assert_eq!(
-            r_current,
-            Some(Bytes::from_static(b"v3")),
+        assert_eq!(r_current.as_deref(), Some(b"v3"),
             "current failed for {}",
             name
         );

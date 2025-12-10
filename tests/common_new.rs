@@ -64,8 +64,8 @@ pub fn new_engine() -> (TempDir, MidgeEngine) {
 pub fn assert_get_equals(eng: &MidgeEngine, key: &[u8], expected: &[u8]) {
     let result = eng.get(key).expect("get");
     assert_eq!(
-        result,
-        Some(Bytes::from_static(expected)),
+        result.as_deref(),
+        Some(expected),
         "Key mismatch for {:?}",
         std::str::from_utf8(key).unwrap_or("<invalid utf8>")
     );

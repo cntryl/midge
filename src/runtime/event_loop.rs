@@ -8,14 +8,14 @@
 //! - All read paths are local (memtables → SST later).
 //! - All actor responses flow through `respond()`.
 
-use std::sync::Arc;
 use crossbeam::channel::Receiver;
+use std::sync::Arc;
 
 use super::actors::{
     CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
 };
 use super::state::RuntimeState;
-use super::{RuntimeMsg, RuntimeResponse, ResponseRouter};
+use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::sst::Memtable;
 
 /// Main synchronous event loop for the runtime.
@@ -108,7 +108,10 @@ impl EventLoop {
                     let resp = self
                         .flush_actor
                         .handle_flush(&mut self.state, cf_id, self.hybrid_storage.as_ref())
-                        .map(|sst_name| RuntimeResponse::FlushComplete { request_id, sst_name })
+                        .map(|sst_name| RuntimeResponse::FlushComplete {
+                            request_id,
+                            sst_name,
+                        })
                         .unwrap_or_else(|e| RuntimeResponse::Error {
                             request_id,
                             message: e.to_string(),
@@ -123,8 +126,12 @@ impl EventLoop {
                     sst_name,
                     sequence,
                 } => {
-                    self.flush_actor
-                        .handle_flush_complete(&mut self.state, cf_id, &sst_name, sequence);
+                    self.flush_actor.handle_flush_complete(
+                        &mut self.state,
+                        cf_id,
+                        &sst_name,
+                        sequence,
+                    );
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
                 }
 
@@ -135,11 +142,7 @@ impl EventLoop {
                     if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
                         let resp = self
                             .compaction_actor
-                            .run_compaction(
-                                &mut self.state,
-                                plan,
-                                self.hybrid_storage.as_ref(),
-                            )
+                            .run_compaction(&mut self.state, plan, self.hybrid_storage.as_ref())
                             .map(|output_ssts| RuntimeResponse::CompactionComplete {
                                 request_id,
                                 output_ssts,
@@ -345,13 +348,10 @@ impl EventLoop {
                     self.respond(request_id, resp);
                 }
 
-                RuntimeMsg::ManifestCreateColumnFamily {
-                    request_id,
-                    name,
-                } => {
-                    let result =
-                        self.manifest_actor
-                            .create_column_family(&mut self.state, name.clone());
+                RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
+                    let result = self
+                        .manifest_actor
+                        .create_column_family(&mut self.state, name.clone());
                     let resp = result
                         .map(|cf_id| RuntimeResponse::ColumnFamilyCreated { request_id, cf_id })
                         .unwrap_or_else(|e| RuntimeResponse::Error {
@@ -361,13 +361,10 @@ impl EventLoop {
                     self.respond(request_id, resp);
                 }
 
-                RuntimeMsg::ManifestDropColumnFamily {
-                    request_id,
-                    cf_id,
-                } => {
-                    let result =
-                        self.manifest_actor
-                            .drop_column_family(&mut self.state, cf_id);
+                RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
+                    let result = self
+                        .manifest_actor
+                        .drop_column_family(&mut self.state, cf_id);
                     let resp = result
                         .map(|_| RuntimeResponse::Ok { request_id })
                         .unwrap_or_else(|e| RuntimeResponse::Error {
@@ -385,13 +382,7 @@ impl EventLoop {
                     sequence,
                 } => {
                     let value = self.handle_read(cf_id, &key, sequence);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::ReadValue {
-                            request_id,
-                            value,
-                        },
-                    );
+                    self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
                 }
             }
         }
