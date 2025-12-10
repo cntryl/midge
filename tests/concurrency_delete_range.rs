@@ -5,7 +5,6 @@
 //!
 //! Storage modes: All 3 (Memory, LocalDisk, CloudBacked)
 
-mod common;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions};
 use cntryl_midge::testkit::*;

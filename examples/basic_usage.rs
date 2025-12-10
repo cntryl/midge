@@ -4,10 +4,11 @@
 
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeResult, WriteBatch, Query};
+use std::path::PathBuf;
 
 fn main() -> MidgeResult<()> {
     // Open a database
-    let db = MidgeEngine::open("./example_db".into())?;
+    let db = MidgeEngine::open(PathBuf::from("./example_db"))?;
     let cf = db.default_column_family();
 
     // Basic put/get operations

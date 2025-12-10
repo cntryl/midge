@@ -47,7 +47,7 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
         let results = eng
             .scan(
                 &cf,
-                Query::new()
+                &Query::new()
                     .start_key(Bytes::from_static(b"key1"))
                     .end_key(Bytes::from_static(b"key4")),
             )
@@ -84,7 +84,7 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
             .start_key(Bytes::from_static(b"key1"))
             .end_key(Bytes::from_static(b"key4"))
             .reverse();
-        let results = eng.scan(&cf, query).expect("reverse scan");
+        let results = eng.scan(&cf, &query).expect("reverse scan");
 
         // Assert - results in descending order
         assert_eq!(results.len(), 3, "{}: expected 3 results", name);
@@ -115,7 +115,7 @@ fn should_limit_results_given_limit_query_when_scanning() {
 
         // Act - scan with limit
         let results = eng
-            .scan(&cf, Query::new().limit(5))
+            .scan(&cf, &Query::new().limit(5))
             .expect("scan with limit");
 
         // Assert
@@ -138,7 +138,7 @@ fn should_return_empty_given_empty_db_when_scanning() {
         let cf = eng.default_column_family();
 
         // Act - scan empty database
-        let results = eng.scan(&cf, Query::new()).expect("scan");
+        let results = eng.scan(&cf, &Query::new()).expect("scan");
 
         // Assert
         assert!(results.is_empty(), "{}: expected empty results", name);
@@ -352,7 +352,7 @@ fn should_iterate_consistently_given_data_spans_sst_boundaries_when_scanning() {
         eng.flush().expect("flush");
 
         // Act - scan all rows
-        let results = eng.scan(&cf, Query::new()).expect("scan");
+        let results = eng.scan(&cf, &Query::new()).expect("scan");
 
         // Assert
         assert_eq!(results.len(), 50, "{}: expected 50 results", name);

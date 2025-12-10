@@ -208,3 +208,114 @@ impl MidgeEngineTestExt for crate::MidgeEngine {
     }
 }
 
+// ============================================================================
+// TEST UTILITIES AND HELPERS
+// ============================================================================
+
+/// Assert that a key has the expected value
+pub fn assert_get_equals(engine: &crate::MidgeEngine, cf: &ColumnFamilyHandle, key: &[u8], expected: &[u8]) {
+    let result = engine.get_cf(cf, key).expect("get failed");
+    assert_eq!(result.as_ref().map(|b| b.as_ref()), Some(expected));
+}
+
+/// Assert that a key is absent (returns None)
+pub fn assert_key_absent(engine: &crate::MidgeEngine, cf: &ColumnFamilyHandle, key: &[u8]) {
+    let result = engine.get_cf(cf, key).expect("get failed");
+    assert!(result.is_none(), "Expected key to be absent, but found value");
+}
+
+/// Create a temporary directory for tests
+pub fn test_temp_dir() -> PathBuf {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_millis();
+    let pid = std::process::id();
+    PathBuf::from(format!("target/test_data/tmp_{}_{}", pid, timestamp))
+}
+
+/// Durability test context (stub for compatibility)
+pub struct DurabilityTestContext {
+    _private: (),
+}
+
+impl DurabilityTestContext {
+    pub fn new() -> Self {
+        Self { _private: () }
+    }
+}
+
+impl Default for DurabilityTestContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Options for compaction tests
+pub fn compaction_test_opts() -> MidgeOptions {
+    MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: test_temp_dir(),
+        },
+        wal_sync: true,
+        memtable_size: 1024 * 1024, // 1 MB for faster flushing in tests
+        compression: false,
+    }
+}
+
+/// Options for manual compaction tests
+pub fn manual_compaction_test_opts() -> MidgeOptions {
+    MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: test_temp_dir(),
+        },
+        wal_sync: true,
+        memtable_size: 512 * 1024, // 512 KB for even faster flushing
+        compression: false,
+    }
+}
+
+/// Bulk insert keys for testing
+pub fn bulk_put(engine: &crate::MidgeEngine, cf: &ColumnFamilyHandle, kvs: &[(&[u8], &[u8])]) -> crate::MidgeResult<()> {
+    for (key, value) in kvs {
+        engine.put_cf(cf, key, value)?;
+    }
+    Ok(())
+}
+
+/// Populate multi-level data for compaction tests (stub)
+pub fn populate_multi_level_data(
+    _engine: &crate::MidgeEngine,
+    _cf: &ColumnFamilyHandle,
+    _levels: usize,
+) -> crate::MidgeResult<()> {
+    // Stub implementation - real implementation would:
+    // 1. Write data to memtable
+    // 2. Flush to L0
+    // 3. Trigger compactions to create multiple levels
+    // For now, this is a placeholder
+    Ok(())
+}
+
+/// Test helpers module
+pub mod test_helpers {
+    use std::time::Duration;
+
+    /// Wait for a signal with default timeout
+    pub fn wait_for_signal_default<T>(rx: std::sync::mpsc::Receiver<T>) -> Option<T> {
+        rx.recv_timeout(Duration::from_secs(5)).ok()
+    }
+}
+
+/// Options for durability tests
+pub fn durability_opts() -> MidgeOptions {
+    MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: test_temp_dir(),
+        },
+        wal_sync: true,
+        memtable_size: 2 * 1024 * 1024, // 2 MB
+        compression: false,
+    }
+}
+

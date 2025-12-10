@@ -13,8 +13,6 @@
 //!
 //! All tests run on both LocalDisk and CloudBacked modes via `disk_storage_modes()`.
 
-mod common;
-
 use cntryl_midge::{MidgeEngine, MidgeOptions};
 use cntryl_midge::testkit::{
     assert_get_equals, create_storage_mode, disk_storage_modes, manual_compaction_test_opts,

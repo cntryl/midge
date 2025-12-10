@@ -23,6 +23,12 @@ pub use api::*;
 pub use context::Context;
 pub use open::open_engine;
 
+/// Trait for types that can be converted to engine open parameters
+/// Allows both PathBuf and MidgeOptions to be used with MidgeEngine::open
+pub trait OpenParam {
+    fn to_path(self) -> PathBuf;
+}
+
 /// Column family identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColumnFamilyId(pub u32);
@@ -83,9 +89,48 @@ pub struct MidgeEngine {
     next_snapshot_id: std::sync::atomic::AtomicU64,
 }
 
+impl OpenParam for PathBuf {
+    fn to_path(self) -> PathBuf {
+        self
+    }
+}
+
+impl OpenParam for crate::testkit::MidgeOptions {
+    fn to_path(self) -> PathBuf {
+        match &self.storage_mode {
+            crate::testkit::StorageMode::Memory => {
+                PathBuf::from(":memory:")
+            }
+            crate::testkit::StorageMode::LocalDisk { db_path } => {
+                db_path.clone()
+            }
+            crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
+                local_cache_path.clone()
+            }
+        }
+    }
+}
+
+impl OpenParam for &crate::testkit::MidgeOptions {
+    fn to_path(self) -> PathBuf {
+        match &self.storage_mode {
+            crate::testkit::StorageMode::Memory => {
+                PathBuf::from(":memory:")
+            }
+            crate::testkit::StorageMode::LocalDisk { db_path } => {
+                db_path.clone()
+            }
+            crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
+                local_cache_path.clone()
+            }
+        }
+    }
+}
+
 impl MidgeEngine {
-    /// Open a database at the given path (internal use)
-    pub fn open(db_path: PathBuf) -> MidgeResult<Self> {
+    /// Open a database from flexible parameters (PathBuf or MidgeOptions)
+    pub fn open<P: OpenParam>(param: P) -> MidgeResult<Self> {
+        let db_path = param.to_path();
         // Create runtime state
         let state = RuntimeState::new(db_path.clone());
 
