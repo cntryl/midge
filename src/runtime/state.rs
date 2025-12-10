@@ -88,6 +88,11 @@ impl Default for CloudState {
 ///
 /// This is the single source of truth for all mutable engine state.
 /// The runtime owns this and actors propose updates via messages.
+///
+/// Important:
+/// - This type does NOT handle per-request routing.
+/// - Response routing is handled exclusively by ResponseRouter
+///   (shared between RuntimeHandle and EventLoop).
 pub struct RuntimeState {
     // === Paths ===
     pub db_path: PathBuf,
@@ -117,9 +122,7 @@ pub struct RuntimeState {
 }
 
 impl RuntimeState {
-    /// Create new runtime state with the given database path
-    ///
-    /// This also performs manifest loading and WAL recovery if they exist.
+    /// Create new runtime state with the given database path.
     pub fn new(db_path: PathBuf) -> Self {
         if let Err(e) = std::fs::create_dir_all(&db_path) {
             tracing::warn!(error = %e, path = ?db_path, "failed to create database directory");
@@ -135,7 +138,7 @@ impl RuntimeState {
             tracing::warn!(error = %e, path = ?sst_dir, "failed to create SST directory");
         }
 
-        // Load manifest from disk if it exists
+        // Load manifest
         let manifest = match crate::metadata::ManifestPersistence::load(&db_path) {
             Ok(m) => {
                 tracing::info!("manifest loaded from disk");
@@ -148,10 +151,8 @@ impl RuntimeState {
         };
 
         let mut column_families = HashMap::new();
-        // Always create the default column family (id=0)
-        column_families.insert(0, ColumnFamilyState::new(0, "default".to_string()));
+        column_families.insert(0, ColumnFamilyState::new(0, "default".into()));
 
-        // Create any other column families from the manifest
         for cf_meta in &manifest.column_families {
             if cf_meta.id != 0 {
                 column_families.insert(
@@ -161,7 +162,7 @@ impl RuntimeState {
             }
         }
 
-        // Perform WAL recovery if WAL directory exists
+        // WAL recovery
         if wal_dir.exists() {
             let mut recovery_memtables = HashMap::new();
             match crate::wal::recovery::replay_wal(&wal_dir, &mut recovery_memtables) {
@@ -171,15 +172,10 @@ impl RuntimeState {
                         bytes_recovered = stats.bytes_recovered,
                         "WAL recovery completed successfully"
                     );
-                    // Merge recovered memtables into column families
                     for (cf_id, recovered_memtable) in recovery_memtables {
                         if let Some(cf_state) = column_families.get_mut(&cf_id) {
-                            // Copy entries from recovered memtable to current memtable
-                            // For now, we'll replace the memtable (in a real implementation,
-                            // we might merge or preserve state more carefully)
                             cf_state.memtable = recovered_memtable;
                         } else {
-                            // Create column family if it doesn't exist
                             let name = format!("cf_{}", cf_id);
                             let mut cf_state = ColumnFamilyState::new(cf_id, name);
                             cf_state.memtable = recovered_memtable;
@@ -204,12 +200,11 @@ impl RuntimeState {
             wal: WalState::default(),
             compaction: CompactionState::default(),
             cloud: CloudState::default(),
-            memtable_size_limit: 64 * 1024 * 1024, // 64MB default
+            memtable_size_limit: 64 * 1024 * 1024, // 64MB
             read_only: false,
         }
     }
 
-    /// Get the next sequence number (atomically increments)
     pub fn next_sequence(&mut self) -> u64 {
         self.sequence += 1;
         self.sequence
@@ -221,25 +216,20 @@ impl RuntimeState {
         self.next_txn_id
     }
 
-    /// Get a column family by ID
     pub fn get_cf(&self, cf_id: u32) -> Option<&ColumnFamilyState> {
         self.column_families.get(&cf_id)
     }
 
-    /// Get a mutable column family by ID
     pub fn get_cf_mut(&mut self, cf_id: u32) -> Option<&mut ColumnFamilyState> {
         self.column_families.get_mut(&cf_id)
     }
 
-    /// Create a new column family
     pub fn create_cf(&mut self, name: String) -> MidgeResult<u32> {
         let id = self.column_families.len() as u32;
-        self.column_families
-            .insert(id, ColumnFamilyState::new(id, name));
+        self.column_families.insert(id, ColumnFamilyState::new(id, name));
         Ok(id)
     }
 
-    /// Check if any memtable needs flushing
     pub fn needs_flush(&self) -> Option<u32> {
         for (cf_id, cf) in &self.column_families {
             // Use the Memtable trait method

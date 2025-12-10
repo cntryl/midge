@@ -5,7 +5,7 @@
 //! features are not yet implemented in the new engine.
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, Query, CasResult, InsertResult};
 use cntryl_midge::testkit::{all_storage_modes, create_storage_mode};
 
 // ============================================================================

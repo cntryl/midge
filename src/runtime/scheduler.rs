@@ -1,13 +1,21 @@
-//! Scheduler - prioritizes and batches work
+//! Scheduler — prioritizes and batches work.
 //!
-//! Orders tasks by priority and batches related operations for efficiency.
+//! IMPORTANT (Copilot guidance):
+//! - Scheduler does *not* perform per-request routing.
+//! - Scheduler does *not* interact with ResponseRouter.
+//! - Scheduler only orders and limits concurrent tasks by TaskKind.
+//!
+//! The EventLoop executes work; scheduler merely selects which task should run next.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 use super::task::{Task, TaskId, TaskKind};
 
-/// Scheduled task wrapper for priority queue
+/// Wrapper for BinaryHeap scheduling.
+///
+/// NOTE: BinaryHeap is a max-heap — the `Ord` implementation defines
+/// which tasks are considered "higher priority."
 struct ScheduledTask {
     task: Task,
 }
@@ -28,80 +36,86 @@ impl PartialOrd for ScheduledTask {
 
 impl Ord for ScheduledTask {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Higher priority first, then older tasks first
+        // Higher priority should come first.
         match self.task.priority.cmp(&other.task.priority) {
-            Ordering::Equal => other.task.created_at.cmp(&self.task.created_at),
+            Ordering::Equal => {
+                // For equal priority tasks, older tasks should run first.
+                // BinaryHeap pops the "largest", so we reverse age ordering.
+                other.task.created_at.cmp(&self.task.created_at)
+            }
             other => other,
         }
     }
 }
 
-/// Task scheduler with priority queue
+/// Priority + concurrency-aware scheduler.
 pub struct Scheduler {
-    /// Priority queue of pending tasks
     queue: BinaryHeap<ScheduledTask>,
-    /// Maximum concurrent tasks per kind
     max_concurrent: usize,
-    /// Current running tasks per kind
-    running: std::collections::HashMap<TaskKind, usize>,
+
+    /// Tracks active tasks by kind.
+    running: HashMap<TaskKind, usize>,
 }
 
 impl Scheduler {
-    /// Create a new scheduler
+    /// Create a new scheduler.
     pub fn new() -> Self {
         Self {
             queue: BinaryHeap::new(),
-            max_concurrent: 4,
-            running: std::collections::HashMap::new(),
+            max_concurrent: 4, // Default concurrency limit.
+            running: HashMap::new(),
         }
     }
 
-    /// Schedule a task
+    /// Schedule a task for future execution.
     pub fn schedule(&mut self, task: Task) {
         self.queue.push(ScheduledTask { task });
     }
 
-    /// Get the next task to run, respecting concurrency limits
+    /// Get the next task to run, respecting concurrency per TaskKind.
+    ///
+    /// Removes and returns exactly one schedulable task, or None if none can run.
     pub fn next(&mut self) -> Option<Task> {
-        // Find a task that can run (not exceeding concurrency for its kind)
-        let mut temp = Vec::new();
-        let mut result = None;
+        let mut deferred = Vec::new();
+        let mut selected = None;
 
+        // Pop until we find something runnable or queue is empty.
         while let Some(scheduled) = self.queue.pop() {
-            let running = self.running.get(&scheduled.task.kind).copied().unwrap_or(0);
+            let kind = scheduled.task.kind;
+            let running = *self.running.get(&kind).unwrap_or(&0);
+
             if running < self.max_concurrent {
-                // Can run this task
-                *self.running.entry(scheduled.task.kind).or_insert(0) += 1;
-                result = Some(scheduled.task);
+                // Select this task to execute.
+                self.running.insert(kind, running + 1);
+                selected = Some(scheduled.task);
                 break;
             } else {
-                // Can't run yet, save for later
-                temp.push(scheduled);
+                // Can't run this task yet; store it temporarily.
+                deferred.push(scheduled);
             }
         }
 
-        // Put back tasks we couldn't run
-        for t in temp {
+        // Restore deferred tasks back into the queue.
+        for t in deferred {
             self.queue.push(t);
         }
 
-        result
+        selected
     }
 
-    /// Mark a task as completed
-    pub fn complete(&mut self, task_id: TaskId, kind: TaskKind) {
+    /// Mark a completed task, decrementing its concurrency counter.
+    pub fn complete(&mut self, _task_id: TaskId, kind: TaskKind) {
         if let Some(count) = self.running.get_mut(&kind) {
             *count = count.saturating_sub(1);
         }
-        let _ = task_id; // Used for logging/debugging
     }
 
-    /// Get number of pending tasks
+    /// Return number of pending tasks.
     pub fn pending_count(&self) -> usize {
         self.queue.len()
     }
 
-    /// Check if any tasks are running
+    /// Returns true if any task of any kind is currently active.
     pub fn has_running(&self) -> bool {
         self.running.values().any(|&c| c > 0)
     }

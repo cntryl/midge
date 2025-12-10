@@ -8,6 +8,7 @@
 
 use super::super::state::RuntimeState;
 use crate::common::MidgeResult;
+use crate::sst::Memtable;
 use crate::wal::{FsWalFactory, WalFactory, WalOpKind, WalRecord, WalWriter};
 use bytes::Bytes;
 use std::path::PathBuf;
@@ -48,11 +49,21 @@ impl WalActor {
         sequence: u64,
     ) -> MidgeResult<()> {
         // Create WAL record
-        let record = WalRecord::new_cf(cf_id, WalOpKind::Put, key, value, sequence);
+        let record = WalRecord::new_cf(cf_id, WalOpKind::Put, key.clone(), value.clone(), sequence);
 
         // Append to WAL
         if let Some(writer) = &self.writer {
             writer.append_record(&record)?;
+        }
+
+        // ALSO update the runtime's memtable for this column family
+        // This is critical - reads need to see the writes!
+        if let Some(cf_state) = state.column_families.get(&cf_id) {
+            if let Some(val) = &value {
+                cf_state.memtable.as_ref().put(key.to_vec(), val.to_vec())?;
+            } else {
+                cf_state.memtable.as_ref().delete(key.to_vec())?;
+            }
         }
 
         // Update state tracking
