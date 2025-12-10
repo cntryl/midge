@@ -1,48 +1,59 @@
-//! Dispatcher - routes messages to appropriate actors
+//! Dispatcher — maps incoming messages to actor task categories.
 //!
-//! Simple message routing based on message type.
+//! IMPORTANT (Copilot guidance):
+//! - Dispatcher does *not* handle per-request routing.
+//! - Dispatcher must never touch ResponseRouter or pending responses.
+//! - EventLoop is solely responsible for running actors and sending responses.
+//! - This component only classifies messages by type.
 
 use super::task::TaskKind;
 use super::RuntimeMsg;
 
-/// Message dispatcher
+/// Message dispatcher — lightweight classifier.
 pub struct Dispatcher;
 
 impl Dispatcher {
-    /// Create a new dispatcher
     pub fn new() -> Self {
         Self
     }
 
-    /// Determine which actor should handle a message
+    /// Determine which actor category should handle the message.
+    ///
+    /// Copilot: DO NOT move response routing here.
     pub fn route(&self, msg: &RuntimeMsg) -> TaskKind {
+        use RuntimeMsg::*;
+
         match msg {
-            RuntimeMsg::FlushMemtable { .. } | RuntimeMsg::FlushComplete { .. } => TaskKind::Flush,
+            // Flush
+            FlushMemtable { .. } | FlushComplete { .. } => TaskKind::Flush,
 
-            RuntimeMsg::CheckCompaction
-            | RuntimeMsg::RunCompaction { .. }
-            | RuntimeMsg::CompactionComplete { .. } => TaskKind::Compaction,
+            // Compaction
+            CheckCompaction { .. } | RunCompaction { .. } | CompactionComplete { .. } => {
+                TaskKind::Compaction
+            }
 
-            RuntimeMsg::WalAppend { .. }
-            | RuntimeMsg::WalSync
-            | RuntimeMsg::WalRotate
-            | RuntimeMsg::WalSyncComplete { .. } => TaskKind::Wal,
+            // WAL
+            WalAppend { .. } | WalSync { .. } | WalRotate { .. } | WalSyncComplete { .. } => {
+                TaskKind::Wal
+            }
 
-            RuntimeMsg::CloudUploadSst { .. }
-            | RuntimeMsg::CloudUploadWal { .. }
-            | RuntimeMsg::CloudUploadComplete { .. } => TaskKind::Cloud,
+            // Cloud
+            CloudUploadSst { .. } | CloudUploadWal { .. } | CloudUploadComplete { .. } => {
+                TaskKind::Cloud
+            }
 
-            RuntimeMsg::CheckGc | RuntimeMsg::DeleteObsoleteSsts { .. } => TaskKind::Gc,
+            // GC
+            CheckGc { .. } | DeleteObsoleteSsts { .. } => TaskKind::Gc,
 
-            RuntimeMsg::ManifestAddSst { .. }
-            | RuntimeMsg::ManifestCompactionComplete { .. }
-            | RuntimeMsg::ManifestPersist
-            | RuntimeMsg::ManifestCreateColumnFamily { .. }
-            | RuntimeMsg::ManifestDropColumnFamily { .. } => TaskKind::Manifest,
+            // Manifest
+            ManifestAddSst { .. }
+            | ManifestCompactionComplete { .. }
+            | ManifestPersist { .. }
+            | ManifestCreateColumnFamily { .. }
+            | ManifestDropColumnFamily { .. } => TaskKind::Manifest,
 
-            RuntimeMsg::Read { .. } => TaskKind::User,
-
-            RuntimeMsg::Shutdown | RuntimeMsg::Noop => TaskKind::User,
+            // User-level (reads, control)
+            Read { .. } | Shutdown | Noop { .. } => TaskKind::User,
         }
     }
 }

@@ -196,16 +196,15 @@ impl MidgeEngineTestExt for crate::MidgeEngine {
     }
     
     fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> crate::MidgeResult<()> {
-        self.put_cf(cf, key, value)
+        crate::MidgeEngine::put(self, cf, key, value)
     }
     
     fn get(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> crate::MidgeResult<Option<Bytes>> {
-        let result = self.get_cf(cf, key)?;
-        Ok(result.map(|v| Bytes::from(v)))
+        crate::MidgeEngine::get(self, cf, key)
     }
     
     fn delete(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> crate::MidgeResult<()> {
-        self.delete_cf(cf, key)
+        crate::MidgeEngine::delete(self, cf, key)
     }
 }
 
