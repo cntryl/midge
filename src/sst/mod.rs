@@ -13,11 +13,13 @@ use crate::iterators::SkipList;
 use bytes::Bytes;
 use std::sync::Arc;
 
+pub mod bloom;
 pub mod encoding;
 pub mod fs;
 pub mod traits;
 pub mod types;
 
+pub use bloom::{BloomFactory, BloomFilterFactory, BloomReader, BloomTestResult, BloomWriter};
 pub use fs::FsSstFactory;
 pub use traits::{DynSstWriter, SstFactory, SstReader, SstStateReader, SstWriter};
 pub use types::{Block, BlockHandle, BlockType, Footer, KeyState, RangeTombstone, SstEntry};
