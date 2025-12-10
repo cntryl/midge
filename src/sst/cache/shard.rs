@@ -146,7 +146,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_store_and_retrieve() {
+    fn should_retrieve_value_after_store() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
         let key = CacheKey::new(1, 0);

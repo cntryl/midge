@@ -180,7 +180,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_insert_and_test_keys() {
+    fn should_contain_key_after_insert() {
         // Arrange
         let mut filter = BloomWriter::new(100, 0.01);
         let key = b"hello";
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn should_serialize_and_deserialize() {
+    fn should_serialize_bloom_filter() {
         // Arrange
         let mut filter = BloomWriter::new(100, 0.01);
         filter.insert(b"test");

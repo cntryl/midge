@@ -32,14 +32,12 @@ fn cleanup_test_dir(dir: &PathBuf) {
 }
 
 #[test]
-fn should_complete_write_flush_recover_pipeline() {
+fn should_persist_writes_to_memtable() {
     // Arrange: Setup
     let test_dir = setup_test_dir();
-
-    // Create engine with test directory
     let engine = MidgeEngine::open(test_dir.clone()).expect("Failed to open engine");
 
-    // Act 1: Write operations (hits memtable + WAL)
+    // Act
     engine.put(b"key1", b"value1").expect("Put failed");
     engine.put(b"key2", b"value2").expect("Put failed");
     engine.put(b"key3", b"value3").expect("Put failed");
@@ -49,9 +47,21 @@ fn should_complete_write_flush_recover_pipeline() {
         .get(b"key1")
         .expect("Get failed")
         .expect("Key not found");
-    assert_eq!(val, b"value1");
+    assert_eq!(val.to_vec(), b"value1".to_vec());
 
-    // Act 2: Flush memtable to SST
+    // Cleanup
+    drop(engine);
+    cleanup_test_dir(&test_dir);
+}
+
+#[test]
+fn should_persist_data_after_flush_to_sst() {
+    // Arrange: Setup
+    let test_dir = setup_test_dir();
+    let engine = MidgeEngine::open(test_dir.clone()).expect("Failed to open engine");
+    engine.put(b"key2", b"value2").expect("Put failed");
+
+    // Act: Flush memtable to SST
     engine.flush().expect("Flush failed");
 
     // Assert: Data still readable after flush (in SST now)
@@ -59,17 +69,29 @@ fn should_complete_write_flush_recover_pipeline() {
         .get(b"key2")
         .expect("Get failed")
         .expect("Key not found");
-    assert_eq!(val, b"value2");
+    assert_eq!(val.to_vec(), b"value2".to_vec());
 
-    // Act 3: Sync to ensure WAL is persisted
+    // Cleanup
+    drop(engine);
+    cleanup_test_dir(&test_dir);
+}
+
+#[test]
+fn should_persist_data_after_sync() {
+    // Arrange: Setup
+    let test_dir = setup_test_dir();
+    let engine = MidgeEngine::open(test_dir.clone()).expect("Failed to open engine");
+    engine.put(b"key3", b"value3").expect("Put failed");
+
+    // Act: Sync to ensure WAL is persisted
     engine.sync().expect("Sync failed");
 
-    // Assert: All data readable before shutdown
+    // Assert: All data readable after sync
     let val = engine
         .get(b"key3")
         .expect("Get failed")
         .expect("Key not found");
-    assert_eq!(val, b"value3");
+    assert_eq!(val.to_vec(), b"value3".to_vec());
 
     // Cleanup
     drop(engine);
@@ -706,7 +728,7 @@ fn should_isolate_data_between_column_families() {
 }
 
 #[test]
-fn should_flush_and_read_custom_column_family_from_sst() {
+fn should_read_custom_column_family_from_sst() {
     // Arrange
     let test_dir = setup_test_dir();
     let engine = MidgeEngine::open(test_dir.clone()).expect("Failed to open engine");

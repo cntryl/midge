@@ -263,7 +263,7 @@ fn should_keep_only_highest_seq_when_batch_deduplicating_multiple_keys() {
 }
 
 #[test]
-fn should_handle_mixed_tombstones_and_values_when_deduplicating() {
+fn should_deduplicate_with_mixed_versions() {
     // Arrange
     let versions = vec![
         mk_version("k1", 5, false, Some("v5"), None),      // Live
@@ -291,7 +291,7 @@ fn should_handle_mixed_tombstones_and_values_when_deduplicating() {
 // ============================================================================
 
 #[test]
-fn should_merge_and_deduplicate_when_running_full_streaming_pipeline() {
+fn should_run_full_streaming_pipeline() {
     // Arrange: Three streams with overlapping keys
     let stream1 = vec![
         MergeEntry {

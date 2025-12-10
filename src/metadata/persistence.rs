@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn should_save_and_load_manifest_when_persisting() {
+    fn should_roundtrip_manifest_when_persisting() {
         // Arrange
         let test_dir = create_test_dir();
         let mut manifest = Manifest::default();

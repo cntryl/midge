@@ -356,14 +356,14 @@ mod tests {
     }
 
     #[test]
-    fn is_expired_should_return_true_for_past_expiration() {
+    fn should_detect_expired_version_when_past_expiration() {
         let now = 1_000_000u64;
         let v = mk_version("k", 1, false, Some("v"), Some(now - 1));
         assert!(is_expired(&v, now));
     }
 
     #[test]
-    fn is_expired_should_return_false_for_future_or_none() {
+    fn should_not_expire_version_when_future_or_none() {
         let now = 1_000_000u64;
         let v_future = mk_version("k", 1, false, Some("v"), Some(now + 10));
         let v_none = mk_version("k", 1, false, Some("v"), None);

@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn should_put_and_get_value() {
+    fn should_retrieve_value_after_put() {
         // Arrange
         let cache = BlockCache::new_default(1024 * 1024);
         let key = CacheKey::new(1, 0);

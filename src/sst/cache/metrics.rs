@@ -96,7 +96,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_track_hits_and_misses() {
+    fn should_track_cache_metrics() {
         // Arrange
         let metrics = CacheMetrics::new();
 

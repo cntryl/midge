@@ -200,29 +200,96 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_roundtrip_record_when_encoding_and_decoding_simple() {
-        // Arrange
+    fn should_encode_put_operation() {
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             42,
         );
+        let encoded = encode(&record).unwrap();
+        assert!(!encoded.is_empty());
+    }
 
-        // Act
+    #[test]
+    fn should_roundtrip_put_operation() {
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            42,
+        );
         let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded[..]).unwrap();
-
-        // Assert
         assert_eq!(decoded.op, WalOpKind::Put);
+    }
+
+    #[test]
+    fn should_preserve_key_when_encoding_and_decoding() {
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"mykey"),
+            Some(Bytes::from_static(b"value")),
+            42,
+        );
+        let encoded = encode(&record).unwrap();
+        let decoded = decode(&encoded[..]).unwrap();
         assert_eq!(decoded.key, record.key);
+    }
+
+    #[test]
+    fn should_preserve_value_when_encoding_and_decoding() {
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"myvalue")),
+            42,
+        );
+        let encoded = encode(&record).unwrap();
+        let decoded = decode(&encoded[..]).unwrap();
         assert_eq!(decoded.value, record.value);
+    }
+
+    #[test]
+    fn should_preserve_sequence_when_encoding_and_decoding() {
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            42,
+        );
+        let encoded = encode(&record).unwrap();
+        let decoded = decode(&encoded[..]).unwrap();
         assert_eq!(decoded.seq, 42);
     }
 
     #[test]
-    fn should_preserve_cf_id_when_encoding_and_decoding_with_column_family() {
-        // Arrange
+    fn should_encode_delete_operation() {
+        let record = WalRecord::new(
+            WalOpKind::Delete,
+            Bytes::from_static(b"key"),
+            None,
+            10,
+        );
+        let encoded = encode(&record).unwrap();
+        assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn should_roundtrip_delete_operation() {
+        let record = WalRecord::new(
+            WalOpKind::Delete,
+            Bytes::from_static(b"key"),
+            None,
+            10,
+        );
+        let encoded = encode(&record).unwrap();
+        let decoded = decode(&encoded[..]).unwrap();
+        assert_eq!(decoded.op, WalOpKind::Delete);
+    }
+
+    #[test]
+    fn should_encode_column_family_id() {
         let record = WalRecord::new_cf(
             1,
             WalOpKind::Delete,
@@ -230,13 +297,35 @@ mod tests {
             None,
             100,
         );
+        let encoded = encode(&record).unwrap();
+        assert!(!encoded.is_empty());
+    }
 
-        // Act
+    #[test]
+    fn should_preserve_cf_id_when_encoding_and_decoding() {
+        let record = WalRecord::new_cf(
+            1,
+            WalOpKind::Delete,
+            Bytes::from_static(b"mykey"),
+            None,
+            100,
+        );
         let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded[..]).unwrap();
-
-        // Assert
         assert_eq!(decoded.cf_id, 1);
+    }
+
+    #[test]
+    fn should_preserve_all_fields_with_column_family() {
+        let record = WalRecord::new_cf(
+            1,
+            WalOpKind::Delete,
+            Bytes::from_static(b"mykey"),
+            None,
+            100,
+        );
+        let encoded = encode(&record).unwrap();
+        let decoded = decode(&encoded[..]).unwrap();
         assert_eq!(decoded.op, WalOpKind::Delete);
         assert_eq!(decoded.key, record.key);
         assert_eq!(decoded.value, None);

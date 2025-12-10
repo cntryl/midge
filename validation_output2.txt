@@ -1,0 +1,107 @@
+﻿cargo : warning: variable does not need to be mutable
+At line:1 char:1
++ cargo run --bin validate_tests -- --summary 2>&1 > validation_output2 ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: variab...d to be mutable:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   --> src\wal\fs\writer.rs:117:13
+    |
+117 |         let mut file = self.file.lock().expect("file mutex poisoned");
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `cntryl-midge` (lib) generated 1 warning (run `cargo fix --lib -p cntryl-midge` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running `target\debug\validate_tests.exe --summary`
+[36mScanning all tests for guideline violations...[0m
+
+[33mSummary:[0m
+  Total tests: 792
+  [32mCompliant: 684 (86.4%)[0m
+  [31mNon-compliant: 108 (13.6%)[0m
+
+[33mIssue breakdown:[0m
+  Naming violations: 2
+  AAA structure violations: 106
+  Multi-behavior violations: 1
+
+[33mSample of non-compliant tests (first 20):[0m
+  [31msrc\compaction\executor.rs::should_deduplicate_multiple_keys_independently  (line 341)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\executor.rs::is_expired_should_return_true_for_past_expiration  (line 359)[0m
+    [33m- NAMING: Does not start with 'should_'[0m
+  [31msrc\compaction\executor.rs::is_expired_should_return_false_for_future_or_none  (line 366)[0m
+    [33m- NAMING: Does not start with 'should_'[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\executor.rs::should_handle_empty_streams_in_merge  (line 449)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\executor.rs::should_deduplicate_correctly_across_streams_with_overlapping_keys  (line 482)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\merge.rs::should_create_merge_iterator_when_new  (line 179)[0m
+    [33m- AAA: Missing '// Act' comment[0m
+  [31msrc\compaction\merge.rs::should_merge_two_sorted_streams_by_key_then_seq  (line 188)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\merge.rs::should_merge_when_some_streams_are_empty  (line 226)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\planner.rs::should_create_task_with_provided_fields_when_new  (line 168)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\planner.rs::should_roundtrip_task_when_converting_to_bytes  (line 180)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\planner.rs::should_increment_task_id_when_adding_task  (line 197)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\planner.rs::should_set_output_files_when_completing_task  (line 207)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\planner.rs::should_roundtrip_log_when_converting_to_bytes  (line 219)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\strategy.rs::should_create_compactor_with_default_config_when_new  (line 260)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\compaction\strategy.rs::should_calculate_level_target_sizes_when_multiplying_by_level_multiplier  (line 268)[0m
+    [33m- AAA: Missing '// Arrange' comment[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+  [31msrc\engine\api\iterator.rs::should_track_remaining_count_when_iterating  (line 277)[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+    [33m- AAA: Has combined AAA comment (e.g., '// Arrange + Act')[0m
+  [31msrc\engine\api\snapshot.rs::should_create_snapshot_with_sequence_when_initialized  (line 63)[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Has combined AAA comment (e.g., '// Arrange + Act')[0m
+  [31msrc\engine\api\snapshot.rs::should_compare_snapshots_by_id_when_using_equality  (line 88)[0m
+    [33m- AAA: Missing '// Assert' comment[0m
+    [33m- AAA: Has combined AAA comment (e.g., '// Arrange + Act')[0m
+  [31msrc\engine\api\snapshot.rs::should_support_default_cf_when_cf_id_is_none  (line 100)[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Has combined AAA comment (e.g., '// Arrange + Act')[0m
+  [31msrc\engine\api\write_batch.rs::should_create_empty_batch_when_initialized  (line 120)[0m
+    [33m- AAA: Missing '// Act' comment[0m
+    [33m- AAA: Has combined AAA comment (e.g., '// Arrange + Act')[0m
+[33mAll Multi-behavior violations:[0m
+  [31mtests\engine_integration_e2e.rs::should_persist_writes_to_memtable_and_wal  (line 35)[0m
+    [33m- MULTI-BEHAVIOR: Test name contains '_and_' in action (may test multiple behaviors)[0m

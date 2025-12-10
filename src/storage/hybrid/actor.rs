@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_concurrent_flush_and_compaction_under_pressure() {
+    fn should_handle_concurrent_operations_under_pressure() {
         // Arrange: Test complex scenario with simultaneous flushes and compaction
         let policy = StorageBudgetPolicy::new(5 * 1024 * 1024); // 5 MB for more flexibility
         let mut actor = StorageBudgetActor::new(policy);

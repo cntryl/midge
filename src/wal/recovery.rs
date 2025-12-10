@@ -157,21 +157,59 @@ mod tests {
     fn should_initialize_stats_with_zeros_when_created() {
         let stats = RecoveryStats::new();
         assert_eq!(stats.record_count, 0);
+    }
+
+    #[test]
+    fn should_initialize_bytes_with_zero_when_created() {
+        let stats = RecoveryStats::new();
         assert_eq!(stats.bytes, 0);
     }
 
     #[test]
-    fn should_return_empty_stats_when_wal_directory_missing() {
+    fn should_return_empty_record_count_when_wal_directory_missing() {
         let mut memtables = HashMap::new();
         let non_existent = std::env::temp_dir().join("midge_nonexistent_wal_dir_12345");
         let stats = replay_wal(&non_existent, &mut memtables).unwrap();
         assert_eq!(stats.record_count, 0);
+    }
+
+    #[test]
+    fn should_return_none_max_sequence_when_wal_directory_missing() {
+        let mut memtables = HashMap::new();
+        let non_existent = std::env::temp_dir().join("midge_nonexistent_wal_dir_12345");
+        let stats = replay_wal(&non_existent, &mut memtables).unwrap();
         assert_eq!(stats.max_sequence, None);
     }
 
     #[test]
-    fn should_recover_put_operations_when_replaying_wal() {
+    fn should_recover_put_record_key_value_when_replaying_wal() {
         let temp_dir = std::env::temp_dir().join("midge_recovery_test_put");
+        let wal_dir = temp_dir.join("wal");
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+            let record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"test_key"),
+                Some(Bytes::from_static(b"test_value")),
+                1,
+            );
+            writer.append_record(&record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+        let _stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        let recovered_memtable = &memtables[&0];
+        let value = recovered_memtable.get(b"test_key").unwrap();
+        assert_eq!(value, Some(b"test_value".to_vec()));
+    }
+
+    #[test]
+    fn should_increment_record_count_when_replaying_put() {
+        let temp_dir = std::env::temp_dir().join("midge_recovery_test_put_count");
         let wal_dir = temp_dir.join("wal");
         std::fs::create_dir_all(&wal_dir).ok();
 
@@ -191,15 +229,34 @@ mod tests {
         let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
         assert!(stats.record_count > 0);
-        assert_eq!(stats.max_sequence, Some(1));
-        assert!(memtables.contains_key(&0));
-        let recovered_memtable = &memtables[&0];
-        let value = recovered_memtable.get(b"test_key").unwrap();
-        assert_eq!(value, Some(b"test_value".to_vec()));
     }
 
     #[test]
-    fn should_recover_delete_operations_when_replaying_wal() {
+    fn should_track_max_sequence_from_put_record() {
+        let temp_dir = std::env::temp_dir().join("midge_recovery_test_put_seq");
+        let wal_dir = temp_dir.join("wal");
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+            let record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"test_key"),
+                Some(Bytes::from_static(b"test_value")),
+                1,
+            );
+            writer.append_record(&record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        assert_eq!(stats.max_sequence, Some(1));
+    }
+
+    #[test]
+    fn should_recover_delete_operation_when_replaying_wal() {
         let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_delete_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
@@ -221,17 +278,122 @@ mod tests {
         }
 
         let mut memtables = HashMap::new();
-        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+        let _stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
-        assert_eq!(stats.record_count, 2, "Should recover exactly 2 records");
         let recovered_memtable = &memtables[&0];
         let value = recovered_memtable.get(b"test_key").unwrap();
         assert_eq!(value, None);
     }
 
     #[test]
-    fn should_handle_multiple_column_families_when_recovering() {
+    fn should_count_put_records() {
+        // Arrange
+        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_delete_count_{}", std::process::id()));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+            let put_record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"test_key"),
+                Some(Bytes::from_static(b"test_value")),
+                1,
+            );
+            writer.append_record(&put_record).unwrap();
+
+            let delete_record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
+            writer.append_record(&delete_record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.record_count, 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_separate_records_by_column_family_when_recovering() {
         let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_cf_{}", std::process::id()));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+
+            let record_cf0 = WalRecord::new_cf(
+                0,
+                WalOpKind::Put,
+                Bytes::from_static(b"key0"),
+                Some(Bytes::from_static(b"value0")),
+                1,
+            );
+            writer.append_record(&record_cf0).unwrap();
+
+            let record_cf1 = WalRecord::new_cf(
+                1,
+                WalOpKind::Put,
+                Bytes::from_static(b"key1"),
+                Some(Bytes::from_static(b"value1")),
+                2,
+            );
+            writer.append_record(&record_cf1).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+        let _stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        assert_eq!(memtables.len(), 2);
+    }
+
+    #[test]
+    fn should_recover_both_column_families_with_correct_data() {
+        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_cf_data_{}", std::process::id()));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+
+            let record_cf0 = WalRecord::new_cf(
+                0,
+                WalOpKind::Put,
+                Bytes::from_static(b"key0"),
+                Some(Bytes::from_static(b"value0")),
+                1,
+            );
+            writer.append_record(&record_cf0).unwrap();
+
+            let record_cf1 = WalRecord::new_cf(
+                1,
+                WalOpKind::Put,
+                Bytes::from_static(b"key1"),
+                Some(Bytes::from_static(b"value1")),
+                2,
+            );
+            writer.append_record(&record_cf1).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+        let _stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        assert!(memtables[&0].get(b"key0").unwrap().is_some());
+        assert!(memtables[&1].get(b"key1").unwrap().is_some());
+    }
+
+    #[test]
+    fn should_count_records_across_multiple_column_families() {
+        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_cf_count_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -262,14 +424,11 @@ mod tests {
         let mut memtables = HashMap::new();
         let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
-        assert_eq!(stats.record_count, 2, "Should recover exactly 2 records");
-        assert_eq!(memtables.len(), 2, "Should have 2 column families");
-        assert!(memtables[&0].get(b"key0").unwrap().is_some());
-        assert!(memtables[&1].get(b"key1").unwrap().is_some());
+        assert_eq!(stats.record_count, 2);
     }
 
     #[test]
-    fn should_track_max_sequence_when_recovering() {
+    fn should_track_max_sequence_across_multiple_records() {
         let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_seq_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
@@ -307,8 +466,51 @@ mod tests {
         let mut memtables = HashMap::new();
         let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
-        assert_eq!(stats.record_count, 3);
         assert_eq!(stats.max_sequence, Some(10));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_count_multiple_records_correctly() {
+        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_count_{}", std::process::id()));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+
+            let record1 = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key1"),
+                Some(Bytes::from_static(b"value1")),
+                5,
+            );
+            writer.append_record(&record1).unwrap();
+
+            let record2 = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key2"),
+                Some(Bytes::from_static(b"value2")),
+                10,
+            );
+            writer.append_record(&record2).unwrap();
+
+            let record3 = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key3"),
+                Some(Bytes::from_static(b"value3")),
+                7,
+            );
+            writer.append_record(&record3).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        assert_eq!(stats.record_count, 3);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -327,8 +529,26 @@ mod tests {
         let mut memtables = HashMap::new();
         let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
 
-        assert_eq!(stats.record_count, 0);
         assert_eq!(stats.max_sequence, None);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_return_zero_record_count_when_no_records() {
+        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_empty_count_{}", std::process::id()));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let _writer = FsWalWriter::new(&wal_dir).unwrap();
+        }
+
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        assert_eq!(stats.record_count, 0);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

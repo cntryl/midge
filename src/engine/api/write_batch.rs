@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn should_support_mixed_put_and_delete_when_building_batch() {
+    fn should_support_mixed_operations_when_building_batch() {
         // Arrange
         let mut batch = WriteBatch::new();
 

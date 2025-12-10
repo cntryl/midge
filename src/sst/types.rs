@@ -234,66 +234,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_roundtrip_footer_when_encoding_and_decoding() {
-        // Arrange
+    fn should_encode_footer() {
         let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
+        let encoded = footer.encode();
+        assert_eq!(encoded.len(), 56);
+    }
 
-        // Act
+    #[test]
+    fn should_decode_footer_meta_index_handle() {
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
         let encoded = footer.encode();
         let decoded = Footer::decode(&encoded).unwrap();
-
-        // Assert
-        assert_eq!(encoded.len(), 56); // New format with trie support
         assert_eq!(decoded.meta_index_handle.offset, 0);
         assert_eq!(decoded.meta_index_handle.size, 100);
+    }
+
+    #[test]
+    fn should_decode_footer_index_handle() {
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
+        let encoded = footer.encode();
+        let decoded = Footer::decode(&encoded).unwrap();
         assert_eq!(decoded.index_handle.offset, 100);
         assert_eq!(decoded.index_handle.size, 200);
+    }
+
+    #[test]
+    fn should_decode_footer_without_trie() {
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
+        let encoded = footer.encode();
+        let decoded = Footer::decode(&encoded).unwrap();
         assert_eq!(decoded.trie_handle, None);
     }
 
     #[test]
-    fn should_roundtrip_footer_with_trie() {
-        // Arrange
+    fn should_add_trie_to_footer() {
         let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200))
             .with_trie(BlockHandle::new(300, 50));
-
-        // Act
         let encoded = footer.encode();
         let decoded = Footer::decode(&encoded).unwrap();
-
-        // Assert
-        assert_eq!(encoded.len(), 56);
         assert_eq!(decoded.trie_handle, Some(BlockHandle::new(300, 50)));
     }
 
     #[test]
-    fn should_identify_keys_within_range_when_checking_coverage() {
-        // Arrange
+    fn should_cover_key_within_range_tombstone() {
         let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
-
-        // Act
-        let covers_m = rt.covers(b"m");
-        let covers_z = rt.covers(b"z");
-        let covers_0 = rt.covers(b"0");
-
-        // Assert
-        assert!(covers_m);
-        assert!(!covers_z);
-        assert!(!covers_0);
+        assert!(rt.covers(b"m"));
     }
 
     #[test]
-    fn should_identify_tombstones_when_checking_entry_type() {
-        // Arrange
+    fn should_not_cover_end_boundary_in_range_tombstone() {
+        let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
+        assert!(!rt.covers(b"z"));
+    }
+
+    #[test]
+    fn should_not_cover_key_below_start_in_range_tombstone() {
+        let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
+        assert!(!rt.covers(b"0"));
+    }
+
+    #[test]
+    fn should_identify_tombstone_entry() {
         let entry = SstEntry::new(b"key".to_vec(), None, 1, 2, None);
+        assert!(entry.is_tombstone());
+    }
+
+    #[test]
+    fn should_identify_non_tombstone_entry() {
         let entry2 = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, None);
-
-        // Act
-        let is_tombstone1 = entry.is_tombstone();
-        let is_tombstone2 = entry2.is_tombstone();
-
-        // Assert
-        assert!(is_tombstone1);
-        assert!(!is_tombstone2);
+        assert!(!entry2.is_tombstone());
     }
 }

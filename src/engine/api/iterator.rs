@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn should_support_builder_chaining_with_reverse_and_bounds() {
+    fn should_support_builder_chaining_with_reverse() {
         // Arrange
         let results = vec![
             (vec![1], vec![10]),

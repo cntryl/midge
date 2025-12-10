@@ -230,7 +230,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_and_evict() {
+    fn should_evict_after_access() {
         // Arrange
         let policy = ClockProPolicy::new();
         let key1 = CacheKey::new(1, 0);
