@@ -46,6 +46,7 @@ pub const SST_FOOTER_MAGIC: u64 = 0xdb4775248b80fb57;
 pub struct Footer {
     pub meta_index_handle: BlockHandle,
     pub index_handle: BlockHandle,
+    pub trie_handle: Option<BlockHandle>,
 }
 
 impl Footer {
@@ -53,13 +54,24 @@ impl Footer {
         Self {
             meta_index_handle,
             index_handle,
+            trie_handle: None,
         }
     }
 
+    pub fn with_trie(mut self, trie_handle: BlockHandle) -> Self {
+        self.trie_handle = Some(trie_handle);
+        self
+    }
+
     /// Encode footer to exactly 48 bytes (compatible with RocksDB format)
-    /// Layout: [meta_index_handle: 16 bytes] [index_handle: 16 bytes] [padding: 8 bytes] [magic: 8 bytes]
+    /// Layout: 
+    ///   [meta_index_handle: 16 bytes] 
+    ///   [index_handle: 16 bytes] 
+    ///   [trie_handle: 16 bytes (optional, 0 if None)]
+    ///   [magic: 8 bytes]
+    /// Total: 56 bytes (extended from 48 for trie support)
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = vec![0u8; 48];
+        let mut buf = vec![0u8; 56];
         // Store handles as fixed 16 bytes each
         // meta_index: offset (8) + size (8)
         buf[0..8].copy_from_slice(&self.meta_index_handle.offset.to_le_bytes());
@@ -67,23 +79,32 @@ impl Footer {
         // index: offset (8) + size (8)
         buf[16..24].copy_from_slice(&self.index_handle.offset.to_le_bytes());
         buf[24..32].copy_from_slice(&self.index_handle.size.to_le_bytes());
-        // Reserved bytes [32..40] for future use
-        // Magic number at end [40..48]
-        buf[40..48].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
+        // trie: offset (8) + size (8) - zero if None
+        if let Some(trie) = self.trie_handle {
+            buf[32..40].copy_from_slice(&trie.offset.to_le_bytes());
+            buf[40..48].copy_from_slice(&trie.size.to_le_bytes());
+        }
+        // Magic number at end [48..56]
+        buf[48..56].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
         buf
     }
 
-    /// Decode footer from 48 bytes
+    /// Decode footer from 48 or 56 bytes (backward compatible)
     pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
         if data.len() < 48 {
             return Err(crate::common::MidgeError::Corruption(
                 "Footer too short".into(),
             ));
         }
+
+        // Check if this is old format (48 bytes) or new format (56 bytes)
+        let is_extended = data.len() >= 56;
         
-        // Validate magic number first
+        // Validate magic number
+        let magic_offset = if is_extended { 48 } else { 40 };
         let magic = u64::from_le_bytes([
-            data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
+            data[magic_offset], data[magic_offset+1], data[magic_offset+2], data[magic_offset+3],
+            data[magic_offset+4], data[magic_offset+5], data[magic_offset+6], data[magic_offset+7],
         ]);
         if magic != SST_FOOTER_MAGIC {
             return Err(crate::common::MidgeError::Corruption(
@@ -104,9 +125,27 @@ impl Footer {
             data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
         ]);
 
+        // Read trie handle if extended format
+        let trie_handle = if is_extended {
+            let trie_offset = u64::from_le_bytes([
+                data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
+            ]);
+            let trie_size = u64::from_le_bytes([
+                data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
+            ]);
+            if trie_offset == 0 && trie_size == 0 {
+                None
+            } else {
+                Some(BlockHandle::new(trie_offset, trie_size))
+            }
+        } else {
+            None
+        };
+
         Ok(Footer {
             meta_index_handle: BlockHandle::new(meta_offset, meta_size),
             index_handle: BlockHandle::new(idx_offset, idx_size),
+            trie_handle,
         })
     }
 }
@@ -204,11 +243,27 @@ mod tests {
         let decoded = Footer::decode(&encoded).unwrap();
 
         // Assert
-        assert_eq!(encoded.len(), 48);
+        assert_eq!(encoded.len(), 56); // New format with trie support
         assert_eq!(decoded.meta_index_handle.offset, 0);
         assert_eq!(decoded.meta_index_handle.size, 100);
         assert_eq!(decoded.index_handle.offset, 100);
         assert_eq!(decoded.index_handle.size, 200);
+        assert_eq!(decoded.trie_handle, None);
+    }
+
+    #[test]
+    fn should_roundtrip_footer_with_trie() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200))
+            .with_trie(BlockHandle::new(300, 50));
+
+        // Act
+        let encoded = footer.encode();
+        let decoded = Footer::decode(&encoded).unwrap();
+
+        // Assert
+        assert_eq!(encoded.len(), 56);
+        assert_eq!(decoded.trie_handle, Some(BlockHandle::new(300, 50)));
     }
 
     #[test]

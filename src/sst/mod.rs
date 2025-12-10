@@ -41,7 +41,8 @@
 //
 //   Block = <block_data_bytes> + <1 byte compression type> + <4 byte crc32c>
 //
-// Compression types supported: NONE, Snappy (optional), Zstd (optional).
+// Compression types: See src/sst/compression/mod.rs for authoritative codes:
+//   0=None, 1=LZ4, 2=Zstd(3), 3=Zstd(9+), 4=Zlib, 5=Snappy
 //
 // =====================================================================================
 // 3. BLOCK RULES
@@ -54,6 +55,7 @@
 //         sorted keys
 //         no duplicates
 //         restart array at end of block
+//         optional compression via CompressionPolicy
 //
 // Index block invariants:
 //   - Contains (separator key → block_handle) entries.
@@ -75,14 +77,14 @@
 //     - adds to current data block
 //
 //   When block is full (>= target_size):
-//     - finalize block
+//     - finalize block (with optional compression via compress_block())
 //     - compute block handle (offset + length)
 //     - add index entry with separator key
 //     - write block to file
 //     - start new block
 //
 //   builder.finish()
-//     - write final data block
+//     - write final data block (compressed)
 //     - write filter block (if enabled)
 //     - write index block
 //     - write footer
@@ -207,17 +209,26 @@ use std::sync::Arc;
 
 pub mod bloom;
 pub mod cache;
+pub mod compression;
 pub mod encoding;
 pub mod fs;
+pub mod index;
 pub mod sparse_index;
 pub mod traits;
+pub mod trie;
 pub mod types;
 
 pub use bloom::{BloomFactory, BloomFilterFactory, BloomReader, BloomTestResult, BloomWriter};
 pub use cache::{BlockCache, CacheKey, CacheMetrics, CachePolicyType, CacheValue};
+pub use compression::{
+    compress_block, decompress_block, CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE,
+    MAX_BLOCK_SIZE, MIN_COMPRESS_SIZE,
+};
 pub use fs::FsSstFactory;
+pub use index::{IndexKind, IndexTuner, KeyStructureProfile, KeyStructureProfiler};
 pub use sparse_index::{BlockRange, IndexEntry, SparseIndexReader, SparseIndexWriter};
 pub use traits::{DynSstWriter, SstFactory, SstReader, SstStateReader, SstWriter};
+pub use trie::{TrieBuilder, TrieReader, TrieWriter};
 pub use types::{Block, BlockHandle, BlockType, Footer, KeyState, RangeTombstone, SstEntry};
 
 /// Key-value pair
