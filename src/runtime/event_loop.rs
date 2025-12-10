@@ -4,7 +4,7 @@
 
 use crossbeam::channel::{Receiver, Sender};
 
-use super::actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
+use super::actors::{CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor};
 use super::state::RuntimeState;
 use super::{RuntimeMsg, RuntimeResponse};
 use crate::sst::Memtable;
@@ -20,6 +20,7 @@ pub struct EventLoop {
     cloud_actor: CloudActor,
     gc_actor: GcActor,
     manifest_actor: ManifestActor,
+    eviction_actor: Option<EvictionActor>,
     /// Hybrid storage with budget management
     hybrid_storage: Option<std::sync::Arc<crate::storage::HybridStorage>>,
     /// Whether to trace messages
@@ -44,13 +45,16 @@ impl EventLoop {
             cloud_actor: CloudActor::new(),
             gc_actor: GcActor::new(),
             manifest_actor: ManifestActor::new(),
+            eviction_actor: None,
             hybrid_storage: None,
             trace_enabled,
         })
     }
 
-    /// Set the hybrid storage reference for SBA integration
+    /// Set the hybrid storage reference for SBA integration and initialize eviction actor
     pub fn set_hybrid_storage(&mut self, storage: std::sync::Arc<crate::storage::HybridStorage>) {
+        // Initialize eviction actor with hybrid storage reference
+        self.eviction_actor = Some(EvictionActor::new(std::sync::Arc::clone(&storage)));
         self.hybrid_storage = Some(storage);
     }
 

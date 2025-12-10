@@ -93,21 +93,21 @@ impl VersionManager {
 
     /// Submit an edit to the pending queue
     pub fn add_edit(&self, edit: VersionEdit) -> MidgeResult<()> {
-        let mut edits = self.pending_edits.lock().unwrap();
+        let mut edits = self.pending_edits.lock().expect("pending_edits lock poisoned");
         edits.push_back(edit);
         Ok(())
     }
 
     /// Apply all pending edits to manifest and create new version
     pub fn apply_edits(&self) -> MidgeResult<Arc<Version>> {
-        let mut edits = self.pending_edits.lock().unwrap();
+        let mut edits = self.pending_edits.lock().expect("pending_edits lock poisoned");
         if edits.is_empty() {
             return Err(crate::common::MidgeError::InvalidArgument(
                 "No edits to apply".to_string(),
             ));
         }
 
-        let mut manifest = self.current_manifest.lock().unwrap();
+        let mut manifest = self.current_manifest.lock().expect("current_manifest lock poisoned");
 
         // Apply all edits
         while let Some(edit) = edits.pop_front() {
@@ -179,7 +179,7 @@ impl VersionManager {
 
     /// Get pending edit count
     pub fn pending_edit_count(&self) -> usize {
-        self.pending_edits.lock().unwrap().len()
+        self.pending_edits.lock().expect("pending_edits lock poisoned").len()
     }
 
     /// Get version set reference
@@ -189,7 +189,7 @@ impl VersionManager {
 
     /// Clear pending edits without applying
     pub fn clear_edits(&self) {
-        self.pending_edits.lock().unwrap().clear();
+        self.pending_edits.lock().expect("pending_edits lock poisoned").clear();
     }
 }
 

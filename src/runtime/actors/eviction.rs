@@ -60,18 +60,12 @@ impl EvictionActor {
         };
 
         if let Some((sst_id, size)) = next_eviction {
-            // Delete the local SST file
-            // Note: The file path would be constructed from sst_id
-            // e.g., "ssts/{sst_id}.sst" or similar based on the filesystem structure
-            let file_path = format!("ssts/{:08x}.sst", sst_id);
-
-            // Try to delete the local replica
-            // For now, we'll just track that we processed it
-            // In real implementation, would call local backend to delete
-            self.evictions_processed += 1;
-            self.total_freed += size;
-
-            // Mark as complete to update disk state
+            // In a real implementation, we would:
+            // 1. Construct the local SST file path
+            // 2. Call local backend to delete the replica
+            // 3. Handle errors gracefully
+            //
+            // For now, we track that we processed it and mark as complete
             self.mark_eviction_complete(sst_id, size)?;
         }
 
@@ -80,9 +74,12 @@ impl EvictionActor {
 
     /// Mark an eviction as complete and update disk state
     fn mark_eviction_complete(&mut self, _sst_id: u64, freed_bytes: u64) -> Result<(), String> {
-        // Update the disk state in SBA to reflect the freed space
-        // This is done implicitly by SBA's LocalSSTPurged event
-        // The EvictionActor calls this to signal completion
+        // Update counters
+        self.evictions_processed += 1;
+        self.total_freed += freed_bytes;
+
+        // Note: The disk state in SBA would be updated separately via LocalSSTPurged event
+        // when the actual file deletion is confirmed at the filesystem level
 
         Ok(())
     }
@@ -101,7 +98,6 @@ impl EvictionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::hybrid::{actor::StorageBudgetActor, policy::StorageBudgetPolicy};
 
     fn create_test_eviction_actor() -> (EvictionActor, Arc<HybridStorage>) {
         // Create mock storage backends for testing
@@ -123,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn should_increment_counters_when_processing_eviction() {
+    fn should_increment_counters_when_marking_eviction_complete() {
         // Arrange
         let (mut actor, _hybrid) = create_test_eviction_actor();
 
@@ -132,5 +128,22 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
+        assert_eq!(actor.evictions_processed(), 1);
+        assert_eq!(actor.total_freed(), 1024);
+    }
+
+    #[test]
+    fn should_accumulate_freed_bytes_across_evictions() {
+        // Arrange
+        let (mut actor, _hybrid) = create_test_eviction_actor();
+
+        // Act
+        let _ = actor.mark_eviction_complete(1, 1024);
+        let _ = actor.mark_eviction_complete(2, 2048);
+        let _ = actor.mark_eviction_complete(3, 4096);
+
+        // Assert
+        assert_eq!(actor.evictions_processed(), 3);
+        assert_eq!(actor.total_freed(), 1024 + 2048 + 4096);
     }
 }

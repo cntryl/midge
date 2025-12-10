@@ -89,7 +89,7 @@ impl WalWriter for FsWalWriter {
     }
 
     fn current_pos(&self) -> WalPos {
-        *self.current_pos.lock().unwrap()
+        *self.current_pos.lock().expect("current_pos lock poisoned")
     }
 
     fn close(&self) -> MidgeResult<()> {

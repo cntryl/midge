@@ -4,9 +4,19 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 
 after each chunk of work is complete we should validate test, run clippy --all-targets, and update this file with our progress.
 
----
+**Development Guidelines:**
+
+- Keep the original `src_old/` tree unchanged; use it purely for reference and diffing.
+- Add the Copilot super prompt to the top of each rewritten file as you drive the port.
+- Use `wip/PERFECT.md` as the canonical structure reference when adding new files.
+- Prefer short, focused commits after each major subsystem port (engine API, runtime, WAL, SST, compaction, metadata).
+- All tests must follow `should_{action}_when_{context}` naming convention
+- All tests must include AAA (Arrange/Act/Assert) structure
+- Zero test naming violations in src/ directory
+- All tests must follow `should_{action}_when_{context}` naming with AAA structure.
 
 ## 1. Engine API & Facade ✅ (COMPLETED)
+
 - [x] Create basic `MidgeEngine` with open, put, get, delete, flush, sync, shutdown
 - [x] Wire engine operations to send messages to runtime actors (put → WAL, get → memtable, etc.)
 - [x] Add column family support with `ColumnFamilyHandle` and CF-scoped operations
@@ -34,6 +44,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
   - **STATUS (Session 12):** CF lifecycle fully implemented. 19/22 tests passing (86%). 1 test deferred (CF data isolation requires per-CF memtables). 2 Windows-specific ignored.
 
 ## 2. Runtime Skeleton ✅ (COMPLETED - ALL 6 ACTORS FULLY WIRED - Session 13)
+
 - [x] Define the runtime actor framework (mod.rs, event_loop.rs, state.rs, task.rs, scheduler.rs, dispatch.rs)
 - [x] Create all 6 actor implementations with message handlers (Flush, Compaction, WAL, Cloud, GC, Manifest)
 - [x] Wire runtime state into `engine::open` with all mutable state owned by EventLoop
@@ -48,6 +59,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
   - [x] **GcActor** — Fully complete: check for orphaned files, delete_ssts with safety checks
 
 ## 3. WAL Port ✅ (COMPLETED - CORE + RECOVERY, DEFERRED OPTIMIZATIONS)
+
 - [x] Create `src/wal/` with types, traits, encoding modules
 - [x] Implement WAL types: WalOpKind, WalRecord, WalPos, WalRecoveryStats, WalSyncMode
 - [x] Create WAL traits: WalWriter, WalReader, WalReaderDyn, WalFactory
@@ -65,6 +77,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
   - [ ] Delete range and merge operator support in recovery (note: TODOs in recovery.rs lines 117, 126)
 
 ## 4. SST Port ✅ (COMPLETED)
+
 - [x] Created `src/sst/` with types, traits, encoding, and fs modules
 - [x] Implemented SST types: Block, BlockHandle, BlockType, Footer, KeyState, RangeTombstone
 - [x] Created SST traits: SstReader, SstStateReader, SstWriter, DynSstWriter, SstFactory
@@ -75,6 +88,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - [x] Verified clean compilation with zero errors (10 warnings, all benign)
 
 ## 5. Metadata ✅ (COMPLETED)
+
 - [x] Create FileMeta, ColumnFamilyMeta, CloudCheckpoint, Manifest types
 - [x] Wire ManifestActor with add_sst, compaction_complete, persist handlers
 - [x] **NEW:** Implement manifest persistence (YAML serialization to disk)
@@ -86,6 +100,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - [x] **NEW:** Add 10 comprehensive VersionManager tests (edit submission, atomic batching, version publication)
 
 ## 6. Compaction ✅ (COMPLETED)
+
 - [x] Create CompactionActor with check_compaction, run_compaction, handle_complete
 - [x] Port compaction strategy with leveled compaction logic (CompactionPlan, Compactor, LeveledCompactionConfig)
 - [x] Port planner with task tracking (CompactionTask, CompactionLog with serialization)
@@ -94,6 +109,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - [x] Refactor all 13 compaction tests to follow `should_{action}_when_{context}` naming convention
 
 ## 7. Storage Backends ✅ (COMPLETED)
+
 - [x] Implement `src/storage/filesystem.rs` with read/write/delete/list
 - [x] **NEW:** Implement cloud storage backend with CloudProvider trait abstraction
 - [x] **NEW:** Add MockCloud provider for testing with in-memory storage
@@ -106,6 +122,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - [x] **NEW (Session 9):** 9 comprehensive callback-based cloud tests
 
 ## 8. Custom Cloud Providers 📋 (PATTERN DEFINED, PARTIAL S3, OTHER STUBS)
+
 - [x] **Pattern Documentation** — Created `docs/CLOUD_PROVIDER_PATTERN.md` with:
   - [x] Complete architectural pattern for callback-based cloud providers
   - [x] Four-operation interface (PUT, GET, DELETE, LIST)
@@ -138,7 +155,9 @@ after each chunk of work is complete we should validate test, run clippy --all-t
   - Status: Placeholder structure exists, not implemented
 
 ### Hybrid Storage + Storage Budget Actor ✅ (COMPLETED - Session 12+)
+
 - [x] **Storage Budget Actor** — Complete disk management for hybrid storage
+
   - [x] Implemented `StorageBudgetActor` in `src/storage/hybrid/actor.rs` (130+ lines)
     - Event-driven state machine: QuerySpace, ReserveForFlush, FlushCompleted, CloudUploadCompleted, CompactionPlanned/Completed, WalGrew, LocalSSTPurged
     - Watermark enforcement: high (90%), critical (95%), emergency (98%) usage thresholds
@@ -177,15 +196,15 @@ after each chunk of work is complete we should validate test, run clippy --all-t
   - [ ] E2E stress tests with realistic disk pressure scenarios (fill→flush→compact→upload)
   - Expected: 5-8 tests for integration scenarios
 
----
-
 **Old Hybrid Storage Item (Pre-SBA):**
+
 - [x] Basic `HybridStorage` in `src/storage/hybrid.rs` handles read fallback, delete fan-out, and deduped lists using shared `StorageBackend` trait
 - [ ] Wire the hybrid backend into `FlushActor` and `CompactionActor` so flush/deletion paths mirror to cloud storage as well
 - [ ] Replace the `HybridStorage::submit_write` fire-and-forget cloud upload with a runtime-safe background queue or tokio task
 - [ ] Add deterministic tests (`should_fall_back_when_local_missing`, `should_merge_lists_without_duplicates`, `should_schedule_cloud_write_after_local`) to lock the behavior
 
 ## 9. Iterators / Memtables ✅ (MOSTLY DONE)
+
 - [x] Ensure lock-free skiplist in `src/iterators/skiplist.rs` is production-quality
 - [x] Update Memtable trait to use interior mutability (&self)
 - [x] Confirm SkipListMemtable works with lock-free skiplist and MVCC
@@ -195,6 +214,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - [x] **NEW:** Add 4 comprehensive MergeIterator tests (multi-source, empty sources, range bounds)
 
 ## 10. Metrics & Testkit 🔧 (PARTIAL - STUBS EXIST, INTEGRATION PENDING)
+
 - [~] **Metrics** (`src/metrics/mod.rs` exists with PerformanceMetrics struct)
   - [x] Basic metric types: read_ops, write_ops, delete_ops, compactions counters
   - [ ] Integration into runtime actors for automatic recording
@@ -210,6 +230,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
   - [ ] Expected: 3-5 test utilities
 
 ## 11. Integration + Tests
+
 - [x] **NEW (Session 10):** Scaffolded integration E2E test file (engine_integration_e2e.rs)
 - [x] **NEW (Session 10):** Fixed runtime channel initialization bug (critical blocker)
 - [x] **NEW (Session 10):** Added write-flush-recover pipeline test
@@ -233,6 +254,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 ## CURRENT STATUS
 
 **Build Health:**
+
 - ✅ `cargo build --workspace` passes with zero errors (0 errors, 18 benign warnings)
 - ✅ All components compiling: runtime, engine, WAL, SST, compaction, recovery, manifest persistence, transactions, cloud storage with callback architecture, **NEW:** full read path
 - ✅ **NEW (Session 8):** Transaction API with state machine and isolation levels added
@@ -274,6 +296,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - ⚠️ 3 temp directory file I/O tests occasionally fail due to test isolation (SST fs tests)
 
 **Test Status:**
+
 - ✅ 103 lib tests passing (was 90 at session 8 start)
 - ✅ All 9 Cloud Storage callback tests passing (submit_put, submit_get, submit_delete, MockCloud)
 - ✅ All 9 Transaction tests passing (creation, puts, deletes, reads, state transitions, mixed ops, error handling, rollback, clear)
@@ -290,6 +313,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - ⚠️ SST fs tests occasionally fail with temp directory issues (3 failures when run in parallel)
 
 **Architecture Summary:**
+
 1. RuntimeState with manifest persistence integrated on startup
    - Loads manifest.yaml from disk if it exists
    - Creates column families from manifest metadata
@@ -343,6 +367,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 15. Core infrastructure ready for cloud and recovery
 
 **Write Path + Recovery (Complete):**
+
 - Engine.put() → RuntimeMsg::WalAppend → WalActor.append() → wal.log
 - Engine.flush() → RuntimeMsg::FlushMemtable → FlushActor.handle_flush() → SST file
 - CheckCompaction → CompactionActor.pick_compaction() → execute_compaction() → merged SST
@@ -353,6 +378,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - VersionSet/VersionManager → lock-free manifest reads + atomic versioning
 
 **Test Status (135+ tests passing - Session 13 Complete):**
+
 - Integration E2E: 19 tests ✅ (write-flush pipeline, delete handling, writebatch atomicity, sync ops, large data, concurrent ops, read from SST, read from memtable, deleted keys, multiple flushes, prefer memtable over SST, CF creation, CF dropping, CF listing, CF writes, CF flush-and-read) — 1 failed (CF isolation limitation), 2 ignored (Windows)
 - **NEW (Session 13):** SBA + Flush/Compaction Actors: 7 tests ✅ (flush with SBA coordination, multiple flushes, SST creation, data consistency, compaction triggering, watermark transitions, E2E coordination, recovery with SBA state) — 2 ignored (Windows)
 - **NEW (Session 13):** Cloud and GC Actors: 9 tests ✅ (SST upload tracking, WAL upload tracking, checkpoint updates, missing SST handling, orphaned file detection, orphaned file deletion, active SST protection, compacting SST protection, concurrent upload tracking)
@@ -372,7 +398,9 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 - **TOTAL:** 135+ lib tests passing, 11/13 integration E2E tests passing
 
 **What's Next (Priority Order):**
+
 1. **Storage Budget Actor** ✅ (COMPLETED - Session 12+)
+
    - [x] Implemented complete SBA with watermark enforcement and reservation model
    - [x] Integrated into HybridStorage with 7 delegation methods
    - [x] 11 comprehensive integration tests covering all watermark scenarios
@@ -380,6 +408,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
    - [x] Ready for integration with FlushActor/CompactionActor
 
 2. **Cloud and GC Actors** ✅ (COMPLETED - Session 13)
+
    - [x] **CloudActor** — Complete background upload implementation
      - [x] Read SST files from disk before upload
      - [x] Read WAL segments from disk before upload
@@ -395,6 +424,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
      - [x] 5 comprehensive integration tests
 
 3. **Wire SBA into Flush/Compaction Actors** ✅ (COMPLETED - Session 13)
+
    - [x] **EventLoop Extended** with HybridStorage field and set_hybrid_storage() method
    - [x] **FlushActor Integration** — Full reservation + backpressure handling
      - [x] Calls hybrid.reserve_for_flush(est_size) before SST creation
@@ -425,6 +455,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
    - [x] **Session 13 Clippy Validation**: cargo clippy --all-targets passes with 54 pre-existing benign warnings, zero new warnings
 
 4. **Background Eviction Task** (CURRENT - Session 14)
+
    - [ ] Create EvictionActor in src/runtime/actors/eviction.rs
    - [ ] Consume pending_evictions queue from SBA actor
    - [ ] Delete local SST replicas after cloud upload confirmation
@@ -436,6 +467,7 @@ after each chunk of work is complete we should validate test, run clippy --all-t
    - Expected: 3-4 tests
 
 5. **E2E Disk Pressure Stress Tests** (FOLLOW-UP)
+
    - [ ] Fill disk incrementally to test watermark transitions
    - [ ] Trigger flush at each watermark (90%, 95%, 98%)
    - [ ] Verify backpressure responses and retry behavior
@@ -444,12 +476,14 @@ after each chunk of work is complete we should validate test, run clippy --all-t
    - Expected: 4-6 tests
 
 6. **S3 Credential Integration Tests** (NEAR-TERM, NO BLOCKER)
+
    - [ ] Add mock S3 responses for testing without AWS account
    - [ ] Test SigV4 signer with actual AWS credentials
    - [ ] End-to-end validation with `--features cloud-aws`
    - Expected: 4-5 tests
 
 7. **Metrics Integration** (ENHANCED OBSERVABILITY, NO BLOCKER)
+
    - [ ] Hook metrics recording into runtime actors (put/get/delete/flush/compaction)
    - [ ] Add latency tracking (p50, p99) with timing instrumentation
    - [ ] Memory usage monitoring
@@ -457,30 +491,21 @@ after each chunk of work is complete we should validate test, run clippy --all-t
    - Expected: 5-8 tests
 
 8. **Testkit Expansion** (TESTING INFRASTRUCTURE, NO BLOCKER)
+
    - [ ] Deterministic runtime test scenario builders (write/flush/read pipelines)
    - [ ] Chaos/fault injection utilities for integration tests
    - [ ] Expected: 3-5 utility enhancements
 
 9. **WAL Performance Optimizations** (DEFERRED, LOW PRIORITY)
+
    - [ ] Batched sync coordination for group commits (~30% write latency reduction, TODO: recovery.rs lines 117, 126)
    - [ ] Cloud WAL segment rotation and cleanup
    - [ ] Delete range and merge operator support in recovery
    - Expected: 3-4 tests
 
 10. **Documentation & Examples** (FINAL POLISH)
-   - [ ] API usage examples
-   - [ ] Configuration guide
-   - [ ] Performance tuning guide
-   - [ ] Cloud provider integration guide
 
-**Development Guidelines:**
-- Keep the original `src_old/` tree unchanged; use it purely for reference and diffing.
-- Add the Copilot super prompt to the top of each rewritten file as you drive the port.
-- Use `wip/PERFECT.md` as the canonical structure reference when adding new files.
-- Prefer short, focused commits after each major subsystem port (engine API, runtime, WAL, SST, compaction, metadata).
-- All tests must follow `should_{action}_when_{context}` naming convention
-- All tests must include AAA (Arrange/Act/Assert) structure
-- Zero test naming violations in src/ directory
-- All tests must follow `should_{action}_when_{context}` naming with AAA structure.
-
-Feel free to re-order the steps if a dependency forces it, but strive to keep the runtime/actor structure in place before hooking up heavyweight subsystems.
+- [ ] API usage examples
+- [ ] Configuration guide
+- [ ] Performance tuning guide
+- [ ] Cloud provider integration guide

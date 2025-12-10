@@ -46,13 +46,13 @@ impl SstFile {
         file.read_exact(&mut footer_data)?;
 
         self.footer = Some(Footer::decode(&footer_data)?);
-        *self.cached_file.lock().unwrap() = Some(file);
+        *self.cached_file.lock().expect("cached_file lock poisoned") = Some(file);
 
         Ok(())
     }
 
     fn read_block(&self, handle: &BlockHandle) -> MidgeResult<Vec<u8>> {
-        let mut file_guard = self.cached_file.lock().unwrap();
+        let mut file_guard = self.cached_file.lock().expect("cached_file lock poisoned");
         if file_guard.is_none() {
             *file_guard = Some(File::open(&self.path)?);
         }

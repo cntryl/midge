@@ -113,7 +113,7 @@ impl VersionSet {
 
     /// Get a specific version by ID
     pub fn get_version(&self, version_id: u64) -> MidgeResult<Arc<Version>> {
-        let versions = self.versions.lock().unwrap();
+        let versions = self.versions.lock().expect("versions lock poisoned");
         versions
             .iter()
             .find(|v| v.version_id() == version_id)
@@ -129,7 +129,7 @@ impl VersionSet {
 
     /// Install a new version (called by manifest writer)
     pub fn install_version(&self, version: Arc<Version>) -> MidgeResult<()> {
-        let mut versions = self.versions.lock().unwrap();
+        let mut versions = self.versions.lock().expect("versions lock poisoned");
         versions.push(version.clone());
         self.current_version
             .store(version.version_id(), Ordering::SeqCst);
@@ -138,19 +138,19 @@ impl VersionSet {
 
     /// Get count of managed versions
     pub fn version_count(&self) -> usize {
-        self.versions.lock().unwrap().len()
+        self.versions.lock().expect("versions lock poisoned").len()
     }
 
     /// Get all versions
     pub fn all_versions(&self) -> Vec<Arc<Version>> {
-        self.versions.lock().unwrap().clone()
+        self.versions.lock().expect("versions lock poisoned").clone()
     }
 
     /// Check if a version exists
     pub fn has_version(&self, version_id: u64) -> bool {
         self.versions
             .lock()
-            .unwrap()
+            .expect("versions lock poisoned")
             .iter()
             .any(|v| v.version_id() == version_id)
     }

@@ -94,7 +94,7 @@ fn replay_wal_file(
     stats: &mut RecoveryStats,
 ) -> MidgeResult<()> {
     // Open WAL file for reading
-    let mut reader = super::fs::FsWalReader::new(file_path.parent().unwrap())?;
+    let mut reader = super::fs::FsWalReader::new(file_path.parent().expect("WAL file path has no parent directory"))?;
 
     // Replay all records from start of file
     reader.replay(0, |record: &WalRecord| {

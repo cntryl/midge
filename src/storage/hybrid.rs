@@ -49,7 +49,7 @@ impl HybridStorage {
 
     /// Try to reserve space for a flush; returns the reservation result
     pub fn reserve_for_flush(&self, est_size: u64) -> actor::ReservationResult {
-        let mut actor = self.budget_actor.lock().unwrap();
+        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
         actor
             .handle_event(actor::StorageBudgetEvent::ReserveForFlush { est_size })
             .unwrap_or(actor::ReservationResult::Ok)
@@ -57,13 +57,13 @@ impl HybridStorage {
 
     /// Signal that a flush completed with actual size
     pub fn flush_completed(&self, actual_size: u64) {
-        let mut actor = self.budget_actor.lock().unwrap();
+        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
         let _ = actor.handle_event(actor::StorageBudgetEvent::FlushCompleted { actual_size });
     }
 
     /// Signal that a cloud upload completed
     pub fn cloud_upload_completed(&self, sst_id: u64, actual_size: u64) {
-        let mut actor = self.budget_actor.lock().unwrap();
+        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
         let _ = actor.handle_event(actor::StorageBudgetEvent::CloudUploadCompleted {
             sst_id,
             actual_size,
@@ -72,24 +72,24 @@ impl HybridStorage {
 
     /// Signal that compaction is starting
     pub fn compaction_planned(&self, input_sizes: Vec<u64>) {
-        let mut actor = self.budget_actor.lock().unwrap();
+        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
         let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionPlanned { input_sizes });
     }
 
     /// Signal that compaction completed
     pub fn compaction_completed(&self, output_sizes: Vec<u64>) {
-        let mut actor = self.budget_actor.lock().unwrap();
+        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
         let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionCompleted { output_sizes });
     }
 
     /// Get current disk state snapshot
     pub fn disk_state(&self) -> state::DiskState {
-        let actor = self.budget_actor.lock().unwrap();
+        let actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
         actor.disk_state()
     }
 
     /// Get mutable access to the budget actor for testing and monitoring
-    pub fn budget_actor(&self) -> Result<std::sync::MutexGuard<actor::StorageBudgetActor>, String> {
+    pub fn budget_actor(&self) -> Result<std::sync::MutexGuard<'_, actor::StorageBudgetActor>, String> {
         self.budget_actor
             .lock()
             .map_err(|e| format!("Failed to lock budget actor: {}", e))
