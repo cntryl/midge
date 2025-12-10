@@ -20,6 +20,8 @@ pub struct EventLoop {
     cloud_actor: CloudActor,
     gc_actor: GcActor,
     manifest_actor: ManifestActor,
+    /// Hybrid storage with budget management
+    hybrid_storage: Option<std::sync::Arc<crate::storage::HybridStorage>>,
     /// Whether to trace messages
     trace_enabled: bool,
 }
@@ -42,8 +44,14 @@ impl EventLoop {
             cloud_actor: CloudActor::new(),
             gc_actor: GcActor::new(),
             manifest_actor: ManifestActor::new(),
+            hybrid_storage: None,
             trace_enabled,
         })
+    }
+
+    /// Set the hybrid storage reference for SBA integration
+    pub fn set_hybrid_storage(&mut self, storage: std::sync::Arc<crate::storage::HybridStorage>) {
+        self.hybrid_storage = Some(storage);
     }
 
     /// Run the event loop until shutdown
@@ -66,7 +74,11 @@ impl EventLoop {
 
                         // === Flush Actor ===
                         RuntimeMsg::FlushMemtable { cf_id } => {
-                            let result = self.flush_actor.handle_flush(&mut self.state, cf_id);
+                            let result = self.flush_actor.handle_flush(
+                                &mut self.state,
+                                cf_id,
+                                self.hybrid_storage.as_ref(),
+                            );
                             let _ = response_tx.send(match result {
                                 Ok(sst_name) => RuntimeResponse::FlushComplete { sst_name },
                                 Err(e) => RuntimeResponse::Error(e.to_string()),
@@ -97,8 +109,11 @@ impl EventLoop {
                                     target_level = plan.target_level,
                                     "Triggering compaction"
                                 );
-                                let result =
-                                    self.compaction_actor.run_compaction(&mut self.state, plan);
+                                let result = self.compaction_actor.run_compaction(
+                                    &mut self.state,
+                                    plan,
+                                    self.hybrid_storage.as_ref(),
+                                );
                                 let _ = response_tx.send(match result {
                                     Ok(output_ssts) => {
                                         RuntimeResponse::CompactionComplete { output_ssts }
@@ -118,9 +133,11 @@ impl EventLoop {
                                 target_level: plan.target_level,
                                 cf_id: plan.cf_id,
                             };
-                            let result = self
-                                .compaction_actor
-                                .run_compaction(&mut self.state, compaction_plan);
+                            let result = self.compaction_actor.run_compaction(
+                                &mut self.state,
+                                compaction_plan,
+                                self.hybrid_storage.as_ref(),
+                            );
                             let _ = response_tx.send(match result {
                                 Ok(output_ssts) => {
                                     RuntimeResponse::CompactionComplete { output_ssts }

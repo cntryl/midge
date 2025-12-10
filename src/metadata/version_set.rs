@@ -165,6 +165,8 @@ mod tests {
         manifest.column_families.push(ColumnFamilyMeta {
             id: 0,
             name: "default".to_string(),
+            created_at: 0,
+            deleted_at: None,
         });
         manifest.files.push(FileMeta {
             name: "file1.sst".to_string(),
@@ -306,6 +308,8 @@ mod tests {
         manifest.column_families.push(ColumnFamilyMeta {
             id: 1,
             name: "secondary".to_string(),
+            created_at: 0,
+            deleted_at: None,
         });
         manifest.files.push(FileMeta {
             name: "file3.sst".to_string(),

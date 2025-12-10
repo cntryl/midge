@@ -30,9 +30,46 @@ impl FlushActor {
 
     /// Handle a flush request for a column family
     ///
+    /// If SBA is available, reserves space before flushing. Handles backpressure
+    /// responses (WaitForCloud, WaitForCompaction, RejectNoSpace).
+    ///
     /// This freezes the active memtable and queues it for background flush.
     /// Returns the name of the SST file that will be created.
-    pub fn handle_flush(&mut self, state: &mut RuntimeState, cf_id: u32) -> MidgeResult<String> {
+    pub fn handle_flush(
+        &mut self,
+        state: &mut RuntimeState,
+        cf_id: u32,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+    ) -> MidgeResult<String> {
+        // Estimate SST size: approximate as active memtable size
+        let est_size = 1024 * 1024; // 1MB estimate; could be more precise
+
+        // Try to reserve space if SBA is available
+        if let Some(hybrid) = sba {
+            let reservation = hybrid.reserve_for_flush(est_size);
+            match reservation {
+                crate::storage::hybrid::actor::ReservationResult::Ok => {
+                    // Proceed with flush
+                }
+                crate::storage::hybrid::actor::ReservationResult::WaitForCloudUpload => {
+                    tracing::warn!(cf_id, "Flush blocked: waiting for cloud upload");
+                    return Err(MidgeError::Internal(
+                        "Flush blocked: waiting for cloud upload".to_string(),
+                    ));
+                }
+                crate::storage::hybrid::actor::ReservationResult::WaitForCompaction => {
+                    tracing::warn!(cf_id, "Flush blocked: waiting for compaction");
+                    return Err(MidgeError::Internal(
+                        "Flush blocked: waiting for compaction".to_string(),
+                    ));
+                }
+                crate::storage::hybrid::actor::ReservationResult::RejectNoSpace => {
+                    tracing::error!(cf_id, "Flush rejected: no disk space available");
+                    return Err(MidgeError::Internal("No disk space available".to_string()));
+                }
+            }
+        }
+
         // Get the column family
         let cf = state
             .get_cf_mut(cf_id)
@@ -68,6 +105,12 @@ impl FlushActor {
         self.write_memtable_to_sst(&frozen, &sst_path)?;
 
         tracing::info!(cf_id, sst_name = %sst_name, "SST file written");
+
+        // Signal flush completion to SBA if available
+        if let Some(hybrid) = sba {
+            let sst_path_obj = std::fs::metadata(&sst_path)?;
+            hybrid.flush_completed(sst_path_obj.len());
+        }
 
         Ok(sst_name)
     }

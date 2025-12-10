@@ -87,6 +87,13 @@ impl HybridStorage {
         let actor = self.budget_actor.lock().unwrap();
         actor.disk_state()
     }
+
+    /// Get mutable access to the budget actor for testing and monitoring
+    pub fn budget_actor(&self) -> Result<std::sync::MutexGuard<actor::StorageBudgetActor>, String> {
+        self.budget_actor
+            .lock()
+            .map_err(|e| format!("Failed to lock budget actor: {}", e))
+    }
 }
 
 impl StorageBackend for HybridStorage {

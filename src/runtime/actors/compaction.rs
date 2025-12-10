@@ -61,10 +61,13 @@ impl CompactionActor {
     }
 
     /// Execute a compaction plan
+    ///
+    /// If SBA is available, notifies it before and after compaction for disk accounting.
     pub fn run_compaction(
         &mut self,
         state: &mut RuntimeState,
         plan: crate::compaction::CompactionPlan,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<Vec<String>> {
         if self.compaction_running {
             return Err(crate::common::MidgeError::Internal(
@@ -80,6 +83,20 @@ impl CompactionActor {
             .compacting_ssts
             .extend(plan.input_files.clone());
 
+        // Calculate input sizes for SBA
+        let input_sizes: Vec<u64> = state
+            .manifest
+            .files
+            .iter()
+            .filter(|f| plan.input_files.contains(&f.name))
+            .map(|f| f.size_bytes)
+            .collect();
+
+        // Notify SBA about planned compaction
+        if let Some(hybrid) = sba {
+            hybrid.compaction_planned(input_sizes);
+        }
+
         tracing::info!(
             input_count = plan.input_files.len(),
             source_level = plan.source_level,
@@ -90,6 +107,20 @@ impl CompactionActor {
 
         // Execute the compaction via the compaction module
         let output_ssts = execute_compaction(&plan, self.sst_factory.as_ref(), &state.sst_dir)?;
+
+        // Calculate output sizes for SBA
+        let output_sizes: Vec<u64> = output_ssts
+            .iter()
+            .filter_map(|name| {
+                let path = state.sst_dir.join(name);
+                std::fs::metadata(&path).ok().map(|m| m.len())
+            })
+            .collect();
+
+        // Notify SBA about completion
+        if let Some(hybrid) = sba {
+            hybrid.compaction_completed(output_sizes);
+        }
 
         tracing::info!(
             input_count = plan.input_files.len(),

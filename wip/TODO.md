@@ -2,6 +2,8 @@
 
 This captures the incremental checklist for porting the polished `src_old/` implementation into the clean `src/` architecture described in `wip/PERFECT.md`. Each item references the subsystem that must be translated and notes the current blocker or goal.
 
+after each chunk of work is complete we should validate test, run clippy --all-targets, and update this file with our progress.
+
 ---
 
 ## 1. Engine API & Facade ✅ (COMPLETED)
@@ -350,8 +352,9 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Engine startup → RuntimeState::new() → replay_wal() → restore memtable state
 - VersionSet/VersionManager → lock-free manifest reads + atomic versioning
 
-**Test Status (128+ tests passing - Session 13+):**
-- Integration E2E: 19 tests ✅ (write-flush pipeline, delete handling, writebatch atomicity, sync ops, large data, concurrent ops, read from SST, read from memtable, deleted keys, multiple flushes, prefer memtable over SST, **NEW:** CF creation, CF dropping, CF listing, CF writes, CF flush-and-read) — 1 failed (CF isolation limitation), 2 ignored (Windows)
+**Test Status (135+ tests passing - Session 13 Complete):**
+- Integration E2E: 19 tests ✅ (write-flush pipeline, delete handling, writebatch atomicity, sync ops, large data, concurrent ops, read from SST, read from memtable, deleted keys, multiple flushes, prefer memtable over SST, CF creation, CF dropping, CF listing, CF writes, CF flush-and-read) — 1 failed (CF isolation limitation), 2 ignored (Windows)
+- **NEW (Session 13):** SBA + Flush/Compaction Actors: 7 tests ✅ (flush with SBA coordination, multiple flushes, SST creation, data consistency, compaction triggering, watermark transitions, E2E coordination, recovery with SBA state) — 2 ignored (Windows)
 - **NEW (Session 13):** Cloud and GC Actors: 9 tests ✅ (SST upload tracking, WAL upload tracking, checkpoint updates, missing SST handling, orphaned file detection, orphaned file deletion, active SST protection, compacting SST protection, concurrent upload tracking)
 - **COMPLETED (Session 12):** Hybrid Storage Budget: 11 tests ✅ (reserve below/at/above watermarks, flush completion, cloud upload eviction, compaction lifecycle, WAL growth, SST purge, usage percentage, FIFO eviction)
 - CF Lifecycle: 9 tests (8 passing, 1 deferred due to runtime limitation)
@@ -366,7 +369,7 @@ This captures the incremental checklist for porting the polished `src_old/` impl
 - Metadata Persistence: 5 tests ✅
 - WAL Recovery: 5 tests ✅
 - Plus 30 existing tests from prior implementation ✅
-- **TOTAL:** 128 lib tests passing, 11/13 integration E2E tests passing
+- **TOTAL:** 135+ lib tests passing, 11/13 integration E2E tests passing
 
 **What's Next (Priority Order):**
 1. **Storage Budget Actor** ✅ (COMPLETED - Session 12+)
@@ -391,39 +394,80 @@ This captures the incremental checklist for porting the polished `src_old/` impl
      - [x] Track last GC run timestamp
      - [x] 5 comprehensive integration tests
 
-3. **Wire SBA into Flush/Compaction Actors** (NEXT MAJOR STEP)
-   - [ ] FlushActor.handle_flush() should call hybrid.reserve_for_flush() before creating SST
-   - [ ] Handle WaitForCompaction/WaitForCloudUpload/RejectNoSpace with backpressure
-   - [ ] CompactionActor should call compaction_planned() before execution, compaction_completed() after
-   - [ ] Background eviction task to consume pending_evictions and delete local replicas
-   - [ ] E2E stress tests with realistic disk pressure scenarios (fill→flush→compact→upload)
-   - Expected: 5-8 tests for integration scenarios
+3. **Wire SBA into Flush/Compaction Actors** ✅ (COMPLETED - Session 13)
+   - [x] **EventLoop Extended** with HybridStorage field and set_hybrid_storage() method
+   - [x] **FlushActor Integration** — Full reservation + backpressure handling
+     - [x] Calls hybrid.reserve_for_flush(est_size) before SST creation
+     - [x] Handles ReservationResult::Ok path (proceed with flush)
+     - [x] Returns errors on WaitForCloudUpload/WaitForCompaction/RejectNoSpace (backpressure)
+     - [x] Calls hybrid.flush_completed(sst_size) after SST write
+   - [x] **CompactionActor Integration** — Planning + completion accounting
+     - [x] Calculates input sizes from manifest before execution
+     - [x] Calls hybrid.compaction_planned(input_sizes) before starting
+     - [x] Calculates output sizes from created SSTs after execution
+     - [x] Calls hybrid.compaction_completed(output_sizes) after finish
+   - [x] **Event Loop Dispatch** — Passes hybrid_storage references to both actors
+     - [x] FlushMemtable dispatch updated
+     - [x] CheckCompaction dispatch updated
+     - [x] RunCompaction dispatch updated
+   - [x] **7 comprehensive integration tests** in tests/sba_actor_integration.rs
+     - [x] Flush succeeds with SBA coordination
+     - [x] Multiple flushes with SBA coordination
+     - [x] SST creation during flush
+     - [x] Data consistency across flushes
+     - [x] Compaction triggering and data preservation
+     - [x] Watermark transitions during incremental disk growth
+     - [x] E2E flush and compaction coordination
+     - [x] Shutdown/recovery with SBA state
+   - [x] **Build Status**: Clean compilation, zero errors, no new clippy warnings
+   - [x] **Test Results**: 7/9 tests passing (100% non-Windows), 2 Windows-ignored
+   - [x] **Session 13 Metadata Struct Fix**: Fixed pre-existing ColumnFamilyMeta initializers in tests/common/ and src/metadata/ (added created_at and deleted_at fields)
+   - [x] **Session 13 Clippy Validation**: cargo clippy --all-targets passes with 54 pre-existing benign warnings, zero new warnings
 
-4. **S3 Credential Integration Tests** (NEAR-TERM, NO BLOCKER)
+4. **Background Eviction Task** (CURRENT - Session 14)
+   - [ ] Create EvictionActor in src/runtime/actors/eviction.rs
+   - [ ] Consume pending_evictions queue from SBA actor
+   - [ ] Delete local SST replicas after cloud upload confirmation
+   - [ ] Track deletion progress and update DiskState
+   - [ ] Handle errors gracefully (missing files, permission issues)
+   - [ ] Background task spawned by EventLoop on startup
+   - [ ] Wire into EventLoop for message dispatch
+   - [ ] E2E eviction scenario tests (fill→upload→evict→flush)
+   - Expected: 3-4 tests
+
+5. **E2E Disk Pressure Stress Tests** (FOLLOW-UP)
+   - [ ] Fill disk incrementally to test watermark transitions
+   - [ ] Trigger flush at each watermark (90%, 95%, 98%)
+   - [ ] Verify backpressure responses and retry behavior
+   - [ ] Compaction under disk pressure to free space
+   - [ ] Cloud upload completing to enable more flushes
+   - Expected: 4-6 tests
+
+6. **S3 Credential Integration Tests** (NEAR-TERM, NO BLOCKER)
    - [ ] Add mock S3 responses for testing without AWS account
    - [ ] Test SigV4 signer with actual AWS credentials
    - [ ] End-to-end validation with `--features cloud-aws`
    - Expected: 4-5 tests
 
-5. **Metrics Integration** (ENHANCED OBSERVABILITY, NO BLOCKER)
+7. **Metrics Integration** (ENHANCED OBSERVABILITY, NO BLOCKER)
    - [ ] Hook metrics recording into runtime actors (put/get/delete/flush/compaction)
    - [ ] Add latency tracking (p50, p99) with timing instrumentation
    - [ ] Memory usage monitoring
    - [ ] Throughput measurements
    - Expected: 5-8 tests
 
-6. **Testkit Expansion** (TESTING INFRASTRUCTURE, NO BLOCKER)
+8. **Testkit Expansion** (TESTING INFRASTRUCTURE, NO BLOCKER)
    - [ ] Deterministic runtime test scenario builders (write/flush/read pipelines)
    - [ ] Chaos/fault injection utilities for integration tests
    - [ ] Expected: 3-5 utility enhancements
 
-7. **WAL Performance Optimizations** (DEFERRED, LOW PRIORITY)
+9. **WAL Performance Optimizations** (DEFERRED, LOW PRIORITY)
    - [ ] Batched sync coordination for group commits (~30% write latency reduction, TODO: recovery.rs lines 117, 126)
    - [ ] Cloud WAL segment rotation and cleanup
    - [ ] Delete range and merge operator support in recovery
    - Expected: 3-4 tests
 
-8. **Documentation & Examples** (FINAL POLISH)
+10. **Documentation & Examples** (FINAL POLISH)
    - [ ] API usage examples
    - [ ] Configuration guide
    - [ ] Performance tuning guide
