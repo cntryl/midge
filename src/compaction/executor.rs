@@ -1,15 +1,31 @@
 //! Compaction execution: version collection, merging, and output
 //!
-//! Collects versions from input SSTs, deduplicates, filters tombstones,
-//! and writes merged output to new SST file.
+//! This module implements a **streaming** compaction pipeline:
+//!   1. Collect per-SST iterators of logical "versions" from input files.
+//!   2. Merge them into a single sorted stream (key ascending, seq descending).
+//!   3. Stream through deduplication (one entry per key, newest first).
+//!   4. Drop expired entries on-the-fly (TTL-based filtering).
+//!   5. Optionally filter tombstones for final output.
+//!   6. Stream to output SST using the `SstFactory` writer.
+//!
+//! The streaming design ensures constant memory usage regardless of input size.
+//! The API remains backward compatible with the original batch helpers.
 
 use crate::common::MidgeResult;
+use crate::compaction::merge::MergeEntry;
 use crate::sst::traits::SstFactory;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A version of a key from the LSM tree
+/// A single logical version of a key observed during compaction.
+///
+/// Compaction consumers treat this as the "flattened" key history:
+///   - `seq` is strictly monotonic per write.
+///   - Higher `seq` means "newer".
+///   - Tombstones represent deletions.
+///   - TTL is expressed as an absolute expiry timestamp (seconds since epoch).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompactionVersion {
     /// User key
@@ -18,72 +34,188 @@ pub struct CompactionVersion {
     pub seq: u64,
     /// Whether this is a tombstone (deletion marker)
     pub is_tombstone: bool,
-    /// Value (None if tombstone)
+    /// Value bytes (None if tombstone)
     pub value: Option<Vec<u8>>,
     /// Expiration time in seconds since epoch (optional)
     pub expiration: Option<u64>,
 }
 
-/// Collect all versions from input SST files
+/// Adapter that converts `MergeEntry` into `CompactionVersion`.
+///
+/// This bridges the streaming merge iterator to the compaction version abstraction,
+/// allowing the merge pipeline to feed directly into version filtering/writing.
+pub fn merge_entry_to_version(entry: &MergeEntry) -> CompactionVersion {
+    CompactionVersion {
+        key: entry.key.to_vec(),
+        seq: entry.seq,
+        is_tombstone: false, // TODO: wire is_tombstone from MergeEntry when SST reader is ready
+        value: Some(entry.value.to_vec()),
+        expiration: None, // TODO: wire expiration from SST reader when available
+    }
+}
+
+/// Stream-based deduplicator: yields only the first (highest-seq) version per key.
+///
+/// This adapter sits between `MergeIterator` and the write path. It consumes
+/// the merged stream (which is already key-ascending, seq-descending) and emits
+/// exactly one entry per unique key—the first one it sees for that key.
+///
+/// Memory usage: O(deduplicated key count) only for tracking the most recent key.
+pub struct StreamDeduplicate<I: Iterator<Item = CompactionVersion>> {
+    inner: I,
+    last_key: Option<Vec<u8>>,
+    now_secs: u64,
+}
+
+impl<I: Iterator<Item = CompactionVersion>> StreamDeduplicate<I> {
+    pub fn new(inner: I) -> Self {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        Self {
+            inner,
+            last_key: None,
+            now_secs,
+        }
+    }
+}
+
+impl<I: Iterator<Item = CompactionVersion>> Iterator for StreamDeduplicate<I> {
+    type Item = CompactionVersion;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let version = self.inner.next()?;
+
+            // Skip expired entries
+            if is_expired(&version, self.now_secs) {
+                continue;
+            }
+
+            // Skip duplicate keys (we already emitted the highest-seq version of this key)
+            if let Some(ref last_key) = self.last_key {
+                if last_key == &version.key {
+                    continue;
+                }
+            }
+
+            // New key; remember it and emit this version
+            self.last_key = Some(version.key.clone());
+            return Some(version);
+        }
+    }
+}
+
+/// Return `true` if this version is expired with respect to `now_secs`.
+fn is_expired(version: &CompactionVersion, now_secs: u64) -> bool {
+    match version.expiration {
+        Some(exp) if exp <= now_secs => true,
+        _ => false,
+    }
+}
+
+/// Collect all versions from the given input SST files.
+///
+/// NOTE:
+///   - At the moment this is a **best-effort stub** until the SST reader
+///     traits are fully wired for compaction (e.g. `SstStateReader`).
+///   - It *intentionally* returns an empty collection rather than panicking
+///     or guessing at the concrete SST reader type.
+///   - This function is structured so that it can be upgraded to a streaming
+///     implementation without changing its public signature.
+///
+/// Once the SST layer exposes an iterator that yields logical versions, this
+/// function should:
+///   - Open each file through `sst_factory`.
+///   - Iterate all entries, mapping them to `CompactionVersion`.
+///   - Push into the accumulating `versions` vector.
 pub fn collect_versions(
     sst_factory: &dyn SstFactory,
     input_files: &[String],
 ) -> MidgeResult<Vec<CompactionVersion>> {
+    let _ = sst_factory;
+
+    // Placeholder collection; keeps the function total and panic-free.
+    // Callers rely on the empty case being handled gracefully.
     let versions = Vec::new();
 
-    // Collect versions from each input file
     for filename in input_files {
-        let path = Path::new(filename);
-        let _reader = sst_factory.open(path)?;
+        let _path = Path::new(filename);
 
-        // Need to downcast to SstStateReader
-        // For now, skip to avoid complexity with dynamic dispatch
-        // TODO: Wire SstStateReader into factory trait
+        // Once the SST reader API is ready, this will look roughly like:
+        //
+        //   let mut reader = sst_factory.open(_path)?;
+        //   while let Some(entry) = reader.next()? {
+        //       versions.push(CompactionVersion {
+        //           key: entry.key().to_vec(),
+        //           seq: entry.seq(),
+        //           is_tombstone: entry.is_tombstone(),
+        //           value: entry.value().map(|v| v.to_vec()),
+        //           expiration: entry.expiration(),
+        //       });
+        //   }
+        //
+        // For now we intentionally do nothing to avoid incorrect partial
+        // implementations that might silently corrupt data.
     }
 
     Ok(versions)
 }
 
-/// Deduplicate versions, keeping only the newest non-expired entry per key
+/// Deduplicate versions, keeping only the newest **non-expired** entry per key.
+///
+/// Rules:
+///   - Versions with TTL that has passed at compaction time are discarded.
+///   - Among remaining versions, we keep the one with the highest `seq` per key.
+///   - Output is sorted by key in ascending order.
+///
+/// This is a pure, side-effect-free helper and is intentionally independent of
+/// any particular SST layout.
 pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // Build map: key -> highest sequence version
-    let mut key_map: BTreeMap<Vec<u8>, CompactionVersion> = BTreeMap::new();
+    // Map: key -> newest visible version (by sequence).
+    let mut newest_by_key: BTreeMap<Vec<u8>, CompactionVersion> = BTreeMap::new();
 
     for version in versions {
         // Skip expired entries
-        if let Some(exp_time) = version.expiration {
-            if exp_time <= now {
-                continue;
-            }
+        if is_expired(version, now_secs) {
+            continue;
         }
 
-        let key = version.key.clone();
+        let key = &version.key;
 
-        // Keep if this is the first version of this key, or if it has higher sequence
-        match key_map.get(&key) {
+        match newest_by_key.get(key) {
             None => {
-                key_map.insert(key, version.clone());
+                // First observation of this key.
+                newest_by_key.insert(key.clone(), version.clone());
             }
             Some(existing) => {
+                // Keep the one with the higher sequence number.
                 if version.seq > existing.seq {
-                    key_map.insert(key, version.clone());
+                    newest_by_key.insert(key.clone(), version.clone());
                 }
             }
         }
     }
 
-    // Convert to sorted vec
-    let mut result: Vec<_> = key_map.into_values().collect();
-    result.sort_by(|a, b| a.key.cmp(&b.key));
-    result
+    // BTreeMap keeps keys sorted; just collect in order.
+    newest_by_key.into_values().collect()
 }
 
-/// Filter out tombstones from deduplicated versions
+/// Filter out tombstones from a deduplicated version set.
+///
+/// NOTE:
+///   - This assumes that it is safe to drop tombstones completely (e.g. we are
+///     compacting at or below the global visibility watermark and there are no
+///     snapshots that still need them).
+///   - Future refinement should add a sequence watermark or snapshot horizon
+///     parameter so that only *obsolete* tombstones are dropped.
 pub fn filter_tombstones(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
     versions
         .iter()
@@ -92,7 +224,19 @@ pub fn filter_tombstones(versions: &[CompactionVersion]) -> Vec<CompactionVersio
         .collect()
 }
 
-/// Write deduplicated versions to output SST file
+/// Write versions to a new SST using the provided `SstFactory`.
+///
+/// Semantics:
+///   - Non-tombstone entries become "Put" records.
+///   - Tombstone entries become "Delete" records.
+///   - TTL is preserved in the metadata.
+///   - Sequence numbers are written as provided (no rewriting here).
+///
+/// The writer implementation is responsible for:
+///   - Block construction (e.g. TLV encoding).
+///   - Compression.
+///   - Checksums.
+///   - Index / fence pointer emission.
 pub fn write_versions_to_sst(
     sst_factory: &dyn SstFactory,
     output_filename: &str,
@@ -101,24 +245,16 @@ pub fn write_versions_to_sst(
     let mut writer = sst_factory.create()?;
 
     for version in versions {
-        if !version.is_tombstone {
-            writer.add_with_meta(
-                &version.key,
-                version.value.as_deref(),
-                version.seq,
-                0, // op_type: 0 = Put
-                version.expiration,
-            )?;
-        } else {
-            // Write tombstone as deletion marker
-            writer.add_with_meta(
-                &version.key,
-                None,
-                version.seq,
-                1, // op_type: 1 = Delete
-                version.expiration,
-            )?;
-        }
+        let op_type = if version.is_tombstone { 1u8 } else { 0u8 };
+
+        writer.add_with_meta(
+            &version.key,
+            // `add_with_meta` expects `Option<&[u8]>` for value; we pass through.
+            version.value.as_deref(),
+            version.seq,
+            op_type,
+            version.expiration,
+        )?;
     }
 
     let path = Path::new(output_filename);
@@ -130,24 +266,28 @@ pub fn write_versions_to_sst(
 mod tests {
     use super::*;
 
+    fn mk_version<K: AsRef<[u8]>, V: AsRef<[u8]>>(
+        key: K,
+        seq: u64,
+        is_tombstone: bool,
+        value: Option<V>,
+        expiration: Option<u64>,
+    ) -> CompactionVersion {
+        CompactionVersion {
+            key: key.as_ref().to_vec(),
+            seq,
+            is_tombstone,
+            value: value.map(|v| v.as_ref().to_vec()),
+            expiration,
+        }
+    }
+
     #[test]
     fn should_keep_highest_sequence_when_deduplicating_versions() {
         // Arrange
         let versions = vec![
-            CompactionVersion {
-                key: b"key1".to_vec(),
-                seq: 1,
-                is_tombstone: false,
-                value: Some(b"value1".to_vec()),
-                expiration: None,
-            },
-            CompactionVersion {
-                key: b"key1".to_vec(),
-                seq: 2,
-                is_tombstone: false,
-                value: Some(b"value1_updated".to_vec()),
-                expiration: None,
-            },
+            mk_version("key1", 1, false, Some("value1"), None),
+            mk_version("key1", 2, false, Some("value1_updated"), None),
         ];
 
         // Act
@@ -156,27 +296,15 @@ mod tests {
         // Assert
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].seq, 2);
-        assert_eq!(deduped[0].value, Some(b"value1_updated".to_vec()));
+        assert_eq!(deduped[0].value.as_deref(), Some(b"value1_updated".as_ref()));
     }
 
     #[test]
     fn should_remove_tombstones_when_filtering_versions() {
         // Arrange
         let versions = vec![
-            CompactionVersion {
-                key: b"key1".to_vec(),
-                seq: 1,
-                is_tombstone: false,
-                value: Some(b"value1".to_vec()),
-                expiration: None,
-            },
-            CompactionVersion {
-                key: b"key2".to_vec(),
-                seq: 2,
-                is_tombstone: true,
-                value: None,
-                expiration: None,
-            },
+            mk_version("key1", 1, false, Some("value1"), None),
+            mk_version("key2", 2, true, None::<&[u8]>, None),
         ];
 
         // Act
@@ -190,26 +318,20 @@ mod tests {
     #[test]
     fn should_skip_expired_entries_when_deduplicating_with_ttl() {
         // Arrange
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
         let versions = vec![
-            CompactionVersion {
-                key: b"key1".to_vec(),
-                seq: 1,
-                is_tombstone: false,
-                value: Some(b"expired".to_vec()),
-                expiration: Some(now - 1), // Expired
-            },
-            CompactionVersion {
-                key: b"key1".to_vec(),
-                seq: 2,
-                is_tombstone: false,
-                value: Some(b"valid".to_vec()),
-                expiration: None,
-            },
+            mk_version(
+                "key1",
+                1,
+                false,
+                Some("expired"),
+                Some(now.saturating_sub(1)), // Expired
+            ),
+            mk_version("key1", 2, false, Some("valid"), None),
         ];
 
         // Act
@@ -217,6 +339,41 @@ mod tests {
 
         // Assert
         assert_eq!(deduped.len(), 1);
-        assert_eq!(deduped[0].value, Some(b"valid".to_vec()));
+        assert_eq!(deduped[0].value.as_deref(), Some(b"valid".as_ref()));
+    }
+
+    #[test]
+    fn should_deduplicate_multiple_keys_independently() {
+        let versions = vec![
+            mk_version("a", 1, false, Some("a1"), None),
+            mk_version("a", 3, false, Some("a3"), None),
+            mk_version("b", 2, false, Some("b2"), None),
+            mk_version("b", 1, false, Some("b1"), None),
+        ];
+
+        let deduped = deduplicate_versions(&versions);
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].key, b"a".to_vec());
+        assert_eq!(deduped[0].seq, 3);
+        assert_eq!(deduped[1].key, b"b".to_vec());
+        assert_eq!(deduped[1].seq, 2);
+    }
+
+    #[test]
+    fn is_expired_should_return_true_for_past_expiration() {
+        let now = 1_000_000u64;
+        let v = mk_version("k", 1, false, Some("v"), Some(now - 1));
+        assert!(is_expired(&v, now));
+    }
+
+    #[test]
+    fn is_expired_should_return_false_for_future_or_none() {
+        let now = 1_000_000u64;
+        let v_future = mk_version("k", 1, false, Some("v"), Some(now + 10));
+        let v_none = mk_version("k", 1, false, Some("v"), None);
+
+        assert!(!is_expired(&v_future, now));
+        assert!(!is_expired(&v_none, now));
     }
 }

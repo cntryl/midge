@@ -1,13 +1,16 @@
 //! Compaction strategy and planning
 //!
-//! Implements leveled compaction for LSM-tree maintenance.
-//! Strategy:
-//! 1. If L0 exceeds size threshold or file count, compact L0 → L1
-//! 2. Otherwise, find level exceeding target size and compact to next level
+//! Implements a classic *leveled compaction* picker for an LSM tree.
+//!
+//! Goals:
+//!   - Compact L0 aggressively (high write amplification, unbounded ingest).
+//!   - Maintain size ratio between levels (L1 ≈ threshold; Ln ≈ threshold * multiplier^(n-1)).
+//!   - Keep read amplification low by honoring key-range overlap.
+//!   - Produce deterministic compaction plans.
 
 use crate::metadata::FileMeta;
 
-/// Compaction plan describing input files and target level
+/// A compaction plan describing which SSTs to read and which level to promote into.
 #[derive(Debug, Clone)]
 pub struct CompactionPlan {
     pub input_files: Vec<String>,
@@ -30,25 +33,25 @@ impl CompactionPlan {
             output_seq: 0,
         }
     }
-    
+
     pub fn with_output_seq(mut self, output_seq: u64) -> Self {
         self.output_seq = output_seq;
         self
     }
 }
 
-/// Configuration for leveled compaction
+/// Configuration for leveled compaction.
+///
+/// Level size rules:
+///   L0: special-case, file-count or size-based threshold.
+///   L1: explicitly configured target.
+///   Ln (n >= 2): L1_target * level_multiplier^(n - 1)
 #[derive(Debug, Clone)]
 pub struct LeveledCompactionConfig {
-    /// L0 compaction threshold in bytes
     pub l0_compaction_threshold: u64,
-    /// L0 file count threshold
     pub l0_file_count_threshold: usize,
-    /// Size multiplier between levels
     pub level_multiplier: u64,
-    /// Target size for L1 in bytes
     pub l1_target_size: u64,
-    /// Maximum number of levels
     pub max_levels: usize,
 }
 
@@ -58,13 +61,13 @@ impl Default for LeveledCompactionConfig {
             l0_compaction_threshold: 4 * 1024 * 1024, // 4MB
             l0_file_count_threshold: 4,
             level_multiplier: 10,
-            l1_target_size: 40 * 1024 * 1024, // 40MB (4MB * 10)
+            l1_target_size: 40 * 1024 * 1024, // 40MB (4MB*10)
             max_levels: 7,
         }
     }
 }
 
-/// Compaction planner using leveled strategy
+/// Compaction planner implementing leveled compaction.
 pub struct Compactor {
     pub config: LeveledCompactionConfig,
 }
@@ -78,15 +81,14 @@ impl Compactor {
         Self { config }
     }
 
-    /// Pick a compaction based on leveled compaction strategy
+    /// Pick compaction using leveled strategy:
+    ///   1. Check L0 → L1 first.
+    ///   2. Check L1+ levels for size-overflow.
+    ///
+    /// NOTE: This picker is deterministic for a given metadata snapshot.
     pub fn pick_compaction(&self, files: &[FileMeta], cf_id: u32) -> Option<CompactionPlan> {
-        if files.is_empty() {
-            return None;
-        }
-
-        // Filter files for this CF
+        // Only look at this CF's files
         let cf_files: Vec<&FileMeta> = files.iter().filter(|f| f.cf_id == cf_id).collect();
-
         if cf_files.is_empty() {
             return None;
         }
@@ -94,128 +96,154 @@ impl Compactor {
         // Group files by level
         let mut levels: Vec<Vec<&FileMeta>> = vec![Vec::new(); self.config.max_levels];
         for file in cf_files {
-            let level = file.level as usize;
-            if level < self.config.max_levels {
-                levels[level].push(file);
+            let lv = file.level as usize;
+            if lv < self.config.max_levels {
+                levels[lv].push(file);
             }
         }
 
-        // Check L0 first
+        // ---------------------------
+        // 1. L0 → L1 (special case)
+        // ---------------------------
         let l0_size: u64 = levels[0].iter().map(|f| f.size_bytes).sum();
-        let l0_file_count = levels[0].len();
+        let l0_count = levels[0].len();
 
         if l0_size > self.config.l0_compaction_threshold
-            || l0_file_count >= self.config.l0_file_count_threshold
+            || l0_count >= self.config.l0_file_count_threshold
         {
-            // Compact all L0 files to L1
-            let input_files: Vec<String> = levels[0].iter().map(|f| f.name.clone()).collect();
-
-            if input_files.is_empty() {
-                return None;
-            }
-
-            // Find overlapping L1 files
-            let l0_smallest = levels[0]
-                .iter()
-                .filter_map(|f| f.smallest_key.as_ref())
-                .min_by(|a, b| a.cmp(b));
-            let l0_largest = levels[0]
-                .iter()
-                .filter_map(|f| f.largest_key.as_ref())
-                .max_by(|a, b| a.cmp(b));
-
-            let mut l1_overlapping = Vec::new();
-            if let (Some(smallest), Some(largest)) = (l0_smallest, l0_largest) {
-                for file in &levels[1] {
-                    if let (Some(file_smallest), Some(file_largest)) =
-                        (&file.smallest_key, &file.largest_key)
-                    {
-                        // Check if ranges overlap
-                        if file_smallest.as_slice() <= largest.as_slice()
-                            && file_largest.as_slice() >= smallest.as_slice()
-                        {
-                            l1_overlapping.push(file.name.clone());
-                        }
-                    }
-                }
-            }
-
-            let mut all_inputs = input_files;
-            all_inputs.extend(l1_overlapping);
-
-            return Some(CompactionPlan {
-                input_files: all_inputs,
-                output_files: Vec::new(),
-                source_level: 0,
-                target_level: 1,
-                cf_id,
-                output_seq: 0,
-            });
+            return self.plan_zero_level(&levels, cf_id);
         }
 
-        // Check other levels (L1 onwards)
+        // ---------------------------
+        // 2. L1..Ln leveled compaction
+        // ---------------------------
         for level in 1..self.config.max_levels - 1 {
             let level_size: u64 = levels[level].iter().map(|f| f.size_bytes).sum();
             let target_size = self.level_target_size(level as u32);
 
             if level_size > target_size {
-                // Compact this level to next level
-                let input_files: Vec<String> =
-                    levels[level].iter().map(|f| f.name.clone()).collect();
-
-                // Find overlapping files in next level
-                let level_smallest = levels[level]
-                    .iter()
-                    .filter_map(|f| f.smallest_key.as_ref())
-                    .min_by(|a, b| a.cmp(b));
-                let level_largest = levels[level]
-                    .iter()
-                    .filter_map(|f| f.largest_key.as_ref())
-                    .max_by(|a, b| a.cmp(b));
-
-                let mut next_overlapping = Vec::new();
-                if let (Some(smallest), Some(largest)) = (level_smallest, level_largest) {
-                    let next_level = level + 1;
-                    for file in &levels[next_level] {
-                        if let (Some(file_smallest), Some(file_largest)) =
-                            (&file.smallest_key, &file.largest_key)
-                        {
-                            if file_smallest.as_slice() <= largest.as_slice()
-                                && file_largest.as_slice() >= smallest.as_slice()
-                            {
-                                next_overlapping.push(file.name.clone());
-                            }
-                        }
-                    }
-                }
-
-                let mut all_inputs = input_files;
-                all_inputs.extend(next_overlapping);
-
-                return Some(CompactionPlan {
-                    input_files: all_inputs,
-                    output_files: Vec::new(),
-                    source_level: level as u32,
-                    target_level: (level + 1) as u32,
-                    cf_id,
-                    output_seq: 0,
-                });
+                return self.plan_inner_level(&levels, cf_id, level);
             }
         }
 
         None
     }
 
-    /// Calculate target size for a given level
+    /// Classic leveled size rule:
+    ///   level=0: threshold tuned for L0
+    ///   level=1: explicitly configured
+    ///   level>=2: l1_target_size * (multiplier^(level - 1))
     fn level_target_size(&self, level: u32) -> u64 {
-        if level == 0 {
-            return self.config.l0_compaction_threshold;
+        match level {
+            0 => self.config.l0_compaction_threshold,
+            1 => self.config.l1_target_size,
+            _ => {
+                let exp = (level - 1) as u32;
+                self.config
+                    .l1_target_size
+                    .saturating_mul(self.config.level_multiplier.saturating_pow(exp))
+            }
         }
-        if level == 1 {
-            return self.config.l1_target_size;
-        }
-        self.config.l1_target_size * self.config.level_multiplier.pow((level - 1) as u32)
     }
+
+    /// Build a compaction plan for L0 → L1.
+    fn plan_zero_level(
+        &self,
+        levels: &[Vec<&FileMeta>],
+        cf_id: u32,
+    ) -> Option<CompactionPlan> {
+        if levels[0].is_empty() {
+            return None;
+        }
+
+        let mut input_files: Vec<String> = levels[0].iter().map(|f| f.name.clone()).collect();
+
+        // Overlap detection: find L1 files whose ranges overlap L0's range.
+        let (min_key, max_key) = smallest_and_largest(levels[0].as_slice())?;
+        let mut l1_overlapping = overlap_with_range(&levels[1], &min_key, &max_key);
+
+        input_files.append(&mut l1_overlapping);
+        dedupe_sort(&mut input_files);
+
+        Some(CompactionPlan {
+            input_files,
+            output_files: Vec::new(),
+            source_level: 0,
+            target_level: 1,
+            cf_id,
+            output_seq: 0,
+        })
+    }
+
+    /// Build a compaction plan for level N → N+1.
+    fn plan_inner_level(
+        &self,
+        levels: &[Vec<&FileMeta>],
+        cf_id: u32,
+        level: usize,
+    ) -> Option<CompactionPlan> {
+        if levels[level].is_empty() {
+            return None;
+        }
+
+        let mut input_files: Vec<String> =
+            levels[level].iter().map(|f| f.name.clone()).collect();
+
+        // Find overlapping files in next level
+        let (min_key, max_key) = smallest_and_largest(levels[level].as_slice())?;
+        let mut overlapping = overlap_with_range(&levels[level + 1], &min_key, &max_key);
+
+        input_files.append(&mut overlapping);
+        dedupe_sort(&mut input_files);
+
+        Some(CompactionPlan {
+            input_files,
+            output_files: Vec::new(),
+            source_level: level as u32,
+            target_level: (level + 1) as u32,
+            cf_id,
+            output_seq: 0,
+        })
+    }
+}
+
+/// Extract smallest and largest user keys across a slice of FileMeta.
+fn smallest_and_largest(files: &[&FileMeta]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let smallest = files
+        .iter()
+        .filter_map(|f| f.smallest_key.clone())
+        .min();
+    let largest = files
+        .iter()
+        .filter_map(|f| f.largest_key.clone())
+        .max();
+
+    match (smallest, largest) {
+        (Some(s), Some(l)) => Some((s, l)),
+        _ => None,
+    }
+}
+
+/// Return names of files whose key-ranges overlap [min_key, max_key].
+fn overlap_with_range(files: &[&FileMeta], min_key: &[u8], max_key: &[u8]) -> Vec<String> {
+    files
+        .iter()
+        .filter_map(|f| {
+            let fs = f.smallest_key.as_ref()?;
+            let fl = f.largest_key.as_ref()?;
+            if fs.as_slice() <= max_key && fl.as_slice() >= min_key {
+                Some(f.name.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Deduplicate + sort file list for deterministic plan output.
+fn dedupe_sort(v: &mut Vec<String>) {
+    v.sort();
+    v.dedup();
 }
 
 impl Default for Compactor {
@@ -230,11 +258,7 @@ mod tests {
 
     #[test]
     fn should_create_compactor_with_default_config_when_new() {
-        // Arrange
-        // Act
         let compactor = Compactor::new();
-
-        // Assert
         assert_eq!(compactor.config.max_levels, 7);
         assert_eq!(compactor.config.l0_compaction_threshold, 4 * 1024 * 1024);
         assert_eq!(compactor.config.level_multiplier, 10);
@@ -242,29 +266,21 @@ mod tests {
 
     #[test]
     fn should_calculate_level_target_sizes_when_multiplying_by_level_multiplier() {
-        // Arrange
         let compactor = Compactor::new();
 
-        // Act
-        let l0_target = compactor.level_target_size(0);
-        let l1_target = compactor.level_target_size(1);
-        let l2_target = compactor.level_target_size(2);
+        let l0_target = compactor.level_target_size(0); // 4MB
+        let l1_target = compactor.level_target_size(1); // 40MB
+        let l2_target = compactor.level_target_size(2); // 40MB * 10 = 400MB
 
-        // Assert
-        assert_eq!(l1_target, l0_target * 10); // L1 is 10x L0
-        assert_eq!(l2_target, l1_target * 10); // L2 is 10x L1
+        assert_eq!(l1_target, compactor.config.l1_target_size);
+        assert_eq!(l1_target, l0_target * 10);
+        assert_eq!(l2_target, l1_target * 10);
     }
 
     #[test]
     fn should_return_none_when_no_files_exist() {
-        // Arrange
         let compactor = Compactor::new();
         let empty_files = [];
-
-        // Act
-        let plan = compactor.pick_compaction(&empty_files, 0);
-
-        // Assert
-        assert!(plan.is_none());
+        assert!(compactor.pick_compaction(&empty_files, 0).is_none());
     }
 }

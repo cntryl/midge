@@ -1,17 +1,22 @@
 //! Midge - High-performance embedded LSM-tree database
 //!
 //! Clean architectural layers:
-//! - `common` - Foundational types with zero dependencies
-//! - `engine` - Main KV store and operations
-//! - `runtime` - Actor-based background task coordination
-//! - `metadata` - Manifest and version management
-//! - `wal` - Write-ahead logging abstraction
-//! - `sst` - Sorted string tables (memtable → immutable SST)
-//! - `storage` - Storage backend abstraction (fs, cloud, hybrid)
-//! - `compaction` - Compaction planning and execution
-//! - `iterators` - Iterator implementations
-//! - `metrics` - Performance monitoring
-//! - `testkit` - Testing utilities
+//!   - `common`      - foundational types with zero dependencies
+//!   - `engine`      - main KV store and public API surface
+//!   - `runtime`     - background actors (compaction, flush, metrics)
+//!   - `metadata`    - manifest + version mgmt
+//!   - `wal`         - write-ahead log abstraction
+//!   - `sst`         - sorted-string table formats + readers/writers
+//!   - `storage`     - storage backend abstraction (fs, cloud, hybrid)
+//!   - `compaction`  - compaction planning + execution
+//!   - `iterators`   - iterator implementations
+//!   - `metrics`     - performance instrumentation
+//!   - `testkit`     - testing utilities
+//!
+//! # Public API Surface
+//!
+//! Only modules re-exported at the bottom of this file are intended to be
+//! stable for external consumption. Internal modules are free to evolve.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
@@ -49,55 +54,59 @@ pub mod metrics;
 // Testing
 pub mod testkit;
 
-// Re-export key types for consumers
+// ---------------------------------------------------------------------------
+// Public Export Surface
+// ---------------------------------------------------------------------------
+
+// Common types
 pub use common::{MidgeError, MidgeResult};
 
 // Main engine API
 pub use engine::{
-    MidgeEngine, 
-    ColumnFamilyHandle, 
+    MidgeEngine,
+    ColumnFamilyHandle,
     ColumnFamilyId,
     open_engine,
 };
 
-// Engine API types
+// High-level API types
 pub use engine::api::{
-    // Query and iteration
-    Query, 
-    Iterator, 
+    // Query + scans
+    Query,
+    Iterator,
     Direction,
-    
-    // Write operations
-    WriteBatch, 
+
+    // Writes
+    WriteBatch,
     WriteOptions,
-    
+
     // Transactions
-    KvTransaction, 
-    IsolationLevel,
     Transaction,
-    
+    KvTransaction,
+    IsolationLevel,
+
     // Results
-    CasResult, 
+    CasResult,
     InsertResult,
-    
+
     // Snapshots
     Snapshot,
-    
+
     // Column families
     ColumnFamily,
-    
-    // Configuration (smart defaults)
+
+    // Engine configuration
     OpenOptions,
     Goal,
     Durability,
     MemoryBudget,
     WorkloadProfile,
-    
-    // Key-value types
+
+    // KV types
     Key,
     Value,
     KvPair,
-    
+
     // Errors
     ApiError,
     ApiResult,
@@ -108,3 +117,54 @@ pub use metrics::PerformanceMetrics;
 
 // Testing utilities
 pub use testkit::{MidgeOptions, StorageMode, MockStorage};
+
+// ---------------------------------------------------------------------------
+// Ergonomic Prelude
+// ---------------------------------------------------------------------------
+
+/// Prelude for ergonomic wildcard imports.
+///
+/// # Example
+///
+/// ```no_run
+/// use midge::prelude::*;
+///
+/// let engine = MidgeEngine::new(OpenOptions::default());
+/// let mut batch = WriteBatch::new();
+/// batch.put(b"key", b"value");
+/// ```
+pub mod prelude {
+    pub use crate::{
+        // Types
+        Key,
+        Value,
+        KvPair,
+
+        // Query + iteration
+        Query,
+        Iterator,
+        Direction,
+
+        // Writes
+        WriteBatch,
+        WriteOptions,
+
+        // Transactions + snapshots
+        Transaction,
+        Snapshot,
+
+        // Engine
+        MidgeEngine,
+        ColumnFamilyHandle,
+        ColumnFamily,
+
+        // Configuration
+        OpenOptions,
+
+        // Errors
+        MidgeError,
+        MidgeResult,
+        ApiError,
+        ApiResult,
+    };
+}
