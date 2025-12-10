@@ -256,43 +256,38 @@ after each chunk of work is complete we should validate test, run clippy --all-t
 **Build Health:**
 
 - ✅ `cargo build --workspace` passes with zero errors (0 errors, 18 benign warnings)
-- ✅ All components compiling: runtime, engine, WAL, SST, compaction, recovery, manifest persistence, transactions, cloud storage with callback architecture, **NEW:** full read path
-- ✅ **NEW (Session 8):** Transaction API with state machine and isolation levels added
-- ✅ **NEW (Session 8):** Cloud Storage backend with multi-cloud provider abstraction
-- ✅ **NEW (Session 8):** Cloud WAL backend for remote durability
-- ✅ **NEW (Session 9):** Callback-based cloud I/O architecture (FoundationDB/ScyllaDB pattern)
-  - CloudEvent enum with 5 typed operation variants
-  - CloudCallback using std::sync::mpsc::Sender
-  - CloudOutcome<T> for Clone-safe result handling
-  - 9 new callback-based tests
-  - Zero async contamination in engine core
-- ✅ **NEW (Session 9):** Custom cloud provider stubs scaffolded (S3, GCS, Azure, OCI)
-  - Lean stub implementations with no heavy SDKs
-  - Ready for direct REST API + tokio implementations
-  - 4 provider creation tests
-  - All stubs follow callback-based architecture
-- ✅ **NEW (Session 10):** Runtime channel initialization bug fixed
-  - Root cause: Runtime.start() created disconnected channels
-  - Solution: Made Runtime struct own both sender/receiver pairs
-  - Impact: Engine.put() working, message passing verified end-to-end
-- ✅ **NEW (Session 10):** Integration E2E test suite expanded to 6 tests
-  - Write-flush pipeline, delete handling, writebatch atomicity
-  - Sync operations, large data (1KB+10KB), concurrent writes (4 threads)
-  - All tests passing, comprehensive coverage of core operations
-- ✅ **NEW (Session 11):** Full read path implementation
-  - Engine.get() checks: local memtable → runtime (immutable memtables + SST files)
-  - Version snapshot lookup in SST layer via manifest
-  - Range-aware SST lookups (skip files outside key range)
-  - Retry logic for file access errors (Windows-specific)
-  - 5 new comprehensive read path tests
-  - 11/13 integration tests passing (2 Windows-specific ignored due to file locking)
-- ✅ **NEW (Session 11):** Cloud provider pattern documentation
-  - Complete architectural pattern defined in `docs/CLOUD_PROVIDER_PATTERN.md`
-  - Four-operation interface (PUT, GET, DELETE, LIST) with callback-based I/O
-  - Authentication strategies documented for S3, GCS, Azure, OCI
-  - Implementation checklist and code templates provided
-  - All provider stubs ready for implementation when needed
-  - Deferred implementation to focus on core engine functionality
+- ✅ `cargo clippy --lib` passes with zero unwrap-related errors (55 pre-existing benign warnings)
+- ✅ All components compiling: runtime (with EvictionActor), engine, WAL, SST, compaction, recovery, manifest persistence, transactions, cloud storage, full read path, storage budget actor
+- ✅ **NEW (Session 14):** EvictionActor fully implemented with state machine
+  - 4 comprehensive integration tests passing (single/multiple/large evictions, hybrid storage init)
+  - Properly consumes pending evictions queue from SBA
+  - Full error handling for missing files and I/O issues
+  - Public API exported via src/runtime/actors/mod.rs
+- ✅ **NEW (Session 14):** Fixed 20 unwrap() clippy violations in production code
+  - Replaced all unwrap() with expect() providing context-specific messages
+  - Files fixed: storage/hybrid.rs (6), wal/fs/writer.rs (1), wal/recovery.rs (1), sst/fs/reader.rs (2), metadata/version_manager.rs (5), metadata/version_set.rs (5)
+  - All lock-poisoning scenarios now have meaningful panic messages
+  - Library builds cleanly with strict clippy settings
+- ✅ **NEW (Session 13):** SBA + Flush/Compaction Actors integration complete
+  - 7 integration tests covering SBA coordination scenarios
+  - FlushActor and CompactionActor fully wired with reservation handling
+  - Complete tracking of disk state through flush/compact/upload lifecycle
+  - Watermark transitions validated (90%, 95%, 98%)
+- ✅ **NEW (Session 13):** Cloud and GC Actors implemented
+  - 9 comprehensive integration tests (upload tracking, checkpoint updates, orphaned file cleanup)
+  - CloudActor handles SST and WAL uploads with checkpoint tracking
+  - GcActor identifies and deletes orphaned files safely
+- ✅ **Comprehensive TODO Updated** — Now includes:
+  - Bloom Filters (8 tests) — HIGH-PRIORITY
+  - Block Cache (12 tests) — HIGH-PRIORITY
+  - Sparse Index (8 tests) — HIGH-PRIORITY
+  - SST Reader Enhancements (4-5 tests)
+  - E2E Disk Pressure (4-6 tests)
+  - S3 Integration (4-5 tests)
+  - Metrics Integration (5-8 tests)
+  - Testkit Expansion (3-5 utilities)
+  - WAL Optimizations (3-4 tests)
+  - Documentation (final polish)
 - ⚠️ 3 temp directory file I/O tests occasionally fail due to test isolation (SST fs tests)
 
 **Test Status:**
@@ -454,19 +449,145 @@ after each chunk of work is complete we should validate test, run clippy --all-t
    - [x] **Session 13 Metadata Struct Fix**: Fixed pre-existing ColumnFamilyMeta initializers in tests/common/ and src/metadata/ (added created_at and deleted_at fields)
    - [x] **Session 13 Clippy Validation**: cargo clippy --all-targets passes with 54 pre-existing benign warnings, zero new warnings
 
-4. **Background Eviction Task** (CURRENT - Session 14)
+4. **Background Eviction Task** ✅ (COMPLETED - Session 14)
 
-   - [ ] Create EvictionActor in src/runtime/actors/eviction.rs
-   - [ ] Consume pending_evictions queue from SBA actor
-   - [ ] Delete local SST replicas after cloud upload confirmation
-   - [ ] Track deletion progress and update DiskState
-   - [ ] Handle errors gracefully (missing files, permission issues)
-   - [ ] Background task spawned by EventLoop on startup
-   - [ ] Wire into EventLoop for message dispatch
-   - [ ] E2E eviction scenario tests (fill→upload→evict→flush)
-   - Expected: 3-4 tests
+   - [x] **EvictionActor** implemented in src/runtime/actors/eviction.rs
+     - [x] Full actor state machine with pending evictions queue
+     - [x] Consume eviction events, delete local SST replicas
+     - [x] Track deletion progress and update DiskState
+     - [x] Error handling for missing files and I/O issues
+     - [x] Graceful shutdown with cleanup
+   - [x] **EventLoop Integration**
+     - [x] Added EvictionActor field to EventLoop
+     - [x] Dispatches FlushMemtable and CompactionComplete to trigger eviction checks
+     - [x] Returns pending evictions for processing
+     - [x] Integrated into runtime startup
+   - [x] **Public API Export** — EvictionEvent added to src/runtime/actors/mod.rs
+   - [x] **4 comprehensive integration tests** in tests/eviction_actor_integration.rs
+     - [x] Single eviction tracking and completion
+     - [x] Multiple evictions accumulated over time
+     - [x] Large eviction batches processing
+     - [x] Hybrid storage initialization with eviction actor
+   - [x] **Build Status**: Clean compilation, zero errors
+   - [x] **Clippy Status**: Library passes clippy --lib with 0 unwrap-related errors
+     - [x] Fixed 20 unwrap() violations across 6 production files
+     - [x] All replacements use expect() with lock-poisoning error messages
+   - [x] **Test Results**: 4/4 eviction integration tests passing
+   - Expected: Complete
 
-5. **E2E Disk Pressure Stress Tests** (FOLLOW-UP)
+5. **Bloom Filters** 📋 (HIGH-PRIORITY - CURRENT)
+
+   - [ ] Create src/sst/bloom/ module structure (reader.rs, writer.rs, factory.rs, mod.rs)
+   - [ ] **BloomFilter writer**: Build bitset during SST creation
+     - [ ] Configurable false positive rate (default 1%)
+     - [ ] Handle variable-length keys with hash functions
+     - [ ] Serialize to SST footer
+   - [ ] **BloomFilter reader**: Fast key membership testing
+     - [ ] Deserialize from SST footer
+     - [ ] O(1) lookup returning {Possible, Definitely Not}
+     - [ ] Cache filter in memory for hot SSTs
+   - [ ] **BloomFactory**: Polymorphic filter creation (production + test stubs)
+   - [ ] **Integration with SST layer**:
+     - [ ] Wire into FsSstWriter to generate filter during flush
+     - [ ] Wire into FsSstReader to use filter for fast negative lookups
+     - [ ] Skip block reads for keys not in filter (90% of misses)
+   - [ ] **8 comprehensive tests** covering all scenarios
+     - [ ] Filter creation and serialization
+     - [ ] Correct/false positive rates under load
+     - [ ] Integration with SST read path
+     - [ ] Multi-SST filtering in merge iterator
+     - [ ] Bloom filter caching behavior
+     - [ ] Factory polymorphism
+     - [ ] Edge cases (empty SSTs, single keys)
+     - [ ] Performance under concurrent reads
+   - Expected: 8 tests
+
+6. **Block Cache** 📋 (HIGH-PRIORITY - FOLLOW)
+
+   - [ ] Create src/sst/cache/ module structure (mod.rs, shard.rs, admission.rs, policy/)
+   - [ ] **Sharded LRU cache**: Reduce lock contention
+     - [ ] 16 independent shards by default (configurable)
+     - [ ] Each shard owns its own lock and LRU list
+     - [ ] CacheKey = (sst_id, block_offset)
+     - [ ] Admission control to prevent cache pollution
+   - [ ] **Cache policies** (pluggable):
+     - [ ] LRU (Least Recently Used) — baseline
+     - [ ] TinyLFU — frequency + recency
+     - [ ] CLOCK-Pro — strong scan resistance
+   - [ ] **Integration with read path**:
+     - [ ] Check cache before reading block from disk
+     - [ ] Load missing blocks from SST into cache
+     - [ ] Update hit/miss metrics
+     - [ ] Respect admission thresholds
+   - [ ] **Metrics & observability**:
+     - [ ] Cache hit/miss rates
+     - [ ] Eviction counts by policy
+     - [ ] Memory usage tracking
+     - [ ] Time-windowed statistics
+   - [ ] **12 comprehensive tests** covering cache behaviors
+     - [ ] Basic get/put operations
+     - [ ] LRU eviction ordering
+     - [ ] Sharding correctness under concurrent access
+     - [ ] Admission control threshold testing
+     - [ ] Policy-specific behavior (LRU vs TinyLFU vs CLOCK-Pro)
+     - [ ] Cache warming scenarios
+     - [ ] Memory bounds enforcement
+     - [ ] Metrics accuracy
+     - [ ] Concurrent reader/writer scenarios
+     - [ ] Scan resistance (sequential access)
+     - [ ] Integration with SST reader
+     - [ ] Performance under high concurrency
+   - Expected: 12 tests
+
+7. **Sparse Index** 📋 (HIGH-PRIORITY - FOLLOW)
+
+   - [ ] Create src/sst/sparse_index/ module structure (reader.rs, writer.rs, shared.rs, mod.rs)
+   - [ ] **Sparse index writer**: Sampled key positions during SST creation
+     - [ ] Extract every Nth key (default N=16 keys per sample)
+     - [ ] Store (key, block_offset, block_index) triples
+     - [ ] Compress index with TLV encoding
+     - [ ] Serialize to SST footer
+   - [ ] **Sparse index reader**: Fast binary search on sampled keys
+     - [ ] Deserialize from SST footer
+     - [ ] Binary search to find containing block range
+     - [ ] Return (lower_bound_block, upper_bound_block) for any key
+     - [ ] Skip unnecessary block reads
+   - [ ] **Integration with read path**:
+     - [ ] Use sparse index to narrow block search range
+     - [ ] Combined with bloom filter for negative lookups
+     - [ ] Reduce block I/O by 40-60% for range scans
+   - [ ] **8 comprehensive tests** covering index behaviors
+     - [ ] Index creation and serialization
+     - [ ] Accurate range queries (find containing blocks)
+     - [ ] Edge cases (first key, last key, not found)
+     - [ ] Integration with bloom filter
+     - [ ] Integration with block cache
+     - [ ] Performance on large keys / many blocks
+     - [ ] Concurrent reader correctness
+     - [ ] Memory efficiency
+   - Expected: 8 tests
+
+8. **SST Reader Enhancements** 📋 (FOLLOW-UP)
+
+   - [ ] Integrate bloom filter into FsSstReader::get()
+     - [ ] Check bloom filter before loading blocks
+     - [ ] Return None early for definite misses
+   - [ ] Integrate sparse index into FsSstReader
+     - [ ] Use sparse index to find block range
+     - [ ] Skip unnecessary block reads
+     - [ ] Reduce I/O for range scans
+   - [ ] Integrate block cache into FsSstReader
+     - [ ] Check cache before reading block from disk
+     - [ ] Load missed blocks into cache
+     - [ ] Update cache metrics
+   - [ ] **Performance validation tests** (4-5 tests)
+     - [ ] Read throughput with cache enabled
+     - [ ] Hit rate under various workloads
+     - [ ] Latency reduction with sparse index
+     - [ ] Combined bloom + sparse index effectiveness
+     - [ ] Memory efficiency trade-offs
+
+9. **E2E Disk Pressure Stress Tests** 📋 (FOLLOW-UP)
 
    - [ ] Fill disk incrementally to test watermark transitions
    - [ ] Trigger flush at each watermark (90%, 95%, 98%)
@@ -475,14 +596,14 @@ after each chunk of work is complete we should validate test, run clippy --all-t
    - [ ] Cloud upload completing to enable more flushes
    - Expected: 4-6 tests
 
-6. **S3 Credential Integration Tests** (NEAR-TERM, NO BLOCKER)
+10. **S3 Credential Integration Tests** 📋 (NEAR-TERM, NO BLOCKER)
 
    - [ ] Add mock S3 responses for testing without AWS account
    - [ ] Test SigV4 signer with actual AWS credentials
    - [ ] End-to-end validation with `--features cloud-aws`
    - Expected: 4-5 tests
 
-7. **Metrics Integration** (ENHANCED OBSERVABILITY, NO BLOCKER)
+11. **Metrics Integration** 📋 (ENHANCED OBSERVABILITY, NO BLOCKER)
 
    - [ ] Hook metrics recording into runtime actors (put/get/delete/flush/compaction)
    - [ ] Add latency tracking (p50, p99) with timing instrumentation
@@ -490,20 +611,64 @@ after each chunk of work is complete we should validate test, run clippy --all-t
    - [ ] Throughput measurements
    - Expected: 5-8 tests
 
-8. **Testkit Expansion** (TESTING INFRASTRUCTURE, NO BLOCKER)
+12. **Testkit Expansion** 📋 (TESTING INFRASTRUCTURE, NO BLOCKER)
 
    - [ ] Deterministic runtime test scenario builders (write/flush/read pipelines)
    - [ ] Chaos/fault injection utilities for integration tests
    - [ ] Expected: 3-5 utility enhancements
 
-9. **WAL Performance Optimizations** (DEFERRED, LOW PRIORITY)
+13. **WAL Performance Optimizations** 📋 (DEFERRED, LOW PRIORITY)
 
    - [ ] Batched sync coordination for group commits (~30% write latency reduction, TODO: recovery.rs lines 117, 126)
    - [ ] Cloud WAL segment rotation and cleanup
    - [ ] Delete range and merge operator support in recovery
    - Expected: 3-4 tests
 
-10. **Documentation & Examples** (FINAL POLISH)
+14. **Rewire All tests/** 📋 (INTEGRATION VALIDATION)
+
+   - [ ] Port all `tests/` integration tests from `src_old/` callbacks to `src/` runtime actors
+   - [ ] Verify each test's original intent and adapt message passing patterns
+   - [ ] Expected scope: 50+ integration tests across these categories:
+     - [ ] **Engine Operations**: api_kvstore.rs, engine_basic.rs, engine_snapshots.rs, engine_write_batch.rs, engine_iterators.rs, engine_delete_range.rs, engine_merge_operators.rs
+     - [ ] **Concurrency**: concurrency_writes.rs, concurrency_wal.rs, concurrency_flush.rs, concurrency_delete_range.rs
+     - [ ] **Durability & Recovery**: durability_atomicity.rs, durability_recovery.rs, durability_wal.rs, checkpoint.rs
+     - [ ] **Compaction**: compaction_basic.rs, compaction_concurrent.rs, compaction_determinism.rs, compaction_filters.rs, compaction_levels.rs, compaction_metrics.rs, compaction_errors.rs
+     - [ ] **Cloud Storage**: cloud_consistency.rs, cloud_durability.rs, cloud_hybrid.rs, cloud_real_providers.rs
+     - [ ] **Advanced Features**: transactions (via engine_integration_e2e.rs), column families (column_family_lifecycle.rs)
+     - [ ] **Stress & Determinism**: determinism.rs, fault_injection.rs, deadlock_detector_demo.rs
+   - [ ] Validation steps:
+     - [ ] All 50+ tests pass with new actor model
+     - [ ] No clippy violations or unwrap() errors introduced
+     - [ ] All test names follow `should_{action}_when_{context}` pattern
+     - [ ] All tests include AAA structure
+   - Expected: **50+ tests fully rewired and passing**
+
+15. **Rewire All benches/** 📋 (PERFORMANCE VALIDATION)
+
+   - [ ] Port all `benches/` criterion benchmarks from `src_old/` to `src/` runtime actors
+   - [ ] Ensure all bench scenarios align with new async/actor-driven runtime behavior
+   - [ ] Expected scope: 6+ benchmark tiers following `benches/TIER_LADDER.md`:
+     - [ ] **Tier 1 (Hot Path)**: Single-key reads/writes, memtable operations, point lookups
+     - [ ] **Tier 2 (Subsystem)**: SST creation, block I/O, compaction overhead, flush coordination
+     - [ ] **Tier 3 (System)**: Multi-level compaction, range scans, concurrent ops, transaction overhead
+     - [ ] **Tier 4 (Integration)**: Cloud upload/download, hybrid storage eviction, full pipelines
+     - [ ] **Tier 5 (Soak)**: Long-running stability, memory leak detection, sustained throughput
+     - [ ] **Tier 6 (Capacity)**: Max database size limits, large keys/values, high concurrency (100+ threads)
+   - [ ] Bench validation requirements:
+     - [ ] All precomputed data outside `b.iter()`
+     - [ ] No allocations inside hot loop
+     - [ ] Use deterministic seeds (no RNG in loop)
+     - [ ] All benches use `black_box()` on inputs/outputs
+     - [ ] All benches set `throughput()` metric
+     - [ ] All benches use `SamplingMode::Flat`
+     - [ ] Expected runtime: <3s per bench
+   - [ ] Integration validation:
+     - [ ] `cargo bench` completes without errors
+     - [ ] All throughput metrics within expected ranges
+     - [ ] No performance regressions vs old implementation
+   - Expected: **6+ benchmark tiers fully rewired and validated**
+
+16. **Documentation & Examples** 📋 (FINAL POLISH)
 
 - [ ] API usage examples
 - [ ] Configuration guide
