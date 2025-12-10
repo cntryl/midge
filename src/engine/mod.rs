@@ -67,8 +67,8 @@ impl ColumnFamilyHandle {
 /// This is a thin façade over the runtime. All state and background work
 /// is managed by the runtime actors.
 ///
-/// CRITICAL: Engine does NOT maintain its own memtable or sequence counter.
-/// All reads/writes go through the runtime to ensure consistency.
+/// Note: Engine maintains a sequence counter for now. This will be moved to
+/// runtime once we implement centralized sequence allocation there.
 pub struct MidgeEngine {
     /// Handle to submit work to the runtime
     runtime_handle: RuntimeHandle,
@@ -77,6 +77,8 @@ pub struct MidgeEngine {
     db_path: PathBuf,
     /// Default column family for convenience
     default_cf: ColumnFamilyHandle,
+    /// Sequence number for write ordering (TODO: move to runtime)
+    sequence: std::sync::atomic::AtomicU64,
     /// Next snapshot ID counter (local only, not related to sequence numbers)
     next_snapshot_id: std::sync::atomic::AtomicU64,
 }
@@ -95,6 +97,7 @@ impl MidgeEngine {
             runtime_handle,
             db_path,
             default_cf: ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string()),
+            sequence: std::sync::atomic::AtomicU64::new(0),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
         })
     }
@@ -123,14 +126,13 @@ impl MidgeEngine {
 
     /// Put a key-value pair into a specific column family
     pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        // Runtime assigns sequence number and writes to WAL + memtable atomically.
         // CRITICAL: Use send_and_wait to ensure durability before returning.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: 0, // Runtime assigns actual sequence
+            sequence: self.next_sequence(),
         })?;
 
         // Check for errors from runtime
@@ -177,7 +179,7 @@ impl MidgeEngine {
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: None, // Tombstone
-            sequence: 0, // Runtime assigns
+            sequence: self.next_sequence(),
         })?;
 
         match response {
@@ -366,7 +368,7 @@ impl MidgeEngine {
                 cf_id: cf_id.as_u32(),
                 key: key.to_vec(),
                 value: Some(value.to_vec()),
-                sequence: 0,
+                sequence: self.next_sequence(),
             })?;
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
@@ -379,7 +381,7 @@ impl MidgeEngine {
                 cf_id: cf_id.as_u32(),
                 key: key.to_vec(),
                 value: None,
-                sequence: 0,
+                sequence: self.next_sequence(),
             })?;
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
@@ -482,7 +484,7 @@ impl MidgeEngine {
                     cf_id: intent.cf_id().as_u32(),
                     key: intent.key().to_vec(),
                     value: Some(value.to_vec()),
-                    sequence: 0,
+                    sequence: self.next_sequence(),
                 })?  
             } else {
                 self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
@@ -490,7 +492,7 @@ impl MidgeEngine {
                     cf_id: intent.cf_id().as_u32(),
                     key: intent.key().to_vec(),
                     value: None,
-                    sequence: 0,
+                    sequence: self.next_sequence(),
                 })?
             };
             
@@ -570,4 +572,10 @@ impl MidgeEngine {
         Ok(vec![self.default_cf.clone()])
     }
 
+    // === Internal helpers ===
+
+    fn next_sequence(&self) -> u64 {
+        self.sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
 }

@@ -12,7 +12,11 @@ pub mod types;
 pub mod write_batch;
 pub mod write_options;
 
+pub use cf::ColumnFamily;
+pub use errors::{ApiError, ApiResult};
 pub use iterator::{Direction, Iterator, IteratorBuilder};
+pub use kv::{Key, Value, KvPair, OptionalValue};
+pub use options::{OpenOptions, Goal, Durability, MemoryBudget, WorkloadProfile};
 pub use query::Query;
 pub use results::{CasResult, InsertResult};
 pub use snapshot::Snapshot;

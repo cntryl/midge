@@ -49,9 +49,62 @@ pub mod metrics;
 // Testing
 pub mod testkit;
 
-// Re-export key types
+// Re-export key types for consumers
 pub use common::{MidgeError, MidgeResult};
-pub use engine::{MidgeEngine, ColumnFamilyHandle};
-pub use engine::api::{Query, CasResult, InsertResult, WriteBatch, KvTransaction, WriteOptions, IsolationLevel};
+
+// Main engine API
+pub use engine::{
+    MidgeEngine, 
+    ColumnFamilyHandle, 
+    ColumnFamilyId,
+    open_engine,
+};
+
+// Engine API types
+pub use engine::api::{
+    // Query and iteration
+    Query, 
+    Iterator, 
+    Direction,
+    
+    // Write operations
+    WriteBatch, 
+    WriteOptions,
+    
+    // Transactions
+    KvTransaction, 
+    IsolationLevel,
+    Transaction,
+    
+    // Results
+    CasResult, 
+    InsertResult,
+    
+    // Snapshots
+    Snapshot,
+    
+    // Column families
+    ColumnFamily,
+    
+    // Configuration (smart defaults)
+    OpenOptions,
+    Goal,
+    Durability,
+    MemoryBudget,
+    WorkloadProfile,
+    
+    // Key-value types
+    Key,
+    Value,
+    KvPair,
+    
+    // Errors
+    ApiError,
+    ApiResult,
+};
+
+// Observability
 pub use metrics::PerformanceMetrics;
+
+// Testing utilities
 pub use testkit::{MidgeOptions, StorageMode, MockStorage};

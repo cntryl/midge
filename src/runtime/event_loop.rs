@@ -41,7 +41,7 @@ pub struct EventLoop {
 }
 
 impl EventLoop {
-    pub fn new(
+    pub(crate) fn new(
         state: RuntimeState,
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
