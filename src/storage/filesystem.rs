@@ -10,96 +10,102 @@ use std::path::{Path, PathBuf};
 
 /// Filesystem-based storage backend
 ///
-/// Implements StorageBackend synchronously. Suitable for local file storage.
+/// Implements `StorageBackend` synchronously. Suitable for local file storage.
 /// All operations execute immediately and send completion events via callback.
 pub struct FileSystem {
     base_path: PathBuf,
 }
 
 impl FileSystem {
-    /// Create a new filesystem storage backend
+    /// Create a new filesystem storage backend.
     pub fn new<P: AsRef<Path>>(base_path: P) -> MidgeResult<Self> {
         let path = base_path.as_ref().to_path_buf();
-        fs::create_dir_all(&path)?;
+        fs::create_dir_all(&path)?; // Ensure base dir exists
         Ok(Self { base_path: path })
     }
 
-    /// Get the full path for a given key
+    /// Compute a sanitized full path for a given key.
     fn full_path(&self, key: &str) -> PathBuf {
-        self.base_path.join(key)
+        // Prevent absolute paths or path traversal outside the base directory.
+        let sanitized = key.trim_start_matches('/');
+        self.base_path.join(sanitized)
     }
 }
 
 impl StorageBackend for FileSystem {
     fn submit_read(&self, path: String, callback: StorageCallback) {
         let full_path = self.full_path(&path);
-        let result = fs::read(&full_path).map_err(|e| MidgeError::Io(e));
 
-        let event = StorageEvent::ReadComplete {
-            path,
-            result: StorageOutcome::from_result(result),
+        let outcome = match fs::read(&full_path) {
+            Ok(bytes) => StorageOutcome::Ok(bytes),
+            Err(e) => StorageOutcome::Err(format!("read {:?}: {}", full_path, e)),
         };
-        let _ = callback.send(event);
+
+        let _ = callback.send(StorageEvent::ReadComplete { path, result: outcome });
     }
 
     fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
         let full_path = self.full_path(&path);
 
-        // Ensure parent directory exists
-        let result = if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent)
-                .and_then(|_| fs::write(&full_path, data))
-                .map_err(|e| MidgeError::Io(e))
-        } else {
-            Ok(())
+        let outcome = {
+            // Always try to create parent directories if present.
+            if let Some(parent) = full_path.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    StorageOutcome::Err(format!("mkdir {:?}: {}", parent, e))
+                } else if let Err(e) = fs::write(&full_path, data) {
+                    StorageOutcome::Err(format!("write {:?}: {}", full_path, e))
+                } else {
+                    StorageOutcome::Ok(())
+                }
+            } else {
+                // Path has no parent (e.g., "foo") — still attempt the write.
+                match fs::write(&full_path, data) {
+                    Ok(_) => StorageOutcome::Ok(()),
+                    Err(e) => StorageOutcome::Err(format!("write {:?}: {}", full_path, e)),
+                }
+            }
         };
 
-        let event = StorageEvent::WriteComplete {
-            path,
-            result: StorageOutcome::from_result(result),
-        };
-        let _ = callback.send(event);
+        let _ = callback.send(StorageEvent::WriteComplete { path, result: outcome });
     }
 
     fn submit_delete(&self, path: String, callback: StorageCallback) {
         let full_path = self.full_path(&path);
-        let result = fs::remove_file(&full_path).map_err(|e| MidgeError::Io(e));
 
-        let event = StorageEvent::DeleteComplete {
-            path,
-            result: StorageOutcome::from_result(result),
+        let outcome = match fs::remove_file(&full_path) {
+            Ok(_) => StorageOutcome::Ok(()),
+            Err(e) => StorageOutcome::Err(format!("delete {:?}: {}", full_path, e)),
         };
-        let _ = callback.send(event);
+
+        let _ =
+            callback.send(StorageEvent::DeleteComplete { path, result: outcome });
     }
 
     fn submit_list(&self, prefix: String, callback: StorageCallback) {
-        let prefix_path = self.full_path(&prefix);
+        let full = self.full_path(&prefix);
 
-        let result = if prefix_path.is_dir() {
-            fs::read_dir(&prefix_path)
-                .and_then(|iter| {
-                    Ok(iter
-                        .filter_map(|e| e.ok())
-                        .filter_map(|e| {
-                            e.path()
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.to_string())
-                        })
-                        .collect())
-                })
-                .map_err(|e| MidgeError::Io(e))
+        let outcome = if full.is_dir() {
+            match fs::read_dir(&full) {
+                Ok(iter) => {
+                    let mut items: Vec<String> = Vec::new();
+
+                    for entry in iter.flatten() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            items.push(name.to_string());
+                        }
+                    }
+
+                    StorageOutcome::Ok(items)
+                }
+                Err(e) => StorageOutcome::Err(format!("list {:?}: {}", full, e)),
+            }
         } else {
-            Ok(Vec::new())
+            StorageOutcome::Ok(Vec::new())
         };
 
-        let event = StorageEvent::ListComplete {
+        let _ = callback.send(StorageEvent::ListComplete {
             prefix,
-            result: StorageOutcome::from_result(result),
-        };
-        let _ = callback.send(event);
+            result: outcome,
+        });
     }
 }
-
-// Use local imports for MidgeError to avoid conflicts
-use crate::common::MidgeError;

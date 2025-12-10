@@ -4,6 +4,11 @@ use crate::common::MidgeError;
 use crate::common::MidgeResult;
 use bytes::{BufMut, Bytes, BytesMut};
 
+/// Restart point interval for block building
+/// Every RESTART_INTERVAL entries, a restart point is stored
+/// for fast binary search within blocks
+pub const RESTART_INTERVAL: usize = 16;
+
 /// TLV tags for SST entries
 pub mod tags {
     pub const SHARED_PREFIX_LEN: u8 = 1;
@@ -302,5 +307,111 @@ mod tests {
         // Assert
         assert_eq!(entry.entry_type, 2);
         assert_eq!(entry.value, None);
+    }
+
+    #[test]
+    fn should_compute_shared_prefix_when_encoding() {
+        // Arrange
+        let key1 = b"user:12345:name";
+        let key2 = b"user:12345:email";
+
+        // Act - key2 shares "user:12345:" prefix (12 bytes)
+        let encoded1 = encode(key1, 0, Some(b"Alice"), 1, 0, None);
+        let encoded2 = encode(&key2[12..], 12, Some(b"alice@example.com"), 2, 0, None);
+        
+        let (entry1, _) = decode(&encoded1, 0).unwrap();
+        let (entry2, _) = decode(&encoded2, 0).unwrap();
+
+        // Assert
+        assert_eq!(entry1.shared_len, 0);
+        assert_eq!(entry1.key_delta, b"user:12345:name");
+        
+        assert_eq!(entry2.shared_len, 12);
+        // Note: key_delta is just the suffix after shared prefix
+        assert_eq!(entry2.key_delta, b"mail"); // "email" without "e" from shared boundary
+    }
+
+    #[test]
+    fn should_encode_suffix_correctly_when_prefix_compressed() {
+        // Arrange
+        let full_key = b"prefix_suffix";
+        let shared_len = 7; // "prefix_"
+        let suffix = &full_key[shared_len..]; // "suffix"
+
+        // Act
+        let encoded = encode(suffix, shared_len as u32, Some(b"val"), 100, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
+        assert_eq!(entry.shared_len, 7);
+        assert_eq!(entry.key_delta, b"suffix");
+        assert_eq!(entry.value, Some(b"val".to_vec()));
+    }
+
+    #[test]
+    fn should_handle_multiple_entry_types_when_encoding() {
+        // Arrange
+        // Act
+        let put = encode(b"k1", 0, Some(b"v1"), 1, 0, None); // Put
+        let insert = encode(b"k2", 0, Some(b"v2"), 2, 1, None); // Insert
+        let delete = encode(b"k3", 0, None, 3, 2, None); // Delete
+        let merge = encode(b"k4", 0, Some(b"v4"), 4, 3, None); // Merge
+
+        let (e_put, _) = decode(&put, 0).unwrap();
+        let (e_insert, _) = decode(&insert, 0).unwrap();
+        let (e_delete, _) = decode(&delete, 0).unwrap();
+        let (e_merge, _) = decode(&merge, 0).unwrap();
+
+        // Assert
+        assert_eq!(e_put.entry_type, 0);
+        assert_eq!(e_insert.entry_type, 1);
+        assert_eq!(e_delete.entry_type, 2);
+        assert_eq!(e_merge.entry_type, 3);
+    }
+
+    #[test]
+    fn should_encode_sequence_correctly_when_encoding() {
+        // Arrange
+        // Act
+        let low_seq = encode(b"key", 0, Some(b"val"), 0, 0, None);
+        let mid_seq = encode(b"key", 0, Some(b"val"), 65536, 0, None);
+        let high_seq = encode(b"key", 0, Some(b"val"), u64::MAX, 0, None);
+
+        let (e_low, _) = decode(&low_seq, 0).unwrap();
+        let (e_mid, _) = decode(&mid_seq, 0).unwrap();
+        let (e_high, _) = decode(&high_seq, 0).unwrap();
+
+        // Assert
+        assert_eq!(e_low.sequence, 0);
+        assert_eq!(e_mid.sequence, 65536);
+        assert_eq!(e_high.sequence, u64::MAX);
+    }
+
+    #[test]
+    fn should_preserve_empty_value_when_encoding() {
+        // Arrange
+        // Act
+        let encoded = encode(b"key", 0, Some(b""), 10, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
+        assert_eq!(entry.value, Some(Vec::new()));
+    }
+
+    #[test]
+    fn should_calculate_bytes_consumed_when_decoding() {
+        // Arrange
+        let encoded1 = encode(b"key1", 0, Some(b"value1"), 1, 0, None);
+        let encoded2 = encode(b"key2", 0, Some(b"value2"), 2, 0, None);
+        
+        // Act - decode each separately since TLV doesn't have built-in entry separators
+        let (entry1, consumed1) = decode(&encoded1, 0).unwrap();
+        let (entry2, consumed2) = decode(&encoded2, 0).unwrap();
+
+        // Assert
+        assert_eq!(entry1.key_delta, b"key1");
+        assert_eq!(entry2.key_delta, b"key2");
+        assert_eq!(consumed1, encoded1.len());
+        assert_eq!(consumed2, encoded2.len());
     }
 }

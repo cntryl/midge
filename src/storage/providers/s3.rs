@@ -1,6 +1,12 @@
 #![cfg_attr(not(feature = "cloud-common"), allow(unused))]
-//! AWS S3 provider implementation using CloudExecutor and SigV4 signing.
+//! Generic S3-compatible provider implementation
 //!
+//! Supports any S3-compatible storage:
+//! - AWS S3 (with SigV4 credential handling)
+//! - Wasabi (simple access key/secret)
+//! - MinIO (local or cloud)
+//! - Oracle Cloud Infrastructure (OCI S3 compatibility)
+//! - Any other S3-compatible service
 #![cfg_attr(not(feature = "cloud-common"), allow(dead_code))]
 
 use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
@@ -100,6 +106,72 @@ const ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'}');
 
+/// Configuration for S3-compatible storage
+#[cfg(feature = "cloud-common")]
+#[derive(Clone, Debug)]
+pub struct S3Config {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: Option<String>,
+    pub path_style: bool,
+}
+
+#[cfg(feature = "cloud-common")]
+impl S3Config {
+    /// Create config for AWS S3 (default endpoint)
+    pub fn aws(bucket: String, region: String) -> Self {
+        Self {
+            bucket,
+            region,
+            endpoint: None,
+            path_style: false,
+        }
+    }
+
+    /// Create config for Wasabi
+    pub fn wasabi(bucket: String, region: String) -> Self {
+        Self {
+            bucket,
+            region: region.clone(),
+            endpoint: Some(format!("https://s3.{}.wasabisys.com", region)),
+            path_style: false,
+        }
+    }
+
+    /// Create config for MinIO
+    pub fn minio(bucket: String, endpoint: String) -> Self {
+        Self {
+            bucket,
+            region: "us-east-1".to_string(),
+            endpoint: Some(endpoint),
+            path_style: true,
+        }
+    }
+
+    /// Create config for OCI S3 compatibility
+    pub fn oci_s3_compat(bucket: String, namespace: String, region: String) -> Self {
+        Self {
+            bucket,
+            region: region.clone(),
+            endpoint: Some(format!(
+                "https://{}.compat.objectstorage.{}.oraclecloud.com",
+                namespace, region
+            )),
+            path_style: false,
+        }
+    }
+
+    /// Create config for custom S3-compatible endpoint
+    pub fn custom(bucket: String, region: String, endpoint: String, path_style: bool) -> Self {
+        Self {
+            bucket,
+            region,
+            endpoint: Some(endpoint),
+            path_style,
+        }
+    }
+}
+
 #[cfg(feature = "cloud-common")]
 pub struct S3Provider {
     backend: Arc<dyn CloudBackend>,
@@ -107,11 +179,80 @@ pub struct S3Provider {
 
 #[cfg(feature = "cloud-common")]
 impl S3Provider {
-    pub fn new(bucket: String, region: String, creds: AwsCredentials) -> Self {
-        let signer = Arc::new(SigV4Signer::new(creds.clone()));
-        let executor = CloudExecutor::new(Some(signer));
-        let backend = Arc::new(S3Backend::new(bucket, region, executor));
+    /// Create provider with AWS credentials (SigV4 signing)
+    pub fn aws(bucket: String, region: String, creds: AwsCredentials) -> Self {
+        let config = S3Config::aws(bucket, region);
+        Self::with_config(config, Some(creds))
+    }
+
+    /// Create provider for Wasabi (simple access key/secret)
+    pub fn wasabi(bucket: String, region: String, access_key: String, secret_key: String) -> Self {
+        let config = S3Config::wasabi(bucket, region.clone());
+        let creds = AwsCredentials {
+            access_key,
+            secret_key,
+            region,
+            session_token: None,
+        };
+        Self::with_config(config, Some(creds))
+    }
+
+    /// Create provider for MinIO (access key/secret)
+    pub fn minio(bucket: String, endpoint: String, access_key: String, secret_key: String) -> Self {
+        let config = S3Config::minio(bucket, endpoint);
+        let creds = AwsCredentials {
+            access_key,
+            secret_key,
+            region: "us-east-1".to_string(),
+            session_token: None,
+        };
+        Self::with_config(config, Some(creds))
+    }
+
+    /// Create provider for OCI S3 compatibility
+    pub fn oci_s3_compat(
+        bucket: String,
+        namespace: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+    ) -> Self {
+        let config = S3Config::oci_s3_compat(bucket, namespace, region.clone());
+        let creds = AwsCredentials {
+            access_key,
+            secret_key,
+            region,
+            session_token: None,
+        };
+        Self::with_config(config, Some(creds))
+    }
+
+    /// Create provider with custom S3-compatible endpoint
+    pub fn custom(
+        config: S3Config,
+        access_key: String,
+        secret_key: String,
+    ) -> Self {
+        let creds = AwsCredentials {
+            access_key,
+            secret_key,
+            region: config.region.clone(),
+            session_token: None,
+        };
+        Self::with_config(config, Some(creds))
+    }
+
+    /// Create provider with full config and optional credentials
+    fn with_config(config: S3Config, creds: Option<AwsCredentials>) -> Self {
+        let signer = creds.map(|c| Arc::new(SigV4Signer::new(c)) as Arc<dyn CloudSigner>);
+        let executor = CloudExecutor::new(signer);
+        let backend = Arc::new(S3Backend::new(config, executor));
         Self { backend }
+    }
+
+    /// Legacy constructor (AWS with explicit credentials)
+    pub fn new(bucket: String, region: String, creds: AwsCredentials) -> Self {
+        Self::aws(bucket, region, creds)
     }
 
     pub fn backend(&self) -> Arc<dyn CloudBackend> {
@@ -121,19 +262,14 @@ impl S3Provider {
 
 #[cfg(feature = "cloud-common")]
 struct S3Backend {
-    bucket: String,
-    region: String,
+    config: S3Config,
     executor: CloudExecutor,
 }
 
 #[cfg(feature = "cloud-common")]
 impl S3Backend {
-    fn new(bucket: String, region: String, executor: CloudExecutor) -> Self {
-        Self {
-            bucket,
-            region,
-            executor,
-        }
+    fn new(config: S3Config, executor: CloudExecutor) -> Self {
+        Self { config, executor }
     }
 
     fn canonical_key(&self, key: &str) -> String {
@@ -144,7 +280,25 @@ impl S3Backend {
     }
 
     fn base_url(&self) -> String {
-        format!("https://{}.s3.{}.amazonaws.com", self.bucket, self.region)
+        if let Some(ref endpoint) = self.config.endpoint {
+            if self.config.path_style {
+                // Path-style: https://endpoint/bucket
+                format!("{}/{}", endpoint.trim_end_matches('/'), self.config.bucket)
+            } else {
+                // Virtual-hosted style: https://bucket.endpoint
+                let endpoint_without_protocol = endpoint
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://");
+                let protocol = if endpoint.starts_with("https") { "https" } else { "http" };
+                format!("{}://{}.{}", protocol, self.config.bucket, endpoint_without_protocol)
+            }
+        } else {
+            // Default AWS S3 endpoint
+            format!(
+                "https://{}.s3.{}.amazonaws.com",
+                self.config.bucket, self.config.region
+            )
+        }
     }
 
     fn object_url(&self, key: &str) -> String {

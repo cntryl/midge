@@ -1,0 +1,242 @@
+# HybridStorage Architecture: Two Separate Roles
+
+## Critical Design Principle
+
+**HybridStorage has TWO COMPLETELY SEPARATE responsibilities that MUST NOT be mixed:**
+
+### Role 1: Object Storage (SSTs, Metadata)
+**Entry Points:** `submit_read()`, `submit_write()`, `submit_delete()`, `submit_list()`
+
+**Behavior:**
+- General-purpose file storage operations
+- Used for SST files, metadata, configuration
+- Local + cloud merging/fallback
+- Cloud writes ONLY for `sst/` prefix paths
+- **NEVER involved in WAL durability**
+
+```rust
+// SST write example
+hybrid.submit_write("sst/0001.sst", data, callback);
+// → writes to local immediately
+// → writes to cloud in background (because path starts with "sst/")
+// → returns via callback when local write completes
+```
+
+### Role 2: WAL Durability Pipeline (CloudFirst Mode)
+**Entry Points:** `enqueue_wal_segment()`, `process_uploads()`, `poll()`
+
+**Behavior:**
+- Exclusive mechanism for WAL cloud durability
+- WalActor writes WAL segment locally first
+- WalActor calls `enqueue_wal_segment()` to queue for cloud upload
+- Runtime calls `process_uploads()` periodically
+- Cloud upload happens via direct cloud backend call (NOT `submit_write()`)
+- Emits `CloudAck` or `CloudFail` events
+- WalActor applies writes to memtable ONLY after `CloudAck`
+
+```rust
+// WAL durability flow
+// 1. WalActor writes to local filesystem
+fs_wal_writer.append_record(&record)?;
+
+// 2. WalActor enqueues for cloud durability
+hybrid.enqueue_wal_segment(segment_id, local_path, max_sequence);
+
+// 3. Runtime processes uploads periodically
+hybrid.process_uploads();  // spawns background thread, calls cloud backend directly
+
+// 4. Runtime polls for completion events
+let events = hybrid.poll();
+for event in events {
+    match event {
+        StorageEvent::CloudAck { segment_id, max_sequence } => {
+            // NOW apply queued writes to memtable
+            wal_actor.apply_pending_writes(max_sequence);
+        }
+        StorageEvent::CloudFail { segment_id, error } => {
+            // Handle failure, retry logic already in process_uploads()
+        }
+        _ => {}
+    }
+}
+```
+
+## Why This Separation Matters
+
+### ❌ WRONG: Mixing concerns
+```rust
+// BAD: Using submit_write for WAL
+hybrid.submit_write("wal/0001.wal", data, callback);
+// Problems:
+// - WAL durability depends on object storage logic
+// - CloudAck timing unclear
+// - Can't distinguish SST vs WAL behavior
+// - Retry logic conflicts with object storage semantics
+```
+
+### ✅ CORRECT: Separate pipelines
+```rust
+// GOOD: Object storage for SSTs
+hybrid.submit_write("sst/0001.sst", data, callback);
+
+// GOOD: WAL durability pipeline
+hybrid.enqueue_wal_segment(1, PathBuf::from("wal/0001.wal"), 1000);
+hybrid.process_uploads();
+let events = hybrid.poll();
+```
+
+## Implementation Details
+
+### submit_write() Behavior
+```rust
+fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
+    // 1. Always write to local
+    self.local.submit_write(path.clone(), data.clone(), tx);
+    
+    // 2. Send callback immediately (local write complete)
+    callback.send(WriteComplete { ... });
+    
+    // 3. Conditionally write to cloud ONLY for SSTs
+    if path.starts_with("sst/") {
+        self.cloud.submit_write(path, data, tx_cloud);
+    }
+    // Note: WAL paths NEVER trigger cloud write here
+}
+```
+
+### initiate_cloud_upload() Behavior
+```rust
+fn initiate_cloud_upload(&self, upload: UploadState) {
+    std::thread::spawn(move || {
+        // 1. Read local WAL segment file
+        let data = std::fs::read(&upload.local_path)?;
+        
+        // 2. Call cloud backend DIRECTLY (not via submit_write)
+        let cloud_key = format!("wal/{}.wal", upload.segment_id);
+        self.cloud.submit_write(cloud_key, data, tx);
+        
+        // 3. On success, emit CloudAck event
+        self.event_queue.push_back(StorageEvent::CloudAck {
+            segment_id: upload.segment_id,
+            max_sequence: upload.max_sequence,
+        });
+    });
+}
+```
+
+## Data Flow Diagrams
+
+### SST Write Flow
+```
+Engine
+  ↓
+submit_write("sst/0001.sst")
+  ↓
+Local Write (immediate)
+  ↓
+Callback (WriteComplete)
+  ↓
+Cloud Write (background, fire-and-forget)
+```
+
+### WAL Durability Flow (CloudFirst)
+```
+WalActor
+  ↓
+Write local WAL segment
+  ↓
+enqueue_wal_segment(id, path, max_seq)
+  ↓
+upload_queue.push(UploadState)
+  ↓
+process_uploads() [periodic]
+  ↓
+initiate_cloud_upload()
+  ↓
+Cloud Backend (direct call)
+  ↓
+CloudAck event → event_queue
+  ↓
+Runtime polls events
+  ↓
+WalActor receives CloudAck
+  ↓
+Apply pending writes to memtable
+```
+
+## Key Invariants
+
+1. **WAL durability NEVER uses `submit_write()`**
+   - Uses `enqueue_wal_segment()` + `process_uploads()` exclusively
+
+2. **Object storage NEVER participates in WAL durability**
+   - SST writes go to cloud automatically
+   - WAL writes NEVER trigger cloud upload in `submit_write()`
+
+3. **CloudAck events come ONLY from WAL durability pipeline**
+   - Generated by `initiate_cloud_upload()`
+   - Never from `submit_write()`
+
+4. **WalActor memtable updates wait for CloudAck**
+   - Local WAL write is ephemeral
+   - Cloud durability is authoritative
+   - Writes invisible until CloudAck received
+
+5. **Retry logic is WAL-specific**
+   - 3 retries for WAL segments
+   - Object storage failures are immediate (no auto-retry)
+
+## Testing Scenarios
+
+### Test: SST Write
+```rust
+hybrid.submit_write("sst/0001.sst", data, callback);
+// Verify: local write occurs
+// Verify: cloud write scheduled (because "sst/" prefix)
+// Verify: NO CloudAck event
+```
+
+### Test: WAL Durability
+```rust
+hybrid.enqueue_wal_segment(1, path, 1000);
+hybrid.process_uploads();
+let events = hybrid.poll();
+// Verify: cloud upload initiated
+// Verify: CloudAck event with segment_id=1, max_sequence=1000
+// Verify: local file still exists (not auto-deleted)
+```
+
+### Test: WAL Retry
+```rust
+// Mock cloud to fail first 2 attempts
+hybrid.enqueue_wal_segment(1, path, 1000);
+hybrid.process_uploads(); // fail
+hybrid.process_uploads(); // fail
+hybrid.process_uploads(); // succeed
+let events = hybrid.poll();
+// Verify: CloudAck received after 3rd attempt
+```
+
+### Test: Path-Based Cloud Write
+```rust
+hybrid.submit_write("metadata/config.json", data, callback);
+// Verify: local write occurs
+// Verify: NO cloud write (path doesn't start with "sst/")
+```
+
+## Migration Guide
+
+### Before (incorrect mixing)
+```rust
+// Old code that mixed concerns
+wal_actor.write_segment(data);
+hybrid.submit_write("wal/0001.wal", data, callback);  // WRONG
+```
+
+### After (correct separation)
+```rust
+// New code with proper separation
+wal_actor.write_segment_locally(data);
+hybrid.enqueue_wal_segment(1, path, max_seq);
+runtime.schedule_upload_processing();
+```

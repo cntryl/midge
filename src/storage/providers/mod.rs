@@ -4,7 +4,7 @@
 //! Each provider implements the callback-based architecture via CloudCallback.
 //!
 //! Providers:
-//! - AWS S3: Direct REST API with SigV4 authentication
+//! - Generic S3-compatible (AWS, Wasabi, MinIO, OCI, etc.)
 //! - Google Cloud Storage: Direct REST API with OAuth2
 //! - Azure Blob Storage: Direct REST API with SAS tokens
 //! - Oracle Cloud Infrastructure: Direct REST API with signature-based auth
@@ -19,3 +19,16 @@ pub use azure::AzureProvider;
 pub use gcs::GcsProvider;
 pub use oci::OciProvider;
 pub use s3::S3Provider;
+
+#[cfg(feature = "cloud-common")]
+pub use s3::S3Config;
+
+// Vendor-specific type aliases for clarity
+#[cfg(feature = "cloud-common")]
+pub type AwsS3Provider = S3Provider;
+#[cfg(feature = "cloud-common")]
+pub type WasabiProvider = S3Provider;
+#[cfg(feature = "cloud-common")]
+pub type MinioProvider = S3Provider;
+#[cfg(feature = "cloud-common")]
+pub type OciS3CompatProvider = S3Provider;

@@ -1,4 +1,37 @@
 #![cfg(feature = "cloud-common")]
+//
+// == COPILOT RULES: CLOUD EXECUTOR ==
+//
+// You MUST implement CloudExecutor as a fully self-contained async engine.
+//
+// Requirements:
+// 1. CloudExecutor MUST embed its own single-threaded Tokio runtime:
+//      let rt = tokio::runtime::Builder::new_current_thread()
+//          .enable_all()
+//          .build()
+//          .unwrap();
+//
+// 2. spawn_request MUST execute inside that runtime using rt.spawn().
+//    NEVER call tokio::spawn directly, because Midge runtime is synchronous.
+//
+// 3. Every cloud request MUST eventually produce a CloudEvent,
+//    either CloudAck or CloudFail. Dropped futures are forbidden.
+//
+// 4. All HTTP calls MUST use reqwest::Client inside the executor runtime.
+//    If signer is present, call signer.sign(request) BEFORE dispatch.
+//
+// 5. CloudResponse MUST include:
+//      - status code
+//      - headers
+//      - full body bytes
+//
+// 6. Errors MUST be mapped to MidgeError::Internal with full context.
+//
+// 7. CloudExecutor is thread-safe and MUST NOT block the Midge runtime thread.
+//
+// 8. No request may outlive the executor. All pending tasks must complete.
+//
+// FOLLOW THESE RULES EXACTLY.
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::storage::cloud::{CloudCallback, CloudEvent};
@@ -65,16 +98,27 @@ pub trait CloudSigner: Send + Sync {
 }
 
 /// Cloud executor that runs async HTTP requests.
+///
+/// Embeds a single-threaded tokio runtime to execute HTTP operations
+/// without blocking the Midge synchronous runtime.
+/// CRITICAL: All cloud operations happen inside this embedded runtime.
 pub struct CloudExecutor {
     client: Client,
     signer: Option<Arc<dyn CloudSigner>>,
+    rt: Arc<tokio::runtime::Runtime>,
 }
 
 impl CloudExecutor {
     pub fn new(signer: Option<Arc<dyn CloudSigner>>) -> Self {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build cloud tokio runtime");
+
         Self {
             client: Client::new(),
             signer,
+            rt: Arc::new(rt),
         }
     }
 
@@ -102,48 +146,49 @@ impl CloudExecutor {
         }
 
         let client = self.client.clone();
-        let headers = request.headers.clone();
-        let body = request.body.clone();
         let method = request.method.clone();
         let url = request.url.clone();
-        let callback = callback.clone();
+        let headers = request.headers.clone();
+        let body = request.body.clone();
 
-        tokio::spawn(async move {
+        let cb = callback.clone();
+
+        self.rt.spawn(async move {
             let mut builder = client.request(method.clone(), &url);
-            for (key, value) in headers.iter() {
-                builder = builder.header(key, value);
+            for (k, v) in headers.iter() {
+                builder = builder.header(k, v);
             }
-            if let Some(body) = body {
-                builder = builder.body(body);
+            if let Some(b) = body {
+                builder = builder.body(b);
             }
 
-            let response = builder.send().await;
-            let result = match response {
-                Ok(resp) => match resp.bytes().await {
-                    Ok(bytes) => {
-                        let headers = resp
-                            .headers()
-                            .iter()
-                            .map(|(k, v)| {
-                                (k.to_string(), v.to_str().unwrap_or_default().to_string())
-                            })
-                            .collect();
-                        Ok(CloudResponse {
-                            status: resp.status().as_u16(),
+            let result = match builder.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let headers = resp
+                        .headers()
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect::<Vec<_>>();
+
+                    match resp.bytes().await {
+                        Ok(bytes) => Ok(CloudResponse {
+                            status,
                             headers,
                             body: bytes.to_vec(),
-                        })
+                        }),
+                        Err(err) => Err(MidgeError::Internal(format!(
+                            "cloud body error: {err}"
+                        ))),
                     }
-                    Err(err) => Err(MidgeError::Internal(format!("cloud body error: {}", err))),
-                },
+                }
                 Err(err) => Err(MidgeError::Internal(format!(
-                    "cloud request failed: {}",
-                    err
+                    "cloud request failed: {err}"
                 ))),
             };
 
-            let event = mapper(context, result);
-            let _ = callback.send(event);
+            let event = mapper(context.clone(), result);
+            let _ = cb.send(event);
         });
     }
 }

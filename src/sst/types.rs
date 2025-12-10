@@ -38,6 +38,9 @@ impl Block {
     }
 }
 
+/// RocksDB-compatible magic number for SST footer validation
+pub const SST_FOOTER_MAGIC: u64 = 0xdb4775248b80fb57;
+
 /// Footer stored at end of SST file
 #[derive(Debug, Clone)]
 pub struct Footer {
@@ -54,6 +57,7 @@ impl Footer {
     }
 
     /// Encode footer to exactly 48 bytes (compatible with RocksDB format)
+    /// Layout: [meta_index_handle: 16 bytes] [index_handle: 16 bytes] [padding: 8 bytes] [magic: 8 bytes]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = vec![0u8; 48];
         // Store handles as fixed 16 bytes each
@@ -63,7 +67,9 @@ impl Footer {
         // index: offset (8) + size (8)
         buf[16..24].copy_from_slice(&self.index_handle.offset.to_le_bytes());
         buf[24..32].copy_from_slice(&self.index_handle.size.to_le_bytes());
-        // Remaining bytes for future expansion
+        // Reserved bytes [32..40] for future use
+        // Magic number at end [40..48]
+        buf[40..48].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
         buf
     }
 
@@ -74,6 +80,17 @@ impl Footer {
                 "Footer too short".into(),
             ));
         }
+        
+        // Validate magic number first
+        let magic = u64::from_le_bytes([
+            data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
+        ]);
+        if magic != SST_FOOTER_MAGIC {
+            return Err(crate::common::MidgeError::Corruption(
+                format!("Invalid footer magic: expected 0x{:016x}, got 0x{:016x}", SST_FOOTER_MAGIC, magic),
+            ));
+        }
+        
         let meta_offset = u64::from_le_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);

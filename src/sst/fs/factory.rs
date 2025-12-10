@@ -42,10 +42,9 @@ mod tests {
 
     #[test]
     fn should_create_writer_when_factory_initialized() -> MidgeResult<()> {
-        // Arrange
-        let temp_dir = std::env::temp_dir().join("midge_factory_test");
-        std::fs::create_dir_all(&temp_dir)?;
-        let factory = FsSstFactory::new(&temp_dir, 4096);
+        // Arrange - use tempfile for proper cross-platform temp handling
+        let temp_dir = tempfile::tempdir()?;
+        let factory = FsSstFactory::new(temp_dir.path(), 4096);
 
         // Act
         let mut writer = factory.create()?;
@@ -54,6 +53,7 @@ mod tests {
 
         // Assert
         assert!(bytes.len() > 0);
+        // tempdir auto-cleans on drop
 
         Ok(())
     }

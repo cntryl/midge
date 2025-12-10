@@ -32,6 +32,7 @@ impl FsSstWriter {
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
+            .read(true)
             .write(true)
             .open(&temp_path)?;
 
@@ -54,6 +55,7 @@ impl FsSstWriter {
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
+            .read(true)
             .write(true)
             .open(&temp_path)?;
 
@@ -186,22 +188,22 @@ impl crate::sst::DynSstWriter for FsSstWriter {
 mod tests {
     use super::*;
     use crate::sst::DynSstWriter;
-    use std::fs;
 
     #[test]
     fn should_write_entries_when_creating_sst() -> MidgeResult<()> {
-        // Arrange
-        let temp_dir = std::env::temp_dir().join("midge_sst_test");
-        fs::create_dir_all(&temp_dir)?;
+        // Arrange - use tempfile crate for proper cross-platform temp handling
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path();
 
         // Act
-        let mut writer = FsSstWriter::new(&temp_dir, 4096)?;
+        let mut writer = FsSstWriter::new(temp_path, 4096)?;
         writer.add(b"key1", b"value1")?;
         writer.add(b"key2", b"value2")?;
         let bytes = Box::new(writer).finish_bytes()?;
 
         // Assert
         assert!(bytes.len() > 0);
+        // tempdir auto-cleans on drop
 
         Ok(())
     }
