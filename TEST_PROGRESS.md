@@ -1,7 +1,7 @@
 # Test Implementation Progress Summary
 
 **Date**: Session 13 (Transaction Implementation Phase)  
-**Total Active Tests Passing**: 129 tests  
+**Total Active Tests Passing**: 133 tests  
 **Overall Completion**: Phase 1-3 Complete, Phase 4 Partial
 
 ---
@@ -157,9 +157,9 @@
 
 ---
 
-## Phase 4: Transactions 🔄 IN PROGRESS (35/61 tests, 57%)
+## Phase 4: Transactions 🔄 IN PROGRESS (39/61 tests, 64%)
 
-### transaction_basic.rs - 7/16 tests (9 ignored)
+### transaction_basic.rs - 8/16 tests (8 ignored)
 **Active tests passing** ✅:
 - Multi-operation commit
 - Empty transaction commit
@@ -168,11 +168,13 @@
 - Rollback clears all writes
 - Delete range in transaction
 - Snapshot isolation with concurrent writes
+- Read own writes (transaction-scoped reads)
 
 **Ignored tests** (require features not yet implemented):
-- Transaction-scoped reads
 - Insert() with existence check
 - Lock management
+- Range scans in transactions
+- Retry logic
 - Persistence/recovery
 - WAL replay
 
@@ -181,8 +183,9 @@
 - WriteIntent tracking for pending operations
 - Proper state transitions in commit_transaction()
 - Rollback on drop implemented
+- Transaction-scoped reads via get_transactional() (read-your-own-writes)
 
-### transaction_conflicts.rs - 13/25 tests (12 ignored)
+### transaction_conflicts.rs - 14/25 tests (11 ignored)
 **Active tests passing** ✅:
 - LWW semantics for concurrent puts
 - Both committers accepted (no conflicts)
@@ -197,12 +200,12 @@
 - 20-thread high-contention stress test (same key)
 - Concurrent read-modify-write stress test
 - Clean transaction commits
+- Read values within transaction (transaction-scoped reads)
 
 **Ignored tests** (require features not yet implemented):
 - Delete range in transactions
 - Insert() with conflict detection
 - Compare-and-swap operations
-- Transaction-scoped reads
 - Optimistic locking
 - Full isolation under stress
 - Persistence/recovery
@@ -212,8 +215,9 @@
 - No optimistic conflict detection (by design)
 - Concurrent transactions succeed independently
 - Stress tests verify thread safety
+- Transaction-scoped reads enabled via get_transactional()
 
-### transaction_isolation.rs - 15/20 tests (5 ignored)
+### transaction_isolation.rs - 17/20 tests (3 ignored)
 **Active tests passing** ✅:
 - Dirty read prevention
 - Concurrent transaction isolation
@@ -230,9 +234,10 @@
 - 20-thread concurrent transaction pressure
 - 50-thread high-concurrency reader test
 - 30-thread mixed reader/writer load test
+- Read uncommitted value in same transaction (transaction-scoped reads)
+- See own writes (transaction-scoped reads)
 
 **Ignored tests** (require features not yet implemented):
-- Transaction-scoped reads (read-your-own-writes)
 - Range query phantom read detection
 - Persistence/recovery
 
@@ -241,6 +246,7 @@
 - No dirty reads from uncommitted transactions
 - Snapshot isolation validated
 - Stress tests validate isolation under load
+- Transaction-scoped reads (read-your-own-writes) implemented
 
 ---
 
