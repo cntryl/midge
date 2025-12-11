@@ -165,22 +165,22 @@ fn should_invalidate_handle_given_cf_dropped_when_accessing() {
 
 #[test]
 fn should_delete_cf_data_given_cf_dropped_when_persisted() {
-    let opts = durability_opts();
+    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test_cf").unwrap();
+            engine.put(&cf, b"key1", b"value1").unwrap();
+            engine.drop_column_family(cf.id()).unwrap();
+            // Engine dropped
+        }
 
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.create_column_family("test_cf").unwrap();
-        engine.put(&cf, b"key1", b"value1").unwrap();
-        engine.drop_column_family(cf.id()).unwrap();
-        // Engine dropped
-    }
-
-    // Assert (Phase 2) - dropped CF data should not be recovered
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        // Would need get_column_family_by_name or list to verify CF is gone
-    }
+        // Assert (Phase 2) - dropped CF data should not be recovered
+        {
+            let engine = open_with_mode(opts, mode);
+            // Would need get_column_family_by_name or list to verify CF is gone
+        }
+    });
 }
 
 #[test]
@@ -360,88 +360,88 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
 
 #[test]
 fn should_persist_cf_metadata_given_restart_when_cf_created() {
-    let opts = durability_opts();
+    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            engine.create_column_family("test_cf").unwrap();
+            // Engine dropped
+        }
 
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        engine.create_column_family("test_cf").unwrap();
-        // Engine dropped
-    }
-
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cfs = engine.list_column_families().unwrap();
-        let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
-        assert!(names.contains(&"test_cf"));
-    }
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cfs = engine.list_column_families().unwrap();
+            let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+            assert!(names.contains(&"test_cf"));
+        }
+    });
 }
 
 #[test]
 fn should_persist_cf_data_given_restart_when_data_flushed() {
-    let opts = durability_opts();
+    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test_cf").unwrap();
+            engine.put(&cf, b"key1", b"value1").unwrap();
+            // Engine dropped
+        }
 
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.create_column_family("test_cf").unwrap();
-        engine.put(&cf, b"key1", b"value1").unwrap();
-        // Engine dropped
-    }
-
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        // Would need get_column_family_by_name to retrieve CF handle
-        // let cf = engine.get_column_family_by_name("test_cf").unwrap();
-        // let result = engine.get(&cf, b"key1").unwrap();
-        // assert_eq!(result, Some(Bytes::from_static(b"value1")));
-    }
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            // Would need get_column_family_by_name to retrieve CF handle
+            // let cf = engine.get_column_family_by_name("test_cf").unwrap();
+            // let result = engine.get(&cf, b"key1").unwrap();
+            // assert_eq!(result, Some(Bytes::from_static(b"value1")));
+        }
+    });
 }
 
 #[test]
 fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
-    let opts = durability_opts();
+    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf1 = engine.create_column_family("cf1").unwrap();
+            let cf2 = engine.create_column_family("cf2").unwrap();
+            engine.put(&cf1, b"key1", b"value1").unwrap();
+            engine.put(&cf2, b"key2", b"value2").unwrap();
+            // Engine dropped
+        }
 
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf1 = engine.create_column_family("cf1").unwrap();
-        let cf2 = engine.create_column_family("cf2").unwrap();
-        engine.put(&cf1, b"key1", b"value1").unwrap();
-        engine.put(&cf2, b"key2", b"value2").unwrap();
-        // Engine dropped
-    }
-
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cfs = engine.list_column_families().unwrap();
-        assert_eq!(cfs.len(), 3); // default + cf1 + cf2
-    }
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cfs = engine.list_column_families().unwrap();
+            assert_eq!(cfs.len(), 3); // default + cf1 + cf2
+        }
+    });
 }
 
 #[test]
 fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
-    let opts = durability_opts();
+    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.create_column_family("test_cf").unwrap();
+            engine.put(&cf, b"key1", b"value1").unwrap();
+            engine.drop_column_family(cf.id()).unwrap();
+            // Engine dropped
+        }
 
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.create_column_family("test_cf").unwrap();
-        engine.put(&cf, b"key1", b"value1").unwrap();
-        engine.drop_column_family(cf.id()).unwrap();
-        // Engine dropped
-    }
-
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cfs = engine.list_column_families().unwrap();
-        let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
-        assert!(!names.contains(&"test_cf"));
-    }
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cfs = engine.list_column_families().unwrap();
+            let names: Vec<&str> = cfs.iter().map(|cf| cf.name()).collect();
+            assert!(!names.contains(&"test_cf"));
+        }
+    });
 }
 
 // ============================================================================
