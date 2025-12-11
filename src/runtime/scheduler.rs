@@ -75,6 +75,7 @@ impl Scheduler {
     /// Get the next task to run, respecting concurrency per TaskKind.
     ///
     /// Removes and returns exactly one schedulable task, or None if none can run.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Task> {
         let mut deferred = Vec::new();
         let mut selected = None;

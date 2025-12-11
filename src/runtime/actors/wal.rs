@@ -91,6 +91,7 @@ impl WalActor {
     ///
     /// In CloudFirst mode, writes are NOT visible until cloud acknowledges.
     /// Returns the assigned sequence number.
+    #[allow(clippy::too_many_arguments)]
     pub fn append(
         &mut self,
         state: &mut RuntimeState,

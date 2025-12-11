@@ -10,6 +10,12 @@ use crate::common::MidgeResult;
 use crate::engine::ColumnFamilyId;
 use std::collections::HashMap;
 
+/// Read set entry: (value, sequence number)
+type ReadSetEntry = (Option<Vec<u8>>, u64);
+
+/// Read set: (cf_id, key) → (value, sequence)
+type ReadSet = HashMap<(ColumnFamilyId, Vec<u8>), ReadSetEntry>;
+
 /// Isolation level for transaction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(Default)]
@@ -117,7 +123,7 @@ pub struct Transaction {
     /// Current state
     state: TransactionState,
     /// Read set: (cf_id, key) → (value, sequence)
-    read_set: HashMap<(ColumnFamilyId, Vec<u8>), (Option<Vec<u8>>, u64)>,
+    read_set: ReadSet,
     /// Write set: sequence of write intents
     write_set: Vec<WriteIntent>,
     /// Start sequence number (snapshot point)
@@ -204,7 +210,7 @@ impl Transaction {
     }
 
     /// Get the read set
-    pub fn read_set(&self) -> &HashMap<(ColumnFamilyId, Vec<u8>), (Option<Vec<u8>>, u64)> {
+    pub fn read_set(&self) -> &ReadSet {
         &self.read_set
     }
 

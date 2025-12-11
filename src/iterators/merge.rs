@@ -151,7 +151,7 @@ impl MergeIterator {
     }
 
     /// Get the next unique key-value pair
-    pub fn next(&mut self) -> MidgeResult<Option<(Vec<u8>, Vec<u8>)>> {
+    pub fn next_item(&mut self) -> MidgeResult<Option<(Vec<u8>, Vec<u8>)>> {
         if self.exhausted {
             return Ok(None);
         }
@@ -245,7 +245,7 @@ mod tests {
 
         // Act
         merge.init().unwrap();
-        let r1 = merge.next().unwrap();
+        let r1 = merge.next_item().unwrap();
 
         // Assert
         assert_eq!(r1.as_ref().unwrap().0, b"a".to_vec());
@@ -260,8 +260,8 @@ mod tests {
 
         // Act
         merge.init().unwrap();
-        merge.next().unwrap();
-        let result = merge.next().unwrap();
+        merge.next_item().unwrap();
+        let result = merge.next_item().unwrap();
 
         // Assert
         assert!(result.is_none());
@@ -276,7 +276,7 @@ mod tests {
 
         // Act
         merge.init().unwrap();
-        let result = merge.next().unwrap();
+        let result = merge.next_item().unwrap();
 
         // Assert
         assert!(result.is_none());
@@ -297,7 +297,7 @@ mod tests {
 
         // Act
         merge.init().unwrap();
-        let result = merge.next().unwrap().unwrap();
+        let result = merge.next_item().unwrap().unwrap();
 
         // Assert
         assert_eq!(result.0, b"b".to_vec());

@@ -67,6 +67,7 @@ impl Iterator {
     }
 
     /// Move to the next key-value pair
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
         if self.exhausted || self.position >= self.results.len() {
             self.exhausted = true;
