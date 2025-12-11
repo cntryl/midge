@@ -237,7 +237,7 @@ cargo test --test engine_basic --test engine_write_batch --test engine_delete_ra
 | **engine_iterators.rs** | 17 | ✅ Passing (17/17) | Multi-version filtering fixed in handle_range_scan |
 | **engine_snapshots.rs** | 14 | ✅ Passing (14/14) | Snapshot API complete, flush interaction verified |
 | **engine_merge.rs** | 19 | ✅ Passing (9/9 active, 10 ignored) | Merge operators implemented (base semantics complete) |
-| **engine_ttl.rs** | 12 | 📋 Not started | TTL metadata tracking needed |
+| **engine_ttl.rs** | 12 | ✅ Passing (7/7 active, 5 ignored) | TTL support complete (expiration at read time) |
 | **column_families.rs** | 27 | 📋 Not started | CF lifecycle management |
 | **config_api.rs** | 20 | 📋 Not started | Config builder validation |
 | **transaction_basic.rs** | 16 | 📋 Not started | Transaction lifecycle |
