@@ -1,4 +1,4 @@
-//! Core KV Engine Integration Tests
+﻿//! Core KV Engine Integration Tests
 //!
 //! Tests the basic put/get/delete operations end-to-end using the public
 //! MidgeEngine API. These tests are **storage-mode invariant**: every supported

@@ -1,4 +1,4 @@
-//! Write Batch Integration Tests
+﻿//! Write Batch Integration Tests
 //!
 //! Tests batched write operations end-to-end using the public MidgeEngine API.
 //! Write batches provide atomic multi-operation semantics: all operations in a

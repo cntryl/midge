@@ -1,4 +1,4 @@
-//! Column Family Integration Tests
+﻿//! Column Family Integration Tests
 //!
 //! Tests for column family lifecycle, isolation, and persistence.
 
@@ -47,7 +47,6 @@ fn should_create_multiple_column_families_given_unique_names_when_engine_open() 
 }
 
 #[test]
-#[ignore = "Requires duplicate name detection"]
 fn should_fail_create_column_family_given_duplicate_name_when_cf_exists() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -63,7 +62,6 @@ fn should_fail_create_column_family_given_duplicate_name_when_cf_exists() {
 }
 
 #[test]
-#[ignore = "Requires per-CF configuration support"]
 fn should_create_column_family_with_custom_config_given_config_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -116,7 +114,6 @@ fn should_drop_column_family_given_flushed_data_when_requested() {
 }
 
 #[test]
-#[ignore = "Requires memtable check before drop"]
 fn should_fail_drop_column_family_given_unflushed_data_when_memtable_not_empty() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -150,7 +147,6 @@ fn should_fail_drop_default_column_family_given_drop_request_when_default_cf() {
 }
 
 #[test]
-#[ignore = "Requires handle invalidation after drop"]
 fn should_invalidate_handle_given_cf_dropped_when_accessing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -168,7 +164,6 @@ fn should_invalidate_handle_given_cf_dropped_when_accessing() {
 }
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_delete_cf_data_given_cf_dropped_when_persisted() {
     let opts = durability_opts();
 
@@ -189,7 +184,6 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
 }
 
 #[test]
-#[ignore = "Requires CF name reuse tracking"]
 fn should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -215,7 +209,6 @@ fn should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires list_column_families implementation"]
 fn should_list_default_cf_only_given_no_custom_cfs_when_listing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -231,7 +224,6 @@ fn should_list_default_cf_only_given_no_custom_cfs_when_listing() {
 }
 
 #[test]
-#[ignore = "Requires list_column_families implementation"]
 fn should_list_all_column_families_given_multiple_cfs_when_listing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -252,7 +244,6 @@ fn should_list_all_column_families_given_multiple_cfs_when_listing() {
 }
 
 #[test]
-#[ignore = "Requires list_column_families implementation"]
 fn should_not_list_dropped_cf_given_cf_dropped_when_listing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -340,7 +331,6 @@ fn should_isolate_data_given_different_data_volumes_when_reading() {
 }
 
 #[test]
-#[ignore = "Requires compaction support"]
 fn should_isolate_compaction_given_per_cf_data_when_compacting() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -369,7 +359,6 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_persist_cf_metadata_given_restart_when_cf_created() {
     let opts = durability_opts();
 
@@ -390,7 +379,6 @@ fn should_persist_cf_metadata_given_restart_when_cf_created() {
 }
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_persist_cf_data_given_restart_when_data_flushed() {
     let opts = durability_opts();
 
@@ -413,7 +401,6 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
 }
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
     let opts = durability_opts();
 
@@ -436,7 +423,6 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
 }
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
     let opts = durability_opts();
 
@@ -463,7 +449,6 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires get_column_family_by_name implementation"]
 fn should_get_column_family_by_name_given_existing_cf_when_querying() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -479,7 +464,6 @@ fn should_get_column_family_by_name_given_existing_cf_when_querying() {
 }
 
 #[test]
-#[ignore = "Requires get_column_family_by_name implementation"]
 fn should_fail_get_column_family_given_nonexistent_name_when_querying() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange

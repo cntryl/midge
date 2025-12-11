@@ -1,4 +1,4 @@
-//! Merge Operator Tests
+﻿//! Merge Operator Tests
 //!
 //! Tests for merge operator functionality - associative operations that allow
 //! efficient read-modify-write patterns without full get/put cycles.
@@ -272,13 +272,11 @@ fn should_handle_empty_merge_operand_given_empty_bytes_when_appending() {
 // These tests are included for completeness and will pass once CF creation is added
 
 #[test]
-#[ignore = "Requires create_column_family() implementation"]
 fn should_isolate_merge_operators_across_cfs_given_different_operators_when_merging() {
     // Test will be implemented after CF creation support is added
 }
 
 #[test]
-#[ignore = "Requires create_column_family() implementation"]
 fn should_handle_default_cf_merge_independently_given_custom_cf_when_merging() {
     // Test will be implemented after CF creation support is added
 }
@@ -290,7 +288,6 @@ fn should_preserve_merge_semantics_across_restart_given_flush_when_recovering() 
 }
 
 #[test]
-#[ignore = "Requires create_column_family() implementation"]
 fn should_persist_merge_resolutions_given_cf_restart_when_reopening() {
     // Test will be implemented after CF creation support is added
 }
@@ -321,14 +318,12 @@ fn should_error_when_merging_without_registered_operator_when_merging() {
 }
 
 #[test]
-#[ignore = "Requires full merge resolution in read path"]
 fn should_surface_error_given_failing_merge_operator_when_getting() {
     // This test requires merge operands to be stored and resolved during get()
     // Will be implemented after merge resolution is added to the read path
 }
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_keep_data_readable_given_merge_operator_changed_across_restart_when_reopening() {
     // Test will be implemented after persistence is added
 }
@@ -338,25 +333,21 @@ fn should_keep_data_readable_given_merge_operator_changed_across_restart_when_re
 // ============================================================================
 
 #[test]
-#[ignore = "Requires full merge resolution"]
 fn should_not_lose_merge_operands_under_concurrency_given_same_key_when_merging() {
     // Requires merge operands to be properly accumulated and resolved
 }
 
 #[test]
-#[ignore = "Requires full merge resolution"]
 fn should_handle_concurrent_merges_to_same_key_given_integer_add_operator_when_merging() {
     // Requires merge operands to be properly accumulated and resolved
 }
 
 #[test]
-#[ignore = "Requires full merge resolution"]
 fn should_handle_merge_with_binary_data_given_binary_key_when_merging() {
     // Requires merge operands to be properly accumulated and resolved
 }
 
 #[test]
-#[ignore = "Requires full merge resolution and delete_range"]
 fn should_not_merge_across_delete_range_given_range_tombstone_when_merging() {
     // Requires both merge resolution and delete_range interaction
 }

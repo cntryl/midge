@@ -1,4 +1,4 @@
-//! Snapshot Integration Tests
+﻿//! Snapshot Integration Tests
 //!
 //! Tests MVCC snapshot semantics: visibility filtering based on snapshot sequence,
 //! isolation from concurrent writes, and persistence across crashes.

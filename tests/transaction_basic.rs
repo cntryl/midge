@@ -1,4 +1,4 @@
-//! Transaction Basic Tests
+﻿//! Transaction Basic Tests
 //!
 //! Core transaction functionality: begin, commit, rollback, isolation.
 
@@ -112,7 +112,6 @@ fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
 }
 
 #[test]
-#[ignore = "Requires lock management implementation"]
 fn should_release_locks_given_aborted_transaction_when_cleanup() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -191,7 +190,6 @@ fn should_read_own_writes_given_transaction_when_reading() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires insert() with existence check"]
 fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -232,7 +230,6 @@ fn should_delete_range_given_committed_transaction_when_delete_range() {
 }
 
 #[test]
-#[ignore = "Requires transaction-scoped range scan"]
 fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -256,7 +253,6 @@ fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
 }
 
 #[test]
-#[ignore = "Requires transaction-scoped range scan"]
 fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -281,7 +277,6 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires retry logic after commit failure"]
 fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -311,7 +306,6 @@ fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_persist_transaction_given_commit_when_crash_after() {
     let opts = durability_opts();
 
@@ -335,7 +329,6 @@ fn should_persist_transaction_given_commit_when_crash_after() {
 }
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_not_persist_transaction_given_abort_when_crash_after() {
     let opts = durability_opts();
 
@@ -359,7 +352,6 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
 }
 
 #[test]
-#[ignore = "Requires persistence and WAL replay"]
 fn should_recover_committed_transactions_given_wal_replay_when_restart() {
     let opts = durability_opts();
 

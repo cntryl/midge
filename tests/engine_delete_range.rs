@@ -1,4 +1,4 @@
-//! Delete Range Integration Tests
+﻿//! Delete Range Integration Tests
 //!
 //! Tests range deletion operations end-to-end using the public MidgeEngine API.
 //! Delete range is implemented by calling range() to find keys, then deleting

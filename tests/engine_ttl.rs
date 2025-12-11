@@ -1,4 +1,4 @@
-//! Integration tests for TTL (Time-To-Live) support
+﻿//! Integration tests for TTL (Time-To-Live) support
 
 use std::sync::Arc;
 use std::thread;
@@ -66,7 +66,6 @@ fn should_not_expire_key_given_zero_ttl_means_no_expiration_when_reading() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires persistence and recovery support"]
 fn should_persist_ttl_metadata_given_restart_when_reopening() {
     let opts = durability_opts();
     
@@ -88,7 +87,6 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
 }
 
 #[test]
-#[ignore = "Requires persistence and recovery support"]
 fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening() {
     let opts = durability_opts();
     
@@ -115,7 +113,6 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
 // ============================================================================
 
 #[test]
-#[ignore = "Requires compaction implementation"]
 fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -134,7 +131,6 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
 }
 
 #[test]
-#[ignore = "Requires compaction implementation"]
 fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -197,7 +193,6 @@ fn should_check_expiration_at_read_time_given_snapshot_when_ttl_elapses_after_sn
 // ============================================================================
 
 #[test]
-#[ignore = "Requires WriteBatch TTL support"]
 fn should_apply_ttl_given_write_batch_with_ttl_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange

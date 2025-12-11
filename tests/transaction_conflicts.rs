@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Cntryl, Inc.
+﻿// Copyright (c) 2025 Cntryl, Inc.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 //! Transaction conflict tests - validates LWW semantics, write conflict handling, and concurrent transaction behavior.
@@ -238,7 +238,6 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires insert() with existence check"]
 fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -263,7 +262,6 @@ fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first()
 }
 
 #[test]
-#[ignore = "Requires insert() with existence check"]
 fn should_conflict_on_insert_given_key_already_exists_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -311,7 +309,6 @@ fn should_allow_lost_update_given_put_read_modify_write_when_concurrent() {
 }
 
 #[test]
-#[ignore = "Requires compare-and-swap operation"]
 fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -540,7 +537,6 @@ fn should_handle_concurrent_read_modify_writes_without_panic() {
 }
 
 #[test]
-#[ignore = "Requires optimistic locking implementation"]
 fn should_handle_high_concurrency_optimistic_locking() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -550,7 +546,6 @@ fn should_handle_high_concurrency_optimistic_locking() {
 }
 
 #[test]
-#[ignore = "Requires full isolation implementation"]
 fn should_maintain_transaction_isolation_under_stress() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -564,7 +559,6 @@ fn should_maintain_transaction_isolation_under_stress() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_recover_conflict_state_after_engine_restart() {
     let opts = durability_opts();
     
@@ -586,7 +580,6 @@ fn should_recover_conflict_state_after_engine_restart() {
 }
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_persist_lost_update_prevention_after_restart() {
     let opts = durability_opts();
     

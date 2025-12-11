@@ -1,4 +1,4 @@
-//! Range Scanning & Iterator Integration Tests
+﻿//! Range Scanning & Iterator Integration Tests
 //!
 //! Tests range scans, iterators, and sequential access patterns.
 //! Validates that keys are returned in proper order, deletion is visible

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Cntryl, Inc.
+﻿// Copyright (c) 2025 Cntryl, Inc.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 //! Transaction isolation tests - validates snapshot isolation, dirty read prevention, and consistency guarantees.
@@ -195,7 +195,6 @@ fn should_return_old_value_given_snapshot_before_write_when_reading() {
 }
 
 #[test]
-#[ignore = "Requires transaction-scoped range scans"]
 fn should_provide_consistent_view_given_transaction_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -325,7 +324,6 @@ fn should_allow_commit_under_read_committed_isolation_when_serializable_not_need
 }
 
 #[test]
-#[ignore = "Requires range query phantom read detection"]
 fn should_prevent_phantom_read_given_range_query_when_concurrent_insert() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -532,7 +530,6 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires persistence support"]
 fn should_recover_snapshot_view_after_engine_restart() {
     // This test requires FS or Cloud mode for persistence
     // for_each_storage_mode(&["fs", "cloud"], |mode, opts| {
