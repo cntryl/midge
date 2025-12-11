@@ -163,6 +163,10 @@ pub fn filesystem_storage_modes() -> Vec<&'static str> {
 /// Panics if mode is not recognized.
 pub fn opts_for_mode(mode: &str) -> MidgeOptions {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique_id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 
     match mode {
         "memory" => MidgeOptions {
@@ -174,8 +178,9 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         },
         "local" => {
             let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_local_{}",
-                std::process::id()
+                "target/tmp/midge_test_local_{}_{}",
+                std::process::id(),
+                unique_id
             ));
             std::fs::create_dir_all(&test_dir).ok();
             MidgeOptions {
@@ -188,8 +193,9 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         }
         "cloud" => {
             let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_cloud_{}",
-                std::process::id()
+                "target/tmp/midge_test_cloud_{}_{}",
+                std::process::id(),
+                unique_id
             ));
             std::fs::create_dir_all(&test_dir).ok();
             MidgeOptions {

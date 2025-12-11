@@ -94,6 +94,11 @@ impl FlushActor {
         let sst_name = format!("sst_{:06}_{:06}.sst", cf_id, sst_seq);
         let sst_path = state.sst_dir.join(&sst_name);
 
+        // Ensure parent directory exists
+        if let Some(parent) = sst_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
         // Update next SST sequence
         state.manifest.next_sst_seqs.insert(cf_id, sst_seq + 1);
 

@@ -353,7 +353,6 @@ fn should_allow_writes_given_snapshot_dropped_when_continuing() {
 }
 
 #[test]
-#[ignore] // TODO: Fix flush() directory creation
 fn should_preserve_snapshot_view_given_flush_when_reading_at_snapshot() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange

@@ -46,7 +46,6 @@ fn should_iterate_all_keys_in_order_given_populated_db_when_scanning() {
 }
 
 #[test]
-#[ignore]
 fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -107,7 +106,6 @@ fn should_limit_results_given_limit_query_when_scanning() {
 }
 
 #[test]
-#[ignore]
 fn should_return_empty_given_empty_db_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -182,7 +180,6 @@ fn should_return_empty_given_invalid_range_when_start_greater_than_end() {
 }
 
 #[test]
-#[ignore]
 fn should_skip_deleted_keys_given_tombstones_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -248,7 +245,6 @@ fn should_respect_range_tombstones_given_delete_range_when_scanning() {
 }
 
 #[test]
-#[ignore]
 fn should_return_latest_value_given_interleaved_puts_deletes_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -276,7 +272,6 @@ fn should_return_latest_value_given_interleaved_puts_deletes_when_scanning() {
 }
 
 #[test]
-#[ignore]
 fn should_match_regular_scan_given_streaming_scan_when_comparing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -336,7 +331,6 @@ fn should_respect_limit_given_streaming_scan_when_limited() {
 }
 
 #[test]
-#[ignore]
 fn should_apply_tombstones_given_streaming_scan_when_keys_deleted() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -400,7 +394,6 @@ fn should_handle_large_scan_given_many_keys_when_iterating() {
 }
 
 #[test]
-#[ignore]
 fn should_handle_large_streaming_scan_given_multiple_ssts_when_spanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
