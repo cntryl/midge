@@ -109,7 +109,7 @@ impl WalWriter for FsWalWriter {
 
     /// Flush + fsync() — ensures durability.
     fn sync(&self) -> MidgeResult<()> {
-        let mut file = self.file.lock().expect("file mutex poisoned");
+        let file = self.file.lock().expect("file mutex poisoned");
         file.sync_all().map_err(MidgeError::Io)
     }
 

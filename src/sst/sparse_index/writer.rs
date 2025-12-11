@@ -37,7 +37,7 @@ impl SparseIndexWriter {
     /// Record a key (add to index if it's a sample point)
     pub fn record_key(&mut self, key: Vec<u8>, block_handle: BlockHandle) {
         // Sample every Nth key
-        if self.key_count % self.sample_rate == 0 {
+        if self.key_count.is_multiple_of(self.sample_rate) {
             self.entries
                 .push(IndexEntry::new(key, block_handle, self.current_block));
         }

@@ -29,6 +29,12 @@ pub struct RecoveryStats {
     pub max_sequence: Option<u64>,
 }
 
+impl Default for RecoveryStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecoveryStats {
     pub fn new() -> Self {
         Self {

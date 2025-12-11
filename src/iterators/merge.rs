@@ -175,11 +175,11 @@ impl MergeIterator {
                 }
             }
 
-            return Ok(Some((key, value)));
+            Ok(Some((key, value)))
         } else {
             // Heap is empty, we're exhausted
             self.exhausted = true;
-            return Ok(None);
+            Ok(None)
         }
     }
 

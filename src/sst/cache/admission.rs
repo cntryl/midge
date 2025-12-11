@@ -60,7 +60,7 @@ impl AdmissionCounter {
 
         // Periodically reset to avoid saturation
         let access_count = self.access_count.fetch_add(1, Ordering::Relaxed);
-        if access_count % self.reset_interval == 0 && old_count > 0 {
+        if access_count.is_multiple_of(self.reset_interval) && old_count > 0 {
             // Reset all counters by dividing by 2
             for cell in self.cells.iter() {
                 let val = cell.load(Ordering::Relaxed);

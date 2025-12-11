@@ -203,7 +203,7 @@ impl SstFile {
                     entry.key_delta
                 };
 
-                let value = entry.value.map(|v| Bytes::from(v));
+                let value = entry.value.map(Bytes::from);
                 result.push((key, value));
                 offset = next_offset;
             } else {
@@ -239,14 +239,14 @@ impl crate::sst::SstReader for SstFile {
             // Find the specific block handle within the narrowed range
             let mut found_handle = None;
             for (idx, (first_key, handle)) in index.iter().enumerate() {
-                if idx < block_range.start_block as usize {
+                if idx < block_range.start_block {
                     continue;
                 }
-                if idx > block_range.end_block as usize {
+                if idx > block_range.end_block {
                     break;
                 }
 
-                if key <= first_key.as_slice() || idx == block_range.end_block as usize {
+                if key <= first_key.as_slice() || idx == block_range.end_block {
                     found_handle = Some(*handle);
                     break;
                 }

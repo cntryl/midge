@@ -27,7 +27,7 @@ impl BloomReader {
         let key_count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
 
         let bits = data[8..].to_vec();
-        let expected_bytes = (num_bits + 7) / 8;
+        let expected_bytes = num_bits.div_ceil(8);
 
         if bits.len() != expected_bytes {
             return Err(MidgeError::Corruption(

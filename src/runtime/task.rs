@@ -36,10 +36,12 @@ impl Default for TaskId {
 /// Copilot: DO NOT add "request" terminology here.
 /// Priorities are scheduling hints, not message routing traits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default)]
 pub enum TaskPriority {
     /// Lowest priority — background maintenance.
     Low = 0,
     /// Normal priority — regular operations.
+    #[default]
     Normal = 1,
     /// High priority — user-initiated operations.
     High = 2,
@@ -47,11 +49,6 @@ pub enum TaskPriority {
     Critical = 3,
 }
 
-impl Default for TaskPriority {
-    fn default() -> Self {
-        TaskPriority::Normal
-    }
-}
 
 /// Category of task, used by Scheduler to apply concurrency limits.
 ///

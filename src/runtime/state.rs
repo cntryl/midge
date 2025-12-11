@@ -57,6 +57,7 @@ impl Default for WalState {
 }
 
 /// Compaction state
+#[derive(Default)]
 pub struct CompactionState {
     /// SSTs currently being compacted (locked from other compactions)
     pub compacting_ssts: Vec<String>,
@@ -64,16 +65,9 @@ pub struct CompactionState {
     pub pending_tasks: usize,
 }
 
-impl Default for CompactionState {
-    fn default() -> Self {
-        Self {
-            compacting_ssts: Vec::new(),
-            pending_tasks: 0,
-        }
-    }
-}
 
 /// Cloud sync state
+#[derive(Default)]
 pub struct CloudState {
     /// SSTs pending upload
     pub pending_uploads: Vec<String>,
@@ -81,14 +75,6 @@ pub struct CloudState {
     pub last_cloud_checkpoint_seq: u64,
 }
 
-impl Default for CloudState {
-    fn default() -> Self {
-        Self {
-            pending_uploads: Vec::new(),
-            last_cloud_checkpoint_seq: 0,
-        }
-    }
-}
 
 /// Centralized runtime state
 ///

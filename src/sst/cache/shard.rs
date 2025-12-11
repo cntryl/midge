@@ -73,7 +73,7 @@ impl CacheShard {
             // Update existing entry
             let old_size = existing.size_bytes() as u64;
             entries.insert(key, cache_value);
-            self.metrics.add_memory(value_size as u64);
+            self.metrics.add_memory(value_size);
             self.metrics.remove_memory(old_size);
             self.policy.on_access(key);
             return true;

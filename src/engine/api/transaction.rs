@@ -12,20 +12,17 @@ use std::collections::HashMap;
 
 /// Isolation level for transaction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum IsolationLevel {
     /// Dirty reads allowed; no consistency guarantees
     ReadUncommitted,
     /// No dirty reads; consistent reads at commit time
     ReadCommitted,
     /// Full snapshot isolation; MVCC-based
+    #[default]
     Serializable,
 }
 
-impl Default for IsolationLevel {
-    fn default() -> Self {
-        Self::Serializable
-    }
-}
 
 /// Transaction state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

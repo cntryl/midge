@@ -47,7 +47,7 @@ impl BlockCache {
         for _ in 0..num_shards {
             shards.push(Arc::new(CacheShard::new(
                 shard_capacity,
-                policy_type.clone(),
+                policy_type,
             )));
         }
 

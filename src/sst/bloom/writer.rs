@@ -60,7 +60,7 @@ impl BloomWriter {
     /// * `false_positive_rate` - Target false positive rate (default 0.01 for 1%)
     pub fn new(estimated_keys: usize, false_positive_rate: f64) -> Self {
         let num_bits = Self::calculate_bit_size(estimated_keys, false_positive_rate);
-        let num_bytes = (num_bits + 7) / 8;
+        let num_bytes = num_bits.div_ceil(8);
 
         Self {
             bits: vec![0u8; num_bytes],

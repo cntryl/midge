@@ -110,10 +110,7 @@ impl<I: Iterator<Item = CompactionVersion>> Iterator for StreamDeduplicate<I> {
 
 /// Return `true` if this version is expired with respect to `now_secs`.
 fn is_expired(version: &CompactionVersion, now_secs: u64) -> bool {
-    match version.expiration {
-        Some(exp) if exp <= now_secs => true,
-        _ => false,
-    }
+    matches!(version.expiration, Some(exp) if exp <= now_secs)
 }
 
 /// Collect all versions from the given input SST files.

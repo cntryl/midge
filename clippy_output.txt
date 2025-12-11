@@ -1,0 +1,346 @@
+﻿cargo : warning: unnecessary parentheses around assigned value
+At line:1 char:1
++ cargo clippy --lib 2>&1 | Out-File -FilePath clippy_output.txt -Encod ...
++ ~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unnece... assigned value:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   --> src\compaction\strategy.rs:141:27
+    |
+141 |                 let exp = (level - 1);
+    |                           ^         ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+141 -                 let exp = (level - 1);
+141 +                 let exp = level - 1;
+    |
+
+warning: method `next` can be confused for the standard trait method `std::iter::Iterator::next`
+   --> src\iterators\merge.rs:154:5
+    |
+154 | /     pub fn next(&mut self) -> MidgeResult<Option<(Vec<u8>, Vec<u8>)>> {
+155 | |         if self.exhausted {
+156 | |             return Ok(None);
+...   |
+184 | |     }
+    | |_____^
+    |
+    = help: consider implementing the trait `std::iter::Iterator` or choosing a less ambiguous method name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#should_implement_trait
+    = note: `#[warn(clippy::should_implement_trait)]` on by default
+
+warning: doc list item overindented
+  --> src\wal\fs\mod.rs:13:5
+   |
+13 | //!     `RuntimeState` and is assigned inside `WalActor::append`.
+   |     ^^^^ help: try using `  ` (2 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+   = note: `#[warn(clippy::doc_overindented_list_items)]` on by default
+
+warning: doc list item overindented
+  --> src\wal\fs\mod.rs:15:5
+   |
+15 | //!     actors, not by the engine.
+   |     ^^^^ help: try using `  ` (2 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:20:5
+   |
+20 | //!      ΓÇó assign global sequence numbers
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:21:5
+   |
+21 | //!      ΓÇó append to FsWalWriter
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:22:5
+   |
+22 | //!      ΓÇó rotate segments {segment_id}.wal
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:23:5
+   |
+23 | //!      ΓÇó issue CloudUpload requests to CloudActor
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:24:5
+   |
+24 | //!      ΓÇó track two durability frontiers:
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:25:5
+   |
+25 | //!            - local_durable_seq
+   |     ^^^^^^^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:26:5
+   |
+26 | //!            - cloud_durable_seq
+   |     ^^^^^^^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:29:5
+   |
+29 | //!      A write is considered DURABLE only after cloud ack IF the mode is
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:30:5
+   |
+30 | //!      Durability::CloudFirst. Otherwise, fallback to Steady/Batched or Strict.
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:33:5
+   |
+33 | //!      ΓÇó uploading WAL segments to cloud storage
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:34:5
+   |
+34 | //!      ΓÇó retrying on failure (no blocking writes)
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:35:5
+   |
+35 | //!      ΓÇó reporting CloudUploadComplete(request_id, segment_id)
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:41:5
+   |
+41 | //!      ΓÇó always append locally
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:42:5
+   |
+42 | //!      ΓÇó schedule upload for the active segment
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:43:5
+   |
+43 | //!      ΓÇó if mode == CloudFirst:
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:44:5
+   |
+44 | //!              do NOT return Ok until cloud_durable_seq >= record.sequence
+   |     ^^^^^^^^^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:45:5
+   |
+45 | //!        else if mode == Strict:
+   |     ^^^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:46:5
+   |
+46 | //!              fsync before returning
+   |     ^^^^^^^^^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:47:5
+   |
+47 | //!        else if mode == Steady/Batched:
+   |     ^^^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:48:5
+   |
+48 | //!              batch sync but return immediately
+   |     ^^^^^^^^^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:51:5
+   |
+51 | //!      ΓÇó recovery returns RecoveryStats { max_sequence, wal_segments }
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:52:5
+   |
+52 | //!      ΓÇó engine must restore the global sequence counter from stats.max_sequence
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:53:5
+   |
+53 | //!      ΓÇó recovery MUST replay cloud segments first, then local segments
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:60:5
+   |
+60 | //!      ΓÇó store pending request_ids in a queue
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: doc list item overindented
+  --> src\wal\policy.rs:61:5
+   |
+61 | //!      ΓÇó complete them asynchronously when cloud_durable_seq advances.
+   |     ^^^^^ help: try using `   ` (3 spaces)
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#doc_overindented_list_items
+
+warning: calls to `push` immediately after creation
+   --> src\metadata\version_set.rs:100:9
+    |
+100 | /         let mut versions = Vec::new();
+101 | |         versions.push(initial_version);
+    | |_______________________________________^ help: consider using the `vec![]` macro: `let versions = vec![..];`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#vec_init_then_push
+    = note: `#[warn(clippy::vec_init_then_push)]` on by default
+
+warning: method `next` can be confused for the standard trait method `std::iter::Iterator::next`
+  --> src\engine\api\iterator.rs:70:5
+   |
+70 | /     pub fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+71 | |         if self.exhausted || self.position >= self.results.len() {
+72 | |             self.exhausted = true;
+73 | |             return None;
+...  |
+77 | |         Some(pair)
+78 | |     }
+   | |_____^
+   |
+   = help: consider implementing the trait `std::iter::Iterator` or choosing a less ambiguous method name
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#should_implement_trait
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src\engine\api\transaction.rs:120:15
+    |
+120 |     read_set: HashMap<(ColumnFamilyId, Vec<u8>), (Option<Vec<u8>>, u64)>,
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#type_complexity
+    = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src\engine\api\transaction.rs:207:31
+    |
+207 |     pub fn read_set(&self) -> &HashMap<(ColumnFamilyId, Vec<u8>), (Option<Vec<u8>>, u64)> {
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#type_complexity
+
+warning: module has the same name as its containing module
+  --> src\engine\mod.rs:21:1
+   |
+21 | pub mod engine;
+   | ^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#module_inception
+   = note: `#[warn(clippy::module_inception)]` on by default
+
+warning: this function has too many arguments (8/7)
+   --> src\runtime\actors\wal.rs:94:5
+    |
+ 94 | /     pub fn append(
+ 95 | |         &mut self,
+ 96 | |         state: &mut RuntimeState,
+ 97 | |         cf_id: u32,
+...   |
+102 | |         ttl_seconds: Option<u64>,
+103 | |     ) -> MidgeResult<u64> {
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#too_many_arguments
+    = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: method `next` can be confused for the standard trait method `std::iter::Iterator::next`
+   --> src\runtime\scheduler.rs:78:5
+    |
+ 78 | /     pub fn next(&mut self) -> Option<Task> {
+ 79 | |         let mut deferred = Vec::new();
+ 80 | |         let mut selected = None;
+...   |
+103 | |         selected
+104 | |     }
+    | |_____^
+    |
+    = help: consider implementing the trait `std::iter::Iterator` or choosing a less ambiguous method name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#should_implement_trait
+
+warning: match expression looks like `matches!` macro
+   --> src\compaction\executor.rs:113:5
+    |
+113 | /     match version.expiration {
+114 | |         Some(exp) if exp <= now_secs => true,
+115 | |         _ => false,
+116 | |     }
+    | |_____^ help: try: `matches!(version.expiration, Some(exp) if exp <= now_secs)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.91.0/index.html#match_like_matches_macro
+    = note: `#[warn(clippy::match_like_matches_macro)]` on by default
+
+warning: error finalizing incremental compilation session directory `\\?\D:\repos\cntryl\midge\target\debug\incremental\cntryl_midge-1jdt6echp6som\s-hdsxaovti7-1s2vcfo-working`: Access is denied. (os error 5)
+
+warning: `cntryl-midge` (lib) generated 38 warnings (run `cargo clippy --fix --lib -p cntryl-midge` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s

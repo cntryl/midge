@@ -29,7 +29,7 @@ impl Version {
         for file in &manifest.files {
             level_files
                 .entry(file.level)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(file.clone());
         }
 
@@ -97,8 +97,7 @@ pub struct VersionSet {
 impl VersionSet {
     pub fn new(initial_version: Arc<Version>) -> Self {
         let version_id = initial_version.version_id();
-        let mut versions = Vec::new();
-        versions.push(initial_version);
+        let versions = vec![initial_version];
 
         Self {
             current_version: AtomicU64::new(version_id),
@@ -118,7 +117,7 @@ impl VersionSet {
             .iter()
             .find(|v| v.version_id() == version_id)
             .cloned()
-            .ok_or_else(|| crate::common::MidgeError::NotFound)
+            .ok_or(crate::common::MidgeError::NotFound)
     }
 
     /// Get the current version

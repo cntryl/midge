@@ -66,7 +66,7 @@ pub struct WalActor {
 impl WalActor {
     pub fn new(wal_dir: PathBuf, durability_policy: DurabilityPolicy) -> MidgeResult<Self> {
         // Create WAL directory if needed
-        std::fs::create_dir_all(&wal_dir).map_err(|e| crate::common::MidgeError::Io(e))?;
+        std::fs::create_dir_all(&wal_dir).map_err(crate::common::MidgeError::Io)?;
 
         // Create writer via factory (always FsWalWriter - never create backends)
         let factory = FsWalFactory;

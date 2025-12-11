@@ -172,7 +172,7 @@ impl CloudBackend for MockCloudBackend {
             .expect("storage mutex poisoned")
             .get(&key)
             .cloned()
-            .ok_or_else(|| MidgeError::NotFound);
+            .ok_or(MidgeError::NotFound);
         self.downloads
             .lock()
             .expect("downloads mutex poisoned")
@@ -195,7 +195,7 @@ impl CloudBackend for MockCloudBackend {
                 let start_idx = start as usize;
                 data[start_idx..end_idx].to_vec()
             })
-            .ok_or_else(|| MidgeError::NotFound);
+            .ok_or(MidgeError::NotFound);
         let event = CloudEvent::GetRangeComplete {
             key,
             start,
@@ -240,7 +240,7 @@ impl CloudBackend for MockCloudBackend {
             .expect("storage mutex poisoned")
             .get(&key)
             .map(|data| ObjectMetadata::new(data.len() as u64, format!("mock-{}", data.len()), 0))
-            .ok_or_else(|| MidgeError::NotFound);
+            .ok_or(MidgeError::NotFound);
         let event = CloudEvent::HeadComplete {
             key,
             result: CloudOutcome::from_result(result),

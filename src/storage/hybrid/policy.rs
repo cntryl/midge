@@ -64,8 +64,10 @@ impl Default for StorageBudgetPolicy {
 
 /// Eviction strategy for local SST replicas
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum EvictionStrategy {
     /// Least Recently Used
+    #[default]
     LRU,
     /// FIFO (oldest first)
     FIFO,
@@ -73,8 +75,3 @@ pub enum EvictionStrategy {
     Random,
 }
 
-impl Default for EvictionStrategy {
-    fn default() -> Self {
-        EvictionStrategy::LRU
-    }
-}

@@ -138,7 +138,7 @@ impl Compactor {
             0 => self.config.l0_compaction_threshold,
             1 => self.config.l1_target_size,
             _ => {
-                let exp = (level - 1) as u32;
+                let exp = level - 1;
                 self.config
                     .l1_target_size
                     .saturating_mul(self.config.level_multiplier.saturating_pow(exp))

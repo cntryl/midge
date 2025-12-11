@@ -2,6 +2,7 @@
 
 /// Execution context for operations
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct Context {
     pub operation_id: u64,
 }
@@ -12,8 +13,3 @@ impl Context {
     }
 }
 
-impl Default for Context {
-    fn default() -> Self {
-        Self { operation_id: 0 }
-    }
-}
