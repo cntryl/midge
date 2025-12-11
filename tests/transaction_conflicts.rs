@@ -409,20 +409,19 @@ fn should_commit_transaction_given_concurrent_modifications_to_different_keys() 
 }
 
 #[test]
-#[ignore = "Requires transaction-scoped reads"]
 fn should_read_values_within_transaction() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"value").unwrap();
+        engine.put(&cf, b"key", b"value").unwrap();
         
         // Act
-        // let mut txn = engine.transaction();
-        // let value = txn.get(cf.id(), b"key").unwrap();
+        let txn = engine.transaction();
+        let value = engine.get_transactional(&cf, b"key", &txn).unwrap();
         
-        // Assert
-        // assert_eq!(value, Some(Bytes::from_static(b"value")));
+        // Assert - should read committed value at transaction start
+        assert_eq!(value, Some(Bytes::from_static(b"value")));
     });
 }
 

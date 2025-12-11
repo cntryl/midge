@@ -250,6 +250,38 @@ impl MidgeEngine {
         self.get(cf, key)
     }
 
+    /// Get a value from within a transaction (read-your-own-writes)
+    ///
+    /// First checks transaction's write set, then falls back to engine state.
+    /// This enables read-your-own-writes semantics within a transaction.
+    pub fn get_transactional(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        txn: &api::Transaction,
+    ) -> MidgeResult<Option<bytes::Bytes>> {
+        // Check transaction's write set first (read-your-own-writes)
+        if let Some(value_opt) = txn.get_from_write_set(cf.id, key) {
+            return Ok(value_opt.map(bytes::Bytes::from));
+        }
+
+        // Fall back to engine state at transaction's snapshot sequence
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
+            request_id: next_request_id(),
+            cf_id: cf.id.0,
+            key: key.to_vec(),
+            sequence: txn.start_sequence(),
+        })?;
+
+        match response {
+            RuntimeResponse::ReadValue { value, .. } => Ok(value.map(bytes::Bytes::from)),
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to transactional get".to_string(),
+            )),
+        }
+    }
+
     /// Delete a key from a specific column family
     pub fn delete(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
         // CRITICAL: Use send_and_wait to ensure tombstone is durable.

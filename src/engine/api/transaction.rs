@@ -207,6 +207,24 @@ impl Transaction {
         Ok(())
     }
 
+    /// Read a key from the transaction's write set (read-your-own-writes)
+    /// 
+    /// Returns the value from write intents if present (including tombstones).
+    /// Returns None if key not in write set (caller should check engine).
+    pub fn get_from_write_set(&self, cf_id: ColumnFamilyId, key: &[u8]) -> Option<Option<Vec<u8>>> {
+        // Scan write set in reverse (most recent write wins)
+        for intent in self.write_set.iter().rev() {
+            if intent.cf_id == cf_id && intent.key == key {
+                if intent.is_delete() {
+                    return Some(None); // Tombstone
+                } else {
+                    return Some(intent.value.clone()); // Found value
+                }
+            }
+        }
+        None // Key not in write set
+    }
+
     /// Get the read set
     pub fn read_set(&self) -> &ReadSet {
         &self.read_set

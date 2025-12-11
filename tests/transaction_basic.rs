@@ -166,7 +166,6 @@ fn should_provide_snapshot_isolation_given_concurrent_writes_when_transaction_ac
 }
 
 #[test]
-#[ignore = "Requires transaction read-your-own-writes"]
 fn should_read_own_writes_given_transaction_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -177,11 +176,11 @@ fn should_read_own_writes_given_transaction_when_reading() {
         let mut txn = engine.transaction();
         txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
         
-        // Read within same transaction (need transaction-specific get)
-        // let value = txn.get(b"key1").unwrap();
+        // Read within same transaction using get_transactional
+        let value = engine.get_transactional(&cf, b"key1", &txn).unwrap();
         
-        // Assert
-        // assert_eq!(value, Some(Bytes::from_static(b"value1")));
+        // Assert - should see own uncommitted write
+        assert_eq!(value, Some(Bytes::from_static(b"value1")));
         
         engine.commit_transaction(txn).unwrap();
     });

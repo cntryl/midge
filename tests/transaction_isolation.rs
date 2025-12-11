@@ -86,7 +86,6 @@ fn should_allow_dirty_write_given_uncommitted_update_when_serialized() {
 // ============================================================================
 
 #[test]
-#[ignore = "Requires transaction-scoped reads"]
 fn should_read_uncommitted_value_given_put_in_same_transaction_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -94,34 +93,33 @@ fn should_read_uncommitted_value_given_put_in_same_transaction_when_reading() {
         let cf = engine.default_column_family();
         
         // Act
-        // let mut txn = engine.transaction();
-        // txn.put(cf.id(), b"key".to_vec(), b"value".to_vec()).unwrap();
-        // let value = txn.get(cf.id(), b"key").unwrap();
+        let mut txn = engine.transaction();
+        txn.put(cf.id(), b"key".to_vec(), b"value".to_vec()).unwrap();
+        let value = engine.get_transactional(&cf, b"key", &txn).unwrap();
         
-        // Assert
-        // assert_eq!(value, Some(Bytes::from_static(b"value")));
+        // Assert - should read own uncommitted write
+        assert_eq!(value, Some(Bytes::from_static(b"value")));
     });
 }
 
 #[test]
-#[ignore = "Requires transaction-scoped reads"]
 fn should_see_own_writes_given_transaction_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
-        let _cf = engine.default_column_family();
+        let cf = engine.default_column_family();
         
         // Act
-        // let mut txn = engine.transaction();
-        // txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        // txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
+        let mut txn = engine.transaction();
+        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+        txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
         
-        // let val1 = txn.get(cf.id(), b"key1").unwrap();
-        // let val2 = txn.get(cf.id(), b"key2").unwrap();
+        let val1 = engine.get_transactional(&cf, b"key1", &txn).unwrap();
+        let val2 = engine.get_transactional(&cf, b"key2", &txn).unwrap();
         
-        // Assert
-        // assert_eq!(val1, Some(Bytes::from_static(b"value1")));
-        // assert_eq!(val2, Some(Bytes::from_static(b"value2")));
+        // Assert - should see both own writes
+        assert_eq!(val1, Some(Bytes::from_static(b"value1")));
+        assert_eq!(val2, Some(Bytes::from_static(b"value2")));
     });
 }
 
