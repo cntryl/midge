@@ -64,16 +64,21 @@ pub struct WalActor {
 }
 
 impl WalActor {
-    pub fn new(wal_dir: PathBuf, durability_policy: DurabilityPolicy) -> MidgeResult<Self> {
-        // Create WAL directory if needed
-        std::fs::create_dir_all(&wal_dir).map_err(crate::common::MidgeError::Io)?;
-
-        // Create writer via factory (always FsWalWriter - never create backends)
-        let factory = FsWalFactory;
-        let writer = factory.create_writer(&wal_dir)?;
+    pub fn new(wal_dir: PathBuf, durability_policy: DurabilityPolicy, memory_mode: bool) -> MidgeResult<Self> {
+        // In memory mode, don't create any filesystem resources
+        let writer = if memory_mode {
+            None // No WAL writer in memory mode
+        } else {
+            // Create WAL directory only if not in memory mode
+            std::fs::create_dir_all(&wal_dir).map_err(crate::common::MidgeError::Io)?;
+            
+            // Create writer via factory (always FsWalWriter - never create backends)
+            let factory = FsWalFactory;
+            Some(factory.create_writer(&wal_dir)?)
+        };
 
         Ok(Self {
-            writer: Some(writer),
+            writer,
             wal_dir,
             pending_sync_count: 0,
             durability_policy,

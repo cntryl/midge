@@ -162,6 +162,8 @@ pub fn filesystem_storage_modes() -> Vec<&'static str> {
 /// # Panics
 /// Panics if mode is not recognized.
 pub fn opts_for_mode(mode: &str) -> MidgeOptions {
+    use std::path::PathBuf;
+    
     match mode {
         "memory" => MidgeOptions {
             storage_mode: StorageMode::Memory,
@@ -170,24 +172,32 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             compression: false,
             enable_compaction: false,
         },
-        "local" => MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: test_temp_dir().path().to_path_buf(),
-            },
-            wal_sync: true,
-            memtable_size: 64 * 1024,
-            compression: false,
-            enable_compaction: false,
-        },
-        "cloud" => MidgeOptions {
-            storage_mode: StorageMode::CloudBacked {
-                local_cache_path: test_temp_dir().path().to_path_buf(),
-            },
-            wal_sync: true,
-            memtable_size: 64 * 1024,
-            compression: false,
-            enable_compaction: false,
-        },
+        "local" => {
+            let test_dir = PathBuf::from(format!("target/tmp/midge_test_local_{}", std::process::id()));
+            std::fs::create_dir_all(&test_dir).ok();
+            MidgeOptions {
+                storage_mode: StorageMode::LocalDisk {
+                    db_path: test_dir,
+                },
+                wal_sync: true,
+                memtable_size: 64 * 1024,
+                compression: false,
+                enable_compaction: false,
+            }
+        }
+        "cloud" => {
+            let test_dir = PathBuf::from(format!("target/tmp/midge_test_cloud_{}", std::process::id()));
+            std::fs::create_dir_all(&test_dir).ok();
+            MidgeOptions {
+                storage_mode: StorageMode::CloudBacked {
+                    local_cache_path: test_dir,
+                },
+                wal_sync: true,
+                memtable_size: 64 * 1024,
+                compression: false,
+                enable_compaction: false,
+            }
+        }
         _ => panic!("unknown storage mode: {}", mode),
     }
 }

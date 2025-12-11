@@ -166,6 +166,8 @@ pub enum RuntimeMsg {
     Shutdown,
     /// No-op for testing.
     Noop { request_id: u64 },
+    /// Startup handshake to verify event loop is running.
+    StartupPing { request_id: u64 },
 }
 
 impl RuntimeMsg {
@@ -196,7 +198,8 @@ impl RuntimeMsg {
             | ManifestCreateColumnFamily { request_id, .. }
             | ManifestDropColumnFamily { request_id, .. }
             | Read { request_id, .. }
-            | Noop { request_id } => Some(*request_id),
+            | Noop { request_id }
+            | StartupPing { request_id } => Some(*request_id),
 
             Shutdown => None,
         }
@@ -425,6 +428,9 @@ impl Runtime {
         let trace_enabled = self.trace_enabled;
         let router = self.router.clone();
 
+        // Channel to signal successful event loop initialization
+        let (init_tx, init_rx) = channel::bounded::<Result<(), String>>(1);
+
         // Handle for callers to use.
         let handle = RuntimeHandle {
             msg_tx: self.msg_tx.clone(),
@@ -433,19 +439,33 @@ impl Runtime {
 
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
-            .spawn(move || match EventLoop::new(state, trace_enabled, router) {
-                Ok(mut event_loop) => {
-                    event_loop.run(msg_rx);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to create event loop: {}", e);
+            .spawn(move || {
+                match EventLoop::new(state, trace_enabled, router) {
+                    Ok(mut event_loop) => {
+                        // Signal successful initialization
+                        let _ = init_tx.send(Ok(()));
+                        event_loop.run(msg_rx);
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to create event loop: {}", e);
+                        tracing::error!("{}", msg);
+                        // Signal initialization failure
+                        let _ = init_tx.send(Err(msg));
+                    }
                 }
             })
             .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {}", e)))?;
 
         self.event_loop_handle = Some(event_loop_handle);
 
-        Ok(handle)
+        // Wait for event loop initialization to complete
+        match init_rx.recv() {
+            Ok(Ok(())) => Ok(handle),
+            Ok(Err(e)) => Err(MidgeError::Internal(e)),
+            Err(_) => Err(MidgeError::Internal(
+                "Runtime initialization channel closed unexpectedly".to_string(),
+            )),
+        }
     }
 
     /// Shutdown the runtime and wait for completion.

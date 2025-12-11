@@ -111,35 +111,49 @@ pub struct RuntimeState {
     // === Configuration ===
     pub memtable_size_limit: usize,
     pub read_only: bool,
+    /// If true, never touch filesystem (pure in-memory mode)
+    pub memory_mode: bool,
 }
 
 impl RuntimeState {
     /// Create new runtime state with the given database path.
-    pub fn new(db_path: PathBuf) -> Self {
-        if let Err(e) = std::fs::create_dir_all(&db_path) {
-            tracing::warn!(error = %e, path = ?db_path, "failed to create database directory");
+    /// If memory_mode is true, filesystem is never touched.
+    pub fn new(db_path: PathBuf, memory_mode: bool) -> Self {
+        // Only touch filesystem if not in memory mode
+        if !memory_mode {
+            if let Err(e) = std::fs::create_dir_all(&db_path) {
+                tracing::warn!(error = %e, path = ?db_path, "failed to create database directory");
+            }
         }
 
         let wal_dir = db_path.join("wal");
-        if let Err(e) = std::fs::create_dir_all(&wal_dir) {
-            tracing::warn!(error = %e, path = ?wal_dir, "failed to create WAL directory");
+        if !memory_mode {
+            if let Err(e) = std::fs::create_dir_all(&wal_dir) {
+                tracing::warn!(error = %e, path = ?wal_dir, "failed to create WAL directory");
+            }
         }
 
         let sst_dir = db_path.join("sst");
-        if let Err(e) = std::fs::create_dir_all(&sst_dir) {
-            tracing::warn!(error = %e, path = ?sst_dir, "failed to create SST directory");
+        if !memory_mode {
+            if let Err(e) = std::fs::create_dir_all(&sst_dir) {
+                tracing::warn!(error = %e, path = ?sst_dir, "failed to create SST directory");
+            }
         }
 
-        // Load manifest
-        let manifest = match crate::metadata::ManifestPersistence::load(&db_path) {
-            Ok(m) => {
-                tracing::info!("manifest loaded from disk");
-                m
+        // Load manifest (only if not in memory mode)
+        let manifest = if !memory_mode {
+            match crate::metadata::ManifestPersistence::load(&db_path) {
+                Ok(m) => {
+                    tracing::info!("manifest loaded from disk");
+                    m
+                }
+                Err(e) => {
+                    tracing::warn!("failed to load manifest, using default: {}", e);
+                    Manifest::default()
+                }
             }
-            Err(e) => {
-                tracing::warn!("failed to load manifest, using default: {}", e);
-                Manifest::default()
-            }
+        } else {
+            Manifest::default()
         };
 
         let mut column_families = HashMap::new();
@@ -154,8 +168,8 @@ impl RuntimeState {
             }
         }
 
-        // WAL recovery
-        let recovered_sequence = if wal_dir.exists() {
+        // WAL recovery (skip in memory mode)
+        let recovered_sequence = if !memory_mode && wal_dir.exists() {
             let mut recovery_memtables = HashMap::new();
             match crate::wal::recovery::replay_wal(&wal_dir, &mut recovery_memtables) {
                 Ok(stats) => {
@@ -200,6 +214,7 @@ impl RuntimeState {
             cloud: CloudState::default(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             read_only: false,
+            memory_mode,
         }
     }
 

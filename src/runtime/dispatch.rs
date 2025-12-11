@@ -53,7 +53,7 @@ impl Dispatcher {
             | ManifestDropColumnFamily { .. } => TaskKind::Manifest,
 
             // User-level (reads, control)
-            Read { .. } | Shutdown | Noop { .. } => TaskKind::User,
+            Read { .. } | Shutdown | Noop { .. } | StartupPing { .. } => TaskKind::User,
         }
     }
 }

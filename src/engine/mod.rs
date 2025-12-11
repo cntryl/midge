@@ -126,8 +126,8 @@ impl MidgeEngine {
     /// Open a database from flexible parameters (PathBuf or MidgeOptions)
     pub fn open<P: OpenParam>(param: P) -> MidgeResult<Self> {
         let db_path = param.to_path();
-        // Create runtime state
-        let state = RuntimeState::new(db_path.clone());
+        // Create runtime state (not in memory mode for regular open)
+        let state = RuntimeState::new(db_path.clone(), false);
 
         // Start runtime
         let (runtime, _) = Runtime::new()?;
@@ -144,15 +144,31 @@ impl MidgeEngine {
 
     /// Open a database with test configuration options
     pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
-        let db_path = match &opts.storage_mode {
-            crate::testkit::StorageMode::Memory => PathBuf::from(":memory:"),
-            crate::testkit::StorageMode::LocalDisk { db_path } => db_path.clone(),
+        let (db_path, memory_mode) = match &opts.storage_mode {
+            crate::testkit::StorageMode::Memory => {
+                // For memory mode, use a placeholder path that will never be touched
+                (PathBuf::from(format!("target/tmp/memory_{}", std::process::id())), true)
+            }
+            crate::testkit::StorageMode::LocalDisk { db_path } => (db_path.clone(), false),
             crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
-                local_cache_path.clone()
+                (local_cache_path.clone(), false)
             }
         };
 
-        Self::open(db_path)
+        // Create runtime state with memory_mode flag
+        let state = RuntimeState::new(db_path.clone(), memory_mode);
+
+        // Start runtime
+        let (runtime, _) = Runtime::new()?;
+        let runtime_handle = runtime.start(state)?;
+
+        Ok(Self {
+            runtime_handle,
+            db_path,
+            default_cf: ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string()),
+            sequence: std::sync::atomic::AtomicU64::new(0),
+            next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
+        })
     }
 
     /// Get the default column family
