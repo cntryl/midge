@@ -107,6 +107,14 @@ pub enum RuntimeMsg {
         ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
         insert_only: bool,        // When true, fail if key already exists
     },
+    /// Append merge operand to WAL.
+    WalMerge {
+        request_id: u64,
+        cf_id: u32,
+        key: Vec<u8>,
+        operand: Vec<u8>,
+        sequence: u64,
+    },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
     /// Rotate WAL segment.
@@ -151,6 +159,12 @@ pub enum RuntimeMsg {
     ManifestCreateColumnFamily { request_id: u64, name: String },
     /// Drop a column family (soft delete).
     ManifestDropColumnFamily { request_id: u64, cf_id: u32 },
+    /// Register a merge operator for a column family
+    RegisterMergeOperator {
+        request_id: u64,
+        cf_id: u32,
+        operator: std::sync::Arc<dyn crate::engine::MergeOperator>,
+    },
 
     // === Read Path ===
     /// Query a value from memtables and SST files.
@@ -192,6 +206,7 @@ impl RuntimeMsg {
             | RunCompaction { request_id, .. }
             | CompactionComplete { request_id, .. }
             | WalAppend { request_id, .. }
+            | WalMerge { request_id, .. }
             | WalSync { request_id }
             | WalRotate { request_id }
             | WalSyncComplete { request_id, .. }
@@ -205,6 +220,7 @@ impl RuntimeMsg {
             | ManifestPersist { request_id }
             | ManifestCreateColumnFamily { request_id, .. }
             | ManifestDropColumnFamily { request_id, .. }
+            | RegisterMergeOperator { request_id, .. }
             | Read { request_id, .. }
             | RangeScan { request_id, .. }
             | Noop { request_id }

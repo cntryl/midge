@@ -241,6 +241,48 @@ impl EventLoop {
                     self.respond(request_id, resp);
                 }
 
+                RuntimeMsg::WalMerge {
+                    request_id,
+                    cf_id,
+                    key,
+                    operand,
+                    sequence,
+                } => {
+                    let result = self.wal_actor.append_merge(
+                        &mut self.state,
+                        cf_id,
+                        bytes::Bytes::from(key),
+                        bytes::Bytes::from(operand),
+                        sequence,
+                    );
+                    let resp = result
+                        .map(|_| RuntimeResponse::Ok { request_id })
+                        .unwrap_or_else(|e| RuntimeResponse::Error {
+                            request_id,
+                            message: e.to_string(),
+                        });
+                    self.respond(request_id, resp);
+                }
+
+                RuntimeMsg::RegisterMergeOperator {
+                    request_id,
+                    cf_id,
+                    operator,
+                } => {
+                    if let Some(cf_state) = self.state.column_families.get_mut(&cf_id) {
+                        cf_state.merge_operator = Some(operator);
+                        self.respond(request_id, RuntimeResponse::Ok { request_id });
+                    } else {
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: format!("Invalid CF ID: {}", cf_id),
+                            },
+                        );
+                    }
+                }
+
                 RuntimeMsg::WalSync { request_id } => {
                     let result = self.wal_actor.sync(&mut self.state);
                     let resp = result
@@ -433,9 +475,84 @@ impl EventLoop {
     }
 
     /// Local read path: memtable → immutable memtables → [SST TODO]
+    /// Resolves merge operands if a merge operator is registered
     fn handle_read(&self, cf_id: u32, key: &[u8], _seq: u64) -> Option<Vec<u8>> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
+        // Check if there's a merge operator for this CF
+        if cf_state.merge_operator.is_some() {
+            // Collect all versions from memtables
+            let mut all_versions = Vec::new();
+
+            // Active memtable
+            let active_versions = cf_state.memtable.get_versions_for_merge(key);
+            all_versions.extend(active_versions);
+
+            // Immutable memtables (newest → oldest)
+            for imm in cf_state.immutable_memtables.iter().rev() {
+                let imm_versions = imm.get_versions_for_merge(key);
+                all_versions.extend(imm_versions);
+            }
+
+            // Sort versions by sequence (oldest first) - versions are already in order
+            // from each memtable, but we need to merge them
+
+            if all_versions.is_empty() {
+                return None;
+            }
+
+            // Separate base value and merge operands
+            // Versions are in newest-first order, so we need to process in reverse
+            // to find the oldest Put (base value) and subsequent Merges
+            let mut base_value: Option<Vec<u8>> = None;
+            let mut merge_operands: Vec<Vec<u8>> = Vec::new();
+
+            use crate::iterators::skiplist::OpType;
+            // Process versions in reverse (oldest first)
+            for (value_opt, _exp, op_type) in all_versions.iter().rev() {
+                match op_type {
+                    OpType::Put => {
+                        // Oldest Put becomes the base value
+                        base_value = Some(value_opt.as_ref().unwrap().to_vec());
+                        merge_operands.clear(); // Start fresh after a Put
+                    }
+                    OpType::Delete => {
+                        // Tombstone clears everything
+                        base_value = None;
+                        merge_operands.clear();
+                    }
+                    OpType::Merge => {
+                        // Collect merge operand in chronological order
+                        if let Some(v) = value_opt {
+                            merge_operands.push(v.to_vec());
+                        }
+                    }
+                }
+            }
+
+            // If there are merge operands, resolve them
+            if !merge_operands.is_empty() {
+                if let Some(operator) = &cf_state.merge_operator {
+                    match operator.merge(key, base_value.as_deref(), &merge_operands) {
+                        Ok(Some(resolved)) => return Some(resolved),
+                        Ok(None) => return None,
+                        Err(e) => {
+                            tracing::error!("Merge operator failed: {}", e);
+                            return None;
+                        }
+                    }
+                } else {
+                    // Shouldn't happen - we checked for merge operator above
+                    tracing::error!("Merge operands found but no operator registered");
+                    return None;
+                }
+            }
+
+            // No merge operands, return base value
+            return base_value;
+        }
+
+        // No merge operator - use simple get logic
         // Active memtable
         if let Ok(Some(v)) = cf_state.memtable.get(key) {
             return Some(v);

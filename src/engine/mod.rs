@@ -90,6 +90,8 @@ pub struct MidgeEngine {
     sequence: std::sync::atomic::AtomicU64,
     /// Next snapshot ID counter (local only, not related to sequence numbers)
     next_snapshot_id: std::sync::atomic::AtomicU64,
+    /// Merge operators registered per column family
+    merge_operators: std::sync::RwLock<std::collections::HashMap<u32, std::sync::Arc<dyn MergeOperator>>>,
 }
 
 impl OpenParam for PathBuf {
@@ -139,6 +141,7 @@ impl MidgeEngine {
             default_cf: ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string()),
             sequence: std::sync::atomic::AtomicU64::new(0),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
+            merge_operators: std::sync::RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -170,8 +173,7 @@ impl MidgeEngine {
             db_path,
             default_cf: ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string()),
             sequence: std::sync::atomic::AtomicU64::new(0),
-            next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
-        })
+            next_snapshot_id: std::sync::atomic::AtomicU64::new(1),            merge_operators: std::sync::RwLock::new(std::collections::HashMap::new()),        })
     }
 
     /// Get the default column family
@@ -274,6 +276,85 @@ impl MidgeEngine {
     pub fn delete_cf(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
         self.delete(cf, key)
     }
+
+    // ========================================================================
+    // Merge Operations
+    // ========================================================================
+
+    /// Register a merge operator for a column family
+    pub fn register_merge_operator(
+        &self,
+        cf_id: u32,
+        operator: Box<dyn MergeOperator>,
+    ) -> MidgeResult<()> {
+        // Convert to Arc so it can be shared
+        let operator_arc: std::sync::Arc<dyn MergeOperator> = operator.into();
+
+        // Store locally
+        {
+            let mut ops = self.merge_operators.write().map_err(|e| {
+                MidgeError::Internal(format!("Failed to acquire merge operators lock: {}", e))
+            })?;
+            ops.insert(cf_id, operator_arc.clone());
+        }
+
+        // Send to runtime
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::RegisterMergeOperator {
+            request_id: next_request_id(),
+            cf_id,
+            operator: operator_arc,
+        })?;
+
+        match response {
+            RuntimeResponse::Ok { .. } => Ok(()),
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to RegisterMergeOperator".to_string(),
+            )),
+        }
+    }
+
+    /// Apply a merge operation to the default column family
+    pub fn merge(&self, key: &[u8], operand: &[u8]) -> MidgeResult<()> {
+        self.merge_cf(&self.default_cf, key, operand)
+    }
+
+    /// Apply a merge operation to a specific column family
+    pub fn merge_cf(&self, cf: &ColumnFamilyHandle, key: &[u8], operand: &[u8]) -> MidgeResult<()> {
+        // Check that merge operator is registered
+        {
+            let ops = self.merge_operators.read().map_err(|e| {
+                MidgeError::Internal(format!("Failed to acquire merge operators lock: {}", e))
+            })?;
+            if !ops.contains_key(&cf.id.0) {
+                return Err(MidgeError::InvalidArgument(format!(
+                    "No merge operator registered for column family {}",
+                    cf.id.0
+                )));
+            }
+        }
+
+        // Send merge operation to runtime
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalMerge {
+            request_id: next_request_id(),
+            cf_id: cf.id.0,
+            key: key.to_vec(),
+            operand: operand.to_vec(),
+            sequence: self.next_sequence(),
+        })?;
+
+        match response {
+            RuntimeResponse::Ok { .. } => Ok(()),
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to merge".to_string(),
+            )),
+        }
+    }
+
+    // ========================================================================
+    // Range Operations
+    // ========================================================================
 
     /// Range scan in a specific column family
     pub fn range(

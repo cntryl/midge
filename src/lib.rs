@@ -89,6 +89,8 @@ pub use engine::api::{
 
     KvTransaction,
     MemoryBudget,
+    // Merge operators
+    MergeOperator,
     // Engine configuration
     OpenOptions,
     // Query + scans
@@ -146,6 +148,8 @@ pub mod prelude {
         // Errors
         MidgeError,
         MidgeResult,
+        // Merge operators
+        MergeOperator,
         // Configuration
         OpenOptions,
 

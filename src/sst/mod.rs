@@ -246,6 +246,11 @@ pub trait Memtable: Send + Sync {
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>>;
     fn delete(&self, key: Vec<u8>) -> MidgeResult<()>;
     fn size_bytes(&self) -> usize;
+    /// Get all versions for merge resolution
+    fn get_versions_for_merge(
+        &self,
+        key: &[u8],
+    ) -> Vec<(Option<bytes::Bytes>, Option<u64>, crate::iterators::skiplist::OpType)>;
 }
 
 /// SkipList-based Memtable (lock-free, MVCC-aware)
@@ -262,6 +267,15 @@ impl SkipListMemtable {
             seq_generator: std::sync::atomic::AtomicU64::new(1),
             size_bytes: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Get all versions for a key (for merge resolution)
+    /// Returns (value, expiration, op_type) tuples in chronological order (oldest first)
+    pub fn get_versions_for_merge(
+        &self,
+        key: &[u8],
+    ) -> Vec<(Option<bytes::Bytes>, Option<u64>, OpType)> {
+        self.skiplist.get_versions_for_merge(key, u64::MAX)
     }
 
     fn next_seq(&self) -> u64 {
@@ -294,6 +308,26 @@ impl SkipListMemtable {
             seq,
             expiration,
             OpType::Put,
+        );
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Store a merge operand
+    pub fn merge(
+        &self,
+        key: Vec<u8>,
+        operand: Vec<u8>,
+    ) -> MidgeResult<()> {
+        let seq = self.next_seq();
+        let size_delta = key.len() + operand.len() + 16;
+        self.skiplist.upsert_exp(
+            Bytes::from(key),
+            Some(Bytes::from(operand)),
+            seq,
+            None, // No expiration for merge operands
+            OpType::Merge,
         );
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
@@ -345,5 +379,12 @@ impl Memtable for SkipListMemtable {
 
     fn size_bytes(&self) -> usize {
         self.size_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn get_versions_for_merge(
+        &self,
+        key: &[u8],
+    ) -> Vec<(Option<bytes::Bytes>, Option<u64>, crate::iterators::skiplist::OpType)> {
+        self.skiplist.get_versions_for_merge(key, u64::MAX)
     }
 }

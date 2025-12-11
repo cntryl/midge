@@ -235,8 +235,8 @@ cargo test --test engine_basic --test engine_write_batch --test engine_delete_ra
 | **engine_write_batch.rs** | 17 | ✅ Passing | Atomic batch semantics verified |
 | **engine_delete_range.rs** | 10+ | ✅ Passing | RangeScan infrastructure implemented |
 | **engine_iterators.rs** | 17 | ✅ Passing (17/17) | Multi-version filtering fixed in handle_range_scan |
-| **engine_snapshots.rs** | 14 | ✅ Passing (13/14, 1 ignored) | Snapshot API added, returns current state (no MVCC yet) |
-| **engine_merge.rs** | 19 | 📋 Not started | Merge operator framework needed |
+| **engine_snapshots.rs** | 14 | ✅ Passing (14/14) | Snapshot API complete, flush interaction verified |
+| **engine_merge.rs** | 19 | ✅ Passing (9/9 active, 10 ignored) | Merge operators implemented (base semantics complete) |
 | **engine_ttl.rs** | 12 | 📋 Not started | TTL metadata tracking needed |
 | **column_families.rs** | 27 | 📋 Not started | CF lifecycle management |
 | **config_api.rs** | 20 | 📋 Not started | Config builder validation |

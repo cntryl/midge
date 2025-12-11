@@ -184,6 +184,92 @@ impl WalActor {
         Ok(sequence)
     }
 
+    /// Append a merge operand to the WAL
+    pub fn append_merge(
+        &mut self,
+        state: &mut RuntimeState,
+        cf_id: u32,
+        key: Bytes,
+        operand: Bytes,
+        _sequence: u64, // Ignored - runtime assigns
+    ) -> MidgeResult<u64> {
+        // Assign sequence number from runtime state
+        let sequence = state.next_sequence();
+
+        // Create WAL record for merge
+        let record = WalRecord::new_cf(
+            cf_id,
+            WalOpKind::Merge,
+            key.clone(),
+            Some(operand.clone()),
+            sequence,
+        );
+
+        // Calculate record size for batching
+        let record_size = record.key.len() + record.value.as_ref().map_or(0, |v| v.len());
+
+        // ALWAYS append to local WAL first (FsWalWriter)
+        if let Some(writer) = &self.writer {
+            writer.append_record(&record)?;
+        }
+
+        // Update state tracking
+        state.wal.pending_writes += 1;
+        self.pending_sync_count += 1;
+        self.bytes_since_sync += record_size;
+
+        // Apply durability policy (same as regular append)
+        match self.durability_policy {
+            DurabilityPolicy::Strict => {
+                // Fsync immediately, then apply to memtable
+                self.sync_internal(state)?;
+                state.wal.local_durable_seq = sequence;
+
+                // Apply merge operand to memtable
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+            }
+            DurabilityPolicy::Batched => {
+                // Apply to memtable immediately (no cloud wait)
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+                // Sync if batch thresholds exceeded (handled by caller/timer)
+            }
+            DurabilityPolicy::CloudMirrored => {
+                // Fsync locally, apply to memtable, schedule cloud upload in background
+                self.sync_internal(state)?;
+                state.wal.local_durable_seq = sequence;
+
+                // Apply merge operand to memtable
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+
+                // Queue for async cloud upload (handled by cloud actor)
+                self.pending_cloud_writes.push_back(PendingCloudWrite {
+                    request_id: 0, // Will be set by cloud upload logic
+                    cf_id,
+                    key: key.to_vec(),
+                    value: Some(operand.to_vec()),
+                    sequence,
+                    expiration: None,
+                });
+            }
+            DurabilityPolicy::CloudFirst => {
+                // Queue for cloud upload without applying to memtable yet
+                // Write is NOT visible until cloud confirms
+                self.pending_cloud_writes.push_back(PendingCloudWrite {
+                    request_id: 0,
+                    cf_id,
+                    key: key.to_vec(),
+                    value: Some(operand.to_vec()),
+                    sequence,
+                    expiration: None,
+                });
+            }
+        }
+
+        tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL merge append");
+
+        Ok(sequence)
+    }
+
     /// Checks current in-memory view (active + immutable memtables) for existence
     fn key_exists(&self, state: &RuntimeState, cf_id: u32, key: &[u8]) -> bool {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
@@ -217,6 +303,23 @@ impl WalActor {
             } else {
                 cf_state.memtable.as_ref().delete(key.to_vec())?;
             }
+        }
+        Ok(())
+    }
+
+    /// Apply a merge operand to the memtable
+    fn apply_merge_to_memtable(
+        &self,
+        state: &RuntimeState,
+        cf_id: u32,
+        key: &[u8],
+        operand: &Bytes,
+    ) -> MidgeResult<()> {
+        if let Some(cf_state) = state.column_families.get(&cf_id) {
+            cf_state
+                .memtable
+                .as_ref()
+                .merge(key.to_vec(), operand.to_vec())?;
         }
         Ok(())
     }

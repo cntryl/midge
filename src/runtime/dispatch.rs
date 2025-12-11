@@ -33,7 +33,7 @@ impl Dispatcher {
             }
 
             // WAL
-            WalAppend { .. } | WalSync { .. } | WalRotate { .. } | WalSyncComplete { .. } => {
+            WalAppend { .. } | WalMerge { .. } | WalSync { .. } | WalRotate { .. } | WalSyncComplete { .. } => {
                 TaskKind::Wal
             }
 
@@ -52,10 +52,13 @@ impl Dispatcher {
             | ManifestCreateColumnFamily { .. }
             | ManifestDropColumnFamily { .. } => TaskKind::Manifest,
 
-            // User-level (reads, control)
-            Read { .. } | RangeScan { .. } | Shutdown | Noop { .. } | StartupPing { .. } => {
-                TaskKind::User
-            }
+            // User-level (reads, control, registration)
+            Read { .. }
+            | RangeScan { .. }
+            | RegisterMergeOperator { .. }
+            | Shutdown
+            | Noop { .. }
+            | StartupPing { .. } => TaskKind::User,
         }
     }
 }
