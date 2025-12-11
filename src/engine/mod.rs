@@ -762,6 +762,10 @@ impl MidgeEngine {
 
     /// Commit a transaction atomically
     pub fn commit_transaction(&self, mut txn: api::Transaction) -> MidgeResult<()> {
+        // Transition through state machine: Active → ReadPhase → Committing
+        txn.enter_read_phase()?;
+        txn.enter_commit_phase()?;
+
         if !txn.has_writes() {
             // Read-only transaction - mark committed with current ID
             let txn_id = txn.id();
@@ -769,9 +773,12 @@ impl MidgeEngine {
             return Ok(());
         }
 
+        // Collect write intents to avoid borrow issues
+        let write_intents: Vec<_> = txn.iter_writes().cloned().collect();
+
         // CRITICAL: Use send_and_wait for durability.
         // TODO: Add RuntimeMsg::CommitTransaction for true atomic commit.
-        for intent in txn.iter_writes() {
+        for intent in write_intents {
             let response = if let Some(value) = intent.value() {
                 self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                     request_id: next_request_id(),
@@ -795,6 +802,7 @@ impl MidgeEngine {
             };
 
             if let RuntimeResponse::Error { message, .. } = response {
+                txn.mark_failed()?;
                 return Err(MidgeError::Internal(message));
             }
         }
