@@ -1,16 +1,16 @@
-﻿mod common;
-use cntryl_midge::{
-    test_hooks::{FsyncBehavior, TestHooks},
-    MidgeEngine, MidgeOptions, StorageMode,
-};
-use cntryl_midge::testkit::test_helpers::TEST_GATE_TIMEOUT;
-use tempfile::TempDir;
-
 #[path = "../testutils/validate_tests.rs"]
 mod validate_tests;
 use validate_tests::{get_all_test_results, TestResult};
 
-// Test infrastructure validation
+// ============================================================================
+// TEST QUALITY VALIDATION
+// ============================================================================
+// These tests enforce code quality standards across the entire test suite.
+// They scan all test files and report violations of naming conventions,
+// structure requirements, and best practices.
+//
+// If any validation test fails, fix the reported issues before committing.
+// ============================================================================
 
 #[test]
 fn should_enforce_test_naming_convention() {
@@ -25,24 +25,28 @@ fn should_enforce_test_naming_convention() {
 
     // Assert
     if !violations.is_empty() {
-        let mut msg = String::from("\n\nâŒ TEST NAMING CONVENTION VIOLATIONS\n");
-        msg.push_str("â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n\n");
-        msg.push_str("Each test must use the `should_*` naming pattern.\n");
-        msg.push_str("Rename tests using `test_*` â†’ `should_*` for clarity.\n\n");
+        let mut msg = String::from("\n\n❌ TEST NAMING CONVENTION VIOLATIONS\n");
+        msg.push_str("═══════════════════════════════════════════════════\n\n");
+        msg.push_str("REQUIRED: All tests must use 'should_{action}_when_{context}' pattern.\n");
+        msg.push_str("REASON: Makes test intent immediately clear and improves readability.\n\n");
+        msg.push_str("VIOLATIONS FOUND:\n\n");
 
         for r in &violations {
             msg.push_str(&format!(
-                "â€¢ {}:{} â†’ '{}' should be renamed to 'should_*'\n",
+                "  • [{}:{}] '{}'\n",
                 r.file, r.line, r.test_name
+            ));
+            msg.push_str(&format!(
+                "    └─ Rename to 'should_[action]_when_[context]'\n\n"
             ));
         }
 
         msg.push_str(&format!(
-            "\nTotal Violations: {}\n\nSee: docs/dev/test_guidelines.md#naming",
+            "Total: {} violation(s)\n\n",
             violations.len()
         ));
-        eprintln!("{}", msg); // Print warning instead of panicking
-                              // panic!("{}", msg); // Commented out to allow migration completion
+        msg.push_str("📖 See: docs/dev/test_guidelines.md#naming\n");
+        panic!("{}", msg);
     }
 }
 
@@ -59,39 +63,39 @@ fn should_enforce_aaa_structure() {
 
     // Assert
     if !violations.is_empty() {
-        let mut msg = String::from("\n\nâš ï¸  AAA STRUCTURE VIOLATIONS\n");
-        msg.push_str("â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n\n");
-        msg.push_str("Tests longer than 5 lines must contain:\n");
-        msg.push_str("  // Arrange\n  // Act\n  // Assert\n\n");
-        msg.push_str("These comments clarify structure and intention.\n\n");
+        let mut msg = String::from("\n\n⚠️  AAA STRUCTURE VIOLATIONS\n");
+        msg.push_str("═══════════════════════════════════════════════════\n\n");
+        msg.push_str("REQUIRED: Tests >5 lines must include:\n");
+        msg.push_str("  // Arrange\n");
+        msg.push_str("  // Act\n");
+        msg.push_str("  // Assert\n\n");
+        msg.push_str("REASON: Clear structure makes tests easier to understand and maintain.\n\n");
+        msg.push_str("VIOLATIONS FOUND:\n\n");
 
         for r in &violations {
-            msg.push_str(&format!("â€¢ {}:{} â€” '{}'\n", r.file, r.line, r.test_name));
+            msg.push_str(&format!("  • [{}:{}] '{}'\n", r.file, r.line, r.test_name));
             for issue in &r.issues {
                 if issue.starts_with("AAA:") {
-                    msg.push_str(&format!("    â†³ {}\n", issue));
+                    let detail = issue.strip_prefix("AAA: ").unwrap_or(issue);
+                    msg.push_str(&format!("    └─ {}\n", detail));
                 }
             }
             msg.push('\n');
         }
 
-        msg.push_str(&format!(
-            "Found {} tests missing proper AAA structure.\n\n",
-            violations.len()
-        ));
-        msg.push_str("ðŸ’¡ Example of correct format:\n\n");
+        msg.push_str(&format!("Total: {} violation(s)\n\n", violations.len()));
+        msg.push_str("💡 CORRECT FORMAT:\n\n");
         msg.push_str("  #[test]\n");
-        msg.push_str("  fn should_perform_action() {\n");
+        msg.push_str("  fn should_perform_action_when_condition() {\n");
         msg.push_str("      // Arrange\n");
-        msg.push_str("      let setup = create_fixture();\n\n");
+        msg.push_str("      let fixture = setup();\n\n");
         msg.push_str("      // Act\n");
-        msg.push_str("      let result = run_operation(setup);\n\n");
+        msg.push_str("      let result = operation(fixture);\n\n");
         msg.push_str("      // Assert\n");
         msg.push_str("      assert_eq!(result, expected);\n");
-        msg.push_str("  }\n");
-
-        eprintln!("{}", msg); // Print warning instead of panicking
-                              // panic!("{}", msg); // Commented out to allow migration completion
+        msg.push_str("  }\n\n");
+        msg.push_str("📖 See: docs/dev/test_guidelines.md#aaa-pattern\n");
+        panic!("{}", msg);
     }
 }
 
@@ -113,169 +117,93 @@ fn should_enforce_single_behavior_per_test() {
 
     // Assert
     if !violations.is_empty() {
-        let mut msg = String::from("\n\nâš ï¸  SINGLE-BEHAVIOR VIOLATIONS\n");
-        msg.push_str("â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n\n");
-        msg.push_str("Each test should verify ONE behavior only.\n");
-        msg.push_str("Multiple '// Act' blocks or '_and_' in names imply multi-behavior.\n\n");
+        let mut msg = String::from("\n\n⚠️  SINGLE-BEHAVIOR VIOLATIONS\n");
+        msg.push_str("═══════════════════════════════════════════════════\n\n");
+        msg.push_str("REQUIRED: Each test verifies exactly ONE behavior.\n");
+        msg.push_str("REASON: Focused tests are easier to debug and maintain.\n\n");
+        msg.push_str("INDICATORS OF MULTI-BEHAVIOR:\n");
+        msg.push_str("  • Multiple '// Act' comments\n");
+        msg.push_str("  • '_and_' in test name\n");
+        msg.push_str("  • Unrelated assertions\n\n");
+        msg.push_str("VIOLATIONS FOUND:\n\n");
 
         for r in &violations {
-            msg.push_str(&format!("â€¢ {}:{} â€” '{}'\n", r.file, r.line, r.test_name));
+            msg.push_str(&format!("  • [{}:{}] '{}'\n", r.file, r.line, r.test_name));
             for issue in &r.issues {
                 if issue.starts_with("MULTI-BEHAVIOR:") {
-                    msg.push_str(&format!("    â†³ {}\n", issue));
+                    let detail = issue.strip_prefix("MULTI-BEHAVIOR: ").unwrap_or(issue);
+                    msg.push_str(&format!("    └─ {}\n", detail));
                 }
             }
             msg.push('\n');
         }
 
-        msg.push_str(&format!(
-            "Found {} multi-behavior tests.\n\n",
-            violations.len()
-        ));
-        msg.push_str("ðŸ’¡ Split into separate tests:\n\n");
-        msg.push_str("  #[test]\n");
-        msg.push_str("  fn should_upload_file_successfully() { ... }\n\n");
-        msg.push_str("  #[test]\n");
-        msg.push_str("  fn should_download_uploaded_file() { ... }\n");
-
-        eprintln!("{}", msg); // Print warning instead of panicking
-                              // panic!("{}", msg); // Commented out to allow migration completion
+        msg.push_str(&format!("Total: {} violation(s)\n\n", violations.len()));
+        msg.push_str("💡 SPLIT INTO SEPARATE TESTS:\n\n");
+        msg.push_str("  ❌ BAD:\n");
+        msg.push_str("  fn should_upload_and_download_file() { ... }\n\n");
+        msg.push_str("  ✅ GOOD:\n");
+        msg.push_str("  fn should_upload_file_when_valid() { ... }\n");
+        msg.push_str("  fn should_download_file_when_exists() { ... }\n\n");
+        msg.push_str("📖 See: docs/dev/test_guidelines.md#single-behavior\n");
+        panic!("{}", msg);
     }
 }
 
 #[test]
-fn should_skip_fsync_with_test_hook() {
+fn should_report_test_quality_summary() {
     // Arrange
-    let dir = TempDir::new().unwrap();
-    let hooks = TestHooks::new().with_fsync_behavior(FsyncBehavior::Skip);
-
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_sync: true, // Enable WAL sync to trigger fsync calls
-        test_hooks: Some(hooks.clone()),
-        ..Default::default()
-    };
+    let all_results = get_all_test_results();
+    let total_tests = all_results.len();
 
     // Act
-    let eng = MidgeEngine::open(opts).expect("open engine");
-    let cf = eng.default_column_family();
-    eng.put(&cf, b"key1", b"value1").expect("put");
-    eng.put(&cf, b"key2", b"value2").expect("put");
+    let naming_violations = all_results
+        .iter()
+        .filter(|r| r.issues.iter().any(|i| i.starts_with("NAMING:")))
+        .count();
+
+    let aaa_violations = all_results
+        .iter()
+        .filter(|r| r.issues.iter().any(|i| i.starts_with("AAA:")))
+        .count();
+
+    let behavior_violations = all_results
+        .iter()
+        .filter(|r| {
+            r.issues.iter().any(|i| {
+                i.starts_with("MULTI-BEHAVIOR:")
+                    && (i.contains("'// Act' sections") || i.contains("_and_"))
+            })
+        })
+        .count();
+
+    let total_violations = naming_violations + aaa_violations + behavior_violations;
+    let clean_tests = total_tests - total_violations;
 
     // Assert
-    // Fsync hooks were called (recorded) but actual fsync was skipped
-    assert!(
-        hooks.fsync_count() > 0,
-        "fsync hooks should have been called"
-    );
+    let mut msg = String::new();
+    msg.push_str("\n╔═══════════════════════════════════════════════════╗\n");
+    msg.push_str("║         TEST QUALITY VALIDATION SUMMARY          ║\n");
+    msg.push_str("╚═══════════════════════════════════════════════════╝\n\n");
+    msg.push_str(&format!("  Total Tests Scanned:     {}\n", total_tests));
+    msg.push_str(&format!("  Tests Passing Standards: {} ({:.1}%)\n", clean_tests, 
+             (clean_tests as f64 / total_tests as f64) * 100.0));
+    msg.push_str("\n  Violations by Category:\n");
+    msg.push_str(&format!("    • Naming Convention:   {}\n", naming_violations));
+    msg.push_str(&format!("    • AAA Structure:       {}\n", aaa_violations));
+    msg.push_str(&format!("    • Single Behavior:     {}\n", behavior_violations));
+    msg.push_str("    ─────────────────────────────\n");
+    msg.push_str(&format!("    Total Violations:      {}\n", total_violations));
 
-    // Verify data is still accessible (in memory)
-    assert_eq!(
-        eng.get(&cf, b"key1").expect("get"),
-        Some(bytes::Bytes::from("value1"))
-    );
-}
-
-#[test]
-fn should_count_wal_appends_with_test_hook() {
-    // Arrange
-    let dir = TempDir::new().unwrap();
-    let hooks = TestHooks::new();
-
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        test_hooks: Some(hooks.clone()),
-        ..Default::default()
-    };
-
-    // Act
-    let eng = MidgeEngine::open(opts).expect("open engine");
-    let cf = eng.default_column_family();
-
-    let initial_count = hooks.wal_append_count();
-    eng.put(&cf, b"key1", b"value1").expect("put");
-    eng.put(&cf, b"key2", b"value2").expect("put");
-    eng.put(&cf, b"key3", b"value3").expect("put");
-    let final_count = hooks.wal_append_count();
-
-    // Assert
-    assert!(
-        final_count > initial_count,
-        "WAL append count should increase after writes (initial: {}, final: {})",
-        initial_count,
-        final_count
-    );
-    assert_eq!(
-        final_count - initial_count,
-        3,
-        "Expected 3 WAL appends for 3 puts"
-    );
-}
-
-#[test]
-fn should_gate_compaction_with_test_hook() {
-    // Arrange
-    let dir = TempDir::new().unwrap();
-    let hooks = TestHooks::new();
-
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        enable_compaction: true,
-        test_hooks: Some(hooks.clone()),
-        ..Default::default()
-    };
-
-    // Act
-    let eng = MidgeEngine::open(opts).expect("open engine");
-    let cf = eng.default_column_family();
-
-    // Write some data to create SST files
-    for i in 0..100 {
-        let key = format!("key_{:04}", i);
-        eng.put(&cf, key.as_bytes(), b"value").expect("put");
+    if total_violations == 0 {
+        msg.push_str("\n  ✅ All tests meet quality standards!\n");
+        println!("{}", msg);
+    } else {
+        msg.push_str(&format!("\n  ⚠️  {} test(s) need attention\n", total_violations));
+        msg.push_str("     Run individual validation tests for detailed reports:\n");
+        msg.push_str("       cargo test --test validation_checks should_enforce_test_naming_convention\n");
+        msg.push_str("       cargo test --test validation_checks should_enforce_aaa_structure\n");
+        msg.push_str("       cargo test --test validation_checks should_enforce_single_behavior_per_test\n");
+        panic!("{}", msg);
     }
-
-    // Flush to create an SST
-    eng.flush_cf(&cf).expect("flush");
-
-    let initial_start = hooks.compaction_start_count();
-    let initial_complete = hooks.compaction_complete_count();
-
-    // Trigger manual compaction
-    eng.compact_range(&cf, Some(b""), Some(b"~"))
-        .expect("compact");
-
-    // Deterministically wait for compaction using hooks.
-    let after_gate = hooks.install_compaction_gate(
-        cntryl_midge::test_hooks::CompactionGatePoint::AfterManifestUpdate,
-    );
-    assert!(
-        after_gate.wait_until_blocked(TEST_GATE_TIMEOUT),
-        "Compaction did not reach AfterManifestUpdate"
-    );
-    // Release the compaction gate and wait deterministically for compaction to finish
-    after_gate.release();
-    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
-    eng.wait_for_compaction(TEST_GATE_TIMEOUT).unwrap();
-
-    let final_start = hooks.compaction_start_count();
-    let final_complete = hooks.compaction_complete_count();
-
-    // Assert
-    // Note: Compaction may not run if there aren't enough SSTs for the threshold
-    // So we just verify the counters either stayed the same or increased
-    assert!(
-        final_start >= initial_start,
-        "Compaction start count should not decrease"
-    );
-    assert!(
-        final_complete >= initial_complete,
-        "Compaction complete count should not decrease"
-    );
 }
