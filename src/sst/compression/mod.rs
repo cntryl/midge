@@ -197,8 +197,8 @@
 // Follow these rules EXACTLY for all SST compression code in the Midge codebase.
 // =====================================================================================
 
-use bytes::Bytes;
 use crate::common::MidgeResult;
+use bytes::Bytes;
 
 /// Compression algorithm codes (stored in block trailer)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,8 +206,8 @@ use crate::common::MidgeResult;
 pub enum CompressionAlgo {
     None = 0,
     Lz4 = 1,
-    Zstd3 = 2,    // Zstd level 3
-    Zstd9 = 3,    // Zstd level 9+
+    Zstd3 = 2, // Zstd level 3
+    Zstd9 = 3, // Zstd level 9+
     Zlib = 4,
     Snappy = 5,
 }
@@ -237,18 +237,18 @@ impl CompressionAlgo {
 pub enum CompressionPolicy {
     /// Never compress
     None,
-    
+
     /// Always use specified algorithm
     Fixed(CompressionAlgo),
-    
+
     /// Auto-select best algorithm per block
     Adaptive {
         /// Minimum bytes saved to use compression
         min_savings_bytes: usize,
-        
+
         /// Minimum compression ratio (compressed/original)
         min_ratio: f32,
-        
+
         /// Algorithms to try (in order)
         check_algorithms: Vec<CompressionAlgo>,
     },
@@ -278,24 +278,25 @@ pub const MAX_BLOCK_SIZE: usize = 64 * 1024;
 pub const BLOCK_TRAILER_SIZE: usize = 5;
 
 /// Compress block data according to policy
-pub fn compress_block(data: &[u8], policy: &CompressionPolicy) -> MidgeResult<(Bytes, CompressionAlgo)> {
+pub fn compress_block(
+    data: &[u8],
+    policy: &CompressionPolicy,
+) -> MidgeResult<(Bytes, CompressionAlgo)> {
     // Never compress tiny blocks
     if data.len() < MIN_COMPRESS_SIZE {
         return Ok((Bytes::copy_from_slice(data), CompressionAlgo::None));
     }
 
     match policy {
-        CompressionPolicy::None => {
-            Ok((Bytes::copy_from_slice(data), CompressionAlgo::None))
-        }
-        
-        CompressionPolicy::Fixed(algo) => {
-            compress_with_algo(data, *algo)
-        }
-        
-        CompressionPolicy::Adaptive { min_savings_bytes, min_ratio, check_algorithms } => {
-            compress_adaptive(data, *min_savings_bytes, *min_ratio, check_algorithms)
-        }
+        CompressionPolicy::None => Ok((Bytes::copy_from_slice(data), CompressionAlgo::None)),
+
+        CompressionPolicy::Fixed(algo) => compress_with_algo(data, *algo),
+
+        CompressionPolicy::Adaptive {
+            min_savings_bytes,
+            min_ratio,
+            check_algorithms,
+        } => compress_adaptive(data, *min_savings_bytes, *min_ratio, check_algorithms),
     }
 }
 
@@ -375,9 +376,9 @@ mod tests {
     fn should_skip_compression_for_tiny_blocks() {
         let policy = CompressionPolicy::default();
         let tiny_data = vec![0u8; 100]; // < MIN_COMPRESS_SIZE
-        
+
         let (compressed, algo) = compress_block(&tiny_data, &policy).unwrap();
-        
+
         assert_eq!(algo, CompressionAlgo::None);
         assert_eq!(compressed.len(), tiny_data.len());
     }
@@ -386,9 +387,9 @@ mod tests {
     fn should_use_fixed_compression_when_specified() {
         let policy = CompressionPolicy::Fixed(CompressionAlgo::Lz4);
         let data = vec![0u8; 1024];
-        
+
         let (_compressed, algo) = compress_block(&data, &policy).unwrap();
-        
+
         // Will be None until we implement actual compression
         assert_eq!(algo, CompressionAlgo::None);
     }
@@ -397,7 +398,7 @@ mod tests {
     fn should_decompress_none_as_passthrough() {
         let data = b"test data";
         let decompressed = decompress_block(data, CompressionAlgo::None).unwrap();
-        
+
         assert_eq!(decompressed.as_ref(), data);
     }
 }

@@ -64,9 +64,9 @@ impl Footer {
     }
 
     /// Encode footer to exactly 48 bytes (compatible with RocksDB format)
-    /// Layout: 
-    ///   [meta_index_handle: 16 bytes] 
-    ///   [index_handle: 16 bytes] 
+    /// Layout:
+    ///   [meta_index_handle: 16 bytes]
+    ///   [index_handle: 16 bytes]
     ///   [trie_handle: 16 bytes (optional, 0 if None)]
     ///   [magic: 8 bytes]
     /// Total: 56 bytes (extended from 48 for trie support)
@@ -99,19 +99,26 @@ impl Footer {
 
         // Check if this is old format (48 bytes) or new format (56 bytes)
         let is_extended = data.len() >= 56;
-        
+
         // Validate magic number
         let magic_offset = if is_extended { 48 } else { 40 };
         let magic = u64::from_le_bytes([
-            data[magic_offset], data[magic_offset+1], data[magic_offset+2], data[magic_offset+3],
-            data[magic_offset+4], data[magic_offset+5], data[magic_offset+6], data[magic_offset+7],
+            data[magic_offset],
+            data[magic_offset + 1],
+            data[magic_offset + 2],
+            data[magic_offset + 3],
+            data[magic_offset + 4],
+            data[magic_offset + 5],
+            data[magic_offset + 6],
+            data[magic_offset + 7],
         ]);
         if magic != SST_FOOTER_MAGIC {
-            return Err(crate::common::MidgeError::Corruption(
-                format!("Invalid footer magic: expected 0x{:016x}, got 0x{:016x}", SST_FOOTER_MAGIC, magic),
-            ));
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "Invalid footer magic: expected 0x{:016x}, got 0x{:016x}",
+                SST_FOOTER_MAGIC, magic
+            )));
         }
-        
+
         let meta_offset = u64::from_le_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);

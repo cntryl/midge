@@ -1,4 +1,4 @@
-﻿//! Shared sparse index types
+//! Shared sparse index types
 
 use crate::sst::types::BlockHandle;
 
@@ -54,4 +54,3 @@ impl BlockRange {
         self.end_block - self.start_block + 1
     }
 }
-

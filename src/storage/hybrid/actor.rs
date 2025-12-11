@@ -290,9 +290,8 @@ mod tests {
 
         // Act: Gradually add SSTs (no watermark transitions yet)
         for _ in 0..3 {
-            let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-                est_size: 250_000,
-            });
+            let result =
+                actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 250_000 });
             assert_eq!(result, Some(ReservationResult::Ok));
 
             actor.handle_event(StorageBudgetEvent::FlushCompleted {
@@ -318,9 +317,7 @@ mod tests {
         // So actually need 999K to get 95.2%
         actor.disk_state.sst_bytes = 999_000;
 
-        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-            est_size: 10_000,
-        });
+        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 10_000 });
 
         // Assert: Should ask to wait for cloud uploads
         assert_eq!(result, Some(ReservationResult::WaitForCloudUpload));
@@ -355,9 +352,7 @@ mod tests {
         // Act: Fill to 1028K (1028000 / 1048576 * 100 = 98.0%)
         actor.disk_state.sst_bytes = 1_028_000;
 
-        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-            est_size: 10_000,
-        });
+        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 10_000 });
 
         // Assert: Should reject writes
         assert_eq!(result, Some(ReservationResult::RejectNoSpace));
@@ -372,9 +367,7 @@ mod tests {
         // Act: Reach critical zone at 95%+
         actor.disk_state.sst_bytes = 998_000; // 95.13%
 
-        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-            est_size: 20_000,
-        });
+        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 20_000 });
 
         // Assert: Should prioritize cloud uploads
         assert_eq!(result, Some(ReservationResult::WaitForCloudUpload));
@@ -388,9 +381,7 @@ mod tests {
 
         // Act: At high watermark (~90%), request flush that won't fit
         actor.disk_state.sst_bytes = 944_000; // 90.02%
-        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-            est_size: 110_000,
-        });
+        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 110_000 });
 
         // Assert: Should return WaitForCompaction
         assert_eq!(result, Some(ReservationResult::WaitForCompaction));
@@ -404,9 +395,7 @@ mod tests {
 
         // Act: Fill to emergency (1,028K = 98.0%)
         actor.disk_state.sst_bytes = 1_028_000;
-        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-            est_size: 10_000,
-        });
+        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 10_000 });
 
         // Assert: Emergency = reject
         assert_eq!(result, Some(ReservationResult::RejectNoSpace));
@@ -419,9 +408,7 @@ mod tests {
         let mut actor = StorageBudgetActor::new(policy);
 
         // Act: Reserve, complete, verify accounting
-        let _ = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-            est_size: 50_000,
-        });
+        let _ = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 50_000 });
 
         let before_complete = actor.disk_state();
         assert_eq!(before_complete.new_sst_reserve, 50_000);
@@ -445,9 +432,7 @@ mod tests {
 
         // Act: Reach emergency watermark (1028K = 98.0%)
         actor.disk_state.sst_bytes = 1_028_000;
-        let result1 = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-            est_size: 10_000,
-        });
+        let result1 = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 10_000 });
         assert_eq!(result1, Some(ReservationResult::RejectNoSpace));
 
         // Simulate cloud upload freeing 300KB
@@ -458,9 +443,7 @@ mod tests {
         actor.disk_state.sst_bytes = 728_000; // 69.4% usage
 
         // Try reservation again
-        let result2 = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-            est_size: 50_000,
-        });
+        let result2 = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 50_000 });
 
         // Assert: Should recover to Normal watermark (<90%)
         assert_eq!(result2, Some(ReservationResult::Ok));
@@ -475,9 +458,8 @@ mod tests {
         // Act: Build up with mixed operations
         for i in 0..10 {
             // Attempt flush (each 150KB reserve)
-            let flush_result = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-                est_size: 150_000,
-            });
+            let flush_result =
+                actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 150_000 });
 
             // Complete flush if successful
             if flush_result == Some(ReservationResult::Ok) {
@@ -551,20 +533,26 @@ mod tests {
         for i in 0..50 {
             let flush_size = 100_000 + (i % 50_000);
 
-            if let Some(ReservationResult::Ok) = actor.handle_event(StorageBudgetEvent::ReserveForFlush {
-                est_size: flush_size,
-            }) {
+            if let Some(ReservationResult::Ok) =
+                actor.handle_event(StorageBudgetEvent::ReserveForFlush {
+                    est_size: flush_size,
+                })
+            {
                 let actual_size = flush_size - 10_000; // 10KB overhead
-                actor.handle_event(StorageBudgetEvent::FlushCompleted {
-                    actual_size,
-                });
+                actor.handle_event(StorageBudgetEvent::FlushCompleted { actual_size });
                 total_flushed += actual_size;
             }
         }
 
         // Assert: Metrics should accurately reflect all operations
         let state = actor.disk_state();
-        assert_eq!(state.sst_bytes, total_flushed, "SST bytes should match total flushed");
-        assert!(state.total_committed() >= total_flushed, "Total committed should be >= SST bytes");
+        assert_eq!(
+            state.sst_bytes, total_flushed,
+            "SST bytes should match total flushed"
+        );
+        assert!(
+            state.total_committed() >= total_flushed,
+            "Total committed should be >= SST bytes"
+        );
     }
 }

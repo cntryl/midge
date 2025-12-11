@@ -131,7 +131,10 @@ impl IndexTuner {
                 }
 
                 if profile.entropy > 4.0 {
-                    reasons.push(format!("High entropy keys ({:.1} bits/byte)", profile.entropy));
+                    reasons.push(format!(
+                        "High entropy keys ({:.1} bits/byte)",
+                        profile.entropy
+                    ));
                 }
 
                 if profile.prefix_divergence >= 1024 {

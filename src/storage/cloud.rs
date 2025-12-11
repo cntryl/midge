@@ -127,12 +127,18 @@ impl MockCloudBackend {
     }
 
     pub fn get_downloads(&self) -> Vec<String> {
-        self.downloads.lock().expect("downloads mutex poisoned").clone()
+        self.downloads
+            .lock()
+            .expect("downloads mutex poisoned")
+            .clone()
     }
 
     pub fn clear_history(&self) {
         self.uploads.lock().expect("uploads mutex poisoned").clear();
-        self.downloads.lock().expect("downloads mutex poisoned").clear();
+        self.downloads
+            .lock()
+            .expect("downloads mutex poisoned")
+            .clear();
     }
 }
 
@@ -167,7 +173,10 @@ impl CloudBackend for MockCloudBackend {
             .get(&key)
             .cloned()
             .ok_or_else(|| MidgeError::NotFound);
-        self.downloads.lock().expect("downloads mutex poisoned").push(key.clone());
+        self.downloads
+            .lock()
+            .expect("downloads mutex poisoned")
+            .push(key.clone());
         let event = CloudEvent::GetComplete {
             key,
             result: CloudOutcome::from_result(result),
@@ -197,7 +206,10 @@ impl CloudBackend for MockCloudBackend {
     }
 
     fn submit_delete(&self, key: String, callback: CloudCallback) {
-        self.storage.lock().expect("storage mutex poisoned").remove(&key);
+        self.storage
+            .lock()
+            .expect("storage mutex poisoned")
+            .remove(&key);
         let event = CloudEvent::DeleteComplete {
             key,
             result: CloudOutcome::Ok(()),

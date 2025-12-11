@@ -11,25 +11,25 @@ use std::collections::HashMap;
 pub struct KeyStructureProfile {
     /// Average bytes of shared prefix between adjacent keys
     pub avg_shared_prefix: f32,
-    
+
     /// Longest prefix shared across any two keys
     pub max_shared_prefix: usize,
-    
+
     /// Number of unique branching points in key space
     pub prefix_divergence: usize,
-    
+
     /// Shannon entropy of key deltas (bits per byte)
     pub entropy: f32,
-    
+
     /// Prefix shared by ALL keys
     pub common_prefix_len: usize,
-    
+
     /// Variance in key lengths
     pub key_length_variance: f32,
-    
+
     /// Sample of hot prefixes (prefix → count)
     pub prefix_heat: Vec<(Vec<u8>, usize)>,
-    
+
     /// Total number of keys profiled
     pub key_count: usize,
 }
@@ -38,22 +38,22 @@ pub struct KeyStructureProfile {
 pub struct KeyStructureProfiler {
     /// Keys seen so far (we need to keep them for full analysis)
     keys: Vec<Vec<u8>>,
-    
+
     /// Running sum of shared prefix lengths
     shared_prefix_sum: usize,
-    
+
     /// Max shared prefix observed
     max_shared_prefix: usize,
-    
+
     /// Prefix frequency map (first N bytes → count)
     prefix_freq: HashMap<Vec<u8>, usize>,
-    
+
     /// Byte frequency for entropy calculation
     byte_freq: [usize; 256],
-    
+
     /// Total bytes seen
     total_bytes: usize,
-    
+
     /// Prefix length to track for divergence (default 4)
     prefix_track_len: usize,
 }
@@ -195,13 +195,17 @@ impl KeyStructureProfiler {
             return 0.0;
         }
 
-        let mean_len = self.keys.iter().map(|k| k.len()).sum::<usize>() as f32 / self.keys.len() as f32;
-        let variance = self.keys.iter()
+        let mean_len =
+            self.keys.iter().map(|k| k.len()).sum::<usize>() as f32 / self.keys.len() as f32;
+        let variance = self
+            .keys
+            .iter()
             .map(|k| {
                 let diff = k.len() as f32 - mean_len;
                 diff * diff
             })
-            .sum::<f32>() / self.keys.len() as f32;
+            .sum::<f32>()
+            / self.keys.len() as f32;
 
         variance.sqrt()
     }
@@ -215,10 +219,7 @@ impl Default for KeyStructureProfiler {
 
 /// Calculate longest common prefix
 fn lcp(a: &[u8], b: &[u8]) -> usize {
-    a.iter()
-        .zip(b.iter())
-        .take_while(|(x, y)| x == y)
-        .count()
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
 #[cfg(test)]
@@ -228,14 +229,14 @@ mod tests {
     #[test]
     fn should_profile_structured_keys() {
         let mut profiler = KeyStructureProfiler::new();
-        
+
         profiler.add_key(b"user/alice/profile");
         profiler.add_key(b"user/alice/settings");
         profiler.add_key(b"user/bob/profile");
         profiler.add_key(b"user/bob/settings");
-        
+
         let profile = profiler.finish();
-        
+
         assert!(profile.avg_shared_prefix >= 5.0); // "user/" shared
         assert!(profile.common_prefix_len >= 4); // "user" shared by all
         assert!(profile.key_count == 4);
@@ -244,13 +245,13 @@ mod tests {
     #[test]
     fn should_profile_random_keys() {
         let mut profiler = KeyStructureProfiler::new();
-        
+
         profiler.add_key(b"3c7f4b2a-1234-5678-9abc-def012345678");
         profiler.add_key(b"7f8e9d0c-5678-1234-abcd-ef0123456789");
         profiler.add_key(b"a1b2c3d4-9012-3456-7890-abcdef012345");
-        
+
         let profile = profiler.finish();
-        
+
         assert!(profile.avg_shared_prefix < 2.0); // Random UUIDs share little
         assert!(profile.entropy > 3.0); // High entropy
     }
@@ -258,28 +259,28 @@ mod tests {
     #[test]
     fn should_detect_common_prefix() {
         let mut profiler = KeyStructureProfiler::new();
-        
+
         profiler.add_key(b"tenant_123_resource_1");
         profiler.add_key(b"tenant_123_resource_2");
         profiler.add_key(b"tenant_123_resource_3");
-        
+
         let profile = profiler.finish();
-        
+
         assert!(profile.common_prefix_len >= 10); // "tenant_123" shared
     }
 
     #[test]
     fn should_track_prefix_divergence() {
         let mut profiler = KeyStructureProfiler::new();
-        
+
         // Many different 4-byte prefixes
         for i in 0..100 {
             let key = format!("{:04}_key_{}", i, i);
             profiler.add_key(key.as_bytes());
         }
-        
+
         let profile = profiler.finish();
-        
+
         assert!(profile.prefix_divergence > 50); // Many unique 4-byte prefixes
     }
 
@@ -287,7 +288,7 @@ mod tests {
     fn should_handle_empty_keys() {
         let profiler = KeyStructureProfiler::new();
         let profile = profiler.finish();
-        
+
         assert_eq!(profile.key_count, 0);
         assert_eq!(profile.avg_shared_prefix, 0.0);
     }
@@ -295,13 +296,13 @@ mod tests {
     #[test]
     fn should_calculate_key_length_variance() {
         let mut profiler = KeyStructureProfiler::new();
-        
+
         profiler.add_key(b"short");
         profiler.add_key(b"medium_key");
         profiler.add_key(b"very_long_key_with_many_chars");
-        
+
         let profile = profiler.finish();
-        
+
         assert!(profile.key_length_variance > 0.0);
     }
 }

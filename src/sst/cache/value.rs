@@ -1,8 +1,8 @@
-﻿//! Cached block value with metadata
+//! Cached block value with metadata
 
 use bytes::Bytes;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 /// A cached block value with metadata
 #[derive(Clone, Debug)]
@@ -45,4 +45,3 @@ impl CacheValue {
         self.access_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
-

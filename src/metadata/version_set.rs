@@ -143,7 +143,10 @@ impl VersionSet {
 
     /// Get all versions
     pub fn all_versions(&self) -> Vec<Arc<Version>> {
-        self.versions.lock().expect("versions lock poisoned").clone()
+        self.versions
+            .lock()
+            .expect("versions lock poisoned")
+            .clone()
     }
 
     /// Check if a version exists

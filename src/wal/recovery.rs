@@ -1,5 +1,5 @@
 //! WAL recovery - replay WAL segments to restore state after crash
-//! 
+//!
 //! On startup, all persistent WAL segments are replayed to reconstruct the
 //! memtables for each column family. This ensures durability: any operation
 //! written to WAL before crash is recovered.
@@ -124,8 +124,19 @@ fn apply_record(
 
     match record.op {
         WalOpKind::Put | WalOpKind::Insert => {
+            // Skip expired entries during recovery
+            if let Some(exp) = record.expiration {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                if exp <= now {
+                    return Ok(());
+                }
+            }
+
             if let Some(value) = &record.value {
-                memtable.put(record.key.to_vec(), value.to_vec())?;
+                memtable.put_with_exp(record.key.to_vec(), value.to_vec(), record.expiration)?;
             }
         }
         WalOpKind::Delete => {
@@ -257,7 +268,8 @@ mod tests {
 
     #[test]
     fn should_recover_delete_operation_when_replaying_wal() {
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_delete_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_delete_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -272,7 +284,8 @@ mod tests {
             );
             writer.append_record(&put_record).unwrap();
 
-            let delete_record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
+            let delete_record =
+                WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
             writer.append_record(&delete_record).unwrap();
             writer.sync().unwrap();
         }
@@ -288,7 +301,10 @@ mod tests {
     #[test]
     fn should_count_put_records() {
         // Arrange
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_delete_count_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_delete_count_{}",
+            std::process::id()
+        ));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -303,7 +319,8 @@ mod tests {
             );
             writer.append_record(&put_record).unwrap();
 
-            let delete_record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
+            let delete_record =
+                WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
             writer.append_record(&delete_record).unwrap();
             writer.sync().unwrap();
         }
@@ -320,7 +337,8 @@ mod tests {
 
     #[test]
     fn should_separate_records_by_column_family_when_recovering() {
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_cf_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_cf_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -356,7 +374,10 @@ mod tests {
 
     #[test]
     fn should_recover_both_column_families_with_correct_data() {
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_cf_data_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_cf_data_{}",
+            std::process::id()
+        ));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -393,7 +414,10 @@ mod tests {
 
     #[test]
     fn should_count_records_across_multiple_column_families() {
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_cf_count_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_cf_count_{}",
+            std::process::id()
+        ));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -429,7 +453,8 @@ mod tests {
 
     #[test]
     fn should_track_max_sequence_across_multiple_records() {
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_seq_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_seq_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -473,7 +498,8 @@ mod tests {
 
     #[test]
     fn should_count_multiple_records_correctly() {
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_count_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_count_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -517,7 +543,8 @@ mod tests {
 
     #[test]
     fn should_return_none_max_sequence_when_no_records() {
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_empty_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_empty_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -536,7 +563,10 @@ mod tests {
 
     #[test]
     fn should_return_zero_record_count_when_no_records() {
-        let temp_dir = std::env::temp_dir().join(format!("midge_recovery_test_empty_count_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_empty_count_{}",
+            std::process::id()
+        ));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();

@@ -85,7 +85,10 @@ pub enum RuntimeMsg {
     /// Trigger compaction check.
     CheckCompaction { request_id: u64 },
     /// Execute a specific compaction plan.
-    RunCompaction { request_id: u64, plan: CompactionPlan },
+    RunCompaction {
+        request_id: u64,
+        plan: CompactionPlan,
+    },
     /// Compaction completed.
     CompactionComplete {
         request_id: u64,
@@ -102,6 +105,7 @@ pub enum RuntimeMsg {
         value: Option<Vec<u8>>,
         sequence: u64,
         ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
+        insert_only: bool,        // When true, fail if key already exists
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
@@ -122,11 +126,17 @@ pub enum RuntimeMsg {
     /// Check for garbage collection opportunities.
     CheckGc { request_id: u64 },
     /// Delete obsolete SST files.
-    DeleteObsoleteSsts { request_id: u64, sst_names: Vec<String> },
+    DeleteObsoleteSsts {
+        request_id: u64,
+        sst_names: Vec<String>,
+    },
 
     // === Manifest Actor ===
     /// Update manifest with new SST.
-    ManifestAddSst { request_id: u64, file_meta: FileMeta },
+    ManifestAddSst {
+        request_id: u64,
+        file_meta: FileMeta,
+    },
     /// Update manifest after compaction.
     ManifestCompactionComplete {
         request_id: u64,
@@ -198,12 +208,29 @@ impl RuntimeMsg {
 /// Copilot: every response variant MUST carry the originating request_id.
 #[derive(Debug)]
 pub enum RuntimeResponse {
-    Ok { request_id: u64 },
-    Error { request_id: u64, message: String },
-    ReadValue { request_id: u64, value: Option<Vec<u8>> },
-    FlushComplete { request_id: u64, sst_name: String },
-    CompactionComplete { request_id: u64, output_ssts: Vec<String> },
-    ColumnFamilyCreated { request_id: u64, cf_id: u32 },
+    Ok {
+        request_id: u64,
+    },
+    Error {
+        request_id: u64,
+        message: String,
+    },
+    ReadValue {
+        request_id: u64,
+        value: Option<Vec<u8>>,
+    },
+    FlushComplete {
+        request_id: u64,
+        sst_name: String,
+    },
+    CompactionComplete {
+        request_id: u64,
+        output_ssts: Vec<String>,
+    },
+    ColumnFamilyCreated {
+        request_id: u64,
+        cf_id: u32,
+    },
 }
 
 impl RuntimeResponse {

@@ -1,4 +1,4 @@
-﻿//! Sparse index reader - fast binary search for block range lookup
+//! Sparse index reader - fast binary search for block range lookup
 
 use super::shared::{BlockRange, IndexEntry};
 use crate::common::MidgeResult;
@@ -180,4 +180,3 @@ mod tests {
         assert_eq!(range.block_count(), range.end_block - range.start_block + 1);
     }
 }
-

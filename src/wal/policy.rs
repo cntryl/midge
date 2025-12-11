@@ -12,7 +12,7 @@
 //! COPILOT: CLOUD DURABILITY REQUIREMENT
 //!
 //! Implement cloud-first durability exactly as follows:
-//! 
+//!
 //! 1. The WAL writer is ALWAYS local-only (FsWalWriter). Do NOT create new WAL
 //!    backends. Do NOT embed cloud logic in the writer.
 //!
@@ -28,7 +28,7 @@
 //! 3. Cloud-first durability rule:
 //!      A write is considered DURABLE only after cloud ack IF the mode is
 //!      Durability::CloudFirst. Otherwise, fallback to Steady/Batched or Strict.
-//! 
+//!
 //! 4. CloudActor is responsible for:
 //!      • uploading WAL segments to cloud storage
 //!      • retrying on failure (no blocking writes)
@@ -109,7 +109,7 @@ pub struct BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            max_delay_ms: 100,  // 100ms
+            max_delay_ms: 100,    // 100ms
             max_bytes: 64 * 1024, // 64KB
         }
     }

@@ -45,25 +45,21 @@ pub fn execute_compaction(
 
     // --- 4. Prepare output file path ----------------------------------------
     let output_file = output_filename(plan, output_dir);
-    let output_file_str = output_file
-        .to_str()
-        .ok_or(MidgeError::InvalidPath)?;
+    let output_file_str = output_file.to_str().ok_or(MidgeError::InvalidPath)?;
 
     // --- 5. Write merged versions to SST ------------------------------------
     executor::write_versions_to_sst(sst_factory, output_file_str, &final_versions)?;
 
-    Ok(vec![
-        output_file
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("output.sst")
-            .to_owned(),
-    ])
+    Ok(vec![output_file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("output.sst")
+        .to_owned()])
 }
 
 /// Construct the output filename for a completed compaction.
 /// This is stable and predictable for crash recovery and manifest logging.
-/// 
+///
 /// Follows LSM-tree industry standard: CF → directory, sequence → filename.
 /// The directory is assumed to already be CF-specific (e.g., `cf_00/`).
 fn output_filename(plan: &CompactionPlan, cf_dir: &Path) -> PathBuf {

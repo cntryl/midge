@@ -81,7 +81,7 @@ mod tests {
     fn should_skip_when_disabled() {
         let mut writer = TrieWriter::new(false);
         writer.add_block_key(b"test", 0).unwrap();
-        
+
         let result = writer.finish();
         assert!(result.is_none());
     }
@@ -92,7 +92,7 @@ mod tests {
         writer.add_block_key(b"apple", 0).unwrap();
         writer.add_block_key(b"banana", 1).unwrap();
         writer.add_block_key(b"cherry", 2).unwrap();
-        
+
         let result = writer.finish();
         assert!(result.is_some());
         assert!(result.unwrap().len() > 0);

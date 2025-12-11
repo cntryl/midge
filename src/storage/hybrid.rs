@@ -54,7 +54,7 @@ pub struct UploadState {
 ///
 /// Managed by a Storage Budget Actor to enforce disk constraints, watermarks,
 /// and coordination between local caching and cloud durability.
-/// 
+///
 /// CloudFirst Durability:
 /// - Tracks pending WAL segment uploads
 /// - Emits CloudAck when cloud confirms durability
@@ -95,23 +95,18 @@ impl HybridStorage {
     }
 
     /// Enqueue a WAL segment for cloud upload (CloudFirst mode)
-    /// 
+    ///
     /// **WAL DURABILITY PIPELINE ONLY**
-    /// 
+    ///
     /// This is the EXCLUSIVE entry point for WAL cloud durability.
     /// - WalActor writes segment locally first
     /// - WalActor calls this method to queue for cloud upload
     /// - process_uploads() handles actual upload to cloud
     /// - CloudAck event emitted when cloud confirms durability
     /// - WalActor applies writes to memtable ONLY after CloudAck
-    /// 
+    ///
     /// NEVER use submit_write() for WAL segments!
-    pub fn enqueue_wal_segment(
-        &self,
-        segment_id: u64,
-        local_path: PathBuf,
-        max_sequence: u64,
-    ) {
+    pub fn enqueue_wal_segment(&self, segment_id: u64, local_path: PathBuf, max_sequence: u64) {
         let upload_state = UploadState {
             segment_id,
             local_path: local_path.clone(),
@@ -120,7 +115,10 @@ impl HybridStorage {
             max_sequence,
         };
 
-        let mut queue = self.upload_queue.lock().expect("upload_queue lock poisoned");
+        let mut queue = self
+            .upload_queue
+            .lock()
+            .expect("upload_queue lock poisoned");
         queue.push_back(upload_state);
 
         tracing::debug!(
@@ -132,7 +130,7 @@ impl HybridStorage {
     }
 
     /// Poll for completed storage events (CloudAck, CloudFail, Backpressure)
-    /// 
+    ///
     /// Called by Runtime event loop to process asynchronous storage completions.
     /// Returns all pending events and clears the internal queue.
     pub fn poll(&self) -> Vec<StorageEvent> {
@@ -141,23 +139,26 @@ impl HybridStorage {
     }
 
     /// Process pending uploads (should be called periodically by runtime)
-    /// 
+    ///
     /// **WAL DURABILITY PIPELINE**
-    /// 
+    ///
     /// Initiates cloud uploads for pending WAL segments.
     /// This is the ONLY place where WAL segments are uploaded to cloud.
     /// - Reads pending uploads from upload_queue
     /// - Initiates cloud upload via cloud backend (not submit_write)
     /// - Handles retries on failure (up to 3 attempts)
     /// - Emits CloudAck/CloudFail events to event_queue
-    /// 
+    ///
     /// Non-blocking - actual uploads happen asynchronously in spawned threads.
     pub fn process_uploads(&self) {
-        let mut queue = self.upload_queue.lock().expect("upload_queue lock poisoned");
-        
+        let mut queue = self
+            .upload_queue
+            .lock()
+            .expect("upload_queue lock poisoned");
+
         // Process each pending upload
         let mut completed_indices = Vec::new();
-        
+
         for (idx, upload) in queue.iter_mut().enumerate() {
             match upload.status {
                 UploadStatus::Pending => {
@@ -188,7 +189,7 @@ impl HybridStorage {
                 }
             }
         }
-        
+
         // Remove completed items
         for &idx in completed_indices.iter().rev() {
             queue.remove(idx);
@@ -196,9 +197,9 @@ impl HybridStorage {
     }
 
     /// Initiate cloud upload for a WAL segment
-    /// 
+    ///
     /// **WAL DURABILITY PIPELINE ONLY**
-    /// 
+    ///
     /// This method directly calls cloud.submit_write() for WAL segments.
     /// It does NOT go through HybridStorage::submit_write().
     /// This ensures WAL durability is independent of object storage logic.
@@ -206,7 +207,7 @@ impl HybridStorage {
         let cloud = Arc::clone(&self.cloud);
         let event_queue = Arc::clone(&self.event_queue);
         let upload_queue = Arc::clone(&self.upload_queue);
-        
+
         // Read local file and upload to cloud
         // This happens asynchronously in the cloud backend
         std::thread::spawn(move || {
@@ -214,25 +215,29 @@ impl HybridStorage {
                 Ok(data) => {
                     let (tx, rx) = std::sync::mpsc::channel();
                     let cloud_key = format!("wal/{}.wal", upload.segment_id);
-                    
+
                     cloud.submit_write(cloud_key, data, tx);
-                    
+
                     match rx.recv() {
                         Ok(StorageEvent::WriteComplete { result, .. }) => {
                             if result.is_ok() {
                                 // Upload successful - emit CloudAck
-                                let mut events = event_queue.lock().expect("event_queue lock poisoned");
+                                let mut events =
+                                    event_queue.lock().expect("event_queue lock poisoned");
                                 events.push_back(StorageEvent::CloudAck {
                                     segment_id: upload.segment_id,
                                     max_sequence: upload.max_sequence,
                                 });
-                                
+
                                 // Mark as completed in upload queue
-                                let mut queue = upload_queue.lock().expect("upload_queue lock poisoned");
-                                if let Some(item) = queue.iter_mut().find(|u| u.segment_id == upload.segment_id) {
+                                let mut queue =
+                                    upload_queue.lock().expect("upload_queue lock poisoned");
+                                if let Some(item) =
+                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
+                                {
                                     item.status = UploadStatus::Completed;
                                 }
-                                
+
                                 tracing::info!(
                                     segment_id = upload.segment_id,
                                     max_sequence = upload.max_sequence,
@@ -244,16 +249,20 @@ impl HybridStorage {
                                     StorageOutcome::Err(e) => e,
                                     _ => "Unknown error".to_string(),
                                 };
-                                
-                                let mut events = event_queue.lock().expect("event_queue lock poisoned");
+
+                                let mut events =
+                                    event_queue.lock().expect("event_queue lock poisoned");
                                 events.push_back(StorageEvent::CloudFail {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
                                 });
-                                
+
                                 // Mark as failed in upload queue
-                                let mut queue = upload_queue.lock().expect("upload_queue lock poisoned");
-                                if let Some(item) = queue.iter_mut().find(|u| u.segment_id == upload.segment_id) {
+                                let mut queue =
+                                    upload_queue.lock().expect("upload_queue lock poisoned");
+                                if let Some(item) =
+                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
+                                {
                                     item.status = UploadStatus::Failed(error);
                                 }
                             }
@@ -282,7 +291,10 @@ impl HybridStorage {
 
     /// Try to reserve space for a flush; returns the reservation result
     pub fn reserve_for_flush(&self, est_size: u64) -> actor::ReservationResult {
-        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
+        let mut actor = self
+            .budget_actor
+            .lock()
+            .expect("budget_actor lock poisoned");
         actor
             .handle_event(actor::StorageBudgetEvent::ReserveForFlush { est_size })
             .unwrap_or(actor::ReservationResult::Ok)
@@ -290,13 +302,19 @@ impl HybridStorage {
 
     /// Signal that a flush completed with actual size
     pub fn flush_completed(&self, actual_size: u64) {
-        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
+        let mut actor = self
+            .budget_actor
+            .lock()
+            .expect("budget_actor lock poisoned");
         let _ = actor.handle_event(actor::StorageBudgetEvent::FlushCompleted { actual_size });
     }
 
     /// Signal that a cloud upload completed
     pub fn cloud_upload_completed(&self, sst_id: u64, actual_size: u64) {
-        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
+        let mut actor = self
+            .budget_actor
+            .lock()
+            .expect("budget_actor lock poisoned");
         let _ = actor.handle_event(actor::StorageBudgetEvent::CloudUploadCompleted {
             sst_id,
             actual_size,
@@ -305,24 +323,35 @@ impl HybridStorage {
 
     /// Signal that compaction is starting
     pub fn compaction_planned(&self, input_sizes: Vec<u64>) {
-        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
+        let mut actor = self
+            .budget_actor
+            .lock()
+            .expect("budget_actor lock poisoned");
         let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionPlanned { input_sizes });
     }
 
     /// Signal that compaction completed
     pub fn compaction_completed(&self, output_sizes: Vec<u64>) {
-        let mut actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
+        let mut actor = self
+            .budget_actor
+            .lock()
+            .expect("budget_actor lock poisoned");
         let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionCompleted { output_sizes });
     }
 
     /// Get current disk state snapshot
     pub fn disk_state(&self) -> state::DiskState {
-        let actor = self.budget_actor.lock().expect("budget_actor lock poisoned");
+        let actor = self
+            .budget_actor
+            .lock()
+            .expect("budget_actor lock poisoned");
         actor.disk_state()
     }
 
     /// Get mutable access to the budget actor for testing and monitoring
-    pub fn budget_actor(&self) -> Result<std::sync::MutexGuard<'_, actor::StorageBudgetActor>, String> {
+    pub fn budget_actor(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, actor::StorageBudgetActor>, String> {
         self.budget_actor
             .lock()
             .map_err(|e| format!("Failed to lock budget actor: {}", e))
@@ -330,7 +359,10 @@ impl HybridStorage {
 
     /// Get count of pending uploads (for monitoring)
     pub fn pending_upload_count(&self) -> usize {
-        self.upload_queue.lock().expect("upload_queue lock poisoned").len()
+        self.upload_queue
+            .lock()
+            .expect("upload_queue lock poisoned")
+            .len()
     }
 }
 
@@ -338,7 +370,7 @@ impl StorageBackend for HybridStorage {
     fn submit_read(&self, path: String, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - reads SSTs, metadata, etc.
         // Try local first, fall back to cloud
-        
+
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
         let path_clone = path.clone();
@@ -380,7 +412,7 @@ impl StorageBackend for HybridStorage {
     fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - NOT for WAL durability
         // WAL durability uses enqueue_wal_segment() instead
-        
+
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
         let path_clone = path.clone();
@@ -418,7 +450,7 @@ impl StorageBackend for HybridStorage {
     fn submit_delete(&self, path: String, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - deletes SSTs, metadata, etc.
         // Delete from both local and cloud
-        
+
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
         let path_clone = path.clone();
@@ -456,7 +488,7 @@ impl StorageBackend for HybridStorage {
     fn submit_list(&self, prefix: String, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - lists SSTs, metadata, etc.
         // Merge results from both local and cloud
-        
+
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
         let prefix_clone = prefix.clone();

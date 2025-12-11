@@ -1,4 +1,4 @@
-﻿//! Multi-way merge iterator for compaction
+//! Multi-way merge iterator for compaction
 //!
 //! Merges multiple sorted sequences of entries while maintaining a global
 //! ordering across all inputs.
@@ -76,7 +76,7 @@ impl PartialOrd for HeapItem {
 impl Ord for HeapItem {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.key.cmp(&other.key) {
-            Ordering::Less => Ordering::Greater,  // smaller key = "higher" priority
+            Ordering::Less => Ordering::Greater, // smaller key = "higher" priority
             Ordering::Greater => Ordering::Less,
             Ordering::Equal => match self.seq.cmp(&other.seq) {
                 Ordering::Less => Ordering::Less, // for same key, larger seq wins
@@ -187,7 +187,11 @@ mod tests {
     #[test]
     fn should_merge_two_sorted_streams_by_key_then_seq() {
         // Input 0: a(3), a(1), c(2)
-        let s0 = vec![entry("a", "a3", 3), entry("a", "a1", 1), entry("c", "c2", 2)];
+        let s0 = vec![
+            entry("a", "a3", 3),
+            entry("a", "a1", 1),
+            entry("c", "c2", 2),
+        ];
 
         // Input 1: a(2), b(5)
         let s1 = vec![entry("a", "a2", 2), entry("b", "b5", 5)];
@@ -218,7 +222,8 @@ mod tests {
 
     #[test]
     fn should_handle_empty_inputs_gracefully() {
-        let merged: Vec<MergeEntry> = MergeIterator::from_iterators::<std::vec::IntoIter<MergeEntry>>(vec![]).collect();
+        let merged: Vec<MergeEntry> =
+            MergeIterator::from_iterators::<std::vec::IntoIter<MergeEntry>>(vec![]).collect();
         assert!(merged.is_empty());
     }
 

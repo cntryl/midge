@@ -228,11 +228,7 @@ impl S3Provider {
     }
 
     /// Create provider with custom S3-compatible endpoint
-    pub fn custom(
-        config: S3Config,
-        access_key: String,
-        secret_key: String,
-    ) -> Self {
+    pub fn custom(config: S3Config, access_key: String, secret_key: String) -> Self {
         let creds = AwsCredentials {
             access_key,
             secret_key,
@@ -289,8 +285,15 @@ impl S3Backend {
                 let endpoint_without_protocol = endpoint
                     .trim_start_matches("https://")
                     .trim_start_matches("http://");
-                let protocol = if endpoint.starts_with("https") { "https" } else { "http" };
-                format!("{}://{}.{}", protocol, self.config.bucket, endpoint_without_protocol)
+                let protocol = if endpoint.starts_with("https") {
+                    "https"
+                } else {
+                    "http"
+                };
+                format!(
+                    "{}://{}.{}",
+                    protocol, self.config.bucket, endpoint_without_protocol
+                )
             }
         } else {
             // Default AWS S3 endpoint

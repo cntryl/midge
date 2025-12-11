@@ -11,7 +11,9 @@
 //! - Snapshots
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::runtime::{next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse, RuntimeState};
+use crate::runtime::{
+    next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse, RuntimeState,
+};
 use std::path::PathBuf;
 
 pub mod api;
@@ -98,12 +100,8 @@ impl OpenParam for PathBuf {
 impl OpenParam for crate::testkit::MidgeOptions {
     fn to_path(self) -> PathBuf {
         match &self.storage_mode {
-            crate::testkit::StorageMode::Memory => {
-                PathBuf::from(":memory:")
-            }
-            crate::testkit::StorageMode::LocalDisk { db_path } => {
-                db_path.clone()
-            }
+            crate::testkit::StorageMode::Memory => PathBuf::from(":memory:"),
+            crate::testkit::StorageMode::LocalDisk { db_path } => db_path.clone(),
             crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
                 local_cache_path.clone()
             }
@@ -114,12 +112,8 @@ impl OpenParam for crate::testkit::MidgeOptions {
 impl OpenParam for &crate::testkit::MidgeOptions {
     fn to_path(self) -> PathBuf {
         match &self.storage_mode {
-            crate::testkit::StorageMode::Memory => {
-                PathBuf::from(":memory:")
-            }
-            crate::testkit::StorageMode::LocalDisk { db_path } => {
-                db_path.clone()
-            }
+            crate::testkit::StorageMode::Memory => PathBuf::from(":memory:"),
+            crate::testkit::StorageMode::LocalDisk { db_path } => db_path.clone(),
             crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
                 local_cache_path.clone()
             }
@@ -150,17 +144,13 @@ impl MidgeEngine {
     /// Open a database with test configuration options
     pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
         let db_path = match &opts.storage_mode {
-            crate::testkit::StorageMode::Memory => {
-                PathBuf::from(":memory:")
-            }
-            crate::testkit::StorageMode::LocalDisk { db_path } => {
-                db_path.clone()
-            }
+            crate::testkit::StorageMode::Memory => PathBuf::from(":memory:"),
+            crate::testkit::StorageMode::LocalDisk { db_path } => db_path.clone(),
             crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
                 local_cache_path.clone()
             }
         };
-        
+
         Self::open(db_path)
     }
 
@@ -176,7 +166,13 @@ impl MidgeEngine {
 
     /// Put a key-value pair with TTL (time-to-live in seconds)
     /// TTL of 0 means no expiration
-    pub fn put_with_ttl(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8], ttl_seconds: u64) -> MidgeResult<()> {
+    pub fn put_with_ttl(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+        ttl_seconds: u64,
+    ) -> MidgeResult<()> {
         // CRITICAL: Use send_and_wait to ensure durability before returning.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
@@ -184,14 +180,21 @@ impl MidgeEngine {
             key: key.to_vec(),
             value: Some(value.to_vec()),
             sequence: self.next_sequence(),
-            ttl_seconds: if ttl_seconds == 0 { None } else { Some(ttl_seconds) },
+            ttl_seconds: if ttl_seconds == 0 {
+                None
+            } else {
+                Some(ttl_seconds)
+            },
+            insert_only: false,
         })?;
 
         // Check for errors from runtime
         match response {
             RuntimeResponse::Ok { .. } => Ok(()),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal("Unexpected response to put".to_string())),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to put".to_string(),
+            )),
         }
     }
 
@@ -214,7 +217,9 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::ReadValue { value, .. } => Ok(value.map(bytes::Bytes::from)),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal("Unexpected response to get".to_string())),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to get".to_string(),
+            )),
         }
     }
 
@@ -233,12 +238,15 @@ impl MidgeEngine {
             value: None, // Tombstone
             sequence: self.next_sequence(),
             ttl_seconds: None,
+            insert_only: false,
         })?;
 
         match response {
             RuntimeResponse::Ok { .. } => Ok(()),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal("Unexpected response to delete".to_string())),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to delete".to_string(),
+            )),
         }
     }
 
@@ -258,7 +266,7 @@ impl MidgeEngine {
         // For now, simulate via multiple get() calls (inefficient but correct).
         // This is a placeholder until proper range scan message is added.
         let _ = (cf, start, end);
-        
+
         // Return empty for now - proper implementation requires RuntimeMsg::RangeScan
         Ok(vec![])
     }
@@ -274,7 +282,11 @@ impl MidgeEngine {
     }
 
     /// Scan with Query parameters
-    pub fn scan(&self, cf: &ColumnFamilyHandle, query: &api::Query) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+    pub fn scan(
+        &self,
+        cf: &ColumnFamilyHandle,
+        query: &api::Query,
+    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
         // Use the effective start/end from the query
         let start_owned;
         let start = if let Some(s) = query.effective_start() {
@@ -283,31 +295,36 @@ impl MidgeEngine {
             start_owned = vec![];
             &start_owned[..]
         };
-        
+
         let end_vec = query.effective_end();
         let end = if let Some(ref e) = end_vec {
             &e[..]
         } else {
             &[][..]
         };
-        
+
         let mut results = self.range(cf, start, end)?;
-        
+
         // Apply limit
         if let Some(limit) = query.limit {
             results.truncate(limit);
         }
-        
+
         // Apply reverse
         if query.reverse {
             results.reverse();
         }
-        
+
         Ok(results)
     }
 
     /// Delete a range of keys (exclusive end)
-    pub fn delete_range(&self, cf: &ColumnFamilyHandle, start: &[u8], end: &[u8]) -> MidgeResult<()> {
+    pub fn delete_range(
+        &self,
+        cf: &ColumnFamilyHandle,
+        start: &[u8],
+        end: &[u8],
+    ) -> MidgeResult<()> {
         // For now, scan and delete each key
         // TODO: Implement efficient range deletion
         let keys = self.range(cf, start, end)?;
@@ -325,48 +342,106 @@ impl MidgeEngine {
 
     /// Insert a key-value pair with TTL (fails if key exists)
     /// Returns true if insert succeeded, false if key already existed
-    pub fn insert_with_ttl(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8], ttl_seconds: u64) -> MidgeResult<bool> {
-        // Check if key already exists
-        if self.get(cf, key)?.is_some() {
-            // Key exists - cannot insert
-            return Ok(false);
+    pub fn insert_with_ttl(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+        ttl_seconds: u64,
+    ) -> MidgeResult<bool> {
+        // Send insert-only WAL append; runtime will enforce uniqueness
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+            request_id: next_request_id(),
+            cf_id: cf.id.0,
+            key: key.to_vec(),
+            value: Some(value.to_vec()),
+            sequence: self.next_sequence(),
+            ttl_seconds: if ttl_seconds == 0 {
+                None
+            } else {
+                Some(ttl_seconds)
+            },
+            insert_only: true,
+        })?;
+
+        match response {
+            RuntimeResponse::Ok { .. } => Ok(true),
+            RuntimeResponse::Error { message, .. } if message.contains("already exists") => {
+                Ok(false)
+            }
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to insert".to_string(),
+            )),
         }
-        
-        // Key doesn't exist - do the insert
-        self.put_with_ttl(cf, key, value, ttl_seconds)?;
-        Ok(true)
     }
 
     /// Insert with value return (returns existing value if key exists)
-    pub fn insert_with_value(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<api::InsertResult> {
+    pub fn insert_with_value(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+    ) -> MidgeResult<api::InsertResult> {
         self.insert_with_value_and_ttl(cf, key, value, 0)
     }
 
     /// Insert with value return and TTL (returns existing value if key exists)
-    pub fn insert_with_value_and_ttl(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8], ttl_seconds: u64) -> MidgeResult<api::InsertResult> {
-        // Check if key already exists
-        if let Some(existing) = self.get(cf, key)? {
-            // Key exists - return existing value
-            return Ok(api::InsertResult::AlreadyExists(bytes::Bytes::from(existing)));
+    pub fn insert_with_value_and_ttl(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+        ttl_seconds: u64,
+    ) -> MidgeResult<api::InsertResult> {
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+            request_id: next_request_id(),
+            cf_id: cf.id.0,
+            key: key.to_vec(),
+            value: Some(value.to_vec()),
+            sequence: self.next_sequence(),
+            ttl_seconds: if ttl_seconds == 0 {
+                None
+            } else {
+                Some(ttl_seconds)
+            },
+            insert_only: true,
+        })?;
+
+        match response {
+            RuntimeResponse::Ok { .. } => Ok(api::InsertResult::Ok),
+            RuntimeResponse::Error { message, .. } if message.contains("already exists") => {
+                // We need the existing value; fall back to a read
+                let existing = self.get(cf, key)?;
+                Ok(api::InsertResult::AlreadyExists(
+                    existing.unwrap_or_default(),
+                ))
+            }
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to insert".to_string(),
+            )),
         }
-        
-        // Key doesn't exist - do the insert
-        self.put_with_ttl(cf, key, value, ttl_seconds)?;
-        Ok(api::InsertResult::Ok)
     }
 
     /// Compare-and-swap operation
-    pub fn compare_and_swap(&self, cf: &ColumnFamilyHandle, key: &[u8], expected: Option<bytes::Bytes>, new_value: &[u8]) -> MidgeResult<api::CasResult> {
+    pub fn compare_and_swap(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        expected: Option<bytes::Bytes>,
+        new_value: &[u8],
+    ) -> MidgeResult<api::CasResult> {
         // Get current value
         let current = self.get(cf, key)?;
-        
+
         // Check if current matches expected
         let matches = match (&current, &expected) {
             (None, None) => true,
             (Some(curr), Some(exp)) => curr == exp,
             _ => false,
         };
-        
+
         if matches {
             // Swap succeeded
             self.put(cf, key, new_value)?;
@@ -386,7 +461,9 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::Ok { .. } => Ok(()),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal("Unexpected response to sync".to_string())),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to sync".to_string(),
+            )),
         }
     }
 
@@ -397,15 +474,19 @@ impl MidgeEngine {
 
     /// Force a flush of a specific column family
     pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::FlushMemtable {
-            request_id: next_request_id(),
-            cf_id: cf.id.0,
-        })?;
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::FlushMemtable {
+                request_id: next_request_id(),
+                cf_id: cf.id.0,
+            })?;
 
         match response {
             RuntimeResponse::Ok { .. } | RuntimeResponse::FlushComplete { .. } => Ok(()),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal("Unexpected response to flush".to_string())),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to flush".to_string(),
+            )),
         }
     }
 
@@ -434,6 +515,7 @@ impl MidgeEngine {
                 value: Some(value.to_vec()),
                 sequence: self.next_sequence(),
                 ttl_seconds: None,
+                insert_only: false,
             })?;
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
@@ -448,6 +530,7 @@ impl MidgeEngine {
                 value: None,
                 sequence: self.next_sequence(),
                 ttl_seconds: None,
+                insert_only: false,
             })?;
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
@@ -478,7 +561,10 @@ impl MidgeEngine {
 
     /// Create a new transaction with serializable isolation
     /// Begin a new transaction for a specific column family (high-level API)
-    pub fn begin_transaction(&self, cf: &ColumnFamilyHandle) -> MidgeResult<Box<dyn api::KvTransaction>> {
+    pub fn begin_transaction(
+        &self,
+        cf: &ColumnFamilyHandle,
+    ) -> MidgeResult<Box<dyn api::KvTransaction>> {
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -552,7 +638,8 @@ impl MidgeEngine {
                     value: Some(value.to_vec()),
                     sequence: self.next_sequence(),
                     ttl_seconds: None,
-                })?  
+                    insert_only: false,
+                })?
             } else {
                 self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                     request_id: next_request_id(),
@@ -561,9 +648,10 @@ impl MidgeEngine {
                     value: None,
                     sequence: self.next_sequence(),
                     ttl_seconds: None,
+                    insert_only: false,
                 })?
             };
-            
+
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
             }
@@ -620,7 +708,12 @@ impl MidgeEngine {
                 request_id: next_request_id(),
                 cf_id: cf_id.as_u32(),
             },
-            |resp| matches!(resp, RuntimeResponse::Ok { .. } | RuntimeResponse::Error { .. }),
+            |resp| {
+                matches!(
+                    resp,
+                    RuntimeResponse::Ok { .. } | RuntimeResponse::Error { .. }
+                )
+            },
         )?;
 
         match response {
@@ -642,11 +735,18 @@ impl MidgeEngine {
 
     /// Compact all data (stub - not implemented)
     pub fn compact_all(&self) -> MidgeResult<()> {
-        Err(MidgeError::Internal("compact_all not yet implemented".to_string()))
+        Err(MidgeError::Internal(
+            "compact_all not yet implemented".to_string(),
+        ))
     }
 
     /// Get a value at a specific snapshot (stub)
-    pub fn get_at(&self, cf: &ColumnFamilyHandle, key: &[u8], _snapshot: &api::Snapshot) -> MidgeResult<Option<bytes::Bytes>> {
+    pub fn get_at(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        _snapshot: &api::Snapshot,
+    ) -> MidgeResult<Option<bytes::Bytes>> {
         // TODO: Wire to RuntimeMsg::Read with snapshot sequence
         self.get(cf, key)
     }

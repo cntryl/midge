@@ -1,4 +1,4 @@
-﻿//! Bloom filter writer for building filters during SST creation
+//! Bloom filter writer for building filters during SST creation
 
 use super::reader::BloomReader;
 
@@ -221,7 +221,10 @@ mod tests {
         for key in &keys {
             assert_eq!(filter.contains(&key[..]), BloomTestResult::MightBePresent);
         }
-        assert_eq!(filter.contains(b"nonexistent"), BloomTestResult::DefinitelyNotPresent);
+        assert_eq!(
+            filter.contains(b"nonexistent"),
+            BloomTestResult::DefinitelyNotPresent
+        );
     }
 
     #[test]

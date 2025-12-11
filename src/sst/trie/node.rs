@@ -5,13 +5,13 @@
 pub struct TrieNode {
     /// Length of prefix shared with parent
     pub prefix_len: u16,
-    
+
     /// Remaining suffix for this edge
     pub key_delta: Vec<u8>,
-    
+
     /// Block ID if this node maps to a block (leaf nodes)
     pub block_id: Option<u32>,
-    
+
     /// Children sorted by first byte of key_delta
     pub children: Vec<TrieEdge>,
 }
@@ -30,7 +30,8 @@ impl TrieNode {
     /// Add a child edge to this node
     pub fn add_child(&mut self, edge: TrieEdge) {
         // Insert in sorted order by first byte
-        let insert_pos = self.children
+        let insert_pos = self
+            .children
             .binary_search_by_key(&edge.first_byte, |e| e.first_byte)
             .unwrap_or_else(|pos| pos);
         self.children.insert(insert_pos, edge);
@@ -55,7 +56,7 @@ impl TrieNode {
 pub struct TrieEdge {
     /// First byte of child's key_delta (for binary search)
     pub first_byte: u8,
-    
+
     /// Index of child node in flat node array
     pub child_index: u32,
 }
@@ -86,11 +87,11 @@ mod tests {
     #[test]
     fn should_add_children_in_sorted_order() {
         let mut node = TrieNode::new(0, b"root".to_vec(), None);
-        
+
         node.add_child(TrieEdge::new(b'c', 2));
         node.add_child(TrieEdge::new(b'a', 0));
         node.add_child(TrieEdge::new(b'b', 1));
-        
+
         assert_eq!(node.children.len(), 3);
         assert_eq!(node.children[0].first_byte, b'a');
         assert_eq!(node.children[1].first_byte, b'b');
@@ -102,7 +103,7 @@ mod tests {
         let mut node = TrieNode::new(0, b"root".to_vec(), None);
         node.add_child(TrieEdge::new(b'a', 0));
         node.add_child(TrieEdge::new(b'b', 1));
-        
+
         assert!(node.find_child(b'a').is_some());
         assert!(node.find_child(b'b').is_some());
         assert!(node.find_child(b'c').is_none());

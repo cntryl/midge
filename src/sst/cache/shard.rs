@@ -1,4 +1,4 @@
-﻿//! Single cache shard with lock-based entry management
+//! Single cache shard with lock-based entry management
 
 use crate::sst::cache::admission::AdmissionCounter;
 use crate::sst::cache::key::CacheKey;
@@ -213,4 +213,3 @@ mod tests {
         assert_eq!(shard.size_bytes(), 0);
     }
 }
-

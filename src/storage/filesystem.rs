@@ -41,7 +41,10 @@ impl StorageBackend for FileSystem {
             Err(e) => StorageOutcome::Err(format!("read {:?}: {}", full_path, e)),
         };
 
-        let _ = callback.send(StorageEvent::ReadComplete { path, result: outcome });
+        let _ = callback.send(StorageEvent::ReadComplete {
+            path,
+            result: outcome,
+        });
     }
 
     fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
@@ -66,7 +69,10 @@ impl StorageBackend for FileSystem {
             }
         };
 
-        let _ = callback.send(StorageEvent::WriteComplete { path, result: outcome });
+        let _ = callback.send(StorageEvent::WriteComplete {
+            path,
+            result: outcome,
+        });
     }
 
     fn submit_delete(&self, path: String, callback: StorageCallback) {
@@ -77,8 +83,10 @@ impl StorageBackend for FileSystem {
             Err(e) => StorageOutcome::Err(format!("delete {:?}: {}", full_path, e)),
         };
 
-        let _ =
-            callback.send(StorageEvent::DeleteComplete { path, result: outcome });
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            path,
+            result: outcome,
+        });
     }
 
     fn submit_list(&self, prefix: String, callback: StorageCallback) {

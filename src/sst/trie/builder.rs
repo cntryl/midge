@@ -8,10 +8,10 @@ use crate::sst::trie::{encoding, lcp};
 pub struct TrieBuilder {
     /// Flat array of nodes (avoids recursion)
     nodes: Vec<TrieNode>,
-    
+
     /// Last key added (for prefix comparison)
     last_key: Vec<u8>,
-    
+
     /// Root node index (always 0)
     root_index: usize,
 }
@@ -21,7 +21,7 @@ impl TrieBuilder {
     pub fn new() -> Self {
         // Create root node with empty key
         let root = TrieNode::new(0, Vec::new(), None);
-        
+
         Self {
             nodes: vec![root],
             last_key: Vec::new(),
@@ -67,7 +67,7 @@ impl TrieBuilder {
             if let Some(edge) = node.find_child(remaining[0]) {
                 let child_index = edge.child_index as usize;
                 let child = &self.nodes[child_index];
-                
+
                 // Calculate how much of child's key_delta matches
                 let child_match_len = lcp(&child.key_delta, remaining);
 
@@ -82,14 +82,11 @@ impl TrieBuilder {
                 }
             } else {
                 // No matching child, create new leaf
-                let new_node = TrieNode::new(
-                    matched_len as u16,
-                    remaining.to_vec(),
-                    Some(block_id),
-                );
+                let new_node =
+                    TrieNode::new(matched_len as u16, remaining.to_vec(), Some(block_id));
                 let new_index = self.nodes.len() as u32;
                 self.nodes.push(new_node);
-                
+
                 // Add edge from current node to new node
                 let edge = TrieEdge::new(remaining[0], new_index);
                 self.nodes[current_index].add_child(edge);
@@ -106,15 +103,11 @@ impl TrieBuilder {
         let old_key_delta = self.nodes[node_index].key_delta.clone();
         let old_block_id = self.nodes[node_index].block_id;
         let old_children = self.nodes[node_index].children.clone();
-        
+
         // Create new intermediate node (becomes the parent)
         let common_part = old_key_delta[..split_pos].to_vec();
-        let mut intermediate = TrieNode::new(
-            self.nodes[node_index].prefix_len,
-            common_part,
-            None,
-        );
-        
+        let mut intermediate = TrieNode::new(self.nodes[node_index].prefix_len, common_part, None);
+
         // Create node for remainder of old key
         let old_suffix = old_key_delta[split_pos..].to_vec();
         let old_remainder = TrieNode {
@@ -126,15 +119,11 @@ impl TrieBuilder {
         let old_remainder_index = self.nodes.len() as u32;
         self.nodes.push(old_remainder);
         intermediate.add_child(TrieEdge::new(old_suffix[0], old_remainder_index));
-        
+
         // Create node for new key
         let new_suffix = remaining[split_pos..].to_vec();
         if !new_suffix.is_empty() {
-            let new_node = TrieNode::new(
-                split_pos as u16,
-                new_suffix.clone(),
-                Some(block_id),
-            );
+            let new_node = TrieNode::new(split_pos as u16, new_suffix.clone(), Some(block_id));
             let new_node_index = self.nodes.len() as u32;
             self.nodes.push(new_node);
             intermediate.add_child(TrieEdge::new(new_suffix[0], new_node_index));
@@ -142,7 +131,7 @@ impl TrieBuilder {
             // New key ends at split point
             intermediate.block_id = Some(block_id);
         }
-        
+
         // Replace original node with intermediate
         self.nodes[node_index] = intermediate;
     }
@@ -174,7 +163,7 @@ mod tests {
         builder.add_key(b"apple", 0).unwrap();
         builder.add_key(b"banana", 1).unwrap();
         builder.add_key(b"cherry", 2).unwrap();
-        
+
         assert!(builder.node_count() >= 3); // At least one node per key
     }
 
@@ -184,7 +173,7 @@ mod tests {
         builder.add_key(b"test", 0).unwrap();
         builder.add_key(b"testing", 1).unwrap();
         builder.add_key(b"tester", 2).unwrap();
-        
+
         let data = builder.finish();
         assert!(data.len() > 0);
     }
@@ -194,7 +183,7 @@ mod tests {
         let mut builder = TrieBuilder::new();
         builder.add_key(b"", 0).unwrap();
         builder.add_key(b"key", 1).unwrap();
-        
+
         assert!(builder.node_count() >= 1);
     }
 }

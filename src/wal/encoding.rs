@@ -265,24 +265,14 @@ mod tests {
 
     #[test]
     fn should_encode_delete_operation() {
-        let record = WalRecord::new(
-            WalOpKind::Delete,
-            Bytes::from_static(b"key"),
-            None,
-            10,
-        );
+        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 10);
         let encoded = encode(&record).unwrap();
         assert!(!encoded.is_empty());
     }
 
     #[test]
     fn should_roundtrip_delete_operation() {
-        let record = WalRecord::new(
-            WalOpKind::Delete,
-            Bytes::from_static(b"key"),
-            None,
-            10,
-        );
+        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 10);
         let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded[..]).unwrap();
         assert_eq!(decoded.op, WalOpKind::Delete);

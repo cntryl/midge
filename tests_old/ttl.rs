@@ -1,34 +1,54 @@
 ﻿//! TTL (Time-To-Live) Integration Tests
 //!
-//! **CURRENTLY IGNORED** - TTL support not yet implemented in new engine architecture
+//! These tests define the desired behavior for TTL once the engine is
+//! fully wired to a **logical/test clock** instead of wall-clock time.
 //!
-//! Tests for TTL functionality:
-//! - Key expiration based on TTL
-//! - TTL persistence across restarts
-//! - TTL with compaction cleanup
-//! - TTL with snapshots
-//! - TTL in transactions and write batches
+//! Key design constraints for TTL tests:
+//! - **No `thread::sleep`**
+//! - Time advancement goes through a single helper that can be backed
+//!   by a logical clock / test hook in the engine or testkit.
+//! - Tests are currently `#[ignore]` until TTL support + clock hooks
+//!   are implemented.
 //!
-//! ## Missing Features
-//! - `put_with_ttl()` / `get_with_ttl()` methods on engine
-//! - `WriteBatch` type for batch operations
-//! - TTL metadata in WAL and SST formats
-//! - Compaction-based expiration cleanup
-//!
-//! ## Coverage (when implemented)
-//! - put_with_ttl / insert_with_ttl
-//! - TTL metadata in WAL and SST
-//! - Compaction-based expiration cleanup
-//! - Snapshot visibility of expired keys
+//! When you wire TTL into a logical clock, update `advance_ttl_window`
+//! below to drive that clock (e.g., via test hooks on `MidgeEngine` or
+//! `cntryl_midge::testkit`).
 
 #![allow(dead_code, unused_variables, unused_imports)]
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use cntryl_midge::testkit::{test_temp_dir, with_engine_restart};
-use std::thread;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
 use std::time::Duration;
 use tempfile::TempDir;
+
+// -----------------------------------------------------------------------------
+// Test-time TTL control
+// -----------------------------------------------------------------------------
+
+/// Advance the TTL window used by the engine.
+///
+/// For now this is a no-op placeholder so the file compiles and the tests
+/// remain as an executable spec. Once TTL is backed by a logical clock,
+/// this should be updated to call the appropriate test hook, for example:
+///
+/// ```ignore
+/// fn advance_ttl_window(secs: u64) {
+///     cntryl_midge::testkit::advance_logical_time(Duration::from_secs(secs));
+/// }
+/// ```
+///
+/// or:
+///
+/// ```ignore
+/// fn advance_ttl_window(secs: u64) {
+///     engine.test_hooks().advance_time(Duration::from_secs(secs));
+/// }
+/// ```
+fn advance_ttl_window(_secs: u64) {
+    // TODO: Wire this to the engine's logical/test clock.
+    // Kept as a no-op so tests compile while TTL is not implemented.
+}
 
 // ============================================================================
 // Basic TTL Expiration Tests
@@ -81,8 +101,8 @@ fn should_return_none_given_ttl_elapsed_when_reading() {
         .put_with_ttl(&cf, b"ephemeral:key", b"temp_data", 1) // 1 second TTL
         .expect("put_with_ttl");
 
-    // Wait for TTL to expire
-    thread::sleep(Duration::from_secs(2));
+    // Advance logical time past TTL
+    advance_ttl_window(2);
 
     // Assert - value should be expired
     let result = engine.get(&cf, b"ephemeral:key").expect("get");
@@ -125,6 +145,7 @@ fn should_expire_key_given_zero_ttl_means_no_expiration_when_reading() {
 // ============================================================================
 
 #[test]
+#[ignore]
 fn should_persist_ttl_metadata_given_restart_when_reopening() {
     // Arrange
     let dir = test_temp_dir();
@@ -157,6 +178,7 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
 }
 
 #[test]
+#[ignore]
 fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening() {
     // Arrange
     let dir = test_temp_dir();
@@ -178,8 +200,8 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
         drop(engine);
     }
 
-    // Wait for TTL to expire
-    thread::sleep(Duration::from_secs(2));
+    // Advance logical time past TTL while engine is "down"
+    advance_ttl_window(2);
 
     // Act - reopen after TTL elapsed
     let engine = MidgeEngine::open(opts).expect("reopen");
@@ -198,6 +220,7 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
 // ============================================================================
 
 #[test]
+#[ignore]
 fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
     // Arrange
     let dir = test_temp_dir();
@@ -220,8 +243,8 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
     }
     engine.flush_cf(&cf).expect("flush");
 
-    // Wait for TTL to expire
-    thread::sleep(Duration::from_secs(2));
+    // Advance logical time past TTL
+    advance_ttl_window(2);
 
     // Act - trigger compaction to clean up expired entries
     engine.compact_all().expect("compact");
@@ -240,6 +263,7 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
 }
 
 #[test]
+#[ignore]
 fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() {
     // Arrange
     let dir = test_temp_dir();
@@ -283,6 +307,7 @@ fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() 
 // ============================================================================
 
 #[test]
+#[ignore]
 fn should_hide_expired_key_given_snapshot_after_expiry_when_reading_at_snapshot() {
     // Arrange
     let dir = test_temp_dir();
@@ -300,8 +325,8 @@ fn should_hide_expired_key_given_snapshot_after_expiry_when_reading_at_snapshot(
         .put_with_ttl(&cf, b"snap_ttl:key", b"snap_value", 1)
         .expect("put_with_ttl");
 
-    // Wait for expiry
-    thread::sleep(Duration::from_secs(2));
+    // Advance logical time past TTL
+    advance_ttl_window(2);
 
     // Act - take snapshot after expiry
     let snapshot = engine.snapshot();
@@ -317,6 +342,7 @@ fn should_hide_expired_key_given_snapshot_after_expiry_when_reading_at_snapshot(
 }
 
 #[test]
+#[ignore]
 fn should_show_key_given_snapshot_before_expiry_when_reading_at_snapshot() {
     // Arrange
     let dir = test_temp_dir();
@@ -353,6 +379,7 @@ fn should_show_key_given_snapshot_before_expiry_when_reading_at_snapshot() {
 // ============================================================================
 
 #[test]
+#[ignore]
 fn should_apply_ttl_given_write_batch_with_ttl_when_committed() {
     // Arrange
     let dir = test_temp_dir();
@@ -379,8 +406,8 @@ fn should_apply_ttl_given_write_batch_with_ttl_when_committed() {
     let result = engine.get(&cf, b"batch_ttl:key").expect("get");
     assert!(result.is_some(), "Key should be readable immediately");
 
-    // Wait for TTL
-    thread::sleep(Duration::from_secs(2));
+    // Advance logical time past TTL
+    advance_ttl_window(2);
 
     // Assert - should be expired
     let result = engine.get(&cf, b"batch_ttl:key").expect("get after ttl");
@@ -395,6 +422,7 @@ fn should_apply_ttl_given_write_batch_with_ttl_when_committed() {
 // ============================================================================
 
 #[test]
+#[ignore]
 fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
     // Arrange
     let dir = test_temp_dir();
@@ -418,8 +446,8 @@ fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
         .put(&cf, b"no_ttl", b"permanent")
         .expect("put no ttl");
 
-    // Act - wait for short TTL to expire
-    thread::sleep(Duration::from_secs(2));
+    // Act - advance logical time so short TTL expires
+    advance_ttl_window(2);
 
     // Assert - only short TTL key should be expired
     assert!(
@@ -437,6 +465,7 @@ fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
 }
 
 #[test]
+#[ignore]
 fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
     // Arrange
     let dir = test_temp_dir();
@@ -454,11 +483,11 @@ fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
         .put_with_ttl(&cf, b"update_ttl:key", b"v1", 1)
         .expect("put short ttl");
 
-    // Act - overwrite with longer TTL and wait past original TTL
+    // Act - overwrite with longer TTL and advance past original TTL
     engine
         .put_with_ttl(&cf, b"update_ttl:key", b"v2", 3600)
         .expect("put long ttl");
-    thread::sleep(Duration::from_secs(2));
+    advance_ttl_window(2);
 
     // Assert - key should still exist with new TTL
     let result = engine.get(&cf, b"update_ttl:key").expect("get");

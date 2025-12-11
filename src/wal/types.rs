@@ -12,8 +12,6 @@ pub type WalPos = u64;
 /// Column family ID type
 pub type ColumnFamilyId = u32;
 
-
-
 /// WAL operation kinds
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum WalOpKind {
@@ -63,8 +61,6 @@ impl WalOpKind {
         }
     }
 }
-
-
 
 /// A single WAL record using TLV encoding format.
 #[derive(Debug, Clone, Serialize, Deserialize)]

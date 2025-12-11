@@ -147,11 +147,7 @@ impl Compactor {
     }
 
     /// Build a compaction plan for L0 → L1.
-    fn plan_zero_level(
-        &self,
-        levels: &[Vec<&FileMeta>],
-        cf_id: u32,
-    ) -> Option<CompactionPlan> {
+    fn plan_zero_level(&self, levels: &[Vec<&FileMeta>], cf_id: u32) -> Option<CompactionPlan> {
         if levels[0].is_empty() {
             return None;
         }
@@ -186,8 +182,7 @@ impl Compactor {
             return None;
         }
 
-        let mut input_files: Vec<String> =
-            levels[level].iter().map(|f| f.name.clone()).collect();
+        let mut input_files: Vec<String> = levels[level].iter().map(|f| f.name.clone()).collect();
 
         // Find overlapping files in next level
         let (min_key, max_key) = smallest_and_largest(levels[level].as_slice())?;
@@ -209,14 +204,8 @@ impl Compactor {
 
 /// Extract smallest and largest user keys across a slice of FileMeta.
 fn smallest_and_largest(files: &[&FileMeta]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let smallest = files
-        .iter()
-        .filter_map(|f| f.smallest_key.clone())
-        .min();
-    let largest = files
-        .iter()
-        .filter_map(|f| f.largest_key.clone())
-        .max();
+    let smallest = files.iter().filter_map(|f| f.smallest_key.clone()).min();
+    let largest = files.iter().filter_map(|f| f.largest_key.clone()).max();
 
     match (smallest, largest) {
         (Some(s), Some(l)) => Some((s, l)),

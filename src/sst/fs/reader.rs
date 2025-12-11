@@ -7,13 +7,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::sst::bloom::writer::BloomTestResult;
+use crate::sst::bloom::{writer::BloomFilterOps, BloomReader};
+use crate::sst::cache::{BlockCache, CacheKey};
 use crate::sst::encoding;
+use crate::sst::sparse_index::SparseIndexReader;
 use crate::sst::traits::SstReader;
 use crate::sst::types::{BlockHandle, Footer};
-use crate::sst::bloom::{BloomReader, writer::BloomFilterOps};
-use crate::sst::bloom::writer::BloomTestResult;
-use crate::sst::sparse_index::SparseIndexReader;
-use crate::sst::cache::{BlockCache, CacheKey};
 
 /// SST file reader with optional bloom filter, sparse index, and block cache
 pub struct SstFile {
@@ -185,7 +185,10 @@ impl SstFile {
         self.scan_block_from_bytes(&block_data)
     }
 
-    fn scan_block_from_bytes(&self, block_data: &[u8]) -> MidgeResult<Vec<(Vec<u8>, Option<Bytes>)>> {
+    fn scan_block_from_bytes(
+        &self,
+        block_data: &[u8],
+    ) -> MidgeResult<Vec<(Vec<u8>, Option<Bytes>)>> {
         let mut result = Vec::new();
         let mut offset = 0;
 
@@ -232,7 +235,7 @@ impl crate::sst::SstReader for SstFile {
         let block_handle = if let Some(ref sparse_idx) = self.sparse_index {
             // Sparse index narrows down which blocks to search
             let block_range = sparse_idx.find_block_range(key);
-            
+
             // Find the specific block handle within the narrowed range
             let mut found_handle = None;
             for (idx, (first_key, handle)) in index.iter().enumerate() {
@@ -242,7 +245,7 @@ impl crate::sst::SstReader for SstFile {
                 if idx > block_range.end_block as usize {
                     break;
                 }
-                
+
                 if key <= first_key.as_slice() || idx == block_range.end_block as usize {
                     found_handle = Some(*handle);
                     break;
@@ -264,7 +267,7 @@ impl crate::sst::SstReader for SstFile {
         if let Some(handle) = block_handle {
             // Step 3: Check block cache (if available)
             let cache_key = CacheKey::new(self.sst_id, handle.offset);
-            
+
             let block_data = if let Some(ref cache) = self.block_cache {
                 // Try to get from cache
                 if let Some(cached_value) = cache.get(&cache_key) {
@@ -273,7 +276,7 @@ impl crate::sst::SstReader for SstFile {
                     // Load from disk and cache
                     let data = self.read_block(&handle)?;
                     let bytes = Bytes::from(data);
-                    
+
                     // Try to insert into cache
                     cache.put(cache_key, bytes.clone());
                     bytes
@@ -361,12 +364,11 @@ mod tests {
         // 2. Sparse index integration (with_sparse_index method)
         // 3. Block cache integration (with_block_cache method)
         // 4. SST ID for cache key generation (with_sst_id method)
-        
+
         // The actual integration is validated by compilation and the enhanced get() method
         // which checks bloom filter -> uses sparse index -> checks block cache in sequence
-        
+
         // The SstFile struct now contains:
         assert!(std::mem::size_of::<SstFile>() > 0);
     }
 }
-

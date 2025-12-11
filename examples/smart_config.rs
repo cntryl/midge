@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the intelligent configuration system with automatic parameter derivation.
 
-use cntryl_midge::{MidgeResult, OpenOptions, Goal, Durability, MemoryBudget, WorkloadProfile};
+use cntryl_midge::{Durability, Goal, MemoryBudget, MidgeResult, OpenOptions, WorkloadProfile};
 
 fn main() -> MidgeResult<()> {
     println!("=== Midge Smart Configuration Examples ===\n");
@@ -13,10 +13,16 @@ fn main() -> MidgeResult<()> {
         .path("./latency_db")
         .goal(Goal::Latency)
         .build();
-    
+
     println!("   Block size: {} KB", opts.block_size() / 1024);
-    println!("   Memtable size: {} MB", opts.memtable_size_limit() / 1024 / 1024);
-    println!("   Cache size: {} MB", opts.block_cache_size() / 1024 / 1024);
+    println!(
+        "   Memtable size: {} MB",
+        opts.memtable_size_limit() / 1024 / 1024
+    );
+    println!(
+        "   Cache size: {} MB",
+        opts.block_cache_size() / 1024 / 1024
+    );
     println!("   WAL sync: {}", opts.wal_sync_on_write());
     println!();
 
@@ -27,10 +33,16 @@ fn main() -> MidgeResult<()> {
         .goal(Goal::Throughput)
         .workload(WorkloadProfile::WriteHeavy)
         .build();
-    
+
     println!("   Block size: {} KB", opts.block_size() / 1024);
-    println!("   Memtable size: {} MB", opts.memtable_size_limit() / 1024 / 1024);
-    println!("   Cache size: {} MB", opts.block_cache_size() / 1024 / 1024);
+    println!(
+        "   Memtable size: {} MB",
+        opts.memtable_size_limit() / 1024 / 1024
+    );
+    println!(
+        "   Cache size: {} MB",
+        opts.block_cache_size() / 1024 / 1024
+    );
     println!("   L0 compaction trigger: {}", opts.l0_compaction_trigger());
     println!();
 
@@ -41,10 +53,16 @@ fn main() -> MidgeResult<()> {
         .goal(Goal::Cost)
         .durability(Durability::Strict)
         .build();
-    
+
     println!("   Block size: {} KB", opts.block_size() / 1024);
-    println!("   Memtable size: {} MB", opts.memtable_size_limit() / 1024 / 1024);
-    println!("   Cache size: {} MB", opts.block_cache_size() / 1024 / 1024);
+    println!(
+        "   Memtable size: {} MB",
+        opts.memtable_size_limit() / 1024 / 1024
+    );
+    println!(
+        "   Cache size: {} MB",
+        opts.block_cache_size() / 1024 / 1024
+    );
     println!("   WAL sync: {} (every write!)", opts.wal_sync_on_write());
     println!();
 
@@ -56,10 +74,16 @@ fn main() -> MidgeResult<()> {
         .memory_budget(MemoryBudget::Bytes(2 * 1024 * 1024 * 1024))
         .workload(WorkloadProfile::ReadMostly)
         .build();
-    
+
     println!("   Block size: {} KB", opts.block_size() / 1024);
-    println!("   Memtable size: {} MB", opts.memtable_size_limit() / 1024 / 1024);
-    println!("   Cache size: {} MB (70% of budget for reads)", opts.block_cache_size() / 1024 / 1024);
+    println!(
+        "   Memtable size: {} MB",
+        opts.memtable_size_limit() / 1024 / 1024
+    );
+    println!(
+        "   Cache size: {} MB (70% of budget for reads)",
+        opts.block_cache_size() / 1024 / 1024
+    );
     println!();
 
     // Example 5: Range scan workload
@@ -69,9 +93,15 @@ fn main() -> MidgeResult<()> {
         .goal(Goal::Throughput)
         .workload(WorkloadProfile::RangeScan)
         .build();
-    
-    println!("   Block size: {} KB (large for sequential reads)", opts.block_size() / 1024);
-    println!("   Memtable size: {} MB", opts.memtable_size_limit() / 1024 / 1024);
+
+    println!(
+        "   Block size: {} KB (large for sequential reads)",
+        opts.block_size() / 1024
+    );
+    println!(
+        "   Memtable size: {} MB",
+        opts.memtable_size_limit() / 1024 / 1024
+    );
     println!();
 
     println!("Key Insight: Only 3 questions needed!");

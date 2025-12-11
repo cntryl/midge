@@ -3,7 +3,7 @@
 //! This demonstrates the core API that library consumers would use.
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeResult, WriteBatch, Query};
+use cntryl_midge::{MidgeEngine, MidgeResult, Query, WriteBatch};
 use std::path::PathBuf;
 
 fn main() -> MidgeResult<()> {
@@ -14,13 +14,13 @@ fn main() -> MidgeResult<()> {
     // Basic put/get operations
     db.put(cf, b"key1", b"value1")?;
     db.put(cf, b"key2", b"value2")?;
-    
+
     let value = db.get(cf, b"key1")?;
     println!("key1 = {:?}", value);
 
     // Delete operation
     db.delete(cf, b"key1")?;
-    
+
     // Write batch (multiple operations)
     let mut batch = WriteBatch::new();
     batch.put(b"batch_key1".to_vec(), b"batch_value1".to_vec());

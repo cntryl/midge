@@ -291,7 +291,10 @@ mod tests {
         // Assert
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].seq, 2);
-        assert_eq!(deduped[0].value.as_deref(), Some(b"value1_updated".as_ref()));
+        assert_eq!(
+            deduped[0].value.as_deref(),
+            Some(b"value1_updated".as_ref())
+        );
     }
 
     #[test]
@@ -374,7 +377,7 @@ mod tests {
 
     #[test]
     fn should_stream_deduplicate_multiple_versions_when_using_iterator() {
-        use crate::compaction::merge::{MergeIterator, MergeEntry};
+        use crate::compaction::merge::{MergeEntry, MergeIterator};
         use bytes::Bytes;
 
         // Arrange: Create two input iterators (simulating SST readers)
@@ -410,10 +413,8 @@ mod tests {
         ];
 
         // Act: Create merge iterator from both streams
-        let merge_iter = MergeIterator::from_iterators(vec![
-            stream1.into_iter(),
-            stream2.into_iter(),
-        ]);
+        let merge_iter =
+            MergeIterator::from_iterators(vec![stream1.into_iter(), stream2.into_iter()]);
 
         // Convert MergeEntry to CompactionVersion
         let version_iter = merge_iter.map(|entry| CompactionVersion {
@@ -447,7 +448,7 @@ mod tests {
 
     #[test]
     fn should_handle_empty_streams_in_merge() {
-        use crate::compaction::merge::{MergeIterator, MergeEntry};
+        use crate::compaction::merge::{MergeEntry, MergeIterator};
         use bytes::Bytes;
 
         let stream1: Vec<MergeEntry> = vec![];
@@ -457,10 +458,8 @@ mod tests {
             seq: 10,
         }];
 
-        let merge_iter = MergeIterator::from_iterators(vec![
-            stream1.into_iter(),
-            stream2.into_iter(),
-        ]);
+        let merge_iter =
+            MergeIterator::from_iterators(vec![stream1.into_iter(), stream2.into_iter()]);
 
         let version_iter = merge_iter.map(|entry| CompactionVersion {
             key: entry.key.to_vec(),
@@ -480,7 +479,7 @@ mod tests {
 
     #[test]
     fn should_deduplicate_correctly_across_streams_with_overlapping_keys() {
-        use crate::compaction::merge::{MergeIterator, MergeEntry};
+        use crate::compaction::merge::{MergeEntry, MergeIterator};
         use bytes::Bytes;
 
         // Stream 1: a(5), a(3), b(4)
@@ -521,10 +520,8 @@ mod tests {
             },
         ];
 
-        let merge_iter = MergeIterator::from_iterators(vec![
-            stream1.into_iter(),
-            stream2.into_iter(),
-        ]);
+        let merge_iter =
+            MergeIterator::from_iterators(vec![stream1.into_iter(), stream2.into_iter()]);
 
         let version_iter = merge_iter.map(|entry| CompactionVersion {
             key: entry.key.to_vec(),

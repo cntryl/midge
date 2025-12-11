@@ -1,4 +1,4 @@
-﻿//! Least Recently Used (LRU) eviction policy
+//! Least Recently Used (LRU) eviction policy
 
 use super::CachePolicy;
 use crate::sst::cache::key::CacheKey;
@@ -149,4 +149,3 @@ mod tests {
         assert_eq!(victim, Some(key2));
     }
 }
-

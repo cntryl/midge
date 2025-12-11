@@ -163,16 +163,10 @@ pub enum StorageEvent {
     },
     /// Cloud upload acknowledged - segment is now durable
     /// WAL Actor MUST apply pending writes to memtable on receipt
-    CloudAck {
-        segment_id: u64,
-        max_sequence: u64,
-    },
+    CloudAck { segment_id: u64, max_sequence: u64 },
     /// Cloud upload failed - segment NOT durable
     /// Runtime should retry or handle failure
-    CloudFail {
-        segment_id: u64,
-        error: String,
-    },
+    CloudFail { segment_id: u64, error: String },
     /// Backpressure activated - disk watermark exceeded
     /// Runtime should pause flushes until BackpressureOff
     BackpressureOn,

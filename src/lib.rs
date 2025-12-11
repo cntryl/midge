@@ -62,61 +62,55 @@ pub mod testkit;
 pub use common::{MidgeError, MidgeResult};
 
 // Main engine API
-pub use engine::{
-    MidgeEngine,
-    ColumnFamilyHandle,
-    ColumnFamilyId,
-    open_engine,
-};
+pub use engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
 
 // High-level API types
 pub use engine::api::{
+    // Errors
+    ApiError,
+    ApiResult,
+    // Results
+    CasResult,
+    // Column families
+    ColumnFamily,
+
+    Direction,
+
+    Durability,
+    Goal,
+    InsertResult,
+
+    IsolationLevel,
+
+    Iterator,
+    // KV types
+    Key,
+    KvPair,
+
+    KvTransaction,
+    MemoryBudget,
+    // Engine configuration
+    OpenOptions,
     // Query + scans
     Query,
-    Iterator,
-    Direction,
+    // Snapshots
+    Snapshot,
+
+    // Transactions
+    Transaction,
+    Value,
+    WorkloadProfile,
 
     // Writes
     WriteBatch,
     WriteOptions,
-
-    // Transactions
-    Transaction,
-    KvTransaction,
-    IsolationLevel,
-
-    // Results
-    CasResult,
-    InsertResult,
-
-    // Snapshots
-    Snapshot,
-
-    // Column families
-    ColumnFamily,
-
-    // Engine configuration
-    OpenOptions,
-    Goal,
-    Durability,
-    MemoryBudget,
-    WorkloadProfile,
-
-    // KV types
-    Key,
-    Value,
-    KvPair,
-
-    // Errors
-    ApiError,
-    ApiResult,
 };
 
 // Observability
 pub use metrics::PerformanceMetrics;
 
 // Testing utilities
-pub use testkit::{MidgeOptions, StorageMode, MockStorage};
+pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 
 // ---------------------------------------------------------------------------
 // Ergonomic Prelude
@@ -135,36 +129,35 @@ pub use testkit::{MidgeOptions, StorageMode, MockStorage};
 /// ```
 pub mod prelude {
     pub use crate::{
-        // Types
-        Key,
-        Value,
-        KvPair,
+        ApiError,
+        ApiResult,
+        ColumnFamily,
 
-        // Query + iteration
-        Query,
-        Iterator,
+        ColumnFamilyHandle,
         Direction,
 
-        // Writes
-        WriteBatch,
-        WriteOptions,
-
-        // Transactions + snapshots
-        Transaction,
-        Snapshot,
+        Iterator,
+        // Types
+        Key,
+        KvPair,
 
         // Engine
         MidgeEngine,
-        ColumnFamilyHandle,
-        ColumnFamily,
-
-        // Configuration
-        OpenOptions,
-
         // Errors
         MidgeError,
         MidgeResult,
-        ApiError,
-        ApiResult,
+        // Configuration
+        OpenOptions,
+
+        // Query + iteration
+        Query,
+        Snapshot,
+
+        // Transactions + snapshots
+        Transaction,
+        Value,
+        // Writes
+        WriteBatch,
+        WriteOptions,
     };
 }

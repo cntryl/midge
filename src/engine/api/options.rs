@@ -1,4 +1,4 @@
-﻿//! Database Configuration Options
+//! Database Configuration Options
 //!
 //! Smart configuration system with **automatic parameter derivation**.
 //!
@@ -153,38 +153,38 @@ pub enum WorkloadProfile {
 pub struct OpenOptions {
     /// Database path
     pub path: PathBuf,
-    
+
     /// Performance goal
     pub goal: Goal,
-    
+
     /// Durability level
     pub durability: Durability,
-    
+
     /// Memory budget
     pub memory_budget: MemoryBudget,
-    
+
     /// Workload profile hint
     pub workload: WorkloadProfile,
-    
+
     // Derived parameters (populated by build())
     /// Block size in bytes (derived)
     pub(crate) block_size: usize,
-    
+
     /// Memtable size limit (derived)
     pub(crate) memtable_size_limit: usize,
-    
+
     /// Target SST file size (derived)
     pub(crate) target_sst_size: usize,
-    
+
     /// Block cache size (derived)
     pub(crate) block_cache_size: usize,
-    
+
     /// WAL sync on every write (derived)
     pub(crate) wal_sync_on_write: bool,
-    
+
     /// WAL buffer size (derived)
     pub(crate) wal_buffer_size: usize,
-    
+
     /// L0 compaction trigger (derived)
     pub(crate) l0_compaction_trigger: usize,
 }
@@ -268,17 +268,17 @@ impl OpenOptions {
 
         // Derive block size based on goal and workload
         self.block_size = match (self.goal, self.workload) {
-            (Goal::Latency, _) => 16 * 1024,           // 16KB for low latency
-            (Goal::Cost, _) => 32 * 1024,              // 32KB balanced
+            (Goal::Latency, _) => 16 * 1024, // 16KB for low latency
+            (Goal::Cost, _) => 32 * 1024,    // 32KB balanced
             (Goal::Throughput, WorkloadProfile::RangeScan) => 128 * 1024, // 128KB for bulk scans
-            (Goal::Throughput, _) => 64 * 1024,        // 64KB for throughput
+            (Goal::Throughput, _) => 64 * 1024, // 64KB for throughput
         };
 
         // Derive memtable size based on goal and workload
         let base_memtable = match self.goal {
-            Goal::Latency => 64 * 1024 * 1024,    // 64MB for latency
+            Goal::Latency => 64 * 1024 * 1024,     // 64MB for latency
             Goal::Throughput => 256 * 1024 * 1024, // 256MB for throughput
-            Goal::Cost => 32 * 1024 * 1024,       // 32MB for cost
+            Goal::Cost => 32 * 1024 * 1024,        // 32MB for cost
         };
 
         self.memtable_size_limit = match self.workload {
@@ -289,42 +289,42 @@ impl OpenOptions {
 
         // Derive target SST size
         self.target_sst_size = match self.goal {
-            Goal::Latency => 128 * 1024 * 1024,   // 128MB
+            Goal::Latency => 128 * 1024 * 1024,    // 128MB
             Goal::Throughput => 512 * 1024 * 1024, // 512MB
             Goal::Cost => 256 * 1024 * 1024,       // 256MB
         };
 
         // Allocate remaining memory to block cache
         let cache_ratio = match self.workload {
-            WorkloadProfile::ReadMostly => 0.7,  // 70% to cache
-            WorkloadProfile::WriteHeavy => 0.2,  // 20% to cache
-            _ => 0.5,                             // 50% to cache
+            WorkloadProfile::ReadMostly => 0.7, // 70% to cache
+            WorkloadProfile::WriteHeavy => 0.2, // 20% to cache
+            _ => 0.5,                           // 50% to cache
         };
-        
+
         let usable_memory = total_memory.saturating_sub(self.memtable_size_limit * 2); // 2 memtables
         self.block_cache_size = ((usable_memory as f64) * cache_ratio) as usize;
 
         // Derive WAL settings
         self.wal_sync_on_write = matches!(self.durability, Durability::Strict);
         self.wal_buffer_size = match self.goal {
-            Goal::Latency => 128 * 1024,    // 128KB
+            Goal::Latency => 128 * 1024,     // 128KB
             Goal::Throughput => 1024 * 1024, // 1MB
-            Goal::Cost => 256 * 1024,       // 256KB
+            Goal::Cost => 256 * 1024,        // 256KB
         };
 
         // Derive compaction trigger
         self.l0_compaction_trigger = match (self.goal, self.workload) {
-            (Goal::Latency, _) => 3,                        // Aggressive
-            (_, WorkloadProfile::WriteHeavy) => 8,          // Relaxed for write-heavy
-            (Goal::Throughput, _) => 6,                     // Moderate
-            _ => 4,                                         // Default
+            (Goal::Latency, _) => 3,               // Aggressive
+            (_, WorkloadProfile::WriteHeavy) => 8, // Relaxed for write-heavy
+            (Goal::Throughput, _) => 6,            // Moderate
+            _ => 4,                                // Default
         };
 
         self
     }
 
     // Getters for derived parameters
-    
+
     /// Get derived block size
     pub fn block_size(&self) -> usize {
         self.block_size

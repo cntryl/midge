@@ -201,6 +201,7 @@ impl EventLoop {
                     value,
                     sequence,
                     ttl_seconds,
+                    insert_only,
                 } => {
                     let result = self.wal_actor.append(
                         &mut self.state,
@@ -208,6 +209,8 @@ impl EventLoop {
                         bytes::Bytes::from(key),
                         value.map(bytes::Bytes::from),
                         sequence,
+                        insert_only,
+                        ttl_seconds,
                     );
                     let resp = result
                         .map(|_| RuntimeResponse::Ok { request_id })

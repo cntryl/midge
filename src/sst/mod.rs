@@ -32,7 +32,7 @@
 //   [ Filter Block ]     (optional but recommended; Bloom or Prefix Bloom)
 //   [ Footer (fixed 48 bytes, RocksDB-compatible) ]
 //
-// Footer contains: 
+// Footer contains:
 //   - metaindex_handle
 //   - index_handle
 //   - magic number: 0xdb4775248b80fb57 (RocksDB-compatible)
@@ -203,6 +203,7 @@
 //! - **fs**: Filesystem-backed SST implementation
 
 use crate::common::MidgeResult;
+use crate::iterators::skiplist::OpType;
 use crate::iterators::SkipList;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -277,6 +278,27 @@ impl SkipListMemtable {
             .map(|(key, value, seq, _, _, _)| (key.to_vec(), value.map(|vb| vb.to_vec()), seq))
             .collect()
     }
+
+    /// Put with optional expiration (Unix millis)
+    pub fn put_with_exp(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()> {
+        let seq = self.next_seq();
+        let size_delta = key.len() + value.len() + 16;
+        self.skiplist.upsert_exp(
+            Bytes::from(key),
+            Some(Bytes::from(value)),
+            seq,
+            expiration,
+            OpType::Put,
+        );
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 impl Default for SkipListMemtable {
@@ -287,17 +309,29 @@ impl Default for SkipListMemtable {
 
 impl Memtable for SkipListMemtable {
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()> {
-        let seq = self.next_seq();
-        let size_delta = key.len() + value.len() + 16;
-        self.skiplist
-            .upsert(Bytes::from(key), Some(Bytes::from(value)), seq);
-        self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+        self.put_with_exp(key, value, None)
     }
 
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
-        Ok(self.skiplist.get(key, u64::MAX).map(|b| b.to_vec()))
+        // Respect expiration if present
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
+
+        Ok(match visible {
+            Some(Some((bytes, exp))) => {
+                if exp.map(|e| e <= now).unwrap_or(false) {
+                    None
+                } else {
+                    Some(bytes.to_vec())
+                }
+            }
+            Some(None) => None,
+            None => None,
+        })
     }
 
     fn delete(&self, key: Vec<u8>) -> MidgeResult<()> {

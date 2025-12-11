@@ -42,8 +42,7 @@ impl WalFactory for FsWalFactory {
         let new_path = dir.join(format!("{segment_id}.wal"));
 
         if old_path.exists() {
-            fs::rename(&old_path, &new_path)
-                .map_err(MidgeError::Io)?;
+            fs::rename(&old_path, &new_path).map_err(MidgeError::Io)?;
         }
 
         // Create a fresh active WAL segment.

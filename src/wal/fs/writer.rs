@@ -48,10 +48,7 @@ impl FsWalWriter {
             .map_err(MidgeError::Io)?;
 
         // Determine current write position (file size).
-        let current_pos = file
-            .metadata()
-            .map_err(MidgeError::Io)?
-            .len();
+        let current_pos = file.metadata().map_err(MidgeError::Io)?.len();
 
         Ok(Self {
             _file_path: file_path.to_string_lossy().into_owned(),
@@ -75,10 +72,8 @@ impl WalWriter for FsWalWriter {
         // Write atomically under file lock.
         let mut file = self.file.lock().expect("file mutex poisoned");
 
-        file.write_all(&len_prefix)
-            .map_err(MidgeError::Io)?;
-        file.write_all(&encoded)
-            .map_err(MidgeError::Io)?;
+        file.write_all(&len_prefix).map_err(MidgeError::Io)?;
+        file.write_all(&encoded).map_err(MidgeError::Io)?;
 
         // Update write position.
         let mut pos = self.current_pos.lock().expect("position mutex poisoned");

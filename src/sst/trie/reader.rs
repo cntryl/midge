@@ -1,14 +1,14 @@
 //! Trie reader for SST lookups
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::sst::trie::{encoding, lcp};
 use crate::sst::trie::node::TrieNode;
+use crate::sst::trie::{encoding, lcp};
 
 /// Reader for trie index lookups
 pub struct TrieReader {
     /// Flat array of nodes
     nodes: Vec<TrieNode>,
-    
+
     /// Root node index (always 0)
     root_index: usize,
 }
@@ -17,7 +17,7 @@ impl TrieReader {
     /// Create a new trie reader from serialized data
     pub fn new(data: &[u8]) -> MidgeResult<Self> {
         let nodes = encoding::decode_trie(data)?;
-        
+
         if nodes.is_empty() {
             return Err(MidgeError::Corruption("Empty trie".into()));
         }
@@ -49,9 +49,9 @@ impl TrieReader {
                 if child_index >= self.nodes.len() {
                     return None; // Invalid index
                 }
-                
+
                 let child = &self.nodes[child_index];
-                
+
                 // Check if remaining key matches child's key_delta
                 let child_match_len = lcp(&child.key_delta, remaining);
 
@@ -98,7 +98,7 @@ impl TrieReader {
                 if child_index >= self.nodes.len() {
                     return result; // Invalid index
                 }
-                
+
                 let child = &self.nodes[child_index];
                 let child_match_len = lcp(&child.key_delta, remaining);
 

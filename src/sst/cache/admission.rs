@@ -1,4 +1,4 @@
-﻿//! Admission control to prevent cache pollution
+//! Admission control to prevent cache pollution
 //!
 //! Admission control uses a probabilistic counter to track the frequency
 //! of keys. Keys that fail the admission check are not added to the cache.
@@ -142,4 +142,3 @@ mod tests {
         let _ = new_key_admitted;
     }
 }
-

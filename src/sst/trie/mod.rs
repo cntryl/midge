@@ -60,10 +60,7 @@ pub use writer::TrieWriter;
 
 /// Calculate longest common prefix length
 pub fn lcp(a: &[u8], b: &[u8]) -> usize {
-    a.iter()
-        .zip(b.iter())
-        .take_while(|(x, y)| x == y)
-        .count()
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
 #[cfg(test)]

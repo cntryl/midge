@@ -1,4 +1,4 @@
-﻿//! Block cache module for caching SST blocks
+//! Block cache module for caching SST blocks
 //!
 //! Provides a sharded LRU/TinyLFU/CLOCK-Pro cache for SST blocks with:
 //! - **Sharding**: 16 independent shards to reduce lock contention
@@ -45,13 +45,13 @@ impl BlockCache {
         let mut shards = Vec::with_capacity(num_shards);
 
         for _ in 0..num_shards {
-            shards.push(Arc::new(CacheShard::new(shard_capacity, policy_type.clone())));
+            shards.push(Arc::new(CacheShard::new(
+                shard_capacity,
+                policy_type.clone(),
+            )));
         }
 
-        Self {
-            shards,
-            num_shards,
-        }
+        Self { shards, num_shards }
     }
 
     /// Create a new block cache with default settings (16 shards, LRU)
@@ -273,4 +273,3 @@ mod tests {
         assert!(clockpro_cache.is_empty());
     }
 }
-

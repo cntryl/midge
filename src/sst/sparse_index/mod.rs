@@ -1,4 +1,4 @@
-﻿//! Sparse index module for fast block range lookups
+//! Sparse index module for fast block range lookups
 //!
 //! Provides a sampled key index to quickly narrow down which blocks to search.
 //! Reduces I/O for range queries by 40-60% by eliminating unnecessary block reads.
@@ -14,4 +14,3 @@ pub mod writer;
 pub use reader::SparseIndexReader;
 pub use shared::{BlockRange, IndexEntry};
 pub use writer::SparseIndexWriter;
-

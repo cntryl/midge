@@ -1,4 +1,4 @@
-﻿//! Cache metrics for observability
+//! Cache metrics for observability
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -152,4 +152,3 @@ mod tests {
         assert_eq!(metrics.memory_bytes(), 2560);
     }
 }
-

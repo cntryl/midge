@@ -1,7 +1,7 @@
-﻿//! Bloom filter reader for querying filters during SST reads
+//! Bloom filter reader for querying filters during SST reads
 
-use crate::common::{MidgeError, MidgeResult};
 use super::writer::{BloomFilterOps, BloomTestResult};
+use crate::common::{MidgeError, MidgeResult};
 
 /// Number of hash functions to use (must match writer)
 const HASH_COUNT: usize = 2;

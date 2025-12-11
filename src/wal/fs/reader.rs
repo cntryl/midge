@@ -52,7 +52,9 @@ impl WalReader for FsWalReader {
     /// - Ok(None) if clean EOF at `pos`
     /// - Err(Corruption) if EOF occurs mid-record
     fn read_at(&mut self, pos: WalPos) -> MidgeResult<Option<WalRecord>> {
-        self.file.seek(SeekFrom::Start(pos)).map_err(MidgeError::Io)?;
+        self.file
+            .seek(SeekFrom::Start(pos))
+            .map_err(MidgeError::Io)?;
 
         // Read 4-byte length prefix
         let mut len_buf = [0u8; 4];
@@ -73,9 +75,10 @@ impl WalReader for FsWalReader {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // EOF *inside* record → corruption
-                return Err(MidgeError::Corruption(
-                    format!("Incomplete WAL record at pos {} (len={})", pos, len),
-                ));
+                return Err(MidgeError::Corruption(format!(
+                    "Incomplete WAL record at pos {} (len={})",
+                    pos, len
+                )));
             }
             Err(e) => return Err(MidgeError::Io(e)),
         }
@@ -96,7 +99,9 @@ impl WalReader for FsWalReader {
     where
         F: FnMut(&WalRecord) -> MidgeResult<()>,
     {
-        self.file.seek(SeekFrom::Start(start)).map_err(MidgeError::Io)?;
+        self.file
+            .seek(SeekFrom::Start(start))
+            .map_err(MidgeError::Io)?;
 
         let mut pos = start;
 

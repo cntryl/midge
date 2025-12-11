@@ -1,17 +1,17 @@
-﻿//! Cache eviction policies
+//! Cache eviction policies
 //!
 //! Pluggable eviction policies determining which blocks to evict when cache is full.
 //! - **LRU**: Least Recently Used
 //! - **TinyLFU**: Frequency + recency (W-TinyLFU)
 //! - **CLOCK-Pro**: Strong scan resistance
 
+pub mod clockpro;
 pub mod lru;
 pub mod tinylfu;
-pub mod clockpro;
 
+pub use clockpro::ClockProPolicy;
 pub use lru::LruPolicy;
 pub use tinylfu::TinyLfuPolicy;
-pub use clockpro::ClockProPolicy;
 
 use crate::sst::cache::key::CacheKey;
 

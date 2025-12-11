@@ -1,4 +1,4 @@
-﻿//! Cache key type identifying a block in the cache
+//! Cache key type identifying a block in the cache
 //!
 //! A cache key uniquely identifies a block by combining:
 //! - SST file ID (u64)
@@ -20,7 +20,10 @@ pub struct CacheKey {
 impl CacheKey {
     /// Create a new cache key for a block
     pub fn new(sst_id: u64, block_offset: u64) -> Self {
-        Self { sst_id, block_offset }
+        Self {
+            sst_id,
+            block_offset,
+        }
     }
 
     /// Get the shard index for this key (0..num_shards)

@@ -238,7 +238,8 @@ impl RuntimeState {
 
     pub fn create_cf(&mut self, name: String) -> MidgeResult<u32> {
         let id = self.column_families.len() as u32;
-        self.column_families.insert(id, ColumnFamilyState::new(id, name));
+        self.column_families
+            .insert(id, ColumnFamilyState::new(id, name));
         Ok(id)
     }
 

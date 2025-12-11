@@ -163,10 +163,10 @@ mod tests {
     fn should_roundtrip_single_node() {
         let node = TrieNode::new(0, b"test".to_vec(), Some(42));
         let nodes = vec![node];
-        
+
         let encoded = encode_trie(&nodes);
         let decoded = decode_trie(&encoded).unwrap();
-        
+
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].prefix_len, 0);
         assert_eq!(decoded[0].key_delta, b"test");
@@ -178,14 +178,14 @@ mod tests {
         let mut parent = TrieNode::new(0, b"root".to_vec(), None);
         parent.add_child(TrieEdge::new(b'a', 1));
         parent.add_child(TrieEdge::new(b'b', 2));
-        
+
         let child1 = TrieNode::new(4, b"pple".to_vec(), Some(10));
         let child2 = TrieNode::new(4, b"anana".to_vec(), Some(20));
-        
+
         let nodes = vec![parent, child1, child2];
         let encoded = encode_trie(&nodes);
         let decoded = decode_trie(&encoded).unwrap();
-        
+
         assert_eq!(decoded.len(), 3);
         assert_eq!(decoded[0].children.len(), 2);
         assert_eq!(decoded[0].children[0].child_index, 1);
@@ -199,7 +199,7 @@ mod tests {
         let node = TrieNode::new(0, b"internal".to_vec(), None);
         let encoded = encode_trie(&vec![node]);
         let decoded = decode_trie(&encoded).unwrap();
-        
+
         assert_eq!(decoded[0].block_id, None);
     }
 }

@@ -1,7 +1,7 @@
-﻿//! Bloom filter factory for polymorphic creation
+//! Bloom filter factory for polymorphic creation
 
-use crate::common::MidgeResult;
 use super::{BloomReader, BloomWriter};
+use crate::common::MidgeResult;
 
 /// Factory trait for creating bloom filters
 pub trait BloomFilterFactory: Send + Sync {
@@ -45,8 +45,8 @@ impl BloomFilterFactory for BloomFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::writer::BloomFilterOps;
+    use super::*;
 
     #[test]
     fn should_create_writer() {

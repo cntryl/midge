@@ -1,4 +1,4 @@
-﻿//! Sparse index writer - samples keys during SST creation
+//! Sparse index writer - samples keys during SST creation
 
 use super::shared::IndexEntry;
 use crate::sst::types::BlockHandle;
@@ -38,11 +38,8 @@ impl SparseIndexWriter {
     pub fn record_key(&mut self, key: Vec<u8>, block_handle: BlockHandle) {
         // Sample every Nth key
         if self.key_count % self.sample_rate == 0 {
-            self.entries.push(IndexEntry::new(
-                key,
-                block_handle,
-                self.current_block,
-            ));
+            self.entries
+                .push(IndexEntry::new(key, block_handle, self.current_block));
         }
         self.key_count += 1;
     }
@@ -157,4 +154,3 @@ mod tests {
         assert!(writer.entry_count() < 100);
     }
 }
-

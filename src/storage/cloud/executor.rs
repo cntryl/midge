@@ -177,14 +177,10 @@ impl CloudExecutor {
                             headers,
                             body: bytes.to_vec(),
                         }),
-                        Err(err) => Err(MidgeError::Internal(format!(
-                            "cloud body error: {err}"
-                        ))),
+                        Err(err) => Err(MidgeError::Internal(format!("cloud body error: {err}"))),
                     }
                 }
-                Err(err) => Err(MidgeError::Internal(format!(
-                    "cloud request failed: {err}"
-                ))),
+                Err(err) => Err(MidgeError::Internal(format!("cloud request failed: {err}"))),
             };
 
             let event = mapper(context.clone(), result);

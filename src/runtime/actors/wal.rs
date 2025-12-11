@@ -26,6 +26,7 @@
 //! - When cloud ACKs: apply to memtable + respond to request
 
 use super::super::state::RuntimeState;
+use crate::common::MidgeError;
 use crate::common::MidgeResult;
 use crate::sst::Memtable;
 use crate::wal::{DurabilityPolicy, FsWalFactory, WalFactory, WalOpKind, WalRecord, WalWriter};
@@ -42,6 +43,7 @@ struct PendingCloudWrite {
     key: Vec<u8>,
     value: Option<Vec<u8>>,
     sequence: u64,
+    expiration: Option<u64>,
 }
 
 /// Actor handling WAL operations
@@ -82,7 +84,6 @@ impl WalActor {
 
     /// Append a record to the WAL
     ///
-    /// Always appends locally first. Durability behavior depends on policy:
     /// - Strict: fsync immediately + apply to memtable + respond
     /// - Batched: batch writes + apply to memtable immediately + respond
     /// - CloudMirrored: fsync + apply to memtable + schedule cloud upload + respond
@@ -97,12 +98,30 @@ impl WalActor {
         key: Bytes,
         value: Option<Bytes>,
         _sequence: u64, // Ignored - runtime assigns
+        insert_only: bool,
+        ttl_seconds: Option<u64>,
     ) -> MidgeResult<u64> {
+        // Enforce insert-only if requested by checking in-memory state
+        if insert_only && self.key_exists(state, cf_id, &key) {
+            return Err(MidgeError::InvalidArgument(
+                "key already exists".to_string(),
+            ));
+        }
         // Assign sequence number from runtime state
         let sequence = state.next_sequence();
 
-        // Create WAL record
-        let record = WalRecord::new_cf(cf_id, WalOpKind::Put, key.clone(), value.clone(), sequence);
+        // Create WAL record (with expiration if provided)
+        let record = match ttl_seconds {
+            Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
+                cf_id,
+                WalOpKind::Put,
+                key.clone(),
+                value.clone(),
+                sequence,
+                ttl,
+            ),
+            _ => WalRecord::new_cf(cf_id, WalOpKind::Put, key.clone(), value.clone(), sequence),
+        };
 
         // Calculate record size for batching
         let record_size = record.key.len() + record.value.as_ref().map_or(0, |v| v.len());
@@ -123,23 +142,23 @@ impl WalActor {
                 // Fsync immediately, then apply to memtable
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = sequence;
-                
+
                 // Apply to memtable - write is now visible
-                self.apply_to_memtable(state, cf_id, &key, &value)?;
+                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
             }
             DurabilityPolicy::Batched => {
                 // Apply to memtable immediately (no cloud wait)
-                self.apply_to_memtable(state, cf_id, &key, &value)?;
+                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
                 // Sync if batch thresholds exceeded (handled by caller/timer)
             }
             DurabilityPolicy::CloudMirrored => {
                 // Fsync locally, apply to memtable, schedule cloud upload in background
                 self.sync_internal(state)?;
                 state.wal.local_durable_seq = sequence;
-                
+
                 // Apply to memtable - local durability sufficient
-                self.apply_to_memtable(state, cf_id, &key, &value)?;
-                
+                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
+
                 // TODO: Send CloudUploadWal message to CloudActor
             }
             DurabilityPolicy::CloudFirst => {
@@ -155,6 +174,21 @@ impl WalActor {
         Ok(sequence)
     }
 
+    /// Checks current in-memory view (active + immutable memtables) for existence
+    fn key_exists(&self, state: &RuntimeState, cf_id: u32, key: &[u8]) -> bool {
+        if let Some(cf_state) = state.column_families.get(&cf_id) {
+            if let Ok(Some(_)) = cf_state.memtable.get(key) {
+                return true;
+            }
+            for imm in cf_state.immutable_memtables.iter().rev() {
+                if let Ok(Some(_)) = imm.get(key) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Apply a write to the memtable
     fn apply_to_memtable(
         &self,
@@ -162,10 +196,14 @@ impl WalActor {
         cf_id: u32,
         key: &[u8],
         value: &Option<Bytes>,
+        expiration: Option<u64>,
     ) -> MidgeResult<()> {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             if let Some(val) = value {
-                cf_state.memtable.as_ref().put(key.to_vec(), val.to_vec())?;
+                cf_state
+                    .memtable
+                    .as_ref()
+                    .put_with_exp(key.to_vec(), val.to_vec(), expiration)?;
             } else {
                 cf_state.memtable.as_ref().delete(key.to_vec())?;
             }
@@ -242,7 +280,7 @@ impl WalActor {
     ) -> MidgeResult<Vec<u64>> {
         // Update cloud durability frontier
         state.wal.cloud_durable_seq = state.wal.cloud_durable_seq.max(max_seq_in_segment);
-        
+
         tracing::debug!(
             segment_id,
             cloud_durable_seq = state.wal.cloud_durable_seq,
@@ -251,18 +289,24 @@ impl WalActor {
 
         // Apply pending writes to memtable and collect completed request_ids
         let mut completed_requests = Vec::new();
-        
+
         while let Some(pending) = self.pending_cloud_writes.front() {
             if pending.sequence <= state.wal.cloud_durable_seq {
                 let write = self.pending_cloud_writes.pop_front().unwrap();
-                
+
                 // NOW apply to memtable - write becomes visible
                 let key_bytes = Bytes::from(write.key);
                 let value_bytes = write.value.map(Bytes::from);
-                self.apply_to_memtable(state, write.cf_id, &key_bytes, &value_bytes)?;
-                
+                self.apply_to_memtable(
+                    state,
+                    write.cf_id,
+                    &key_bytes,
+                    &value_bytes,
+                    write.expiration,
+                )?;
+
                 completed_requests.push(write.request_id);
-                
+
                 tracing::trace!(
                     request_id = write.request_id,
                     sequence = write.sequence,
@@ -284,6 +328,7 @@ impl WalActor {
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         sequence: u64,
+        expiration: Option<u64>,
     ) {
         self.pending_cloud_writes.push_back(PendingCloudWrite {
             request_id,
@@ -291,6 +336,7 @@ impl WalActor {
             key,
             value,
             sequence,
+            expiration,
         });
 
         tracing::trace!(request_id, sequence, "Queued write for cloud durability");
