@@ -282,7 +282,6 @@ fn should_handle_default_cf_merge_independently_given_custom_cf_when_merging() {
 }
 
 #[test]
-#[ignore = "Requires create_column_family() implementation"] 
 fn should_preserve_merge_semantics_across_restart_given_flush_when_recovering() {
     // Test will be implemented after CF creation support is added
 }

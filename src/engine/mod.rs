@@ -92,6 +92,8 @@ pub struct MidgeEngine {
     next_snapshot_id: std::sync::atomic::AtomicU64,
     /// Merge operators registered per column family
     merge_operators: std::sync::RwLock<std::collections::HashMap<u32, std::sync::Arc<dyn MergeOperator>>>,
+    /// Column families registry (CF ID -> Handle)
+    column_families: std::sync::RwLock<std::collections::HashMap<u32, ColumnFamilyHandle>>,
 }
 
 impl OpenParam for PathBuf {
@@ -135,13 +137,30 @@ impl MidgeEngine {
         let (runtime, _) = Runtime::new()?;
         let runtime_handle = runtime.start(state)?;
 
+        let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
+        let mut column_families = std::collections::HashMap::new();
+        column_families.insert(0, default_cf.clone());
+
+        // Load existing CFs from manifest
+        let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
+        for cf_meta in &manifest.column_families {
+            if cf_meta.id != 0 {
+                let handle = ColumnFamilyHandle::new(
+                    ColumnFamilyId(cf_meta.id),
+                    cf_meta.name.clone(),
+                );
+                column_families.insert(cf_meta.id, handle);
+            }
+        }
+
         Ok(Self {
             runtime_handle,
             db_path,
-            default_cf: ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string()),
+            default_cf,
             sequence: std::sync::atomic::AtomicU64::new(0),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
             merge_operators: std::sync::RwLock::new(std::collections::HashMap::new()),
+            column_families: std::sync::RwLock::new(column_families),
         })
     }
 
@@ -168,12 +187,33 @@ impl MidgeEngine {
         let (runtime, _) = Runtime::new()?;
         let runtime_handle = runtime.start(state)?;
 
+        let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
+        let mut column_families = std::collections::HashMap::new();
+        column_families.insert(0, default_cf.clone());
+
+        // Load existing CFs from manifest (skip in memory mode)
+        if !memory_mode {
+            let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
+            for cf_meta in &manifest.column_families {
+                if cf_meta.id != 0 {
+                    let handle = ColumnFamilyHandle::new(
+                        ColumnFamilyId(cf_meta.id),
+                        cf_meta.name.clone(),
+                    );
+                    column_families.insert(cf_meta.id, handle);
+                }
+            }
+        }
+
         Ok(Self {
             runtime_handle,
             db_path,
-            default_cf: ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string()),
+            default_cf,
             sequence: std::sync::atomic::AtomicU64::new(0),
-            next_snapshot_id: std::sync::atomic::AtomicU64::new(1),            merge_operators: std::sync::RwLock::new(std::collections::HashMap::new()),        })
+            next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
+            merge_operators: std::sync::RwLock::new(std::collections::HashMap::new()),
+            column_families: std::sync::RwLock::new(column_families),
+        })
     }
 
     /// Get the default column family
@@ -183,6 +223,14 @@ impl MidgeEngine {
 
     /// Put a key-value pair into a specific column family
     pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+        // Check if CF still exists
+        if !self.column_families.read().unwrap().contains_key(&cf.id().as_u32()) {
+            return Err(MidgeError::Internal(format!(
+                "Column family '{}' (id={}) has been dropped",
+                cf.name(),
+                cf.id().as_u32()
+            )));
+        }
         self.put_with_ttl(cf, key, value, 0)
     }
 
@@ -900,10 +948,15 @@ impl MidgeEngine {
         )?;
 
         match response {
-            RuntimeResponse::ColumnFamilyCreated { cf_id, .. } => Ok(ColumnFamilyHandle::new(
-                ColumnFamilyId(cf_id),
-                name.to_string(),
-            )),
+            RuntimeResponse::ColumnFamilyCreated { cf_id, .. } => {
+                let handle = ColumnFamilyHandle::new(
+                    ColumnFamilyId(cf_id),
+                    name.to_string(),
+                );
+                // Register CF in local registry
+                self.column_families.write().unwrap().insert(cf_id, handle.clone());
+                Ok(handle)
+            }
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
             _ => Err(MidgeError::Internal(
                 "Unexpected response to create_column_family".to_string(),
@@ -927,7 +980,11 @@ impl MidgeEngine {
         )?;
 
         match response {
-            RuntimeResponse::Ok { .. } => Ok(()),
+            RuntimeResponse::Ok { .. } => {
+                // Remove from local registry
+                self.column_families.write().unwrap().remove(&cf_id.as_u32());
+                Ok(())
+            }
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
             _ => Err(MidgeError::Internal(
                 "Unexpected response to drop_column_family".to_string(),
@@ -937,10 +994,7 @@ impl MidgeEngine {
 
     /// List all active column families
     pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
-        // Get the runtime state to access the manifest
-        // For now, return the default CF + a placeholder for others
-        // TODO: Wire to RuntimeMsg to query all active CFs from manifest
-        Ok(vec![self.default_cf.clone()])
+        Ok(self.column_families.read().unwrap().values().cloned().collect())
     }
 
     /// Compact all data (stub - not implemented)

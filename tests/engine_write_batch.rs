@@ -403,105 +403,105 @@ fn should_maintain_atomicity_during_concurrent_reads_when_write_batch() {
 
 #[test]
 fn should_persist_batch_given_flush_when_reopening() {
-    // Note: Only test with durable storage modes (LocalDisk, CloudBacked).
+    // Note: Only test with durable storage modes (local, cloud).
     // Memory mode doesn't persist, so it's excluded.
-    let opts = durability_opts();
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            let mut batch = WriteBatch::new();
 
-    // Arrange
-    {
-        let engine = open_with_mode(opts.clone(), "LocalDisk");
+            // Act
+            batch.put(b"persist_key".to_vec(), b"persist_val".to_vec());
+            engine.write_batch(&batch).expect("write_batch");
+            engine.flush().expect("flush");
+            let _ = cf; // Use cf in the block
+        }
+
+        // Reopen and assert
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
-        let mut batch = WriteBatch::new();
-
-        // Act
-        batch.put(b"persist_key".to_vec(), b"persist_val".to_vec());
-        engine.write_batch(&batch).expect("write_batch");
-        engine.flush().expect("flush");
-        let _ = cf; // Use cf in the block
-    }
-
-    // Reopen and assert
-    let engine = open_with_mode(opts, "LocalDisk");
-    let cf = engine.default_column_family();
-    let got = engine.get(cf, b"persist_key").expect("get");
-    assert_eq!(
-        got,
-        Some(Bytes::from_static(b"persist_val")),
-        "persisted batch not recovered"
-    );
+        let got = engine.get(cf, b"persist_key").expect("get");
+        assert_eq!(
+            got,
+            Some(Bytes::from_static(b"persist_val")),
+            "persisted batch not recovered"
+        );
+    });
 }
 
 #[test]
 fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
-    // Note: WAL is only used in durable storage modes (not in Memory mode).
-    // Memory mode doesn't persist WAL, so skip this test for Memory.
-    let opts = durability_opts();
+    // Note: WAL is only used in durable storage modes (not in memory mode).
+    // Memory mode doesn't persist WAL, so skip this test for memory.
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            let mut batch = WriteBatch::new();
 
-    // Arrange
-    {
-        let engine = open_with_mode(opts.clone(), "LocalDisk");
+            // Act: Write batch (atomically in WAL)
+            batch.put(b"atomic_key1".to_vec(), b"atomic_val1".to_vec());
+            batch.put(b"atomic_key2".to_vec(), b"atomic_val2".to_vec());
+            engine.write_batch(&batch).expect("write_batch");
+            let _ = cf;
+        }
+
+        // Reopen and verify batch atomicity
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
-        let mut batch = WriteBatch::new();
+        let val1 = engine.get(cf, b"atomic_key1").expect("get1");
+        let val2 = engine.get(cf, b"atomic_key2").expect("get2");
 
-        // Act: Write batch (atomically in WAL)
-        batch.put(b"atomic_key1".to_vec(), b"atomic_val1".to_vec());
-        batch.put(b"atomic_key2".to_vec(), b"atomic_val2".to_vec());
-        engine.write_batch(&batch).expect("write_batch");
-        let _ = cf;
-    }
-
-    // Reopen and verify batch atomicity
-    let engine = open_with_mode(opts, "LocalDisk");
-    let cf = engine.default_column_family();
-    let val1 = engine.get(cf, b"atomic_key1").expect("get1");
-    let val2 = engine.get(cf, b"atomic_key2").expect("get2");
-
-    // Either both present or both absent (atomic)
-    assert!(
-        val1.is_some() && val2.is_some() || val1.is_none() && val2.is_none(),
-        "batch not atomic"
-    );
+        // Either both present or both absent (atomic)
+        assert!(
+            val1.is_some() && val2.is_some() || val1.is_none() && val2.is_none(),
+            "batch not atomic"
+        );
+    });
 }
 
 #[test]
 fn should_be_atomic_given_large_batch_crash_when_recovering() {
-    // Note: WAL is only used in durable storage modes (not in Memory mode).
-    // Memory mode doesn't persist WAL, so skip this test for Memory.
-    let opts = durability_opts();
+    // Note: WAL is only used in durable storage modes (not in memory mode).
+    // Memory mode doesn't persist WAL, so skip this test for memory.
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            let mut batch = WriteBatch::new();
 
-    // Arrange
-    {
-        let engine = open_with_mode(opts.clone(), "LocalDisk");
+            // Act: Large batch written atomically
+            for i in 0..100 {
+                let key = format!("crash_key_{i}");
+                let val = format!("crash_val_{i}");
+                batch.put(key.into_bytes(), val.into_bytes());
+            }
+            engine.write_batch(&batch).expect("write_batch");
+            let _ = cf;
+        }
+
+        // Reopen and verify all-or-nothing
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
-        let mut batch = WriteBatch::new();
-
-        // Act: Large batch written atomically
+        let mut count = 0;
         for i in 0..100 {
             let key = format!("crash_key_{i}");
-            let val = format!("crash_val_{i}");
-            batch.put(key.into_bytes(), val.into_bytes());
+            if engine.get(cf, key.as_bytes()).expect("get").is_some() {
+                count += 1;
+            }
         }
-        engine.write_batch(&batch).expect("write_batch");
-        let _ = cf;
-    }
 
-    // Reopen and verify all-or-nothing
-    let engine = open_with_mode(opts, "LocalDisk");
-    let cf = engine.default_column_family();
-    let mut count = 0;
-    for i in 0..100 {
-        let key = format!("crash_key_{i}");
-        if engine.get(cf, key.as_bytes()).expect("get").is_some() {
-            count += 1;
-        }
-    }
-
-    // Either all 100 present or all absent (atomic)
-    assert!(
-        count == 100 || count == 0,
-        "batch not atomic: {} recovered",
-        count
-    );
+        // Either all 100 present or all absent (atomic)
+        assert!(
+            count == 100 || count == 0,
+            "batch not atomic: {} recovered",
+            count
+        );
+    });
 }
 
 // ============================================================================

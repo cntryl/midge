@@ -214,40 +214,40 @@ fn should_allow_multiple_delete_ranges_when_called_sequentially() {
 
 #[test]
 fn should_persist_keys_across_delete_range_with_restart_when_durable() {
-    // Note: Only test with LocalDisk mode for restart tests.
-    // Memory mode doesn't persist, and CloudBacked has different test semantics.
-    let opts = durability_opts();
+    // Note: Only test with durable storage modes (local, cloud).
+    // Memory mode doesn't persist.
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    // Arrange & Act
-    {
-        let engine = open_with_mode(opts.clone(), "LocalDisk");
+            engine.put(cf, b"key1", b"val1").expect("put1");
+            engine.put(cf, b"key2", b"val2").expect("put2");
+            engine.put(cf, b"key3", b"val3").expect("put3");
+            engine
+                .delete_range(cf, b"key1", b"key3")
+                .expect("delete_range");
+            let _ = cf;
+        }
+
+        // Reopen and assert
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        engine.put(cf, b"key1", b"val1").expect("put1");
-        engine.put(cf, b"key2", b"val2").expect("put2");
-        engine.put(cf, b"key3", b"val3").expect("put3");
-        engine
-            .delete_range(cf, b"key1", b"key3")
-            .expect("delete_range");
-        let _ = cf;
-    }
-
-    // Reopen and assert
-    let engine = open_with_mode(opts, "LocalDisk");
-    let cf = engine.default_column_family();
-
-    // Keys should be restored after restart
-    // (delete_range didn't actually delete them since range() returns empty)
-    assert_eq!(
-        engine.get(cf, b"key1").expect("get1"),
-        Some(Bytes::from_static(b"val1")),
-        "key1 should persist after restart"
-    );
-    assert_eq!(
-        engine.get(cf, b"key2").expect("get2"),
-        Some(Bytes::from_static(b"val2")),
-        "key2 should persist after restart"
-    );
+        // Keys should be restored after restart
+        // (delete_range didn't actually delete them since range() returns empty)
+        assert_eq!(
+            engine.get(cf, b"key1").expect("get1"),
+            Some(Bytes::from_static(b"val1")),
+            "key1 should persist after restart"
+        );
+        assert_eq!(
+            engine.get(cf, b"key2").expect("get2"),
+            Some(Bytes::from_static(b"val2")),
+            "key2 should persist after restart"
+        );
+    });
 }
 
 // ============================================================================

@@ -307,76 +307,76 @@ fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
 
 #[test]
 fn should_persist_transaction_given_commit_when_crash_after() {
-    let opts = durability_opts();
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            let mut txn = engine.transaction();
+            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            engine.commit_transaction(txn).unwrap();
+            // Engine dropped (simulated crash)
+        }
 
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.default_column_family();
-        let mut txn = engine.transaction();
-        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        engine.commit_transaction(txn).unwrap();
-        // Engine dropped (simulated crash)
-    }
-
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cf = engine.default_column_family();
-        let value = engine.get(cf, b"key1").unwrap();
-        assert_eq!(value, Some(Bytes::from_static(b"value1")));
-    }
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
+            let value = engine.get(cf, b"key1").unwrap();
+            assert_eq!(value, Some(Bytes::from_static(b"value1")));
+        }
+    });
 }
 
 #[test]
 fn should_not_persist_transaction_given_abort_when_crash_after() {
-    let opts = durability_opts();
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            let mut txn = engine.transaction();
+            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            // Txn dropped without commit
+            // Engine dropped (simulated crash)
+        }
 
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.default_column_family();
-        let mut txn = engine.transaction();
-        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        // Txn dropped without commit
-        // Engine dropped (simulated crash)
-    }
-
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cf = engine.default_column_family();
-        let value = engine.get(cf, b"key1").unwrap();
-        assert_eq!(value, None);
-    }
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
+            let value = engine.get(cf, b"key1").unwrap();
+            assert_eq!(value, None);
+        }
+    });
 }
 
 #[test]
 fn should_recover_committed_transactions_given_wal_replay_when_restart() {
-    let opts = durability_opts();
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            
+            // Multiple transactions
+            let mut txn1 = engine.transaction();
+            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            engine.commit_transaction(txn1).unwrap();
 
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.default_column_family();
-        
-        // Multiple transactions
-        let mut txn1 = engine.transaction();
-        txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        engine.commit_transaction(txn1).unwrap();
+            let mut txn2 = engine.transaction();
+            txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
+            engine.commit_transaction(txn2).unwrap();
+            
+            // Engine dropped
+        }
 
-        let mut txn2 = engine.transaction();
-        txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
-        engine.commit_transaction(txn2).unwrap();
-        
-        // Engine dropped
-    }
-
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cf = engine.default_column_family();
-        assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
-        assert_eq!(engine.get(cf, b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
-    }
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
+            assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
+            assert_eq!(engine.get(cf, b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+        }
+    });
 }

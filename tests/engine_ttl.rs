@@ -67,45 +67,45 @@ fn should_not_expire_key_given_zero_ttl_means_no_expiration_when_reading() {
 
 #[test]
 fn should_persist_ttl_metadata_given_restart_when_reopening() {
-    let opts = durability_opts();
-    
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.default_column_family();
-        engine.put_with_ttl(cf, b"key1", b"value1", 3600).unwrap(); // 1 hour
-        // Engine dropped
-    }
-    
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cf = engine.default_column_family();
-        let result = engine.get(cf, b"key1").unwrap();
-        assert_eq!(result, Some(Bytes::from_static(b"value1")));
-    }
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            engine.put_with_ttl(cf, b"key1", b"value1", 3600).unwrap(); // 1 hour
+            // Engine dropped
+        }
+        
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
+            let result = engine.get(cf, b"key1").unwrap();
+            assert_eq!(result, Some(Bytes::from_static(b"value1")));
+        }
+    });
 }
 
 #[test]
 fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening() {
-    let opts = durability_opts();
-    
-    // Arrange & Act (Phase 1)
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.default_column_family();
-        engine.put_with_ttl(cf, b"key1", b"value1", 1).unwrap(); // 1 second
-        thread::sleep(Duration::from_millis(1100)); // Wait for expiration
-        // Engine dropped
-    }
-    
-    // Assert (Phase 2)
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cf = engine.default_column_family();
-        let result = engine.get(cf, b"key1").unwrap();
-        assert_eq!(result, None);
-    }
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            engine.put_with_ttl(cf, b"key1", b"value1", 1).unwrap(); // 1 second
+            thread::sleep(Duration::from_millis(1100)); // Wait for expiration
+            // Engine dropped
+        }
+        
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
+            let result = engine.get(cf, b"key1").unwrap();
+            assert_eq!(result, None);
+        }
+    });
 }
 
 // ============================================================================

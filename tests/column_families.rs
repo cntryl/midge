@@ -165,7 +165,7 @@ fn should_invalidate_handle_given_cf_dropped_when_accessing() {
 
 #[test]
 fn should_delete_cf_data_given_cf_dropped_when_persisted() {
-    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -360,7 +360,7 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
 
 #[test]
 fn should_persist_cf_metadata_given_restart_when_cf_created() {
-    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -380,7 +380,7 @@ fn should_persist_cf_metadata_given_restart_when_cf_created() {
 
 #[test]
 fn should_persist_cf_data_given_restart_when_data_flushed() {
-    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -402,7 +402,7 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
 
 #[test]
 fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
-    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -424,7 +424,7 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
 
 #[test]
 fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
-    for_each_storage_mode(&["LocalDisk", "CloudBacked"], |mode, opts| {
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);

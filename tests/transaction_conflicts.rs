@@ -560,42 +560,42 @@ fn should_maintain_transaction_isolation_under_stress() {
 
 #[test]
 fn should_recover_conflict_state_after_engine_restart() {
-    let opts = durability_opts();
-    
-    // Arrange
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.default_column_family();
-        // Set up conflict state and crash
-    }
-    
-    // Act
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cf = engine.default_column_family();
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let _cf = engine.default_column_family();
+            // Set up conflict state and crash
+        }
         
-        // Assert
-        // Verify conflict resolution persists
-    }
+        // Act
+        {
+            let engine = open_with_mode(opts, mode);
+            let _cf = engine.default_column_family();
+            
+            // Assert
+            // Verify conflict resolution persists
+        }
+    });
 }
 
 #[test]
 fn should_persist_lost_update_prevention_after_restart() {
-    let opts = durability_opts();
-    
-    // Arrange
-    {
-        let engine = open_with_mode(opts.clone(), "localdisk");
-        let cf = engine.default_column_family();
-        // Set up lost update prevention
-    }
-    
-    // Act
-    {
-        let engine = open_with_mode(opts, "localdisk");
-        let cf = engine.default_column_family();
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let _cf = engine.default_column_family();
+            // Set up lost update prevention
+        }
         
-        // Assert
-        // Verify lost update prevention persists
-    }
+        // Act
+        {
+            let engine = open_with_mode(opts, mode);
+            let _cf = engine.default_column_family();
+            
+            // Assert
+            // Verify lost update prevention persists
+        }
+    });
 }
