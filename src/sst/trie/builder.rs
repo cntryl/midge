@@ -175,7 +175,7 @@ mod tests {
         builder.add_key(b"tester", 2).unwrap();
 
         let data = builder.finish();
-        assert!(data.len() > 0);
+        assert!(!data.is_empty());
     }
 
     #[test]

@@ -432,7 +432,7 @@ mod tests {
         txn.enter_read_phase().unwrap();
         let put_result = txn.put(ColumnFamilyId::DEFAULT, vec![1], vec![2]);
         let delete_result = txn.delete(ColumnFamilyId::DEFAULT, vec![3]);
-        let read_result = txn.read(ColumnFamilyId::DEFAULT, &vec![4], None, 0);
+        let read_result = txn.read(ColumnFamilyId::DEFAULT, &[4], None, 0);
 
         // Assert
         assert!(put_result.is_err());
@@ -446,7 +446,7 @@ mod tests {
         let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
         txn.put(ColumnFamilyId::DEFAULT, vec![1], vec![100])
             .unwrap();
-        txn.read(ColumnFamilyId::DEFAULT, &vec![2], Some(vec![200]), 50)
+        txn.read(ColumnFamilyId::DEFAULT, &[2], Some(vec![200]), 50)
             .unwrap();
         assert_eq!(txn.write_count(), 1);
         assert_eq!(txn.read_count(), 1);

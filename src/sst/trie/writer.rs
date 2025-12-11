@@ -95,6 +95,6 @@ mod tests {
 
         let result = writer.finish();
         assert!(result.is_some());
-        assert!(result.unwrap().len() > 0);
+        assert!(!result.unwrap().is_empty());
     }
 }

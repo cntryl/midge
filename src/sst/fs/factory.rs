@@ -52,7 +52,7 @@ mod tests {
         let bytes = writer.finish_bytes()?;
 
         // Assert
-        assert!(bytes.len() > 0);
+        assert!(!bytes.is_empty());
         // tempdir auto-cleans on drop
 
         Ok(())

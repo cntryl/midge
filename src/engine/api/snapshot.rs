@@ -113,7 +113,7 @@ mod tests {
         let snap3 = Snapshot::new(3, None, 102);
 
         // Act
-        let snapshots = vec![snap1, snap2, snap3];
+        let snapshots = [snap1, snap2, snap3];
 
         // Assert
         assert_eq!(snapshots.len(), 3);

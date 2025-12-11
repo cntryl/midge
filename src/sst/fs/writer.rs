@@ -204,7 +204,7 @@ mod tests {
         let bytes = Box::new(writer).finish_bytes()?;
 
         // Assert
-        assert!(bytes.len() > 0);
+        assert!(!bytes.is_empty());
         // tempdir auto-cleans on drop
 
         Ok(())

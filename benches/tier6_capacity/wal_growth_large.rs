@@ -47,7 +47,7 @@ fn bench_wal_growth_large(c: &mut Criterion) {
             for i in 0..50_000 {
                 let key = format!("wal_key_{:010}", i);
                 let val = vec![b'w'; 128]; // 128-byte values
-                engine.put(&cf, key.as_bytes(), &val).unwrap();
+                engine.put(cf, key.as_bytes(), &val).unwrap();
 
                 // Sample WAL size periodically
                 if i % 5000 == 0 {

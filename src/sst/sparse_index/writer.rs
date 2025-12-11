@@ -88,7 +88,7 @@ mod tests {
 
         // Act
         for i in 0..12 {
-            writer.record_key(format!("key_{:03}", i).into_bytes(), handle.clone());
+            writer.record_key(format!("key_{:03}", i).into_bytes(), handle);
         }
         let entries = writer.finish();
 
@@ -106,10 +106,10 @@ mod tests {
         let handle = BlockHandle::new(0, 100);
 
         // Act
-        writer.record_key(b"key_0".to_vec(), handle.clone());
-        writer.record_key(b"key_1".to_vec(), handle.clone());
+        writer.record_key(b"key_0".to_vec(), handle);
+        writer.record_key(b"key_1".to_vec(), handle);
         writer.next_block();
-        writer.record_key(b"key_2".to_vec(), handle.clone());
+        writer.record_key(b"key_2".to_vec(), handle);
         writer.record_key(b"key_3".to_vec(), handle);
         let entries = writer.finish();
 
@@ -128,7 +128,7 @@ mod tests {
 
         // Act
         for i in 0..32 {
-            writer.record_key(format!("key_{:03}", i).into_bytes(), handle.clone());
+            writer.record_key(format!("key_{:03}", i).into_bytes(), handle);
         }
 
         // Assert - should estimate reasonable size
@@ -145,7 +145,7 @@ mod tests {
 
         // Act
         for i in 0..100 {
-            writer.record_key(format!("key_{:03}", i).into_bytes(), handle.clone());
+            writer.record_key(format!("key_{:03}", i).into_bytes(), handle);
         }
 
         // Assert

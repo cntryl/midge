@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn should_encode_none_block_id() {
         let node = TrieNode::new(0, b"internal".to_vec(), None);
-        let encoded = encode_trie(&vec![node]);
+        let encoded = encode_trie(&[node]);
         let decoded = decode_trie(&encoded).unwrap();
 
         assert_eq!(decoded[0].block_id, None);

@@ -36,9 +36,7 @@ fn should_enforce_test_naming_convention() {
                 "  • [{}:{}] '{}'\n",
                 r.file, r.line, r.test_name
             ));
-            msg.push_str(&format!(
-                "    └─ Rename to 'should_[action]_when_[context]'\n\n"
-            ));
+            msg.push_str("    └─ Rename to 'should_[action]_when_[context]'\n\n");
         }
 
         msg.push_str(&format!(

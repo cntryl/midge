@@ -138,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn should_roundtrip_manifest_when_persisting() {
         // Arrange
         let test_dir = create_test_dir();

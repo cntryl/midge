@@ -85,9 +85,9 @@ mod tests {
         // Arrange
         let handle = BlockHandle::new(0, 100);
         let entries = vec![
-            IndexEntry::new(b"key_100".to_vec(), handle.clone(), 0),
-            IndexEntry::new(b"key_200".to_vec(), handle.clone(), 5),
-            IndexEntry::new(b"key_300".to_vec(), handle.clone(), 10),
+            IndexEntry::new(b"key_100".to_vec(), handle, 0),
+            IndexEntry::new(b"key_200".to_vec(), handle, 5),
+            IndexEntry::new(b"key_300".to_vec(), handle, 10),
         ];
         let reader = SparseIndexReader::new(entries).unwrap();
 
@@ -104,8 +104,8 @@ mod tests {
         // Arrange
         let handle = BlockHandle::new(0, 100);
         let entries = vec![
-            IndexEntry::new(b"key_100".to_vec(), handle.clone(), 0),
-            IndexEntry::new(b"key_300".to_vec(), handle.clone(), 10),
+            IndexEntry::new(b"key_100".to_vec(), handle, 0),
+            IndexEntry::new(b"key_300".to_vec(), handle, 10),
         ];
         let reader = SparseIndexReader::new(entries).unwrap();
 
@@ -121,7 +121,7 @@ mod tests {
         // Arrange
         let handle = BlockHandle::new(0, 100);
         let entries = vec![
-            IndexEntry::new(b"key_500".to_vec(), handle.clone(), 5),
+            IndexEntry::new(b"key_500".to_vec(), handle, 5),
             IndexEntry::new(b"key_600".to_vec(), handle, 10),
         ];
         let reader = SparseIndexReader::new(entries).unwrap();
@@ -138,7 +138,7 @@ mod tests {
         // Arrange
         let handle = BlockHandle::new(0, 100);
         let entries = vec![
-            IndexEntry::new(b"key_100".to_vec(), handle.clone(), 0),
+            IndexEntry::new(b"key_100".to_vec(), handle, 0),
             IndexEntry::new(b"key_200".to_vec(), handle, 5),
         ];
         let reader = SparseIndexReader::new(entries).unwrap();
@@ -167,8 +167,8 @@ mod tests {
         // Arrange
         let handle = BlockHandle::new(0, 100);
         let entries = vec![
-            IndexEntry::new(b"key_100".to_vec(), handle.clone(), 0),
-            IndexEntry::new(b"key_200".to_vec(), handle.clone(), 5),
+            IndexEntry::new(b"key_100".to_vec(), handle, 0),
+            IndexEntry::new(b"key_200".to_vec(), handle, 5),
             IndexEntry::new(b"key_300".to_vec(), handle, 10),
         ];
         let reader = SparseIndexReader::new(entries).unwrap();
