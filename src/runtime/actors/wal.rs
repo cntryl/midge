@@ -292,7 +292,7 @@ impl WalActor {
 
         while let Some(pending) = self.pending_cloud_writes.front() {
             if pending.sequence <= state.wal.cloud_durable_seq {
-                let write = self.pending_cloud_writes.pop_front().unwrap();
+                let write = self.pending_cloud_writes.pop_front().expect("pending write exists after front() check");
 
                 // NOW apply to memtable - write becomes visible
                 let key_bytes = Bytes::from(write.key);

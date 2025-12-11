@@ -178,7 +178,6 @@ impl CachePolicy for ClockProPolicy {
                     slots[idx].key = None; // Ghost entry
                     key_to_slot.remove(&evicted_key);
                     *resident_count = resident_count.saturating_sub(1);
-                    *hand = *hand; // Update from local after locking
                     return Some(evicted_key);
                 }
             } else if *hot_count > *hot_target {
@@ -190,7 +189,6 @@ impl CachePolicy for ClockProPolicy {
                     *resident_count = resident_count.saturating_sub(1);
                     *hot_count = hot_count.saturating_sub(1);
                     Self::on_hot_evict(&mut hot_target);
-                    *hand = *hand;
                     return Some(evicted_key);
                 }
             }
