@@ -45,66 +45,121 @@ pub enum TransactionState {
     CommitFailed,
 }
 
-/// Write intent: pending put or delete operation
+/// Write intent: pending put, delete, or delete_range operation
 #[derive(Debug, Clone)]
-pub struct WriteIntent {
-    /// Column family ID
-    cf_id: ColumnFamilyId,
-    /// Key being written
-    key: Vec<u8>,
-    /// Value for puts; None for deletes
-    value: Option<Vec<u8>>,
-    /// Sequence number when written
-    sequence: u64,
+pub enum WriteIntent {
+    /// Put operation
+    Put {
+        cf_id: ColumnFamilyId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        sequence: u64,
+    },
+    /// Delete operation
+    Delete {
+        cf_id: ColumnFamilyId,
+        key: Vec<u8>,
+        sequence: u64,
+    },
+    /// Delete range operation [start_key, end_key)
+    DeleteRange {
+        cf_id: ColumnFamilyId,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        sequence: u64,
+    },
 }
 
 impl WriteIntent {
     /// Create a put intent
     pub fn put(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>) -> Self {
-        Self {
+        Self::Put {
             cf_id,
             key,
-            value: Some(value),
+            value,
             sequence: 0,
         }
     }
 
     /// Create a delete intent
     pub fn delete(cf_id: ColumnFamilyId, key: Vec<u8>) -> Self {
-        Self {
+        Self::Delete {
             cf_id,
             key,
-            value: None,
+            sequence: 0,
+        }
+    }
+
+    /// Create a delete_range intent
+    pub fn delete_range(cf_id: ColumnFamilyId, start_key: Vec<u8>, end_key: Vec<u8>) -> Self {
+        Self::DeleteRange {
+            cf_id,
+            start_key,
+            end_key,
             sequence: 0,
         }
     }
 
     pub fn cf_id(&self) -> ColumnFamilyId {
-        self.cf_id
+        match self {
+            Self::Put { cf_id, .. } | Self::Delete { cf_id, .. } | Self::DeleteRange { cf_id, .. } => *cf_id,
+        }
     }
 
-    pub fn key(&self) -> &[u8] {
-        &self.key
+    pub fn key(&self) -> Option<&[u8]> {
+        match self {
+            Self::Put { key, .. } | Self::Delete { key, .. } => Some(key),
+            Self::DeleteRange { .. } => None,
+        }
     }
 
     pub fn value(&self) -> Option<&[u8]> {
-        self.value.as_deref()
+        match self {
+            Self::Put { value, .. } => Some(value),
+            _ => None,
+        }
     }
 
     pub fn is_delete(&self) -> bool {
-        self.value.is_none()
+        matches!(self, Self::Delete { .. })
     }
 
     pub fn is_put(&self) -> bool {
-        self.value.is_some()
+        matches!(self, Self::Put { .. })
+    }
+
+    pub fn is_delete_range(&self) -> bool {
+        matches!(self, Self::DeleteRange { .. })
     }
 
     pub fn sequence(&self) -> u64 {
-        self.sequence
+        match self {
+            Self::Put { sequence, .. }
+            | Self::Delete { sequence, .. }
+            | Self::DeleteRange { sequence, .. } => *sequence,
+        }
     }
 
     pub fn set_sequence(&mut self, seq: u64) {
-        self.sequence = seq;
+        match self {
+            Self::Put { sequence, .. }
+            | Self::Delete { sequence, .. }
+            | Self::DeleteRange { sequence, .. } => *sequence = seq,
+        }
+    }
+
+    pub fn start_key(&self) -> Option<&[u8]> {
+        match self {
+            Self::DeleteRange { start_key, .. } => Some(start_key),
+            _ => None,
+        }
+    }
+
+    pub fn end_key(&self) -> Option<&[u8]> {
+        match self {
+            Self::DeleteRange { end_key, .. } => Some(end_key),
+            _ => None,
+        }
     }
 }
 
@@ -207,6 +262,24 @@ impl Transaction {
         Ok(())
     }
 
+    /// Add a delete_range to the transaction's write set
+    pub fn delete_range(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    ) -> MidgeResult<()> {
+        if self.state != TransactionState::Active {
+            return Err(crate::common::MidgeError::InvalidArgument(format!(
+                "Cannot write in {:?} state",
+                self.state
+            )));
+        }
+        self.write_set
+            .push(WriteIntent::delete_range(cf_id, start_key, end_key));
+        Ok(())
+    }
+
     /// Read a key from the transaction's write set (read-your-own-writes)
     /// 
     /// Returns the value from write intents if present (including tombstones).
@@ -214,11 +287,21 @@ impl Transaction {
     pub fn get_from_write_set(&self, cf_id: ColumnFamilyId, key: &[u8]) -> Option<Option<Vec<u8>>> {
         // Scan write set in reverse (most recent write wins)
         for intent in self.write_set.iter().rev() {
-            if intent.cf_id == cf_id && intent.key == key {
-                if intent.is_delete() {
-                    return Some(None); // Tombstone
-                } else {
-                    return Some(intent.value.clone()); // Found value
+            if intent.cf_id() == cf_id {
+                match intent {
+                    WriteIntent::Put { key: k, value, .. } if k.as_slice() == key => {
+                        return Some(Some(value.clone()));
+                    }
+                    WriteIntent::Delete { key: k, .. } if k.as_slice() == key => {
+                        return Some(None); // Tombstone
+                    }
+                    WriteIntent::DeleteRange { start_key, end_key, .. } => {
+                        // Check if key falls in range [start_key, end_key)
+                        if key >= start_key.as_slice() && key < end_key.as_slice() {
+                            return Some(None); // Deleted by range
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

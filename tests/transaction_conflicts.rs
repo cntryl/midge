@@ -139,7 +139,6 @@ fn should_allow_concurrent_delete_put_operations_given_lww_semantics() {
 }
 
 #[test]
-#[ignore = "Requires delete_range in transactions"]
 fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -149,13 +148,13 @@ fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
         engine.put(cf, b"key2", b"value2").unwrap();
         
         // Act
-        let txn1 = engine.transaction();
+        let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
         
-        // txn1.delete_range(cf.id(), b"key1", b"key3").unwrap();
+        txn1.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec()).unwrap();
         txn2.put(cf.id(), b"key2".to_vec(), b"newvalue".to_vec()).unwrap();
         
-        // engine.commit_transaction(txn1).unwrap();
+        engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
         
         // Assert
@@ -165,7 +164,6 @@ fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
 }
 
 #[test]
-#[ignore = "Requires delete_range in transactions"]
 fn should_allow_put_then_delete_range_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -174,13 +172,13 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
         
         // Act
         let mut txn1 = engine.transaction();
-        let txn2 = engine.transaction();
+        let mut txn2 = engine.transaction();
         
         txn1.put(cf.id(), b"key".to_vec(), b"value".to_vec()).unwrap();
-        // txn2.delete_range(cf.id(), b"key", b"keyz").unwrap();
+        txn2.delete_range(cf.id(), b"key".to_vec(), b"keyz".to_vec()).unwrap();
         
         engine.commit_transaction(txn1).unwrap();
-        // engine.commit_transaction(txn2).unwrap();
+        engine.commit_transaction(txn2).unwrap();
         
         // Assert
         let value = engine.get(cf, b"key").unwrap();
@@ -189,7 +187,6 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
 }
 
 #[test]
-#[ignore = "Requires delete_range in transactions"]
 fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -199,14 +196,14 @@ fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
         engine.put(cf, b"key2", b"value2").unwrap();
         
         // Act
-        let txn1 = engine.transaction();
-        let txn2 = engine.transaction();
+        let mut txn1 = engine.transaction();
+        let mut txn2 = engine.transaction();
         
-        // txn1.delete_range(cf.id(), b"key1", b"key3").unwrap();
-        // txn2.delete_range(cf.id(), b"key1", b"key3").unwrap();
+        txn1.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec()).unwrap();
+        txn2.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec()).unwrap();
         
-        // engine.commit_transaction(txn1).unwrap();
-        // engine.commit_transaction(txn2).unwrap();
+        engine.commit_transaction(txn1).unwrap();
+        engine.commit_transaction(txn2).unwrap();
         
         // Assert - both succeed
         assert!(engine.get(cf, b"key1").unwrap().is_none());
@@ -214,7 +211,6 @@ fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
 }
 
 #[test]
-#[ignore = "Requires delete_range in transactions"]
 fn should_allow_delete_range_delete_operations_given_lww_semantics() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -223,13 +219,13 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
         engine.put(cf, b"key", b"value").unwrap();
         
         // Act
-        let txn1 = engine.transaction();
+        let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
         
-        // txn1.delete_range(cf.id(), b"key", b"keyz").unwrap();
+        txn1.delete_range(cf.id(), b"key".to_vec(), b"keyz".to_vec()).unwrap();
         txn2.delete(cf.id(), b"key".to_vec()).unwrap();
         
-        // engine.commit_transaction(txn1).unwrap();
+        engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
         
         // Assert

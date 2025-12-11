@@ -811,31 +811,59 @@ impl MidgeEngine {
         // CRITICAL: Use send_and_wait for durability.
         // TODO: Add RuntimeMsg::CommitTransaction for true atomic commit.
         for intent in write_intents {
-            let response = if let Some(value) = intent.value() {
-                self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
-                    request_id: next_request_id(),
-                    cf_id: intent.cf_id().as_u32(),
-                    key: intent.key().to_vec(),
-                    value: Some(value.to_vec()),
-                    sequence: self.next_sequence(),
-                    ttl_seconds: None,
-                    insert_only: false,
-                })?
-            } else {
-                self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
-                    request_id: next_request_id(),
-                    cf_id: intent.cf_id().as_u32(),
-                    key: intent.key().to_vec(),
-                    value: None,
-                    sequence: self.next_sequence(),
-                    ttl_seconds: None,
-                    insert_only: false,
-                })?
-            };
-
-            if let RuntimeResponse::Error { message, .. } = response {
-                txn.mark_failed()?;
-                return Err(MidgeError::Internal(message));
+            match &intent {
+                api::WriteIntent::Put { cf_id, key, value, .. } => {
+                    let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+                        request_id: next_request_id(),
+                        cf_id: cf_id.as_u32(),
+                        key: key.clone(),
+                        value: Some(value.clone()),
+                        sequence: self.next_sequence(),
+                        ttl_seconds: None,
+                        insert_only: false,
+                    })?;
+                    if let RuntimeResponse::Error { message, .. } = response {
+                        txn.mark_failed()?;
+                        return Err(MidgeError::Internal(message));
+                    }
+                }
+                api::WriteIntent::Delete { cf_id, key, .. } => {
+                    let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+                        request_id: next_request_id(),
+                        cf_id: cf_id.as_u32(),
+                        key: key.clone(),
+                        value: None,
+                        sequence: self.next_sequence(),
+                        ttl_seconds: None,
+                        insert_only: false,
+                    })?;
+                    if let RuntimeResponse::Error { message, .. } = response {
+                        txn.mark_failed()?;
+                        return Err(MidgeError::Internal(message));
+                    }
+                }
+                api::WriteIntent::DeleteRange { cf_id, start_key, end_key, .. } => {
+                    // Delete range by scanning and deleting each key
+                    // TODO: Implement efficient range deletion at WAL level
+                    // For now, only support default CF (limitation of current API)
+                    let cf_handle = ColumnFamilyHandle::new(*cf_id, "default".to_string());
+                    let keys = self.range(&cf_handle, start_key, end_key)?;
+                    for (key, _) in keys {
+                        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+                            request_id: next_request_id(),
+                            cf_id: cf_id.as_u32(),
+                            key: key.to_vec(),
+                            value: None,
+                            sequence: self.next_sequence(),
+                            ttl_seconds: None,
+                            insert_only: false,
+                        })?;
+                        if let RuntimeResponse::Error { message, .. } = response {
+                            txn.mark_failed()?;
+                            return Err(MidgeError::Internal(message));
+                        }
+                    }
+                }
             }
         }
 
