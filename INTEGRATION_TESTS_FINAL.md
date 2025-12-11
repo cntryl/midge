@@ -238,7 +238,7 @@ cargo test --test engine_basic --test engine_write_batch --test engine_delete_ra
 | **engine_snapshots.rs** | 14 | ✅ Passing (14/14) | Snapshot API complete, flush interaction verified |
 | **engine_merge.rs** | 19 | ✅ Passing (9/9 active, 10 ignored) | Merge operators implemented (base semantics complete) |
 | **engine_ttl.rs** | 12 | ✅ Passing (7/7 active, 5 ignored) | TTL support complete (expiration at read time) |
-| **column_families.rs** | 27 | 📋 Not started | CF lifecycle management |
+| **column_families.rs** | 28 | ✅ Passing (12/12 active, 16 ignored) | CF lifecycle and isolation complete |
 | **config_api.rs** | 20 | 📋 Not started | Config builder validation |
 | **transaction_basic.rs** | 16 | 📋 Not started | Transaction lifecycle |
 | **transaction_conflicts.rs** | 25 | 📋 Not started | LWW conflict resolution |

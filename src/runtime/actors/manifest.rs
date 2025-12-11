@@ -127,6 +127,10 @@ impl ManifestActor {
         let cf_id = state.manifest.create_column_family(name.clone());
         self.pending_edits += 1;
 
+        // Create ColumnFamilyState for the new CF
+        let cf_state = crate::runtime::state::ColumnFamilyState::new(cf_id, name.clone());
+        state.column_families.insert(cf_id, cf_state);
+
         tracing::info!(cf_id = cf_id, cf_name = %name, "Manifest: created column family");
 
         Ok(cf_id)
@@ -134,12 +138,22 @@ impl ManifestActor {
 
     /// Drop a column family (soft delete for durability)
     pub fn drop_column_family(&mut self, state: &mut RuntimeState, cf_id: u32) -> MidgeResult<()> {
+        // Prevent dropping default CF
+        if cf_id == 0 {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "Cannot drop default column family".to_string(),
+            ));
+        }
+
         if !state.manifest.delete_column_family(cf_id) {
             return Err(crate::common::MidgeError::Internal(format!(
                 "Column family {} not found or already deleted",
                 cf_id
             )));
         }
+
+        // Remove ColumnFamilyState
+        state.column_families.remove(&cf_id);
 
         self.pending_edits += 1;
 
