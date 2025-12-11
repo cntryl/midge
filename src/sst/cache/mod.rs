@@ -45,10 +45,7 @@ impl BlockCache {
         let mut shards = Vec::with_capacity(num_shards);
 
         for _ in 0..num_shards {
-            shards.push(Arc::new(CacheShard::new(
-                shard_capacity,
-                policy_type,
-            )));
+            shards.push(Arc::new(CacheShard::new(shard_capacity, policy_type)));
         }
 
         Self { shards, num_shards }

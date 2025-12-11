@@ -11,8 +11,8 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
 use cntryl_midge::engine::api::WriteBatch;
+use cntryl_midge::testkit::*;
 
 // ============================================================================
 // BASIC BATCH OPERATIONS
@@ -406,7 +406,7 @@ fn should_persist_batch_given_flush_when_reopening() {
     // Note: Only test with durable storage modes (LocalDisk, CloudBacked).
     // Memory mode doesn't persist, so it's excluded.
     let opts = durability_opts();
-    
+
     // Arrange
     {
         let engine = open_with_mode(opts.clone(), "LocalDisk");
@@ -436,7 +436,7 @@ fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
     // Note: WAL is only used in durable storage modes (not in Memory mode).
     // Memory mode doesn't persist WAL, so skip this test for Memory.
     let opts = durability_opts();
-    
+
     // Arrange
     {
         let engine = open_with_mode(opts.clone(), "LocalDisk");
@@ -457,9 +457,8 @@ fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
     let val2 = engine.get(cf, b"atomic_key2").expect("get2");
 
     // Either both present or both absent (atomic)
-    assert_eq!(
+    assert!(
         val1.is_some() && val2.is_some() || val1.is_none() && val2.is_none(),
-        true,
         "batch not atomic"
     );
 }
@@ -469,7 +468,7 @@ fn should_be_atomic_given_large_batch_crash_when_recovering() {
     // Note: WAL is only used in durable storage modes (not in Memory mode).
     // Memory mode doesn't persist WAL, so skip this test for Memory.
     let opts = durability_opts();
-    
+
     // Arrange
     {
         let engine = open_with_mode(opts.clone(), "LocalDisk");
@@ -552,7 +551,11 @@ fn should_increment_sequence_numbers_given_batch_operations_when_write_batch() {
         let got1 = engine.get(cf, b"seq_key").expect("get1");
         let got2 = engine.get(cf, b"seq_key2").expect("get2");
 
-        assert!(got1.is_some(), "first batch value missing in mode: {}", mode);
+        assert!(
+            got1.is_some(),
+            "first batch value missing in mode: {}",
+            mode
+        );
         assert!(
             got2.is_some(),
             "second batch value missing in mode: {}",

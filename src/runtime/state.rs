@@ -65,7 +65,6 @@ pub struct CompactionState {
     pub pending_tasks: usize,
 }
 
-
 /// Cloud sync state
 #[derive(Default)]
 pub struct CloudState {
@@ -74,7 +73,6 @@ pub struct CloudState {
     /// Last checkpoint sequence uploaded to cloud
     pub last_cloud_checkpoint_seq: u64,
 }
-
 
 /// Centralized runtime state
 ///

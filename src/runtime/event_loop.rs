@@ -58,9 +58,15 @@ impl EventLoop {
         let (flush_actor, wal_actor) = if memory_mode {
             // In memory mode, create stub actors that don't touch filesystem
             // For now, create them anyway but they won't be used for actual operations
-            (FlushActor::new(&sst_dir)?, WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched, memory_mode)?)
+            (
+                FlushActor::new(&sst_dir)?,
+                WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched, memory_mode)?,
+            )
         } else {
-            (FlushActor::new(&sst_dir)?, WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched, memory_mode)?)
+            (
+                FlushActor::new(&sst_dir)?,
+                WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched, memory_mode)?,
+            )
         };
 
         Ok(Self {
@@ -403,6 +409,23 @@ impl EventLoop {
                     let value = self.handle_read(cf_id, &key, sequence);
                     self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
                 }
+
+                RuntimeMsg::RangeScan {
+                    request_id,
+                    cf_id,
+                    start,
+                    end,
+                    sequence,
+                } => {
+                    let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::RangeScanResults {
+                            request_id,
+                            results,
+                        },
+                    );
+                }
             }
         }
 
@@ -427,5 +450,64 @@ impl EventLoop {
 
         // SST lookup temporarily disabled
         None
+    }
+
+    /// Range scan: iterate keys in [start, end) from memtables
+    fn handle_range_scan(
+        &self,
+        cf_id: u32,
+        start: &[u8],
+        end: &[u8],
+        _seq: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let cf_state = match self.state.column_families.get(&cf_id) {
+            Some(state) => state,
+            None => return vec![],
+        };
+
+        // Collect results from active memtable + immutable memtables
+        let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
+            std::collections::BTreeMap::new();
+
+        // Scan active memtable - group by key to get latest version only
+        let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::BTreeMap::new();
+        for (key, value, _seq) in cf_state.memtable.iter_all(u64::MAX) {
+            // For each key, keep the first (most recent) value we encounter
+            by_key.entry(key).or_insert(value);
+        }
+
+        for (key, value) in by_key.iter() {
+            if value.is_none() {
+                // Skip tombstones (deleted keys)
+                continue;
+            }
+            if key.as_slice() >= start && key.as_slice() < end {
+                results.insert(key.clone(), value.clone().expect("value already checked"));
+            }
+        }
+
+        // Scan immutable memtables (oldest → newest for correct override semantics)
+        for imm in cf_state.immutable_memtables.iter() {
+            let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+                std::collections::BTreeMap::new();
+            for (key, value, _seq) in imm.iter_all(u64::MAX) {
+                // Keep the first (most recent) value for each key
+                by_key.entry(key).or_insert(value);
+            }
+
+            for (key, value) in by_key.iter() {
+                if value.is_none() {
+                    // Skip tombstones
+                    continue;
+                }
+                if key.as_slice() >= start && key.as_slice() < end {
+                    results.insert(key.clone(), value.clone().expect("value already checked"));
+                }
+            }
+        }
+
+        // Convert to vec of (key, value) tuples
+        results.into_iter().collect()
     }
 }

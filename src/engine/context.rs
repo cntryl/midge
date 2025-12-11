@@ -1,8 +1,7 @@
 //! Engine execution context
 
 /// Execution context for operations
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Context {
     pub operation_id: u64,
 }
@@ -12,4 +11,3 @@ impl Context {
         Self { operation_id }
     }
 }
-

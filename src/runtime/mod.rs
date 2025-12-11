@@ -160,6 +160,14 @@ pub enum RuntimeMsg {
         key: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
     },
+    /// Scan a range of keys from memtables and SST files.
+    RangeScan {
+        request_id: u64,
+        cf_id: u32,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        sequence: u64, // Read at this sequence number or earlier.
+    },
 
     // === Control ===
     /// Shutdown the runtime (no request_id; fire-and-forget).
@@ -198,6 +206,7 @@ impl RuntimeMsg {
             | ManifestCreateColumnFamily { request_id, .. }
             | ManifestDropColumnFamily { request_id, .. }
             | Read { request_id, .. }
+            | RangeScan { request_id, .. }
             | Noop { request_id }
             | StartupPing { request_id } => Some(*request_id),
 
@@ -222,6 +231,10 @@ pub enum RuntimeResponse {
         request_id: u64,
         value: Option<Vec<u8>>,
     },
+    RangeScanResults {
+        request_id: u64,
+        results: Vec<(Vec<u8>, Vec<u8>)>,
+    },
     FlushComplete {
         request_id: u64,
         sst_name: String,
@@ -242,6 +255,7 @@ impl RuntimeResponse {
             RuntimeResponse::Ok { request_id }
             | RuntimeResponse::Error { request_id, .. }
             | RuntimeResponse::ReadValue { request_id, .. }
+            | RuntimeResponse::RangeScanResults { request_id, .. }
             | RuntimeResponse::FlushComplete { request_id, .. }
             | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. } => *request_id,

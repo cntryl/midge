@@ -17,8 +17,7 @@ type ReadSetEntry = (Option<Vec<u8>>, u64);
 type ReadSet = HashMap<(ColumnFamilyId, Vec<u8>), ReadSetEntry>;
 
 /// Isolation level for transaction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IsolationLevel {
     /// Dirty reads allowed; no consistency guarantees
     ReadUncommitted,
@@ -28,7 +27,6 @@ pub enum IsolationLevel {
     #[default]
     Serializable,
 }
-
 
 /// Transaction state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

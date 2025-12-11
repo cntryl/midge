@@ -64,14 +64,18 @@ pub struct WalActor {
 }
 
 impl WalActor {
-    pub fn new(wal_dir: PathBuf, durability_policy: DurabilityPolicy, memory_mode: bool) -> MidgeResult<Self> {
+    pub fn new(
+        wal_dir: PathBuf,
+        durability_policy: DurabilityPolicy,
+        memory_mode: bool,
+    ) -> MidgeResult<Self> {
         // In memory mode, don't create any filesystem resources
         let writer = if memory_mode {
             None // No WAL writer in memory mode
         } else {
             // Create WAL directory only if not in memory mode
             std::fs::create_dir_all(&wal_dir).map_err(crate::common::MidgeError::Io)?;
-            
+
             // Create writer via factory (always FsWalWriter - never create backends)
             let factory = FsWalFactory;
             Some(factory.create_writer(&wal_dir)?)
@@ -298,7 +302,10 @@ impl WalActor {
 
         while let Some(pending) = self.pending_cloud_writes.front() {
             if pending.sequence <= state.wal.cloud_durable_seq {
-                let write = self.pending_cloud_writes.pop_front().expect("pending write exists after front() check");
+                let write = self
+                    .pending_cloud_writes
+                    .pop_front()
+                    .expect("pending write exists after front() check");
 
                 // NOW apply to memtable - write becomes visible
                 let key_bytes = Bytes::from(write.key);

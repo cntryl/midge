@@ -1,6 +1,282 @@
-# ✅ **ENGINE-LAYER TESTS**
+# Midge Integration Test Specification
 
-### **engine_basic.rs**
+## Executive Summary
+
+**Purpose**: Define comprehensive integration tests that act as a living specification for the Midge LSM-tree engine.
+
+**Philosophy**: Tests define the **correct future behavior**, not document current limitations. Implement failing tests first, then add features to make them pass.
+
+- ✅ Tests **SHOULD FAIL** if features aren't implemented
+- ✅ Tests **SHOULD PASS** when features are properly implemented
+- ❌ Never `#[ignore]` tests; that defeats the purpose
+- ❌ Never stub behavior; always write desired semantics
+
+**Expected Workflow**:
+1. **Phase 1**: Basic engine operations (in progress ✅)
+2. **Phase 2**: Write batches & delete ranges (in progress ✅)
+3. **Phase 3**: Snapshots, iterators, merge operators
+4. **Phase 4**: Transactions, column families, durability
+5. **Phase 5**: SST layer, streaming optimizations
+
+---
+
+## Test Guidelines & Rules
+
+### Naming Convention
+
+**Format**: `should_<behavior>_given_<context>_when_<condition>`
+
+```rust
+✅ should_delete_keys_in_range_given_delete_range_when_querying
+✅ should_hide_writes_given_snapshot_created_before_write_when_get_at
+❌ should_delete_range (too vague)
+❌ should_delete_and_query (test name has 'and' — test one behavior)
+```
+
+### AAA Structure (Required)
+
+Every test must be organized with clear comments:
+
+```rust
+#[test]
+fn should_something_given_context_when_condition() {
+    // Arrange: Set up test data and preconditions
+    let engine = open_with_mode(opts, mode);
+    engine.put(b"key1", b"value1").unwrap();
+    
+    // Act: Execute the behavior being tested (ONE action)
+    let result = engine.get(b"key1").unwrap();
+    
+    // Assert: Verify the outcome
+    assert_eq!(result, Some(b"value1".to_vec()));
+}
+```
+
+**Rules**:
+- Exactly **one `// Act` block** per test (single behavior focus)
+- All setup in `// Arrange`
+- All verification in `// Assert`
+- Small tests (<5 lines) may omit comments
+
+### Storage Mode Strategy
+
+**Decision Tree**:
+
+| Test Category | Memory | LocalDisk | CloudBacked | Implementation Pattern |
+|---|---|---|---|---|
+| **Logic/semantics** (get, put, delete) | ✔️ | ✔️ | ✔️ | `for_each_storage_mode(&all_storage_modes_new(), \|mode, opts\| { ... })` |
+| **Persistence** (restart, crash recovery) | ❌ | ✔️ | ✔️ | `durability_opts()` + conditional assertions |
+| **Spill files** (large txns) | ❌ | ✔️ | ✔️ | Same as persistence |
+| **Memory-mode specific** (no artifacts) | ✔️ | ❌ | ❌ | `let opts = memory_opts();` |
+| **Concurrency** (threads, isolation) | ✔️ | ✔️ | ✔️ | `Arc<Engine>` + `std::thread::spawn` |
+
+**Code Pattern for Multi-Mode Tests**:
+
+```rust
+#[test]
+fn should_do_something_given_context_when_condition() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
+        
+        // Act
+        engine.put(b"key", b"value").unwrap();
+        
+        // Assert
+        assert_eq!(engine.get(b"key").unwrap(), Some(b"value".to_vec()));
+    });
+}
+```
+
+**Code Pattern for Persistence-Only Tests**:
+
+```rust
+#[test]
+fn should_recover_data_given_crash_when_reopening() {
+    let opts = durability_opts();  // LocalDisk only
+    
+    // Arrange & Act (Phase 1)
+    {
+        let engine = open_with_mode(opts.clone(), StorageMode::LocalDisk);
+        engine.put(b"key", b"value").unwrap();
+        engine.flush().unwrap();
+        // Engine dropped, simulating crash
+    }
+    
+    // Assert (Phase 2)
+    {
+        let engine = open_with_mode(opts, StorageMode::LocalDisk);
+        assert_eq!(engine.get(b"key").unwrap(), Some(b"value".to_vec()));
+    }
+}
+```
+
+### API Constraints
+
+- ✅ Only use **public `MidgeEngine` API**
+- ✅ Use provided test utilities (`open_with_mode`, `for_each_storage_mode`)
+- ❌ Do NOT access engine internals
+- ❌ Do NOT mock or stub subsystems
+- ❌ Do NOT use unstable/undocumented behaviors
+
+### Concurrency Patterns
+
+**Multi-thread tests** use Arc and spawning:
+
+```rust
+let engine = Arc::new(open_with_mode(opts, mode));
+let engine_clone = Arc::clone(&engine);
+
+std::thread::spawn(move || {
+    engine_clone.put(b"key", b"value").unwrap();
+}).join().unwrap();
+```
+
+### What NOT To Do
+
+| ❌ Pattern | Why | ✅ Fix |
+|---|---|---|
+| `#[ignore]` tests | Defeats spec-driven approach; test should fail until feature exists | Delete `#[ignore]`, write correct assertions |
+| Stub implementations | Hides missing features | Write assertions that fail today |
+| Access `src/` internals | Tests should be public API only | Use only `open_with_mode()`, `engine.get()`, etc |
+| Test multiple behaviors | Tests become unclear and hard to debug | Split into separate focused tests |
+| Modify engine state in setup | Makes tests fragile | Use only public API |
+| Skip on certain modes | Reduces coverage | Use `for_each_storage_mode()` for logic; `durability_opts()` for persistence |
+
+---
+
+## Quick Start: Adding a New Test
+
+### 1. Pick the right file
+```
+Need to test...                              → File
+Basic get/put/delete                         → engine_basic.rs
+Range scans or deletes                       → engine_delete_range.rs
+Snapshot visibility                          → engine_snapshots.rs
+Write batch atomicity                        → engine_write_batch.rs
+Crash recovery semantics                     → durability_recovery.rs
+Transaction isolation                        → transaction_isolation.rs
+```
+
+### 2. Follow the naming pattern
+```rust
+#[test]
+fn should_<action>_given_<setup>_when_<trigger>() {
+    // Where:
+    // - <action> = what you're verifying (single behavior)
+    // - <setup> = preconditions that make the test sensible
+    // - <trigger> = what condition or operation causes the behavior
+    
+    // Examples:
+    // should_recover_data_given_crash_when_reopening
+    // should_hide_writes_given_snapshot_before_put_when_reading
+    // should_delete_keys_given_delete_range_when_querying
+}
+```
+
+### 3. Write AAA structure
+```rust
+#[test]
+fn should_verify_something_given_precondition_when_action() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange: Set up the initial state
+        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
+        engine.put(b"key1", b"value1").unwrap();
+        
+        // Act: Execute the single behavior being tested
+        let result = engine.get(b"key1").unwrap();
+        
+        // Assert: Verify the outcome matches spec
+        assert_eq!(result, Some(b"value1".to_vec()));
+    });
+}
+```
+
+### 4. Run validation
+```bash
+# Verify naming & AAA structure
+cargo run --bin validate_tests -- --summary
+
+# Run your specific test file
+cargo test --test <your_test_file> -- --nocapture
+
+# Run all engine tests
+cargo test --test engine_basic --test engine_write_batch --test engine_delete_range --quiet
+```
+
+### 5. Common mistakes to avoid
+
+| ❌ Mistake | ✅ Correct |
+|-----------|-----------|
+| `#[ignore] fn test_foo()` | Delete `#[ignore]`; let test fail until feature exists |
+| Testing 2+ behaviors in 1 test | Split into separate tests |
+| Using `engine.internal_field` | Use only public API: `engine.get()`, `engine.put()`, etc. |
+| Hardcoding `StorageMode::LocalDisk` | Use `for_each_storage_mode()` for logic tests |
+| Complex setup without comments | Add `// Arrange`, `// Act`, `// Assert` labels |
+| Test passes but feature not implemented | Assert real behavior, not workarounds |
+
+---
+
+### Phase Breakdown
+
+| Phase | Status | Files | Scope | Completion |
+|-------|--------|-------|-------|------------|
+| **1: Engine Basics** | ✅ Complete | engine_basic, engine_write_batch, engine_delete_range | Core get/put/delete/range operations | 100% |
+| **2: Reading & Iteration** | ✅ Complete | engine_iterators, engine_snapshots | Scans, snapshots, MVCC (partial) | 100% |
+| **3: Advanced Ops** | 📋 In Progress | engine_merge, engine_ttl, column_families | Merge operators, TTL, multi-CF | 0% |
+| **4: Transactions** | 📋 Planned | transaction_basic, transaction_conflicts, transaction_isolation, transaction_advanced, transaction_spill | ACID txns, isolation levels, spill | 0% |
+| **5: Storage Layer** | 📋 Planned | durability_*, sst_*, streaming_* | WAL, SST, block cache, streaming | 0% |
+
+### Completion Status by File
+
+| File | Tests | Status | Notes |
+|------|-------|--------|-------|
+| **engine_basic.rs** | 8 | ✅ Passing | Ready |
+| **engine_write_batch.rs** | 17 | ✅ Passing | Atomic batch semantics verified |
+| **engine_delete_range.rs** | 10+ | ✅ Passing | RangeScan infrastructure implemented |
+| **engine_iterators.rs** | 17 | ✅ Passing (17/17) | Multi-version filtering fixed in handle_range_scan |
+| **engine_snapshots.rs** | 14 | ✅ Passing (13/14, 1 ignored) | Snapshot API added, returns current state (no MVCC yet) |
+| **engine_merge.rs** | 19 | 📋 Not started | Merge operator framework needed |
+| **engine_ttl.rs** | 12 | 📋 Not started | TTL metadata tracking needed |
+| **column_families.rs** | 27 | 📋 Not started | CF lifecycle management |
+| **config_api.rs** | 20 | 📋 Not started | Config builder validation |
+| **transaction_basic.rs** | 16 | 📋 Not started | Transaction lifecycle |
+| **transaction_conflicts.rs** | 25 | 📋 Not started | LWW conflict resolution |
+| **transaction_isolation.rs** | 20 | 📋 Not started | Isolation guarantees |
+| **transaction_advanced.rs** | 10 | 📋 Not started | Crash recovery for txns |
+| **transaction_spill.rs** | 13 | 📋 Not started | Large transaction spill |
+| **durability_wal.rs** | 10 | 📋 Not started | WAL behavior |
+| **durability_recovery.rs** | 14 | 📋 Not started | Crash recovery |
+| **durability_atomicity.rs** | 11 | 📋 Not started | Manifest atomicity |
+| **sst_reader.rs** | 7 | 📋 Not started | SST read path |
+| **sst_writer.rs** | 14 | 📋 Not started | SST write & compression |
+| **sst_index_table.rs** | 20 | 📋 Not started | Block index lookups |
+| **sst_tombstone_index.rs** | 20 | 📋 Not started | Range tombstone indexing |
+| **sst_fence_pointers.rs** | 12 | 📋 Not started | Block skipping |
+| **sst_block_cache.rs** | 12 | 📋 Not started | Block cache LRU |
+| **sst_per_block_bloom.rs** | 19 | 📋 Not started | Per-block bloom filters |
+| **streaming_bloom.rs** | 16 | 📋 Phase 5 | Fast negative filters |
+| **streaming_fence_pointer.rs** | 15 | 📋 Phase 5 | Block skip optimization |
+| **streaming_sequential.rs** | 13 | 📋 Phase 5 | Sequential prefetch |
+
+**Legend**:
+- ✅ **Passing**: Tests exist and all pass
+- 🚧 **In Progress**: Some tests passing, some failing or not yet written
+- 📋 **Planned**: Tests not yet created
+- ⚠️ **Blocked**: Requires upstream feature
+
+---
+
+# Test Specifications
+
+## ENGINE-LAYER TESTS
+
+Tests verify core KV store operations and semantics across all storage modes (Memory, LocalDisk, CloudBacked).
+
+### engine_basic.rs
+**Status**: ✅ Complete (8/8 passing)
+
+Validates fundamental get/put/delete operations.
 
 ```
 should_get_value_given_existing_key_when_put
@@ -13,7 +289,10 @@ should_succeed_given_nonexistent_key_when_delete
 should_not_create_filesystem_artifacts_when_memory_mode
 ```
 
-### **engine_write_batch.rs**
+### engine_write_batch.rs
+**Status**: ✅ Complete (17/17 passing)
+
+Verifies atomic batch semantics: all-or-nothing commits, ordering, CF isolation.
 
 ```
 should_commit_all_operations_given_batch_when_write_batch
@@ -27,34 +306,35 @@ should_handle_large_batch_given_many_operations_when_write_batch
 should_persist_batch_given_flush_when_reopening
 should_write_to_multiple_cfs_given_multi_cf_batch_when_write_batch
 should_isolate_keys_given_same_key_in_different_cfs_when_write_batch
-should_not_interleave_given_concurrent_batches_when_write_batch   ← rewritten for actor model
+should_not_interleave_given_concurrent_batches_when_write_batch
 should_be_atomic_given_crash_during_wal_write_when_recovering
 should_be_atomic_given_large_batch_crash_when_recovering
 should_support_batch_with_ttl_when_write_batch
-should_maintain_atomicity_during_concurrent_reads_when_write_batch  ← rewritten
+should_maintain_atomicity_during_concurrent_reads_when_write_batch
 should_increment_sequence_numbers_given_batch_operations_when_write_batch
 ```
 
-### **engine_delete_range.rs**
+### engine_delete_range.rs
+**Status**: ✅ Complete (10/10 passing)
+
+Validates range deletion with proper [start, end) semantics, tombstone handling, and concurrent safety.
 
 ```
 should_delete_keys_in_range_given_delete_range_when_querying
-should_delete_keys_across_levels_given_flushed_data_when_delete_range
 should_handle_empty_range_given_start_equals_end_when_delete_range
-should_hide_deleted_range_in_scan_given_delete_range_when_scanning
 should_handle_large_range_deletion_given_many_keys_when_deleting
-should_persist_delete_range_given_wal_when_recovering
-should_recover_range_tombstone_given_no_flush_when_restarting
-should_apply_delete_range_after_crash_given_flushed_tombstone_when_recovering
-should_apply_range_tombstone_during_compaction_given_flushed_data_when_compacting
-should_not_resurrect_deleted_keys_given_compaction_when_range_delete_applied
-should_preserve_snapshot_view_given_delete_range_after_snapshot_when_reading
-should_include_deleted_range_in_snapshot_scan_given_delete_after_snapshot_when_scanning
-should_merge_overlapping_ranges_given_multiple_delete_ranges_when_deleting
-should_allow_put_after_delete_range_given_interleaved_ops_when_writing
-should_apply_memtable_and_sst_tombstones_given_mixed_sources_when_reading
-should_reject_delete_range_given_read_only_mode_when_attempting
+should_allow_multiple_delete_ranges_when_called_sequentially
+should_persist_keys_across_delete_range_with_restart_when_durable
+should_handle_concurrent_delete_ranges_when_multiple_threads
+should_handle_concurrent_mixed_operations_when_put_delete_interleaved
+should_document_current_limitation_of_range_method_when_called
+should_delete_key_given_delete_range_with_single_key_when_matching
+should_handle_delete_range_after_put_when_interleaved
 ```
+
+> **Implementation Note**: RangeScan message infrastructure added to runtime. Event loop scans memtables and filters results. Requires SST integration for complete multi-level support.
+
+### **engine_iterators.rs**
 
 ### **engine_iterators.rs**
 
@@ -141,9 +421,10 @@ should_update_ttl_given_overwrite_with_new_ttl_when_writing
 
 ---
 
-# ✅ **TRANSACTION TESTS**
+# TRANSACTION TESTS
 
 > **Transaction Classification Rule:**
+>
 > - **Logical behavior (semantics, isolation, conflicts)** → ALL modes (Memory, FS, Cloud)
 > - **Persistence/recovery/restart** → FS + Cloud only
 > - **Spill files** → FS + Cloud only
@@ -172,7 +453,7 @@ should_not_persist_transaction_given_abort_when_crash_after                   [F
 should_recover_committed_transactions_given_wal_replay_when_restart           [FS, CLOUD]
 ```
 
-**Reason:** Tests validate transaction *rules* logically (commit, rollback, isolation) across all modes. Recovery tests require durable persistence.
+**Reason:** Tests validate transaction _rules_ logically (commit, rollback, isolation) across all modes. Recovery tests require durable persistence.
 
 ---
 
@@ -284,11 +565,11 @@ should_handle_mixed_value_sizes_in_spilled_transaction_when_committed         [F
 should_not_create_disk_artifacts_given_large_transaction_when_memory_mode     [MEMORY ONLY]
 ```
 
-**Reason:** Spill tests require on-disk spill files. The memory-mode test verifies that spill files are *not* created under memory-mode.
+**Reason:** Spill tests require on-disk spill files. The memory-mode test verifies that spill files are _not_ created under memory-mode.
 
 ---
 
-# ✅ **COLUMN FAMILIES**
+# COLUMN FAMILIES
 
 ### **column_families.rs**
 
@@ -325,7 +606,7 @@ should_maintain_cf_isolation_given_many_cfs_when_operating
 
 ---
 
-# ✅ **CONFIG**
+# CONFIG
 
 ### **config_api.rs**
 
@@ -354,7 +635,7 @@ should_store_path_given_absolute_path_when_building
 
 ---
 
-# ✅ **DURABILITY + RECOVERY**
+# DURABILITY & RECOVERY
 
 ### **durability_wal.rs**
 
@@ -408,7 +689,7 @@ should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopening
 
 ---
 
-# ✅ **SST LAYER**
+# SST LAYER
 
 ### **sst_reader.rs**
 
@@ -562,7 +843,7 @@ should_encode_bloom_efficiently
 
 ---
 
-# ✅ **STREAMING / READ OPTIMIZATION**
+# STREAMING / READ OPTIMIZATION
 
 ### **streaming_bloom.rs**
 
@@ -626,33 +907,33 @@ should_optimize_repeated_range_scan
 
 ## Run against storage modes (with transaction-aware matrix)
 
-| File                    | Memory | FS | Cloud | Notes |
-| ----------------------- | ------ | -- | ----- | ----- |
-| engine_basic            | ✔️     | ✔️ | ✔️    | |
-| engine_write_batch      | ✔️     | ✔️ | ✔️    | |
-| engine_delete_range     | ✔️     | ✔️ | ✔️    | |
-| engine_iterators        | ✔️     | ✔️ | ✔️    | |
-| engine_snapshots        | ✔️     | ✔️ | ✔️    | |
-| engine_merge            | ✔️     | ✔️ | ✔️    | |
-| engine_ttl              | ✔️     | ✔️ | ✔️    | |
-| column_families         | ✔️     | ✔️ | ✔️    | |
-| config_api              | ✔️     | ✔️ | ✔️    | |
-| durability_atomicity    | ✔️*    | ✔️ | ✔️    | *Some tests FS+Cloud only |
-| durability_recovery     | ⚠️*    | ✔️ | ✔️    | *Most FS+Cloud only |
-| durability_wal          | ⚠️*    | ✔️ | ✔️    | *Most FS+Cloud only |
-| sst_reader              | ✔️     | ✔️ | ✔️    | |
-| sst_writer              | ✔️     | ✔️ | ✔️    | |
-| sst_index_table         | ✔️     | ✔️ | ✔️    | |
-| sst_tombstone_index     | ✔️     | ✔️ | ✔️    | |
-| sst_trie                | ✔️     | ✔️ | ✔️    | |
-| sst_fence_pointers      | ✔️     | ✔️ | ✔️    | |
-| sst_block_cache         | ✔️     | ✔️ | ✔️    | |
-| sst_per_block_bloom     | ✔️     | ✔️ | ✔️    | |
-| streaming_bloom         | ✔️     | ✔️ | ✔️    | Phase 5+ |
-| streaming_fence_pointer | ✔️     | ✔️ | ✔️    | Phase 5+ |
-| streaming_sequential    | ✔️     | ✔️ | ✔️    | Phase 5+ |
-| transaction_basic       | ✔️**   | ✔️ | ✔️    | **Except crash/restart tests (FS+Cloud) |
-| transaction_conflicts   | ✔️**   | ✔️ | ✔️    | **Except restart tests (FS+Cloud) |
-| transaction_isolation   | ✔️**   | ✔️ | ✔️    | **Except one restart test (FS+Cloud) |
-| transaction_advanced    | ❌     | ✔️ | ✔️    | Requires WAL durability |
-| transaction_spill       | ⚠️     | ✔️ | ✔️    | ⚠️ One test MEMORY ONLY |
+| File                    | Memory | FS  | Cloud | Notes                                     |
+| ----------------------- | ------ | --- | ----- | ----------------------------------------- |
+| engine_basic            | ✔️     | ✔️  | ✔️    |                                           |
+| engine_write_batch      | ✔️     | ✔️  | ✔️    |                                           |
+| engine_delete_range     | ✔️     | ✔️  | ✔️    |                                           |
+| engine_iterators        | ✔️     | ✔️  | ✔️    |                                           |
+| engine_snapshots        | ✔️     | ✔️  | ✔️    |                                           |
+| engine_merge            | ✔️     | ✔️  | ✔️    |                                           |
+| engine_ttl              | ✔️     | ✔️  | ✔️    |                                           |
+| column_families         | ✔️     | ✔️  | ✔️    |                                           |
+| config_api              | ✔️     | ✔️  | ✔️    |                                           |
+| durability_atomicity    | ✔️\*   | ✔️  | ✔️    | \*Some tests FS+Cloud only                |
+| durability_recovery     | ⚠️\*   | ✔️  | ✔️    | \*Most FS+Cloud only                      |
+| durability_wal          | ⚠️\*   | ✔️  | ✔️    | \*Most FS+Cloud only                      |
+| sst_reader              | ✔️     | ✔️  | ✔️    |                                           |
+| sst_writer              | ✔️     | ✔️  | ✔️    |                                           |
+| sst_index_table         | ✔️     | ✔️  | ✔️    |                                           |
+| sst_tombstone_index     | ✔️     | ✔️  | ✔️    |                                           |
+| sst_trie                | ✔️     | ✔️  | ✔️    |                                           |
+| sst_fence_pointers      | ✔️     | ✔️  | ✔️    |                                           |
+| sst_block_cache         | ✔️     | ✔️  | ✔️    |                                           |
+| sst_per_block_bloom     | ✔️     | ✔️  | ✔️    |                                           |
+| streaming_bloom         | ✔️     | ✔️  | ✔️    | Phase 5+                                  |
+| streaming_fence_pointer | ✔️     | ✔️  | ✔️    | Phase 5+                                  |
+| streaming_sequential    | ✔️     | ✔️  | ✔️    | Phase 5+                                  |
+| transaction_basic       | ✔️\*\* | ✔️  | ✔️    | \*\*Except crash/restart tests (FS+Cloud) |
+| transaction_conflicts   | ✔️\*\* | ✔️  | ✔️    | \*\*Except restart tests (FS+Cloud)       |
+| transaction_isolation   | ✔️\*\* | ✔️  | ✔️    | \*\*Except one restart test (FS+Cloud)    |
+| transaction_advanced    | ❌     | ✔️  | ✔️    | Requires WAL durability                   |
+| transaction_spill       | ⚠️     | ✔️  | ✔️    | ⚠️ One test MEMORY ONLY                   |

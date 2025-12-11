@@ -63,8 +63,7 @@ impl Default for StorageBudgetPolicy {
 }
 
 /// Eviction strategy for local SST replicas
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EvictionStrategy {
     /// Least Recently Used
     #[default]
@@ -74,4 +73,3 @@ pub enum EvictionStrategy {
     /// Random eviction
     Random,
 }
-

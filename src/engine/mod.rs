@@ -147,7 +147,10 @@ impl MidgeEngine {
         let (db_path, memory_mode) = match &opts.storage_mode {
             crate::testkit::StorageMode::Memory => {
                 // For memory mode, use a placeholder path that will never be touched
-                (PathBuf::from(format!("target/tmp/memory_{}", std::process::id())), true)
+                (
+                    PathBuf::from(format!("target/tmp/memory_{}", std::process::id())),
+                    true,
+                )
             }
             crate::testkit::StorageMode::LocalDisk { db_path } => (db_path.clone(), false),
             crate::testkit::StorageMode::CloudBacked { local_cache_path } => {
@@ -279,13 +282,7 @@ impl MidgeEngine {
         start: &[u8],
         end: &[u8],
     ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        // TODO: Add RuntimeMsg::RangeScan variant and implement in runtime.
-        // For now, simulate via multiple get() calls (inefficient but correct).
-        // This is a placeholder until proper range scan message is added.
-        let _ = (cf, start, end);
-
-        // Return empty for now - proper implementation requires RuntimeMsg::RangeScan
-        Ok(vec![])
+        self.range_with_sequence(cf, start, end, u64::MAX)
     }
 
     /// Alias for range() for backward compatibility
@@ -298,29 +295,72 @@ impl MidgeEngine {
         self.range(cf, start, end)
     }
 
+    fn range_with_sequence(
+        &self,
+        cf: &ColumnFamilyHandle,
+        start: &[u8],
+        end: &[u8],
+        sequence: u64,
+    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
+            request_id: next_request_id(),
+            cf_id: cf.id.0,
+            start: start.to_vec(),
+            end: end.to_vec(),
+            sequence,
+        })?;
+
+        match response {
+            RuntimeResponse::RangeScanResults { results, .. } => Ok(results
+                .into_iter()
+                .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
+                .collect()),
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to range scan".to_string(),
+            )),
+        }
+    }
+
     /// Scan with Query parameters
     pub fn scan(
         &self,
         cf: &ColumnFamilyHandle,
         query: &api::Query,
     ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+        self.scan_with_sequence(cf, query, u64::MAX)
+    }
+
+    fn scan_with_sequence(
+        &self,
+        cf: &ColumnFamilyHandle,
+        query: &api::Query,
+        sequence: u64,
+    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
         // Use the effective start/end from the query
         let start_owned;
         let start = if let Some(s) = query.effective_start() {
             s
         } else {
+            // If no start bound, use empty byte slice (start of all keys)
             start_owned = vec![];
             &start_owned[..]
         };
 
+        // For end bound: if no explicit end and no prefix, use high sentinel value
         let end_vec = query.effective_end();
+        let end_sentinel = vec![0xFFu8; 256]; // High sentinel for full scan
         let end = if let Some(ref e) = end_vec {
             &e[..]
+        } else if query.prefix.is_none() && query.end.is_none() {
+            // No prefix and no end bound: full key space scan
+            &end_sentinel[..]
         } else {
+            // Has prefix or end bound already computed
             &[][..]
         };
 
-        let mut results = self.range(cf, start, end)?;
+        let mut results = self.range_with_sequence(cf, start, end, sequence)?;
 
         // Apply limit
         if let Some(limit) = query.limit {
@@ -559,21 +599,25 @@ impl MidgeEngine {
 
     /// Create a snapshot of the current database state
     pub fn snapshot(&self) -> api::Snapshot {
-        // TODO: Query current sequence from runtime via send_and_wait.
-        // For now, use snapshot_id as sequence (incorrect but safe for testing).
         let snapshot_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        api::Snapshot::new(snapshot_id, None, snapshot_id)
+        let sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        api::Snapshot::new(sequence, None, snapshot_id, self.runtime_handle.clone())
     }
 
     /// Create a snapshot of a specific column family
     pub fn snapshot_cf(&self, cf: &ColumnFamilyHandle) -> api::Snapshot {
-        // TODO: Query current sequence from runtime.
         let snapshot_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        api::Snapshot::new(snapshot_id, Some(cf.id), snapshot_id)
+        let sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        api::Snapshot::new(
+            sequence,
+            Some(cf.id),
+            snapshot_id,
+            self.runtime_handle.clone(),
+        )
     }
 
     /// Create a new transaction with serializable isolation

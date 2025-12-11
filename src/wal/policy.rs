@@ -7,8 +7,7 @@
 ///
 /// This determines when the WalActor calls fsync() on the underlying writer
 /// and whether cloud replication is required for durability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DurabilityPolicy {
     /// Fsync after every single write operation.
     /// Maximum durability, highest latency.
@@ -32,7 +31,6 @@ pub enum DurabilityPolicy {
     /// WalActor tracks cloud_durable_seq and blocks responses until cloud confirms.
     CloudFirst,
 }
-
 
 /// Configuration for batched sync policy.
 #[derive(Debug, Clone, Copy)]
