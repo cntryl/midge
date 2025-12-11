@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
-use cntryl_midge::{MergeOperator, MidgeResult, StorageMode};
+use cntryl_midge::{MergeOperator, MidgeResult};
 use std::sync::Arc;
 
 // ============================================================================

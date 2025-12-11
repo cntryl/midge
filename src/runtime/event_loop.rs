@@ -513,7 +513,9 @@ impl EventLoop {
                 match op_type {
                     OpType::Put => {
                         // Oldest Put becomes the base value
-                        base_value = Some(value_opt.as_ref().unwrap().to_vec());
+                        if let Some(value) = value_opt.as_ref() {
+                            base_value = Some(value.to_vec());
+                        }
                         merge_operands.clear(); // Start fresh after a Put
                     }
                     OpType::Delete => {

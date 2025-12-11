@@ -109,7 +109,7 @@ fn should_see_own_writes_given_transaction_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
-        let cf = engine.default_column_family();
+        let _cf = engine.default_column_family();
         
         // Act
         // let mut txn = engine.transaction();

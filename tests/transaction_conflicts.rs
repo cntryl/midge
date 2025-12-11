@@ -149,7 +149,7 @@ fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
         engine.put(cf, b"key2", b"value2").unwrap();
         
         // Act
-        let mut txn1 = engine.transaction();
+        let txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
         
         // txn1.delete_range(cf.id(), b"key1", b"key3").unwrap();
@@ -174,7 +174,7 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
         
         // Act
         let mut txn1 = engine.transaction();
-        let mut txn2 = engine.transaction();
+        let txn2 = engine.transaction();
         
         txn1.put(cf.id(), b"key".to_vec(), b"value".to_vec()).unwrap();
         // txn2.delete_range(cf.id(), b"key", b"keyz").unwrap();
@@ -199,8 +199,8 @@ fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
         engine.put(cf, b"key2", b"value2").unwrap();
         
         // Act
-        let mut txn1 = engine.transaction();
-        let mut txn2 = engine.transaction();
+        let txn1 = engine.transaction();
+        let txn2 = engine.transaction();
         
         // txn1.delete_range(cf.id(), b"key1", b"key3").unwrap();
         // txn2.delete_range(cf.id(), b"key1", b"key3").unwrap();
@@ -223,7 +223,7 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
         engine.put(cf, b"key", b"value").unwrap();
         
         // Act
-        let mut txn1 = engine.transaction();
+        let txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
         
         // txn1.delete_range(cf.id(), b"key", b"keyz").unwrap();
@@ -250,8 +250,8 @@ fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first()
         let cf = engine.default_column_family();
         
         // Act
-        let mut txn1 = engine.transaction();
-        let mut txn2 = engine.transaction();
+        let txn1 = engine.transaction();
+        let txn2 = engine.transaction();
         
         // txn1.insert(cf.id(), b"key".to_vec(), b"value1".to_vec()).unwrap();
         // txn2.insert(cf.id(), b"key".to_vec(), b"value2".to_vec()).unwrap();
@@ -276,7 +276,7 @@ fn should_conflict_on_insert_given_key_already_exists_when_committed() {
         engine.put(cf, b"key", b"existing").unwrap();
         
         // Act
-        let mut txn = engine.transaction();
+        let txn = engine.transaction();
         // let result = txn.insert(cf.id(), b"key".to_vec(), b"newvalue".to_vec());
         
         // Assert
@@ -297,8 +297,8 @@ fn should_allow_lost_update_given_put_read_modify_write_when_concurrent() {
         engine.put(cf, b"counter", b"0").unwrap();
         
         // Act - simulate lost update with LWW semantics
-        let val1 = engine.get(cf, b"counter").unwrap().unwrap();
-        let val2 = engine.get(cf, b"counter").unwrap().unwrap();
+        let _val1 = engine.get(cf, b"counter").unwrap().unwrap();
+        let _val2 = engine.get(cf, b"counter").unwrap().unwrap();
         
         let mut txn1 = engine.transaction();
         txn1.put(cf.id(), b"counter".to_vec(), b"1".to_vec()).unwrap();
@@ -549,7 +549,7 @@ fn should_handle_concurrent_read_modify_writes_without_panic() {
 fn should_handle_high_concurrency_optimistic_locking() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let _engine = Arc::new(open_with_mode(opts, mode));
         // Test optimistic locking with high concurrency
     });
 }
@@ -559,7 +559,7 @@ fn should_handle_high_concurrency_optimistic_locking() {
 fn should_maintain_transaction_isolation_under_stress() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let _engine = Arc::new(open_with_mode(opts, mode));
         // Test transaction isolation under concurrent load
     });
 }
