@@ -234,11 +234,13 @@ impl StorageBudgetActor {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn set_sst_bytes(&mut self, bytes: u64) {
         self.disk_state.sst_bytes = bytes;
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn set_wal_bytes(&mut self, bytes: u64) {
         self.disk_state.wal_bytes = bytes;
     }

@@ -38,7 +38,7 @@ impl crate::sst::SstFactory for FsSstFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sst::{DynSstWriter, SstFactory, SstReader};
+    use crate::sst::SstFactory;
 
     #[test]
     fn should_create_writer_when_factory_initialized() -> MidgeResult<()> {

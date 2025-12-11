@@ -339,6 +339,7 @@ mod tests {
 
     #[test]
     fn should_deduplicate_multiple_keys_independently() {
+        // Arrange
         let versions = vec![
             mk_version("a", 1, false, Some("a1"), None),
             mk_version("a", 3, false, Some("a3"), None),
@@ -346,7 +347,10 @@ mod tests {
             mk_version("b", 1, false, Some("b1"), None),
         ];
 
+        // Act
         let deduped = deduplicate_versions(&versions);
+
+        // Assert
 
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].key, b"a".to_vec());
@@ -364,12 +368,18 @@ mod tests {
 
     #[test]
     fn should_not_expire_version_when_future_or_none() {
+        // Arrange
         let now = 1_000_000u64;
         let v_future = mk_version("k", 1, false, Some("v"), Some(now + 10));
         let v_none = mk_version("k", 1, false, Some("v"), None);
 
-        assert!(!is_expired(&v_future, now));
-        assert!(!is_expired(&v_none, now));
+        // Act
+        let future_expired = is_expired(&v_future, now);
+        let none_expired = is_expired(&v_none, now);
+
+        // Assert
+        assert!(!future_expired);
+        assert!(!none_expired);
     }
 
     #[test]
@@ -448,6 +458,7 @@ mod tests {
         use crate::compaction::merge::{MergeEntry, MergeIterator};
         use bytes::Bytes;
 
+        // Arrange
         let stream1: Vec<MergeEntry> = vec![];
         let stream2 = vec![MergeEntry {
             key: Bytes::from(b"k".to_vec()),
@@ -455,6 +466,7 @@ mod tests {
             seq: 10,
         }];
 
+        // Act
         let merge_iter =
             MergeIterator::from_iterators(vec![stream1.into_iter(), stream2.into_iter()]);
 
@@ -469,6 +481,8 @@ mod tests {
         let dedup_iter = StreamDeduplicate::new(version_iter);
         let result: Vec<_> = dedup_iter.collect();
 
+        // Assert
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].key, b"k".to_vec());
         assert_eq!(result[0].seq, 10);
@@ -479,6 +493,7 @@ mod tests {
         use crate::compaction::merge::{MergeEntry, MergeIterator};
         use bytes::Bytes;
 
+        // Arrange
         // Stream 1: a(5), a(3), b(4)
         let stream1 = vec![
             MergeEntry {

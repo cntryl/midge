@@ -137,10 +137,11 @@ fn should_succeed_given_nonexistent_key_when_delete() {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Act + Assert: must not error
-        engine
-            .delete(cf, b"nonexistent")
-            .expect("delete nonexistent");
+        // Act
+        let result = engine.delete(cf, b"nonexistent");
+
+        // Assert
+        result.expect("delete nonexistent");
     });
 }
 
