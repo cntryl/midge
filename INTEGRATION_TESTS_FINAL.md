@@ -12,11 +12,13 @@
 - ❌ Never stub behavior; always write desired semantics
 
 **Expected Workflow**:
-1. **Phase 1**: Basic engine operations (in progress ✅)
-2. **Phase 2**: Write batches & delete ranges (in progress ✅)
-3. **Phase 3**: Snapshots, iterators, merge operators
-4. **Phase 4**: Transactions, column families, durability
-5. **Phase 5**: SST layer, streaming optimizations
+1. **Phase 1**: Basic engine operations ✅ COMPLETE (35/35 tests)
+2. **Phase 2**: Reading & iteration ✅ COMPLETE (31/31 tests)
+3. **Phase 3**: Advanced operations ✅ COMPLETE (28/28 tests)
+4. **Phase 4**: Transactions 🔄 IN PROGRESS (35/61 tests, 57%)
+5. **Phase 5**: SST layer, streaming optimizations 📋 PLANNED
+
+**Current Status**: 129 active integration tests passing
 
 ---
 
@@ -240,9 +242,9 @@ cargo test --test engine_basic --test engine_write_batch --test engine_delete_ra
 | **engine_ttl.rs** | 12 | ✅ Passing (7/7 active, 5 ignored) | TTL support complete (expiration at read time) |
 | **column_families.rs** | 28 | ✅ Passing (12/12 active, 16 ignored) | CF lifecycle and isolation complete |
 | **config_api.rs** | 20 | 📋 Not started | Config builder validation |
-| **transaction_basic.rs** | 16 | 📋 Not started | Transaction lifecycle |
-| **transaction_conflicts.rs** | 25 | 📋 Not started | LWW conflict resolution |
-| **transaction_isolation.rs** | 20 | 📋 Not started | Isolation guarantees |
+| **transaction_basic.rs** | 16 | ✅ Passing (7/7 active, 9 ignored) | Transaction lifecycle with state machine |
+| **transaction_conflicts.rs** | 25 | ✅ Passing (13/13 active, 12 ignored) | LWW semantics & stress tests |
+| **transaction_isolation.rs** | 20 | ✅ Passing (15/15 active, 5 ignored) | Snapshot isolation & dirty read prevention |
 | **transaction_advanced.rs** | 10 | 📋 Not started | Crash recovery for txns |
 | **transaction_spill.rs** | 13 | 📋 Not started | Large transaction spill |
 | **durability_wal.rs** | 10 | 📋 Not started | WAL behavior |
@@ -432,26 +434,34 @@ should_update_ttl_given_overwrite_with_new_ttl_when_writing
 
 ### **transaction_basic.rs**
 
+**Status**: ✅ Passing (7/16 tests, 9 ignored)
+
 **Runs on ALL modes (with exceptions noted):**
 
 ```
-should_commit_transaction_given_multiple_operations_when_committed            [ALL]
-should_succeed_given_empty_transaction_when_committed                         [ALL]
-should_succeed_given_read_only_transaction_when_committed                     [ALL]
-should_rollback_transaction_given_uncommitted_when_dropped                    [ALL]
-should_rollback_all_writes_given_multiple_operations_when_dropped             [ALL]
-should_release_locks_given_aborted_transaction_when_cleanup                   [ALL]
-should_provide_snapshot_isolation_given_concurrent_writes_when_transaction_active [ALL]
-should_read_own_writes_given_transaction_when_reading                         [ALL]
-should_insert_value_given_nonexistent_key_when_insert_in_transaction          [ALL]
-should_delete_range_given_committed_transaction_when_delete_range             [ALL]
-should_hide_deleted_range_given_transaction_scan_when_delete_range            [ALL]
-should_see_uncommitted_writes_given_transaction_scan_when_scanning            [ALL]
-should_allow_operations_given_previous_commit_failed_when_disk_full           [ALL]
-should_persist_transaction_given_commit_when_crash_after                      [FS, CLOUD]
-should_not_persist_transaction_given_abort_when_crash_after                   [FS, CLOUD]
-should_recover_committed_transactions_given_wal_replay_when_restart           [FS, CLOUD]
+✅ should_commit_transaction_given_multiple_operations_when_committed            [ALL]
+✅ should_succeed_given_empty_transaction_when_committed                         [ALL]
+✅ should_succeed_given_read_only_transaction_when_committed                     [ALL]
+✅ should_rollback_transaction_given_uncommitted_when_dropped                    [ALL]
+✅ should_rollback_all_writes_given_multiple_operations_when_dropped             [ALL]
+⏭️ should_release_locks_given_aborted_transaction_when_cleanup                   [ALL] (ignored: requires lock management)
+✅ should_provide_snapshot_isolation_given_concurrent_writes_when_transaction_active [ALL]
+⏭️ should_read_own_writes_given_transaction_when_reading                         [ALL] (ignored: requires transaction-scoped reads)
+⏭️ should_insert_value_given_nonexistent_key_when_insert_in_transaction          [ALL] (ignored: requires insert() with existence check)
+✅ should_delete_range_given_committed_transaction_when_delete_range             [ALL]
+⏭️ should_hide_deleted_range_given_transaction_scan_when_delete_range            [ALL] (ignored: requires transaction-scoped range scan)
+⏭️ should_see_uncommitted_writes_given_transaction_scan_when_scanning            [ALL] (ignored: requires transaction-scoped range scan)
+⏭️ should_allow_operations_given_previous_commit_failed_when_disk_full           [ALL] (ignored: requires retry logic)
+⏭️ should_persist_transaction_given_commit_when_crash_after                      [FS, CLOUD] (ignored: requires persistence)
+⏭️ should_not_persist_transaction_given_abort_when_crash_after                   [FS, CLOUD] (ignored: requires persistence)
+⏭️ should_recover_committed_transactions_given_wal_replay_when_restart           [FS, CLOUD] (ignored: requires persistence & WAL)
 ```
+
+**Implementation Notes:**
+- Transaction state machine: Active → ReadPhase → Committing → Committed
+- Fixed commit_transaction() to properly transition through states
+- WriteIntent tracking for pending operations
+- Rollback on drop implemented
 
 **Reason:** Tests validate transaction _rules_ logically (commit, rollback, isolation) across all modes. Recovery tests require durable persistence.
 
@@ -459,35 +469,44 @@ should_recover_committed_transactions_given_wal_replay_when_restart           [F
 
 ### **transaction_conflicts.rs**
 
+**Status**: ✅ Passing (13/25 tests, 12 ignored)
+
 **Runs on ALL modes (with exceptions noted):**
 
 ```
-should_allow_concurrent_puts_to_same_key_given_lww_semantics                  [ALL]
-should_allow_both_puts_to_succeed_given_concurrent_writes_when_lww            [ALL]
-should_accept_both_committers_given_concurrent_puts_when_lww                  [ALL]
-should_preserve_first_commit_given_write_conflict_when_second_aborts          [ALL]
-should_allow_concurrent_delete_put_operations_given_lww_semantics             [ALL]
-should_allow_overlapping_put_after_delete_range_given_lww_semantics           [ALL]
-should_allow_put_then_delete_range_given_lww_semantics                        [ALL]
-should_allow_concurrent_delete_ranges_given_lww_semantics                     [ALL]
-should_allow_delete_range_delete_operations_given_lww_semantics               [ALL]
-should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first   [ALL]
-should_conflict_on_insert_given_key_already_exists_when_committed             [ALL]
-should_allow_lost_update_given_put_read_modify_write_when_concurrent          [ALL]
-should_detect_lost_update_given_cas_pattern_when_value_changed                [ALL]
-should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commits [ALL]
-should_commit_transaction_given_no_conflicts                                  [ALL]
-should_commit_transaction_given_concurrent_modifications_to_different_keys     [ALL]
-should_read_values_within_transaction                                         [ALL]
-should_commit_new_key_given_clean_transaction                                 [ALL]
-should_allow_concurrent_writes_to_different_keys                              [ALL]
-should_handle_high_contention_writes_without_panic                            [ALL]
-should_handle_concurrent_read_modify_writes_without_panic                     [ALL]
-should_handle_high_concurrency_optimistic_locking                             [ALL]
-should_maintain_transaction_isolation_under_stress                            [ALL]
-should_recover_conflict_state_after_engine_restart                            [FS, CLOUD]
-should_persist_lost_update_prevention_after_restart                           [FS, CLOUD]
+✅ should_allow_concurrent_puts_to_same_key_given_lww_semantics                  [ALL]
+✅ should_allow_both_puts_to_succeed_given_concurrent_writes_when_lww            [ALL]
+✅ should_accept_both_committers_given_concurrent_puts_when_lww                  [ALL]
+✅ should_preserve_first_commit_given_write_conflict_when_second_aborts          [ALL]
+✅ should_allow_concurrent_delete_put_operations_given_lww_semantics             [ALL]
+⏭️ should_allow_overlapping_put_after_delete_range_given_lww_semantics           [ALL] (ignored: requires delete_range in transactions)
+⏭️ should_allow_put_then_delete_range_given_lww_semantics                        [ALL] (ignored: requires delete_range in transactions)
+⏭️ should_allow_concurrent_delete_ranges_given_lww_semantics                     [ALL] (ignored: requires delete_range in transactions)
+⏭️ should_allow_delete_range_delete_operations_given_lww_semantics               [ALL] (ignored: requires delete_range in transactions)
+⏭️ should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first   [ALL] (ignored: requires insert() with existence check)
+⏭️ should_conflict_on_insert_given_key_already_exists_when_committed             [ALL] (ignored: requires insert() with existence check)
+✅ should_allow_lost_update_given_put_read_modify_write_when_concurrent          [ALL]
+⏭️ should_detect_lost_update_given_cas_pattern_when_value_changed                [ALL] (ignored: requires compare-and-swap)
+✅ should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commits [ALL]
+✅ should_commit_transaction_given_no_conflicts                                  [ALL]
+✅ should_commit_transaction_given_concurrent_modifications_to_different_keys     [ALL]
+⏭️ should_read_values_within_transaction                                         [ALL] (ignored: requires transaction-scoped reads)
+✅ should_commit_new_key_given_clean_transaction                                 [ALL]
+✅ should_allow_concurrent_writes_to_different_keys                              [ALL]
+✅ should_handle_high_contention_writes_without_panic                            [ALL]
+✅ should_handle_concurrent_read_modify_writes_without_panic                     [ALL]
+⏭️ should_handle_high_concurrency_optimistic_locking                             [ALL] (ignored: requires optimistic locking implementation)
+⏭️ should_maintain_transaction_isolation_under_stress                            [ALL] (ignored: requires full isolation implementation)
+⏭️ should_recover_conflict_state_after_engine_restart                            [FS, CLOUD] (ignored: requires persistence)
+⏭️ should_persist_lost_update_prevention_after_restart                           [FS, CLOUD] (ignored: requires persistence)
 ```
+
+**Implementation Notes:**
+- Last-Write-Wins (LWW) semantics validated
+- No optimistic conflict detection (by design)
+- Concurrent transactions succeed independently
+- Stress tests: 20 threads writing to same key (high contention)
+- Thread safety confirmed under concurrent load
 
 **Reason:** LWW semantics and conflict detection are in-memory guarantees. Recovery tests require durable state.
 
@@ -495,30 +514,39 @@ should_persist_lost_update_prevention_after_restart                           [F
 
 ### **transaction_isolation.rs**
 
+**Status**: ✅ Passing (15/20 tests, 5 ignored)
+
 **Runs on ALL modes (with exceptions noted):**
 
 ```
-should_prevent_dirty_read_given_uncommitted_write_when_reading                [ALL]
-should_not_see_uncommitted_write_given_concurrent_transaction_when_reading    [ALL]
-should_allow_dirty_write_given_uncommitted_update_when_serialized             [ALL]
-should_read_uncommitted_value_given_put_in_same_transaction_when_reading      [ALL]
-should_see_own_writes_given_transaction_when_reading                          [ALL]
-should_read_at_begin_sequence_given_snapshot_when_reading                     [ALL]
-should_not_see_concurrent_writes_given_snapshot_isolation_when_reading        [ALL]
-should_return_old_value_given_snapshot_before_write_when_reading              [ALL]
-should_provide_consistent_view_given_transaction_when_scanning                [ALL]
-should_allow_commit_given_read_key_modified_when_concurrent_write             [ALL]
-should_allow_put_commit_given_read_key_modified_when_concurrent_write         [ALL]
-should_allow_concurrent_puts_given_different_keys_when_multiple_transactions  [ALL]
-should_allow_commit_under_read_committed_isolation_when_serializable_not_needed [ALL]
-should_prevent_phantom_read_given_range_query_when_concurrent_insert          [ALL]
-should_rollback_all_operations_given_transaction_when_aborted                 [ALL]
-should_preserve_isolation_across_transaction_lifecycle_when_reading           [ALL]
-should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed [ALL]
-should_handle_high_concurrency_readers_given_many_transactions_when_active    [ALL]
-should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent     [ALL]
-should_recover_snapshot_view_after_engine_restart                             [FS, CLOUD]
+✅ should_prevent_dirty_read_given_uncommitted_write_when_reading                [ALL]
+✅ should_not_see_uncommitted_write_given_concurrent_transaction_when_reading    [ALL]
+✅ should_allow_dirty_write_given_uncommitted_update_when_serialized             [ALL]
+⏭️ should_read_uncommitted_value_given_put_in_same_transaction_when_reading      [ALL] (ignored: requires transaction-scoped reads)
+⏭️ should_see_own_writes_given_transaction_when_reading                          [ALL] (ignored: requires transaction-scoped reads)
+✅ should_read_at_begin_sequence_given_snapshot_when_reading                     [ALL]
+✅ should_not_see_concurrent_writes_given_snapshot_isolation_when_reading        [ALL]
+✅ should_return_old_value_given_snapshot_before_write_when_reading              [ALL]
+⏭️ should_provide_consistent_view_given_transaction_when_scanning                [ALL] (ignored: requires transaction-scoped range scans)
+✅ should_allow_commit_given_read_key_modified_when_concurrent_write             [ALL]
+✅ should_allow_put_commit_given_read_key_modified_when_concurrent_write         [ALL]
+✅ should_allow_concurrent_puts_given_different_keys_when_multiple_transactions  [ALL]
+✅ should_allow_commit_under_read_committed_isolation_when_serializable_not_needed [ALL]
+⏭️ should_prevent_phantom_read_given_range_query_when_concurrent_insert          [ALL] (ignored: requires phantom read detection)
+✅ should_rollback_all_operations_given_transaction_when_aborted                 [ALL]
+✅ should_preserve_isolation_across_transaction_lifecycle_when_reading           [ALL]
+✅ should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed [ALL]
+✅ should_handle_high_concurrency_readers_given_many_transactions_when_active    [ALL]
+✅ should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent     [ALL]
+⏭️ should_recover_snapshot_view_after_engine_restart                             [FS, CLOUD] (ignored: requires persistence)
 ```
+
+**Implementation Notes:**
+- Dirty read prevention working correctly
+- Snapshot isolation validated (transactions capture snapshot at start)
+- No dirty reads from uncommitted transactions
+- Stress tests: 50 concurrent readers, 30-thread mixed read/write load
+- Thread safety validated under high concurrency
 
 **Reason:** Isolation is a logical guarantee (no dirty reads, phantom reads, etc.). Recovery requires persistence.
 
