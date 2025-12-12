@@ -93,7 +93,7 @@ fn run_workload_d(
             let _ = black_box(engine.get(cf, key));
         } else {
             // 5% updates, grouped into small batches
-            batch.put(cf_id, key.clone(), val.clone());
+            batch.put_cf(cf_id, key.clone(), val.clone());
 
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();
@@ -143,7 +143,7 @@ fn run_workload_d_concurrent(
         if rng.gen_bool(READ_RATIO) {
             let _ = black_box(engine.get(cf, key));
         } else {
-            batch.put(cf_id, key.clone(), val.clone());
+            batch.put_cf(cf_id, key.clone(), val.clone());
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();
                 batch.clear();
