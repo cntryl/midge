@@ -126,3 +126,387 @@ impl WalWriter for FsWalWriter {
         self.sync()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Read;
+    use tempfile::TempDir;
+    use bytes::Bytes;
+
+    // =========== Creation and Position Tests ===========
+
+    #[test]
+    fn should_create_wal_writer_and_wal_log_file() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+
+        // Act
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+
+        // Assert
+        assert!(dir.path().join("wal.log").exists());
+        assert_eq!(writer.current_pos(), 0);
+    }
+
+    #[test]
+    fn should_track_write_position_after_records() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let record = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("key1"),
+            value: Some(Bytes::from("value1")),
+            cf_id: 0,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+
+        // Act
+        let pos1 = writer.append_record(&record).unwrap();
+        let pos2 = writer.append_record(&record).unwrap();
+
+        // Assert
+        assert_eq!(pos1, 0);
+        assert!(pos2 > pos1);
+        // current_pos() should be beyond pos2 (since we wrote a record at pos2)
+        assert!(writer.current_pos() > pos2);
+    }
+
+    #[test]
+    fn should_return_previous_position_on_append() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let record = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("test_key"),
+            value: Some(Bytes::from("test_value")),
+            cf_id: 1,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+
+        // Act
+        let returned_pos = writer.append_record(&record).unwrap();
+        let current_pos = writer.current_pos();
+
+        // Assert
+        assert_eq!(returned_pos, 0);
+        assert!(current_pos > returned_pos);
+    }
+
+    #[test]
+    fn should_monotonically_increase_write_position() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let record1 = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("key1"),
+            value: Some(Bytes::from("value1")),
+            cf_id: 0,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+        let record2 = WalRecord {
+            op: WalOpKind::Delete,
+            key: Bytes::from("key2"),
+            value: None,
+            cf_id: 0,
+            seq: 2,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+
+        // Act
+        let pos1 = writer.append_record(&record1).unwrap();
+        let middle_pos = writer.current_pos();
+        let pos2 = writer.append_record(&record2).unwrap();
+        let final_pos = writer.current_pos();
+
+        // Assert
+        assert_eq!(pos1, 0);
+        assert!(middle_pos > pos1);
+        assert_eq!(pos2, middle_pos);
+        assert!(final_pos > pos2);
+    }
+
+    // =========== Flush and Sync Tests ===========
+
+    #[test]
+    fn should_flush_without_error() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let record = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("key"),
+            value: Some(Bytes::from("value")),
+            cf_id: 0,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+        writer.append_record(&record).unwrap();
+
+        // Act & Assert
+        assert!(writer.flush().is_ok());
+    }
+
+    #[test]
+    fn should_sync_without_error() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let record = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("key"),
+            value: Some(Bytes::from("value")),
+            cf_id: 0,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+        writer.append_record(&record).unwrap();
+
+        // Act & Assert
+        assert!(writer.sync().is_ok());
+    }
+
+    #[test]
+    fn should_sync_local_without_error() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+
+        // Act & Assert
+        assert!(writer.sync_local().is_ok());
+    }
+
+    // =========== Data Format and Invariants ===========
+
+    #[test]
+    fn should_write_with_length_prefix_format() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let record = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("abc"),
+            value: Some(Bytes::from("xyz")),
+            cf_id: 0,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+
+        // Act
+        writer.append_record(&record).unwrap();
+        writer.sync().unwrap();
+
+        // Assert - read back and verify format
+        let mut file = fs::File::open(dir.path().join("wal.log")).unwrap();
+        let mut buf = vec![0u8; 4];
+        file.read_exact(&mut buf).unwrap();
+        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        assert!(len > 0); // Length prefix should be non-zero for non-empty record
+    }
+
+    // =========== Close Tests ===========
+
+    #[test]
+    fn should_close_successfully() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+
+        // Act & Assert
+        assert!(writer.close().is_ok());
+    }
+
+    // =========== Operation Rejection Tests ===========
+
+    #[test]
+    fn should_reject_append_op_without_sequence() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+
+        // Act & Assert
+        let result = writer.append_op(WalOpKind::Put, b"key", Some(b"value"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("append_op() without explicit sequence is unsupported"));
+    }
+
+    #[test]
+    fn should_reject_append_op_kind_delete() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+
+        // Act & Assert
+        let result = writer.append_op(WalOpKind::Delete, b"key", None);
+        assert!(result.is_err());
+    }
+
+    // =========== Append Mode and Continuation Tests ===========
+
+    #[test]
+    fn should_append_to_existing_wal_log() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let record = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("key1"),
+            value: Some(Bytes::from("value1")),
+            cf_id: 0,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+
+        // Write first record
+        let writer1 = FsWalWriter::new(dir.path()).unwrap();
+        let pos1 = writer1.append_record(&record).unwrap();
+        writer1.sync().unwrap();
+
+        // Drop writer1 (file stays on disk)
+        drop(writer1);
+
+        // Act - open new writer on same directory
+        let writer2 = FsWalWriter::new(dir.path()).unwrap();
+        let expected_next_pos = pos1 + 4 + encoding::encode(&record).unwrap().len() as u64;
+
+        // Assert - new writer continues from end
+        assert_eq!(writer2.current_pos(), expected_next_pos);
+    }
+
+    #[test]
+    fn should_handle_large_record() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let large_value = vec![42u8; 100_000]; // 100 KB value
+        let record = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("large_key"),
+            value: Some(Bytes::copy_from_slice(&large_value)),
+            cf_id: 0,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+
+        // Act
+        let pos = writer.append_record(&record).unwrap();
+
+        // Assert
+        assert_eq!(pos, 0);
+        assert!(writer.current_pos() > large_value.len() as u64);
+    }
+
+    #[test]
+    fn should_handle_empty_value_in_delete_record() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let record = WalRecord {
+            op: WalOpKind::Delete,
+            key: Bytes::from("key_to_delete"),
+            value: None,
+            cf_id: 0,
+            seq: 1,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+
+        // Act
+        let pos = writer.append_record(&record).unwrap();
+
+        // Assert
+        assert_eq!(pos, 0);
+        assert!(writer.current_pos() > 0);
+    }
+
+    #[test]
+    fn should_handle_different_column_families() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let cf_ids = vec![0, 1, 5, 100];
+
+        // Act
+        for cf_id in cf_ids {
+            let record = WalRecord {
+                op: WalOpKind::Put,
+                key: Bytes::from(format!("key_{}", cf_id)),
+                value: Some(Bytes::from("value")),
+                cf_id,
+                seq: 1,
+                expiration: None,
+                range_end: None,
+                txn_id: None,
+                compression: None,
+            };
+            assert!(writer.append_record(&record).is_ok());
+        }
+
+        // Assert
+        assert!(writer.current_pos() > 0);
+    }
+
+    #[test]
+    fn should_handle_high_sequence_numbers() {
+        // Arrange
+        let dir = TempDir::new().unwrap();
+        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let high_seq = u64::MAX - 1;
+        let record = WalRecord {
+            op: WalOpKind::Put,
+            key: Bytes::from("key"),
+            value: Some(Bytes::from("value")),
+            cf_id: 0,
+            seq: high_seq,
+            expiration: None,
+            range_end: None,
+            txn_id: None,
+            compression: None,
+        };
+
+        // Act
+        let pos = writer.append_record(&record).unwrap();
+
+        // Assert
+        assert_eq!(pos, 0);
+    }
+}
+
