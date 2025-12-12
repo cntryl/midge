@@ -18,8 +18,6 @@ use std::path::PathBuf;
 
 pub mod api;
 pub mod context;
-#[allow(clippy::module_inception)]
-pub mod engine;
 pub mod open;
 
 pub use api::*;
