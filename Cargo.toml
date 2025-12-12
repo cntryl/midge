@@ -226,83 +226,23 @@ path = "benches/tier2_subsystem/bloom_false_positive_rate.rs"
 harness = false
 
 [[bench]]
-name = "tier2_subsystem_flush"
-path = "benches/tier2_subsystem/flush.rs"
+name = "tier2_subsystem_sst_point_read_bloom"
+path = "benches/tier2_subsystem/sst_point_read_bloom.rs"
 harness = false
 
 [[bench]]
-name = "tier2_subsystem_manifest_apply"
-path = "benches/tier2_subsystem/manifest_apply.rs"
+name = "tier2_subsystem_range_scan_cache"
+path = "benches/tier2_subsystem/range_scan_cache.rs"
 harness = false
 
 [[bench]]
-name = "tier2_subsystem_manifest_large_history"
-path = "benches/tier2_subsystem/manifest_large_history.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_manifest_parse"
-path = "benches/tier2_subsystem/manifest_parse.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_memtable_full"
-path = "benches/tier2_subsystem/memtable_full.rs"
+name = "tier2_subsystem_iterator_multi_sst"
+path = "benches/tier2_subsystem/iterator_multi_sst.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_memtable_rotate"
 path = "benches/tier2_subsystem/memtable_rotate.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_sst"
-path = "benches/tier2_subsystem/sst.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_core_primitives"
-path = "benches/tier2_subsystem/core_primitives.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_wal_io"
-path = "benches/tier2_subsystem/wal_io.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_streaming_iterators"
-path = "benches/tier2_subsystem/streaming_iterators.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_streaming_range_scan"
-path = "benches/tier2_subsystem/streaming_range_scan.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_streaming_iterator_throughput"
-path = "benches/tier2_subsystem/streaming_iterator_throughput.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_wal_replay"
-path = "benches/tier2_subsystem/wal_replay.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_wal_segment_rollover"
-path = "benches/tier2_subsystem/wal_segment_rollover.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_index_table"
-path = "benches/tier2_subsystem/index_table.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_tombstone_index"
-path = "benches/tier2_subsystem/tombstone_index.rs"
 harness = false
 
 # =============================================================================

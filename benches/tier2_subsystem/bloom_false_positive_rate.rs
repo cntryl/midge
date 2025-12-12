@@ -12,7 +12,7 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
-use cntryl_midge::sst::bloom::BloomFilterBuilder;
+use cntryl_midge::sst::bloom::{writer::BloomFilterOps, BloomWriter};
 
 /// Pre-generate keys as raw bytes
 fn make_test_keys(start: usize, count: usize) -> Vec<Vec<u8>> {
@@ -29,9 +29,9 @@ fn bench_bloom_false_positive_rate_small(c: &mut Criterion) {
     let query_keys = make_test_keys(100_000, 10_000);
 
     // Build the filter once (outside benchmark)
-    let mut builder = BloomFilterBuilder::with_expected_keys(1_000, 10); // 10 bits/key ~1% FPR
+    let mut builder = BloomWriter::with_defaults(1_000); // 1% FPR
     for key in &insert_keys {
-        builder.add_key(key);
+        builder.insert(key);
     }
     let filter = builder.finish();
 
@@ -44,7 +44,7 @@ fn bench_bloom_false_positive_rate_small(c: &mut Criterion) {
             // Query 10k non-existent keys
             let mut false_positives = 0u32;
             for key in &query_keys {
-                if filter.may_contain(key) {
+                if filter.contains(key).might_be_present() {
                     false_positives += 1;
                 }
             }
@@ -57,7 +57,7 @@ fn bench_bloom_false_positive_rate_small(c: &mut Criterion) {
     // Report actual FPR after benchmark (informational)
     let mut fps = 0;
     for key in &query_keys {
-        if filter.may_contain(key) {
+        if filter.contains(key).might_be_present() {
             fps += 1;
         }
     }
@@ -77,9 +77,9 @@ fn bench_bloom_false_positive_rate_large(c: &mut Criterion) {
     let query_keys = make_test_keys(1_000_000, 50_000);
 
     // Build the filter once
-    let mut builder = BloomFilterBuilder::with_expected_keys(100_000, 10); // 10 bits/key
+    let mut builder = BloomWriter::with_defaults(100_000); // 1% FPR
     for key in &insert_keys {
-        builder.add_key(key);
+        builder.insert(key);
     }
     let filter = builder.finish();
 
@@ -92,7 +92,7 @@ fn bench_bloom_false_positive_rate_large(c: &mut Criterion) {
             // Query 50k non-existent keys
             let mut false_positives = 0u32;
             for key in &query_keys {
-                if filter.may_contain(key) {
+                if filter.contains(key).might_be_present() {
                     false_positives += 1;
                 }
             }
@@ -105,7 +105,7 @@ fn bench_bloom_false_positive_rate_large(c: &mut Criterion) {
     // Report actual FPR
     let mut fps = 0;
     for key in &query_keys {
-        if filter.may_contain(key) {
+        if filter.contains(key).might_be_present() {
             fps += 1;
         }
     }

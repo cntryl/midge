@@ -10,7 +10,7 @@
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use cntryl_midge::sst::bloom::BloomFilterBuilder;
+use cntryl_midge::sst::bloom::BloomWriter;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
@@ -32,9 +32,9 @@ fn bench_bloom_build_10k_keys(c: &mut Criterion) {
 
     group.bench_function("build_10k_keys", |b| {
         b.iter(|| {
-            let mut builder = BloomFilterBuilder::with_expected_keys(10_000, 10);
+            let mut builder = BloomWriter::with_defaults(10_000);
             for key in &keys {
-                builder.add_key(key);
+                builder.insert(key);
             }
             black_box(builder.finish())
         })
@@ -53,9 +53,9 @@ fn bench_bloom_build_100k_keys(c: &mut Criterion) {
 
     group.bench_function("build_100k_keys", |b| {
         b.iter(|| {
-            let mut builder = BloomFilterBuilder::with_expected_keys(100_000, 10);
+            let mut builder = BloomWriter::with_defaults(100_000);
             for key in &keys {
-                builder.add_key(key);
+                builder.insert(key);
             }
             black_box(builder.finish())
         })
@@ -75,9 +75,9 @@ fn bench_bloom_build_1m_keys(c: &mut Criterion) {
 
     group.bench_function("build_1m_keys", |b| {
         b.iter(|| {
-            let mut builder = BloomFilterBuilder::with_expected_keys(1_000_000, 10);
+            let mut builder = BloomWriter::with_defaults(1_000_000);
             for key in &keys {
-                builder.add_key(key);
+                builder.insert(key);
             }
             black_box(builder.finish())
         })

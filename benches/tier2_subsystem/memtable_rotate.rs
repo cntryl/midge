@@ -12,7 +12,7 @@ use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throug
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
-use cntryl_midge::core::memtable::MemTable;
+use cntryl_midge::sst::SkipListMemtable;
 
 /// Pre-generate keys and values as raw bytes
 fn make_kv_pairs(count: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -36,12 +36,12 @@ fn bench_memtable_rotate_small(c: &mut Criterion) {
 
     group.bench_function("rotate_small", |b| {
         b.iter(|| {
-            let memtable = MemTable::new();
+            let memtable = SkipListMemtable::new();
             for (key, value) in &kv_pairs {
-                memtable.put(key, value);
+                memtable.put_with_exp(key.clone(), value.clone(), None).unwrap();
             }
             // Drain (simulate rotation)
-            black_box(memtable.drain_with_meta_internal())
+            black_box(memtable.iter_all(u64::MAX))
         })
     });
 
@@ -58,12 +58,12 @@ fn bench_memtable_rotate_large(c: &mut Criterion) {
 
     group.bench_function("rotate_large", |b| {
         b.iter(|| {
-            let memtable = MemTable::new();
+            let memtable = SkipListMemtable::new();
             for (key, value) in &kv_pairs {
-                memtable.put(key, value);
+                memtable.put_with_exp(key.clone(), value.clone(), None).unwrap();
             }
             // Drain (simulate rotation)
-            black_box(memtable.drain_with_meta_internal())
+            black_box(memtable.iter_all(u64::MAX))
         })
     });
 

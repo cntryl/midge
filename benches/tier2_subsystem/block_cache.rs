@@ -15,17 +15,15 @@ mod criterion_helper;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::sync::Arc;
 
-use cntryl_midge::sst::block_cache::{
-    BlockCache, BlockCacheOptions, BlockData, BlockKey, BlockKind, ShardedBlockCache,
-};
+use bytes::Bytes;
+use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Pre-computed block keys to avoid allocation in benchmarks.
 struct PrecomputedKeys {
-    keys: Vec<BlockKey>,
+    keys: Vec<CacheKey>,
 }
 
 impl PrecomputedKeys {
@@ -33,11 +31,9 @@ impl PrecomputedKeys {
         let mut keys = Vec::with_capacity(file_count * blocks_per_file);
         for file_idx in 0..file_count {
             for block_idx in 0..blocks_per_file {
-                keys.push(BlockKey::new(
+                keys.push(CacheKey::new(
                     file_idx as u64,
                     (block_idx * 4096) as u64,
-                    BlockKind::Data,
-                    0,
                 ));
             }
         }
@@ -46,31 +42,29 @@ impl PrecomputedKeys {
 
     fn linear(count: usize) -> Self {
         let keys = (0..count)
-            .map(|i| BlockKey::new(0, (i * 4096) as u64, BlockKind::Data, 0))
+            .map(|i| CacheKey::new(0, (i * 4096) as u64))
             .collect();
         Self { keys }
     }
 
     #[inline]
-    fn get(&self, file_idx: usize, block_idx: usize, blocks_per_file: usize) -> &BlockKey {
-        &self.keys[file_idx * blocks_per_file + block_idx]
+    fn get(&self, file_idx: usize, block_idx: usize, blocks_per_file: usize) -> CacheKey {
+        self.keys[file_idx * blocks_per_file + block_idx].clone()
     }
 
     #[inline]
-    fn get_linear(&self, idx: usize) -> &BlockKey {
-        &self.keys[idx]
+    fn get_linear(&self, idx: usize) -> CacheKey {
+        self.keys[idx].clone()
     }
 }
 
 /// Pre-allocated block data to avoid allocation in benchmarks.
-fn make_block_data_static() -> BlockData {
-    static BLOCK_DATA: [u8; 4096] = [0xAB; 4096];
-    let data: Arc<[u8]> = Arc::from(&BLOCK_DATA[..]);
-    BlockData::uncompressed(data, BlockKind::Data)
+fn make_block_data_static() -> Bytes {
+    Bytes::from_static(&[0xAB; 4096])
 }
 
-fn create_cache(capacity: usize) -> ShardedBlockCache {
-    ShardedBlockCache::new(BlockCacheOptions::with_capacity(capacity))
+fn create_cache(capacity: u64) -> BlockCache {
+    BlockCache::new(capacity, 16, CachePolicyType::Lru)
 }
 
 // ─── Eviction Scan Benchmarks ────────────────────────────────────────────────
@@ -89,14 +83,14 @@ fn bench_eviction_scan(c: &mut Criterion) {
             || {
                 let cache = create_cache(5 * 1024 * 1024); // 5MB to hold all 1000 x 4KB blocks
                 for i in 0..1000 {
-                    cache.insert(*keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), block.clone());
                 }
                 cache
             },
             |cache| {
                 let mut count = 0u32;
                 for i in 0..1000 {
-                    if cache.get(keys.get_linear(i)).is_some() {
+                    if cache.get(&keys.get_linear(i)).is_some() {
                         count += 1;
                     }
                 }
@@ -125,7 +119,7 @@ fn bench_fill_then_hit(c: &mut Criterion) {
             || {
                 let cache = create_cache(1024 * 1024); // 1MB cache
                 for i in 0..100 {
-                    cache.insert(*keys.get(0, i, 1000), block.clone());
+                    cache.put(keys.get(0, i, 1000), block.clone());
                 }
                 cache
             },
@@ -133,10 +127,10 @@ fn bench_fill_then_hit(c: &mut Criterion) {
                 let mut hits = 0u32;
                 for i in 0..1000 {
                     let key = keys.get(0, i % 150, 1000);
-                    if cache.get(key).is_some() {
+                    if cache.get(&key).is_some() {
                         hits += 1;
                     } else {
-                        cache.insert(*keys.get(1, i, 1000), block.clone());
+                        cache.put(keys.get(1, i, 1000), block.clone());
                     }
                 }
                 black_box(hits)
@@ -164,7 +158,7 @@ fn bench_hotset_rotation(c: &mut Criterion) {
             || {
                 let cache = create_cache(1024 * 1024); // 1MB cache
                 for i in 0..50 {
-                    cache.insert(*keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), block.clone());
                 }
                 cache
             },
@@ -172,12 +166,12 @@ fn bench_hotset_rotation(c: &mut Criterion) {
                 for round in 0..10 {
                     for i in 0..50 {
                         let key = keys.get_linear((i + round) % 75);
-                        if cache.get(key).is_none() {
-                            cache.insert(*key, block.clone());
+                        if cache.get(&key).is_none() {
+                            cache.put(key, block.clone());
                         }
                     }
                 }
-                black_box(cache.stats())
+                black_box(())
             },
             criterion::BatchSize::SmallInput,
         )
@@ -202,13 +196,13 @@ fn bench_lru_eviction_1k(c: &mut Criterion) {
             || {
                 let cache = create_cache(512 * 1024); // 512KB holds ~125 blocks
                 for i in 0..125 {
-                    cache.insert(*keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), block.clone());
                 }
                 cache
             },
             |cache| {
                 for i in 125..1125 {
-                    cache.insert(*keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), block.clone());
                 }
                 black_box(cache)
             },
@@ -233,13 +227,13 @@ fn bench_lru_eviction_10k(c: &mut Criterion) {
             || {
                 let cache = create_cache(2 * 1024 * 1024); // 2MB holds ~500 blocks
                 for i in 0..500 {
-                    cache.insert(*keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), block.clone());
                 }
                 cache
             },
             |cache| {
                 for i in 500..10_500 {
-                    cache.insert(*keys.get_linear(i), block.clone());
+                    cache.put(keys.get_linear(i), block.clone());
                 }
                 black_box(cache)
             },
