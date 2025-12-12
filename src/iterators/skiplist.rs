@@ -964,4 +964,657 @@ mod tests {
         assert!(entries[1].3); // tombstone
         assert_eq!(entries[2].4, Some(12345)); // has expiration
     }
+
+    // ========================================================================
+    // OpType enum tests
+    // ========================================================================
+
+    #[test]
+    fn should_convert_optype_put_to_u8() {
+        // Arrange / Act
+        let code = OpType::Put.as_u8();
+
+        // Assert: Put maps to 0
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn should_convert_optype_delete_to_u8() {
+        // Arrange / Act
+        let code = OpType::Delete.as_u8();
+
+        // Assert: Delete maps to 2
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn should_convert_optype_merge_to_u8() {
+        // Arrange / Act
+        let code = OpType::Merge.as_u8();
+
+        // Assert: Merge maps to 3
+        assert_eq!(code, 3);
+    }
+
+    #[test]
+    fn should_support_optype_equality() {
+        // Arrange / Act / Assert
+        assert_eq!(OpType::Put, OpType::Put);
+        assert_eq!(OpType::Delete, OpType::Delete);
+        assert_eq!(OpType::Merge, OpType::Merge);
+        assert_ne!(OpType::Put, OpType::Delete);
+        assert_ne!(OpType::Put, OpType::Merge);
+    }
+
+    #[test]
+    fn should_support_optype_copy() {
+        // Arrange
+        let op1 = OpType::Put;
+
+        // Act
+        let op2 = op1;
+
+        // Assert: Copy trait works
+        assert_eq!(op1, op2);
+    }
+
+    // ========================================================================
+    // SkipList creation and initialization tests
+    // ========================================================================
+
+    #[test]
+    fn should_create_new_skiplist() {
+        // Arrange / Act
+        let sl = SkipList::new();
+
+        // Assert: creation succeeds
+        let keys = sl.get_all_keys();
+        assert_eq!(keys.len(), 0);
+    }
+
+    #[test]
+    fn should_support_default_trait() {
+        // Arrange / Act
+        let sl = SkipList::default();
+
+        // Assert: same as new()
+        let keys = sl.get_all_keys();
+        assert_eq!(keys.len(), 0);
+    }
+
+    // ========================================================================
+    // Basic upsert tests
+    // ========================================================================
+
+    #[test]
+    fn should_upsert_new_key() {
+        // Arrange
+        let sl = SkipList::new();
+
+        // Act
+        sl.upsert(Bytes::from_static(b"key"), Some(Bytes::from_static(b"value")), 1);
+
+        // Assert
+        assert_eq!(sl.get(b"key", u64::MAX), Some(Bytes::from_static(b"value")));
+    }
+
+    #[test]
+    fn should_update_existing_key() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v1")), 1);
+
+        // Act
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v2")), 2);
+
+        // Assert: latest version returned
+        assert_eq!(sl.get(b"k", u64::MAX), Some(Bytes::from_static(b"v2")));
+    }
+
+    #[test]
+    fn should_support_empty_key() {
+        // Arrange
+        let sl = SkipList::new();
+
+        // Act
+        sl.upsert(Bytes::new(), Some(Bytes::from_static(b"value")), 1);
+
+        // Assert
+        assert_eq!(sl.get(b"", u64::MAX), Some(Bytes::from_static(b"value")));
+    }
+
+    #[test]
+    fn should_support_empty_value() {
+        // Arrange
+        let sl = SkipList::new();
+
+        // Act
+        sl.upsert(Bytes::from_static(b"key"), Some(Bytes::new()), 1);
+
+        // Assert
+        assert_eq!(sl.get(b"key", u64::MAX), Some(Bytes::new()));
+    }
+
+    #[test]
+    fn should_support_binary_keys() {
+        // Arrange
+        let sl = SkipList::new();
+        let binary_key = Bytes::from(vec![0u8, 1u8, 255u8, 127u8]);
+
+        // Act
+        sl.upsert(binary_key.clone(), Some(Bytes::from_static(b"val")), 1);
+
+        // Assert
+        assert_eq!(
+            sl.get(binary_key.as_ref(), u64::MAX),
+            Some(Bytes::from_static(b"val"))
+        );
+    }
+
+    #[test]
+    fn should_support_binary_values() {
+        // Arrange
+        let sl = SkipList::new();
+        let binary_val = Bytes::from(vec![0u8, 127u8, 255u8]);
+
+        // Act
+        sl.upsert(
+            Bytes::from_static(b"key"),
+            Some(binary_val.clone()),
+            1,
+        );
+
+        // Assert
+        assert_eq!(sl.get(b"key", u64::MAX), Some(binary_val));
+    }
+
+    #[test]
+    fn should_handle_large_keys() {
+        // Arrange
+        let sl = SkipList::new();
+        let large_key = Bytes::from(vec![42u8; 10000]);
+
+        // Act
+        sl.upsert(large_key.clone(), Some(Bytes::from_static(b"val")), 1);
+
+        // Assert
+        assert_eq!(
+            sl.get(large_key.as_ref(), u64::MAX),
+            Some(Bytes::from_static(b"val"))
+        );
+    }
+
+    #[test]
+    fn should_handle_large_values() {
+        // Arrange
+        let sl = SkipList::new();
+        let large_val = Bytes::from(vec![99u8; 10 * 1024 * 1024]); // 10MB
+
+        // Act
+        sl.upsert(Bytes::from_static(b"key"), Some(large_val.clone()), 1);
+
+        // Assert
+        assert_eq!(sl.get(b"key", u64::MAX), Some(large_val));
+    }
+
+    // ========================================================================
+    // Delete and tombstone tests
+    // ========================================================================
+
+    #[test]
+    fn should_delete_key() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 1);
+
+        // Act
+        sl.delete(Bytes::from_static(b"k"), 2);
+
+        // Assert: deleted key returns None
+        assert_eq!(sl.get(b"k", u64::MAX), None);
+    }
+
+    #[test]
+    fn should_resurrect_deleted_key() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v1")), 1);
+        sl.delete(Bytes::from_static(b"k"), 2);
+
+        // Act: insert new value at higher sequence
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v2")), 3);
+
+        // Assert
+        assert_eq!(sl.get(b"k", u64::MAX), Some(Bytes::from_static(b"v2")));
+    }
+
+    #[test]
+    fn should_mark_deleted_key_as_tombstone() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 1);
+        sl.delete(Bytes::from_static(b"k"), 2);
+
+        // Act
+        let tombstones = sl.tombstones_range(None, None);
+
+        // Assert
+        assert_eq!(tombstones, vec![Bytes::from_static(b"k")]);
+    }
+
+    // ========================================================================
+    // Snapshot visibility tests
+    // ========================================================================
+
+    #[test]
+    fn should_hide_future_versions() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v1")), 10);
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v2")), 20);
+
+        // Act: query at sequence 15 (between 10 and 20)
+        let result = sl.get(b"k", 15);
+
+        // Assert: should see v1 (seq 10), not v2 (seq 20)
+        assert_eq!(result, Some(Bytes::from_static(b"v1")));
+    }
+
+    #[test]
+    fn should_see_oldest_visible_version() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v1")), 5);
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v2")), 10);
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v3")), 15);
+
+        // Act
+        let v_at_7 = sl.get(b"k", 7);
+        let v_at_12 = sl.get(b"k", 12);
+        let v_at_20 = sl.get(b"k", 20);
+
+        // Assert: LSM visibility rule - oldest visible version
+        assert_eq!(v_at_7, Some(Bytes::from_static(b"v1")));
+        assert_eq!(v_at_12, Some(Bytes::from_static(b"v2")));
+        assert_eq!(v_at_20, Some(Bytes::from_static(b"v3")));
+    }
+
+    #[test]
+    fn should_return_none_at_empty_sequence() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 10);
+
+        // Act: query at sequence less than any version
+        let result = sl.get(b"k", 5);
+
+        // Assert: no visible version
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn should_hide_tombstone_from_future() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 5);
+        sl.delete(Bytes::from_static(b"k"), 10);
+
+        // Act: query between write and delete
+        let result = sl.get(b"k", 7);
+
+        // Assert: should see the value before deletion
+        assert_eq!(result, Some(Bytes::from_static(b"v")));
+    }
+
+    // ========================================================================
+    // Range scan tests
+    // ========================================================================
+
+    #[test]
+    fn should_scan_full_range() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 1);
+        sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 1);
+
+        // Act
+        let results = sl.range(None, None);
+
+        // Assert
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, Bytes::from_static(b"a"));
+        assert_eq!(results[1].0, Bytes::from_static(b"b"));
+        assert_eq!(results[2].0, Bytes::from_static(b"c"));
+    }
+
+    #[test]
+    fn should_scan_with_start_bound() {
+        // Arrange
+        let sl = SkipList::new();
+        for i in 0..10 {
+            sl.upsert(
+                Bytes::from(format!("key_{}", i)),
+                Some(Bytes::from(format!("val_{}", i))),
+                1,
+            );
+        }
+
+        // Act
+        let results = sl.range(Some(b"key_5"), None);
+
+        // Assert: starts at key_5
+        assert!(results[0].0.starts_with(b"key_5"));
+    }
+
+    #[test]
+    fn should_scan_with_end_bound() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 1);
+        sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 1);
+
+        // Act: [a, c) should give a and b
+        let results = sl.range(Some(b"a"), Some(b"c"));
+
+        // Assert
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, Bytes::from_static(b"a"));
+        assert_eq!(results[1].0, Bytes::from_static(b"b"));
+    }
+
+    #[test]
+    fn should_skip_tombstones_in_range() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+        sl.upsert(Bytes::from_static(b"b"), None, 2); // tombstone
+        sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 3);
+
+        // Act
+        let results = sl.range(None, None);
+
+        // Assert: only non-tombstones
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, Bytes::from_static(b"a"));
+        assert_eq!(results[1].0, Bytes::from_static(b"c"));
+    }
+
+    #[test]
+    fn should_return_empty_range_for_non_overlapping_bounds() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+
+        // Act: [z, zz) has no keys
+        let results = sl.range(Some(b"z"), Some(b"zz"));
+
+        // Assert
+        assert!(results.is_empty());
+    }
+
+    // ========================================================================
+    // Expiration tests
+    // ========================================================================
+
+    #[test]
+    fn should_store_expiration_time() {
+        // Arrange
+        let sl = SkipList::new();
+
+        // Act
+        sl.upsert_exp(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            1,
+            Some(123456),
+            OpType::Put,
+        );
+
+        // Assert
+        let result = sl.get_visible_with_exp(b"k", u64::MAX);
+        assert_eq!(
+            result,
+            Some(Some((Bytes::from_static(b"v"), Some(123456))))
+        );
+    }
+
+    #[test]
+    fn should_support_upsert_without_expiration() {
+        // Arrange
+        let sl = SkipList::new();
+
+        // Act
+        sl.upsert_exp(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            1,
+            None,
+            OpType::Put,
+        );
+
+        // Assert
+        let result = sl.get_visible_with_exp(b"k", u64::MAX);
+        assert_eq!(result, Some(Some((Bytes::from_static(b"v"), None))));
+    }
+
+    // ========================================================================
+    // OpType tracking tests
+    // ========================================================================
+
+    #[test]
+    fn should_track_put_operations() {
+        // Arrange
+        let sl = SkipList::new();
+
+        // Act
+        sl.upsert_exp(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            1,
+            None,
+            OpType::Put,
+        );
+
+        // Assert
+        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
+        assert_eq!(versions[0].2, OpType::Put);
+    }
+
+    #[test]
+    fn should_track_merge_operations() {
+        // Arrange
+        let sl = SkipList::new();
+
+        // Act
+        sl.upsert_exp(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            1,
+            None,
+            OpType::Merge,
+        );
+
+        // Assert
+        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
+        assert_eq!(versions[0].2, OpType::Merge);
+    }
+
+    #[test]
+    fn should_track_delete_operations() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert_exp(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            1,
+            None,
+            OpType::Put,
+        );
+
+        // Act
+        sl.upsert_exp(
+            Bytes::from_static(b"k"),
+            None,
+            2,
+            None,
+            OpType::Delete,
+        );
+
+        // Assert
+        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
+        assert_eq!(versions[0].2, OpType::Delete); // Most recent
+        assert_eq!(versions[1].2, OpType::Put);    // Older
+    }
+
+    // ========================================================================
+    // get_all_keys tests
+    // ========================================================================
+
+    #[test]
+    fn should_return_all_keys_in_insertion_order() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"z"), Some(Bytes::from_static(b"1")), 1);
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"2")), 1);
+        sl.upsert(Bytes::from_static(b"m"), Some(Bytes::from_static(b"3")), 1);
+
+        // Act
+        let keys = sl.get_all_keys();
+
+        // Assert: sorted order (skiplist property)
+        assert_eq!(keys[0], Bytes::from_static(b"a"));
+        assert_eq!(keys[1], Bytes::from_static(b"m"));
+        assert_eq!(keys[2], Bytes::from_static(b"z"));
+    }
+
+    #[test]
+    fn should_return_empty_keys_for_empty_skiplist() {
+        // Arrange / Act
+        let sl = SkipList::new();
+        let keys = sl.get_all_keys();
+
+        // Assert
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn should_return_deleted_keys_in_all_keys() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 1);
+        sl.delete(Bytes::from_static(b"a"), 2); // deleted, but still in skiplist
+
+        // Act
+        let keys = sl.get_all_keys();
+
+        // Assert: deleted keys still present in skiplist structure
+        assert_eq!(keys.len(), 2);
+    }
+
+    // ========================================================================
+    // delete_range tests
+    // ========================================================================
+
+    #[test]
+    fn should_count_changed_keys_in_delete_range() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 2);
+        sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 3);
+
+        // Act: delete range [a, c)
+        let changed = sl.delete_range(Some(b"a"), Some(b"c"), 10);
+
+        // Assert: a and b changed
+        assert_eq!(changed, 2);
+    }
+
+    #[test]
+    fn should_handle_delete_range_with_no_changes() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+        sl.delete(Bytes::from_static(b"b"), 2);
+
+        // Act: delete range on already deleted key
+        let changed = sl.delete_range(Some(b"b"), Some(b"b"), 10);
+
+        // Assert: no changes (b was already deleted)
+        assert_eq!(changed, 0);
+    }
+
+    #[test]
+    fn should_delete_full_range_when_unbounded() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 2);
+        sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 3);
+
+        // Act: delete [None, None)
+        let changed = sl.delete_range(None, None, 10);
+
+        // Assert: all three keys deleted
+        assert_eq!(changed, 3);
+    }
+
+    #[test]
+    fn should_create_multiple_versions_on_delete_range() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 1);
+
+        // Act: delete and then query versions
+        sl.delete_range(Some(b"k"), Some(b"l"), 2);
+        let versions = sl.get_versions_for_merge(b"k", u64::MAX);
+
+        // Assert: two versions (put, then delete)
+        assert_eq!(versions.len(), 2);
+        assert!(versions[0].0.is_none()); // Delete is tombstone
+        assert_eq!(versions[1].0, Some(Bytes::from_static(b"v"))); // Original put
+    }
+
+    // ========================================================================
+    // Range visibility tests
+    // ========================================================================
+
+    #[test]
+    fn should_filter_by_snapshot_in_range() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"v1")), 5);
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"v2")), 15);
+        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"v")), 10);
+
+        // Act: snapshot at seq 12
+        let results = sl.range_visible(None, None, 12);
+
+        // Assert: a shows v1 (seq 5), b shows v (seq 10)
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].1, Bytes::from_static(b"v1"));
+        assert_eq!(results[1].1, Bytes::from_static(b"v"));
+    }
+
+    #[test]
+    fn should_respect_tombstone_visibility() {
+        // Arrange
+        let sl = SkipList::new();
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
+        sl.delete(Bytes::from_static(b"a"), 5);
+        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"2")), 10);
+
+        // Act: query at different snapshots
+        let at_3 = sl.range_visible(None, None, 3);  // Before delete
+        let at_7 = sl.range_visible(None, None, 7);  // After delete
+        let at_15 = sl.range_visible(None, None, 15); // After resurrection
+
+        // Assert
+        assert_eq!(at_3.len(), 1);
+        assert_eq!(at_7.len(), 0);
+        assert_eq!(at_15.len(), 1);
+    }
 }
