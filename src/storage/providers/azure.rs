@@ -5,7 +5,7 @@
 //! - Non-blocking callback-based API
 //! - Suitable for async runtime integration
 
-use crate::storage::cloud::{CloudBackend, CloudCallback, CloudEvent, CloudOutcome, ObjectMetadata};
+use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 
 /// Azure authentication credentials
 #[derive(Debug, Clone)]
@@ -70,8 +70,8 @@ impl AzureProvider {
         sas_token: String,
     ) -> Self {
         // Normalize token - ensure it doesn't start with ?
-        let token = if sas_token.starts_with('?') {
-            sas_token[1..].to_string()
+        let token = if let Some(stripped) = sas_token.strip_prefix('?') {
+            stripped.to_string()
         } else {
             sas_token
         };

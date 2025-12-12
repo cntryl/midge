@@ -5,7 +5,7 @@
 //! - Non-blocking callback-based API
 //! - Suitable for async runtime integration
 
-use crate::storage::cloud::{CloudBackend, CloudCallback, CloudEvent, CloudOutcome, ObjectMetadata};
+use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 
 /// Google Cloud Storage provider
 /// 

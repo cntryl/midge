@@ -222,7 +222,7 @@ impl MidgeEngine {
     /// Put a key-value pair into a specific column family
     pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         // Check if CF still exists
-        if !self.column_families.read().unwrap().contains_key(&cf.id().as_u32()) {
+        if !self.column_families.read().expect("column_families lock poisoned").contains_key(&cf.id().as_u32()) {
             return Err(MidgeError::Internal(format!(
                 "Column family '{}' (id={}) has been dropped",
                 cf.name(),
@@ -952,7 +952,7 @@ impl MidgeEngine {
                     name.to_string(),
                 );
                 // Register CF in local registry
-                self.column_families.write().unwrap().insert(cf_id, handle.clone());
+                self.column_families.write().expect("column_families lock poisoned").insert(cf_id, handle.clone());
                 
                 // Persist manifest to disk
                 let _persist_response = self.runtime_handle.send_and_wait(
@@ -988,7 +988,7 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::Ok { .. } => {
                 // Remove from local registry
-                self.column_families.write().unwrap().remove(&cf_id.as_u32());
+                self.column_families.write().expect("column_families lock poisoned").remove(&cf_id.as_u32());
                 
                 // Persist manifest to disk
                 let _persist_response = self.runtime_handle.send_and_wait(
@@ -1008,7 +1008,7 @@ impl MidgeEngine {
 
     /// List all active column families
     pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
-        Ok(self.column_families.read().unwrap().values().cloned().collect())
+        Ok(self.column_families.read().expect("column_families lock poisoned").values().cloned().collect())
     }
 
     /// Compact all data (stub - not implemented)
