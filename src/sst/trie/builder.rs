@@ -158,32 +158,293 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_build_simple_trie() {
+    fn should_create_new_builder() {
+        // Arrange & Act
+        let builder = TrieBuilder::new();
+
+        // Assert
+        assert_eq!(builder.node_count(), 1); // Root node
+    }
+
+    #[test]
+    fn should_create_default_builder() {
+        // Arrange & Act
+        let builder = TrieBuilder::default();
+
+        // Assert
+        assert_eq!(builder.node_count(), 1);
+    }
+
+    #[test]
+    fn should_add_single_key() {
+        // Arrange
         let mut builder = TrieBuilder::new();
+
+        // Act
+        builder.add_key(b"apple", 0).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 2);
+    }
+
+    #[test]
+    fn should_add_multiple_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act
         builder.add_key(b"apple", 0).unwrap();
         builder.add_key(b"banana", 1).unwrap();
         builder.add_key(b"cherry", 2).unwrap();
 
-        assert!(builder.node_count() >= 3); // At least one node per key
+        // Assert
+        assert!(builder.node_count() >= 3);
+    }
+
+    #[test]
+    fn should_skip_empty_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        let initial_count = builder.node_count();
+
+        // Act
+        builder.add_key(b"", 0).unwrap();
+
+        // Assert
+        assert_eq!(builder.node_count(), initial_count);
     }
 
     #[test]
     fn should_handle_prefix_keys() {
+        // Arrange
         let mut builder = TrieBuilder::new();
+
+        // Act
         builder.add_key(b"test", 0).unwrap();
         builder.add_key(b"testing", 1).unwrap();
         builder.add_key(b"tester", 2).unwrap();
 
+        // Assert
         let data = builder.finish();
         assert!(!data.is_empty());
     }
 
     #[test]
-    fn should_skip_empty_keys() {
+    fn should_handle_single_character_keys() {
+        // Arrange
         let mut builder = TrieBuilder::new();
-        builder.add_key(b"", 0).unwrap();
-        builder.add_key(b"key", 1).unwrap();
 
-        assert!(builder.node_count() >= 1);
+        // Act
+        builder.add_key(b"a", 0).unwrap();
+        builder.add_key(b"b", 1).unwrap();
+        builder.add_key(b"c", 2).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 3);
+    }
+
+    #[test]
+    fn should_handle_identical_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act
+        builder.add_key(b"same", 0).unwrap();
+        builder.add_key(b"same", 1).unwrap();
+        builder.add_key(b"same", 2).unwrap();
+
+        // Assert
+        let data = builder.finish();
+        assert!(!data.is_empty());
+    }
+
+    #[test]
+    fn should_handle_overlapping_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act
+        builder.add_key(b"abc", 0).unwrap();
+        builder.add_key(b"abcd", 1).unwrap();
+        builder.add_key(b"abcde", 2).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 3);
+    }
+
+    #[test]
+    fn should_handle_different_prefixes() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act
+        builder.add_key(b"apple", 0).unwrap();
+        builder.add_key(b"apricot", 1).unwrap();
+        builder.add_key(b"avocado", 2).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 3);
+    }
+
+    #[test]
+    fn should_handle_large_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        let large_key = vec![42; 1000];
+
+        // Act
+        builder.add_key(&large_key, 0).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 2);
+    }
+
+    #[test]
+    fn should_handle_many_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act
+        for i in 0..100 {
+            let key = format!("key_{:04}", i).into_bytes();
+            builder.add_key(&key, i as u32).unwrap();
+        }
+
+        // Assert
+        assert!(builder.node_count() >= 10);
+    }
+
+    #[test]
+    fn should_finish_empty_builder() {
+        // Arrange
+        let builder = TrieBuilder::new();
+
+        // Act
+        let data = builder.finish();
+
+        // Assert
+        assert!(!data.is_empty()); // Root node encoded
+    }
+
+    #[test]
+    fn should_finish_with_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        builder.add_key(b"apple", 0).unwrap();
+        builder.add_key(b"banana", 1).unwrap();
+
+        // Act
+        let data = builder.finish();
+
+        // Assert
+        assert!(!data.is_empty());
+    }
+
+    #[test]
+    fn should_handle_reversed_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act - Note: real usage would have sorted keys, but builder should handle this
+        builder.add_key(b"zebra", 0).unwrap();
+        builder.add_key(b"apple", 1).unwrap();
+        builder.add_key(b"banana", 2).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 3);
+    }
+
+    #[test]
+    fn should_handle_special_characters() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act
+        builder.add_key(b"key-with-dashes", 0).unwrap();
+        builder.add_key(b"key.with.dots", 1).unwrap();
+        builder.add_key(b"key/with/slashes", 2).unwrap();
+        builder.add_key(b"key_with_underscores", 3).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 4);
+    }
+
+    #[test]
+    fn should_handle_binary_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        let binary_key1 = vec![0, 1, 2, 3, 4];
+        let binary_key2 = vec![5, 6, 7, 8, 9];
+        let binary_key3 = vec![0, 1, 2, 3, 5];
+
+        // Act
+        builder.add_key(&binary_key1, 0).unwrap();
+        builder.add_key(&binary_key2, 1).unwrap();
+        builder.add_key(&binary_key3, 2).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 3);
+    }
+
+    #[test]
+    fn should_handle_maximum_block_ids() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act
+        builder.add_key(b"key1", u32::MAX).unwrap();
+        builder.add_key(b"key2", 0).unwrap();
+        builder.add_key(b"key3", u32::MAX - 1).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 3);
+    }
+
+    #[test]
+    fn should_track_node_count() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        let initial = builder.node_count();
+
+        // Act & Assert
+        builder.add_key(b"apple", 0).unwrap();
+        assert!(builder.node_count() > initial);
+
+        let after_first = builder.node_count();
+        builder.add_key(b"banana", 1).unwrap();
+        assert!(builder.node_count() >= after_first);
+    }
+
+    #[test]
+    fn should_handle_utf8_like_sequences() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+
+        // Act
+        builder.add_key("hello".as_bytes(), 0).unwrap();
+        builder.add_key("world".as_bytes(), 1).unwrap();
+        builder.add_key("héllo".as_bytes(), 2).unwrap();
+
+        // Assert
+        assert!(builder.node_count() >= 3);
+    }
+
+    #[test]
+    fn should_finish_produces_deterministic_output() {
+        // Arrange
+        let mut builder1 = TrieBuilder::new();
+        builder1.add_key(b"apple", 0).unwrap();
+        builder1.add_key(b"banana", 1).unwrap();
+
+        let mut builder2 = TrieBuilder::new();
+        builder2.add_key(b"apple", 0).unwrap();
+        builder2.add_key(b"banana", 1).unwrap();
+
+        // Act
+        let data1 = builder1.finish();
+        let data2 = builder2.finish();
+
+        // Assert
+        assert_eq!(data1, data2);
     }
 }

@@ -271,95 +271,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_encode_key_delta() {
+    fn should_encode_and_decode_key_delta() {
+        // Arrange & Act
         let encoded = encode(b"mykey", 0, None, 0, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
         assert_eq!(entry.key_delta, b"mykey");
     }
 
     #[test]
-    fn should_encode_value() {
+    fn should_encode_and_decode_with_value() {
+        // Arrange & Act
         let encoded = encode(b"key", 0, Some(b"myvalue"), 0, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
+        assert_eq!(entry.key_delta, b"key");
         assert_eq!(entry.value, Some(b"myvalue".to_vec()));
     }
 
     #[test]
-    fn should_encode_empty_value() {
-        let encoded = encode(b"key", 0, Some(b""), 0, 0, None);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.value, Some(Vec::new()));
-    }
-
-    #[test]
-    fn should_encode_sequence() {
+    fn should_encode_and_decode_sequence() {
+        // Arrange & Act
         let encoded = encode(b"key", 0, None, 12345, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
         assert_eq!(entry.sequence, 12345);
     }
 
     #[test]
-    fn should_encode_max_sequence() {
-        let encoded = encode(b"key", 0, None, u64::MAX, 0, None);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.sequence, u64::MAX);
-    }
-
-    #[test]
-    fn should_encode_entry_type_put() {
-        let encoded = encode(b"key", 0, Some(b"val"), 0, 0, None);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.entry_type, 0);
-    }
-
-    #[test]
-    fn should_encode_entry_type_insert() {
-        let encoded = encode(b"key", 0, Some(b"val"), 0, 1, None);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.entry_type, 1);
-    }
-
-    #[test]
-    fn should_encode_entry_type_delete() {
+    fn should_encode_and_decode_entry_type_delete() {
+        // Arrange & Act
         let encoded = encode(b"key", 0, None, 0, 2, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
         assert_eq!(entry.entry_type, 2);
     }
 
     #[test]
-    fn should_encode_entry_type_merge() {
-        let encoded = encode(b"key", 0, Some(b"val"), 0, 3, None);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.entry_type, 3);
-    }
-
-    #[test]
-    fn should_encode_expiration() {
+    fn should_encode_and_decode_with_expiration() {
+        // Arrange
         let exp = 1234567890u64;
+        
+        // Act
         let encoded = encode(b"key", 0, None, 0, 0, Some(exp));
         let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
         assert_eq!(entry.expiration, Some(exp));
     }
 
     #[test]
-    fn should_encode_shared_prefix_len() {
+    fn should_encode_and_decode_shared_prefix() {
+        // Arrange & Act
         let encoded = encode(b"suffix", 42, Some(b"val"), 0, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
         assert_eq!(entry.shared_len, 42);
     }
 
     #[test]
-    fn should_decode_tombstone() {
-        let encoded = encode(b"key", 0, None, 5, 2, None);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.entry_type, 2);
-        assert_eq!(entry.value, None);
-    }
-
-    #[test]
     fn should_return_bytes_consumed() {
+        // Arrange
         let encoded = encode(b"key", 0, Some(b"val"), 42, 0, None);
+        
+        // Act
         let (_entry, consumed) = decode(&encoded, 0).unwrap();
+
+        // Assert
         assert_eq!(consumed, encoded.len());
     }
 
@@ -384,5 +367,97 @@ mod tests {
         assert_eq!(entry.entry_type, op_type);
         assert_eq!(entry.expiration, exp);
         assert_eq!(entry.shared_len, shared);
+    }
+
+    #[test]
+    fn should_handle_binary_keys() {
+        // Arrange
+        let binary_key = vec![0u8, 1u8, 255u8, 254u8, 128u8];
+        
+        // Act
+        let encoded = encode(&binary_key, 0, Some(b"val"), 0, 0, None);
+        let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
+        assert_eq!(entry.key_delta, binary_key);
+    }
+
+    #[test]
+    fn should_decode_from_offset_zero() {
+        // Arrange
+        let encoded = encode(b"key", 0, Some(b"val"), 0, 0, None);
+        
+        // Act
+        let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
+        assert_eq!(entry.key_delta, b"key");
+    }
+
+    #[test]
+    fn should_handle_invalid_offset_beyond_data() {
+        // Arrange
+        let encoded = encode(b"key", 0, Some(b"val"), 0, 0, None);
+        
+        // Act
+        let result = decode(&encoded, encoded.len() + 100);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_encode_produces_same_output_for_same_inputs() {
+        // Arrange & Act
+        let enc1 = encode(b"key", 5, Some(b"val"), 100, 1, Some(200));
+        let enc2 = encode(b"key", 5, Some(b"val"), 100, 1, Some(200));
+
+        // Assert
+        assert_eq!(enc1, enc2);
+    }
+
+    #[test]
+    fn should_create_tlv_entry_from_decode() {
+        // Arrange
+        let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
+        
+        // Act
+        let (entry, _) = decode(&encoded, 0).unwrap();
+
+        // Assert
+        assert_eq!(entry.key_delta, b"test");
+        assert_eq!(entry.value, Some(b"data".to_vec()));
+        assert_eq!(entry.sequence, 42);
+        assert_eq!(entry.entry_type, 1);
+        assert_eq!(entry.expiration, Some(100));
+        assert!(entry.bytes_consumed > 0);
+    }
+
+    #[test]
+    fn should_tlv_entry_be_cloneable() {
+        // Arrange
+        let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        
+        // Act
+        let cloned = entry.clone();
+
+        // Assert
+        assert_eq!(entry.key_delta, cloned.key_delta);
+        assert_eq!(entry.value, cloned.value);
+        assert_eq!(entry.sequence, cloned.sequence);
+    }
+
+    #[test]
+    fn should_tlv_entry_be_debuggable() {
+        // Arrange
+        let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
+        let (entry, _) = decode(&encoded, 0).unwrap();
+        
+        // Act
+        let debug_str = format!("{:?}", entry);
+
+        // Assert
+        assert!(debug_str.contains("TlvEntry") || debug_str.contains("key_delta"));
     }
 }

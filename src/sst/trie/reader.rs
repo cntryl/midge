@@ -181,11 +181,43 @@ mod tests {
         builder.finish()
     }
 
+    fn build_large_test_trie() -> Vec<u8> {
+        let mut builder = TrieBuilder::new();
+        for i in 0..100 {
+            let key = format!("key_{:04}", i).into_bytes();
+            builder.add_key(&key, i as u32).unwrap();
+        }
+        builder.finish()
+    }
+
+    #[test]
+    fn should_create_reader_from_valid_trie() {
+        // Arrange
+        let data = build_test_trie();
+
+        // Act
+        let reader = TrieReader::new(&data);
+
+        // Assert
+        assert!(reader.is_ok());
+    }
+
+    #[test]
+    fn should_reject_empty_trie_data() {
+        // Arrange & Act
+        let reader = TrieReader::new(&[]);
+
+        // Assert
+        assert!(reader.is_err());
+    }
+
     #[test]
     fn should_find_exact_keys() {
+        // Arrange
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
+        // Act & Assert
         assert_eq!(reader.find_block(b"apple"), Some(0));
         assert_eq!(reader.find_block(b"application"), Some(1));
         assert_eq!(reader.find_block(b"banana"), Some(2));
@@ -194,42 +226,339 @@ mod tests {
 
     #[test]
     fn should_return_none_for_missing_keys() {
+        // Arrange
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
+        // Act & Assert
         assert_eq!(reader.find_block(b"apricot"), None);
         assert_eq!(reader.find_block(b"zoo"), None);
         assert_eq!(reader.find_block(b""), None);
+        assert_eq!(reader.find_block(b"app"), None);
     }
 
     #[test]
-    fn should_find_prefix_ranges() {
+    fn should_return_none_for_partial_matches() {
+        // Arrange
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        let app_blocks = reader.find_prefix_range(b"app");
-        assert!(app_blocks.contains(&0)); // apple
-        assert!(app_blocks.contains(&1)); // application
+        // Act & Assert
+        assert_eq!(reader.find_block(b"app"), None);
+        assert_eq!(reader.find_block(b"appl"), None);
+        assert_eq!(reader.find_block(b"ban"), None);
+    }
 
+    #[test]
+    fn should_find_first_key() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.find_block(b"apple"), Some(0));
+    }
+
+    #[test]
+    fn should_find_last_key() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.find_block(b"cherry"), Some(3));
+    }
+
+    #[test]
+    fn should_find_block_in_large_trie() {
+        // Arrange
+        let data = build_large_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.find_block(b"key_0000"), Some(0));
+        assert_eq!(reader.find_block(b"key_0050"), Some(50));
+        assert_eq!(reader.find_block(b"key_0099"), Some(99));
+    }
+
+    #[test]
+    fn should_find_prefix_range_for_single_key() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let blocks = reader.find_prefix_range(b"apple");
+
+        // Assert
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks.contains(&0));
+    }
+
+    #[test]
+    fn should_find_prefix_range_for_multiple_keys() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let blocks = reader.find_prefix_range(b"app");
+
+        // Assert
+        assert!(blocks.contains(&0)); // apple
+        assert!(blocks.contains(&1)); // application
+        assert!(!blocks.contains(&2)); // banana
+        assert!(!blocks.contains(&3)); // cherry
+    }
+
+    #[test]
+    fn should_find_single_prefix_match() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
         let ban_blocks = reader.find_prefix_range(b"ban");
+
+        // Assert
         assert_eq!(ban_blocks, vec![2]); // banana
     }
 
     #[test]
     fn should_handle_empty_prefix() {
+        // Arrange
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
+        // Act
         let all_blocks = reader.find_prefix_range(b"");
+
+        // Assert
         assert!(all_blocks.len() >= 4); // All blocks
+        assert!(all_blocks.contains(&0));
+        assert!(all_blocks.contains(&1));
+        assert!(all_blocks.contains(&2));
+        assert!(all_blocks.contains(&3));
     }
 
     #[test]
     fn should_return_empty_for_no_prefix_match() {
+        // Arrange
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
+        // Act
         let blocks = reader.find_prefix_range(b"xyz");
+
+        // Assert
         assert_eq!(blocks.len(), 0);
+    }
+
+    #[test]
+    fn should_return_empty_for_partial_non_matching_prefix() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let blocks = reader.find_prefix_range(b"zz");
+
+        // Assert
+        assert_eq!(blocks.len(), 0);
+    }
+
+    #[test]
+    fn should_find_prefix_in_large_trie() {
+        // Arrange
+        let data = build_large_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let blocks = reader.find_prefix_range(b"key_00");
+
+        // Assert
+        assert!(blocks.contains(&0));
+        assert!(blocks.contains(&9));
+    }
+
+    #[test]
+    fn should_seek_next_with_find_block() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.seek_next(b"apple"), Some(0));
+        assert_eq!(reader.seek_next(b"banana"), Some(2));
+    }
+
+    #[test]
+    fn should_seek_next_missing_key() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.seek_next(b"missing"), None);
+    }
+
+    #[test]
+    fn should_get_node_count() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let count = reader.node_count();
+
+        // Assert
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn should_get_node_count_for_large_trie() {
+        // Arrange
+        let data = build_large_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let count = reader.node_count();
+
+        // Assert
+        assert!(count >= 100);
+    }
+
+    #[test]
+    fn should_find_exact_match_in_prefix_range() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let blocks = reader.find_prefix_range(b"cherry");
+
+        // Assert
+        assert!(blocks.contains(&3));
+    }
+
+    #[test]
+    fn should_find_all_keys_with_common_prefix() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let app_blocks = reader.find_prefix_range(b"a");
+
+        // Assert
+        assert!(app_blocks.contains(&0)); // apple
+        assert!(app_blocks.contains(&1)); // application
+        assert!(!app_blocks.contains(&2)); // banana
+    }
+
+    #[test]
+    fn should_handle_single_character_prefix() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let b_blocks = reader.find_prefix_range(b"b");
+
+        // Assert
+        assert!(b_blocks.contains(&2)); // banana
+        assert!(!b_blocks.contains(&0)); // apple
+    }
+
+    #[test]
+    fn should_handle_prefix_longer_than_key() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act
+        let blocks = reader.find_prefix_range(b"applezzzz");
+
+        // Assert
+        assert_eq!(blocks.len(), 0);
+    }
+
+    #[test]
+    fn should_maintain_block_id_values() {
+        // Arrange
+        let data = build_test_trie();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.find_block(b"apple"), Some(0));
+        assert_eq!(reader.find_block(b"application"), Some(1));
+        assert_eq!(reader.find_block(b"banana"), Some(2));
+        assert_eq!(reader.find_block(b"cherry"), Some(3));
+    }
+
+    #[test]
+    fn should_find_keys_with_special_characters() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        builder.add_key(b"key-with-dash", 0).unwrap();
+        builder.add_key(b"key.with.dot", 1).unwrap();
+        builder.add_key(b"key_with_underscore", 2).unwrap();
+        let data = builder.finish();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.find_block(b"key-with-dash"), Some(0));
+        assert_eq!(reader.find_block(b"key.with.dot"), Some(1));
+        assert_eq!(reader.find_block(b"key_with_underscore"), Some(2));
+    }
+
+    #[test]
+    fn should_find_binary_keys() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        builder.add_key(&[0, 1, 2], 0).unwrap();
+        builder.add_key(&[0, 1, 3], 1).unwrap();
+        builder.add_key(&[5, 6, 7], 2).unwrap();
+        let data = builder.finish();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.find_block(&[0, 1, 2]), Some(0));
+        assert_eq!(reader.find_block(&[0, 1, 3]), Some(1));
+        assert_eq!(reader.find_block(&[5, 6, 7]), Some(2));
+    }
+
+    #[test]
+    fn should_find_maximum_block_ids() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        builder.add_key(b"key1", u32::MAX - 1).unwrap();
+        builder.add_key(b"key2", 0).unwrap();
+        let data = builder.finish();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.find_block(b"key1"), Some(u32::MAX - 1));
+        assert_eq!(reader.find_block(b"key2"), Some(0));
+    }
+
+    #[test]
+    fn should_handle_deeply_nested_trie() {
+        // Arrange
+        let mut builder = TrieBuilder::new();
+        builder.add_key(b"a", 0).unwrap();
+        builder.add_key(b"ab", 1).unwrap();
+        builder.add_key(b"abc", 2).unwrap();
+        builder.add_key(b"abcd", 3).unwrap();
+        builder.add_key(b"abcde", 4).unwrap();
+        let data = builder.finish();
+        let reader = TrieReader::new(&data).unwrap();
+
+        // Act & Assert
+        assert_eq!(reader.find_block(b"a"), Some(0));
+        assert_eq!(reader.find_block(b"ab"), Some(1));
+        assert_eq!(reader.find_block(b"abc"), Some(2));
+        assert_eq!(reader.find_block(b"abcd"), Some(3));
+        assert_eq!(reader.find_block(b"abcde"), Some(4));
     }
 }

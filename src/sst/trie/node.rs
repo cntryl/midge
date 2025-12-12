@@ -77,7 +77,10 @@ mod tests {
 
     #[test]
     fn should_create_node() {
+        // Arrange & Act
         let node = TrieNode::new(0, b"test".to_vec(), Some(42));
+
+        // Assert
         assert_eq!(node.prefix_len, 0);
         assert_eq!(node.key_delta, b"test");
         assert_eq!(node.block_id, Some(42));
@@ -85,13 +88,90 @@ mod tests {
     }
 
     #[test]
+    fn should_create_root_node() {
+        // Arrange & Act
+        let node = TrieNode::new(0, Vec::new(), None);
+
+        // Assert
+        assert_eq!(node.prefix_len, 0);
+        assert!(node.key_delta.is_empty());
+        assert!(node.block_id.is_none());
+        assert!(!node.is_leaf());
+    }
+
+    #[test]
+    fn should_create_internal_node_with_prefix() {
+        // Arrange & Act
+        let node = TrieNode::new(5, b"delta".to_vec(), None);
+
+        // Assert
+        assert_eq!(node.prefix_len, 5);
+        assert_eq!(node.key_delta, b"delta");
+        assert!(node.block_id.is_none());
+        assert!(!node.is_leaf());
+    }
+
+    #[test]
+    fn should_create_leaf_node_with_block_id() {
+        // Arrange & Act
+        let node = TrieNode::new(10, b"suffix".to_vec(), Some(999));
+
+        // Assert
+        assert_eq!(node.prefix_len, 10);
+        assert_eq!(node.key_delta, b"suffix");
+        assert_eq!(node.block_id, Some(999));
+        assert!(node.is_leaf());
+    }
+
+    #[test]
+    fn should_create_node_with_large_block_id() {
+        // Arrange & Act
+        let node = TrieNode::new(0, b"key".to_vec(), Some(u32::MAX));
+
+        // Assert
+        assert_eq!(node.block_id, Some(u32::MAX));
+        assert!(node.is_leaf());
+    }
+
+    #[test]
+    fn should_create_node_with_large_key_delta() {
+        // Arrange
+        let large_key: Vec<u8> = vec![42; 1000];
+        
+        // Act
+        let node = TrieNode::new(0, large_key.clone(), Some(1));
+
+        // Assert
+        assert_eq!(node.key_delta.len(), 1000);
+        assert_eq!(node.key_delta, large_key);
+    }
+
+    #[test]
+    fn should_add_single_child() {
+        // Arrange
+        let mut node = TrieNode::new(0, b"root".to_vec(), None);
+        let edge = TrieEdge::new(b'a', 1);
+
+        // Act
+        node.add_child(edge);
+
+        // Assert
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children[0].first_byte, b'a');
+        assert_eq!(node.children[0].child_index, 1);
+    }
+
+    #[test]
     fn should_add_children_in_sorted_order() {
+        // Arrange
         let mut node = TrieNode::new(0, b"root".to_vec(), None);
 
+        // Act
         node.add_child(TrieEdge::new(b'c', 2));
         node.add_child(TrieEdge::new(b'a', 0));
         node.add_child(TrieEdge::new(b'b', 1));
 
+        // Assert
         assert_eq!(node.children.len(), 3);
         assert_eq!(node.children[0].first_byte, b'a');
         assert_eq!(node.children[1].first_byte, b'b');
@@ -99,13 +179,174 @@ mod tests {
     }
 
     #[test]
+    fn should_maintain_sort_order_with_duplicates() {
+        // Arrange
+        let mut node = TrieNode::new(0, b"root".to_vec(), None);
+
+        // Act
+        node.add_child(TrieEdge::new(b'z', 0));
+        node.add_child(TrieEdge::new(b'a', 1));
+        node.add_child(TrieEdge::new(b'z', 2)); // Duplicate byte, different index
+        node.add_child(TrieEdge::new(b'm', 3));
+
+        // Assert - should be sorted by first_byte, with duplicates in insertion order within same byte
+        assert_eq!(node.children.len(), 4);
+        assert_eq!(node.children[0].first_byte, b'a');
+        assert_eq!(node.children[0].child_index, 1);
+        assert_eq!(node.children[1].first_byte, b'm');
+        assert_eq!(node.children[1].child_index, 3);
+        assert_eq!(node.children[2].first_byte, b'z');
+        // Both z entries should be present
+        assert_eq!(node.children[3].first_byte, b'z');
+    }
+
+    #[test]
+    fn should_add_many_children_in_order() {
+        // Arrange
+        let mut node = TrieNode::new(0, b"root".to_vec(), None);
+        let bytes = b"zyxwvutsrqponmlkjihgfedcba";
+
+        // Act
+        for (i, &b) in bytes.iter().enumerate() {
+            node.add_child(TrieEdge::new(b, i as u32));
+        }
+
+        // Assert
+        assert_eq!(node.children.len(), 26);
+        for i in 0..26 {
+            assert_eq!(node.children[i].first_byte, b"abcdefghijklmnopqrstuvwxyz"[i]);
+        }
+    }
+
+    #[test]
     fn should_find_child_by_byte() {
+        // Arrange
+        let mut node = TrieNode::new(0, b"root".to_vec(), None);
+        node.add_child(TrieEdge::new(b'a', 0));
+        node.add_child(TrieEdge::new(b'b', 1));
+        node.add_child(TrieEdge::new(b'c', 2));
+
+        // Act & Assert
+        assert!(node.find_child(b'a').is_some());
+        assert_eq!(node.find_child(b'a').unwrap().child_index, 0);
+        
+        assert!(node.find_child(b'b').is_some());
+        assert_eq!(node.find_child(b'b').unwrap().child_index, 1);
+        
+        assert!(node.find_child(b'c').is_some());
+        assert_eq!(node.find_child(b'c').unwrap().child_index, 2);
+    }
+
+    #[test]
+    fn should_return_none_for_missing_child() {
+        // Arrange
         let mut node = TrieNode::new(0, b"root".to_vec(), None);
         node.add_child(TrieEdge::new(b'a', 0));
         node.add_child(TrieEdge::new(b'b', 1));
 
-        assert!(node.find_child(b'a').is_some());
-        assert!(node.find_child(b'b').is_some());
+        // Act & Assert
+        assert!(node.find_child(b'z').is_none());
         assert!(node.find_child(b'c').is_none());
+        assert!(node.find_child(0).is_none());
+    }
+
+    #[test]
+    fn should_find_first_and_last_children() {
+        // Arrange
+        let mut node = TrieNode::new(0, b"root".to_vec(), None);
+        node.add_child(TrieEdge::new(0, 0)); // Minimum byte value
+        node.add_child(TrieEdge::new(255, 1)); // Maximum byte value
+
+        // Act & Assert
+        assert!(node.find_child(0).is_some());
+        assert!(node.find_child(255).is_some());
+    }
+
+    #[test]
+    fn should_identify_leaf_correctly() {
+        // Arrange
+        let leaf_node = TrieNode::new(0, b"leaf".to_vec(), Some(42));
+        let internal_node = TrieNode::new(0, b"internal".to_vec(), None);
+
+        // Act & Assert
+        assert!(leaf_node.is_leaf());
+        assert!(!internal_node.is_leaf());
+    }
+
+    #[test]
+    fn should_identify_leaf_with_block_id_zero() {
+        // Arrange & Act
+        let node = TrieNode::new(0, b"key".to_vec(), Some(0));
+
+        // Assert
+        assert!(node.is_leaf()); // Some(0) is still a leaf
+    }
+
+    #[test]
+    fn should_clone_node_correctly() {
+        // Arrange
+        let mut original = TrieNode::new(5, b"test".to_vec(), Some(42));
+        original.add_child(TrieEdge::new(b'a', 10));
+
+        // Act
+        let cloned = original.clone();
+
+        // Assert
+        assert_eq!(cloned.prefix_len, original.prefix_len);
+        assert_eq!(cloned.key_delta, original.key_delta);
+        assert_eq!(cloned.block_id, original.block_id);
+        assert_eq!(cloned.children.len(), original.children.len());
+    }
+
+    #[test]
+    fn should_debug_format_node() {
+        // Arrange
+        let node = TrieNode::new(5, b"test".to_vec(), Some(42));
+
+        // Act
+        let debug_str = format!("{:?}", node);
+
+        // Assert
+        assert!(debug_str.contains("TrieNode"));
+        assert!(debug_str.contains("prefix_len"));
+    }
+
+    #[test]
+    fn should_create_edge_with_valid_indices() {
+        // Arrange & Act
+        let edge = TrieEdge::new(b'x', 0);
+        let edge_max = TrieEdge::new(b'y', u32::MAX);
+
+        // Assert
+        assert_eq!(edge.first_byte, b'x');
+        assert_eq!(edge.child_index, 0);
+        assert_eq!(edge_max.first_byte, b'y');
+        assert_eq!(edge_max.child_index, u32::MAX);
+    }
+
+    #[test]
+    fn should_clone_edge() {
+        // Arrange
+        let original = TrieEdge::new(b'a', 42);
+
+        // Act
+        let cloned = original.clone();
+
+        // Assert
+        assert_eq!(cloned.first_byte, original.first_byte);
+        assert_eq!(cloned.child_index, original.child_index);
+    }
+
+    #[test]
+    fn should_debug_format_edge() {
+        // Arrange
+        let edge = TrieEdge::new(b'a', 10);
+
+        // Act
+        let debug_str = format!("{:?}", edge);
+
+        // Assert
+        assert!(debug_str.contains("TrieEdge"));
+        assert!(debug_str.contains("first_byte"));
     }
 }

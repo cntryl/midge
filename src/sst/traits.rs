@@ -114,12 +114,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    // Test that traits are object-safe
-    fn _assert_object_safe() {
-        let _: &dyn DynSstWriter;
-        let _: &dyn SstReader;
-    }
-
     // =========== Mock Implementations for Testing ===========
 
     #[derive(Debug)]
@@ -208,10 +202,51 @@ mod tests {
         }
     }
 
-    // =========== SstReader Trait Tests ===========
+    // =========== Trait Object Safety Tests ===========
 
     #[test]
-    fn should_get_present_key() {
+    fn should_use_reader_as_trait_object() {
+        // Arrange
+        let reader = MockSstReader::new();
+        let reader_ref: &dyn SstReader = &reader;
+
+        // Act
+        let result = reader_ref.get(b"any_key");
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn should_use_writer_as_boxed_trait_object() {
+        // Arrange
+        let writer: Box<dyn DynSstWriter> = Box::new(MockSstWriter::new());
+
+        // Act & Assert - Trait object can be created and used
+        // Just verifying it compiles and is object-safe
+        let _: Box<dyn DynSstWriter> = writer;
+    }
+
+    #[test]
+    fn should_downcast_reader_through_trait_object() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key1".to_vec(), b"value1".to_vec());
+        let reader_ref: &dyn SstReader = &reader;
+
+        // Act
+        let result = reader_ref.get(b"key1");
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().unwrap(), Bytes::from("value1"));
+    }
+
+    // =========== SstReader Trait Behavior Tests ===========
+
+    #[test]
+    fn should_get_return_present_key() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"key1".to_vec(), b"value1".to_vec());
@@ -227,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn should_return_none_for_absent_key() {
+    fn should_get_return_none_for_absent_key() {
         // Arrange
         let reader = MockSstReader::new();
 
@@ -240,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn should_scan_range_with_both_bounds() {
+    fn should_scan_range_with_both_bounds_inclusive_exclusive() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"a".to_vec(), b"val_a".to_vec());
@@ -248,7 +283,7 @@ mod tests {
         reader.insert(b"c".to_vec(), b"val_c".to_vec());
         reader.insert(b"d".to_vec(), b"val_d".to_vec());
 
-        // Act
+        // Act - [b, d) should return b and c (inclusive start, exclusive end)
         let result = reader.scan_range(Some(b"b"), Some(b"d"));
 
         // Assert
@@ -260,45 +295,48 @@ mod tests {
     }
 
     #[test]
-    fn should_scan_range_with_start_only() {
+    fn should_scan_range_respects_inclusive_start_boundary() {
         // Arrange
         let mut reader = MockSstReader::new();
-        reader.insert(b"a".to_vec(), b"val_a".to_vec());
-        reader.insert(b"b".to_vec(), b"val_b".to_vec());
-        reader.insert(b"c".to_vec(), b"val_c".to_vec());
+        reader.insert(b"apple".to_vec(), b"v1".to_vec());
+        reader.insert(b"banana".to_vec(), b"v2".to_vec());
+        reader.insert(b"cherry".to_vec(), b"v3".to_vec());
 
-        // Act
-        let result = reader.scan_range(Some(b"b"), None);
+        // Act - Start boundary is inclusive
+        let result = reader.scan_range(Some(b"banana"), None);
 
         // Assert
         assert!(result.is_ok());
         let pairs = result.unwrap();
         assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, Bytes::from("banana"));
     }
 
     #[test]
-    fn should_scan_range_with_end_only() {
+    fn should_scan_range_respects_exclusive_end_boundary() {
         // Arrange
         let mut reader = MockSstReader::new();
-        reader.insert(b"a".to_vec(), b"val_a".to_vec());
-        reader.insert(b"b".to_vec(), b"val_b".to_vec());
-        reader.insert(b"c".to_vec(), b"val_c".to_vec());
+        reader.insert(b"apple".to_vec(), b"v1".to_vec());
+        reader.insert(b"banana".to_vec(), b"v2".to_vec());
+        reader.insert(b"cherry".to_vec(), b"v3".to_vec());
 
-        // Act
-        let result = reader.scan_range(None, Some(b"c"));
+        // Act - End boundary is exclusive
+        let result = reader.scan_range(None, Some(b"cherry"));
 
         // Assert
         assert!(result.is_ok());
         let pairs = result.unwrap();
         assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(|(k, _)| k.as_ref() < b"cherry".as_ref()));
     }
 
     #[test]
-    fn should_scan_range_with_no_bounds() {
+    fn should_scan_range_with_no_bounds_returns_all() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"a".to_vec(), b"val_a".to_vec());
         reader.insert(b"b".to_vec(), b"val_b".to_vec());
+        reader.insert(b"c".to_vec(), b"val_c".to_vec());
 
         // Act
         let result = reader.scan_range(None, None);
@@ -306,7 +344,7 @@ mod tests {
         // Assert
         assert!(result.is_ok());
         let pairs = result.unwrap();
-        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs.len(), 3);
     }
 
     #[test]
@@ -324,55 +362,60 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_scan_with_exclusive_end_boundary() {
+    fn should_scan_range_returns_results_in_order() {
         // Arrange
         let mut reader = MockSstReader::new();
-        reader.insert(b"a".to_vec(), b"val_a".to_vec());
-        reader.insert(b"b".to_vec(), b"val_b".to_vec());
+        reader.insert(b"key3".to_vec(), b"v3".to_vec());
+        reader.insert(b"key1".to_vec(), b"v1".to_vec());
+        reader.insert(b"key2".to_vec(), b"v2".to_vec());
 
-        // Act - Scan [a, b) should only include 'a'
-        let result = reader.scan_range(Some(b"a"), Some(b"b"));
+        // Act
+        let result = reader.scan_range(None, None).unwrap();
+
+        // Assert - BTreeMap maintains sorted order
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, Bytes::from("key1"));
+        assert_eq!(result[1].0, Bytes::from("key2"));
+        assert_eq!(result[2].0, Bytes::from("key3"));
+    }
+
+    #[test]
+    fn should_get_handle_binary_keys() {
+        // Arrange
+        let binary_key = vec![0u8, 1u8, 255u8, 254u8];
+        let binary_value = vec![100u8, 200u8];
+        let mut reader = MockSstReader::new();
+        reader.insert(binary_key.clone(), binary_value.clone());
+
+        // Act
+        let result = reader.get(&binary_key).unwrap();
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].0, Bytes::from("a"));
+        assert_eq!(result.unwrap().to_vec(), binary_value);
     }
 
-    // =========== DynSstWriter Trait Tests ===========
-
     #[test]
-    fn should_add_single_entry() {
+    fn should_get_handle_large_values() {
         // Arrange
-        let mut writer = MockSstWriter::new();
+        let large_value = vec![42u8; 100000];
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key".to_vec(), large_value.clone());
 
         // Act
-        let result = writer.add(b"key", b"value");
+        let result = reader.get(b"key").unwrap();
 
         // Assert
-        assert!(result.is_ok());
+        assert_eq!(result.unwrap().to_vec(), large_value);
     }
 
+    // =========== DynSstWriter Trait Behavior Tests ===========
+
     #[test]
-    fn should_add_multiple_entries() {
+    fn should_add_with_meta_default_impl_calls_add_for_some() {
         // Arrange
         let mut writer = MockSstWriter::new();
 
-        // Act
-        writer.add(b"k1", b"v1").unwrap();
-        writer.add(b"k2", b"v2").unwrap();
-        writer.add(b"k3", b"v3").unwrap();
-
-        // Assert - No error means success
-    }
-
-    #[test]
-    fn should_add_with_meta_delegates_to_add() {
-        // Arrange
-        let mut writer = MockSstWriter::new();
-
-        // Act
+        // Act - Default impl should call add() for Some(value)
         let result = writer.add_with_meta(b"key", Some(b"value"), 100, 0, None);
 
         // Assert
@@ -380,11 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn should_add_with_meta_handles_none_value() {
+    fn should_add_with_meta_default_impl_skips_none() {
         // Arrange
         let mut writer = MockSstWriter::new();
 
-        // Act - Value is None, should skip
+        // Act - Default impl should skip None values
         let result = writer.add_with_meta(b"key", None, 100, 0, None);
 
         // Assert
@@ -392,35 +435,19 @@ mod tests {
     }
 
     #[test]
-    fn should_add_range_tombstone_succeeds() {
+    fn should_add_range_tombstone_default_impl_returns_ok() {
         // Arrange
         let mut writer = MockSstWriter::new();
 
-        // Act
+        // Act - Default impl returns Ok(())
         let result = writer.add_range_tombstone(b"start", b"end", 100);
-
-        // Assert - Default impl returns Ok
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_finish_bytes() {
-        // Arrange
-        let mut writer = MockSstWriter::new();
-        writer.add(b"test", b"data").unwrap();
-        let boxed = Box::new(writer);
-
-        // Act
-        let result = boxed.finish_bytes();
 
         // Assert
         assert!(result.is_ok());
-        let bytes = result.unwrap();
-        assert!(!bytes.is_empty());
     }
 
     #[test]
-    fn should_finish_to_path() {
+    fn should_finish_to_path_default_impl_writes_file() {
         // Arrange
         let writer = MockSstWriter::new();
         let boxed = Box::new(writer);
@@ -436,71 +463,66 @@ mod tests {
         }
     }
 
-    // =========== SstStateReader Trait Tests ===========
-
     #[test]
-    fn should_get_state_at_with_snapshot_filtering() {
-        // Arrange
-        // Note: This is a default implementation test, so we can only test the trait method exists
-        // In actual use, implementers would override this
-
-        // Assert - Just verify the trait can be compiled and used
-        let _ = "trait method exists";
-    }
-
-    #[test]
-    fn should_range_tombstones_returns_default_empty() {
-        // Arrange
-        // Note: Default implementation returns empty vector
-
-        // Assert - Just verify method exists
-        let _ = "default implementation returns Vec::new()";
-    }
-
-    // =========== Trait Polymorphism Tests ===========
-
-    #[test]
-    fn should_use_reader_as_trait_object() {
-        // Arrange
-        let reader = MockSstReader::new();
-        let reader_ref: &dyn SstReader = &reader;
-
-        // Act
-        let result = reader_ref.get(b"any_key");
-
-        // Assert
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_use_writer_as_trait_object() {
+    fn should_finish_bytes_produces_non_empty_output_when_has_data() {
         // Arrange
         let mut writer = MockSstWriter::new();
-        let writer_ref: &mut dyn DynSstWriter = &mut writer;
+        writer.add(b"test", b"data").unwrap();
+        let boxed = Box::new(writer);
 
         // Act
-        let result = writer_ref.add(b"key", b"value");
+        let result = boxed.finish_bytes();
 
         // Assert
         assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert!(!bytes.is_empty());
     }
 
     #[test]
-    fn should_handle_empty_keys() {
+    fn should_finish_bytes_produces_output_for_empty_writer() {
         // Arrange
-        let mut reader = MockSstReader::new();
-        reader.insert(Vec::new(), b"empty_key_value".to_vec());
+        let writer = MockSstWriter::new();
+        let boxed = Box::new(writer);
 
         // Act
-        let result = reader.get(&[]);
+        let result = boxed.finish_bytes();
 
         // Assert
         assert!(result.is_ok());
-        assert!(result.unwrap().is_some());
+        // Empty writer may produce empty or minimal output
     }
 
     #[test]
-    fn should_handle_empty_values() {
+    fn should_multiple_add_calls_accumulate() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+
+        // Act
+        writer.add(b"k1", b"v1").unwrap();
+        writer.add(b"k2", b"v2").unwrap();
+        writer.add(b"k3", b"v3").unwrap();
+        let boxed = Box::new(writer);
+        let result = boxed.finish_bytes().unwrap();
+
+        // Assert - Should have accumulated data
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn should_handle_empty_key_in_add() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+
+        // Act
+        let result = writer.add(b"", b"value");
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_handle_empty_value_in_add() {
         // Arrange
         let mut writer = MockSstWriter::new();
 
@@ -512,25 +534,24 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_large_keys() {
+    fn should_handle_binary_data_in_writer() {
         // Arrange
-        let large_key = vec![0u8; 10000];
-        let mut reader = MockSstReader::new();
-        reader.insert(large_key.clone(), b"value".to_vec());
+        let mut writer = MockSstWriter::new();
+        let binary_key = vec![0u8, 255u8, 128u8];
+        let binary_value = vec![1u8, 254u8, 127u8];
 
         // Act
-        let result = reader.get(&large_key);
+        let result = writer.add(&binary_key, &binary_value);
 
         // Assert
         assert!(result.is_ok());
-        assert!(result.unwrap().is_some());
     }
 
     #[test]
-    fn should_handle_large_values() {
+    fn should_writer_handle_large_values() {
         // Arrange
-        let large_value = vec![1u8; 100000];
         let mut writer = MockSstWriter::new();
+        let large_value = vec![42u8; 50000];
 
         // Act
         let result = writer.add(b"key", &large_value);
@@ -539,47 +560,46 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn should_preserve_binary_data() {
-        // Arrange
-        let binary_data = vec![0u8, 1u8, 255u8, 254u8];
-        let mut reader = MockSstReader::new();
-        reader.insert(b"binary".to_vec(), binary_data.clone());
+    // =========== Trait Polymorphism Edge Cases ===========
 
-        // Act
-        let result = reader.get(b"binary").unwrap().unwrap();
+    #[test]
+    fn should_scan_with_start_end_as_same_value_returns_empty() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key1".to_vec(), b"v".to_vec());
+
+        // Act - [key1, key1) should be empty
+        let result = reader.scan_range(Some(b"key1"), Some(b"key1")).unwrap();
 
         // Assert
-        assert_eq!(result.to_vec(), binary_data);
+        assert!(result.is_empty());
     }
 
     #[test]
-    fn should_scan_respects_inclusive_start() {
+    fn should_scan_with_start_greater_than_end_returns_empty() {
         // Arrange
         let mut reader = MockSstReader::new();
-        reader.insert(b"key1".to_vec(), b"v".to_vec());
-        reader.insert(b"key2".to_vec(), b"v".to_vec());
+        reader.insert(b"a".to_vec(), b"v".to_vec());
+        reader.insert(b"z".to_vec(), b"v".to_vec());
 
-        // Act - Start is inclusive
-        let result = reader.scan_range(Some(b"key1"), Some(b"key2")).unwrap();
+        // Act - [z, a) is invalid range
+        let result = reader.scan_range(Some(b"z"), Some(b"a")).unwrap();
 
-        // Assert - Should include key1
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, Bytes::from("key1"));
+        // Assert
+        assert!(result.is_empty());
     }
 
     #[test]
-    fn should_scan_respects_exclusive_end() {
+    fn should_preserve_value_integrity_through_bytes() {
         // Arrange
+        let original_value = vec![0u8, 1u8, 2u8, 255u8, 254u8];
         let mut reader = MockSstReader::new();
-        reader.insert(b"key1".to_vec(), b"v".to_vec());
-        reader.insert(b"key2".to_vec(), b"v".to_vec());
-        reader.insert(b"key3".to_vec(), b"v".to_vec());
+        reader.insert(b"key".to_vec(), original_value.clone());
 
-        // Act - End is exclusive
-        let result = reader.scan_range(Some(b"key1"), Some(b"key3")).unwrap();
+        // Act
+        let result = reader.get(b"key").unwrap().unwrap();
 
-        // Assert - Should NOT include key3
-        assert_eq!(result.len(), 2);
+        // Assert
+        assert_eq!(result.to_vec(), original_value);
     }
 }
