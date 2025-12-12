@@ -141,4 +141,154 @@ mod tests {
         // Assert - verify estimate returns a bool (may vary due to hash collisions)
         let _ = new_key_admitted;
     }
+
+    // ===== New comprehensive tests =====
+
+    #[test]
+    fn should_accept_empty_keys() {
+        // Arrange
+        let counter = AdmissionCounter::new(64, 1000);
+
+        // Act
+        counter.record_access(b"");
+        let admitted = counter.estimate(b"");
+
+        // Assert
+        assert!(admitted);
+    }
+
+    #[test]
+    fn should_handle_large_keys() {
+        // Arrange
+        let counter = AdmissionCounter::new(64, 1000);
+        let large_key = vec![42u8; 1000]; // 1KB key
+
+        // Act
+        counter.record_access(&large_key);
+        let admitted = counter.estimate(&large_key);
+
+        // Assert
+        assert!(admitted);
+    }
+
+    #[test]
+    fn should_handle_single_cell_counter() {
+        // Arrange
+        let counter = AdmissionCounter::new(1, 1000);
+
+        // Act & Assert - all keys hash to same cell
+        counter.record_access(b"key1");
+        assert!(counter.estimate(b"key1"));
+        counter.record_access(b"key2");
+        assert!(counter.estimate(b"key1"));
+        assert!(counter.estimate(b"key2"));
+    }
+
+    #[test]
+    fn should_handle_many_cells() {
+        // Arrange
+        let counter = AdmissionCounter::new(1024, 1000);
+        let keys: Vec<Vec<u8>> = (0..100)
+            .map(|i| format!("key_{}", i).into_bytes())
+            .collect();
+
+        // Act
+        for key in &keys {
+            counter.record_access(key);
+        }
+
+        // Assert - all recorded keys should be admitted
+        for key in &keys {
+            assert!(counter.estimate(key), "Key {:?} should be admitted", key);
+        }
+    }
+
+    #[test]
+    fn should_clone_counter() {
+        // Arrange
+        let counter1 = AdmissionCounter::new(64, 1000);
+        counter1.record_access(b"test_key");
+
+        // Act
+        let counter2 = counter1.clone();
+
+        // Assert (both should see the same data via Arc)
+        assert!(counter2.estimate(b"test_key"));
+    }
+
+    #[test]
+    fn should_share_state_across_clones() {
+        // Arrange
+        let counter1 = AdmissionCounter::new(64, 1000);
+
+        // Act
+        let counter2 = counter1.clone();
+        counter2.record_access(b"new_key");
+
+        // Assert (counter1 should see the update from counter2)
+        assert!(counter1.estimate(b"new_key"));
+    }
+
+    #[test]
+    fn should_handle_hash_collisions() {
+        // Arrange
+        let counter = AdmissionCounter::new(4, 1000); // Small table to force collisions
+
+        // Act - record many keys, some will collide
+        for i in 0..50 {
+            counter.record_access(format!("key_{}", i).as_bytes());
+        }
+
+        // Assert - at least some keys should be tracked
+        let mut tracked_count = 0;
+        for i in 0..50 {
+            if counter.estimate(format!("key_{}", i).as_bytes()) {
+                tracked_count += 1;
+            }
+        }
+        assert!(tracked_count > 0);
+    }
+
+    #[test]
+    fn should_handle_edge_case_keys() {
+        // Arrange
+        let counter = AdmissionCounter::new(64, 1000);
+
+        // Act
+        counter.record_access(b"");
+        counter.record_access(&[255u8; 256]); // All 0xFF bytes
+        counter.record_access(&[0u8; 256]);   // All 0x00 bytes
+
+        // Assert
+        assert!(counter.estimate(b""));
+        assert!(counter.estimate(&[255u8; 256]));
+        assert!(counter.estimate(&[0u8; 256]));
+    }
+
+    #[test]
+    fn should_maintain_consistent_hash_for_same_key() {
+        // Arrange
+        let counter = AdmissionCounter::new(64, 1000);
+
+        // Act
+        counter.record_access(b"test");
+        let admitted1 = counter.estimate(b"test");
+        let admitted2 = counter.estimate(b"test");
+
+        // Assert
+        assert_eq!(admitted1, admitted2);
+    }
+
+    #[test]
+    fn should_have_deterministic_hash_function() {
+        // Arrange
+        let key = b"deterministic_key";
+
+        // Act
+        let hash1 = AdmissionCounter::hash_key(key);
+        let hash2 = AdmissionCounter::hash_key(key);
+
+        // Assert
+        assert_eq!(hash1, hash2);
+    }
 }

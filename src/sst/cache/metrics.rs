@@ -151,4 +151,211 @@ mod tests {
         // Assert
         assert_eq!(metrics.memory_bytes(), 2560);
     }
+
+    // ===== New comprehensive tests =====
+
+    #[test]
+    fn should_initialize_all_metrics_to_zero() {
+        // Arrange & Act
+        let metrics = CacheMetrics::new();
+
+        // Assert
+        assert_eq!(metrics.hit_count(), 0);
+        assert_eq!(metrics.miss_count(), 0);
+        assert_eq!(metrics.eviction_count(), 0);
+        assert_eq!(metrics.memory_bytes(), 0);
+    }
+
+    #[test]
+    fn should_have_zero_hit_rate_when_no_accesses() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act
+        let hit_rate = metrics.hit_rate();
+
+        // Assert
+        assert_eq!(hit_rate, 0.0);
+    }
+
+    #[test]
+    fn should_have_100_percent_hit_rate_with_only_hits() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act
+        metrics.record_hit();
+        metrics.record_hit();
+        metrics.record_hit();
+
+        // Assert
+        assert_eq!(metrics.hit_rate(), 100.0);
+    }
+
+    #[test]
+    fn should_have_zero_hit_rate_with_only_misses() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act
+        metrics.record_miss();
+        metrics.record_miss();
+
+        // Assert
+        assert_eq!(metrics.hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn should_monotonically_increase_hit_count() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act & Assert
+        for i in 1..=10 {
+            metrics.record_hit();
+            assert_eq!(metrics.hit_count(), i);
+        }
+    }
+
+    #[test]
+    fn should_monotonically_increase_miss_count() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act & Assert
+        for i in 1..=10 {
+            metrics.record_miss();
+            assert_eq!(metrics.miss_count(), i);
+        }
+    }
+
+    #[test]
+    fn should_monotonically_increase_eviction_count() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act & Assert
+        for i in 1..=10 {
+            metrics.record_eviction();
+            assert_eq!(metrics.eviction_count(), i);
+        }
+    }
+
+    #[test]
+    fn should_handle_set_memory_bytes() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act
+        metrics.set_memory_bytes(5000);
+
+        // Assert
+        assert_eq!(metrics.memory_bytes(), 5000);
+    }
+
+    #[test]
+    fn should_handle_add_memory_monotonically() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act & Assert
+        for i in 1..=5 {
+            metrics.add_memory(1000);
+            assert_eq!(metrics.memory_bytes(), i * 1000);
+        }
+    }
+
+    #[test]
+    fn should_handle_remove_memory() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+        metrics.add_memory(5000);
+
+        // Act
+        metrics.remove_memory(2000);
+
+        // Assert
+        assert_eq!(metrics.memory_bytes(), 3000);
+    }
+
+    #[test]
+    fn should_calculate_fractional_hit_rates() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act
+        metrics.record_hit();
+        metrics.record_miss();
+        metrics.record_miss();
+
+        // Assert (1 hit, 2 misses -> 33.33%)
+        let expected = (1.0 / 3.0) * 100.0;
+        assert!((metrics.hit_rate() - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn should_be_cloneable_and_share_state() {
+        // Arrange
+        let metrics1 = CacheMetrics::new();
+
+        // Act
+        metrics1.record_hit();
+        let metrics2 = metrics1.clone();
+        metrics2.record_hit();
+
+        // Assert (both share the same Arc data)
+        assert_eq!(metrics1.hit_count(), 2);
+        assert_eq!(metrics2.hit_count(), 2);
+    }
+
+    #[test]
+    fn should_have_default_instance() {
+        // Arrange & Act
+        let metrics = CacheMetrics::default();
+
+        // Assert
+        assert_eq!(metrics.hit_count(), 0);
+        assert_eq!(metrics.miss_count(), 0);
+    }
+
+    #[test]
+    fn should_handle_large_metric_values() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+
+        // Act
+        for _ in 0..1000 {
+            metrics.record_hit();
+        }
+        metrics.add_memory(u64::MAX / 2);
+
+        // Assert
+        assert_eq!(metrics.hit_count(), 1000);
+        assert!(metrics.memory_bytes() > 0);
+    }
+
+    #[test]
+    fn should_handle_concurrent_metric_updates() {
+        // Arrange
+        let metrics = std::sync::Arc::new(CacheMetrics::new());
+        let mut handles = vec![];
+
+        // Act
+        for _ in 0..10 {
+            let m = std::sync::Arc::clone(&metrics);
+            let handle = std::thread::spawn(move || {
+                for _ in 0..10 {
+                    m.record_hit();
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Assert (10 threads * 10 hits = 100)
+        assert_eq!(metrics.hit_count(), 100);
+    }
 }

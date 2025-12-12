@@ -199,4 +199,229 @@ mod tests {
         // Assert
         assert_eq!(serialized1, serialized2);
     }
+
+    // ===== New comprehensive invariant tests =====
+
+    #[test]
+    fn should_reject_empty_deserialization_data() {
+        // Arrange
+        let data = vec![];
+
+        // Act
+        let result = BloomReader::deserialize(&data);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_reject_data_with_size_mismatch() {
+        // Arrange
+        let mut writer = BloomWriter::new(100, 0.01);
+        writer.insert(b"test");
+        let mut serialized = writer.serialize();
+
+        // Act - truncate bits section
+        serialized.truncate(serialized.len() - 1);
+        let result = BloomReader::deserialize(&serialized);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_preserve_key_count_through_serialization() {
+        // Arrange
+        let mut writer = BloomWriter::new(100, 0.01);
+        for i in 0..25 {
+            writer.insert(format!("key{}", i).as_bytes());
+        }
+
+        // Act
+        let serialized = writer.serialize();
+        let reader = BloomReader::deserialize(&serialized).unwrap();
+
+        // Assert
+        assert_eq!(reader.key_count(), 25);
+    }
+
+    #[test]
+    fn should_preserve_num_bits_through_serialization() {
+        // Arrange
+        let mut writer = BloomWriter::new(200, 0.01);
+        writer.insert(b"test");
+        let original_reader = writer.finish();
+        let original_num_bits = original_reader.num_bits();
+
+        // Act
+        let serialized = original_reader.serialize();
+        let reader = BloomReader::deserialize(&serialized).unwrap();
+
+        // Assert
+        assert_eq!(reader.num_bits(), original_num_bits);
+    }
+
+    #[test]
+    fn should_have_zero_fpr_for_empty_filter() {
+        // Arrange
+        let writer = BloomWriter::new(100, 0.01);
+        let reader = writer.finish();
+
+        // Act
+        let fpr = reader.estimated_fpr();
+
+        // Assert
+        assert_eq!(fpr, 0.0);
+    }
+
+    #[test]
+    fn should_have_bounded_fpr_value() {
+        // Arrange
+        let mut writer = BloomWriter::new(100, 0.01);
+        for i in 0..100 {
+            writer.insert(format!("key{}", i).as_bytes());
+        }
+
+        // Act
+        let reader = writer.finish();
+        let fpr = reader.estimated_fpr();
+
+        // Assert
+        assert!(fpr >= 0.0, "FPR must be non-negative");
+        assert!(fpr <= 1.0, "FPR must be <= 1.0");
+    }
+
+    #[test]
+    fn should_increase_fpr_with_more_keys() {
+        // Arrange & Act
+        let mut writer_low = BloomWriter::new(100, 0.01);
+        for i in 0..10 {
+            writer_low.insert(format!("key{}", i).as_bytes());
+        }
+        let fpr_low = writer_low.finish().estimated_fpr();
+
+        let mut writer_high = BloomWriter::new(100, 0.01);
+        for i in 0..100 {
+            writer_high.insert(format!("key{}", i).as_bytes());
+        }
+        let fpr_high = writer_high.finish().estimated_fpr();
+
+        // Assert
+        assert!(fpr_high > fpr_low, "More keys should increase FPR");
+    }
+
+    #[test]
+    fn should_test_missing_keys_consistently() {
+        // Arrange
+        let mut writer = BloomWriter::new(100, 0.01);
+        writer.insert(b"present");
+        let serialized = writer.serialize();
+        let reader = BloomReader::deserialize(&serialized).unwrap();
+
+        // Act
+        let result_missing = reader.contains(b"missing");
+        let result_other = reader.contains(b"other");
+
+        // Assert (missing keys should be definitely not present)
+        assert_eq!(result_missing, BloomTestResult::DefinitelyNotPresent);
+        assert_eq!(result_other, BloomTestResult::DefinitelyNotPresent);
+    }
+
+    #[test]
+    fn should_handle_empty_key_in_reader() {
+        // Arrange
+        let mut writer = BloomWriter::new(100, 0.01);
+        writer.insert(b"");
+        let serialized = writer.serialize();
+        let reader = BloomReader::deserialize(&serialized).unwrap();
+
+        // Act
+        let result = reader.contains(b"");
+
+        // Assert
+        assert_eq!(result, BloomTestResult::MightBePresent);
+    }
+
+    #[test]
+    fn should_handle_large_key_in_reader() {
+        // Arrange
+        let large_key = vec![99u8; 5000]; // 5KB key
+        let mut writer = BloomWriter::new(100, 0.01);
+        writer.insert(&large_key);
+        let serialized = writer.serialize();
+        let reader = BloomReader::deserialize(&serialized).unwrap();
+
+        // Act
+        let result = reader.contains(&large_key);
+
+        // Assert
+        assert_eq!(result, BloomTestResult::MightBePresent);
+    }
+
+    #[test]
+    fn should_maintain_consistent_size_bytes() {
+        // Arrange
+        let mut writer = BloomWriter::new(100, 0.01);
+        writer.insert(b"key1");
+        writer.insert(b"key2");
+
+        // Act
+        let serialized = writer.serialize();
+        let reader = BloomReader::deserialize(&serialized).unwrap();
+        let size_after_deser = reader.size_bytes();
+
+        // Assert
+        assert_eq!(size_after_deser, writer.size_bytes());
+    }
+
+    #[test]
+    fn should_hash_consistently_across_instances() {
+        // Arrange
+        let key = b"consistent_key";
+
+        // Act
+        let mut writer1 = BloomWriter::new(100, 0.01);
+        writer1.insert(key);
+        let serialized = writer1.serialize();
+        let reader = BloomReader::deserialize(&serialized).unwrap();
+
+        // Assert - Reader and Writer should give same result
+        assert_eq!(
+            writer1.contains(key),
+            reader.contains(key),
+            "Reader and Writer must agree on membership"
+        );
+    }
+
+    #[test]
+    fn should_handle_many_keys_in_filter() {
+        // Arrange
+        let mut writer = BloomWriter::new(10000, 0.01);
+        for i in 0..10000 {
+            writer.insert(format!("key{}", i).as_bytes());
+        }
+
+        // Act
+        let serialized = writer.serialize();
+        let reader = BloomReader::deserialize(&serialized).unwrap();
+
+        // Assert
+        assert_eq!(reader.key_count(), 10000);
+        // Spot check some keys
+        assert_eq!(reader.contains(b"key0"), BloomTestResult::MightBePresent);
+        assert_eq!(reader.contains(b"key5000"), BloomTestResult::MightBePresent);
+        assert_eq!(reader.contains(b"key9999"), BloomTestResult::MightBePresent);
+    }
+
+    #[test]
+    fn should_reject_incomplete_metadata() {
+        // Arrange
+        let incomplete = vec![1, 2, 3, 4]; // Only 4 bytes, need 8
+
+        // Act
+        let result = BloomReader::deserialize(&incomplete);
+
+        // Assert
+        assert!(result.is_err());
+    }
 }

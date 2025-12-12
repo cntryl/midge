@@ -259,4 +259,158 @@ mod tests {
         assert!(key_map.contains_key(&key1));
         assert!(key_map.contains_key(&key2));
     }
+
+    // ===== New comprehensive tests =====
+
+    #[test]
+    fn should_clear_all_state() {
+        // Arrange
+        let policy = ClockProPolicy::new();
+        for i in 0..5 {
+            policy.on_access(CacheKey::new(i, 0));
+        }
+
+        // Act
+        policy.clear();
+
+        // Assert
+        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        assert_eq!(key_map.len(), 0);
+    }
+
+    #[test]
+    fn should_pick_none_when_empty() {
+        // Arrange
+        let policy = ClockProPolicy::new();
+
+        // Act
+        let victim = policy.pick_victim();
+
+        // Assert
+        assert!(victim.is_none());
+    }
+
+    #[test]
+    fn should_have_default_instance() {
+        // Arrange & Act
+        let policy = ClockProPolicy::default();
+
+        // Act
+        policy.on_access(CacheKey::new(1, 0));
+        let victim = policy.pick_victim();
+
+        // Assert
+        assert!(victim.is_some());
+    }
+
+    #[test]
+    fn should_create_with_custom_capacity() {
+        // Arrange & Act
+        let policy = ClockProPolicy::with_capacity(512);
+
+        // Act
+        policy.on_access(CacheKey::new(1, 0));
+
+        // Assert
+        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        assert_eq!(key_map.len(), 1);
+    }
+
+    #[test]
+    fn should_handle_small_capacity() {
+        // Arrange & Act
+        let policy = ClockProPolicy::with_capacity(1); // Very small
+
+        // Act
+        policy.on_access(CacheKey::new(1, 0));
+
+        // Assert
+        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        assert!(key_map.len() > 0);
+    }
+
+    #[test]
+    fn should_remove_key_from_tracking() {
+        // Arrange
+        let policy = ClockProPolicy::new();
+        let key1 = CacheKey::new(1, 0);
+        let key2 = CacheKey::new(2, 0);
+
+        // Act
+        policy.on_access(key1);
+        policy.on_access(key2);
+        policy.remove(key1);
+
+        // Assert
+        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        assert!(!key_map.contains_key(&key1));
+        assert!(key_map.contains_key(&key2));
+    }
+
+    #[test]
+    fn should_handle_mixed_accesses_and_removals() {
+        // Arrange
+        let policy = ClockProPolicy::new();
+        let keys: Vec<CacheKey> = (1..=5).map(|i| CacheKey::new(i, 0)).collect();
+
+        // Act
+        for key in &keys[..3] {
+            policy.on_access(*key);
+        }
+        policy.remove(keys[0]);
+        for key in &keys[3..] {
+            policy.on_access(*key);
+        }
+
+        // Assert - 4 keys should remain
+        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        assert_eq!(key_map.len(), 4);
+    }
+
+    #[test]
+    fn should_remove_nonexistent_key_safely() {
+        // Arrange
+        let policy = ClockProPolicy::new();
+
+        // Act
+        policy.remove(CacheKey::new(999, 999)); // Remove non-existent key
+
+        // Assert - should not panic
+        let victim = policy.pick_victim();
+        assert!(victim.is_none());
+    }
+
+    #[test]
+    fn should_handle_duplicate_accesses() {
+        // Arrange
+        let policy = ClockProPolicy::new();
+        let key = CacheKey::new(1, 0);
+
+        // Act
+        policy.on_access(key);
+        policy.on_access(key); // Access again
+        policy.on_access(key); // And again
+
+        // Assert
+        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        assert_eq!(key_map.len(), 1); // Only one entry
+    }
+
+    #[test]
+    fn should_build_circular_structure() {
+        // Arrange
+        let policy = ClockProPolicy::new();
+        let keys: Vec<CacheKey> = (0..100).map(|i| CacheKey::new(i, 0)).collect();
+
+        // Act
+        for key in &keys {
+            policy.on_access(*key);
+        }
+
+        // Assert
+        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        assert_eq!(key_map.len(), 100);
+    }
 }
+
+
