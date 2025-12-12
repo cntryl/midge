@@ -250,9 +250,9 @@ cargo test --test engine_basic --test engine_write_batch --test engine_delete_ra
 | **transaction_isolation.rs** | 20 | 🚧 In Progress (15/20 passing, 5 failing) | Dirty read prevention works; phantom reads pending |
 | **transaction_advanced.rs** | 10 | 📋 Not started | Crash recovery for txns |
 | **transaction_spill.rs** | 13 | 📋 Not started | Large transaction spill |
-| **durability_wal.rs** | 10 | 📋 Not started | WAL behavior |
-| **durability_recovery.rs** | 14 | 📋 Not started | Crash recovery |
-| **durability_atomicity.rs** | 11 | 📋 Not started | Manifest atomicity |
+| **durability_wal.rs** | 10 | ✅ Passing (10/10) | WAL recovery, rotation, replay, corruption |
+| **durability_recovery.rs** | 14 | � In Progress (13/14 passing, 1 failing) | Crash recovery, WAL replay, consistency |
+| **durability_atomicity.rs** | 11 | ✅ Passing (11/11) | Manifest atomicity, SST exposure, WAL precedence |
 | **sst_reader.rs** | 7 | 📋 Not started | SST read path |
 | **sst_writer.rs** | 14 | 📋 Not started | SST write & compression |
 | **sst_index_table.rs** | 20 | 📋 Not started | Block index lookups |

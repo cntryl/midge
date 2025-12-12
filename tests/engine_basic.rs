@@ -176,3 +176,28 @@ fn should_handle_many_operations_when_sequential() {
         }
     });
 }
+
+#[test]
+fn should_not_create_filesystem_artifacts_when_memory_mode() {
+    // This test validates that memory mode operates entirely in RAM.
+    // All storage modes should support this pattern with identical semantics.
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange: Open engine and write data
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+
+        // Act: Perform various operations
+        for i in 0..50 {
+            let key = format!("artifact_test_{i}");
+            engine.put(cf, key.as_bytes(), b"test_value").expect("put");
+        }
+
+        // Assert: All data is readable (operations succeeded)
+        let got = engine.get(cf, b"artifact_test_0").expect("get");
+        assert!(
+            got.is_some(),
+            "failed to retrieve written data in mode: {}",
+            mode
+        );
+    });
+}

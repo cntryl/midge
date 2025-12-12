@@ -109,6 +109,8 @@ pub struct MidgeOptions {
     pub compression: bool,
     /// Enable automatic background compaction
     pub enable_compaction: bool,
+    /// Memory budget for spilling (in bytes)
+    pub memory_budget: Option<usize>,
 }
 
 impl Default for MidgeOptions {
@@ -119,7 +121,19 @@ impl Default for MidgeOptions {
             memtable_size: 64 * 1024 * 1024, // 64 MB
             compression: false,
             enable_compaction: true,
+            memory_budget: None,
         }
+    }
+}
+
+impl MidgeOptions {
+    /// Set memory budget for transaction spilling (in bytes)
+    /// 
+    /// When a transaction exceeds this memory limit, it will spill to disk.
+    /// Set to None for unlimited memory.
+    pub fn memory_budget(mut self, bytes: usize) -> Self {
+        self.memory_budget = Some(bytes);
+        self
     }
 }
 
@@ -138,14 +152,21 @@ pub fn all_storage_modes_new() -> Vec<&'static str> {
 
 /// Durable storage modes only: local disk and cloud.
 /// Use this for tests that require persistence (SST, WAL, recovery, durability).
-pub fn durable_storage_modes() -> Vec<&'static str> {
-    vec!["local", "cloud"]
+pub fn durable_storage_modes() -> &'static [&'static str] {
+    &["local", "cloud"]
 }
 
 /// Memory-only storage mode.
 /// Use this for tests that explicitly need non-persistent storage.
 pub fn memory_storage_modes() -> Vec<&'static str> {
     vec!["memory"]
+}
+
+/// Create memory-only options for testing
+/// 
+/// Convenience helper for creating MidgeOptions with memory storage mode.
+pub fn memory_opts() -> MidgeOptions {
+    opts_for_mode("memory")
 }
 
 /// Filesystem-only storage mode.
@@ -175,6 +196,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             memtable_size: 64 * 1024,
             compression: false,
             enable_compaction: false,
+            memory_budget: None,
         },
         "local" => {
             let test_dir = PathBuf::from(format!(
@@ -189,6 +211,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memtable_size: 64 * 1024,
                 compression: false,
                 enable_compaction: false,
+                memory_budget: None,
             }
         }
         "cloud" => {
@@ -206,6 +229,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memtable_size: 64 * 1024,
                 compression: false,
                 enable_compaction: false,
+                memory_budget: None,
             }
         }
         _ => panic!("unknown storage mode: {}", mode),
@@ -392,6 +416,7 @@ pub fn compaction_test_opts() -> MidgeOptions {
         memtable_size: 1024 * 1024, // 1 MB for faster flushing in tests
         compression: false,
         enable_compaction: true,
+        memory_budget: None,
     }
 }
 
@@ -405,6 +430,7 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
         memtable_size: 512 * 1024, // 512 KB for even faster flushing
         compression: false,
         enable_compaction: false,
+        memory_budget: None,
     }
 }
 
@@ -474,5 +500,6 @@ pub fn durability_opts() -> MidgeOptions {
         memtable_size: 64 * 1024,
         compression: false,
         enable_compaction: false,
+        memory_budget: None,
     }
 }

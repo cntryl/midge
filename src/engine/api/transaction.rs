@@ -343,6 +343,18 @@ impl Transaction {
         !self.read_set.is_empty()
     }
 
+    /// Result-like expect wrapper for Transaction errors
+    /// 
+    /// Returns self if transaction is valid and active.
+    /// Panics with message if transaction is in invalid state.
+    pub fn expect(self, msg: &str) -> Self {
+        if self.state == TransactionState::Active {
+            self
+        } else {
+            panic!("{}: transaction in {:?} state", msg, self.state)
+        }
+    }
+
     /// Mark transaction as committed
     pub fn mark_committed(&mut self, commit_seq: u64) -> MidgeResult<()> {
         if self.state != TransactionState::Committing {

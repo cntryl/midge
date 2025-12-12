@@ -235,17 +235,23 @@ fn should_persist_keys_across_delete_range_with_restart_when_durable() {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Keys should be restored after restart
-        // (delete_range didn't actually delete them since range() returns empty)
+        // Keys in the delete_range should be deleted
+        // delete_range(key1, key3) deletes [key1, key3) = key1 and key2
         assert_eq!(
             engine.get(cf, b"key1").expect("get1"),
-            Some(Bytes::from_static(b"val1")),
-            "key1 should persist after restart"
+            None,
+            "key1 should be deleted"
         );
         assert_eq!(
             engine.get(cf, b"key2").expect("get2"),
-            Some(Bytes::from_static(b"val2")),
-            "key2 should persist after restart"
+            None,
+            "key2 should be deleted"
+        );
+        // key3 is outside the range [key1, key3), so it should persist
+        assert_eq!(
+            engine.get(cf, b"key3").expect("get3"),
+            Some(Bytes::from_static(b"val3")),
+            "key3 should persist after restart"
         );
     });
 }

@@ -120,17 +120,24 @@ impl WalActor {
         // Assign sequence number from runtime state
         let sequence = state.next_sequence();
 
+        // Determine operation kind: Delete if value is None, Put otherwise
+        let op_kind = if value.is_none() {
+            WalOpKind::Delete
+        } else {
+            WalOpKind::Put
+        };
+
         // Create WAL record (with expiration if provided)
         let record = match ttl_seconds {
             Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
                 cf_id,
-                WalOpKind::Put,
+                op_kind,
                 key.clone(),
                 value.clone(),
                 sequence,
                 ttl,
             ),
-            _ => WalRecord::new_cf(cf_id, WalOpKind::Put, key.clone(), value.clone(), sequence),
+            _ => WalRecord::new_cf(cf_id, op_kind, key.clone(), value.clone(), sequence),
         };
 
         // Calculate record size for batching
