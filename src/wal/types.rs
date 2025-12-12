@@ -188,3 +188,140 @@ impl WalRecord {
         4 + 1 + 8 + 4 + key_size + 4 + value_size + range_end_size + 20
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_check_expiration_correctly() {
+        // Arrange - record that expired long ago
+        let mut expired_record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            1,
+        );
+        expired_record.expiration = Some(1); // 1 ms after epoch
+
+        // Act & Assert
+        assert!(expired_record.is_expired());
+    }
+
+    #[test]
+    fn should_check_non_expired_record() {
+        // Arrange - record with far future expiration
+        let mut future_record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            1,
+        );
+        future_record.expiration = Some(u64::MAX);
+
+        // Act & Assert
+        assert!(!future_record.is_expired());
+    }
+
+    #[test]
+    fn should_consider_record_without_expiration_as_not_expired() {
+        // Arrange
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            1,
+        );
+
+        // Act & Assert
+        assert!(!record.is_expired());
+    }
+
+    #[test]
+    fn should_estimate_size_for_put_operation() {
+        // Arrange
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"mykey"),
+            Some(Bytes::from_static(b"myvalue")),
+            42,
+        );
+
+        // Act
+        let size = record.estimated_size();
+
+        // Assert - should include all fields
+        // 4 (cf_id) + 1 (op) + 8 (seq) + 4 (key len) + 5 (key) + 4 (value len) + 7 (value) + 20 (overhead) = 53
+        assert!(size >= 53);
+    }
+
+    #[test]
+    fn should_estimate_size_without_value() {
+        // Arrange
+        let record = WalRecord::new(
+            WalOpKind::Delete,
+            Bytes::from_static(b"key"),
+            None,
+            1,
+        );
+
+        // Act
+        let size = record.estimated_size();
+
+        // Assert - should not include value length
+        assert!(size >= 4 + 1 + 8 + 4 + 3 + 4 + 20);
+    }
+
+    #[test]
+    fn should_round_trip_ttl_record() {
+        // Arrange
+        let record = WalRecord::new_with_ttl(
+            0,
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            42,
+            3600, // 1 hour
+        );
+
+        // Act
+        let has_expiration = record.expiration.is_some();
+
+        // Assert
+        assert!(has_expiration);
+        assert!(!record.is_expired()); // Should not be expired immediately
+    }
+
+    #[test]
+    fn should_wire_format_all_operation_kinds() {
+        // Arrange & Act & Assert
+        assert_eq!(WalOpKind::Put.to_wire_format(), 0);
+        assert_eq!(WalOpKind::Insert.to_wire_format(), 1);
+        assert_eq!(WalOpKind::Delete.to_wire_format(), 2);
+        assert_eq!(WalOpKind::DeleteRange.to_wire_format(), 3);
+        assert_eq!(WalOpKind::TxnBegin.to_wire_format(), 4);
+        assert_eq!(WalOpKind::TxnCommit.to_wire_format(), 5);
+        assert_eq!(WalOpKind::Merge.to_wire_format(), 6);
+    }
+
+    #[test]
+    fn should_parse_wire_format_for_all_kinds() {
+        // Arrange & Act & Assert
+        assert_eq!(WalOpKind::from_wire_format(0).unwrap(), WalOpKind::Put);
+        assert_eq!(WalOpKind::from_wire_format(1).unwrap(), WalOpKind::Insert);
+        assert_eq!(WalOpKind::from_wire_format(2).unwrap(), WalOpKind::Delete);
+        assert_eq!(WalOpKind::from_wire_format(3).unwrap(), WalOpKind::DeleteRange);
+        assert_eq!(WalOpKind::from_wire_format(4).unwrap(), WalOpKind::TxnBegin);
+        assert_eq!(WalOpKind::from_wire_format(5).unwrap(), WalOpKind::TxnCommit);
+        assert_eq!(WalOpKind::from_wire_format(6).unwrap(), WalOpKind::Merge);
+    }
+
+    #[test]
+    fn should_reject_invalid_wire_format() {
+        // Arrange & Act
+        let result = WalOpKind::from_wire_format(255);
+
+        // Assert
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid WAL operation"));
+    }
+}

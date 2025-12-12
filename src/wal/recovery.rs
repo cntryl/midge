@@ -588,4 +588,230 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
-}
+
+    // =========== TTL/Expiration Tests ===========
+
+    #[test]
+    fn should_skip_expired_records_during_recovery() {
+        // Arrange
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_expiration_{}",
+            std::process::id()
+        ));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+            let mut expired_record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"expired_key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+            );
+            // Set expiration to the past (1 millisecond after epoch)
+            expired_record.expiration = Some(1);
+            writer.append_record(&expired_record).unwrap();
+
+            let mut future_record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"future_key"),
+                Some(Bytes::from_static(b"value")),
+                2,
+            );
+            // Set expiration to far future
+            future_record.expiration = Some(u64::MAX);
+            writer.append_record(&future_record).unwrap();
+
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        let recovered_memtable = &memtables[&0];
+        // Expired record should not be present
+        assert!(recovered_memtable.get(b"expired_key").unwrap().is_none());
+        // Future record should be present
+        assert!(recovered_memtable.get(b"future_key").unwrap().is_some());
+        // Both records were processed but expired one was skipped during apply
+        assert_eq!(stats.record_count, 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_track_bytes_accounting_correctly() {
+        // Arrange
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_bytes_{}",
+            std::process::id()
+        ));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+            let record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key123"), // 6 bytes
+                Some(Bytes::from_static(b"value456")), // 8 bytes
+                1,
+            );
+            writer.append_record(&record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        // Should account for key (6) + value (8) = 14 bytes minimum
+        assert!(stats.bytes >= 14);
+        assert_eq!(stats.record_count, 1);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_handle_delete_range_operations() {
+        // Arrange
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_delete_range_{}",
+            std::process::id()
+        ));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+
+            // Add a put record first
+            let put_record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+            );
+            writer.append_record(&put_record).unwrap();
+
+            // DeleteRange is currently a no-op, but should not cause errors
+            let mut delete_range_record = WalRecord::new(
+                WalOpKind::DeleteRange,
+                Bytes::from_static(b"start"),
+                None,
+                2,
+            );
+            delete_range_record.range_end = Some(Bytes::from_static(b"end"));
+            writer.append_record(&delete_range_record).unwrap();
+
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.record_count, 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_handle_merge_operations() {
+        // Arrange
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_merge_{}",
+            std::process::id()
+        ));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+
+            // Merge operations are currently not applied, but should not cause errors
+            let merge_record = WalRecord::new(
+                WalOpKind::Merge,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"merge_data")),
+                1,
+            );
+            writer.append_record(&merge_record).unwrap();
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.record_count, 1);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn should_handle_transaction_markers() {
+        // Arrange
+        let temp_dir = std::env::temp_dir().join(format!(
+            "midge_recovery_test_txn_{}",
+            std::process::id()
+        ));
+        let wal_dir = temp_dir.join("wal");
+        let _ = std::fs::remove_dir_all(&wal_dir);
+        std::fs::create_dir_all(&wal_dir).ok();
+
+        {
+            let writer = FsWalWriter::new(&wal_dir).unwrap();
+
+            let begin_record = WalRecord::new(
+                WalOpKind::TxnBegin,
+                Bytes::from_static(b"txn_key"),
+                None,
+                1,
+            );
+            writer.append_record(&begin_record).unwrap();
+
+            let put_record = WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+                2,
+            );
+            writer.append_record(&put_record).unwrap();
+
+            let commit_record = WalRecord::new(
+                WalOpKind::TxnCommit,
+                Bytes::from_static(b"txn_key"),
+                None,
+                3,
+            );
+            writer.append_record(&commit_record).unwrap();
+
+            writer.sync().unwrap();
+        }
+
+        // Act
+        let mut memtables = HashMap::new();
+        let stats = replay_wal(&wal_dir, &mut memtables).unwrap();
+
+        // Assert
+        assert_eq!(stats.record_count, 3);
+        // The Put should have been applied, TxnBegin and TxnCommit are markers
+        let recovered_memtable = &memtables[&0];
+        assert_eq!(
+            recovered_memtable.get(b"key").unwrap(),
+            Some(b"value".to_vec())
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }}
