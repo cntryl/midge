@@ -8,12 +8,9 @@
 //! - FS + Cloud engine variants with configurable latency
 
 use bytes::Bytes;
-use cntryl_midge::cloud::mock::MockCloudBackend;
-use cntryl_midge::cloud::LatencyConfig;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
-use std::sync::Arc;
 use std::sync::OnceLock;
 use tempfile::TempDir;
 
@@ -167,7 +164,7 @@ pub fn load_data_batched(
 
     let mut batch = WriteBatch::new();
     for i in 0..keys.len() {
-        batch.put(cf_id, keys[i].clone(), values[i].clone());
+        batch.put_cf(cf_id, keys[i].clone(), values[i].clone());
         if batch.len() >= batch_size {
             engine.write_batch(&batch).unwrap();
             batch.clear();
@@ -237,22 +234,13 @@ pub fn setup_engine_fs_sync() -> (MidgeEngine, TempDir) {
 // ============================================================================
 
 /// Setup cloud-backed engine with realistic latency simulation.
-/// Use `LatencyConfig::benchmark()` for pure throughput testing (no sleep).
-/// Use `LatencyConfig::same_region()` for realistic same-region simulation.
-/// Use `LatencyConfig::fast_simulation()` for accounting-only mode.
 #[allow(dead_code)]
-pub fn setup_engine_cloud_nosync_with_config(config: LatencyConfig) -> (MidgeEngine, TempDir) {
+pub fn setup_engine_cloud_nosync() -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
-    let backend = Arc::new(MockCloudBackend::new().with_latency_config(config));
 
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
             local_cache_path: dir.path().to_path_buf(),
-            cloud_backend: backend.clone(),
-            storage_context: Default::default(),
-            local_wal_sync: false,
-            wal_batch_size: 1024 * 1024, // 1MB batches
-            sst_cache_capacity: 10,
         },
         memtable_size: 64 * 1024 * 1024,
         enable_compaction: true,
@@ -264,18 +252,12 @@ pub fn setup_engine_cloud_nosync_with_config(config: LatencyConfig) -> (MidgeEng
 }
 
 #[allow(dead_code)]
-pub fn setup_engine_cloud_sync_with_config(config: LatencyConfig) -> (MidgeEngine, TempDir) {
+pub fn setup_engine_cloud_sync() -> (MidgeEngine, TempDir) {
     let dir = TempDir::new().unwrap();
-    let backend = Arc::new(MockCloudBackend::new().with_latency_config(config));
 
     let opts = MidgeOptions {
         storage_mode: StorageMode::CloudBacked {
             local_cache_path: dir.path().to_path_buf(),
-            cloud_backend: backend.clone(),
-            storage_context: Default::default(),
-            local_wal_sync: true,
-            wal_batch_size: 1024 * 1024, // 1MB batches
-            sst_cache_capacity: 10,
         },
         memtable_size: 64 * 1024 * 1024,
         enable_compaction: true,
@@ -284,19 +266,4 @@ pub fn setup_engine_cloud_sync_with_config(config: LatencyConfig) -> (MidgeEngin
     };
 
     (MidgeEngine::open(opts).unwrap(), dir)
-}
-
-// Convenience wrappers - use fast_simulation (no blocking) for benchmarks
-// to measure engine throughput without artificial latency delays.
-
-#[allow(dead_code)]
-pub fn setup_engine_cloud_nosync() -> (MidgeEngine, TempDir) {
-    // Use fast simulation for benchmarks - tracks latency but doesn't block
-    setup_engine_cloud_nosync_with_config(LatencyConfig::fast_simulation())
-}
-
-#[allow(dead_code)]
-pub fn setup_engine_cloud_sync() -> (MidgeEngine, TempDir) {
-    // Use fast simulation for benchmarks - tracks latency but doesn't block
-    setup_engine_cloud_sync_with_config(LatencyConfig::fast_simulation())
 }

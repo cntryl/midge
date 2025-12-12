@@ -2,7 +2,7 @@
 //!
 //! Common types used throughout the KV API.
 
-use bytes::Bytes;
+pub use bytes::Bytes;
 
 /// Key type alias
 pub type Key = Bytes;
@@ -16,23 +16,23 @@ pub type KvPair = (Key, Value);
 /// Optional value (None means deleted/not found)
 pub type OptionalValue = Option<Value>;
 
-/// Convert byte slice to Key
-pub fn key_from_slice(slice: &[u8]) -> Key {
+/// Create a Key from a byte slice (copies data)
+pub fn key(slice: &[u8]) -> Key {
     Bytes::copy_from_slice(slice)
 }
 
-/// Convert byte slice to Value
-pub fn value_from_slice(slice: &[u8]) -> Value {
+/// Create a Value from a byte slice (copies data)
+pub fn value(slice: &[u8]) -> Value {
     Bytes::copy_from_slice(slice)
 }
 
-/// Convert byte vector to Key
-pub fn key_from_vec(vec: Vec<u8>) -> Key {
+/// Create a Key from an owned byte vector (zero-copy)
+pub fn key_owned(vec: Vec<u8>) -> Key {
     Bytes::from(vec)
 }
 
-/// Convert byte vector to Value
-pub fn value_from_vec(vec: Vec<u8>) -> Value {
+/// Create a Value from an owned byte vector (zero-copy)
+pub fn value_owned(vec: Vec<u8>) -> Value {
     Bytes::from(vec)
 }
 
@@ -49,7 +49,7 @@ mod tests {
         let slice = b"test_key";
 
         // Act
-        let key = key_from_slice(slice);
+        let key = key(slice);
 
         // Assert
         assert_eq!(key, Bytes::from_static(b"test_key"));
@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn should_create_key_from_empty_slice() {
         // Arrange & Act
-        let key = key_from_slice(b"");
+        let key = key(b"");
 
         // Assert
         assert_eq!(key, Bytes::from_static(b""));
@@ -70,7 +70,7 @@ mod tests {
         let slice = vec![42u8; 10000];
 
         // Act
-        let key = key_from_slice(&slice);
+        let key = key(&slice);
 
         // Assert
         assert_eq!(key.len(), 10000);
@@ -82,7 +82,7 @@ mod tests {
         let slice = &[0x00, 0xFF, 0x80, 0x01];
 
         // Act
-        let key = key_from_slice(slice);
+        let key = key(slice);
 
         // Assert
         assert_eq!(key.as_ref(), slice);
@@ -94,7 +94,7 @@ mod tests {
         let vec = vec![1, 2, 3, 4];
 
         // Act
-        let key = key_from_vec(vec);
+        let key = key_owned(vec);
 
         // Assert
         assert_eq!(key.as_ref(), &[1, 2, 3, 4]);
@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn should_create_key_from_empty_vec() {
         // Arrange & Act
-        let key = key_from_vec(vec![]);
+        let key = key_owned(vec![]);
 
         // Assert
         assert_eq!(key.len(), 0);
@@ -115,7 +115,7 @@ mod tests {
         let original_data = vec![100u8; 5000];
 
         // Act
-        let key = key_from_vec(original_data.clone());
+        let key = key_owned(original_data.clone());
 
         // Assert
         assert_eq!(key.as_ref(), original_data.as_slice());
@@ -130,7 +130,7 @@ mod tests {
         let slice = b"test_value";
 
         // Act
-        let value = value_from_slice(slice);
+        let value = value(slice);
 
         // Assert
         assert_eq!(value, Bytes::from_static(b"test_value"));
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn should_create_value_from_empty_slice() {
         // Arrange & Act
-        let value = value_from_slice(b"");
+        let value = value(b"");
 
         // Assert
         assert_eq!(value, Bytes::from_static(b""));
@@ -151,7 +151,7 @@ mod tests {
         let slice = vec![99u8; 8000];
 
         // Act
-        let value = value_from_slice(&slice);
+        let value = value(&slice);
 
         // Assert
         assert_eq!(value.len(), 8000);
@@ -163,7 +163,7 @@ mod tests {
         let slice = &[0xFF, 0x00, 0x7F, 0x80];
 
         // Act
-        let value = value_from_slice(slice);
+        let value = value(slice);
 
         // Assert
         assert_eq!(value.as_ref(), slice);
@@ -175,7 +175,7 @@ mod tests {
         let vec = vec![5, 6, 7, 8];
 
         // Act
-        let value = value_from_vec(vec);
+        let value = value_owned(vec);
 
         // Assert
         assert_eq!(value.as_ref(), &[5, 6, 7, 8]);
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn should_create_value_from_empty_vec() {
         // Arrange & Act
-        let value = value_from_vec(vec![]);
+        let value = value_owned(vec![]);
 
         // Assert
         assert_eq!(value.len(), 0);
@@ -196,7 +196,7 @@ mod tests {
         let original_data = vec![200u8; 3000];
 
         // Act
-        let value = value_from_vec(original_data.clone());
+        let value = value_owned(original_data.clone());
 
         // Assert
         assert_eq!(value.as_ref(), original_data.as_slice());
@@ -208,8 +208,8 @@ mod tests {
     #[test]
     fn should_create_kv_pair() {
         // Arrange
-        let key = key_from_slice(b"key");
-        let value = value_from_slice(b"value");
+        let key = key(b"key");
+        let value = value(b"value");
 
         // Act
         let pair: KvPair = (key.clone(), value.clone());
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn should_access_key_from_pair() {
         // Arrange
-        let pair: KvPair = (key_from_slice(b"k"), value_from_slice(b"v"));
+        let pair: KvPair = (key(b"k"), value(b"v"));
 
         // Act & Assert
         assert_eq!(pair.0.as_ref(), b"k");
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn should_access_value_from_pair() {
         // Arrange
-        let pair: KvPair = (key_from_slice(b"k"), value_from_slice(b"v"));
+        let pair: KvPair = (key(b"k"), value(b"v"));
 
         // Act & Assert
         assert_eq!(pair.1.as_ref(), b"v");
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn should_create_optional_value_some() {
         // Arrange & Act
-        let opt_value: OptionalValue = Some(value_from_slice(b"value"));
+        let opt_value: OptionalValue = Some(value(b"value"));
 
         // Assert
         assert!(opt_value.is_some());
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn should_handle_optional_value_mapping() {
         // Arrange
-        let opt_value: OptionalValue = Some(value_from_slice(b"original"));
+        let opt_value: OptionalValue = Some(value(b"original"));
 
         // Act
         let mapped = opt_value.map(|v| v);
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn should_convert_key_to_bytes_slice() {
         // Arrange
-        let key = key_from_slice(b"mykey");
+        let key = key(b"mykey");
 
         // Act
         let slice: &[u8] = key.as_ref();
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn should_convert_value_to_bytes_slice() {
         // Arrange
-        let value = value_from_vec(vec![1, 2, 3]);
+        let value = value_owned(vec![1, 2, 3]);
 
         // Act
         let slice: &[u8] = value.as_ref();
@@ -306,7 +306,7 @@ mod tests {
         let utf8_bytes = "日本語".as_bytes();
 
         // Act
-        let key = key_from_slice(utf8_bytes);
+        let key = key(utf8_bytes);
 
         // Assert
         assert_eq!(key.as_ref(), utf8_bytes);
@@ -319,7 +319,7 @@ mod tests {
         let bytes = utf8_string.as_bytes().to_vec();
 
         // Act
-        let value = value_from_vec(bytes.clone());
+        let value = value_owned(bytes.clone());
 
         // Assert
         assert_eq!(value.as_ref(), bytes.as_slice());
@@ -331,7 +331,7 @@ mod tests {
         let slice = vec![0u8; 100];
 
         // Act
-        let key = key_from_slice(&slice);
+        let key = key(&slice);
 
         // Assert
         assert_eq!(key.len(), 100);
@@ -344,7 +344,7 @@ mod tests {
         let slice = vec![0xFFu8; 100];
 
         // Act
-        let value = value_from_vec(slice);
+        let value = value_owned(slice);
 
         // Assert
         assert_eq!(value.len(), 100);

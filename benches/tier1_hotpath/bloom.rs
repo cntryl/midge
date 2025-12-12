@@ -11,7 +11,8 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::bloom::BloomFilterBuilder;
+use cntryl_midge::sst::bloom::{BloomWriter, BloomTestResult};
+use cntryl_midge::sst::bloom::writer::BloomFilterOps;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
@@ -24,25 +25,31 @@ fn bench_bloom_maybe_contains(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     // Build filter once outside benchmark loop
-    let mut builder = BloomFilterBuilder::with_bits_per_key(10);
+    let mut builder = BloomWriter::with_defaults(100);
     let keys: Vec<Bytes> = (0..100)
         .map(|i| Bytes::from(format!("key_{:010}", i)))
         .collect();
     for key in &keys {
-        builder.add_key(key);
+        builder.insert(key);
     }
     let filter = builder.finish();
 
     // Precompute keys (avoid allocation in hot path)
-    let hit_key = keys[42].clone();
-    let miss_key = Bytes::from_static(b"key_00001000");
+    let hit_key = &keys[42];
+    let miss_key = b"key_00001000";
 
     group.bench_function("maybe_contains_hit", |b| {
-        b.iter(|| black_box(filter.may_contain(black_box(&hit_key))))
+        b.iter(|| {
+            let result = filter.contains(black_box(hit_key));
+            black_box(result.might_be_present())
+        })
     });
 
     group.bench_function("maybe_contains_miss", |b| {
-        b.iter(|| black_box(filter.may_contain(black_box(&miss_key))))
+        b.iter(|| {
+            let result = filter.contains(black_box(miss_key));
+            black_box(result.definitely_not_present())
+        })
     });
 
     group.finish();
@@ -55,22 +62,22 @@ fn bench_bloom_batch_lookups(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
 
     // Build a larger filter
-    let mut builder = BloomFilterBuilder::with_bits_per_key(10);
+    let mut builder = BloomWriter::with_defaults(1000);
     let keys: Vec<Bytes> = (0..1000)
         .map(|i| Bytes::from(format!("key_{:010}", i)))
         .collect();
     for key in &keys {
-        builder.add_key(key);
+        builder.insert(key);
     }
     let filter = builder.finish();
 
     // Precompute lookup keys (mix of hits and misses)
-    let lookup_keys: Vec<Bytes> = (0..100)
+    let lookup_keys: Vec<(bool, Vec<u8>)> = (0..100)
         .map(|i| {
             if i % 2 == 0 {
-                keys[i * 5].clone() // hit
+                (true, keys[i * 5].to_vec()) // hit
             } else {
-                Bytes::from(format!("miss_{:010}", i)) // miss
+                (false, format!("miss_{:010}", i).into_bytes()) // miss
             }
         })
         .collect();
@@ -80,8 +87,8 @@ fn bench_bloom_batch_lookups(c: &mut Criterion) {
     group.bench_function("batch_100_lookups_mixed", |b| {
         b.iter(|| {
             let mut count = 0u32;
-            for key in &lookup_keys {
-                if filter.may_contain(black_box(key)) {
+            for (_is_hit, key) in &lookup_keys {
+                if filter.contains(black_box(key)).might_be_present() {
                     count += 1;
                 }
             }
@@ -92,27 +99,30 @@ fn bench_bloom_batch_lookups(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark hash computation isolated (via may_contain on miss)
+/// Benchmark hash computation isolated (via contains on miss)
 fn bench_bloom_compute_hashes(c: &mut Criterion) {
     let mut group = c.benchmark_group("hotpath_bloom_compute_hashes");
     group.measurement_time(std::time::Duration::from_millis(200));
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
 
-    let mut builder = BloomFilterBuilder::with_bits_per_key(10);
+    let mut builder = BloomWriter::with_defaults(100);
     let keys: Vec<Bytes> = (0..100)
         .map(|i| Bytes::from(format!("key_{:010}", i)))
         .collect();
     for key in &keys {
-        builder.add_key(key);
+        builder.insert(key);
     }
     let filter = builder.finish();
 
     // Precompute miss key
-    let miss_key = Bytes::from_static(b"key_00001000");
+    let miss_key = b"key_00001000";
 
     group.bench_function("compute_hashes_via_miss", |b| {
-        b.iter(|| black_box(filter.may_contain(black_box(&miss_key))))
+        b.iter(|| {
+            let result = filter.contains(black_box(miss_key));
+            black_box(result.definitely_not_present())
+        })
     });
 
     group.finish();

@@ -36,17 +36,17 @@ impl WriteBatch {
     }
 
     /// Add a put operation to the batch for the default column family
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> &mut Self {
+    pub fn put(&mut self, key: bytes::Bytes, value: bytes::Bytes) -> &mut Self {
         self.put_cf(ColumnFamilyId::DEFAULT, key, value);
         self
     }
 
     /// Add a put operation to the batch for a specific column family
-    pub fn put_cf(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>) -> &mut Self {
+    pub fn put_cf(&mut self, cf_id: ColumnFamilyId, key: bytes::Bytes, value: bytes::Bytes) -> &mut Self {
         self.operations.push(BatchOp::Put {
             cf_id,
-            key,
-            value,
+            key: key.to_vec(),
+            value: value.to_vec(),
             ttl_seconds: None,
         });
         self
@@ -74,14 +74,14 @@ impl WriteBatch {
     }
 
     /// Add a delete operation to the batch for the default column family
-    pub fn delete(&mut self, key: Vec<u8>) -> &mut Self {
+    pub fn delete(&mut self, key: bytes::Bytes) -> &mut Self {
         self.delete_cf(ColumnFamilyId::DEFAULT, key);
         self
     }
 
     /// Add a delete operation to the batch for a specific column family
-    pub fn delete_cf(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>) -> &mut Self {
-        self.operations.push(BatchOp::Delete { cf_id, key });
+    pub fn delete_cf(&mut self, cf_id: ColumnFamilyId, key: bytes::Bytes) -> &mut Self {
+        self.operations.push(BatchOp::Delete { cf_id, key: key.to_vec() });
         self
     }
 
@@ -161,8 +161,8 @@ mod tests {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(vec![1, 2, 3], vec![4, 5, 6]);
-        batch.put(vec![7, 8], vec![9]);
+        batch.put(bytes::Bytes::from(vec![1, 2, 3]), bytes::Bytes::from(vec![4, 5, 6]));
+        batch.put(bytes::Bytes::from(vec![7, 8]), bytes::Bytes::from(vec![9]));
 
         // Assert
         assert_eq!(batch.len(), 2);
@@ -177,8 +177,8 @@ mod tests {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.delete(vec![1, 2, 3]);
-        batch.delete(vec![7, 8]);
+        batch.delete(bytes::Bytes::from(vec![1, 2, 3]));
+        batch.delete(bytes::Bytes::from(vec![7, 8]));
 
         // Assert
         assert_eq!(batch.len(), 2);
@@ -192,9 +192,9 @@ mod tests {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(vec![1], vec![2]);
-        batch.delete(vec![3]);
-        batch.put(vec![4], vec![5]);
+        batch.put(bytes::Bytes::from(vec![1]), bytes::Bytes::from(vec![2]));
+        batch.delete(bytes::Bytes::from(vec![3]));
+        batch.put(bytes::Bytes::from(vec![4]), bytes::Bytes::from(vec![5]));
 
         // Assert
         assert_eq!(batch.len(), 3);
@@ -211,8 +211,8 @@ mod tests {
         let cf2 = ColumnFamilyId(2);
 
         // Act
-        batch.put_cf(cf1, vec![1, 2], vec![3, 4]);
-        batch.put_cf(cf2, vec![5, 6], vec![7, 8]);
+        batch.put_cf(cf1, bytes::Bytes::from(vec![1, 2]), bytes::Bytes::from(vec![3, 4]));
+        batch.put_cf(cf2, bytes::Bytes::from(vec![5, 6]), bytes::Bytes::from(vec![7, 8]));
 
         // Assert
         let puts: Vec<_> = batch.iter_puts().collect();
@@ -225,8 +225,8 @@ mod tests {
     fn should_clear_all_operations_when_clearing_batch() {
         // Arrange
         let mut batch = WriteBatch::new();
-        batch.put(vec![1], vec![2]);
-        batch.delete(vec![3]);
+        batch.put(bytes::Bytes::from(vec![1]), bytes::Bytes::from(vec![2]));
+        batch.delete(bytes::Bytes::from(vec![3]));
         assert_eq!(batch.len(), 2);
 
         // Act
@@ -245,9 +245,9 @@ mod tests {
         // Act
         let batch = {
             let mut b = WriteBatch::new();
-            b.put(vec![1], vec![2])
-                .delete(vec![3])
-                .put_cf(cf1, vec![4], vec![5]);
+            b.put(bytes::Bytes::from(vec![1]), bytes::Bytes::from(vec![2]))
+                .delete(bytes::Bytes::from(vec![3]))
+                .put_cf(cf1, bytes::Bytes::from(vec![4]), bytes::Bytes::from(vec![5]));
             b
         };
 

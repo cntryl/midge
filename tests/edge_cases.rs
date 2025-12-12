@@ -1,4 +1,4 @@
-//! Edge Cases Tests
+﻿//! Edge Cases Tests
 //!
 //! Tests boundary conditions and unusual scenarios:
 //! - Very large keys (1MB+) and values (100MB+)
@@ -106,7 +106,7 @@ fn should_handle_special_characters_in_keys_when_utf8_and_binary_mixed() {
         // Act: Store keys with special characters and binary data
         let keys = vec![
             b"normal_key" as &[u8],
-            "unicode_😀_key".as_bytes(),
+            "unicode_ðŸ˜€_key".as_bytes(),
             b"\x00\x01\x02\x03", // Binary nulls
             b"key\twith\ttabs",
             b"key\nwith\nnewlines",

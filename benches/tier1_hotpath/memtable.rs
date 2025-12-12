@@ -6,15 +6,11 @@
 //! Covers critical memtable hot paths:
 //! - Insert operations (single and batch, various value sizes)
 //! - Point lookups (hit/miss)
-//! - Version retrieval
-//! - Forward/reverse iteration
-//! - Bloom filter optimization
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use bytes::Bytes;
-use cntryl_midge::core::memtable::MemTable;
+use cntryl_midge::sst::{SkipListMemtable, Memtable};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
@@ -23,17 +19,17 @@ use std::hint::black_box;
 
 /// Pre-compute a key (deterministic, no allocation in hot path)
 #[inline]
-fn make_key(i: usize) -> Bytes {
-    Bytes::from(format!("key_{:010}", i))
+fn make_key(i: usize) -> Vec<u8> {
+    format!("key_{:010}", i).into_bytes()
 }
 
 /// Pre-compute value of given size
-fn make_value(size: usize) -> Bytes {
-    Bytes::from(vec![b'x'; size])
+fn make_value(size: usize) -> Vec<u8> {
+    vec![b'x'; size]
 }
 
-fn make_value_indexed(i: usize) -> Bytes {
-    Bytes::from(format!("value_{}", i))
+fn make_value_indexed(i: usize) -> Vec<u8> {
+    format!("value_{}", i).into_bytes()
 }
 
 // ─── Insert Benchmarks ───────────────────────────────────────────────────────
@@ -45,15 +41,15 @@ fn bench_put_single(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     // Pre-create keys and values outside measurement
-    let keys: Vec<Bytes> = (0..1000).map(make_key).collect();
+    let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
     let small_val = make_value(64);
     let medium_val = make_value(1024);
     let large_val = make_value(4096);
 
     // Warm memtable - pre-populated with some data
-    let memtable = MemTable::new();
+    let memtable = SkipListMemtable::new();
     for key in keys.iter().take(100) {
-        memtable.put(key.as_ref(), small_val.as_ref());
+        let _ = memtable.put(key.clone(), small_val.clone());
     }
 
     let mut counter = 100usize;
@@ -62,7 +58,7 @@ fn bench_put_single(c: &mut Criterion) {
         b.iter(|| {
             let idx = counter % keys.len();
             counter = counter.wrapping_add(1);
-            memtable.put(black_box(keys[idx].as_ref()), black_box(small_val.as_ref()));
+            let _ = memtable.put(black_box(keys[idx].clone()), black_box(small_val.clone()));
         })
     });
 
@@ -70,10 +66,7 @@ fn bench_put_single(c: &mut Criterion) {
         b.iter(|| {
             let idx = counter % keys.len();
             counter = counter.wrapping_add(1);
-            memtable.put(
-                black_box(keys[idx].as_ref()),
-                black_box(medium_val.as_ref()),
-            );
+            let _ = memtable.put(black_box(keys[idx].clone()), black_box(medium_val.clone()));
         })
     });
 
@@ -81,7 +74,7 @@ fn bench_put_single(c: &mut Criterion) {
         b.iter(|| {
             let idx = counter % keys.len();
             counter = counter.wrapping_add(1);
-            memtable.put(black_box(keys[idx].as_ref()), black_box(large_val.as_ref()));
+            let _ = memtable.put(black_box(keys[idx].clone()), black_box(large_val.clone()));
         })
     });
 
@@ -95,15 +88,16 @@ fn bench_put_batch(c: &mut Criterion) {
     group.throughput(Throughput::Elements(100));
 
     // Pre-create keys and values
-    let keys: Vec<Bytes> = (0..100).map(make_key).collect();
+    let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
     let value = make_value(128);
 
     group.bench_function("100_inserts", |b| {
-        let memtable = MemTable::new();
         b.iter(|| {
+            let memtable = SkipListMemtable::new();
             for key in &keys {
-                memtable.put(black_box(key.as_ref()), black_box(value.as_ref()));
+                let _ = memtable.put(black_box(key.clone()), black_box(value.clone()));
             }
+            black_box(memtable)
         })
     });
 
@@ -120,150 +114,80 @@ fn bench_get_point(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_millis(200));
 
     // Pre-compute all keys outside benchmark
-    let keys: Vec<Bytes> = (0..1000).map(make_key).collect();
-    let values: Vec<Bytes> = (0..1000).map(make_value_indexed).collect();
+    let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
+    let values: Vec<Vec<u8>> = (0..1000).map(make_value_indexed).collect();
 
-    let memtable = MemTable::new();
+    let memtable = SkipListMemtable::new();
     for i in 0..1000 {
-        memtable.put(keys[i].as_ref(), values[i].as_ref());
+        let _ = memtable.put(keys[i].clone(), values[i].clone());
     }
 
     let hit_key = keys[500].clone();
     let miss_key = make_key(2000);
 
     group.bench_function("hit", |b| {
-        b.iter(|| black_box(memtable.get(black_box(hit_key.as_ref()))))
+        b.iter(|| {
+            let result = memtable.get(black_box(&hit_key));
+            black_box(result)
+        })
     });
 
     group.bench_function("miss", |b| {
-        b.iter(|| black_box(memtable.get(black_box(miss_key.as_ref()))))
-    });
-
-    group.finish();
-}
-
-/// Benchmark getting latest version from multi-version key
-fn bench_get_latest_version(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/get_latest_version");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(1));
-    group.measurement_time(std::time::Duration::from_millis(200));
-
-    let memtable = MemTable::new();
-    let key = make_key(42);
-    // Add multiple versions
-    for i in 0..5 {
-        memtable.put_with_seq(key.as_ref(), make_value_indexed(i).as_ref(), i as u64);
-    }
-
-    group.bench_function("5_versions", |b| {
-        b.iter(|| black_box(memtable.get(black_box(key.as_ref()))))
-    });
-
-    group.finish();
-}
-
-// ─── Iteration Benchmarks ────────────────────────────────────────────────────
-
-/// Benchmark forward seek (32 steps)
-fn bench_seek_forward(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/seek_forward");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(32));
-    group.measurement_time(std::time::Duration::from_millis(200));
-
-    let keys: Vec<Bytes> = (0..100).map(make_key).collect();
-    let values: Vec<Bytes> = (0..100).map(make_value_indexed).collect();
-
-    let memtable = MemTable::new();
-    for i in 0..100 {
-        memtable.put(keys[i].as_ref(), values[i].as_ref());
-    }
-
-    let start_key = keys[10].clone();
-
-    group.bench_function("32_steps", |b| {
         b.iter(|| {
-            let all_keys = memtable.get_all_keys();
-            let results: Vec<_> = all_keys
-                .iter()
-                .filter(|k| k.as_ref() >= start_key.as_ref())
-                .take(32)
-                .cloned()
-                .collect();
-            black_box(results)
+            let result = memtable.get(black_box(&miss_key));
+            black_box(result)
         })
     });
 
     group.finish();
 }
 
-/// Benchmark reverse seek (32 steps)
-fn bench_seek_reverse(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/seek_reverse");
+/// Benchmark delete operations
+fn bench_delete(c: &mut Criterion) {
+    let mut group = c.benchmark_group("memtable/delete");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(32));
-    group.measurement_time(std::time::Duration::from_millis(200));
+    group.throughput(Throughput::Elements(1));
 
-    let keys: Vec<Bytes> = (0..100).map(make_key).collect();
-    let values: Vec<Bytes> = (0..100).map(make_value_indexed).collect();
+    let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
+    let value = make_value(128);
 
-    let memtable = MemTable::new();
-    for i in 0..100 {
-        memtable.put(keys[i].as_ref(), values[i].as_ref());
+    // Warm memtable
+    let memtable = SkipListMemtable::new();
+    for key in &keys {
+        let _ = memtable.put(key.clone(), value.clone());
     }
 
-    let start_key = keys[50].clone();
+    let mut counter = 0usize;
 
-    group.bench_function("32_steps", |b| {
+    group.bench_function("delete", |b| {
         b.iter(|| {
-            let all_keys = memtable.get_all_keys();
-            let mut results: Vec<_> = all_keys
-                .iter()
-                .filter(|k| k.as_ref() <= start_key.as_ref())
-                .cloned()
-                .collect();
-            results.reverse();
-            results.truncate(32);
-            black_box(results)
+            let idx = counter % keys.len();
+            counter = counter.wrapping_add(1);
+            let _ = memtable.delete(black_box(keys[idx].clone()));
         })
     });
 
     group.finish();
 }
 
-// ─── Bloom Filter Benchmarks ─────────────────────────────────────────────────
+// ─── Size Benchmark ─────────────────────────────────────────────────────────
 
-/// Benchmark bloom filter optimization for negative lookups
-fn bench_bloom_hint(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable/bloom_hint");
+/// Benchmark memtable size tracking
+fn bench_size_bytes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("memtable/size_bytes");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1));
-    group.measurement_time(std::time::Duration::from_millis(200));
 
-    let keys: Vec<Bytes> = (0..1000).map(make_key).collect();
-    let values: Vec<Bytes> = (0..1000).map(make_value_indexed).collect();
+    let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
+    let value = make_value(1024);
 
-    // Without bloom hint
-    let memtable_no_bloom = MemTable::new();
-    for i in 0..1000 {
-        memtable_no_bloom.put(keys[i].as_ref(), values[i].as_ref());
+    let memtable = SkipListMemtable::new();
+    for key in &keys {
+        let _ = memtable.put(key.clone(), value.clone());
     }
 
-    // With bloom hint
-    let memtable_with_bloom = MemTable::with_bloom_hint(1000);
-    for i in 0..1000 {
-        memtable_with_bloom.put(keys[i].as_ref(), values[i].as_ref());
-    }
-
-    let miss_key = make_key(100_000);
-
-    group.bench_function("miss_no_bloom", |b| {
-        b.iter(|| black_box(memtable_no_bloom.get(black_box(miss_key.as_ref()))))
-    });
-
-    group.bench_function("miss_with_bloom", |b| {
-        b.iter(|| black_box(memtable_with_bloom.get(black_box(miss_key.as_ref()))))
+    group.bench_function("size_query", |b| {
+        b.iter(|| black_box(memtable.size_bytes()))
     });
 
     group.finish();
@@ -272,15 +196,13 @@ fn bench_bloom_hint(c: &mut Criterion) {
 // ─── Criterion Setup ─────────────────────────────────────────────────────────
 
 criterion_group! {
-    name = tier1_memtable;
+    name = tier1_hotpath_memtable;
     config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets =
         bench_put_single,
         bench_put_batch,
         bench_get_point,
-        bench_get_latest_version,
-        bench_seek_forward,
-        bench_seek_reverse,
-        bench_bloom_hint
+        bench_delete,
+        bench_size_bytes
 }
-criterion_main!(tier1_memtable);
+criterion_main!(tier1_hotpath_memtable);

@@ -1,4 +1,4 @@
-//! Manifest Atomicity Tests
+﻿//! Manifest Atomicity Tests
 //!
 //! Tests manifest atomicity and consistency guarantees, ensuring:
 //! - SST files are not exposed without manifest entries

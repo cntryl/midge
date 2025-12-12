@@ -27,9 +27,9 @@ fn should_commit_all_operations_given_batch_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(b"key1".to_vec(), b"val1".to_vec());
-        batch.put(b"key2".to_vec(), b"val2".to_vec());
-        batch.put(b"key3".to_vec(), b"val3".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"key1"), bytes::Bytes::copy_from_slice(b"val1"));
+        batch.put(bytes::Bytes::copy_from_slice(b"key2"), bytes::Bytes::copy_from_slice(b"val2"));
+        batch.put(bytes::Bytes::copy_from_slice(b"key3"), bytes::Bytes::copy_from_slice(b"val3"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -63,9 +63,9 @@ fn should_apply_last_value_given_duplicate_keys_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(b"key".to_vec(), b"value1".to_vec());
-        batch.put(b"key".to_vec(), b"value2".to_vec());
-        batch.put(b"key".to_vec(), b"value3".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value1"));
+        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value2"));
+        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value3"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -103,8 +103,8 @@ fn should_delete_key_given_delete_after_put_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(b"key".to_vec(), b"value".to_vec());
-        batch.delete(b"key".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value"));
+        batch.delete(bytes::Bytes::copy_from_slice(b"key"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -124,7 +124,7 @@ fn should_delete_existing_key_given_delete_in_batch_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.delete(b"key".to_vec());
+        batch.delete(bytes::Bytes::copy_from_slice(b"key"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -144,7 +144,7 @@ fn should_overwrite_existing_value_given_put_in_batch_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(b"key".to_vec(), b"new_value".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"new_value"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -170,9 +170,9 @@ fn should_apply_mixed_operations_in_order_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(b"a".to_vec(), b"updated_a".to_vec());
-        batch.delete(b"b".to_vec());
-        batch.put(b"c".to_vec(), b"new_c".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"a"), bytes::Bytes::copy_from_slice(b"updated_a"));
+        batch.delete(bytes::Bytes::copy_from_slice(b"b"));
+        batch.put(bytes::Bytes::copy_from_slice(b"c"), bytes::Bytes::copy_from_slice(b"new_c"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -210,7 +210,7 @@ fn should_handle_large_batch_given_many_operations_when_write_batch() {
         for i in 0..BATCH_SIZE {
             let key = format!("key_{i}");
             let val = format!("value_{i}");
-            batch.put(key.into_bytes(), val.into_bytes());
+            batch.put(key.into_bytes().into(), val.into_bytes().into());
         }
         engine.write_batch(&batch).expect("write_batch");
 
@@ -244,7 +244,7 @@ fn should_write_to_multiple_cfs_given_multi_cf_batch_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(b"cf_default_key".to_vec(), b"cf_default_val".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"cf_default_key"), bytes::Bytes::copy_from_slice(b"cf_default_val"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -268,7 +268,7 @@ fn should_isolate_keys_given_same_key_in_different_cfs_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(b"shared_key".to_vec(), b"value_default".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"shared_key"), bytes::Bytes::copy_from_slice(b"value_default"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -303,7 +303,7 @@ fn should_not_interleave_given_concurrent_batches_when_write_batch() {
                 for i in 0..10 {
                     let key = format!("t{}_k{}", thread_id, i);
                     let val = format!("t{}_v{}", thread_id, i);
-                    batch.put(key.into_bytes(), val.into_bytes());
+                    batch.put(key.into_bytes().into(), val.into_bytes().into());
                 }
                 engine_clone.write_batch(&batch).expect("write_batch");
             });
@@ -356,7 +356,7 @@ fn should_maintain_atomicity_during_concurrent_reads_when_write_batch() {
                 let mut batch = WriteBatch::new();
                 for i in 0..10 {
                     let key = format!("key_{i}");
-                    batch.put(key.into_bytes(), b"updated".to_vec());
+                    batch.put(key.into_bytes().into(), b"updated".to_vec().into());
                 }
                 engine_clone.write_batch(&batch).expect("write_batch");
             });
@@ -413,7 +413,7 @@ fn should_persist_batch_given_flush_when_reopening() {
             let mut batch = WriteBatch::new();
 
             // Act
-            batch.put(b"persist_key".to_vec(), b"persist_val".to_vec());
+            batch.put(bytes::Bytes::copy_from_slice(b"persist_key"), bytes::Bytes::copy_from_slice(b"persist_val"));
             engine.write_batch(&batch).expect("write_batch");
             engine.flush().expect("flush");
             let _ = cf; // Use cf in the block
@@ -443,8 +443,8 @@ fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
             let mut batch = WriteBatch::new();
 
             // Act: Write batch (atomically in WAL)
-            batch.put(b"atomic_key1".to_vec(), b"atomic_val1".to_vec());
-            batch.put(b"atomic_key2".to_vec(), b"atomic_val2".to_vec());
+            batch.put(bytes::Bytes::copy_from_slice(b"atomic_key1"), bytes::Bytes::copy_from_slice(b"atomic_val1"));
+            batch.put(bytes::Bytes::copy_from_slice(b"atomic_key2"), bytes::Bytes::copy_from_slice(b"atomic_val2"));
             engine.write_batch(&batch).expect("write_batch");
             let _ = cf;
         }
@@ -478,7 +478,7 @@ fn should_be_atomic_given_large_batch_crash_when_recovering() {
             for i in 0..100 {
                 let key = format!("crash_key_{i}");
                 let val = format!("crash_val_{i}");
-                batch.put(key.into_bytes(), val.into_bytes());
+                batch.put(key.into_bytes().into(), val.into_bytes().into());
             }
             engine.write_batch(&batch).expect("write_batch");
             let _ = cf;
@@ -517,7 +517,7 @@ fn should_support_batch_with_ttl_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(b"ttl_key".to_vec(), b"ttl_value".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"ttl_key"), bytes::Bytes::copy_from_slice(b"ttl_value"));
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert: Value immediately readable (TTL not elapsed)
@@ -540,11 +540,11 @@ fn should_increment_sequence_numbers_given_batch_operations_when_write_batch() {
 
         // Act
         let mut batch = WriteBatch::new();
-        batch.put(b"seq_key".to_vec(), b"seq_val".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"seq_key"), bytes::Bytes::copy_from_slice(b"seq_val"));
         engine.write_batch(&batch).expect("write_batch");
 
         let mut batch2 = WriteBatch::new();
-        batch2.put(b"seq_key2".to_vec(), b"seq_val2".to_vec());
+        batch2.put(bytes::Bytes::copy_from_slice(b"seq_key2"), bytes::Bytes::copy_from_slice(b"seq_val2"));
         engine.write_batch(&batch2).expect("write_batch");
 
         // Assert: Both values present (sequence advanced)

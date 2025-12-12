@@ -1,4 +1,4 @@
-//! WAL (Write-Ahead Log) Durability Tests
+﻿//! WAL (Write-Ahead Log) Durability Tests
 //!
 //! Tests the Write-Ahead Log's behavior for ensuring write durability and recovery.
 //! These tests verify:

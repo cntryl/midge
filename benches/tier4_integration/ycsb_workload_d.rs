@@ -84,7 +84,8 @@ fn run_workload_d(
         let key = &keys[key_id];
         let val = &values[key_id];
 
-        let cf = &cf_list[rng.gen_range(0..cf_count)];
+        let cf_list_unwrapped = cf_list.as_ref().unwrap();
+        let cf = &cf_list_unwrapped[rng.gen_range(0..cf_count)];
         let cf_id = cf.id();
 
         let start = Instant::now();
@@ -136,7 +137,8 @@ fn run_workload_d_concurrent(
         let key = &keys[key_id];
         let val = &values[key_id];
 
-        let cf = &cf_list[rng.gen_range(0..cf_count)];
+        let cf_list_unwrapped = cf_list.as_ref().unwrap();
+        let cf = &cf_list_unwrapped[rng.gen_range(0..cf_count)];
         let cf_id = cf.id();
 
         let start = Instant::now();
@@ -230,8 +232,7 @@ fn bench_workload_d(c: &mut Criterion) {
             let (engine, _t) = setup_engine_fs_nosync();
 
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
             load_full_dataset(&engine);
 

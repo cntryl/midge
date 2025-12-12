@@ -1,4 +1,4 @@
-//! Advanced Snapshot Tests
+﻿//! Advanced Snapshot Tests
 //!
 //! Tests advanced snapshot scenarios: stress conditions, interaction with 
 //! compaction/flush, memory pressure, and edge cases. Validates snapshots
@@ -156,8 +156,8 @@ fn should_see_consistent_state_given_snapshot_across_write_batch_when_committed(
 
         // Commit write batch
         let mut batch = WriteBatch::new();
-        batch.put(b"key1".to_vec(), b"v1_updated".to_vec());
-        batch.put(b"key2".to_vec(), b"v2".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"key1"), bytes::Bytes::copy_from_slice(b"v1_updated"));
+        batch.put(bytes::Bytes::copy_from_slice(b"key2"), bytes::Bytes::copy_from_slice(b"v2"));
         engine.write_batch(&batch).expect("batch");
 
         // Assert: Snapshot still works (note: may not isolate from batch in current impl)

@@ -75,7 +75,8 @@ fn run_workload_b(
         let key = &keys[key_id];
 
         // CF selection
-        let cf = &cf_list[rng.gen_range(0..cf_count)];
+        let cf_list_unwrapped = cf_list.as_ref().unwrap();
+        let cf = &cf_list_unwrapped[rng.gen_range(0..cf_count)];
         let cf_id = cf.id();
 
         let start = Instant::now();
@@ -87,7 +88,7 @@ fn run_workload_b(
         } else {
             // UPDATE
             let value = &values[key_id];
-            batch.put(cf_id, key.clone(), value.clone());
+            batch.put_cf(cf_id, key.clone(), value.clone());
 
             if batch.len() >= BATCH_SIZE {
                 engine.write_batch(&batch).unwrap();
@@ -191,8 +192,7 @@ fn bench_workload_b(c: &mut Criterion) {
 
             // Create CFs
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
 
             // Load dataset once per variant
@@ -221,8 +221,7 @@ fn bench_workload_b(c: &mut Criterion) {
             let (engine, _tmp) = setup_engine_fs_nosync();
 
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
 
             load_full_dataset(&engine);

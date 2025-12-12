@@ -1,4 +1,4 @@
-//! Tests for transaction spill behavior and memory management
+﻿//! Tests for transaction spill behavior and memory management
 //!
 //! Tests 1-12: durable storage modes (LocalDisk, CloudBacked) with spill
 //! Test 13: memory-only mode (no spill files)

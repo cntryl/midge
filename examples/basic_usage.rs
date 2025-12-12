@@ -23,9 +23,9 @@ fn main() -> MidgeResult<()> {
 
     // Write batch (multiple operations)
     let mut batch = WriteBatch::new();
-    batch.put(b"batch_key1".to_vec(), b"batch_value1".to_vec());
-    batch.put(b"batch_key2".to_vec(), b"batch_value2".to_vec());
-    batch.delete(b"key2".to_vec());
+    batch.put(b"batch_key1".to_vec().into(), b"batch_value1".to_vec().into());
+    batch.put(b"batch_key2".to_vec().into(), b"batch_value2".to_vec().into());
+    batch.delete(b"key2".to_vec().into());
     db.write_batch(&batch)?;
 
     // Range scan

@@ -1,4 +1,4 @@
-//! Config API Integration Tests
+﻿//! Config API Integration Tests
 //!
 //! Tests the builder-based configuration system that derives low-level parameters
 //! from high-level optimization goals (latency/throughput/cost), durability

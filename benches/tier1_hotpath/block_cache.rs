@@ -12,48 +12,45 @@
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use cntryl_midge::sst::block_cache::{
-    BlockCache, BlockCacheOptions, BlockData, BlockKey, BlockKind, ShardedBlockCache,
-};
+use bytes::Bytes;
+use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::sync::Arc;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Pre-create a block key with file number 1.
+/// Pre-create a cache key with SST file 1.
 #[inline]
-fn make_block_key(offset: u64) -> BlockKey {
-    BlockKey::new(1, offset, BlockKind::Data, 0)
+fn make_cache_key(block_offset: u64) -> CacheKey {
+    CacheKey::new(1, block_offset)
 }
 
-/// Pre-create a block key with specified file number.
+/// Pre-create a cache key with specified SST file.
 #[inline]
-fn make_block_key_with_file(file_num: u64, offset: u64) -> BlockKey {
-    BlockKey::new(file_num, offset, BlockKind::Data, 0)
+fn make_cache_key_with_sst(sst_id: u64, block_offset: u64) -> CacheKey {
+    CacheKey::new(sst_id, block_offset)
 }
 
 /// Pre-allocated block data to avoid allocation in benchmark hot path.
-fn make_block_data(size: usize) -> BlockData {
-    let data: Arc<[u8]> = vec![0xAB; size].into();
-    BlockData::uncompressed(data, BlockKind::Data)
+fn make_block_data(size: usize) -> Bytes {
+    Bytes::from(vec![0xAB; size])
 }
 
-fn create_cache(capacity: usize) -> ShardedBlockCache {
-    ShardedBlockCache::new(BlockCacheOptions::with_capacity(capacity))
+fn create_cache(capacity: u64) -> BlockCache {
+    BlockCache::new(capacity, 16, CachePolicyType::Lru)
 }
 
 fn precompute_keys_and_blocks(
     num_blocks: usize,
     block_size: usize,
-) -> (Vec<BlockKey>, Vec<BlockData>) {
+) -> (Vec<CacheKey>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(num_blocks);
     let mut blocks = Vec::with_capacity(num_blocks);
     for i in 0..num_blocks {
-        let key = make_block_key_with_file((i / 100) as u64, (i % 100) as u64 * block_size as u64);
+        let key = make_cache_key_with_sst((i / 100) as u64, (i % 100) as u64 * block_size as u64);
         let block = make_block_data(block_size);
         keys.push(key);
         blocks.push(block);
@@ -74,11 +71,13 @@ fn bench_get_hot_single(c: &mut Criterion) {
 
     // Pre-populate with hot data
     for i in 0..1000 {
-        cache.insert(make_block_key(i * 4096), make_block_data(4096));
+        let key = make_cache_key(i * 4096);
+        let block = make_block_data(4096);
+        cache.put(key, block);
     }
 
     // Precompute hot key (no allocation in hot path)
-    let hot_key = make_block_key(42 * 4096);
+    let hot_key = make_cache_key(42 * 4096);
 
     group.bench_function("4k_block", |b| {
         b.iter(|| black_box(cache.get(black_box(&hot_key))))
@@ -99,7 +98,9 @@ fn bench_insert_single(c: &mut Criterion) {
 
     // Pre-populate to simulate realistic warm cache state
     for i in 0..100 {
-        cache.insert(make_block_key(i * 4096), make_block_data(4096));
+        let key = make_cache_key(i * 4096);
+        let block = make_block_data(4096);
+        cache.put(key, block);
     }
 
     // Pre-create block data outside hot loop
@@ -108,9 +109,9 @@ fn bench_insert_single(c: &mut Criterion) {
 
     group.bench_function("4k_block", |b| {
         b.iter(|| {
-            let key = make_block_key(offset_counter * 4096);
+            let key = make_cache_key(offset_counter * 4096);
             offset_counter = offset_counter.wrapping_add(1);
-            cache.insert(black_box(key), black_box(block_data.clone()));
+            cache.put(black_box(key), black_box(block_data.clone()));
         })
     });
 
@@ -134,7 +135,7 @@ fn bench_get_batch_hit(c: &mut Criterion) {
     // Pre-populate cache
     let cache = create_cache(cache_size);
     for i in 0..num_blocks {
-        cache.insert(keys[i], blocks[i].clone());
+        cache.put(keys[i], blocks[i].clone());
     }
 
     group.bench_function("1000_lookups", |b| {
@@ -164,16 +165,16 @@ fn bench_get_batch_miss(c: &mut Criterion) {
 
     let (keys, blocks) = precompute_keys_and_blocks(num_blocks, block_size);
 
-    // Pre-populate cache with keys in file range 0-9
+    // Pre-populate cache with keys in SST range 0-9
     let cache = create_cache(cache_size);
     for i in 0..num_blocks {
-        cache.insert(keys[i], blocks[i].clone());
+        cache.put(keys[i], blocks[i].clone());
     }
 
-    // Create miss keys in different file range (100-199)
-    let miss_keys: Vec<BlockKey> = (0..num_blocks)
+    // Create miss keys in different SST range (100-199)
+    let miss_keys: Vec<CacheKey> = (0..num_blocks)
         .map(|i| {
-            make_block_key_with_file((100 + i / 100) as u64, (i % 100) as u64 * block_size as u64)
+            make_cache_key_with_sst((100 + i / 100) as u64, (i % 100) as u64 * block_size as u64)
         })
         .collect();
 
@@ -212,7 +213,7 @@ fn bench_insert_batch(c: &mut Criterion) {
                     || create_cache(cache_size),
                     |cache| {
                         for i in 0..n {
-                            cache.insert(keys[i], blocks[i].clone());
+                            cache.put(keys[i], blocks[i].clone());
                         }
                         black_box(());
                     },
@@ -244,7 +245,7 @@ fn bench_eviction(c: &mut Criterion) {
         b.iter(|| {
             let cache = create_cache(cache_size);
             for i in 0..num_blocks {
-                cache.insert(keys[i], blocks[i].clone());
+                cache.put(keys[i], blocks[i].clone());
             }
             black_box(cache)
         })
@@ -256,7 +257,7 @@ fn bench_eviction(c: &mut Criterion) {
 // ─── Criterion Setup ─────────────────────────────────────────────────────────
 
 criterion_group! {
-    name = tier1_block_cache;
+    name = tier1_hotpath_block_cache;
     config = criterion_config_for_tier(BenchTier::Tier1Hot);
     targets =
         bench_get_hot_single,
@@ -266,4 +267,4 @@ criterion_group! {
         bench_insert_batch,
         bench_eviction
 }
-criterion_main!(tier1_block_cache);
+criterion_main!(tier1_hotpath_block_cache);

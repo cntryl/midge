@@ -1,4 +1,4 @@
-//! Tests for transaction crash recovery and durability semantics
+﻿//! Tests for transaction crash recovery and durability semantics
 //!
 //! All tests parametrized across durable storage modes only (LocalDisk, CloudBacked)
 //! Pattern: for_each_storage_mode(&durable_storage_modes(), |mode, opts| { ... })

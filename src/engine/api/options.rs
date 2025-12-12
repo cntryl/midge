@@ -16,22 +16,12 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use cntryl_midge::{OpenOptions, Goal, Durability};
+//! use cntryl_midge::MidgeEngine;
+//! use std::path::PathBuf;
 //!
-//! // Simple: just specify path and goal
-//! let opts = OpenOptions::new()
-//!     .path("./my_db")
-//!     .goal(Goal::Latency)
-//!     .build();
-//!
-//! // Advanced: tune for specific workload
-//! let opts = OpenOptions::new()
-//!     .path("./my_db")
-//!     .goal(Goal::Throughput)
-//!     .durability(Durability::Steady)
-//!     .memory_budget(MemoryBudget::Bytes(4 * 1024 * 1024 * 1024)) // 4GB
-//!     .workload(WorkloadProfile::WriteHeavy)
-//!     .build();
+//! // Open a database with default options
+//! let engine = MidgeEngine::open(PathBuf::from("./my_db"))?;
+//! # Ok::<(), cntryl_midge::MidgeError>(())
 //! ```
 
 use std::path::PathBuf;

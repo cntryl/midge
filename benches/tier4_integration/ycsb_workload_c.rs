@@ -102,7 +102,8 @@ fn run_workload_c_concurrent(
         let key_id = zipf.next(&mut rng);
         let key = &keys[key_id];
 
-        let cf = &cf_list[rng.gen_range(0..cf_count)];
+        let cf_list_unwrapped = cf_list.as_ref().unwrap();
+        let cf = &cf_list_unwrapped[rng.gen_range(0..cf_count)];
 
         let start = Instant::now();
         let _ = black_box(engine.get(cf, key));
@@ -145,8 +146,7 @@ fn bench_workload_c(c: &mut Criterion) {
 
             // Create CFs up front (zero allocations later)
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
 
             // Pre-load dataset
@@ -171,8 +171,7 @@ fn bench_workload_c(c: &mut Criterion) {
             let (engine, _tmp) = setup_engine_fs_nosync();
 
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"), Default::default());
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
 
             load_full_dataset(&engine);

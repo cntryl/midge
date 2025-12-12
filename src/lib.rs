@@ -123,11 +123,14 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 /// # Example
 ///
 /// ```no_run
-/// use midge::prelude::*;
+/// use cntryl_midge::prelude::*;
+/// use std::path::PathBuf;
 ///
-/// let engine = MidgeEngine::new(OpenOptions::default());
+/// let engine = MidgeEngine::open(PathBuf::from("./db"))?;
 /// let mut batch = WriteBatch::new();
-/// batch.put(b"key", b"value");
+/// batch.put(b"key".to_vec().into(), b"value".to_vec().into());
+/// engine.write_batch(&batch)?;
+/// # Ok::<(), cntryl_midge::MidgeError>(())
 /// ```
 pub mod prelude {
     pub use crate::{

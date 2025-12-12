@@ -1,4 +1,4 @@
-//! Advanced Merge Operator Tests
+﻿//! Advanced Merge Operator Tests
 //!
 //! Tests advanced merge operator scenarios: tombstone interactions, error handling,
 //! and complex merge patterns. Validates that merge operators behave correctly when
@@ -146,9 +146,9 @@ fn should_apply_multiple_merges_in_batch_given_write_batch_when_committed() {
         // Act: Write batch with multiple puts (merges require custom operator)
         // For now, test with puts to validate batch ordering
         let mut batch = WriteBatch::new();
-        batch.put(b"key".to_vec(), b"value1".to_vec());
-        batch.put(b"key".to_vec(), b"value2".to_vec());
-        batch.put(b"key".to_vec(), b"value3".to_vec());
+        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value1"));
+        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value2"));
+        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value3"));
         engine.write_batch(&batch).expect("commit batch");
 
         // Assert: Last put in batch wins
@@ -259,7 +259,7 @@ fn should_handle_special_characters_in_string_merge_given_delimiters_when_append
             .merge_cf(cf, b"key", "tab_\t_here".as_bytes())
             .expect("merge tab");
         engine
-            .merge_cf(cf, b"key", "emoji_😀_unicode".as_bytes())
+            .merge_cf(cf, b"key", "emoji_ðŸ˜€_unicode".as_bytes())
             .expect("merge emoji");
 
         // Assert: All special characters handled
@@ -289,7 +289,7 @@ fn should_accumulate_multiple_merges_on_different_keys_when_batch() {
         let mut batch = WriteBatch::new();
         for i in 0..5 {
             let key = format!("key_{i}");
-            batch.put(key.as_bytes().to_vec(), format!("_update{i}").as_bytes().to_vec());
+            batch.put(key.as_bytes().to_vec().into(), format!("_update{i}").as_bytes().to_vec().into());
         }
         engine.write_batch(&batch).expect("commit batch");
 

@@ -1,4 +1,4 @@
-//! Crash Recovery Tests
+﻿//! Crash Recovery Tests
 //!
 //! Tests recovery behavior after crashes, restarts, and WAL/SST interactions.
 //! Validates that the engine recovers correctly from various failure modes:
@@ -238,9 +238,9 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
 
             // Write batch (atomic operation)
             let mut batch = WriteBatch::new();
-            batch.put(b"key1".to_vec(), b"value1".to_vec());
-            batch.put(b"key2".to_vec(), b"value2".to_vec());
-            batch.put(b"key3".to_vec(), b"value3".to_vec());
+            batch.put(bytes::Bytes::copy_from_slice(b"key1"), bytes::Bytes::copy_from_slice(b"value1"));
+            batch.put(bytes::Bytes::copy_from_slice(b"key2"), bytes::Bytes::copy_from_slice(b"value2"));
+            batch.put(bytes::Bytes::copy_from_slice(b"key3"), bytes::Bytes::copy_from_slice(b"value3"));
             engine.write_batch(&batch).expect("write_batch");
             // Crash before flush
         }
