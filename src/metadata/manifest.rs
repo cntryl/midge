@@ -194,3 +194,465 @@ impl Manifest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // Manifest creation and initialization tests
+    // ========================================================================
+
+    #[test]
+    fn should_create_default_manifest() {
+        // Arrange / Act
+        let manifest = Manifest::default();
+
+        // Assert
+        assert_eq!(manifest.last_persisted_sequence, 0);
+        assert!(manifest.ssts.is_empty());
+        assert!(manifest.files.is_empty());
+        assert!(manifest.column_families.is_empty());
+        assert!(manifest.cloud_checkpoint.is_none());
+        assert_eq!(manifest.next_wal_seq, 1);
+        assert!(manifest.next_sst_seqs.is_empty());
+    }
+
+    #[test]
+    fn should_create_manifest_via_new() {
+        // Arrange / Act
+        let manifest = Manifest::new();
+
+        // Assert: same as default
+        assert_eq!(manifest.last_persisted_sequence, 0);
+        assert!(manifest.ssts.is_empty());
+    }
+
+    // ========================================================================
+    // WAL sequence tests
+    // ========================================================================
+
+    #[test]
+    fn should_return_next_wal_seq() {
+        // Arrange
+        let manifest = Manifest {
+            next_wal_seq: 42,
+            ..Default::default()
+        };
+
+        // Act
+        let seq = manifest.next_wal_seq();
+
+        // Assert
+        assert_eq!(seq, 42);
+    }
+
+    #[test]
+    fn should_increment_wal_seq() {
+        // Arrange
+        let mut manifest = Manifest {
+            next_wal_seq: 5,
+            ..Default::default()
+        };
+
+        // Act
+        manifest.increment_wal_seq();
+
+        // Assert
+        assert_eq!(manifest.next_wal_seq, 6);
+    }
+
+    #[test]
+    fn should_increment_wal_seq_multiple_times() {
+        // Arrange
+        let mut manifest = Manifest {
+            next_wal_seq: 1,
+            ..Default::default()
+        };
+
+        // Act
+        manifest.increment_wal_seq();
+        manifest.increment_wal_seq();
+        manifest.increment_wal_seq();
+
+        // Assert
+        assert_eq!(manifest.next_wal_seq, 4);
+    }
+
+    // ========================================================================
+    // File management tests
+    // ========================================================================
+
+    #[test]
+    fn should_add_file_to_manifest() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        let file = FileMeta {
+            name: "sst_001.sst".to_string(),
+            level: 0,
+            size_bytes: 1024,
+            cf_id: 0,
+            sst_seq: 1,
+            ..Default::default()
+        };
+
+        // Act
+        manifest.add_file(file.clone());
+
+        // Assert
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].name, "sst_001.sst");
+    }
+
+    #[test]
+    fn should_add_multiple_files_to_manifest() {
+        // Arrange
+        let mut manifest = Manifest::default();
+
+        // Act
+        for i in 0..5 {
+            let file = FileMeta {
+                name: format!("sst_{:03}.sst", i),
+                level: i as u32,
+                size_bytes: 1000 + (i as u64 * 100),
+                ..Default::default()
+            };
+            manifest.add_file(file);
+        }
+
+        // Assert
+        assert_eq!(manifest.files.len(), 5);
+    }
+
+    #[test]
+    fn should_get_files_at_level() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        manifest.add_file(FileMeta {
+            name: "l0_file1.sst".to_string(),
+            level: 0,
+            ..Default::default()
+        });
+        manifest.add_file(FileMeta {
+            name: "l0_file2.sst".to_string(),
+            level: 0,
+            ..Default::default()
+        });
+        manifest.add_file(FileMeta {
+            name: "l1_file1.sst".to_string(),
+            level: 1,
+            ..Default::default()
+        });
+
+        // Act
+        let level_0 = manifest.files_at_level(0);
+        let level_1 = manifest.files_at_level(1);
+        let level_2 = manifest.files_at_level(2);
+
+        // Assert
+        assert_eq!(level_0.len(), 2);
+        assert_eq!(level_1.len(), 1);
+        assert!(level_2.is_empty());
+    }
+
+    #[test]
+    fn should_remove_file_by_name() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        manifest.add_file(FileMeta {
+            name: "file_to_keep.sst".to_string(),
+            ..Default::default()
+        });
+        manifest.add_file(FileMeta {
+            name: "file_to_remove.sst".to_string(),
+            ..Default::default()
+        });
+
+        // Act
+        manifest.remove_file("file_to_remove.sst");
+
+        // Assert
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].name, "file_to_keep.sst");
+    }
+
+    #[test]
+    fn should_remove_all_matching_files() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        manifest.add_file(FileMeta {
+            name: "remove_me.sst".to_string(),
+            ..Default::default()
+        });
+        manifest.add_file(FileMeta {
+            name: "remove_me.sst".to_string(),
+            ..Default::default()
+        });
+
+        // Act
+        manifest.remove_file("remove_me.sst");
+
+        // Assert: all matching files removed
+        assert!(manifest.files.is_empty());
+    }
+
+    #[test]
+    fn should_not_remove_non_existent_file() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        manifest.add_file(FileMeta {
+            name: "exists.sst".to_string(),
+            ..Default::default()
+        });
+
+        // Act
+        manifest.remove_file("does_not_exist.sst");
+
+        // Assert: no change
+        assert_eq!(manifest.files.len(), 1);
+    }
+
+    // ========================================================================
+    // Column family management tests
+    // ========================================================================
+
+    #[test]
+    fn should_get_next_cf_id() {
+        // Arrange
+        let mut manifest = Manifest::default();
+
+        // Act
+        let id1 = manifest.next_cf_id();
+        manifest.create_column_family("cf1".to_string());
+        let id2 = manifest.next_cf_id();
+
+        // Assert
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+    }
+
+    #[test]
+    fn should_return_one_for_empty_column_families() {
+        // Arrange
+        let manifest = Manifest::default();
+
+        // Act
+        let next_id = manifest.next_cf_id();
+
+        // Assert
+        assert_eq!(next_id, 1);
+    }
+
+    #[test]
+    fn should_create_column_family() {
+        // Arrange
+        let mut manifest = Manifest::default();
+
+        // Act
+        let cf_id = manifest.create_column_family("my_cf".to_string());
+
+        // Assert
+        assert_eq!(cf_id, 1);
+        assert_eq!(manifest.column_families.len(), 1);
+        assert_eq!(manifest.column_families[0].id, 1);
+        assert_eq!(manifest.column_families[0].name, "my_cf");
+        assert!(manifest.column_families[0].deleted_at.is_none());
+    }
+
+    #[test]
+    fn should_auto_increment_cf_ids() {
+        // Arrange
+        let mut manifest = Manifest::default();
+
+        // Act
+        let id1 = manifest.create_column_family("cf1".to_string());
+        let id2 = manifest.create_column_family("cf2".to_string());
+        let id3 = manifest.create_column_family("cf3".to_string());
+
+        // Assert
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+    }
+
+    #[test]
+    fn should_get_column_family_by_name() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        manifest.create_column_family("my_cf".to_string());
+
+        // Act
+        let cf = manifest.get_column_family_by_name("my_cf");
+
+        // Assert
+        assert!(cf.is_some());
+        assert_eq!(cf.unwrap().name, "my_cf");
+    }
+
+    #[test]
+    fn should_return_none_for_non_existent_cf_name() {
+        // Arrange
+        let manifest = Manifest::default();
+
+        // Act
+        let cf = manifest.get_column_family_by_name("does_not_exist");
+
+        // Assert
+        assert!(cf.is_none());
+    }
+
+    #[test]
+    fn should_get_column_family_by_id() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        let cf_id = manifest.create_column_family("my_cf".to_string());
+
+        // Act
+        let cf = manifest.get_column_family_by_id(cf_id);
+
+        // Assert
+        assert!(cf.is_some());
+        assert_eq!(cf.unwrap().id, cf_id);
+    }
+
+    #[test]
+    fn should_return_none_for_non_existent_cf_id() {
+        // Arrange
+        let manifest = Manifest::default();
+
+        // Act
+        let cf = manifest.get_column_family_by_id(999);
+
+        // Assert
+        assert!(cf.is_none());
+    }
+
+    #[test]
+    fn should_return_active_column_families() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        manifest.create_column_family("cf1".to_string());
+        manifest.create_column_family("cf2".to_string());
+
+        // Act
+        let active = manifest.active_column_families();
+
+        // Assert
+        assert_eq!(active.len(), 2);
+    }
+
+    #[test]
+    fn should_exclude_deleted_column_families() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        let id1 = manifest.create_column_family("cf1".to_string());
+        let id2 = manifest.create_column_family("cf2".to_string());
+        manifest.delete_column_family(id1);
+
+        // Act
+        let active = manifest.active_column_families();
+
+        // Assert: only cf2 is active
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, id2);
+    }
+
+    #[test]
+    fn should_delete_column_family_by_id() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        let cf_id = manifest.create_column_family("to_delete".to_string());
+
+        // Act: delete returns true and marks deleted_at
+        let deleted = manifest.delete_column_family(cf_id);
+
+        // Assert
+        assert!(deleted);
+        // After deletion, get_column_family_by_id returns None (filters out deleted)
+        let cf = manifest.get_column_family_by_id(cf_id);
+        assert!(cf.is_none());
+        // But the CF still exists in the list with deleted_at set
+        let all_cfs = &manifest.column_families;
+        let deleted_cf = all_cfs.iter().find(|cf| cf.id == cf_id).unwrap();
+        assert!(deleted_cf.deleted_at.is_some());
+    }
+
+    #[test]
+    fn should_set_deleted_at_timestamp() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        let cf_id = manifest.create_column_family("cf".to_string());
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Act
+        manifest.delete_column_family(cf_id);
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Assert: deleted_at is set and within time window
+        let cf = manifest.column_families.iter().find(|cf| cf.id == cf_id).unwrap();
+        assert!(cf.deleted_at.is_some());
+        let deleted_at = cf.deleted_at.unwrap();
+        assert!(deleted_at >= before);
+        assert!(deleted_at <= after);
+    }
+
+    // ========================================================================
+    // Integration tests
+    // ========================================================================
+
+    #[test]
+    fn should_manage_files_across_levels() {
+        // Arrange
+        let mut manifest = Manifest::default();
+
+        // Act: Add files to different levels
+        for level in 0..4 {
+            for i in 0..3 {
+                manifest.add_file(FileMeta {
+                    name: format!("l{}_f{}.sst", level, i),
+                    level,
+                    ..Default::default()
+                });
+            }
+        }
+
+        // Assert
+        for level in 0..4 {
+            assert_eq!(manifest.files_at_level(level).len(), 3);
+        }
+        assert_eq!(manifest.files.len(), 12);
+    }
+
+    #[test]
+    fn should_handle_multiple_column_families_with_files() {
+        // Arrange
+        let mut manifest = Manifest::default();
+
+        // Act
+        let cf1_id = manifest.create_column_family("cf1".to_string());
+        let cf2_id = manifest.create_column_family("cf2".to_string());
+
+        manifest.add_file(FileMeta {
+            cf_id: cf1_id,
+            name: "cf1_file.sst".to_string(),
+            ..Default::default()
+        });
+        manifest.add_file(FileMeta {
+            cf_id: cf2_id,
+            name: "cf2_file.sst".to_string(),
+            ..Default::default()
+        });
+
+        // Assert
+        assert_eq!(manifest.column_families.len(), 2);
+        assert_eq!(manifest.files.len(), 2);
+        assert_eq!(manifest.files[0].cf_id, cf1_id);
+        assert_eq!(manifest.files[1].cf_id, cf2_id);
+    }
+}

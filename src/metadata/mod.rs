@@ -2,17 +2,13 @@
 //!
 //! Tracks SST files, levels, and version history
 
-pub mod invariants;
 pub mod manifest;
 pub mod persistence;
-pub mod sst_catalog;
 pub mod version_manager;
 pub mod version_set;
 
-pub use invariants::Invariants;
 pub use manifest::{CloudCheckpoint, ColumnFamilyMeta, FileMeta, Manifest};
 pub use persistence::ManifestPersistence;
-pub use sst_catalog::SstCatalog;
 pub use version_manager::VersionManager;
 pub use version_set::VersionSet;
 
