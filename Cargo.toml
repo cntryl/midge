@@ -177,8 +177,8 @@ path = "benches/tier1_hotpath/block_cache.rs"
 harness = false
 
 [[bench]]
-name = "tier1_hotpath_index"
-path = "benches/tier1_hotpath/index.rs"
+name = "tier1_hotpath_iterator"
+path = "benches/tier1_hotpath/iterator.rs"
 harness = false
 
 [[bench]]
@@ -192,38 +192,18 @@ path = "benches/tier1_hotpath/sst.rs"
 harness = false
 
 [[bench]]
-name = "tier1_hotpath_data_structures"
-path = "benches/tier1_hotpath/data_structures.rs"
+name = "tier1_hotpath_sparse_index"
+path = "benches/tier1_hotpath/sparse_index.rs"
 harness = false
 
 [[bench]]
-name = "tier1_hotpath_tlv"
-path = "benches/tier1_hotpath/tlv.rs"
+name = "tier1_hotpath_trie"
+path = "benches/tier1_hotpath/trie.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_wal"
 path = "benches/tier1_hotpath/wal.rs"
-harness = false
-
-[[bench]]
-name = "tier1_hotpath_wal_frame_parse"
-path = "benches/tier1_hotpath/wal_frame_parse.rs"
-harness = false
-
-[[bench]]
-name = "tier1_hotpath_per_block_bloom"
-path = "benches/tier1_hotpath/per_block_bloom.rs"
-harness = false
-
-[[bench]]
-name = "tier1_hotpath_streaming_filters"
-path = "benches/tier1_hotpath/streaming_filters.rs"
-harness = false
-
-[[bench]]
-name = "tier1_hotpath_streaming_bloom_bits"
-path = "benches/tier1_hotpath/streaming_bloom_bits.rs"
 harness = false
 
 # =============================================================================

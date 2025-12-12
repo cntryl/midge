@@ -1,25 +1,20 @@
-//! Tier 1 — REAL Hot Path SST Benchmarks
+//! Tier 1 — SST Encoding Hot Path Benchmarks
 //!
 //! Target: < 500ms total runtime
 //! Frequency: Every PR (CI gate)
 //!
 //! Hotpath = operations that occur on most Get/Put cycles:
-//! - encode small delta keys
-//! - decode a single entry
-//! - iterator.next() on an already-built block
-//! - tiny 10-entry writer (memtable flush microstep)
+//! - encode single SST entry (TLV format)
+//! - decode single SST entry
+//! - roundtrip encode→decode
 
 #[path = "../criterion_helper.rs"]
 mod criterion_helper;
 
-use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 
-use cntryl_midge::common::codec::CompressionType;
-use cntryl_midge::sst::encoding::{decode, encode, TlvBlockIterator};
-use cntryl_midge::sst::format::DataBlockBuilder;
-use cntryl_midge::sst::mem::SstMemWriter;
+use cntryl_midge::sst::encoding::{decode, encode};
 use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
@@ -46,7 +41,7 @@ fn bench_encode(c: &mut Criterion) {
 
     g.bench_function("encode_small", |b| {
         b.iter(|| {
-            black_box(encode(delta, shared as u32, Some(value), 1, 0, false, None));
+            black_box(encode(delta, shared as u32, Some(value), 1, 0, None));
         });
     });
 
@@ -66,43 +61,18 @@ fn bench_decode(c: &mut Criterion) {
     let shared = shared_prefix_len(prev, key);
     let delta = &key[shared..];
 
-    let encoded = encode(delta, shared as u32, Some(b"value"), 1, 0, false, None);
+    let encoded = encode(delta, shared as u32, Some(b"value"), 1, 0, None);
 
     g.bench_function("decode_small", |b| {
         b.iter(|| {
-            black_box(decode(&encoded, 0, encoded.len()).unwrap());
+            black_box(decode(&encoded, 0).unwrap());
         });
     });
 
     g.finish();
 }
 
-// ---------------------------------------------------------------------------
-// HOTPATH 3: Iterator.next() (NOT a full scan)
-// ---------------------------------------------------------------------------
-fn bench_iterator_step(c: &mut Criterion) {
-    let mut g = c.benchmark_group("hotpath_sst_iter_step");
-    g.sampling_mode(SamplingMode::Flat);
-    g.throughput(Throughput::Elements(1));
 
-    // Pre-build 10-entry block outside benchmarking
-    let mut builder = DataBlockBuilder::new(16);
-    for i in 0..10 {
-        let key = format!("user:small:{:03}", i);
-        let val = format!("v{}", i);
-        builder.add(key.as_bytes(), val.as_bytes()).unwrap();
-    }
-    let block = builder.finish();
-
-    g.bench_function("iterator_single_step", |b| {
-        b.iter(|| {
-            let mut it = TlvBlockIterator::new(block.as_ref());
-            black_box(it.next()); // only step once
-        });
-    });
-
-    g.finish();
-}
 
 // ---------------------------------------------------------------------------
 // HOTPATH 4: Roundtrip (encode → decode 1 entry)
@@ -121,8 +91,8 @@ fn bench_roundtrip(c: &mut Criterion) {
 
     g.bench_function("roundtrip_small", |b| {
         b.iter(|| {
-            let encoded = encode(delta, shared as u32, Some(value), 1, 0, false, None);
-            let _ = decode(&encoded, 0, encoded.len()).unwrap();
+            let encoded = encode(delta, shared as u32, Some(value), 1, 0, None);
+            let _ = decode(&encoded, 0).unwrap();
             black_box(encoded);
         });
     });
@@ -130,32 +100,7 @@ fn bench_roundtrip(c: &mut Criterion) {
     g.finish();
 }
 
-// ---------------------------------------------------------------------------
-// HOTPATH 5: Tiny Writer (10 entries)
-// ---------------------------------------------------------------------------
-fn bench_writer_tiny(c: &mut Criterion) {
-    let mut g = c.benchmark_group("hotpath_sst_writer_tiny");
-    g.sampling_mode(SamplingMode::Flat);
-    g.throughput(Throughput::Elements(10));
 
-    // Precompute key/value slices
-    let keys: Vec<Bytes> = (0..10)
-        .map(|i| Bytes::from(format!("key_{:03}", i)))
-        .collect();
-    let vals: Vec<Bytes> = (0..10).map(|i| Bytes::from(format!("v{:03}", i))).collect();
-
-    g.bench_function("writer_10_entries", |b| {
-        b.iter(|| {
-            let mut w = SstMemWriter::new(CompressionType::None, 4096);
-            for i in 0..10 {
-                w.add(&keys[i], &vals[i]).unwrap();
-            }
-            black_box(w.finish_bytes().unwrap());
-        });
-    });
-
-    g.finish();
-}
 
 // ---------------------------------------------------------------------------
 // Criterion registration
@@ -166,8 +111,6 @@ criterion_group! {
     targets =
         bench_encode,
         bench_decode,
-        bench_iterator_step,
-        bench_roundtrip,
-        bench_writer_tiny
+        bench_roundtrip
 }
 criterion_main!(tier1_hotpath_sst);

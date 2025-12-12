@@ -15,12 +15,11 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+    criterion_group, criterion_main, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 
-use cntryl_midge::wal::encode_pipeline::{EncodeConfig, WalEncoder};
-use cntryl_midge::wal::encoding::{decode, encode, encode_delete, encode_put_simple};
+use cntryl_midge::wal::encoding::{decode, encode};
 use cntryl_midge::wal::{WalOpKind, WalRecord};
 use std::hint::black_box;
 
@@ -122,7 +121,7 @@ fn bench_wal_decode_record(c: &mut Criterion) {
 
     for (name, encoded) in test_cases {
         group.bench_function(name, |b| {
-            b.iter(|| black_box(decode(&encoded).unwrap()));
+            b.iter(|| black_box(decode(encoded.clone()).unwrap()));
         });
     }
 
@@ -165,7 +164,7 @@ fn bench_wal_roundtrip(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter(|| {
                 let encoded = encode(&record).unwrap();
-                black_box(decode(&encoded).unwrap())
+                black_box(decode(encoded).unwrap())
             });
         });
     }
@@ -174,34 +173,13 @@ fn bench_wal_roundtrip(c: &mut Criterion) {
 }
 
 // ============================================================================
-// Fast Path Optimizations
+// Additional Encoding Patterns
 // ============================================================================
 
-/// Benchmark specialized encode_delete fast path vs normal encode.
-fn bench_wal_encode_delete_fast_path(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_wal_encode_delete");
-
-    let cf_id = 0;
-    let seq = 1;
-    let key = b"deleted_key";
-    let delete_record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(key), None, seq);
-
-    group.throughput(Throughput::Elements(1));
-
-    group.bench_function("normal_encode", |b| {
-        b.iter(|| black_box(encode(&delete_record).unwrap()));
-    });
-
-    group.bench_function("fast_path", |b| {
-        b.iter(|| black_box(encode_delete(cf_id, seq, key)));
-    });
-
-    group.finish();
-}
-
-/// Benchmark specialized encode_put_simple fast path vs normal encode.
-fn bench_wal_encode_put_fast_path(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_wal_encode_put");
+/// Benchmark encode with different key/value sizes.
+fn bench_wal_encode_sizes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hotpath_wal_encode_sizes");
+    group.sampling_mode(SamplingMode::Flat);
 
     let tiny_key: &[u8] = b"k";
     let tiny_value: &[u8] = b"v";
@@ -219,83 +197,22 @@ fn bench_wal_encode_put_fast_path(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     for (name, key, value) in test_cases {
-        let cf_id = 0;
-        let seq = 1;
         let put_record = WalRecord::new(
             WalOpKind::Put,
             Bytes::copy_from_slice(key),
             Some(Bytes::copy_from_slice(value)),
-            seq,
+            1,
         );
 
-        group.bench_function(format!("{}_normal", name), |b| {
+        group.bench_function(name, |b| {
             b.iter(|| black_box(encode(&put_record).unwrap()));
         });
-
-        group.bench_function(format!("{}_fast", name), |b| {
-            b.iter(|| black_box(encode_put_simple(cf_id, seq, key, value)));
-        });
     }
 
     group.finish();
 }
 
-// ============================================================================
-// Parallel Encoding
-// ============================================================================
 
-/// Benchmark sequential vs parallel batch encoding.
-fn bench_wal_batch_encode(c: &mut Criterion) {
-    let mut group = c.benchmark_group("hotpath_wal_parallel_encode");
-
-    // Test smaller batch sizes for tier1
-    for batch_size in [50, 100] {
-        let records: Vec<WalRecord> = (0..batch_size)
-            .map(|i| {
-                WalRecord::new(
-                    WalOpKind::Put,
-                    Bytes::from(format!("key{:08}", i)),
-                    Some(Bytes::from(vec![0u8; 256])), // Smaller values for faster tier1
-                    i as u64,
-                )
-            })
-            .collect();
-
-        group.throughput(Throughput::Elements(batch_size as u64));
-
-        let encoder_seq = WalEncoder::with_config(EncodeConfig {
-            parallelism: 1,
-            max_body_len: u32::MAX as usize,
-            parallel_threshold_bytes: 1,
-        })
-        .unwrap();
-
-        group.bench_with_input(
-            BenchmarkId::new("sequential", batch_size),
-            &records,
-            |b, recs| {
-                b.iter(|| encoder_seq.encode_batch(recs).unwrap());
-            },
-        );
-
-        let encoder_par = WalEncoder::with_config(EncodeConfig {
-            parallelism: 4,
-            max_body_len: u32::MAX as usize,
-            parallel_threshold_bytes: 1,
-        })
-        .unwrap();
-
-        group.bench_with_input(
-            BenchmarkId::new("parallel_4", batch_size),
-            &records,
-            |b, recs| {
-                b.iter(|| encoder_par.encode_batch(recs).unwrap());
-            },
-        );
-    }
-
-    group.finish();
-}
 
 criterion_group! {
     name = tier1_hotpath_wal;
@@ -304,8 +221,6 @@ criterion_group! {
         bench_wal_encode_record,
         bench_wal_decode_record,
         bench_wal_roundtrip,
-        bench_wal_encode_delete_fast_path,
-        bench_wal_encode_put_fast_path,
-        bench_wal_batch_encode
+        bench_wal_encode_sizes
 }
 criterion_main!(tier1_hotpath_wal);

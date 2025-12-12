@@ -72,7 +72,7 @@ fn bench_batch_put(c: &mut Criterion) {
                         // Only prepare a WriteBatch in setup (no allocations)
                         let mut batch = WriteBatch::new();
                         for i in 0..size {
-                            batch.put_cf(cf_id, keys[i].to_vec(), vals[i].to_vec());
+                            batch.put_cf(cf_id, keys[i].clone(), vals[i].clone());
                         }
                         batch
                     },
