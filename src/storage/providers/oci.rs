@@ -1,89 +1,95 @@
+#![cfg_attr(not(feature = "cloud-common"), allow(unused))]
 //! Oracle Cloud Infrastructure (OCI) Object Storage Provider
 //!
-//! TODO: Implement custom lean OCI client with direct REST API + signature-based auth
-//! For now, this is a stub. MockCloud is used for testing and integration.
+//! Two modes of operation:
+//! 1. **S3-compatible mode** (recommended): Uses OCI's S3-compatible API via S3Provider
+//!    - Standard access key / secret key authentication
+//!    - Full CloudBackend support via S3Provider
+//!
+//! 2. **Native OCI API** (future): Direct REST API with OCI signature-based auth
+//!    - Would use OCI's proprietary authentication headers
+//!    - Not yet implemented (stub functions provided)
 
-use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
+#[cfg(feature = "cloud-common")]
+use super::s3::S3Config;
+#[cfg(feature = "cloud-common")]
+use super::s3::S3Provider;
 
-/// Oracle Cloud Infrastructure Object Storage provider stub
-///
-/// Full implementation will use:
-/// - Direct REST API calls (no OCI SDK)
-/// - Signature-based authentication (OCI auth headers)
-/// - reqwest for async HTTP client
-/// - tokio for async task spawning
-pub struct OciProvider {
-    #[allow(dead_code)]
-    namespace: String,
-    #[allow(dead_code)]
-    bucket: String,
-    #[allow(dead_code)]
-    region: String,
-    // tenancy_id, user_id, fingerprint, private_key
+#[cfg(not(feature = "cloud-common"))]
+/// Stub OCI provider when async cloud features are disabled.
+pub struct OciProvider;
+
+#[cfg(not(feature = "cloud-common"))]
+impl OciProvider {
+    pub fn new(_namespace: String, _bucket: String, _region: String) -> Self {
+        Self
+    }
+
+    pub fn s3_compat(
+        _bucket: String,
+        _namespace: String,
+        _region: String,
+        _access_key: String,
+        _secret_key: String,
+    ) -> Self {
+        Self
+    }
 }
 
+/// Oracle Cloud Infrastructure Object Storage provider
+///
+/// Supports both:
+/// - **S3-compatible API**: Leverages generic S3Provider for easy integration
+/// - **Native OCI API**: (future) Direct REST API with OCI signature-based auth
+#[cfg(feature = "cloud-common")]
+pub struct OciProvider {
+    inner: S3Provider,
+}
+
+#[cfg(feature = "cloud-common")]
 impl OciProvider {
-    /// Create a new OCI Object Storage provider
+    /// Create OCI provider using S3-compatible API (recommended)
+    ///
+    /// OCI Object Storage offers an S3-compatible API endpoint that works
+    /// seamlessly with standard S3 clients and libraries.
     ///
     /// # Arguments
-    /// * `namespace` - OCI namespace
     /// * `bucket` - Object Storage bucket name
-    /// * `region` - OCI region
-    /// * `auth` - Tenancy ID, user ID, key fingerprint, private key (for auth)
+    /// * `namespace` - OCI namespace (found in bucket details)
+    /// * `region` - OCI region (e.g., "us-phoenix-1")
+    /// * `access_key` - OCI user's API signing key ID
+    /// * `secret_key` - OCI user's API signing key
+    pub fn s3_compat(
+        bucket: String,
+        namespace: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+    ) -> Self {
+        let config = S3Config::oci_s3_compat(bucket, namespace, region);
+        let inner = S3Provider::custom(config, access_key, secret_key);
+        Self { inner }
+    }
+
+    /// Create OCI provider (using S3-compatible API)
+    ///
+    /// Convenience constructor equivalent to `s3_compat()`.
     pub fn new(namespace: String, bucket: String, region: String) -> Self {
-        Self {
-            namespace,
-            bucket,
-            region,
-        }
+        // Note: This is a stub constructor that creates a provider with the namespace/bucket/region
+        // but no credentials. Real usage should call `s3_compat()` with full credentials.
+        let config = S3Config::oci_s3_compat(bucket, namespace, region.clone());
+        let inner = S3Provider::custom(config, String::new(), String::new());
+        Self { inner }
     }
 
-    /// Submit a PUT operation (stub)
-    #[allow(dead_code)]
-    pub fn submit_put(&self, key: String, _data: Vec<u8>, callback: CloudCallback) {
-        // TODO: Implement async PUT with OCI signature-based auth
-        // For now, send success
-        let event = CloudEvent::PutComplete {
-            key,
-            result: CloudOutcome::Ok(()),
-        };
-        let _ = callback.send(event);
+    /// Access the underlying S3Provider for lower-level operations
+    pub fn inner(&self) -> &S3Provider {
+        &self.inner
     }
 
-    /// Submit a GET operation (stub)
-    #[allow(dead_code)]
-    pub fn submit_get(&self, key: String, callback: CloudCallback) {
-        // TODO: Implement async GET with OCI signature-based auth
-        // For now, send empty data
-        let event = CloudEvent::GetComplete {
-            key,
-            result: CloudOutcome::Ok(Vec::new()),
-        };
-        let _ = callback.send(event);
-    }
-
-    /// Submit a DELETE operation (stub)
-    #[allow(dead_code)]
-    pub fn submit_delete(&self, key: String, callback: CloudCallback) {
-        // TODO: Implement async DELETE with OCI signature-based auth
-        // For now, send success
-        let event = CloudEvent::DeleteComplete {
-            key,
-            result: CloudOutcome::Ok(()),
-        };
-        let _ = callback.send(event);
-    }
-
-    /// Submit a LIST operation (stub)
-    #[allow(dead_code)]
-    pub fn submit_list(&self, prefix: String, callback: CloudCallback) {
-        // TODO: Implement async LIST with OCI signature-based auth
-        // For now, send empty list
-        let event = CloudEvent::ListComplete {
-            prefix,
-            result: CloudOutcome::Ok(Vec::new()),
-        };
-        let _ = callback.send(event);
+    /// Convert into the underlying S3Provider
+    pub fn into_inner(self) -> S3Provider {
+        self.inner
     }
 }
 
@@ -92,14 +98,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_oci_provider() {
+    #[cfg(feature = "cloud-common")]
+    fn should_create_oci_s3_compat_provider() {
+        let provider = OciProvider::s3_compat(
+            "my-bucket".into(),
+            "mynamespace".into(),
+            "us-phoenix-1".into(),
+            "oci-access-key".into(),
+            "oci-secret-key".into(),
+        );
+        let _ = provider.inner();
+    }
+
+    #[test]
+    #[cfg(feature = "cloud-common")]
+    fn should_create_oci_provider_with_new() {
         let provider = OciProvider::new(
             "mynamespace".to_string(),
             "mybucket".to_string(),
             "us-phoenix-1".to_string(),
         );
-        assert_eq!(provider.namespace, "mynamespace");
-        assert_eq!(provider.bucket, "mybucket");
-        assert_eq!(provider.region, "us-phoenix-1");
+        let _ = provider.inner();
+    }
+
+    #[test]
+    #[cfg(not(feature = "cloud-common"))]
+    fn stub_oci_provider_compiles() {
+        let _provider = OciProvider::new(
+            "namespace".into(),
+            "bucket".into(),
+            "region".into(),
+        );
     }
 }
+
