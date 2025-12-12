@@ -266,8 +266,8 @@ mod tests {
         let entries = vec![IndexEntry::new(b"key_100".to_vec(), handle, 5)];
         let reader = SparseIndexReader::new(entries).unwrap();
 
-        // Act
-        let range = reader.find_block_range(b"key_50");
+        // Act - search for key smaller than the single entry
+        let range = reader.find_block_range(b"key_050");
 
         // Assert - key before all entries should start from block 0 to first entry's block
         assert_eq!(range.start_block, 0);
