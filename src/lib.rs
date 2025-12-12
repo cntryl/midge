@@ -109,7 +109,7 @@ pub use engine::api::{
 };
 
 // Observability
-pub use metrics::PerformanceMetrics;
+pub use metrics::{EngineMetrics, PerformanceMetrics};
 
 // Testing utilities
 pub use testkit::{MidgeOptions, MockStorage, StorageMode};
