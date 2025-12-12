@@ -108,7 +108,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # =============================================================================
 
 [features]
-default = []
+default = ["cloud-common"]
 logging = ["dep:tracing-subscriber"]
 uring = ["io-uring"]
 

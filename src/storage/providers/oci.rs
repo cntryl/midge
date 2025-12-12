@@ -1,4 +1,3 @@
-#![cfg_attr(not(feature = "cloud-common"), allow(unused))]
 //! Oracle Cloud Infrastructure (OCI) Object Storage Provider
 //!
 //! Two modes of operation:
@@ -10,43 +9,17 @@
 //!    - Would use OCI's proprietary authentication headers
 //!    - Not yet implemented (stub functions provided)
 
-#[cfg(feature = "cloud-common")]
-use super::s3::S3Config;
-#[cfg(feature = "cloud-common")]
-use super::s3::S3Provider;
-
-#[cfg(not(feature = "cloud-common"))]
-/// Stub OCI provider when async cloud features are disabled.
-pub struct OciProvider;
-
-#[cfg(not(feature = "cloud-common"))]
-impl OciProvider {
-    pub fn new(_namespace: String, _bucket: String, _region: String) -> Self {
-        Self
-    }
-
-    pub fn s3_compat(
-        _bucket: String,
-        _namespace: String,
-        _region: String,
-        _access_key: String,
-        _secret_key: String,
-    ) -> Self {
-        Self
-    }
-}
+use super::s3::{S3Config, S3Provider};
 
 /// Oracle Cloud Infrastructure Object Storage provider
 ///
 /// Supports both:
 /// - **S3-compatible API**: Leverages generic S3Provider for easy integration
 /// - **Native OCI API**: (future) Direct REST API with OCI signature-based auth
-#[cfg(feature = "cloud-common")]
 pub struct OciProvider {
     inner: S3Provider,
 }
 
-#[cfg(feature = "cloud-common")]
 impl OciProvider {
     /// Create OCI provider using S3-compatible API (recommended)
     ///
@@ -98,7 +71,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_create_oci_s3_compat_provider() {
         let provider = OciProvider::s3_compat(
             "my-bucket".into(),
@@ -111,7 +83,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_create_oci_provider_with_new() {
         let provider = OciProvider::new(
             "mynamespace".to_string(),
@@ -119,16 +90,6 @@ mod tests {
             "us-phoenix-1".to_string(),
         );
         let _ = provider.inner();
-    }
-
-    #[test]
-    #[cfg(not(feature = "cloud-common"))]
-    fn stub_oci_provider_compiles() {
-        let _provider = OciProvider::new(
-            "namespace".into(),
-            "bucket".into(),
-            "region".into(),
-        );
     }
 }
 

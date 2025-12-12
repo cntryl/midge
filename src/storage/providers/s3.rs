@@ -1,4 +1,3 @@
-#![cfg_attr(not(feature = "cloud-common"), allow(unused))]
 //! Generic S3-compatible provider implementation
 //!
 //! Supports any S3-compatible storage:
@@ -7,94 +6,23 @@
 //! - MinIO (local or cloud)
 //! - Oracle Cloud Infrastructure (OCI S3 compatibility)
 //! - Any other S3-compatible service
-#![cfg_attr(not(feature = "cloud-common"), allow(dead_code))]
 
 use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
-
-#[cfg(feature = "cloud-common")]
 use crate::common::{MidgeError, MidgeResult};
-#[cfg(feature = "cloud-common")]
 use crate::storage::cloud::executor::AwsCredentials;
-#[cfg(feature = "cloud-common")]
 use crate::storage::cloud::{
     CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
-#[cfg(feature = "cloud-common")]
 use chrono::Utc;
-#[cfg(feature = "cloud-common")]
 use hex;
-#[cfg(feature = "cloud-common")]
 use hmac::{Hmac, Mac};
-#[cfg(feature = "cloud-common")]
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-#[cfg(feature = "cloud-common")]
 use reqwest::Method;
-#[cfg(feature = "cloud-common")]
-use sha2::Sha256;
-#[cfg(feature = "cloud-common")]
-use std::borrow::Cow;
-#[cfg(feature = "cloud-common")]
+use sha2::{Sha256, Digest};
 use std::sync::Arc;
-#[cfg(feature = "cloud-common")]
 use url::Url;
-#[cfg(feature = "cloud-common")]
 use urlencoding::encode;
 
-#[cfg(not(feature = "cloud-common"))]
-/// Minimal stub provider when async cloud features are disabled.
-pub struct S3Provider {
-    bucket: String,
-    region: String,
-}
-
-#[cfg(not(feature = "cloud-common"))]
-impl S3Provider {
-    pub fn new(bucket: String, region: String) -> Self {
-        Self { bucket, region }
-    }
-
-    pub fn submit_put(&self, key: String, _data: Vec<u8>, callback: CloudCallback) {
-        let event = CloudEvent::PutComplete {
-            key,
-            result: CloudOutcome::Err("cloud-common feature disabled".into()),
-        };
-        let _ = callback.send(event);
-    }
-
-    pub fn submit_get(&self, key: String, callback: CloudCallback) {
-        let event = CloudEvent::GetComplete {
-            key,
-            result: CloudOutcome::Err("cloud-common feature disabled".into()),
-        };
-        let _ = callback.send(event);
-    }
-
-    pub fn submit_delete(&self, key: String, callback: CloudCallback) {
-        let event = CloudEvent::DeleteComplete {
-            key,
-            result: CloudOutcome::Err("cloud-common feature disabled".into()),
-        };
-        let _ = callback.send(event);
-    }
-
-    pub fn submit_list(&self, prefix: String, callback: CloudCallback) {
-        let event = CloudEvent::ListComplete {
-            prefix,
-            result: CloudOutcome::Err("cloud-common feature disabled".into()),
-        };
-        let _ = callback.send(event);
-    }
-
-    pub fn submit_head(&self, key: String, callback: CloudCallback) {
-        let event = CloudEvent::HeadComplete {
-            key,
-            result: CloudOutcome::Err("cloud-common feature disabled".into()),
-        };
-        let _ = callback.send(event);
-    }
-}
-
-#[cfg(feature = "cloud-common")]
 const ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -107,7 +35,6 @@ const ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'}');
 
 /// Configuration for S3-compatible storage
-#[cfg(feature = "cloud-common")]
 #[derive(Clone, Debug)]
 pub struct S3Config {
     pub bucket: String,
@@ -116,7 +43,6 @@ pub struct S3Config {
     pub path_style: bool,
 }
 
-#[cfg(feature = "cloud-common")]
 impl S3Config {
     /// Create config for AWS S3 (default endpoint)
     pub fn aws(bucket: String, region: String) -> Self {
@@ -172,12 +98,10 @@ impl S3Config {
     }
 }
 
-#[cfg(feature = "cloud-common")]
 pub struct S3Provider {
     backend: Arc<dyn CloudBackend>,
 }
 
-#[cfg(feature = "cloud-common")]
 impl S3Provider {
     /// Create provider with AWS credentials (SigV4 signing)
     pub fn aws(bucket: String, region: String, creds: AwsCredentials) -> Self {
@@ -256,13 +180,11 @@ impl S3Provider {
     }
 }
 
-#[cfg(feature = "cloud-common")]
 struct S3Backend {
     config: S3Config,
     executor: CloudExecutor,
 }
 
-#[cfg(feature = "cloud-common")]
 impl S3Backend {
     fn new(config: S3Config, executor: CloudExecutor) -> Self {
         Self { config, executor }
@@ -313,7 +235,6 @@ impl S3Backend {
     }
 }
 
-#[cfg(feature = "cloud-common")]
 impl CloudBackend for S3Backend {
     fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
         let url = self.object_url(&key);
@@ -478,7 +399,6 @@ impl CloudBackend for S3Backend {
     }
 }
 
-#[cfg(feature = "cloud-common")]
 impl CloudSigner for SigV4Signer {
     fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()> {
         let url = Url::parse(&request.url)
@@ -557,7 +477,7 @@ impl CloudSigner for SigV4Signer {
 
         let auth_header = format!(
             "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-            format!("{}/{}", self.creds.access_key, credential_scope),
+            self.creds.access_key,
             credential_scope,
             signed_headers,
             signature
@@ -568,12 +488,10 @@ impl CloudSigner for SigV4Signer {
     }
 }
 
-#[cfg(feature = "cloud-common")]
 struct SigV4Signer {
     creds: AwsCredentials,
 }
 
-#[cfg(feature = "cloud-common")]
 impl SigV4Signer {
     fn new(creds: AwsCredentials) -> Self {
         Self { creds }
@@ -594,7 +512,6 @@ impl SigV4Signer {
     }
 }
 
-#[cfg(feature = "cloud-common")]
 fn hmac_sha256(key: &[u8], data: &[u8]) -> MidgeResult<Vec<u8>> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key)
         .map_err(|_| MidgeError::Internal("hmac init".to_string()))?;
@@ -602,28 +519,14 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> MidgeResult<Vec<u8>> {
     Ok(mac.finalize().into_bytes().to_vec())
 }
 
-#[cfg(feature = "cloud-common")]
 fn percent_encode_path(path: &str) -> String {
     utf8_percent_encode(path, ENCODE_SET).to_string()
 }
 
-#[cfg(feature = "cloud-common")]
 fn canonicalize_query(query: &str) -> String {
-    let mut pairs: Vec<Cow<'_, str>> = url::form_urlencoded::parse(query.as_bytes())
+    let mut pairs: Vec<String> = url::form_urlencoded::parse(query.as_bytes())
         .map(|(key, value)| format!("{}={}", encode(&key), encode(&value)))
         .collect();
     pairs.sort();
     pairs.join("&")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[cfg(not(feature = "cloud-common"))]
-    fn stub_provider_exists() {
-        let provider = S3Provider::new("bucket".into(), "region".into());
-        provider.submit_put("key".into(), vec![], std::sync::mpsc::channel().0);
-    }
 }

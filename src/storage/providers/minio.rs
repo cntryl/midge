@@ -1,4 +1,3 @@
-#![cfg_attr(not(feature = "cloud-common"), allow(unused))]
 //! MinIO S3-compatible object storage provider
 //!
 //! Specialized implementation leveraging generic S3 provider for MinIO:
@@ -7,24 +6,7 @@
 //! - Automatic path-style endpoint configuration
 //! - Support for custom endpoints (local, self-hosted, or cloud providers)
 
-#[cfg(feature = "cloud-common")]
 use super::s3::{S3Config, S3Provider};
-
-#[cfg(not(feature = "cloud-common"))]
-/// Stub MinIO provider when async cloud features are disabled.
-pub struct MinioProvider;
-
-#[cfg(not(feature = "cloud-common"))]
-impl MinioProvider {
-    pub fn new(
-        _bucket: String,
-        _endpoint: String,
-        _access_key: String,
-        _secret_key: String,
-    ) -> Self {
-        Self
-    }
-}
 
 /// MinIO S3-compatible object storage provider
 ///
@@ -35,12 +17,10 @@ impl MinioProvider {
 /// - **Local**: `http://localhost:9000` for development
 /// - **Self-hosted**: Private MinIO cluster on your infrastructure
 /// - **Cloud**: MinIO Operator on Kubernetes or other managed services
-#[cfg(feature = "cloud-common")]
 pub struct MinioProvider {
     inner: S3Provider,
 }
 
-#[cfg(feature = "cloud-common")]
 impl MinioProvider {
     /// Create MinIO provider
     ///
@@ -76,7 +56,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_create_minio_provider_local() {
         let provider = MinioProvider::new(
             "my-bucket".into(),
@@ -88,7 +67,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_create_minio_provider_remote() {
         let provider = MinioProvider::new(
             "data-bucket".into(),
@@ -100,7 +78,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_support_different_endpoints() {
         let endpoints = vec![
             "http://localhost:9000",
@@ -117,16 +94,5 @@ mod tests {
             );
             let _ = provider.inner();
         }
-    }
-
-    #[test]
-    #[cfg(not(feature = "cloud-common"))]
-    fn stub_minio_provider_compiles() {
-        let _provider = MinioProvider::new(
-            "bucket".into(),
-            "http://localhost:9000".into(),
-            "key".into(),
-            "secret".into(),
-        );
     }
 }

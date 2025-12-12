@@ -1,4 +1,3 @@
-#![cfg_attr(not(feature = "cloud-common"), allow(unused))]
 //! Wasabi Cloud Storage provider
 //!
 //! Specialized implementation leveraging generic S3 provider for Wasabi's S3-compatible API:
@@ -8,19 +7,7 @@
 //!
 //! Wasabi regions: https://wasabi.com/
 
-#[cfg(feature = "cloud-common")]
 use super::s3::{S3Config, S3Provider};
-
-#[cfg(not(feature = "cloud-common"))]
-/// Stub Wasabi provider when async cloud features are disabled.
-pub struct WasabiProvider;
-
-#[cfg(not(feature = "cloud-common"))]
-impl WasabiProvider {
-    pub fn new(_bucket: String, _region: String, _access_key: String, _secret_key: String) -> Self {
-        Self
-    }
-}
 
 /// Wasabi Cloud Storage provider
 ///
@@ -30,12 +17,10 @@ impl WasabiProvider {
 /// # Regions
 /// Common Wasabi regions: `us-east-1`, `us-west-1`, `eu-west-1`, `ap-northeast-1`, etc.
 /// See https://wasabi.com/ for current region list.
-#[cfg(feature = "cloud-common")]
 pub struct WasabiProvider {
     inner: S3Provider,
 }
 
-#[cfg(feature = "cloud-common")]
 impl WasabiProvider {
     /// Create Wasabi provider
     ///
@@ -66,7 +51,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_create_wasabi_provider() {
         let provider = WasabiProvider::new(
             "my-bucket".into(),
@@ -78,7 +62,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_support_different_regions() {
         let regions = vec!["us-east-1", "us-west-1", "eu-west-1", "ap-northeast-1"];
         for region in regions {
@@ -90,16 +73,5 @@ mod tests {
             );
             let _ = provider.inner();
         }
-    }
-
-    #[test]
-    #[cfg(not(feature = "cloud-common"))]
-    fn stub_wasabi_provider_compiles() {
-        let _provider = WasabiProvider::new(
-            "bucket".into(),
-            "region".into(),
-            "key".into(),
-            "secret".into(),
-        );
     }
 }

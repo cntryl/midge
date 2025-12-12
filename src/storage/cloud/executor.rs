@@ -1,4 +1,3 @@
-#![cfg(feature = "cloud-common")]
 //
 // == COPILOT RULES: CLOUD EXECUTOR ==
 //
@@ -52,6 +51,7 @@ pub struct AwsCredentials {
     pub access_key: String,
     pub secret_key: String,
     pub region: String,
+    pub session_token: Option<String>,
 }
 
 impl AwsCredentials {
@@ -60,6 +60,7 @@ impl AwsCredentials {
             access_key,
             secret_key,
             region,
+            session_token: None,
         }
     }
 }

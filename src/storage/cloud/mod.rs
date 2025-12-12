@@ -30,7 +30,6 @@ use crate::common::MidgeError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "cloud-common")]
 pub use executor::{AwsCredentials, CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 
 /// Cloud operation outcome – cloneable wrapper around Result

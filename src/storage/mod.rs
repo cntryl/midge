@@ -140,10 +140,7 @@ pub use cloud::CloudStorage;
 pub use filesystem::FileSystem;
 pub use hybrid::{HybridStorage, UploadState, UploadStatus};
 pub use paths::Paths;
-pub use providers::{AzureProvider, GcsProvider, OciProvider, S3Provider};
-
-#[cfg(feature = "cloud-common")]
-pub use providers::{AwsS3Provider, MinioProvider, OciS3CompatProvider, S3Config, WasabiProvider};
+pub use providers::{AwsS3Provider, AzureProvider, GcsProvider, MinioProvider, OciProvider, S3Config, S3Provider, WasabiProvider};
 
 use crate::common::MidgeResult;
 

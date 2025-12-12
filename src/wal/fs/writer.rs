@@ -130,11 +130,11 @@ impl WalWriter for FsWalWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use std::fs;
     use std::io::Read;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use tempfile::TempDir;
-    use bytes::Bytes;
 
     // =========== Creation and Position Tests ===========
 
@@ -564,7 +564,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let writer = Arc::new(FsWalWriter::new(dir.path()).unwrap());
-        let mut positions = Arc::new(Mutex::new(Vec::new()));
+        let positions = Arc::new(Mutex::new(Vec::new()));
 
         // Act - spawn threads and collect returned positions
         let mut handles = vec![];
@@ -639,5 +639,3 @@ mod tests {
         assert_eq!(decoded.expiration, Some(1234567890000));
     }
 }
-
-

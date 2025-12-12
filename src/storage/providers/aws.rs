@@ -1,4 +1,3 @@
-#![cfg_attr(not(feature = "cloud-common"), allow(unused))]
 //! AWS S3 provider with SigV4 authentication
 //!
 //! Specialized implementation of S3Provider for AWS with:
@@ -6,45 +5,16 @@
 //! - AWS credential handling (access key, secret key, optional session token)
 //! - Region-specific endpoint routing
 
-#[cfg(feature = "cloud-common")]
 use crate::storage::cloud::executor::AwsCredentials;
-#[cfg(feature = "cloud-common")]
 use super::s3::S3Provider;
-
-#[cfg(not(feature = "cloud-common"))]
-/// Stub AWS provider when async cloud features are disabled.
-pub struct AwsS3Provider;
-
-#[cfg(not(feature = "cloud-common"))]
-impl AwsS3Provider {
-    pub fn new(_bucket: String, _region: String, _access_key: String, _secret_key: String) -> Self {
-        Self
-    }
-
-    pub fn with_session_token(
-        _bucket: String,
-        _region: String,
-        _access_key: String,
-        _secret_key: String,
-        _session_token: String,
-    ) -> Self {
-        Self
-    }
-
-    pub fn from_credentials(_bucket: String, _creds: (String, String, String, Option<String>)) -> Self {
-        Self
-    }
-}
 
 /// AWS S3 provider with SigV4 authentication
 ///
 /// Provides convenient constructors for AWS-specific credential types.
-#[cfg(feature = "cloud-common")]
 pub struct AwsS3Provider {
     inner: S3Provider,
 }
 
-#[cfg(feature = "cloud-common")]
 impl AwsS3Provider {
     /// Create AWS S3 provider with access key and secret key
     ///
@@ -117,7 +87,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_create_aws_provider_with_keys() {
         let provider = AwsS3Provider::new(
             "my-bucket".into(),
@@ -129,7 +98,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_create_aws_provider_with_session_token() {
         let provider = AwsS3Provider::with_session_token(
             "my-bucket".into(),
@@ -142,7 +110,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "cloud-common")]
     fn should_create_aws_provider_from_credentials() {
         let creds = AwsCredentials {
             access_key: "AKIAIOSFODNN7EXAMPLE".into(),
@@ -152,16 +119,5 @@ mod tests {
         };
         let provider = AwsS3Provider::from_credentials("my-bucket".into(), creds);
         let _ = provider.inner();
-    }
-
-    #[test]
-    #[cfg(not(feature = "cloud-common"))]
-    fn stub_aws_provider_compiles() {
-        let _provider = AwsS3Provider::new(
-            "bucket".into(),
-            "region".into(),
-            "key".into(),
-            "secret".into(),
-        );
     }
 }
