@@ -404,6 +404,23 @@ impl Transaction {
     }
 }
 
+/// Auto-rollback on drop if not already committed/rolled back
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        // If transaction is still active or in read phase, automatically rollback
+        match self.state {
+            TransactionState::Active | TransactionState::ReadPhase | TransactionState::Committing => {
+                let _ = self.mark_rolled_back();
+            }
+            TransactionState::Committed
+            | TransactionState::RolledBack
+            | TransactionState::CommitFailed => {
+                // Already in a terminal state, nothing to do
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

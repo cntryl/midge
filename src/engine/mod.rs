@@ -189,11 +189,11 @@ impl MidgeEngine {
         let mut column_families = std::collections::HashMap::new();
         column_families.insert(0, default_cf.clone());
 
-        // Load existing CFs from manifest (skip in memory mode)
+        // Load existing CFs from manifest (skip in memory mode and deleted CFs)
         if !memory_mode {
             let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
             for cf_meta in &manifest.column_families {
-                if cf_meta.id != 0 {
+                if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
                     let handle = ColumnFamilyHandle::new(
                         ColumnFamilyId(cf_meta.id),
                         cf_meta.name.clone(),

@@ -161,7 +161,8 @@ impl RuntimeState {
         column_families.insert(0, ColumnFamilyState::new(0, "default".into()));
 
         for cf_meta in &manifest.column_families {
-            if cf_meta.id != 0 {
+            // Skip deleted column families and default CF (already added)
+            if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
                 column_families.insert(
                     cf_meta.id,
                     ColumnFamilyState::new(cf_meta.id, cf_meta.name.clone()),

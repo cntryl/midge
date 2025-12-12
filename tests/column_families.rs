@@ -65,7 +65,7 @@ fn should_fail_create_column_family_given_duplicate_name_when_cf_exists() {
 fn should_create_column_family_with_custom_config_given_config_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let _engine = Arc::new(open_with_mode(opts, mode));
 
         // Act - would need create_column_family_with_options(name, config)
         // let config = ColumnFamilyConfig { memtable_size: 1024 * 1024 };
@@ -123,7 +123,7 @@ fn should_fail_drop_column_family_given_unflushed_data_when_memtable_not_empty()
         let cf_id = cf.id();
 
         // Act - should fail if memtable not flushed
-        let result = engine.drop_column_family(cf_id);
+        let _result = engine.drop_column_family(cf_id);
 
         // Assert - current behavior may allow drop, but safe behavior would prevent it
         // This test documents desired behavior
@@ -177,7 +177,7 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
 
         // Assert (Phase 2) - dropped CF data should not be recovered
         {
-            let engine = open_with_mode(opts, mode);
+            let _engine = open_with_mode(opts, mode);
             // Would need get_column_family_by_name or list to verify CF is gone
         }
     });
@@ -391,7 +391,7 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
 
         // Assert (Phase 2)
         {
-            let engine = open_with_mode(opts, mode);
+            let _engine = open_with_mode(opts, mode);
             // Would need get_column_family_by_name to retrieve CF handle
             // let cf = engine.get_column_family_by_name("test_cf").unwrap();
             // let result = engine.get(&cf, b"key1").unwrap();
@@ -427,7 +427,7 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange & Act (Phase 1)
         {
-            let engine = open_with_mode(opts.clone(), mode);
+            let engine = Arc::new(open_with_mode(opts.clone(), mode));
             let cf = engine.create_column_family("test_cf").unwrap();
             engine.put(&cf, b"key1", b"value1").unwrap();
             engine.drop_column_family(cf.id()).unwrap();
@@ -467,7 +467,7 @@ fn should_get_column_family_by_name_given_existing_cf_when_querying() {
 fn should_fail_get_column_family_given_nonexistent_name_when_querying() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = Arc::new(open_with_mode(opts, mode));
+        let _engine = Arc::new(open_with_mode(opts, mode));
 
         // Act
         // let result = engine.get_column_family_by_name("nonexistent");

@@ -87,23 +87,15 @@ impl ManifestActor {
 
     /// Persist manifest to disk
     pub fn persist(&self, state: &RuntimeState) -> MidgeResult<()> {
-        let manifest_path = state.db_path.join("MANIFEST");
-
         tracing::info!(
-            path = %manifest_path.display(),
             file_count = state.manifest.files.len(),
+            cf_count = state.manifest.column_families.len(),
             "Manifest: persisting"
         );
 
-        // Serialize manifest to JSON
-        let json = serde_json::to_string_pretty(&state.manifest).map_err(|e| {
-            crate::common::MidgeError::Internal(format!("Failed to serialize manifest: {}", e))
-        })?;
-
-        // Write atomically via temp file
-        let temp_path = manifest_path.with_extension("tmp");
-        std::fs::write(&temp_path, &json)?;
-        std::fs::rename(&temp_path, &manifest_path)?;
+        // Use ManifestPersistence to save in YAML format
+        crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
+            .map_err(|e| crate::common::MidgeError::Internal(e))?;
 
         tracing::debug!("Manifest persisted");
 
