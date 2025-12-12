@@ -358,47 +358,652 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
 mod tests {
     use super::*;
 
+    // ====================== CompressionAlgo Tests ======================
+
     #[test]
-    fn should_roundtrip_compression_codes() {
+    fn should_roundtrip_none_code() {
+        // Arrange & Act
+        let algo = CompressionAlgo::from_u8(0).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::None);
+        assert_eq!(algo.to_u8(), 0);
+    }
+
+    #[test]
+    fn should_roundtrip_lz4_code() {
+        // Arrange & Act
+        let algo = CompressionAlgo::from_u8(1).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::Lz4);
+        assert_eq!(algo.to_u8(), 1);
+    }
+
+    #[test]
+    fn should_roundtrip_zstd3_code() {
+        // Arrange & Act
+        let algo = CompressionAlgo::from_u8(2).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::Zstd3);
+        assert_eq!(algo.to_u8(), 2);
+    }
+
+    #[test]
+    fn should_roundtrip_zstd9_code() {
+        // Arrange & Act
+        let algo = CompressionAlgo::from_u8(3).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::Zstd9);
+        assert_eq!(algo.to_u8(), 3);
+    }
+
+    #[test]
+    fn should_roundtrip_zlib_code() {
+        // Arrange & Act
+        let algo = CompressionAlgo::from_u8(4).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::Zlib);
+        assert_eq!(algo.to_u8(), 4);
+    }
+
+    #[test]
+    fn should_roundtrip_snappy_code() {
+        // Arrange & Act
+        let algo = CompressionAlgo::from_u8(5).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::Snappy);
+        assert_eq!(algo.to_u8(), 5);
+    }
+
+    #[test]
+    fn should_roundtrip_all_valid_codes() {
+        // Arrange & Act & Assert
         for code in 0..=5 {
-            let algo = CompressionAlgo::from_u8(code).unwrap();
-            assert_eq!(algo.to_u8(), code);
+            let algo = CompressionAlgo::from_u8(code).expect("valid code");
+            assert_eq!(algo.to_u8(), code, "roundtrip failed for code {}", code);
         }
     }
 
     #[test]
-    fn should_reject_invalid_compression_codes() {
-        assert!(CompressionAlgo::from_u8(6).is_none());
-        assert!(CompressionAlgo::from_u8(255).is_none());
+    fn should_reject_invalid_compression_code_6() {
+        // Arrange & Act
+        let result = CompressionAlgo::from_u8(6);
+
+        // Assert
+        assert!(result.is_none());
     }
+
+    #[test]
+    fn should_reject_invalid_compression_code_255() {
+        // Arrange & Act
+        let result = CompressionAlgo::from_u8(255);
+
+        // Assert
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn should_reject_all_invalid_codes() {
+        // Arrange & Act & Assert
+        for code in 6..=255 {
+            let result = CompressionAlgo::from_u8(code);
+            assert!(result.is_none(), "code {} should be invalid", code);
+        }
+    }
+
+    #[test]
+    fn should_implement_clone_on_compression_algo() {
+        // Arrange
+        let algo = CompressionAlgo::Lz4;
+
+        // Act
+        let cloned = algo;
+
+        // Assert
+        assert_eq!(algo, cloned);
+    }
+
+    #[test]
+    fn should_implement_copy_on_compression_algo() {
+        // Arrange
+        let algo = CompressionAlgo::Zstd3;
+
+        // Act
+        let copied = algo;
+        let used_original = algo;
+
+        // Assert
+        assert_eq!(copied, used_original);
+    }
+
+    #[test]
+    fn should_have_exact_u8_repr() {
+        // Arrange & Act & Assert
+        assert_eq!(CompressionAlgo::None.to_u8(), 0);
+        assert_eq!(CompressionAlgo::Lz4.to_u8(), 1);
+        assert_eq!(CompressionAlgo::Zstd3.to_u8(), 2);
+        assert_eq!(CompressionAlgo::Zstd9.to_u8(), 3);
+        assert_eq!(CompressionAlgo::Zlib.to_u8(), 4);
+        assert_eq!(CompressionAlgo::Snappy.to_u8(), 5);
+    }
+
+    // ====================== CompressionPolicy Tests ======================
+
+    #[test]
+    fn should_create_none_policy() {
+        // Arrange & Act
+        let policy = CompressionPolicy::None;
+
+        // Assert - should not panic
+        match policy {
+            CompressionPolicy::None => {},
+            _ => panic!("wrong policy variant"),
+        }
+    }
+
+    #[test]
+    fn should_create_fixed_policy() {
+        // Arrange & Act
+        let policy = CompressionPolicy::Fixed(CompressionAlgo::Lz4);
+
+        // Assert
+        match policy {
+            CompressionPolicy::Fixed(algo) => assert_eq!(algo, CompressionAlgo::Lz4),
+            _ => panic!("wrong policy variant"),
+        }
+    }
+
+    #[test]
+    fn should_create_adaptive_policy_with_custom_params() {
+        // Arrange & Act
+        let policy = CompressionPolicy::Adaptive {
+            min_savings_bytes: 512,
+            min_ratio: 1.1,
+            check_algorithms: vec![CompressionAlgo::Zstd3],
+        };
+
+        // Assert
+        match policy {
+            CompressionPolicy::Adaptive {
+                min_savings_bytes,
+                min_ratio,
+                check_algorithms,
+            } => {
+                assert_eq!(min_savings_bytes, 512);
+                assert!(min_ratio > 1.09 && min_ratio < 1.11);
+                assert_eq!(check_algorithms.len(), 1);
+                assert_eq!(check_algorithms[0], CompressionAlgo::Zstd3);
+            }
+            _ => panic!("wrong policy variant"),
+        }
+    }
+
+    #[test]
+    fn should_have_default_adaptive_policy() {
+        // Arrange & Act
+        let policy = CompressionPolicy::default();
+
+        // Assert
+        match policy {
+            CompressionPolicy::Adaptive {
+                min_savings_bytes,
+                min_ratio,
+                check_algorithms,
+            } => {
+                assert_eq!(min_savings_bytes, 256);
+                assert!(min_ratio > 1.04 && min_ratio < 1.06);
+                assert!(check_algorithms.contains(&CompressionAlgo::Lz4));
+                assert!(check_algorithms.contains(&CompressionAlgo::Zstd3));
+                assert!(check_algorithms.contains(&CompressionAlgo::Zstd9));
+                assert_eq!(check_algorithms.len(), 3);
+            }
+            _ => panic!("should be adaptive by default"),
+        }
+    }
+
+    #[test]
+    fn should_be_cloneable_policy() {
+        // Arrange
+        let policy = CompressionPolicy::Adaptive {
+            min_savings_bytes: 256,
+            min_ratio: 1.05,
+            check_algorithms: vec![CompressionAlgo::Zstd3],
+        };
+
+        // Act
+        let cloned = policy.clone();
+
+        // Assert
+        match cloned {
+            CompressionPolicy::Adaptive { min_savings_bytes, .. } => {
+                assert_eq!(min_savings_bytes, 256);
+            }
+            _ => panic!("clone should preserve variant"),
+        }
+    }
+
+    // ====================== compress_block Tests ======================
 
     #[test]
     fn should_skip_compression_for_tiny_blocks() {
+        // Arrange
         let policy = CompressionPolicy::default();
-        let tiny_data = vec![0u8; 100]; // < MIN_COMPRESS_SIZE
+        let tiny_data = vec![0u8; 100]; // < MIN_COMPRESS_SIZE (256)
 
+        // Act
         let (compressed, algo) = compress_block(&tiny_data, &policy).unwrap();
 
+        // Assert
         assert_eq!(algo, CompressionAlgo::None);
         assert_eq!(compressed.len(), tiny_data.len());
+        assert_eq!(compressed.as_ref(), tiny_data.as_slice());
     }
 
     #[test]
-    fn should_use_fixed_compression_when_specified() {
-        let policy = CompressionPolicy::Fixed(CompressionAlgo::Lz4);
-        let data = vec![0u8; 1024];
+    fn should_skip_compression_at_min_compress_size_boundary() {
+        // Arrange
+        let policy = CompressionPolicy::default();
+        let boundary_data = vec![0u8; MIN_COMPRESS_SIZE - 1];
 
+        // Act
+        let (compressed, algo) = compress_block(&boundary_data, &policy).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::None);
+        assert_eq!(compressed.len(), boundary_data.len());
+    }
+
+    #[test]
+    fn should_compress_at_min_compress_size() {
+        // Arrange
+        let policy = CompressionPolicy::default();
+        let boundary_data = vec![0u8; MIN_COMPRESS_SIZE];
+
+        // Act
+        let (compressed, algo) = compress_block(&boundary_data, &policy).unwrap();
+
+        // Assert - should attempt compression
+        assert_eq!(algo, CompressionAlgo::None); // Fallback when not implemented
+        assert_eq!(compressed.len(), boundary_data.len());
+    }
+
+    #[test]
+    fn should_use_none_policy_without_compression() {
+        // Arrange
+        let policy = CompressionPolicy::None;
+        let data = vec![1u8; 1024];
+
+        // Act
+        let (compressed, algo) = compress_block(&data, &policy).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::None);
+        assert_eq!(compressed.as_ref(), data.as_slice());
+    }
+
+    #[test]
+    fn should_use_fixed_none_policy_without_compression() {
+        // Arrange
+        let policy = CompressionPolicy::Fixed(CompressionAlgo::None);
+        let data = vec![2u8; 1024];
+
+        // Act
+        let (compressed, algo) = compress_block(&data, &policy).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::None);
+        assert_eq!(compressed.as_ref(), data.as_slice());
+    }
+
+    #[test]
+    fn should_use_fixed_lz4_policy() {
+        // Arrange
+        let policy = CompressionPolicy::Fixed(CompressionAlgo::Lz4);
+        let data = vec![3u8; 1024];
+
+        // Act
         let (_compressed, algo) = compress_block(&data, &policy).unwrap();
 
-        // Will be None until we implement actual compression
+        // Assert - returns None until implemented
         assert_eq!(algo, CompressionAlgo::None);
     }
+
+    #[test]
+    fn should_use_fixed_zstd3_policy() {
+        // Arrange
+        let policy = CompressionPolicy::Fixed(CompressionAlgo::Zstd3);
+        let data = vec![4u8; 1024];
+
+        // Act
+        let (_compressed, algo) = compress_block(&data, &policy).unwrap();
+
+        // Assert - returns None until implemented
+        assert_eq!(algo, CompressionAlgo::None);
+    }
+
+    #[test]
+    fn should_use_fixed_zstd9_policy() {
+        // Arrange
+        let policy = CompressionPolicy::Fixed(CompressionAlgo::Zstd9);
+        let data = vec![5u8; 2048];
+
+        // Act
+        let (_compressed, algo) = compress_block(&data, &policy).unwrap();
+
+        // Assert - returns None until implemented
+        assert_eq!(algo, CompressionAlgo::None);
+    }
+
+    #[test]
+    fn should_use_fixed_zlib_policy() {
+        // Arrange
+        let policy = CompressionPolicy::Fixed(CompressionAlgo::Zlib);
+        let data = vec![6u8; 1024];
+
+        // Act
+        let (_compressed, algo) = compress_block(&data, &policy).unwrap();
+
+        // Assert - returns None until implemented
+        assert_eq!(algo, CompressionAlgo::None);
+    }
+
+    #[test]
+    fn should_handle_adaptive_policy() {
+        // Arrange
+        let policy = CompressionPolicy::Adaptive {
+            min_savings_bytes: 256,
+            min_ratio: 1.05,
+            check_algorithms: vec![CompressionAlgo::Lz4, CompressionAlgo::Zstd3],
+        };
+        let data = vec![7u8; 2048];
+
+        // Act
+        let (compressed, algo) = compress_block(&data, &policy).unwrap();
+
+        // Assert - should return something
+        assert!(compressed.len() > 0);
+        assert!(algo == CompressionAlgo::None || algo == CompressionAlgo::Lz4 || algo == CompressionAlgo::Zstd3);
+    }
+
+    #[test]
+    fn should_preserve_data_on_none_compression() {
+        // Arrange
+        let data = vec![8u8; 512];
+
+        // Act
+        let (compressed, _algo) = compress_block(&data, &CompressionPolicy::None).unwrap();
+
+        // Assert
+        assert_eq!(compressed.as_ref(), data.as_slice());
+    }
+
+    #[test]
+    fn should_handle_empty_data() {
+        // Arrange
+        let data: Vec<u8> = vec![];
+
+        // Act
+        let (compressed, algo) = compress_block(&data, &CompressionPolicy::default()).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::None);
+        assert_eq!(compressed.len(), 0);
+    }
+
+    #[test]
+    fn should_handle_single_byte() {
+        // Arrange
+        let data = vec![42u8];
+
+        // Act
+        let (compressed, algo) = compress_block(&data, &CompressionPolicy::default()).unwrap();
+
+        // Assert
+        assert_eq!(algo, CompressionAlgo::None);
+        assert_eq!(compressed.as_ref(), [42u8].as_ref());
+    }
+
+    #[test]
+    fn should_handle_large_block() {
+        // Arrange
+        let data = vec![9u8; 32 * 1024]; // 32KB
+
+        // Act
+        let (compressed, _algo) = compress_block(&data, &CompressionPolicy::default()).unwrap();
+
+        // Assert
+        assert!(compressed.len() > 0);
+    }
+
+    #[test]
+    fn should_handle_max_block_size() {
+        // Arrange
+        let data = vec![10u8; MAX_BLOCK_SIZE];
+
+        // Act
+        let (compressed, _algo) = compress_block(&data, &CompressionPolicy::default()).unwrap();
+
+        // Assert
+        assert!(compressed.len() > 0);
+    }
+
+    // ====================== decompress_block Tests ======================
 
     #[test]
     fn should_decompress_none_as_passthrough() {
-        let data = b"test data";
+        // Arrange
+        let data = b"test data for decompression";
+
+        // Act
         let decompressed = decompress_block(data, CompressionAlgo::None).unwrap();
 
+        // Assert
         assert_eq!(decompressed.as_ref(), data);
+    }
+
+    #[test]
+    fn should_decompress_empty_data_with_none() {
+        // Arrange
+        let data: &[u8] = b"";
+
+        // Act
+        let decompressed = decompress_block(data, CompressionAlgo::None).unwrap();
+
+        // Assert
+        assert_eq!(decompressed.as_ref(), b"");
+    }
+
+    #[test]
+    fn should_handle_decompress_lz4_unimplemented() {
+        // Arrange
+        let data = b"uncompressed fallback";
+
+        // Act - should fallback to passthrough since not implemented
+        let decompressed = decompress_block(data, CompressionAlgo::Lz4).unwrap();
+
+        // Assert
+        assert_eq!(decompressed.as_ref(), data);
+    }
+
+    #[test]
+    fn should_handle_decompress_zstd3_unimplemented() {
+        // Arrange
+        let data = b"uncompressed fallback";
+
+        // Act
+        let decompressed = decompress_block(data, CompressionAlgo::Zstd3).unwrap();
+
+        // Assert
+        assert_eq!(decompressed.as_ref(), data);
+    }
+
+    #[test]
+    fn should_handle_decompress_zstd9_unimplemented() {
+        // Arrange
+        let data = b"uncompressed fallback";
+
+        // Act
+        let decompressed = decompress_block(data, CompressionAlgo::Zstd9).unwrap();
+
+        // Assert
+        assert_eq!(decompressed.as_ref(), data);
+    }
+
+    #[test]
+    fn should_handle_decompress_zlib_unimplemented() {
+        // Arrange
+        let data = b"uncompressed fallback";
+
+        // Act
+        let decompressed = decompress_block(data, CompressionAlgo::Zlib).unwrap();
+
+        // Assert
+        assert_eq!(decompressed.as_ref(), data);
+    }
+
+    #[test]
+    fn should_handle_decompress_snappy_unimplemented() {
+        // Arrange
+        let data = b"uncompressed fallback";
+
+        // Act
+        let decompressed = decompress_block(data, CompressionAlgo::Snappy).unwrap();
+
+        // Assert
+        assert_eq!(decompressed.as_ref(), data);
+    }
+
+    #[test]
+    fn should_decompress_large_data_with_none() {
+        // Arrange
+        let data = vec![11u8; 16 * 1024]; // 16KB
+
+        // Act
+        let decompressed = decompress_block(&data, CompressionAlgo::None).unwrap();
+
+        // Assert
+        assert_eq!(decompressed.as_ref(), data.as_slice());
+    }
+
+    // ====================== Round-trip Tests ======================
+
+    #[test]
+    fn should_roundtrip_compress_decompress_none() {
+        // Arrange
+        let original = b"round trip test data";
+
+        // Act
+        let (compressed, algo) = compress_block(original, &CompressionPolicy::None).unwrap();
+        let decompressed = decompress_block(&compressed, algo).unwrap();
+
+        // Assert
+        assert_eq!(decompressed.as_ref(), original);
+    }
+
+    #[test]
+    fn should_roundtrip_with_various_policies() {
+        // Arrange
+        let data = vec![12u8; 512];
+        let policies = vec![
+            CompressionPolicy::None,
+            CompressionPolicy::Fixed(CompressionAlgo::None),
+            CompressionPolicy::Adaptive {
+                min_savings_bytes: 64,
+                min_ratio: 1.05,
+                check_algorithms: vec![CompressionAlgo::Lz4],
+            },
+        ];
+
+        // Act & Assert
+        for policy in policies {
+            let (compressed, algo) = compress_block(&data, &policy).unwrap();
+            let decompressed = decompress_block(&compressed, algo).unwrap();
+            assert_eq!(decompressed.as_ref(), data.as_slice());
+        }
+    }
+
+    // ====================== Constants Tests ======================
+
+    #[test]
+    fn should_have_correct_min_compress_size() {
+        // Arrange & Act & Assert
+        assert_eq!(MIN_COMPRESS_SIZE, 256);
+    }
+
+    #[test]
+    fn should_have_correct_max_block_size() {
+        // Arrange & Act & Assert
+        assert_eq!(MAX_BLOCK_SIZE, 64 * 1024);
+    }
+
+    #[test]
+    fn should_have_correct_block_trailer_size() {
+        // Arrange & Act & Assert
+        assert_eq!(BLOCK_TRAILER_SIZE, 5);
+    }
+
+    #[test]
+    fn should_have_block_trailer_5_bytes() {
+        // Arrange
+        // Block trailer: compression_type (1) + crc32c (4) = 5 bytes
+
+        // Act & Assert
+        assert_eq!(BLOCK_TRAILER_SIZE, 1 + 4);
+    }
+
+    // ====================== Determinism Tests ======================
+
+    #[test]
+    fn should_be_deterministic_with_none_policy() {
+        // Arrange
+        let data = vec![13u8; 1024];
+        let policy = CompressionPolicy::None;
+
+        // Act
+        let (compressed1, algo1) = compress_block(&data, &policy).unwrap();
+        let (compressed2, algo2) = compress_block(&data, &policy).unwrap();
+
+        // Assert
+        assert_eq!(compressed1, compressed2);
+        assert_eq!(algo1, algo2);
+    }
+
+    #[test]
+    fn should_be_deterministic_with_fixed_policy() {
+        // Arrange
+        let data = vec![14u8; 1024];
+        let policy = CompressionPolicy::Fixed(CompressionAlgo::Lz4);
+
+        // Act
+        let (compressed1, algo1) = compress_block(&data, &policy).unwrap();
+        let (compressed2, algo2) = compress_block(&data, &policy).unwrap();
+
+        // Assert
+        assert_eq!(compressed1, compressed2);
+        assert_eq!(algo1, algo2);
+    }
+
+    #[test]
+    fn should_be_deterministic_with_adaptive_policy() {
+        // Arrange
+        let data = vec![15u8; 2048];
+        let policy = CompressionPolicy::Adaptive {
+            min_savings_bytes: 256,
+            min_ratio: 1.05,
+            check_algorithms: vec![CompressionAlgo::Zstd3],
+        };
+
+        // Act
+        let (compressed1, algo1) = compress_block(&data, &policy).unwrap();
+        let (compressed2, algo2) = compress_block(&data, &policy).unwrap();
+
+        // Assert
+        assert_eq!(compressed1, compressed2);
+        assert_eq!(algo1, algo2);
     }
 }

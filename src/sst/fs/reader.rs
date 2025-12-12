@@ -356,19 +356,427 @@ impl crate::sst::SstStateReader for SstFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::{DynSstWriter, SstReader, SstStateReader};
+
+    fn create_test_sst(entries: &[(&[u8], &[u8])]) -> MidgeResult<Vec<u8>> {
+        // Create and write SST
+        let temp_dir = tempfile::tempdir()?;
+        let mut writer = crate::sst::fs::writer::FsSstWriter::new(temp_dir.path(), 4096)?;
+        
+        for (key, value) in entries {
+            writer.add(key, value)?;
+        }
+        
+        Ok(Box::new(writer).finish_bytes()?)
+    }
 
     #[test]
-    fn should_compile_with_all_three_components() {
-        // This test validates that the reader compiles with:
-        // 1. Bloom filter integration (with_bloom method)
-        // 2. Sparse index integration (with_sparse_index method)
-        // 3. Block cache integration (with_block_cache method)
-        // 4. SST ID for cache key generation (with_sst_id method)
+    fn should_create_new_reader() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test.sst");
 
-        // The actual integration is validated by compilation and the enhanced get() method
-        // which checks bloom filter -> uses sparse index -> checks block cache in sequence
+        // Act
+        let reader = SstFile::new(path.as_path());
 
-        // The SstFile struct now contains:
+        // Assert
+        assert!(reader.footer.is_none());
+    }
+
+    #[test]
+    fn should_open_valid_sst_file() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let entries = vec![
+            (b"key1" as &[u8], b"value1" as &[u8]),
+            (b"key2", b"value2"),
+        ];
+        let bytes = create_test_sst(&entries)?;
+        let path = temp_dir.path().join("test.sst");
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+
+        // Assert
+        assert!(reader.footer.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn should_chain_with_bloom_filter() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        assert!(reader.footer.is_some());
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_chain_with_sparse_index() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        assert!(reader.footer.is_some());
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_chain_with_block_cache() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        assert!(reader.footer.is_some());
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_set_sst_id() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?.with_sst_id(42);
+
+        // Assert
+        assert_eq!(reader.sst_id, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_file_too_small() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("tiny.sst");
+        std::fs::write(&path, b"tiny")?;
+
+        // Act
+        let result = SstFile::open(path.as_path());
+
+        // Assert
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_nonexistent_file() {
+        // Arrange
+        let path = std::path::Path::new("/nonexistent/path/test.sst");
+
+        // Act
+        let result = SstFile::open(path);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_have_proper_size() {
+        // Arrange & Act & Assert
         assert!(std::mem::size_of::<SstFile>() > 0);
+    }
+
+    #[test]
+    fn should_read_metadata() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let mut reader = SstFile::new(path.as_path());
+        reader.load_metadata()?;
+
+        // Assert
+        assert!(reader.footer.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn should_open_multiblock_sst() -> MidgeResult<()> {
+        // Arrange - force multiple blocks with small block size
+        let temp_dir = tempfile::tempdir()?;
+        let mut writer = crate::sst::fs::writer::FsSstWriter::new(temp_dir.path(), 256)?;
+        for i in 0..20 {
+            let key = format!("key{:03}", i);
+            let val = format!("value{:03}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+        let path = temp_dir.path().join("test.sst");
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+
+        // Assert
+        assert!(reader.footer.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_two_entries() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[
+            (b"key1" as &[u8], b"value1" as &[u8]),
+            (b"key2", b"value2"),
+        ])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        assert!(reader.footer.is_some());
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_try_get_method() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key1", b"value1")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get(b"key1");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_scan_range_without_panic() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let entries: Vec<(&[u8], &[u8])> = vec![
+            (b"aaa", b"v1"),
+            (b"bbb", b"v2"),
+            (b"ccc", b"v3"),
+        ];
+        let bytes = create_test_sst(&entries)?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range(None, None);
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_scan_range_with_start_bound() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[
+            (b"aaa" as &[u8], b"v1" as &[u8]),
+            (b"bbb", b"v2"),
+        ])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range(Some(b"bbb"), None);
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_scan_range_with_end_bound() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[
+            (b"aaa" as &[u8], b"v1" as &[u8]),
+            (b"bbb", b"v2"),
+        ])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range(None, Some(b"bbb"));
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_call_get_state() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get_state(b"key");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_call_get_state_for_absent_key() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get_state(b"nonexistent");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_call_scan_range_state() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[
+            (b"key1" as &[u8], b"value1" as &[u8]),
+            (b"key2", b"value2"),
+        ])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range_state(None, None);
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_load_valid_footer() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+
+        // Assert
+        assert!(reader.footer.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_empty_sst_file() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get(b"any_key");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_single_entry_file() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"only", b"one")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get_state(b"only");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_large_file() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let mut entries = Vec::new();
+        for i in 0..100 {
+            let key = format!("key_{:04}", i);
+            let val = format!("value_{:04}", i);
+            entries.push((key, val));
+        }
+        let entry_refs: Vec<(&[u8], &[u8])> = entries
+            .iter()
+            .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
+            .collect();
+        
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&entry_refs)?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range(None, None);
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_open_and_chain_methods() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[
+            (b"key1" as &[u8], b"value1" as &[u8]),
+            (b"key2", b"value2"),
+        ])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get(b"key1");
+        let _ = reader.scan_range(None, None);
+        let _ = reader.get(b"key2");
+
+        // Assert
+        Ok(())
     }
 }

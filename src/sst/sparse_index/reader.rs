@@ -179,4 +179,247 @@ mod tests {
         // Assert
         assert_eq!(range.block_count(), range.end_block - range.start_block + 1);
     }
+
+    #[test]
+    fn should_sort_unsorted_entries() {
+        // Arrange - entries intentionally out of order
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![
+            IndexEntry::new(b"key_300".to_vec(), handle, 2),
+            IndexEntry::new(b"key_100".to_vec(), handle, 0),
+            IndexEntry::new(b"key_200".to_vec(), handle, 1),
+        ];
+
+        // Act
+        let reader = SparseIndexReader::new(entries).unwrap();
+        let range = reader.find_block_range(b"key_150");
+
+        // Assert - should still find correct range
+        assert_eq!(range.start_block, 0);
+    }
+
+    #[test]
+    fn should_count_entries() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![
+            IndexEntry::new(b"key_100".to_vec(), handle, 0),
+            IndexEntry::new(b"key_200".to_vec(), handle, 5),
+            IndexEntry::new(b"key_300".to_vec(), handle, 10),
+        ];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let count = reader.entry_count();
+
+        // Assert
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn should_identify_empty_index() {
+        // Arrange
+        let reader = SparseIndexReader::new(vec![]).unwrap();
+
+        // Act
+        let is_empty = reader.is_empty();
+
+        // Assert
+        assert!(is_empty);
+    }
+
+    #[test]
+    fn should_identify_non_empty_index() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![IndexEntry::new(b"key".to_vec(), handle, 0)];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let is_empty = reader.is_empty();
+
+        // Assert
+        assert!(!is_empty);
+    }
+
+    #[test]
+    fn should_find_exact_match() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![
+            IndexEntry::new(b"key_100".to_vec(), handle, 0),
+            IndexEntry::new(b"key_200".to_vec(), handle, 5),
+        ];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"key_100");
+
+        // Assert
+        assert_eq!(range.start_block, 0);
+    }
+
+    #[test]
+    fn should_find_range_for_single_entry() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![IndexEntry::new(b"key_100".to_vec(), handle, 5)];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"key_50");
+
+        // Assert - key before all entries should start from block 0 to first entry's block
+        assert_eq!(range.start_block, 0);
+        assert_eq!(range.end_block, 5);
+    }
+
+    #[test]
+    fn should_handle_large_index() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let mut entries = Vec::new();
+        for i in 0..1000 {
+            entries.push(IndexEntry::new(
+                format!("key_{:04}", i * 10).into_bytes(),
+                handle,
+                i,
+            ));
+        }
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"key_4567");
+
+        // Assert
+        assert!(range.start_block < 500);
+    }
+
+    #[test]
+    fn should_handle_binary_keys_in_search() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![
+            IndexEntry::new(vec![0u8, 0, 0], handle, 0),
+            IndexEntry::new(vec![255u8, 255, 255], handle, 10),
+        ];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(&[128u8, 128, 128]);
+
+        // Assert
+        assert_eq!(range.start_block, 0);
+    }
+
+    #[test]
+    fn should_narrow_search_range_effectively() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let mut entries = Vec::new();
+        for i in (0..100).step_by(10) {
+            entries.push(IndexEntry::new(
+                format!("key_{:04}", i).into_bytes(),
+                handle,
+                i,
+            ));
+        }
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"key_0055");
+
+        // Assert - should narrow range to reasonable bounds
+        assert!(range.block_count() <= 100);
+    }
+
+    #[test]
+    fn should_handle_duplicate_keys_in_index() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![
+            IndexEntry::new(b"key".to_vec(), handle, 0),
+            IndexEntry::new(b"key".to_vec(), handle, 5),
+        ];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"key");
+
+        // Assert - should still find a valid range
+        assert!(range.start_block <= range.end_block || range.end_block == usize::MAX);
+    }
+
+    #[test]
+    fn should_handle_boundary_search_before_first_entry() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![
+            IndexEntry::new(b"bbb".to_vec(), handle, 5),
+            IndexEntry::new(b"ccc".to_vec(), handle, 10),
+        ];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"aaa");
+
+        // Assert
+        assert_eq!(range.start_block, 0);
+    }
+
+    #[test]
+    fn should_handle_boundary_search_after_last_entry() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![
+            IndexEntry::new(b"aaa".to_vec(), handle, 0),
+            IndexEntry::new(b"bbb".to_vec(), handle, 5),
+        ];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"zzz");
+
+        // Assert
+        assert_eq!(range.start_block, 5);
+        assert_eq!(range.end_block, usize::MAX);
+    }
+
+    #[test]
+    fn should_handle_search_between_high_blocks() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let entries = vec![
+            IndexEntry::new(b"key_100".to_vec(), handle, 100),
+            IndexEntry::new(b"key_200".to_vec(), handle, 200),
+        ];
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"key_150");
+
+        // Assert
+        assert_eq!(range.start_block, 100);
+    }
+
+    #[test]
+    fn should_find_correct_range_with_many_entries() {
+        // Arrange
+        let handle = BlockHandle::new(0, 100);
+        let mut entries = Vec::new();
+        for i in 0..100 {
+            entries.push(IndexEntry::new(
+                format!("key_{:03}", i).into_bytes(),
+                handle,
+                i,
+            ));
+        }
+        let reader = SparseIndexReader::new(entries).unwrap();
+
+        // Act
+        let range = reader.find_block_range(b"key_050");
+
+        // Assert
+        assert_eq!(range.start_block, 50);
+    }
 }

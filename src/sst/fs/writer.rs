@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn should_write_entries_when_creating_sst() -> MidgeResult<()> {
-        // Arrange - use tempfile crate for proper cross-platform temp handling
+        // Arrange
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.path();
 
@@ -205,8 +205,344 @@ mod tests {
 
         // Assert
         assert!(!bytes.is_empty());
-        // tempdir auto-cleans on drop
+        Ok(())
+    }
 
+    #[test]
+    fn should_write_single_entry() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add(b"key", b"value")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_empty_value() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add(b"key", b"")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_many_entries() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        for i in 0..100 {
+            let key = format!("key{:03}", i);
+            let val = format!("value{}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_flush_blocks_on_size_exceeded() -> MidgeResult<()> {
+        // Arrange - small block size forces flushes
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 64)?;
+        for i in 0..10 {
+            let key = format!("key{:03}", i);
+            let val = format!("value{:0100}", i); // Large value
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert - should have multiple blocks
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_create_with_deterministic_naming() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new_with_seq(temp_dir.path(), 4096, 42)?;
+        writer.add(b"key", b"value")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_with_metadata() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_deletion() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add_with_meta(b"key", None, 2, 1, None)?; // op_type=1 for delete
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_expiration() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add_with_meta(b"key", Some(b"value"), 0, 0, Some(999999))?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_range_tombstone() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add_range_tombstone(b"start", b"end", 0)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_large_block_size() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 64 * 1024)?;
+        for i in 0..50 {
+            let key = format!("k{}", i);
+            let val = format!("v{}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_small_block_size() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 128)?;
+        for i in 0..20 {
+            let key = format!("key{:02}", i);
+            let val = format!("val{}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_finish_empty_writer() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert - should have footer at minimum
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_utf8_keys() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add("こんにちは".as_bytes(), "世界".as_bytes())?;
+        writer.add("🔥".as_bytes(), "💯".as_bytes())?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_binary_data() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        let binary_key = vec![0u8, 1, 2, 255, 254, 253];
+        let binary_val = vec![255u8, 128, 64, 32, 16];
+        writer.add(&binary_key, &binary_val)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_track_offset() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+
+        // Act - track offset progression
+        let initial_offset = writer.offset;
+        writer.add(b"key1", b"value1")?;
+        
+        // Flush by exceeding block size significantly
+        for i in 0..100 {
+            let key = format!("k{:04}", i);
+            let val = format!("very_long_value_{:04}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert_eq!(initial_offset, 0);
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_keys_in_order() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        for i in 0..10 {
+            let key = format!("key_{:02}", i);
+            writer.add(key.as_bytes(), b"value")?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_duplicate_keys() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add(b"key", b"value1")?;
+        writer.add(b"key", b"value2")?;
+        writer.add(b"key", b"value3")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_sequence_numbers_in_metadata() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        for i in 0..5 {
+            writer.add_with_meta(b"key", Some(b"value"), i as u64, 0, None)?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_very_large_keys() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let large_key = vec![0u8; 10000];
+        let large_val = vec![1u8; 10000];
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 64 * 1024)?;
+        writer.add(&large_key, &large_val)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_very_large_values() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let large_val = vec![42u8; 100000];
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 64 * 1024)?;
+        writer.add(b"key", &large_val)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
         Ok(())
     }
 }

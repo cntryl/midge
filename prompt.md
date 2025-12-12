@@ -1,1 +1,1 @@
-Please do a sweep of all files in sst/cache/ and please make sure we have proper unit tests for all invariants, and that the test follow the guidelines. we can also prune obsolete files and dead code. make sure the final code is clean and clippy approved.
+Please do a sweep of all files in sst/fs and please make sure we have proper unit tests for all invariants, and that the test follow the guidelines. we can also prune obsolete files and dead code. make sure the final code is clean and clippy approved.

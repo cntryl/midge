@@ -228,81 +228,301 @@ mod tests {
 
     #[test]
     fn should_profile_structured_keys() {
+        // Arrange
         let mut profiler = KeyStructureProfiler::new();
 
+        // Act
         profiler.add_key(b"user/alice/profile");
         profiler.add_key(b"user/alice/settings");
         profiler.add_key(b"user/bob/profile");
         profiler.add_key(b"user/bob/settings");
-
         let profile = profiler.finish();
 
+        // Assert
         assert!(profile.avg_shared_prefix >= 5.0); // "user/" shared
         assert!(profile.common_prefix_len >= 4); // "user" shared by all
-        assert!(profile.key_count == 4);
+        assert_eq!(profile.key_count, 4);
     }
 
     #[test]
     fn should_profile_random_keys() {
+        // Arrange
         let mut profiler = KeyStructureProfiler::new();
 
+        // Act
         profiler.add_key(b"3c7f4b2a-1234-5678-9abc-def012345678");
         profiler.add_key(b"7f8e9d0c-5678-1234-abcd-ef0123456789");
         profiler.add_key(b"a1b2c3d4-9012-3456-7890-abcdef012345");
-
         let profile = profiler.finish();
 
+        // Assert
         assert!(profile.avg_shared_prefix < 2.0); // Random UUIDs share little
         assert!(profile.entropy > 3.0); // High entropy
     }
 
     #[test]
     fn should_detect_common_prefix() {
+        // Arrange
         let mut profiler = KeyStructureProfiler::new();
 
+        // Act
         profiler.add_key(b"tenant_123_resource_1");
         profiler.add_key(b"tenant_123_resource_2");
         profiler.add_key(b"tenant_123_resource_3");
-
         let profile = profiler.finish();
 
+        // Assert
         assert!(profile.common_prefix_len >= 10); // "tenant_123" shared
     }
 
     #[test]
     fn should_track_prefix_divergence() {
+        // Arrange
         let mut profiler = KeyStructureProfiler::new();
 
-        // Many different 4-byte prefixes
+        // Act
         for i in 0..100 {
             let key = format!("{:04}_key_{}", i, i);
             profiler.add_key(key.as_bytes());
         }
-
         let profile = profiler.finish();
 
+        // Assert
         assert!(profile.prefix_divergence > 50); // Many unique 4-byte prefixes
     }
 
     #[test]
-    fn should_handle_empty_keys() {
+    fn should_handle_empty_profiler() {
+        // Arrange
         let profiler = KeyStructureProfiler::new();
+
+        // Act
         let profile = profiler.finish();
 
+        // Assert
         assert_eq!(profile.key_count, 0);
         assert_eq!(profile.avg_shared_prefix, 0.0);
+        assert_eq!(profile.entropy, 0.0);
+        assert_eq!(profile.common_prefix_len, 0);
     }
 
     #[test]
     fn should_calculate_key_length_variance() {
+        // Arrange
         let mut profiler = KeyStructureProfiler::new();
 
+        // Act
         profiler.add_key(b"short");
         profiler.add_key(b"medium_key");
         profiler.add_key(b"very_long_key_with_many_chars");
-
         let profile = profiler.finish();
 
+        // Assert
         assert!(profile.key_length_variance > 0.0);
+    }
+
+    #[test]
+    fn should_handle_single_key() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        profiler.add_key(b"single");
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.key_count, 1);
+        assert_eq!(profile.avg_shared_prefix, 0.0);
+        assert!(profile.entropy >= 0.0);
+    }
+
+    #[test]
+    fn should_ignore_empty_keys() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        profiler.add_key(b"");
+        profiler.add_key(b"real_key");
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.key_count, 1);
+    }
+
+    #[test]
+    fn should_track_prefix_frequencies() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        profiler.add_key(b"aa_key1");
+        profiler.add_key(b"aa_key2");
+        profiler.add_key(b"bb_key1");
+        let profile = profiler.finish();
+
+        // Assert
+        assert!(profile.prefix_heat.len() > 0);
+        let (_, count) = &profile.prefix_heat[0];
+        assert_eq!(*count, 2); // "aa__" appears twice
+    }
+
+    #[test]
+    fn should_handle_identical_keys() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        profiler.add_key(b"same");
+        profiler.add_key(b"same");
+        profiler.add_key(b"same");
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.key_count, 3);
+        assert_eq!(profile.avg_shared_prefix, 4.0); // All bytes match
+        assert_eq!(profile.common_prefix_len, 4);
+        assert_eq!(profile.key_length_variance, 0.0);
+    }
+
+    #[test]
+    fn should_calculate_entropy_for_random_bytes() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        for i in 0..255 {
+            let byte = i as u8;
+            profiler.add_key(&[byte]);
+        }
+        let profile = profiler.finish();
+
+        // Assert
+        assert!(profile.entropy > 7.0); // Near maximum for byte distribution
+    }
+
+    #[test]
+    fn should_calculate_entropy_for_uniform_bytes() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        for _ in 0..100 {
+            profiler.add_key(b"aaa");
+        }
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.entropy, 0.0); // All same byte
+    }
+
+    #[test]
+    fn should_calculate_max_shared_prefix() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        profiler.add_key(b"prefix_abc");
+        profiler.add_key(b"prefix_def");
+        profiler.add_key(b"other");
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.max_shared_prefix, 7); // "prefix_" matches
+    }
+
+    #[test]
+    fn should_handle_binary_data() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        profiler.add_key(&[0u8, 1, 2, 3, 255]);
+        profiler.add_key(&[0u8, 1, 2, 4, 254]);
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.key_count, 2);
+        assert_eq!(profile.max_shared_prefix, 3); // First 3 bytes match
+    }
+
+    #[test]
+    fn should_create_profile_via_default() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::default();
+
+        // Act
+        profiler.add_key(b"test");
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.key_count, 1);
+    }
+
+    #[test]
+    fn should_maintain_prefix_heat_top_10() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        for i in 0..100 {
+            let key = format!("prefix_{:02}_tail", i);
+            profiler.add_key(key.as_bytes());
+        }
+        let profile = profiler.finish();
+
+        // Assert
+        assert!(profile.prefix_heat.len() <= 10); // Truncated to top 10
+    }
+
+    #[test]
+    fn should_handle_very_long_keys() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+        let long_key1 = "x".repeat(10000).into_bytes();
+        let long_key2 = "y".repeat(10000).into_bytes();
+
+        // Act
+        profiler.add_key(&long_key1);
+        profiler.add_key(&long_key2);
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.key_count, 2);
+        assert_eq!(profile.max_shared_prefix, 0);
+    }
+
+    #[test]
+    fn should_handle_numeric_pattern_keys() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        for i in 0..10 {
+            let key = format!("key_{:04}", i);
+            profiler.add_key(key.as_bytes());
+        }
+        let profile = profiler.finish();
+
+        // Assert
+        assert_eq!(profile.key_count, 10);
+        assert!(profile.common_prefix_len >= 4); // "key_" shared
+    }
+
+    #[test]
+    fn should_detect_hierarchical_structure() {
+        // Arrange
+        let mut profiler = KeyStructureProfiler::new();
+
+        // Act
+        profiler.add_key(b"app/user/123/profile");
+        profiler.add_key(b"app/user/123/settings");
+        profiler.add_key(b"app/user/456/profile");
+        profiler.add_key(b"app/user/456/settings");
+        let profile = profiler.finish();
+
+        // Assert
+        assert!(profile.avg_shared_prefix >= 8.0); // "app/user/" shared
+        assert!(profile.common_prefix_len >= 4); // "app/" shared by all
     }
 }
