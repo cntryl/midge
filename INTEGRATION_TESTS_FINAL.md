@@ -4,12 +4,14 @@
 
 **Purpose**: Define comprehensive integration tests that act as a living specification for the Midge LSM-tree engine.
 
-**Philosophy**: Tests define the **correct future behavior**, not document current limitations. Implement failing tests first, then add features to make them pass.
+**Philosophy**: Tests define the **correct future behavior**, not document current limitations. Always implement tests fully; they may fail until features exist.
 
-- ✅ Tests **SHOULD FAIL** if features aren't implemented
-- ✅ Tests **SHOULD PASS** when features are properly implemented
-- ❌ Never `#[ignore]` tests; that defeats the purpose
-- ❌ Never stub behavior; always write desired semantics
+- ✅ Write ALL tests (never `#[ignore]`)
+- ✅ Tests **MAY FAIL** if features aren't implemented yet
+- ✅ Once features are built, failing tests become passing tests
+- ✅ Tests act as a specification for what code needs to do
+- ❌ Never stub behavior; always assert desired semantics
+- ❌ Never skip tests on certain storage modes; use conditional logic instead
 
 **Expected Workflow**:
 1. **Phase 1**: Basic engine operations ✅ COMPLETE (35/35 tests)
@@ -138,12 +140,13 @@ std::thread::spawn(move || {
 
 | ❌ Pattern | Why | ✅ Fix |
 |---|---|---|
-| `#[ignore]` tests | Defeats spec-driven approach; test should fail until feature exists | Delete `#[ignore]`, write correct assertions |
-| Stub implementations | Hides missing features | Write assertions that fail today |
+| `#[ignore]` tests | Defeats spec-driven approach; test should fail until feature exists | Delete `#[ignore]`, write full test that fails |
+| Conditional test execution based on feature availability | Tests should always run, fail until feature works | Write test that asserts desired behavior; let it fail |
+| Stub implementations | Hides what's actually missing | Write assertions that reflect real semantics |
 | Access `src/` internals | Tests should be public API only | Use only `open_with_mode()`, `engine.get()`, etc |
 | Test multiple behaviors | Tests become unclear and hard to debug | Split into separate focused tests |
 | Modify engine state in setup | Makes tests fragile | Use only public API |
-| Skip on certain modes | Reduces coverage | Use `for_each_storage_mode()` for logic; `durability_opts()` for persistence |
+| Skip tests on certain modes | Reduces coverage | Use conditional assertions within test; run on all modes |
 
 ---
 
@@ -238,13 +241,13 @@ cargo test --test engine_basic --test engine_write_batch --test engine_delete_ra
 | **engine_delete_range.rs** | 10+ | ✅ Passing | RangeScan infrastructure implemented |
 | **engine_iterators.rs** | 17 | ✅ Passing (17/17) | Multi-version filtering fixed in handle_range_scan |
 | **engine_snapshots.rs** | 14 | ✅ Passing (14/14) | Snapshot API complete, flush interaction verified |
-| **engine_merge.rs** | 19 | ✅ Passing (9/9 active, 10 ignored) | Merge operators implemented (base semantics complete) |
-| **engine_ttl.rs** | 12 | ✅ Passing (7/7 active, 5 ignored) | TTL support complete (expiration at read time) |
-| **column_families.rs** | 28 | ✅ Passing (12/12 active, 16 ignored) | CF lifecycle and isolation complete |
-| **config_api.rs** | 20 | 📋 Not started | Config builder validation |
-| **transaction_basic.rs** | 16 | ✅ Passing (7/7 active, 9 ignored) | Transaction lifecycle with state machine |
-| **transaction_conflicts.rs** | 25 | ✅ Passing (13/13 active, 12 ignored) | LWW semantics & stress tests |
-| **transaction_isolation.rs** | 20 | ✅ Passing (15/15 active, 5 ignored) | Snapshot isolation & dirty read prevention |
+| **engine_merge.rs** | 19 | 🚧 In Progress (11/19 passing, 8 failing) | Merge operators; some advanced features pending |
+| **engine_ttl.rs** | 12 | 🚧 In Progress (7/12 passing, 5 failing) | TTL expiration at read time; compaction cleanup pending |
+| **column_families.rs** | 28 | 🚧 In Progress (12/28 passing, 16 failing) | CF creation/drops work; restart and compaction isolation pending |
+| **config_api.rs** | 20 | ✅ Passing (18/18 written; all passing) | Config builder validation |
+| **transaction_basic.rs** | 16 | 🚧 In Progress (7/16 passing, 9 failing) | Commit/rollback work; restart and advanced ops pending |
+| **transaction_conflicts.rs** | 25 | 🚧 In Progress (13/25 passing, 12 failing) | LWW semantics work; delete_range and CAS pending |
+| **transaction_isolation.rs** | 20 | 🚧 In Progress (15/20 passing, 5 failing) | Dirty read prevention works; phantom reads pending |
 | **transaction_advanced.rs** | 10 | 📋 Not started | Crash recovery for txns |
 | **transaction_spill.rs** | 13 | 📋 Not started | Large transaction spill |
 | **durability_wal.rs** | 10 | 📋 Not started | WAL behavior |
@@ -262,10 +265,10 @@ cargo test --test engine_basic --test engine_write_batch --test engine_delete_ra
 | **streaming_sequential.rs** | 13 | 📋 Phase 5 | Sequential prefetch |
 
 **Legend**:
-- ✅ **Passing**: Tests exist and all pass
-- 🚧 **In Progress**: Some tests passing, some failing or not yet written
-- 📋 **Planned**: Tests not yet created
-- ⚠️ **Blocked**: Requires upstream feature
+- ✅ **Passing**: All tests exist and pass
+- 🚧 **In Progress**: Tests exist; some passing, some failing
+- 📋 **Not Started**: Tests not yet written
+- ⚠️ **Blocked**: Tests written but require upstream feature
 
 ---
 
