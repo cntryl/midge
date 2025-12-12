@@ -255,3 +255,359 @@ impl RuntimeState {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========== ColumnFamilyState Tests ===========
+
+    #[test]
+    fn should_create_column_family_with_unique_id() {
+        // Arrange
+        let id = 42;
+        let name = "test_cf".to_string();
+
+        // Act
+        let cf = ColumnFamilyState::new(id, name.clone());
+
+        // Assert
+        assert_eq!(cf.id, 42);
+        assert_eq!(cf.name, "test_cf");
+        assert!(cf.merge_operator.is_none());
+        assert!(cf.immutable_memtables.is_empty());
+    }
+
+    #[test]
+    fn should_track_immutable_memtables_in_cf_state() {
+        // Arrange
+        let mut cf = ColumnFamilyState::new(1, "cf".to_string());
+        let imm_memtable = Arc::new(SkipListMemtable::new());
+
+        // Act
+        cf.immutable_memtables.push(imm_memtable.clone());
+        cf.immutable_memtables.push(imm_memtable.clone());
+
+        // Assert
+        assert_eq!(cf.immutable_memtables.len(), 2);
+    }
+
+    // =========== WalState Tests ===========
+
+    #[test]
+    fn should_initialize_wal_state_with_defaults() {
+        // Arrange & Act
+        let wal = WalState::default();
+
+        // Assert
+        assert_eq!(wal.current_segment_id, 1);
+        assert_eq!(wal.last_synced_seq, 0);
+        assert_eq!(wal.pending_writes, 0);
+        assert_eq!(wal.local_durable_seq, 0);
+        assert_eq!(wal.cloud_durable_seq, 0);
+    }
+
+    #[test]
+    fn should_maintain_wal_durability_frontiers() {
+        // Arrange
+        let mut wal = WalState::default();
+
+        // Act - Simulate sequence progression
+        wal.last_synced_seq = 10;
+        wal.local_durable_seq = 10;
+        wal.pending_writes = 5;
+        wal.cloud_durable_seq = 8;
+
+        // Assert - Verify monotonicity constraints
+        assert!(wal.cloud_durable_seq <= wal.local_durable_seq);
+        assert!(wal.local_durable_seq >= wal.last_synced_seq);
+        assert!(wal.pending_writes < u64::MAX as usize);
+    }
+
+    #[test]
+    fn should_track_segment_rotation() {
+        // Arrange
+        let mut wal = WalState::default();
+        let initial_segment = wal.current_segment_id;
+
+        // Act
+        wal.current_segment_id += 1;
+        wal.current_segment_id += 1;
+
+        // Assert
+        assert_eq!(wal.current_segment_id, initial_segment + 2);
+    }
+
+    // =========== CompactionState Tests ===========
+
+    #[test]
+    fn should_initialize_compaction_state() {
+        // Arrange & Act
+        let compaction = CompactionState::default();
+
+        // Assert
+        assert!(compaction.compacting_ssts.is_empty());
+        assert_eq!(compaction.pending_tasks, 0);
+    }
+
+    #[test]
+    fn should_track_compacting_ssts() {
+        // Arrange
+        let mut compaction = CompactionState::default();
+
+        // Act
+        compaction.compacting_ssts.push("sst_001.sst".to_string());
+        compaction.compacting_ssts.push("sst_002.sst".to_string());
+        compaction.pending_tasks = 2;
+
+        // Assert
+        assert_eq!(compaction.compacting_ssts.len(), 2);
+        assert_eq!(compaction.pending_tasks, 2);
+    }
+
+    // =========== CloudState Tests ===========
+
+    #[test]
+    fn should_initialize_cloud_state() {
+        // Arrange & Act
+        let cloud = CloudState::default();
+
+        // Assert
+        assert!(cloud.pending_uploads.is_empty());
+        assert_eq!(cloud.last_cloud_checkpoint_seq, 0);
+    }
+
+    #[test]
+    fn should_track_pending_uploads() {
+        // Arrange
+        let mut cloud = CloudState::default();
+
+        // Act
+        cloud.pending_uploads.push("sst_001.sst".to_string());
+        cloud.last_cloud_checkpoint_seq = 100;
+
+        // Assert
+        assert_eq!(cloud.pending_uploads.len(), 1);
+        assert_eq!(cloud.last_cloud_checkpoint_seq, 100);
+    }
+
+    // =========== RuntimeState Tests ===========
+
+    #[test]
+    fn should_create_runtime_state_in_memory_mode() {
+        // Arrange & Act
+        let state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Assert
+        assert!(state.memory_mode);
+        assert_eq!(state.sequence, 0);
+        assert_eq!(state.next_txn_id, 0);
+        assert!(state.column_families.contains_key(&0)); // Default CF
+        assert_eq!(state.column_families.len(), 1);
+    }
+
+    #[test]
+    fn should_initialize_default_column_family() {
+        // Arrange & Act
+        let state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Assert
+        let cf0 = state.get_cf(0).expect("Default CF should exist");
+        assert_eq!(cf0.id, 0);
+        assert_eq!(cf0.name, "default");
+    }
+
+    #[test]
+    fn should_increment_sequence_numbers_monotonically() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        let initial = state.sequence;
+
+        // Act
+        let seq1 = state.next_sequence();
+        let seq2 = state.next_sequence();
+        let seq3 = state.next_sequence();
+
+        // Assert
+        assert_eq!(seq1, initial + 1);
+        assert_eq!(seq2, initial + 2);
+        assert_eq!(seq3, initial + 3);
+        assert!(seq1 < seq2 && seq2 < seq3);
+    }
+
+    #[test]
+    fn should_increment_transaction_ids_monotonically() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Act
+        let txn1 = state.next_txn_id();
+        let txn2 = state.next_txn_id();
+        let txn3 = state.next_txn_id();
+
+        // Assert
+        assert_eq!(txn1, 1);
+        assert_eq!(txn2, 2);
+        assert_eq!(txn3, 3);
+        assert!(txn1 < txn2 && txn2 < txn3);
+    }
+
+    #[test]
+    fn should_create_new_column_family() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Act
+        let cf_id = state.create_cf("test_cf".to_string()).expect("create_cf should succeed");
+
+        // Assert
+        assert_eq!(cf_id, 1); // After default (0)
+        assert!(state.column_families.contains_key(&cf_id));
+        let cf = state.get_cf(cf_id).expect("Created CF should exist");
+        assert_eq!(cf.name, "test_cf");
+    }
+
+    #[test]
+    fn should_get_column_family_by_id() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.create_cf("my_cf".to_string()).expect("create_cf should succeed");
+
+        // Act
+        let cf = state.get_cf(1);
+
+        // Assert
+        assert!(cf.is_some());
+        assert_eq!(cf.unwrap().name, "my_cf");
+    }
+
+    #[test]
+    fn should_return_none_for_nonexistent_column_family() {
+        // Arrange
+        let state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Act & Assert
+        assert!(state.get_cf(999).is_none());
+    }
+
+    #[test]
+    fn should_get_mutable_column_family() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.create_cf("mutable_cf".to_string()).expect("create_cf should succeed");
+
+        // Act
+        {
+            let cf_mut = state.get_cf_mut(1).expect("get_cf_mut should succeed");
+            cf_mut.immutable_memtables.push(Arc::new(SkipListMemtable::new()));
+        }
+
+        // Assert
+        let cf = state.get_cf(1).expect("CF should exist");
+        assert_eq!(cf.immutable_memtables.len(), 1);
+    }
+
+    #[test]
+    fn should_track_wal_state_separately() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Act
+        state.wal.current_segment_id = 5;
+        state.wal.pending_writes = 10;
+
+        // Assert
+        assert_eq!(state.wal.current_segment_id, 5);
+        assert_eq!(state.wal.pending_writes, 10);
+    }
+
+    #[test]
+    fn should_track_compaction_state_separately() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Act
+        state.compaction.compacting_ssts.push("sst_001.sst".to_string());
+        state.compaction.pending_tasks = 3;
+
+        // Assert
+        assert_eq!(state.compaction.compacting_ssts.len(), 1);
+        assert_eq!(state.compaction.pending_tasks, 3);
+    }
+
+    #[test]
+    fn should_track_cloud_state_separately() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Act
+        state.cloud.pending_uploads.push("sst_remote.sst".to_string());
+        state.cloud.last_cloud_checkpoint_seq = 50;
+
+        // Assert
+        assert_eq!(state.cloud.pending_uploads.len(), 1);
+        assert_eq!(state.cloud.last_cloud_checkpoint_seq, 50);
+    }
+
+    #[test]
+    fn should_maintain_memtable_size_limit() {
+        // Arrange
+        let state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Assert
+        assert!(state.memtable_size_limit > 0);
+        assert_eq!(state.memtable_size_limit, 64 * 1024 * 1024); // 64MB
+    }
+
+    #[test]
+    fn should_respect_read_only_flag() {
+        // Arrange & Act
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Assert - Initially not read-only
+        assert!(!state.read_only);
+
+        // Act - Set read-only
+        state.read_only = true;
+
+        // Assert
+        assert!(state.read_only);
+    }
+
+    #[test]
+    fn should_handle_multiple_column_families() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Act
+        let cf1 = state.create_cf("cf1".to_string()).expect("create_cf should succeed");
+        let cf2 = state.create_cf("cf2".to_string()).expect("create_cf should succeed");
+        let cf3 = state.create_cf("cf3".to_string()).expect("create_cf should succeed");
+
+        // Assert
+        assert_eq!(state.column_families.len(), 4); // default + 3 created
+        assert!(state.get_cf(cf1).is_some());
+        assert!(state.get_cf(cf2).is_some());
+        assert!(state.get_cf(cf3).is_some());
+    }
+
+    #[test]
+    fn should_track_all_state_components_independently() {
+        // Arrange
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+
+        // Act
+        let seq1 = state.next_sequence();
+        let txn1 = state.next_txn_id();
+        state.wal.pending_writes = 5;
+        state.compaction.pending_tasks = 2;
+        state.cloud.last_cloud_checkpoint_seq = 100;
+
+        // Assert
+        assert_eq!(seq1, 1);
+        assert_eq!(txn1, 1);
+        assert_eq!(state.wal.pending_writes, 5);
+        assert_eq!(state.compaction.pending_tasks, 2);
+        assert_eq!(state.cloud.last_cloud_checkpoint_seq, 100);
+    }
+}

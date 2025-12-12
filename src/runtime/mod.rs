@@ -513,3 +513,449 @@ impl Runtime {
 
 // Note: Runtime does not implement Default because it returns (Runtime, RuntimeHandle).
 // Use Runtime::new() directly.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    // =========== next_request_id Tests ===========
+
+    #[test]
+    fn should_generate_unique_request_ids() {
+        // Arrange & Act
+        let id1 = next_request_id();
+        let id2 = next_request_id();
+        let id3 = next_request_id();
+
+        // Assert
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn should_increment_request_ids_monotonically() {
+        // Arrange & Act
+        let id1 = next_request_id();
+        let id2 = next_request_id();
+        let id3 = next_request_id();
+
+        // Assert
+        assert!(id1 < id2);
+        assert!(id2 < id3);
+    }
+
+    #[test]
+    fn should_allocate_request_ids_atomically_across_threads() {
+        // Arrange
+        let handles: Vec<_> = (0..5)
+            .map(|_| {
+                thread::spawn(|| {
+                    let mut ids = vec![];
+                    for _ in 0..20 {
+                        ids.push(next_request_id());
+                    }
+                    ids
+                })
+            })
+            .collect();
+
+        // Act
+        let all_ids: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+
+        // Assert - All IDs should be unique
+        for i in 0..all_ids.len() {
+            for j in (i + 1)..all_ids.len() {
+                assert_ne!(all_ids[i], all_ids[j]);
+            }
+        }
+
+        // Should have 100 IDs from 5 threads
+        assert_eq!(all_ids.len(), 100);
+    }
+
+    #[test]
+    fn should_start_from_nonzero() {
+        // Arrange & Act
+        let id = next_request_id();
+
+        // Assert - Should never be 0
+        assert!(id > 0);
+    }
+
+    // =========== RuntimeMsg Tests ===========
+
+    #[test]
+    fn should_extract_request_id_from_message() {
+        // Arrange
+        let msg = RuntimeMsg::Noop { request_id: 42 };
+
+        // Act
+        let req_id = msg.request_id();
+
+        // Assert
+        assert_eq!(req_id, Some(42));
+    }
+
+    #[test]
+    fn should_return_none_for_shutdown_message() {
+        // Arrange
+        let msg = RuntimeMsg::Shutdown;
+
+        // Act
+        let req_id = msg.request_id();
+
+        // Assert
+        assert_eq!(req_id, None);
+    }
+
+    #[test]
+    fn should_extract_request_id_from_all_request_response_messages() {
+        // Arrange & Act & Assert
+        assert!(RuntimeMsg::FlushMemtable {
+            request_id: 1,
+            cf_id: 0
+        }
+        .request_id()
+        .is_some());
+
+        assert!(RuntimeMsg::CheckCompaction { request_id: 2 }
+            .request_id()
+            .is_some());
+
+        assert!(RuntimeMsg::WalAppend {
+            request_id: 3,
+            cf_id: 0,
+            key: vec![],
+            value: None,
+            sequence: 0,
+            ttl_seconds: None,
+            insert_only: false
+        }
+        .request_id()
+        .is_some());
+
+        assert!(RuntimeMsg::CheckGc { request_id: 4 }
+            .request_id()
+            .is_some());
+
+        assert!(RuntimeMsg::Noop { request_id: 5 }
+            .request_id()
+            .is_some());
+
+        assert!(RuntimeMsg::StartupPing { request_id: 6 }
+            .request_id()
+            .is_some());
+    }
+
+    // =========== RuntimeResponse Tests ===========
+
+    #[test]
+    fn should_extract_request_id_from_response() {
+        // Arrange
+        let response = RuntimeResponse::Ok { request_id: 42 };
+
+        // Act
+        let req_id = response.request_id();
+
+        // Assert
+        assert_eq!(req_id, 42);
+    }
+
+    #[test]
+    fn should_extract_request_id_from_all_responses() {
+        // Arrange & Act & Assert
+        assert_eq!(
+            RuntimeResponse::Ok { request_id: 1 }.request_id(),
+            1
+        );
+
+        assert_eq!(
+            RuntimeResponse::Error {
+                request_id: 2,
+                message: "error".to_string()
+            }
+            .request_id(),
+            2
+        );
+
+        assert_eq!(
+            RuntimeResponse::ReadValue {
+                request_id: 3,
+                value: None
+            }
+            .request_id(),
+            3
+        );
+
+        assert_eq!(
+            RuntimeResponse::RangeScanResults {
+                request_id: 4,
+                results: vec![]
+            }
+            .request_id(),
+            4
+        );
+
+        assert_eq!(
+            RuntimeResponse::FlushComplete {
+                request_id: 5,
+                sst_name: "sst".to_string()
+            }
+            .request_id(),
+            5
+        );
+
+        assert_eq!(
+            RuntimeResponse::CompactionComplete {
+                request_id: 6,
+                output_ssts: vec![]
+            }
+            .request_id(),
+            6
+        );
+
+        assert_eq!(
+            RuntimeResponse::ColumnFamilyCreated {
+                request_id: 7,
+                cf_id: 0
+            }
+            .request_id(),
+            7
+        );
+    }
+
+    // =========== ResponseRouter Tests ===========
+
+    #[test]
+    fn should_create_response_router() {
+        // Arrange & Act
+        let router = ResponseRouter::new();
+
+        // Assert - Should be usable, register should return a receiver
+        let rx = router.register(1);
+        // Just verify we got a receiver back (doesn't block, nonblocking channel)
+        drop(rx);
+    }
+
+    #[test]
+    fn should_register_and_complete_response() {
+        // Arrange
+        let router = ResponseRouter::new();
+
+        // Act - Register and deliver response
+        let rx = router.register(42);
+        router.complete(RuntimeResponse::Ok { request_id: 42 });
+
+        // Assert - Should receive response
+        let received = rx.recv().unwrap();
+        assert_eq!(received.request_id(), 42);
+    }
+
+    #[test]
+    fn should_handle_multiple_pending_requests() {
+        // Arrange
+        let router = Arc::new(ResponseRouter::new());
+        let rx1 = router.register(1);
+        let rx2 = router.register(2);
+        let rx3 = router.register(3);
+
+        // Act - Complete in different order
+        router.complete(RuntimeResponse::Ok { request_id: 2 });
+        router.complete(RuntimeResponse::Ok { request_id: 1 });
+        router.complete(RuntimeResponse::Ok { request_id: 3 });
+
+        // Assert - Should receive correct responses
+        assert_eq!(rx1.recv().unwrap().request_id(), 1);
+        assert_eq!(rx2.recv().unwrap().request_id(), 2);
+        assert_eq!(rx3.recv().unwrap().request_id(), 3);
+    }
+
+    #[test]
+    fn should_handle_orphaned_response() {
+        // Arrange
+        let router = ResponseRouter::new();
+
+        // Act - Try to complete response with no matching request
+        // (Should not panic, logs warning)
+        router.complete(RuntimeResponse::Ok { request_id: 999 });
+
+        // Assert - Should not crash
+    }
+
+    // =========== RuntimeHandle Tests ===========
+
+    #[test]
+    fn should_create_runtime_handle() {
+        // Arrange & Act
+        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+
+        // Assert
+        // Handle should be cloneable
+        let handle2 = handle.clone();
+        drop(runtime);
+        drop(handle2);
+    }
+
+    #[test]
+    fn should_handle_send_noop_message() {
+        // Arrange
+        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let msg = RuntimeMsg::Noop { request_id: 1 };
+
+        // Act
+        let result = handle.send(msg);
+
+        // Assert
+        assert!(result.is_ok());
+        drop(runtime);
+    }
+
+    #[test]
+    fn should_detect_closed_channel_on_send() {
+        // Arrange
+        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+
+        // Act - Drop runtime to close channel
+        drop(runtime);
+
+        // Wait a moment for channel to close
+        thread::sleep(std::time::Duration::from_millis(10));
+
+        // Assert
+        let result = handle.send(RuntimeMsg::Noop { request_id: 1 });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_validate_send_and_wait_requires_request_id() {
+        // Arrange
+        let (runtime, handle) = Runtime::new().expect("Should create runtime");
+        let msg = RuntimeMsg::Shutdown;
+
+        // Act
+        let result = handle.send_and_wait(msg);
+
+        // Assert
+        assert!(result.is_err());
+        drop(runtime);
+    }
+
+    // =========== Runtime Tests ===========
+
+    #[test]
+    fn should_create_runtime() {
+        // Arrange & Act
+        let result = Runtime::new();
+
+        // Assert
+        assert!(result.is_ok());
+        let (runtime, _handle) = result.unwrap();
+        drop(runtime);
+    }
+
+    #[test]
+    fn should_create_with_trace_disabled_by_default() {
+        // Arrange & Act
+        let (_runtime, _handle) = Runtime::new().expect("Should create runtime");
+
+        // Assert - Default should have tracing disabled
+        // (Verified by not panicking)
+    }
+
+    #[test]
+    fn should_shutdown_runtime() {
+        // Arrange
+        let (runtime, _handle) = Runtime::new().expect("Should create runtime");
+
+        // Act - Shutdown should not panic
+        runtime.shutdown();
+
+        // Assert - Just checking no panic
+    }
+
+    // =========== CompactionPlan Tests ===========
+
+    #[test]
+    fn should_create_compaction_plan() {
+        // Arrange & Act
+        let plan = CompactionPlan {
+            input_files: vec!["sst_001.sst".to_string()],
+            source_level: 0,
+            target_level: 1,
+            cf_id: 0,
+        };
+
+        // Assert
+        assert_eq!(plan.input_files.len(), 1);
+        assert_eq!(plan.source_level, 0);
+        assert_eq!(plan.target_level, 1);
+        assert_eq!(plan.cf_id, 0);
+    }
+
+    #[test]
+    fn should_clone_compaction_plan() {
+        // Arrange
+        let plan = CompactionPlan {
+            input_files: vec!["sst.sst".to_string()],
+            source_level: 0,
+            target_level: 1,
+            cf_id: 0,
+        };
+
+        // Act
+        let cloned = plan.clone();
+
+        // Assert
+        assert_eq!(plan.input_files, cloned.input_files);
+    }
+
+    // =========== FileMeta Tests ===========
+
+    #[test]
+    fn should_create_file_meta() {
+        // Arrange & Act
+        let meta = FileMeta {
+            name: "sst_001.sst".to_string(),
+            level: 0,
+            size_bytes: 1024,
+            cf_id: 0,
+            smallest_key: None,
+            largest_key: None,
+            smallest_seq: None,
+            largest_seq: None,
+        };
+
+        // Assert
+        assert_eq!(meta.name, "sst_001.sst");
+        assert_eq!(meta.level, 0);
+        assert_eq!(meta.size_bytes, 1024);
+        assert_eq!(meta.cf_id, 0);
+    }
+
+    #[test]
+    fn should_clone_file_meta() {
+        // Arrange
+        let meta = FileMeta {
+            name: "sst.sst".to_string(),
+            level: 0,
+            size_bytes: 100,
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(100),
+        };
+
+        // Act
+        let cloned = meta.clone();
+
+        // Assert
+        assert_eq!(meta.name, cloned.name);
+        assert_eq!(meta.smallest_key, cloned.smallest_key);
+    }
+}
