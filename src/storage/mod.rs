@@ -71,6 +71,65 @@
 // Follow these rules EXACTLY. They reflect the authoritative storage architecture.
 // ====================================================================================
 
+//! # Storage Subsystem
+//!
+//! Provides durability abstractions for SSTs (synchronous local/cloud) and WAL segments
+//! (cloud-first with local fallback).
+//!
+//! ## Module Overview
+//!
+//! - **[`cloud`]**: Cloud storage abstractions (callbacks, backends, executor)
+//!   - `CloudBackend` trait for non-blocking I/O
+//!   - `CloudStorage` namespace-aware dispatcher
+//!   - `CloudExecutor` embedded tokio runtime for async HTTP
+//!   - `MockCloudBackend` for deterministic testing
+//!
+//! - **[`filesystem`]**: Local filesystem storage
+//!   - Synchronous file read/write via callbacks
+//!   - Parent directory creation, path sanitization
+//!   - Used for local SST cache and WAL segments
+//!
+//! - **[`hybrid`]**: Orchestration layer
+//!   - Combines local filesystem + cloud backends
+//!   - WAL durability: local → cloud upload pipeline
+//!   - SST management: local cache + cloud replication
+//!   - Retry logic, backpressure, state tracking
+//!
+//! - **[`providers`]**: Cloud provider implementations
+//!   - Generic S3 (base implementation)
+//!   - AWS S3, Wasabi, MinIO (S3-compatible wrappers)
+//!   - Azure Blob Storage, Google Cloud Storage, OCI stubs
+//!
+//! - **[`paths`]**: Path utilities
+//!   - SST key formatting
+//!   - WAL segment naming conventions
+//!
+//! ## Data Flow
+//!
+//! ### SST Write Path
+//! ```text
+//! Engine → HybridStorage::submit_write()
+//!   → FileSystem (local cache) → CloudStorage (background)
+//!   → StorageEvent::WriteComplete
+//! ```
+//!
+//! ### WAL Durability Path (Cloud-First)
+//! ```text
+//! Memtable → WAL segment (local)
+//!   → HybridStorage::enqueue_wal_segment()
+//!   → [Pending] → [InProgress] → [Completed]
+//!   → CloudStorage (upload via CloudExecutor)
+//!   → StorageEvent::CloudAck(segment_id)
+//!   → WAL Actor (memtable commit)
+//! ```
+//!
+//! ## Key Guarantees
+//!
+//! 1. **No futures in engine thread**: All async work happens in `CloudExecutor`'s embedded tokio runtime
+//! 2. **Callback-driven**: No blocking or waiting; results sent via mpsc channels
+//! 3. **WAL ordering**: Local write → cloud upload → CloudAck → memtable update
+//! 4. **Deterministic testing**: `MockCloudBackend` for synchronous test execution
+
 pub mod cloud;
 pub mod filesystem;
 pub mod hybrid;

@@ -73,3 +73,97 @@ pub enum EvictionStrategy {
     /// Random eviction
     Random,
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_create_policy_with_default_watermarks() {
+        // Arrange & Act
+        let policy = StorageBudgetPolicy::new(1024 * 1024);
+
+        // Assert
+        assert_eq!(policy.max_local_bytes, 1024 * 1024);
+        assert_eq!(policy.high_watermark_percent, 90);
+        assert_eq!(policy.critical_watermark_percent, 95);
+        assert_eq!(policy.emergency_watermark_percent, 98);
+    }
+
+    #[test]
+    fn should_identify_high_watermark_correctly() {
+        // Arrange
+        let policy = StorageBudgetPolicy::new(1024 * 1024);
+
+        // Act & Assert
+        assert!(!policy.is_high_watermark(89));
+        assert!(policy.is_high_watermark(90));
+        assert!(policy.is_high_watermark(95));
+        assert!(policy.is_high_watermark(98));
+    }
+
+    #[test]
+    fn should_identify_critical_watermark_correctly() {
+        // Arrange
+        let policy = StorageBudgetPolicy::new(1024 * 1024);
+
+        // Act & Assert
+        assert!(!policy.is_critical_watermark(94));
+        assert!(policy.is_critical_watermark(95));
+        assert!(policy.is_critical_watermark(98));
+    }
+
+    #[test]
+    fn should_identify_emergency_watermark_correctly() {
+        // Arrange
+        let policy = StorageBudgetPolicy::new(1024 * 1024);
+
+        // Act & Assert
+        assert!(!policy.is_emergency_watermark(97));
+        assert!(policy.is_emergency_watermark(98));
+        assert!(policy.is_emergency_watermark(99));
+        assert!(policy.is_emergency_watermark(100));
+    }
+
+    #[test]
+    fn should_customize_watermarks() {
+        // Arrange & Act
+        let policy = StorageBudgetPolicy::new(1024 * 1024)
+            .with_watermarks(80, 85, 90);
+
+        // Assert
+        assert_eq!(policy.high_watermark_percent, 80);
+        assert_eq!(policy.critical_watermark_percent, 85);
+        assert_eq!(policy.emergency_watermark_percent, 90);
+    }
+
+    #[test]
+    fn should_calculate_bytes_until_high_watermark() {
+        // Arrange
+        let policy = StorageBudgetPolicy::new(1000); // 1000 bytes, high at 90%
+
+        // Act & Assert
+        // High threshold = 900 bytes
+        assert_eq!(policy.bytes_until_high_watermark(0), 900); // 900 bytes free
+        assert_eq!(policy.bytes_until_high_watermark(450), 450); // 450 bytes free
+        assert_eq!(policy.bytes_until_high_watermark(900), 0); // At threshold
+        assert_eq!(policy.bytes_until_high_watermark(950), -50); // Over threshold
+    }
+
+    #[test]
+    fn should_return_default_policy() {
+        // Arrange & Act
+        let policy = StorageBudgetPolicy::default();
+
+        // Assert
+        assert_eq!(policy.max_local_bytes, 2 * 1024 * 1024 * 1024); // 2 GB
+        assert_eq!(policy.high_watermark_percent, 90);
+    }
+
+    #[test]
+    fn should_have_eviction_strategies_with_default() {
+        // Arrange & Act & Assert
+        assert_eq!(EvictionStrategy::default(), EvictionStrategy::LRU);
+        assert_ne!(EvictionStrategy::LRU, EvictionStrategy::FIFO);
+        assert_ne!(EvictionStrategy::FIFO, EvictionStrategy::Random);
+    }
+}

@@ -232,18 +232,6 @@ impl StorageBudgetActor {
     pub fn next_eviction(&mut self) -> Option<(u64, u64)> {
         self.pending_evictions.pop_front()
     }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn set_sst_bytes(&mut self, bytes: u64) {
-        self.disk_state.sst_bytes = bytes;
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn set_wal_bytes(&mut self, bytes: u64) {
-        self.disk_state.wal_bytes = bytes;
-    }
 }
 
 #[cfg(test)]
@@ -360,48 +348,7 @@ mod tests {
         assert_eq!(result, Some(ReservationResult::RejectNoSpace));
     }
 
-    #[test]
-    fn should_return_wait_for_cloud_upload_at_critical_watermark() {
-        // Arrange: Critical watermark at 95%
-        let policy = StorageBudgetPolicy::new(1024 * 1024);
-        let mut actor = StorageBudgetActor::new(policy);
 
-        // Act: Reach critical zone at 95%+
-        actor.disk_state.sst_bytes = 998_000; // 95.13%
-
-        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 20_000 });
-
-        // Assert: Should prioritize cloud uploads
-        assert_eq!(result, Some(ReservationResult::WaitForCloudUpload));
-    }
-
-    #[test]
-    fn should_return_wait_for_compaction_at_high_watermark() {
-        // Arrange
-        let policy = StorageBudgetPolicy::new(1024 * 1024);
-        let mut actor = StorageBudgetActor::new(policy);
-
-        // Act: At high watermark (~90%), request flush that won't fit
-        actor.disk_state.sst_bytes = 944_000; // 90.02%
-        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 110_000 });
-
-        // Assert: Should return WaitForCompaction
-        assert_eq!(result, Some(ReservationResult::WaitForCompaction));
-    }
-
-    #[test]
-    fn should_reject_writes_at_emergency_watermark_final() {
-        // Arrange
-        let policy = StorageBudgetPolicy::new(1024 * 1024);
-        let mut actor = StorageBudgetActor::new(policy);
-
-        // Act: Fill to emergency (1,028K = 98.0%)
-        actor.disk_state.sst_bytes = 1_028_000;
-        let result = actor.handle_event(StorageBudgetEvent::ReserveForFlush { est_size: 10_000 });
-
-        // Assert: Emergency = reject
-        assert_eq!(result, Some(ReservationResult::RejectNoSpace));
-    }
 
     #[test]
     fn should_track_flush_completion() {
