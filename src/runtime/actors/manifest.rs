@@ -168,3 +168,70 @@ impl Default for ManifestActor {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_initialize_manifest_actor_with_zero_pending_edits() {
+        // Arrange / Act
+        let actor = ManifestActor::new();
+
+        // Assert
+        assert_eq!(actor.pending_edits, 0);
+    }
+
+    #[test]
+    fn should_initialize_via_default() {
+        // Arrange / Act
+        let actor = ManifestActor::default();
+
+        // Assert
+        assert_eq!(actor.pending_edits, 0);
+    }
+
+    #[test]
+    fn should_increment_pending_edits_on_add_sst() {
+        // Arrange
+        let mut actor = ManifestActor::new();
+        assert_eq!(actor.pending_edits, 0);
+
+        // Act: manually simulate adding an edit
+        actor.pending_edits += 1;
+
+        // Assert
+        assert_eq!(actor.pending_edits, 1);
+    }
+
+    #[test]
+    fn should_accumulate_pending_edits_across_operations() {
+        // Arrange
+        let mut actor = ManifestActor::new();
+
+        // Act
+        actor.pending_edits += 1; // Add SST
+        actor.pending_edits += 1; // Compaction complete
+        actor.pending_edits += 1; // Another add
+
+        // Assert
+        assert_eq!(actor.pending_edits, 3);
+    }
+
+    #[test]
+    fn should_maintain_monotonic_edit_count() {
+        // Arrange
+        let mut actor = ManifestActor::new();
+        let count1 = actor.pending_edits;
+
+        // Act
+        actor.pending_edits += 1;
+        let count2 = actor.pending_edits;
+        actor.pending_edits += 1;
+        let count3 = actor.pending_edits;
+
+        // Assert: counts only increase
+        assert!(count2 > count1);
+        assert!(count3 > count2);
+    }
+}

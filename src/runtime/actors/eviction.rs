@@ -109,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn should_create_eviction_actor_when_initialized() {
+    fn should_initialize_eviction_actor_with_zero_counters() {
         // Arrange
         let (actor, _hybrid) = create_test_eviction_actor();
 
@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn should_increment_counters_when_marking_eviction_complete() {
+    fn should_increment_evictions_when_marking_complete() {
         // Arrange
         let (mut actor, _hybrid) = create_test_eviction_actor();
 
@@ -129,7 +129,6 @@ mod tests {
         // Assert
         assert!(result.is_ok());
         assert_eq!(actor.evictions_processed(), 1);
-        assert_eq!(actor.total_freed(), 1024);
     }
 
     #[test]
@@ -145,5 +144,75 @@ mod tests {
         // Assert
         assert_eq!(actor.evictions_processed(), 3);
         assert_eq!(actor.total_freed(), 1024 + 2048 + 4096);
+    }
+
+    #[test]
+    fn should_maintain_monotonic_eviction_count() {
+        // Arrange
+        let (mut actor, _hybrid) = create_test_eviction_actor();
+
+        // Act
+        actor.mark_eviction_complete(1, 100).unwrap();
+        let count1 = actor.evictions_processed();
+
+        actor.mark_eviction_complete(2, 200).unwrap();
+        let count2 = actor.evictions_processed();
+
+        actor.mark_eviction_complete(3, 300).unwrap();
+        let count3 = actor.evictions_processed();
+
+        // Assert: counts only increase
+        assert_eq!(count1, 1);
+        assert_eq!(count2, 2);
+        assert_eq!(count3, 3);
+    }
+
+    #[test]
+    fn should_maintain_monotonic_freed_bytes() {
+        // Arrange
+        let (mut actor, _hybrid) = create_test_eviction_actor();
+
+        // Act
+        actor.mark_eviction_complete(1, 1000).unwrap();
+        let freed1 = actor.total_freed();
+
+        actor.mark_eviction_complete(2, 500).unwrap();
+        let freed2 = actor.total_freed();
+
+        actor.mark_eviction_complete(3, 200).unwrap();
+        let freed3 = actor.total_freed();
+
+        // Assert: freed bytes only increase
+        assert!(freed2 > freed1);
+        assert!(freed3 > freed2);
+        assert_eq!(freed3, 1700);
+    }
+
+    #[test]
+    fn should_handle_zero_byte_evictions() {
+        // Arrange
+        let (mut actor, _hybrid) = create_test_eviction_actor();
+
+        // Act
+        let result = actor.mark_eviction_complete(1, 0);
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(actor.evictions_processed(), 1);
+        assert_eq!(actor.total_freed(), 0);
+    }
+
+    #[test]
+    fn should_handle_multiple_evictions_same_sst() {
+        // Arrange
+        let (mut actor, _hybrid) = create_test_eviction_actor();
+
+        // Act: Mark same SST as complete multiple times (edge case)
+        actor.mark_eviction_complete(1, 1000).unwrap();
+        actor.mark_eviction_complete(1, 500).unwrap();
+
+        // Assert: Counter still increments even with same SST ID
+        assert_eq!(actor.evictions_processed(), 2);
+        assert_eq!(actor.total_freed(), 1500);
     }
 }

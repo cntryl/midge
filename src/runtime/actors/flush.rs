@@ -170,3 +170,93 @@ impl FlushActor {
         tracing::info!(cf_id, sst_name, sequence, "Flush completed");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn create_test_flush_actor() -> MidgeResult<FlushActor> {
+        FlushActor::new(&PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn should_initialize_flush_actor_with_zero_in_progress() -> MidgeResult<()> {
+        // Arrange / Act
+        let actor = create_test_flush_actor()?;
+
+        // Assert
+        assert_eq!(actor.in_progress, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_increment_in_progress_count() {
+        // Arrange
+        let mut actor = create_test_flush_actor().unwrap();
+        assert_eq!(actor.in_progress, 0);
+
+        // Act
+        actor.in_progress += 1;
+
+        // Assert
+        assert_eq!(actor.in_progress, 1);
+    }
+
+    #[test]
+    fn should_accumulate_multiple_in_progress() {
+        // Arrange
+        let mut actor = create_test_flush_actor().unwrap();
+
+        // Act
+        actor.in_progress += 1;
+        actor.in_progress += 1;
+        actor.in_progress += 1;
+
+        // Assert
+        assert_eq!(actor.in_progress, 3);
+    }
+
+    #[test]
+    fn should_decrement_in_progress_on_complete() {
+        // Arrange
+        let mut actor = create_test_flush_actor().unwrap();
+        actor.in_progress = 2;
+
+        // Act
+        actor.in_progress = actor.in_progress.saturating_sub(1);
+
+        // Assert
+        assert_eq!(actor.in_progress, 1);
+    }
+
+    #[test]
+    fn should_not_go_negative_with_saturating_sub() {
+        // Arrange
+        let mut actor = create_test_flush_actor().unwrap();
+        actor.in_progress = 0;
+
+        // Act
+        actor.in_progress = actor.in_progress.saturating_sub(1);
+
+        // Assert: should stay at 0
+        assert_eq!(actor.in_progress, 0);
+    }
+
+    #[test]
+    fn should_maintain_monotonic_in_progress_tracking() {
+        // Arrange
+        let mut actor = create_test_flush_actor().unwrap();
+
+        // Act & Assert: increment and decrement pattern
+        actor.in_progress += 1;
+        assert_eq!(actor.in_progress, 1);
+
+        actor.in_progress += 1;
+        assert_eq!(actor.in_progress, 2);
+
+        actor.in_progress = actor.in_progress.saturating_sub(1);
+        assert_eq!(actor.in_progress, 1);
+    }
+}

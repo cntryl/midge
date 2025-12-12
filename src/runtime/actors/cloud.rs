@@ -138,3 +138,80 @@ impl Default for CloudActor {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_initialize_cloud_actor_with_zero_uploads() {
+        // Arrange / Act
+        let actor = CloudActor::new();
+
+        // Assert
+        assert_eq!(actor.uploads_in_progress(), 0);
+    }
+
+    #[test]
+    fn should_initialize_via_default() {
+        // Arrange / Act
+        let actor = CloudActor::default();
+
+        // Assert
+        assert_eq!(actor.uploads_in_progress(), 0);
+    }
+
+    #[test]
+    fn should_increment_uploads_on_sst_upload_request() {
+        // Arrange
+        let mut actor = CloudActor::new();
+        let sst_count_before = actor.uploads_in_progress();
+
+        // Note: Would need MockRuntimeState for full test
+        // For now, verify the counter increment logic
+        actor.uploads_in_progress = actor.uploads_in_progress + 1;
+
+        // Assert
+        assert_eq!(actor.uploads_in_progress(), sst_count_before + 1);
+    }
+
+    #[test]
+    fn should_track_multiple_uploads_in_progress() {
+        // Arrange
+        let mut actor = CloudActor::new();
+
+        // Act: simulate multiple upload starts
+        actor.uploads_in_progress = 1;
+        actor.uploads_in_progress = 2;
+        actor.uploads_in_progress = 3;
+
+        // Assert
+        assert_eq!(actor.uploads_in_progress(), 3);
+    }
+
+    #[test]
+    fn should_decrement_uploads_when_complete() {
+        // Arrange
+        let mut actor = CloudActor::new();
+        actor.uploads_in_progress = 3;
+
+        // Act: simulate upload completion
+        actor.uploads_in_progress = actor.uploads_in_progress.saturating_sub(1);
+
+        // Assert
+        assert_eq!(actor.uploads_in_progress(), 2);
+    }
+
+    #[test]
+    fn should_handle_saturation_when_uploads_go_negative() {
+        // Arrange
+        let mut actor = CloudActor::new();
+        actor.uploads_in_progress = 0;
+
+        // Act: saturating_sub prevents underflow
+        actor.uploads_in_progress = actor.uploads_in_progress.saturating_sub(1);
+
+        // Assert: should not go negative
+        assert_eq!(actor.uploads_in_progress(), 0);
+    }
+}

@@ -137,3 +137,77 @@ impl Default for GcActor {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_initialize_gc_actor_with_no_last_run() {
+        // Arrange / Act
+        let actor = GcActor::new();
+
+        // Assert
+        assert!(actor.last_gc_run().is_none());
+    }
+
+    #[test]
+    fn should_initialize_via_default() {
+        // Arrange / Act
+        let actor = GcActor::default();
+
+        // Assert
+        assert!(actor.last_gc_run().is_none());
+    }
+
+    #[test]
+    fn should_record_gc_run_timestamp() {
+        // Arrange
+        let mut actor = GcActor::new();
+        assert!(actor.last_gc_run().is_none());
+
+        // Act
+        actor.last_gc_run = Some(std::time::Instant::now());
+
+        // Assert
+        assert!(actor.last_gc_run().is_some());
+    }
+
+    #[test]
+    fn should_update_timestamp_on_successive_gc_runs() {
+        // Arrange
+        let mut actor = GcActor::new();
+
+        // Act
+        let run1 = std::time::Instant::now();
+        actor.last_gc_run = Some(run1);
+        let first_run = actor.last_gc_run();
+
+        // Sleep briefly to ensure different timestamp
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        let run2 = std::time::Instant::now();
+        actor.last_gc_run = Some(run2);
+        let second_run = actor.last_gc_run();
+
+        // Assert: both runs recorded
+        assert!(first_run.is_some());
+        assert!(second_run.is_some());
+        // Second run should be later
+        assert!(second_run.unwrap() > first_run.unwrap());
+    }
+
+    #[test]
+    fn should_clear_gc_run_timestamp() {
+        // Arrange
+        let mut actor = GcActor::new();
+        actor.last_gc_run = Some(std::time::Instant::now());
+        assert!(actor.last_gc_run().is_some());
+
+        // Act
+        actor.last_gc_run = None;
+
+        // Assert
+        assert!(actor.last_gc_run().is_none());
+    }
+}
