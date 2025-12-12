@@ -1,4 +1,4 @@
-Please do a sweep of all files in wal/\*
+Please do a thorough sweep of all files in wal/*
 
 - please make sure we have proper unit tests for all invariants
 - please make sure the test follow the guidelines
