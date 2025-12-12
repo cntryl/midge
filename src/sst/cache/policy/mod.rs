@@ -227,14 +227,14 @@ mod tests {
     #[test]
     fn should_preserve_policy_semantics_across_types() {
         // Arrange
-        let policies: Vec<(CachePolicyType, Box<dyn CachePolicy>)> = vec![
-            (CachePolicyType::Lru, CachePolicyType::Lru.create()),
-            (CachePolicyType::TinyLfu, CachePolicyType::TinyLfu.create()),
-            (CachePolicyType::ClockPro, CachePolicyType::ClockPro.create()),
+        let policies: Vec<Box<dyn CachePolicy>> = vec![
+            CachePolicyType::Lru.create(),
+            CachePolicyType::TinyLfu.create(),
+            CachePolicyType::ClockPro.create(),
         ];
 
         // Act & Assert
-        for (policy_type, policy) in &policies {
+        for policy in &policies {
             // Add keys in order
             let keys: Vec<CacheKey> = (0..5).map(|i| CacheKey::new(i, 0)).collect();
             for key in &keys {
@@ -242,7 +242,7 @@ mod tests {
             }
 
             // Should be able to pick victims (or return None)
-            let victim = policy.pick_victim();
+            let _ = policy.pick_victim();
 
             // Clear should work
             policy.clear();
