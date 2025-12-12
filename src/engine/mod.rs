@@ -955,6 +955,14 @@ impl MidgeEngine {
                 );
                 // Register CF in local registry
                 self.column_families.write().unwrap().insert(cf_id, handle.clone());
+                
+                // Persist manifest to disk
+                let _persist_response = self.runtime_handle.send_and_wait(
+                    RuntimeMsg::ManifestPersist {
+                        request_id: next_request_id(),
+                    },
+                )?;
+                
                 Ok(handle)
             }
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
@@ -983,6 +991,14 @@ impl MidgeEngine {
             RuntimeResponse::Ok { .. } => {
                 // Remove from local registry
                 self.column_families.write().unwrap().remove(&cf_id.as_u32());
+                
+                // Persist manifest to disk
+                let _persist_response = self.runtime_handle.send_and_wait(
+                    RuntimeMsg::ManifestPersist {
+                        request_id: next_request_id(),
+                    },
+                )?;
+                
                 Ok(())
             }
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
