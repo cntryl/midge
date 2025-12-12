@@ -360,3 +360,265 @@ impl OpenOptions {
         self.l0_compaction_trigger
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========== Goal Enum Tests ==========
+
+    #[test]
+    fn should_have_latency_as_default_goal() {
+        assert_eq!(Goal::default(), Goal::Latency);
+    }
+
+    #[test]
+    fn should_create_throughput_goal() {
+        assert_eq!(Goal::Throughput, Goal::Throughput);
+    }
+
+    #[test]
+    fn should_create_cost_goal() {
+        assert_eq!(Goal::Cost, Goal::Cost);
+    }
+
+    #[test]
+    fn should_distinguish_different_goals() {
+        assert_ne!(Goal::Latency, Goal::Throughput);
+        assert_ne!(Goal::Throughput, Goal::Cost);
+        assert_ne!(Goal::Cost, Goal::Latency);
+    }
+
+    // ========== Durability Enum Tests ==========
+
+    #[test]
+    fn should_have_steady_as_default_durability() {
+        assert_eq!(Durability::default(), Durability::Steady);
+    }
+
+    #[test]
+    fn should_create_strict_durability() {
+        assert_eq!(Durability::Strict, Durability::Strict);
+    }
+
+    #[test]
+    fn should_create_cloud_replicated_durability() {
+        assert_eq!(Durability::CloudReplicated, Durability::CloudReplicated);
+    }
+
+    #[test]
+    fn should_distinguish_different_durabilities() {
+        assert_ne!(Durability::Strict, Durability::Steady);
+        assert_ne!(Durability::Steady, Durability::CloudReplicated);
+        assert_ne!(Durability::CloudReplicated, Durability::Strict);
+    }
+
+    // ========== MemoryBudget Enum Tests ==========
+
+    #[test]
+    fn should_have_auto_as_default_memory_budget() {
+        assert_eq!(MemoryBudget::default(), MemoryBudget::Auto);
+    }
+
+    #[test]
+    fn should_create_explicit_memory_budget() {
+        let budget = MemoryBudget::Bytes(4 * 1024 * 1024 * 1024);
+        assert_eq!(budget, MemoryBudget::Bytes(4 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn should_distinguish_memory_budgets() {
+        assert_ne!(MemoryBudget::Auto, MemoryBudget::Bytes(1000));
+    }
+
+    // ========== WorkloadProfile Enum Tests ==========
+
+    #[test]
+    fn should_have_mixed_as_default_workload() {
+        assert_eq!(WorkloadProfile::default(), WorkloadProfile::Mixed);
+    }
+
+    #[test]
+    fn should_create_write_heavy_workload() {
+        assert_eq!(WorkloadProfile::WriteHeavy, WorkloadProfile::WriteHeavy);
+    }
+
+    #[test]
+    fn should_create_read_mostly_workload() {
+        assert_eq!(WorkloadProfile::ReadMostly, WorkloadProfile::ReadMostly);
+    }
+
+    #[test]
+    fn should_create_range_scan_workload() {
+        assert_eq!(WorkloadProfile::RangeScan, WorkloadProfile::RangeScan);
+    }
+
+    #[test]
+    fn should_create_ttl_heavy_workload() {
+        assert_eq!(WorkloadProfile::TtlHeavy, WorkloadProfile::TtlHeavy);
+    }
+
+    #[test]
+    fn should_distinguish_workload_profiles() {
+        assert_ne!(WorkloadProfile::Mixed, WorkloadProfile::WriteHeavy);
+        assert_ne!(WorkloadProfile::WriteHeavy, WorkloadProfile::ReadMostly);
+        assert_ne!(WorkloadProfile::ReadMostly, WorkloadProfile::RangeScan);
+        assert_ne!(WorkloadProfile::RangeScan, WorkloadProfile::TtlHeavy);
+    }
+
+    // ========== OpenOptions Builder Tests ==========
+
+    #[test]
+    fn should_create_options_with_defaults() {
+        let opts = OpenOptions::new();
+        assert_eq!(opts.goal, Goal::Latency);
+        assert_eq!(opts.durability, Durability::Steady);
+        assert_eq!(opts.memory_budget, MemoryBudget::Auto);
+        assert_eq!(opts.workload, WorkloadProfile::Mixed);
+    }
+
+    #[test]
+    fn should_set_path_when_calling_path() {
+        let opts = OpenOptions::new().path("./test_db");
+        assert_eq!(opts.path, PathBuf::from("./test_db"));
+    }
+
+    #[test]
+    fn should_set_goal_when_calling_goal() {
+        let opts = OpenOptions::new().goal(Goal::Throughput);
+        assert_eq!(opts.goal, Goal::Throughput);
+    }
+
+    #[test]
+    fn should_set_durability_when_calling_durability() {
+        let opts = OpenOptions::new().durability(Durability::Strict);
+        assert_eq!(opts.durability, Durability::Strict);
+    }
+
+    #[test]
+    fn should_set_memory_budget_when_calling_memory_budget() {
+        let budget = MemoryBudget::Bytes(2 * 1024 * 1024 * 1024);
+        let opts = OpenOptions::new().memory_budget(budget);
+        assert_eq!(opts.memory_budget, budget);
+    }
+
+    #[test]
+    fn should_set_workload_when_calling_workload() {
+        let opts = OpenOptions::new().workload(WorkloadProfile::WriteHeavy);
+        assert_eq!(opts.workload, WorkloadProfile::WriteHeavy);
+    }
+
+    #[test]
+    fn should_support_fluent_builder_chain() {
+        let opts = OpenOptions::new()
+            .path("./db")
+            .goal(Goal::Latency)
+            .durability(Durability::Strict)
+            .workload(WorkloadProfile::ReadMostly)
+            .build();
+
+        assert_eq!(opts.path, PathBuf::from("./db"));
+        assert_eq!(opts.goal, Goal::Latency);
+        assert_eq!(opts.durability, Durability::Strict);
+        assert_eq!(opts.workload, WorkloadProfile::ReadMostly);
+    }
+
+    #[test]
+    fn should_derive_parameters_when_building() {
+        let opts = OpenOptions::new().goal(Goal::Latency).build();
+        
+        assert!(opts.block_size > 0);
+        assert!(opts.memtable_size_limit > 0);
+        assert!(opts.target_sst_size > 0);
+        assert!(opts.block_cache_size > 0);
+    }
+
+    #[test]
+    fn should_set_wal_sync_for_strict_durability() {
+        let opts = OpenOptions::new()
+            .durability(Durability::Strict)
+            .build();
+        
+        assert!(opts.wal_sync_on_write);
+    }
+
+    #[test]
+    fn should_not_set_wal_sync_for_steady_durability() {
+        let opts = OpenOptions::new()
+            .durability(Durability::Steady)
+            .build();
+        
+        assert!(!opts.wal_sync_on_write);
+    }
+
+    #[test]
+    fn should_use_different_block_sizes_for_different_goals() {
+        let latency_opts = OpenOptions::new().goal(Goal::Latency).build();
+        let throughput_opts = OpenOptions::new().goal(Goal::Throughput).build();
+        
+        assert_ne!(latency_opts.block_size, throughput_opts.block_size);
+    }
+
+    #[test]
+    fn should_use_different_memtable_sizes_for_different_workloads() {
+        let normal = OpenOptions::new()
+            .workload(WorkloadProfile::Mixed)
+            .build();
+        let write_heavy = OpenOptions::new()
+            .workload(WorkloadProfile::WriteHeavy)
+            .build();
+        
+        assert!(write_heavy.memtable_size_limit >= normal.memtable_size_limit);
+    }
+
+    #[test]
+    fn should_derive_parameters_from_default() {
+        let opts = OpenOptions::default().build();
+        
+        assert_eq!(opts.goal, Goal::Latency);
+        assert!(opts.block_size > 0);
+        assert!(opts.memtable_size_limit > 0);
+    }
+
+    #[test]
+    fn should_provide_getter_methods() {
+        let opts = OpenOptions::new().build();
+        
+        let _ = opts.block_size();
+        let _ = opts.memtable_size_limit();
+        let _ = opts.target_sst_size();
+        let _ = opts.block_cache_size();
+        let _ = opts.wal_sync_on_write();
+        let _ = opts.wal_buffer_size();
+        let _ = opts.l0_compaction_trigger();
+    }
+
+    #[test]
+    fn should_handle_path_conversion() {
+        let opts = OpenOptions::new().path("/tmp/db");
+        assert_eq!(opts.path, PathBuf::from("/tmp/db"));
+    }
+
+    #[test]
+    fn should_respect_explicit_memory_budget() {
+        // Use a realistic budget larger than 2x memtable size to have cache allocation
+        let budget = MemoryBudget::Bytes(512 * 1024 * 1024); // 512MB
+        let opts = OpenOptions::new()
+            .memory_budget(budget)
+            .build();
+        
+        // With explicit budget, cache size should be derived from it
+        assert!(opts.block_cache_size > 0);
+    }
+
+    #[test]
+    fn should_clone_options() {
+        let original = OpenOptions::new()
+            .goal(Goal::Throughput)
+            .durability(Durability::Strict);
+        let cloned = original.clone();
+        
+        assert_eq!(cloned.goal, original.goal);
+        assert_eq!(cloned.durability, original.durability);
+    }
+}

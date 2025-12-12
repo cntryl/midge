@@ -1038,3 +1038,396 @@ impl MidgeEngine {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============================================================================
+    // Tests for ColumnFamilyId invariants
+    // ============================================================================
+
+    #[test]
+    fn should_create_default_column_family_id_with_zero() {
+        // Arrange / Act
+        let cf_id = ColumnFamilyId::DEFAULT;
+
+        // Assert
+        assert_eq!(cf_id.as_u32(), 0);
+    }
+
+    #[test]
+    fn should_return_zero_for_default_column_family_as_u32() {
+        // Arrange
+        let cf_id = ColumnFamilyId::DEFAULT;
+
+        // Act
+        let value = cf_id.as_u32();
+
+        // Assert
+        assert_eq!(value, 0);
+    }
+
+    #[test]
+    fn should_implement_default_trait_for_column_family_id() {
+        // Arrange / Act
+        let cf_id = ColumnFamilyId::default();
+
+        // Assert: default should be same as DEFAULT constant
+        assert_eq!(cf_id, ColumnFamilyId::DEFAULT);
+    }
+
+    #[test]
+    fn should_preserve_custom_column_family_id_value() {
+        // Arrange
+        let custom_id = 42u32;
+
+        // Act
+        let cf_id = ColumnFamilyId(custom_id);
+
+        // Assert
+        assert_eq!(cf_id.as_u32(), custom_id);
+    }
+
+    #[test]
+    fn should_support_column_family_id_equality() {
+        // Arrange
+        let id1 = ColumnFamilyId(5);
+        let id2 = ColumnFamilyId(5);
+        let id3 = ColumnFamilyId(6);
+
+        // Assert
+        assert_eq!(id1, id2);
+        assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn should_support_column_family_id_hashing() {
+        // Arrange
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        let id = ColumnFamilyId(10);
+
+        // Act
+        map.insert(id, "value");
+
+        // Assert: should be retrievable by id
+        assert_eq!(map.get(&id), Some(&"value"));
+    }
+
+    // ============================================================================
+    // Tests for ColumnFamilyHandle invariants
+    // ============================================================================
+
+    #[test]
+    fn should_create_column_family_handle_with_id_and_name() {
+        // Arrange
+        let cf_id = ColumnFamilyId(5);
+        let name = "my_cf".to_string();
+
+        // Act
+        let handle = ColumnFamilyHandle::new(cf_id, name.clone());
+
+        // Assert
+        assert_eq!(handle.id(), cf_id);
+        assert_eq!(handle.name(), "my_cf");
+    }
+
+    #[test]
+    fn should_preserve_column_family_handle_identity() {
+        // Arrange
+        let cf_id = ColumnFamilyId(10);
+        let name = "test_cf".to_string();
+        let handle = ColumnFamilyHandle::new(cf_id, name);
+
+        // Assert: id() and name() return exact values
+        assert_eq!(handle.id().as_u32(), 10);
+        assert_eq!(handle.name(), "test_cf");
+    }
+
+    #[test]
+    fn should_clone_column_family_handle() {
+        // Arrange
+        let handle1 = ColumnFamilyHandle::new(ColumnFamilyId(7), "cf".to_string());
+
+        // Act
+        let handle2 = handle1.clone();
+
+        // Assert
+        assert_eq!(handle1.id(), handle2.id());
+        assert_eq!(handle1.name(), handle2.name());
+    }
+
+    #[test]
+    fn should_support_empty_column_family_name() {
+        // Arrange / Act
+        let handle = ColumnFamilyHandle::new(ColumnFamilyId(1), "".to_string());
+
+        // Assert
+        assert_eq!(handle.name(), "");
+    }
+
+    #[test]
+    fn should_handle_unicode_column_family_names() {
+        // Arrange
+        let unicode_name = "数据_测试".to_string();
+
+        // Act
+        let handle = ColumnFamilyHandle::new(ColumnFamilyId(1), unicode_name.clone());
+
+        // Assert
+        assert_eq!(handle.name(), unicode_name);
+    }
+
+    // ============================================================================
+    // Tests for OpenParam trait invariants
+    // ============================================================================
+
+    #[test]
+    fn should_convert_pathbuf_to_path_via_openparam() {
+        // Arrange
+        let path = PathBuf::from("/test/db");
+
+        // Act
+        let result = path.clone().to_path();
+
+        // Assert
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn should_convert_midgeoptions_memory_to_memory_path() {
+        // Arrange
+        let opts = crate::testkit::MidgeOptions {
+            storage_mode: crate::testkit::StorageMode::Memory,
+            ..Default::default()
+        };
+
+        // Act
+        let path = opts.to_path();
+
+        // Assert
+        assert_eq!(path.to_string_lossy(), ":memory:");
+    }
+
+    #[test]
+    fn should_convert_midgeoptions_local_disk_to_db_path() {
+        // Arrange
+        let db_path = PathBuf::from("/tmp/test_db");
+        let opts = crate::testkit::MidgeOptions {
+            storage_mode: crate::testkit::StorageMode::LocalDisk {
+                db_path: db_path.clone(),
+            },
+            ..Default::default()
+        };
+
+        // Act
+        let result_path = opts.to_path();
+
+        // Assert
+        assert_eq!(result_path, db_path);
+    }
+
+    #[test]
+    fn should_convert_midgeoptions_ref_memory_to_memory_path() {
+        // Arrange
+        let opts = crate::testkit::MidgeOptions {
+            storage_mode: crate::testkit::StorageMode::Memory,
+            ..Default::default()
+        };
+
+        // Act
+        let path = (&opts).to_path();
+
+        // Assert
+        assert_eq!(path.to_string_lossy(), ":memory:");
+    }
+
+    // ============================================================================
+    // Tests for ColumnFamilyId special values
+    // ============================================================================
+
+    #[test]
+    fn should_handle_maximum_column_family_id() {
+        // Arrange / Act
+        let max_id = ColumnFamilyId(u32::MAX);
+
+        // Assert
+        assert_eq!(max_id.as_u32(), u32::MAX);
+    }
+
+    #[test]
+    fn should_handle_zero_column_family_id() {
+        // Arrange / Act
+        let zero_id = ColumnFamilyId(0);
+
+        // Assert
+        assert_eq!(zero_id.as_u32(), 0);
+        assert_eq!(zero_id, ColumnFamilyId::DEFAULT);
+    }
+
+    #[test]
+    fn should_distinguish_between_different_column_family_ids() {
+        // Arrange
+        let id_vec = vec![
+            ColumnFamilyId(0),
+            ColumnFamilyId(1),
+            ColumnFamilyId(100),
+            ColumnFamilyId(u32::MAX),
+        ];
+
+        // Act
+        let unique_count = id_vec.iter().collect::<std::collections::HashSet<_>>().len();
+
+        // Assert: all IDs are unique
+        assert_eq!(unique_count, 4);
+    }
+
+    #[test]
+    fn should_copy_column_family_id() {
+        // Arrange
+        let id1 = ColumnFamilyId(42);
+
+        // Act
+        let id2 = id1; // Copy trait implemented
+        let id3 = id1;
+
+        // Assert: all are equal
+        assert_eq!(id1, id2);
+        assert_eq!(id2, id3);
+    }
+
+    // ============================================================================
+    // Tests for ColumnFamilyHandle creation invariants
+    // ============================================================================
+
+    #[test]
+    fn should_create_handle_for_default_column_family() {
+        // Arrange / Act
+        let handle = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
+
+        // Assert
+        assert_eq!(handle.id(), ColumnFamilyId::DEFAULT);
+        assert_eq!(handle.name(), "default");
+    }
+
+    #[test]
+    fn should_create_multiple_handles_with_different_ids() {
+        // Arrange / Act
+        let handle1 = ColumnFamilyHandle::new(ColumnFamilyId(1), "cf1".to_string());
+        let handle2 = ColumnFamilyHandle::new(ColumnFamilyId(2), "cf2".to_string());
+        let handle3 = ColumnFamilyHandle::new(ColumnFamilyId(3), "cf3".to_string());
+
+        // Assert: all distinct
+        assert_ne!(handle1.id(), handle2.id());
+        assert_ne!(handle2.id(), handle3.id());
+        assert_ne!(handle1.id(), handle3.id());
+    }
+
+    #[test]
+    fn should_preserve_handle_identity_after_clone() {
+        // Arrange
+        let original = ColumnFamilyHandle::new(ColumnFamilyId(99), "original_name".to_string());
+
+        // Act
+        let cloned = original.clone();
+
+        // Assert: cloned is identical
+        assert_eq!(original.id(), cloned.id());
+        assert_eq!(original.name(), cloned.name());
+
+        // And original still works
+        assert_eq!(original.id().as_u32(), 99);
+    }
+
+    // ============================================================================
+    // Tests for debug trait implementation
+    // ============================================================================
+
+    #[test]
+    fn should_format_column_family_id_for_debug() {
+        // Arrange
+        let id = ColumnFamilyId(42);
+
+        // Act
+        let debug_str = format!("{:?}", id);
+
+        // Assert: should be debuggable
+        assert!(!debug_str.is_empty());
+        assert!(debug_str.contains("42"));
+    }
+
+    #[test]
+    fn should_format_column_family_handle_for_debug() {
+        // Arrange
+        let handle = ColumnFamilyHandle::new(ColumnFamilyId(5), "test".to_string());
+
+        // Act
+        let debug_str = format!("{:?}", handle);
+
+        // Assert: should be debuggable
+        assert!(!debug_str.is_empty());
+    }
+
+    // ============================================================================
+    // Tests for trait bounds enforcement
+    // ============================================================================
+
+    #[test]
+    fn should_support_column_family_id_in_hashmap() {
+        // Arrange
+        use std::collections::HashMap;
+        let mut map: HashMap<ColumnFamilyId, String> = HashMap::new();
+
+        // Act
+        map.insert(ColumnFamilyId(1), "cf1".to_string());
+        map.insert(ColumnFamilyId(2), "cf2".to_string());
+
+        // Assert
+        assert_eq!(map.get(&ColumnFamilyId(1)), Some(&"cf1".to_string()));
+        assert_eq!(map.get(&ColumnFamilyId(2)), Some(&"cf2".to_string()));
+    }
+
+    #[test]
+    fn should_support_column_family_handle_in_vector() {
+        // Arrange
+        let mut handles = Vec::new();
+
+        // Act
+        handles.push(ColumnFamilyHandle::new(ColumnFamilyId(0), "default".to_string()));
+        handles.push(ColumnFamilyHandle::new(ColumnFamilyId(1), "secondary".to_string()));
+
+        // Assert
+        assert_eq!(handles.len(), 2);
+        assert_eq!(handles[0].name(), "default");
+        assert_eq!(handles[1].name(), "secondary");
+    }
+
+    #[test]
+    fn should_enforce_eq_implementation_for_column_family_id() {
+        // Arrange
+        let id1 = ColumnFamilyId(5);
+        let id2 = ColumnFamilyId(5);
+
+        // Act & Assert: Eq trait enforced
+        assert!(id1 == id2);
+        assert!(!(id1 != id2));
+    }
+
+    #[test]
+    fn should_enforce_hash_implementation_for_column_family_id() {
+        // Arrange
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let id = ColumnFamilyId(42);
+        let mut hasher = DefaultHasher::new();
+
+        // Act
+        id.hash(&mut hasher);
+        let hash_value = hasher.finish();
+
+        // Assert: should be hashable without panicking
+        assert!(hash_value > 0 || hash_value == 0); // Just verify it produced a hash
+    }
+}

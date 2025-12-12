@@ -106,3 +106,279 @@ impl KvTransaction for TransactionImpl {
         self.inner.state() == crate::engine::api::TransactionState::Active
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========== WriteOptions Initialization Tests ==========
+    // Tests for WriteOptions::new() invariants: all fields initialized with defaults
+
+    #[test]
+    fn should_initialize_all_fields_to_false_when_creating_new_options() {
+        // Arrange & Act
+        let opts = WriteOptions::new();
+
+        // Assert
+        assert!(!opts.sync);
+        assert!(!opts.disable_wal);
+    }
+
+    #[test]
+    fn should_create_options_with_all_default_values_when_calling_default() {
+        // Arrange & Act
+        let opts = WriteOptions::default();
+
+        // Assert - all fields should match new()
+        assert!(!opts.sync);
+        assert!(!opts.disable_wal);
+    }
+
+    #[test]
+    fn should_have_new_and_default_return_equivalent_options() {
+        // Arrange
+        let new_opts = WriteOptions::new();
+        let default_opts = WriteOptions::default();
+
+        // Act & Assert
+        assert_eq!(new_opts.sync, default_opts.sync);
+        assert_eq!(new_opts.disable_wal, default_opts.disable_wal);
+    }
+
+    // ========== WriteOptions Sync Method Tests ==========
+    // Tests for sync() method: sets sync field to true, returns self for chaining
+
+    #[test]
+    fn should_set_sync_to_true_when_calling_sync() {
+        // Arrange & Act
+        let opts = WriteOptions::new().sync();
+
+        // Assert
+        assert!(opts.sync);
+        assert!(!opts.disable_wal);
+    }
+
+    #[test]
+    fn should_return_self_for_chaining_when_calling_sync() {
+        // Arrange & Act
+        let opts = WriteOptions::new()
+            .sync()
+            .disable_wal();
+
+        // Assert
+        assert!(opts.sync);
+        assert!(opts.disable_wal);
+    }
+
+    #[test]
+    fn should_keep_sync_true_when_calling_sync_multiple_times() {
+        // Arrange & Act
+        let opts = WriteOptions::new()
+            .sync()
+            .sync();
+
+        // Assert
+        assert!(opts.sync);
+    }
+
+    // ========== WriteOptions Disable WAL Method Tests ==========
+    // Tests for disable_wal() method: sets disable_wal field to true, returns self for chaining
+
+    #[test]
+    fn should_set_disable_wal_to_true_when_calling_disable_wal() {
+        // Arrange & Act
+        let opts = WriteOptions::new().disable_wal();
+
+        // Assert
+        assert!(!opts.sync);
+        assert!(opts.disable_wal);
+    }
+
+    #[test]
+    fn should_return_self_for_chaining_when_calling_disable_wal() {
+        // Arrange & Act
+        let opts = WriteOptions::new()
+            .disable_wal()
+            .sync();
+
+        // Assert
+        assert!(opts.sync);
+        assert!(opts.disable_wal);
+    }
+
+    #[test]
+    fn should_keep_disable_wal_true_when_calling_disable_wal_multiple_times() {
+        // Arrange & Act
+        let opts = WriteOptions::new()
+            .disable_wal()
+            .disable_wal();
+
+        // Assert
+        assert!(opts.disable_wal);
+    }
+
+    // ========== WriteOptions Clone Tests ==========
+    // Tests for Clone trait: independent copies
+
+    #[test]
+    fn should_clone_options_with_all_defaults() {
+        // Arrange
+        let original = WriteOptions::new();
+
+        // Act
+        let cloned = original.clone();
+
+        // Assert
+        assert_eq!(cloned.sync, original.sync);
+        assert_eq!(cloned.disable_wal, original.disable_wal);
+    }
+
+    #[test]
+    fn should_clone_options_with_sync_enabled() {
+        // Arrange
+        let original = WriteOptions::new().sync();
+
+        // Act
+        let cloned = original.clone();
+
+        // Assert
+        assert!(cloned.sync);
+        assert!(!cloned.disable_wal);
+    }
+
+    #[test]
+    fn should_clone_options_with_wal_disabled() {
+        // Arrange
+        let original = WriteOptions::new().disable_wal();
+
+        // Act
+        let cloned = original.clone();
+
+        // Assert
+        assert!(!cloned.sync);
+        assert!(cloned.disable_wal);
+    }
+
+    #[test]
+    fn should_clone_options_with_both_flags_set() {
+        // Arrange
+        let original = WriteOptions::new()
+            .sync()
+            .disable_wal();
+
+        // Act
+        let cloned = original.clone();
+
+        // Assert
+        assert!(cloned.sync);
+        assert!(cloned.disable_wal);
+    }
+
+    #[test]
+    fn should_be_independent_after_cloning() {
+        // Arrange
+        let original = WriteOptions::new();
+
+        // Act
+        let cloned = original.clone();
+        let modified_cloned = cloned.sync();
+
+        // Assert - original unchanged
+        assert!(!original.sync);
+        assert!(modified_cloned.sync);
+    }
+
+    // ========== WriteOptions Debug Trait Tests ==========
+
+    #[test]
+    fn should_debug_format_options_with_defaults() {
+        // Arrange & Act
+        let opts = WriteOptions::new();
+        let debug_str = format!("{:?}", opts);
+
+        // Assert
+        assert!(debug_str.contains("WriteOptions"));
+    }
+
+    #[test]
+    fn should_debug_format_options_with_sync() {
+        // Arrange & Act
+        let opts = WriteOptions::new().sync();
+        let debug_str = format!("{:?}", opts);
+
+        // Assert
+        assert!(debug_str.contains("sync"));
+    }
+
+    // ========== WriteOptions Fluent API Tests ==========
+    // Tests for method chaining with all combinations
+
+    #[test]
+    fn should_support_full_fluent_api_chain() {
+        // Arrange & Act
+        let opts = WriteOptions::new()
+            .sync()
+            .disable_wal();
+
+        // Assert
+        assert!(opts.sync);
+        assert!(opts.disable_wal);
+    }
+
+    #[test]
+    fn should_allow_methods_in_any_order() {
+        // Arrange
+        let opts1 = WriteOptions::new()
+            .sync()
+            .disable_wal();
+
+        let opts2 = WriteOptions::new()
+            .disable_wal()
+            .sync();
+
+        // Act & Assert
+        assert_eq!(opts1.sync, opts2.sync);
+        assert_eq!(opts1.disable_wal, opts2.disable_wal);
+    }
+
+    // ========== Edge Cases ==========
+
+    #[test]
+    fn should_handle_multiple_sync_calls() {
+        // Arrange & Act
+        let opts = WriteOptions::new()
+            .sync()
+            .sync()
+            .sync();
+
+        // Assert
+        assert!(opts.sync);
+    }
+
+    #[test]
+    fn should_handle_alternating_method_calls() {
+        // Arrange & Act
+        let opts = WriteOptions::new()
+            .sync()
+            .disable_wal()
+            .sync()
+            .disable_wal();
+
+        // Assert
+        assert!(opts.sync);
+        assert!(opts.disable_wal);
+    }
+
+    #[test]
+    fn should_preserve_field_values_through_chaining() {
+        // Arrange
+        let intermediate = WriteOptions::new().sync();
+
+        // Act
+        let final_opts = intermediate.disable_wal();
+
+        // Assert
+        assert!(final_opts.sync);
+        assert!(final_opts.disable_wal);
+    }
+}
