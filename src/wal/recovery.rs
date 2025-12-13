@@ -73,6 +73,15 @@ pub fn replay_wal(
 ) -> MidgeResult<RecoveryStats> {
     let mut stats = RecoveryStats::new();
 
+    // Transaction buffering for atomic recovery.
+    //
+    // Legacy records (without txn_id) are applied immediately.
+    // Records tagged with txn_id are only applied if we observe a TxnCommit
+    // for that txn_id after a TxnBegin.
+    let mut open_txns: std::collections::HashMap<u64, Vec<WalRecord>> =
+        std::collections::HashMap::new();
+    let mut begun_txns: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
     if !wal_dir.exists() {
         return Ok(stats);
     }
@@ -86,9 +95,43 @@ pub fn replay_wal(
     };
 
     let result = reader.replay(0, |record| {
-        apply_record(record, memtables)?;
+        // Always count records, even if buffered/ignored.
         stats.record(record);
-        Ok(())
+
+        match record.op {
+            WalOpKind::TxnBegin => {
+                if let Some(txn_id) = record.txn_id {
+                    begun_txns.insert(txn_id);
+                    open_txns.entry(txn_id).or_default();
+                }
+                Ok(())
+            }
+            WalOpKind::TxnCommit => {
+                if let Some(txn_id) = record.txn_id {
+                    if begun_txns.remove(&txn_id) {
+                        if let Some(records) = open_txns.remove(&txn_id) {
+                            for buffered in &records {
+                                apply_record(buffered, memtables)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => {
+                if let Some(txn_id) = record.txn_id {
+                    if begun_txns.contains(&txn_id) {
+                        open_txns
+                            .entry(txn_id)
+                            .or_default()
+                            .push(record.clone());
+                        return Ok(());
+                    }
+                }
+
+                apply_record(record, memtables)
+            }
+        }
     });
 
     match result {

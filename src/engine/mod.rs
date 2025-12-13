@@ -988,63 +988,47 @@ impl MidgeEngine {
             return Ok(());
         }
 
-        // TODO: Add RuntimeMsg::WriteBatch variant for true atomic batching.
-        // Current approach: apply each operation via send_and_wait (not truly atomic).
-        // This is a known limitation until batch message is added.
-
-        for (cf_id, key, value) in batch.iter_puts() {
-            let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
-                request_id: next_request_id(),
-                cf_id: cf_id.as_u32(),
-                key: key.to_vec(),
-                value: Some(value.to_vec()),
-                ttl_seconds: None,
-                insert_only: false,
-            })?;
-            match response {
-                RuntimeResponse::WalAppended { sequence, .. } => {
-                    // Update engine's sequence to reflect completed write
-                    self.sequence
-                        .store(sequence, std::sync::atomic::Ordering::SeqCst);
+        let mut ops: Vec<crate::runtime::WriteBatchOp> = Vec::with_capacity(batch.len());
+        for op in batch.iter_ops() {
+            match op {
+                api::write_batch::BatchOpRef::Put {
+                    cf_id,
+                    key,
+                    value,
+                    ttl_seconds,
+                } => {
+                    ops.push(crate::runtime::WriteBatchOp::Put {
+                        cf_id: cf_id.as_u32(),
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                        ttl_seconds,
+                    });
                 }
-                RuntimeResponse::Error { message, .. } => {
-                    return Err(MidgeError::Internal(message))
-                }
-                _ => {
-                    return Err(MidgeError::Internal(
-                        "Unexpected response to write_batch put".to_string(),
-                    ))
+                api::write_batch::BatchOpRef::Delete { cf_id, key } => {
+                    ops.push(crate::runtime::WriteBatchOp::Delete {
+                        cf_id: cf_id.as_u32(),
+                        key: key.to_vec(),
+                    });
                 }
             }
         }
 
-        for (cf_id, key) in batch.iter_deletes() {
-            let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
-                request_id: next_request_id(),
-                cf_id: cf_id.as_u32(),
-                key: key.to_vec(),
-                value: None,
-                ttl_seconds: None,
-                insert_only: false,
-            })?;
-            match response {
-                RuntimeResponse::WalAppended { sequence, .. } => {
-                    // Update engine's sequence to reflect completed delete
-                    self.sequence
-                        .store(sequence, std::sync::atomic::Ordering::SeqCst);
-                }
-                RuntimeResponse::Error { message, .. } => {
-                    return Err(MidgeError::Internal(message))
-                }
-                _ => {
-                    return Err(MidgeError::Internal(
-                        "Unexpected response to write_batch delete".to_string(),
-                    ))
-                }
-            }
-        }
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WriteBatch {
+            request_id: next_request_id(),
+            ops,
+        })?;
 
-        Ok(())
+        match response {
+            RuntimeResponse::WriteBatchAppended { last_sequence, .. } => {
+                self.sequence
+                    .store(last_sequence, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to write_batch".to_string(),
+            )),
+        }
     }
 
     /// Create a snapshot of the current database state

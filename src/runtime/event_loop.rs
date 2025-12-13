@@ -145,6 +145,24 @@ impl EventLoop {
                     );
                 }
 
+                RuntimeMsg::WriteBatch { request_id, ops } => {
+                    let op_count = ops.len();
+                    let resp = self
+                        .wal_actor
+                        .append_batch(&mut self.state, ops)
+                        .map(|last_sequence| RuntimeResponse::WriteBatchAppended {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                        })
+                        .unwrap_or_else(|e| RuntimeResponse::Error {
+                            request_id,
+                            message: e.to_string(),
+                        });
+
+                    self.respond(request_id, resp);
+                }
+
                 // =============================================================
                 // Flush
                 // =============================================================

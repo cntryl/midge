@@ -67,6 +67,24 @@ pub struct FileMeta {
     pub largest_seq: Option<u64>,
 }
 
+/// A single operation within a write batch.
+///
+/// This type lives in the runtime layer so that the engine can send a batch
+/// without depending on engine API types.
+#[derive(Debug, Clone)]
+pub enum WriteBatchOp {
+    Put {
+        cf_id: u32,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_seconds: Option<u64>,
+    },
+    Delete {
+        cf_id: u32,
+        key: Vec<u8>,
+    },
+}
+
 /// Intent log entry - records all state transitions for deterministic replay
 #[derive(Debug, Clone)]
 pub enum IntentLogEntry {
@@ -137,6 +155,15 @@ pub enum RuntimeMsg {
         cf_id: u32,
         key: Vec<u8>,
         operand: Vec<u8>,
+    },
+
+    /// Apply a write batch as a single atomic unit.
+    ///
+    /// Sequence numbers are allocated in-order inside the runtime.
+    /// The response returns the last allocated sequence for the batch.
+    WriteBatch {
+        request_id: u64,
+        ops: Vec<WriteBatchOp>,
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
@@ -241,6 +268,7 @@ impl RuntimeMsg {
             | CompactionComplete { request_id, .. }
             | WalAppend { request_id, .. }
             | WalMerge { request_id, .. }
+            | WriteBatch { request_id, .. }
             | WalSync { request_id }
             | WalRotate { request_id }
             | WalSyncComplete { request_id, .. }
@@ -282,6 +310,15 @@ pub enum RuntimeResponse {
     WalAppended {
         request_id: u64,
         sequence: u64,
+    },
+
+    /// Write batch accepted and assigned a contiguous sequence range.
+    ///
+    /// `last_sequence` is the last (highest) sequence allocated for the batch.
+    WriteBatchAppended {
+        request_id: u64,
+        last_sequence: u64,
+        op_count: usize,
     },
     Error {
         request_id: u64,
@@ -333,6 +370,7 @@ impl RuntimeResponse {
         match self {
             RuntimeResponse::Ok { request_id }
             | RuntimeResponse::WalAppended { request_id, .. }
+            | RuntimeResponse::WriteBatchAppended { request_id, .. }
             | RuntimeResponse::Error { request_id, .. }
             | RuntimeResponse::ReadValue { request_id, .. }
             | RuntimeResponse::RangeScanResults { request_id, .. }
@@ -797,6 +835,16 @@ mod tests {
             }
             .request_id(),
             8
+        );
+
+        assert_eq!(
+            RuntimeResponse::WriteBatchAppended {
+                request_id: 9,
+                last_sequence: 200,
+                op_count: 2
+            }
+            .request_id(),
+            9
         );
     }
 

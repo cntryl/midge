@@ -12,6 +12,21 @@ pub struct WriteBatch {
     operations: Vec<BatchOp>,
 }
 
+/// Borrowed view of a write-batch operation, preserving original order.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BatchOpRef<'a> {
+    Put {
+        cf_id: ColumnFamilyId,
+        key: &'a [u8],
+        value: &'a [u8],
+        ttl_seconds: Option<u64>,
+    },
+    Delete {
+        cf_id: ColumnFamilyId,
+        key: &'a [u8],
+    },
+}
+
 /// A single operation in a write batch
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // These will be used when write_batch is integrated into engine
@@ -152,6 +167,27 @@ impl WriteBatch {
                 cf_id, key, value, ..
             } => Some((*cf_id, key.as_slice(), value.as_slice())),
             _ => None,
+        })
+    }
+
+    /// Iterate over all operations in insertion order.
+    pub(crate) fn iter_ops(&self) -> impl Iterator<Item = BatchOpRef<'_>> {
+        self.operations.iter().map(|op| match op {
+            BatchOp::Put {
+                cf_id,
+                key,
+                value,
+                ttl_seconds,
+            } => BatchOpRef::Put {
+                cf_id: *cf_id,
+                key: key.as_slice(),
+                value: value.as_slice(),
+                ttl_seconds: *ttl_seconds,
+            },
+            BatchOp::Delete { cf_id, key } => BatchOpRef::Delete {
+                cf_id: *cf_id,
+                key: key.as_slice(),
+            },
         })
     }
 

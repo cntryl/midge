@@ -186,6 +186,200 @@ impl WalActor {
         Ok(sequence)
     }
 
+    /// Append a batch of operations to the WAL as a single atomic unit.
+    ///
+    /// This method:
+    /// - allocates a single transaction id
+    /// - writes TxnBegin marker
+    /// - writes all operation records (in order)
+    /// - writes TxnCommit marker
+    /// - applies all operations to memtables (in order)
+    ///
+    /// Returns the last allocated sequence number for the batch.
+    pub fn append_batch(
+        &mut self,
+        state: &mut RuntimeState,
+        ops: Vec<crate::runtime::WriteBatchOp>,
+    ) -> MidgeResult<u64> {
+        if ops.is_empty() {
+            return Ok(state.sequence);
+        }
+
+        if matches!(self.durability_policy, DurabilityPolicy::CloudFirst) {
+            return Err(MidgeError::InvalidArgument(
+                "CloudFirst durability is not supported for write batches yet".to_string(),
+            ));
+        }
+
+        let txn_id = state.next_txn_id();
+
+        // Marker key is unused by semantics but required by the record format.
+        let marker_key = Bytes::from_static(b"txn");
+
+        let begin_seq = state.next_sequence();
+        let mut begin_record = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBegin,
+            marker_key.clone(),
+            None,
+            begin_seq,
+        );
+        begin_record.txn_id = Some(txn_id);
+
+        if let Some(writer) = &mut self.writer {
+            writer.append_record(&begin_record)?;
+        }
+
+        state.wal.pending_writes += 1;
+        self.pending_sync_count += 1;
+        self.bytes_since_sync += begin_record.estimated_size();
+
+        // Collect the concrete records we wrote so we can apply in order.
+        // (We keep the minimal info needed to apply, rather than replaying WAL.)
+        enum ApplyOp {
+            Put {
+                cf_id: u32,
+                key: Bytes,
+                value: Bytes,
+                expiration: Option<u64>,
+            },
+            Delete {
+                cf_id: u32,
+                key: Bytes,
+            },
+        }
+
+        let mut apply_ops: Vec<ApplyOp> = Vec::with_capacity(ops.len());
+
+        for op in ops {
+            match op {
+                crate::runtime::WriteBatchOp::Put {
+                    cf_id,
+                    key,
+                    value,
+                    ttl_seconds,
+                } => {
+                    let seq = state.next_sequence();
+                    let key_b = Bytes::from(key);
+                    let value_b = Bytes::from(value);
+
+                    let mut record = match ttl_seconds {
+                        Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
+                            cf_id,
+                            WalOpKind::Put,
+                            key_b.clone(),
+                            Some(value_b.clone()),
+                            seq,
+                            ttl,
+                        ),
+                        _ => WalRecord::new_cf(
+                            cf_id,
+                            WalOpKind::Put,
+                            key_b.clone(),
+                            Some(value_b.clone()),
+                            seq,
+                        ),
+                    };
+                    record.txn_id = Some(txn_id);
+
+                    if let Some(writer) = &mut self.writer {
+                        writer.append_record(&record)?;
+                    }
+
+                    state.wal.pending_writes += 1;
+                    self.pending_sync_count += 1;
+                    self.bytes_since_sync += record.estimated_size();
+
+                    apply_ops.push(ApplyOp::Put {
+                        cf_id,
+                        key: key_b,
+                        value: value_b,
+                        expiration: record.expiration,
+                    });
+                }
+                crate::runtime::WriteBatchOp::Delete { cf_id, key } => {
+                    let seq = state.next_sequence();
+                    let key_b = Bytes::from(key);
+
+                    let mut record = WalRecord::new_cf(
+                        cf_id,
+                        WalOpKind::Delete,
+                        key_b.clone(),
+                        None,
+                        seq,
+                    );
+                    record.txn_id = Some(txn_id);
+
+                    if let Some(writer) = &mut self.writer {
+                        writer.append_record(&record)?;
+                    }
+
+                    state.wal.pending_writes += 1;
+                    self.pending_sync_count += 1;
+                    self.bytes_since_sync += record.estimated_size();
+
+                    apply_ops.push(ApplyOp::Delete { cf_id, key: key_b });
+                }
+            }
+        }
+
+        let commit_seq = state.next_sequence();
+        let last_sequence = commit_seq;
+        let mut commit_record = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnCommit,
+            marker_key,
+            None,
+            commit_seq,
+        );
+        commit_record.txn_id = Some(txn_id);
+
+        if let Some(writer) = &mut self.writer {
+            writer.append_record(&commit_record)?;
+        }
+
+        state.wal.pending_writes += 1;
+        self.pending_sync_count += 1;
+        self.bytes_since_sync += commit_record.estimated_size();
+
+        // Apply durability policy (single sync for the whole batch, where relevant).
+        match self.durability_policy {
+            DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
+                self.sync_internal(state)?;
+                state.wal.local_durable_seq = last_sequence;
+            }
+            DurabilityPolicy::Batched => {
+                // no-op; background/timer can sync later
+            }
+            DurabilityPolicy::CloudFirst => {
+                // guarded above
+            }
+        }
+
+        let op_count = apply_ops.len();
+
+        // Apply to memtables in-order (atomic visibility within the actor).
+        for apply_op in apply_ops {
+            match apply_op {
+                ApplyOp::Put {
+                    cf_id,
+                    key,
+                    value,
+                    expiration,
+                } => {
+                    self.apply_to_memtable(state, cf_id, &key, &Some(value), expiration)?;
+                }
+                ApplyOp::Delete { cf_id, key } => {
+                    self.apply_to_memtable(state, cf_id, &key, &None, None)?;
+                }
+            }
+        }
+
+        tracing::trace!(txn_id, last_sequence, op_count, "WAL batch append");
+
+        Ok(last_sequence)
+    }
+
     /// Append a merge operand to the WAL
     pub fn append_merge(
         &mut self,

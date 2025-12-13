@@ -35,6 +35,7 @@ impl Dispatcher {
             // WAL
             WalAppend { .. }
             | WalMerge { .. }
+            | WriteBatch { .. }
             | WalSync { .. }
             | WalRotate { .. }
             | WalSyncComplete { .. } => TaskKind::Wal,
