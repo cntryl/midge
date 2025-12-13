@@ -143,10 +143,7 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
 
     // Assert: API should return valid accumulated metrics
     // Actual read count from SSTs depends on memtable/cache state
-    assert!(
-        metrics.reads_total >= 0,
-        "Should have non-negative read count"
-    );
+    // Note: reads_total is u64, always >= 0, but check for sanity
     assert!(
         metrics.avg_ssts_per_read >= 0.0,
         "Should have non-negative average"

@@ -160,11 +160,9 @@ impl CachePolicy for ClockProPolicy {
             let slot = &slots[idx];
 
             // Skip empty/ghost entries
-            if slot.key.is_none() {
+            let Some(key) = slot.key else {
                 continue;
-            }
-
-            let key = slot.key.unwrap();
+            };
 
             // Skip excluded block types
             if exclude_types.contains(&key.block_type) {
