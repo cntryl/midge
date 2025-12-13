@@ -19,7 +19,7 @@ mod criterion_helper;
 #[path = "./tier4_integration_ycsb_common.rs"]
 mod ycsb_common;
 
-use cntryl_midge::MidgeEngine;
+use cntryl_midge::{MidgeEngine, WriteBatch};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use hdrhistogram::Histogram;
@@ -68,6 +68,7 @@ fn run_workload_f(
 
     let mut rng = StdRng::seed_from_u64(seed);
     let mut hist = Histogram::<u64>::new(3).unwrap();
+    let mut batch = WriteBatch::new();
 
     for _ in 0..operations {
         // Choose key via Zipfian distribution
@@ -76,6 +77,7 @@ fn run_workload_f(
 
         // Choose CF
         let cf = &cf_list[rng.gen_range(0..cf_count)];
+        let cf_id = cf.id();
 
         // Choose a new value (RMW doesn't care about value derivation)
         let new_val_idx = rng.gen_range(0..values.len());
@@ -88,10 +90,19 @@ fn run_workload_f(
         black_box(&_existing);
 
         // Modify + Write (update)
-        engine.put(cf, key, new_val).unwrap();
+        batch.put_cf(cf_id, key.clone(), new_val.clone());
+
+        if batch.len() >= BATCH_SIZE {
+            engine.write_batch(&batch).unwrap();
+            batch.clear();
+        }
 
         let elapsed_us = start.elapsed().as_micros() as u64;
         let _ = hist.record(elapsed_us.max(1));
+    }
+
+    if !batch.is_empty() {
+        engine.write_batch(&batch).unwrap();
     }
 
     LatencyStats {
@@ -116,12 +127,14 @@ fn run_workload_f_concurrent(
 
     let mut rng = make_thread_rng(thread_id, 0xF0F0_F0F0);
     let mut hist = Histogram::<u64>::new(3).unwrap();
+    let mut batch = WriteBatch::new();
 
     for _ in 0..operations_per_thread {
         let key_idx = zipf.next(&mut rng);
         let key = &keys[key_idx];
 
         let cf = &cf_list[rng.gen_range(0..cf_count)];
+        let cf_id = cf.id();
 
         let new_val_idx = rng.gen_range(0..values.len());
         let new_val = &values[new_val_idx];
@@ -131,10 +144,19 @@ fn run_workload_f_concurrent(
         let _existing = engine.get(cf, key).unwrap();
         black_box(&_existing);
 
-        engine.put(cf, key, new_val).unwrap();
+        batch.put_cf(cf_id, key.clone(), new_val.clone());
+
+        if batch.len() >= BATCH_SIZE {
+            engine.write_batch(&batch).unwrap();
+            batch.clear();
+        }
 
         let elapsed_us = start.elapsed().as_micros() as u64;
         let _ = hist.record(elapsed_us.max(1));
+    }
+
+    if !batch.is_empty() {
+        engine.write_batch(&batch).unwrap();
     }
 
     LatencyStats {
