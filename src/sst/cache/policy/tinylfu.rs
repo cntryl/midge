@@ -79,12 +79,26 @@ impl CachePolicy for TinyLfuPolicy {
         victim
     }
 
-    fn remove(&self, key: CacheKey) {
+    fn on_remove(&self, key: CacheKey) {
         let mut recent = self.recent.lock().expect("TinyLFU recent lock");
         let mut frequencies = self.frequencies.lock().expect("TinyLFU frequencies lock");
 
         recent.retain(|k| *k != key);
         frequencies.remove(&key);
+    }
+
+    fn on_stale(&self, key: CacheKey) {
+        // Decrement frequency for stale keys to prevent policy drift
+        let mut recent = self.recent.lock().expect("TinyLFU recent lock");
+        let mut frequencies = self.frequencies.lock().expect("TinyLFU frequencies lock");
+
+        recent.retain(|k| *k != key);
+        if let Some(freq) = frequencies.get_mut(&key) {
+            *freq = freq.saturating_sub(1);
+            if *freq == 0 {
+                frequencies.remove(&key);
+            }
+        }
     }
 
     fn clear(&self) {
@@ -188,7 +202,7 @@ mod tests {
         // Act
         policy.on_access(key1);
         policy.on_access(key2);
-        policy.remove(key1);
+        policy.on_remove(key1);
 
         // Assert - key1 should not be picked
         if let Some(victim) = policy.pick_victim(&[]) {
@@ -261,7 +275,7 @@ mod tests {
         let policy = TinyLfuPolicy::new();
 
         // Act
-        policy.remove(CacheKey::for_data(999, 999));
+        policy.on_remove(CacheKey::for_data(999, 999));
 
         // Assert - should not panic
         let victim = policy.pick_victim(&[]);

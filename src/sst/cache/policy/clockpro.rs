@@ -200,7 +200,7 @@ impl CachePolicy for ClockProPolicy {
         None
     }
 
-    fn remove(&self, key: CacheKey) {
+    fn on_remove(&self, key: CacheKey) {
         let mut slots = self.slots.lock().expect("slots lock");
         let mut key_to_slot = self.key_to_slot.lock().expect("key_to_slot lock");
         let mut hot_count = self.hot_count.lock().expect("hot_count lock");
@@ -215,6 +215,29 @@ impl CachePolicy for ClockProPolicy {
                 *resident_count = resident_count.saturating_sub(1);
             }
         }
+    }
+
+    fn on_stale(&self, key: CacheKey) {
+        // Advance hand when encountering stale entries
+        // Treat as evicted test entry - clean up tracking
+        let mut slots = self.slots.lock().expect("slots lock");
+        let mut key_to_slot = self.key_to_slot.lock().expect("key_to_slot lock");
+        let mut hot_count = self.hot_count.lock().expect("hot_count lock");
+        let mut resident_count = self.resident_count.lock().expect("resident_count lock");
+        let mut hand = self.hand.lock().expect("hand lock");
+
+        if let Some(slot_idx) = key_to_slot.remove(&key) {
+            if slot_idx < slots.len() {
+                if slots[slot_idx].hot_bit {
+                    *hot_count = hot_count.saturating_sub(1);
+                }
+                slots[slot_idx] = SlotMetadata::default();
+                *resident_count = resident_count.saturating_sub(1);
+            }
+        }
+
+        // Advance hand to skip over stale entries
+        *hand = (*hand + 1) % slots.len().max(1);
     }
 
     fn clear(&self) {
@@ -238,7 +261,7 @@ mod tests {
 
         // Act
         policy.on_access(key1);
-        policy.remove(key1);
+        policy.on_remove(key1);
 
         // Assert - verify key_to_slot map is empty after removal
         let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
@@ -342,7 +365,7 @@ mod tests {
         // Act
         policy.on_access(key1);
         policy.on_access(key2);
-        policy.remove(key1);
+        policy.on_remove(key1);
 
         // Assert
         let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
@@ -360,7 +383,7 @@ mod tests {
         for key in &keys[..3] {
             policy.on_access(*key);
         }
-        policy.remove(keys[0]);
+        policy.on_remove(keys[0]);
         for key in &keys[3..] {
             policy.on_access(*key);
         }
@@ -376,7 +399,7 @@ mod tests {
         let policy = ClockProPolicy::new();
 
         // Act
-        policy.remove(CacheKey::for_data(999, 999)); // Remove non-existent key
+        policy.on_remove(CacheKey::for_data(999, 999)); // Remove non-existent key
 
         // Assert - should not panic
         let victim = policy.pick_victim(&[]);

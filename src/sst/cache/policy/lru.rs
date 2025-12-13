@@ -80,7 +80,7 @@ impl CachePolicy for LruPolicy {
         }
     }
 
-    fn remove(&self, key: CacheKey) {
+    fn on_remove(&self, key: CacheKey) {
         let mut queue = self.queue.lock().expect("LRU queue lock");
         let mut positions = self.positions.lock().expect("LRU positions lock");
 
@@ -93,6 +93,11 @@ impl CachePolicy for LruPolicy {
                 }
             }
         }
+    }
+
+    fn on_stale(&self, key: CacheKey) {
+        // Same as on_remove - just clean up tracking state
+        self.on_remove(key);
     }
 
     fn clear(&self) {
@@ -152,7 +157,7 @@ mod tests {
         // Act
         policy.on_access(key1);
         policy.on_access(key2);
-        policy.remove(key1);
+        policy.on_remove(key1);
         let victim = policy.pick_victim(&[]);
 
         // Assert - key2 should be evicted (key1 was removed)
@@ -231,7 +236,7 @@ mod tests {
         // Act
         policy.on_access(key1);
         policy.on_access(key2);
-        policy.remove(key2);
+        policy.on_remove(key2);
         policy.on_access(key3);
         let victim1 = policy.pick_victim(&[]);
         let victim2 = policy.pick_victim(&[]);
@@ -265,7 +270,7 @@ mod tests {
         let policy = LruPolicy::new();
 
         // Act
-        policy.remove(CacheKey::for_data(999, 999)); // Remove non-existent key
+        policy.on_remove(CacheKey::for_data(999, 999)); // Remove non-existent key
         let victim = policy.pick_victim(&[]);
 
         // Assert - should not panic

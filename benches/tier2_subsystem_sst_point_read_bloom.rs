@@ -264,7 +264,8 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
                         let range = sst.sparse_index.find_block_range(key);
                         for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
                         {
-                            let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
+                            let cache_key =
+                                CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
                             if sst.cache.get(&cache_key).is_none() {
                                 blocks_read += 1;
                             }

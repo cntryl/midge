@@ -15,10 +15,12 @@
 
 pub mod block_bloom;
 pub mod factory;
+pub mod metrics;
 pub mod reader;
 pub mod writer;
 
 pub use block_bloom::BlockBloomFilter;
 pub use factory::{BloomFactory, BloomFilterFactory};
+pub use metrics::BloomMetrics;
 pub use reader::BloomReader;
 pub use writer::{BloomTestResult, BloomWriter};

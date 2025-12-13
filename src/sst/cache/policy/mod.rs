@@ -16,6 +16,9 @@ pub use tinylfu::TinyLfuPolicy;
 use crate::sst::cache::key::{BlockType, CacheKey};
 
 /// Eviction policy trait
+///
+/// Policies must tolerate stale keys (keys that were evicted, removed, or never admitted).
+/// The cache is the source of truth; policies provide hints, not guarantees.
 pub trait CachePolicy: Send + Sync {
     /// Record an access to a key (for policy state tracking)
     fn on_access(&self, key: CacheKey);
@@ -24,10 +27,17 @@ pub trait CachePolicy: Send + Sync {
     ///
     /// `exclude_types`: Block types to protect from eviction (e.g., Index, Filter)
     /// Returns None if no suitable victim is found
+    ///
+    /// **May return stale keys** - caller must validate with cache before evicting
     fn pick_victim(&self, exclude_types: &[BlockType]) -> Option<CacheKey>;
 
-    /// Remove key from policy tracking
-    fn remove(&self, key: CacheKey);
+    /// Notify policy that a key was successfully evicted
+    fn on_remove(&self, key: CacheKey);
+
+    /// Notify policy that a picked victim was stale (already gone from cache)
+    ///
+    /// Policies should remove stale tracking state to converge naturally.
+    fn on_stale(&self, key: CacheKey);
 
     /// Clear all tracked keys
     fn clear(&self);
@@ -125,7 +135,7 @@ mod tests {
         // Act
         for policy in &policies {
             policy.on_access(key);
-            policy.remove(key);
+            policy.on_remove(key);
         }
 
         // Assert - all should handle removal without panic
