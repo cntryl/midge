@@ -267,6 +267,13 @@ impl EventLoop {
                             message: e.to_string(),
                         });
                     self.respond(request_id, resp);
+
+                    // Auto-sync if batched threshold exceeded
+                    if self.wal_actor.should_sync_batch() {
+                        if let Err(e) = self.wal_actor.sync(&mut self.state) {
+                            tracing::warn!(error = %e, "failed to auto-sync WAL batch");
+                        }
+                    }
                 }
 
                 RuntimeMsg::WalMerge {
@@ -283,6 +290,13 @@ impl EventLoop {
                         bytes::Bytes::from(operand),
                         sequence,
                     );
+
+                    // Auto-sync if batched threshold exceeded
+                    if self.wal_actor.should_sync_batch() {
+                        if let Err(e) = self.wal_actor.sync(&mut self.state) {
+                            tracing::warn!(error = %e, "failed to auto-sync WAL batch");
+                        }
+                    }
                     let resp = result
                         .map(|_| RuntimeResponse::Ok { request_id })
                         .unwrap_or_else(|e| RuntimeResponse::Error {
