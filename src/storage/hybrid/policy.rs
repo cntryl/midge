@@ -127,8 +127,7 @@ mod tests {
     #[test]
     fn should_customize_watermarks() {
         // Arrange & Act
-        let policy = StorageBudgetPolicy::new(1024 * 1024)
-            .with_watermarks(80, 85, 90);
+        let policy = StorageBudgetPolicy::new(1024 * 1024).with_watermarks(80, 85, 90);
 
         // Assert
         assert_eq!(policy.high_watermark_percent, 80);

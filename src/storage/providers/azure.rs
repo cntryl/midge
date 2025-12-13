@@ -46,11 +46,7 @@ impl AzureProvider {
     /// * `account_name` - Azure storage account name
     /// * `container` - Blob container name
     /// * `account_key` - Primary or secondary account key
-    pub fn with_shared_key(
-        account_name: String,
-        container: String,
-        account_key: String,
-    ) -> Self {
+    pub fn with_shared_key(account_name: String, container: String, account_key: String) -> Self {
         Self {
             account_name,
             container,
@@ -64,11 +60,7 @@ impl AzureProvider {
     /// * `account_name` - Azure storage account name
     /// * `container` - Blob container name
     /// * `sas_token` - SAS token (with ? prefix or without)
-    pub fn with_sas_token(
-        account_name: String,
-        container: String,
-        sas_token: String,
-    ) -> Self {
+    pub fn with_sas_token(account_name: String, container: String, sas_token: String) -> Self {
         // Normalize token - ensure it doesn't start with ?
         let token = if let Some(stripped) = sas_token.strip_prefix('?') {
             stripped.to_string()
@@ -433,8 +425,10 @@ mod tests {
     #[test]
     fn should_create_provider_with_managed_identity() {
         // Arrange & Act
-        let provider =
-            AzureProvider::with_managed_identity("myaccount".to_string(), "mycontainer".to_string());
+        let provider = AzureProvider::with_managed_identity(
+            "myaccount".to_string(),
+            "mycontainer".to_string(),
+        );
 
         // Assert
         assert_eq!(provider.account_name, "myaccount");
@@ -481,10 +475,8 @@ mod tests {
     #[test]
     fn should_handle_special_characters_in_names() {
         // Arrange & Act
-        let provider = AzureProvider::new(
-            "my-account-123".to_string(),
-            "my-container-456".to_string(),
-        );
+        let provider =
+            AzureProvider::new("my-account-123".to_string(), "my-container-456".to_string());
 
         // Assert
         assert_eq!(provider.account_name, "my-account-123");
@@ -598,16 +590,10 @@ mod tests {
     #[test]
     fn should_handle_multiple_credential_types() {
         // Arrange & Act
-        let sk = AzureProvider::with_shared_key(
-            "a".to_string(),
-            "c".to_string(),
-            "key".to_string(),
-        );
-        let sas = AzureProvider::with_sas_token(
-            "a".to_string(),
-            "c".to_string(),
-            "token".to_string(),
-        );
+        let sk =
+            AzureProvider::with_shared_key("a".to_string(), "c".to_string(), "key".to_string());
+        let sas =
+            AzureProvider::with_sas_token("a".to_string(), "c".to_string(), "token".to_string());
         let mi = AzureProvider::with_managed_identity("a".to_string(), "c".to_string());
         let cs = AzureProvider::with_connection_string(
             "a".to_string(),
@@ -619,7 +605,10 @@ mod tests {
         assert!(matches!(&sk.credential, AzureCredential::SharedKey { .. }));
         assert!(matches!(&sas.credential, AzureCredential::SasToken { .. }));
         assert!(matches!(&mi.credential, AzureCredential::ManagedIdentity));
-        assert!(matches!(&cs.credential, AzureCredential::ConnectionString { .. }));
+        assert!(matches!(
+            &cs.credential,
+            AzureCredential::ConnectionString { .. }
+        ));
     }
 
     #[test]

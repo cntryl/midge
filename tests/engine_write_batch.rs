@@ -1,4 +1,4 @@
-﻿//! Write Batch Integration Tests
+//! Write Batch Integration Tests
 //!
 //! Tests batched write operations end-to-end using the public MidgeEngine API.
 //! Write batches provide atomic multi-operation semantics: all operations in a
@@ -27,9 +27,18 @@ fn should_commit_all_operations_given_batch_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::copy_from_slice(b"key1"), bytes::Bytes::copy_from_slice(b"val1"));
-        batch.put(bytes::Bytes::copy_from_slice(b"key2"), bytes::Bytes::copy_from_slice(b"val2"));
-        batch.put(bytes::Bytes::copy_from_slice(b"key3"), bytes::Bytes::copy_from_slice(b"val3"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key1"),
+            bytes::Bytes::copy_from_slice(b"val1"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key2"),
+            bytes::Bytes::copy_from_slice(b"val2"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key3"),
+            bytes::Bytes::copy_from_slice(b"val3"),
+        );
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -63,9 +72,18 @@ fn should_apply_last_value_given_duplicate_keys_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value1"));
-        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value2"));
-        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value3"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value1"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value2"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value3"),
+        );
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -103,7 +121,10 @@ fn should_delete_key_given_delete_after_put_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value"),
+        );
         batch.delete(bytes::Bytes::copy_from_slice(b"key"));
         engine.write_batch(&batch).expect("write_batch");
 
@@ -144,7 +165,10 @@ fn should_overwrite_existing_value_given_put_in_batch_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"new_value"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"new_value"),
+        );
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -170,9 +194,15 @@ fn should_apply_mixed_operations_in_order_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::copy_from_slice(b"a"), bytes::Bytes::copy_from_slice(b"updated_a"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"a"),
+            bytes::Bytes::copy_from_slice(b"updated_a"),
+        );
         batch.delete(bytes::Bytes::copy_from_slice(b"b"));
-        batch.put(bytes::Bytes::copy_from_slice(b"c"), bytes::Bytes::copy_from_slice(b"new_c"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"c"),
+            bytes::Bytes::copy_from_slice(b"new_c"),
+        );
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -244,7 +274,10 @@ fn should_write_to_multiple_cfs_given_multi_cf_batch_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::copy_from_slice(b"cf_default_key"), bytes::Bytes::copy_from_slice(b"cf_default_val"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"cf_default_key"),
+            bytes::Bytes::copy_from_slice(b"cf_default_val"),
+        );
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -268,7 +301,10 @@ fn should_isolate_keys_given_same_key_in_different_cfs_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::copy_from_slice(b"shared_key"), bytes::Bytes::copy_from_slice(b"value_default"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"shared_key"),
+            bytes::Bytes::copy_from_slice(b"value_default"),
+        );
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert
@@ -413,7 +449,10 @@ fn should_persist_batch_given_flush_when_reopening() {
             let mut batch = WriteBatch::new();
 
             // Act
-            batch.put(bytes::Bytes::copy_from_slice(b"persist_key"), bytes::Bytes::copy_from_slice(b"persist_val"));
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"persist_key"),
+                bytes::Bytes::copy_from_slice(b"persist_val"),
+            );
             engine.write_batch(&batch).expect("write_batch");
             engine.flush().expect("flush");
             let _ = cf; // Use cf in the block
@@ -443,8 +482,14 @@ fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
             let mut batch = WriteBatch::new();
 
             // Act: Write batch (atomically in WAL)
-            batch.put(bytes::Bytes::copy_from_slice(b"atomic_key1"), bytes::Bytes::copy_from_slice(b"atomic_val1"));
-            batch.put(bytes::Bytes::copy_from_slice(b"atomic_key2"), bytes::Bytes::copy_from_slice(b"atomic_val2"));
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"atomic_key1"),
+                bytes::Bytes::copy_from_slice(b"atomic_val1"),
+            );
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"atomic_key2"),
+                bytes::Bytes::copy_from_slice(b"atomic_val2"),
+            );
             engine.write_batch(&batch).expect("write_batch");
             let _ = cf;
         }
@@ -517,7 +562,10 @@ fn should_support_batch_with_ttl_when_write_batch() {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::copy_from_slice(b"ttl_key"), bytes::Bytes::copy_from_slice(b"ttl_value"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"ttl_key"),
+            bytes::Bytes::copy_from_slice(b"ttl_value"),
+        );
         engine.write_batch(&batch).expect("write_batch");
 
         // Assert: Value immediately readable (TTL not elapsed)
@@ -540,11 +588,17 @@ fn should_increment_sequence_numbers_given_batch_operations_when_write_batch() {
 
         // Act
         let mut batch = WriteBatch::new();
-        batch.put(bytes::Bytes::copy_from_slice(b"seq_key"), bytes::Bytes::copy_from_slice(b"seq_val"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"seq_key"),
+            bytes::Bytes::copy_from_slice(b"seq_val"),
+        );
         engine.write_batch(&batch).expect("write_batch");
 
         let mut batch2 = WriteBatch::new();
-        batch2.put(bytes::Bytes::copy_from_slice(b"seq_key2"), bytes::Bytes::copy_from_slice(b"seq_val2"));
+        batch2.put(
+            bytes::Bytes::copy_from_slice(b"seq_key2"),
+            bytes::Bytes::copy_from_slice(b"seq_val2"),
+        );
         engine.write_batch(&batch2).expect("write_batch");
 
         // Assert: Both values present (sequence advanced)

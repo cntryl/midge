@@ -129,14 +129,9 @@ impl WalActor {
 
         // Create WAL record (with expiration if provided)
         let record = match ttl_seconds {
-            Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
-                cf_id,
-                op_kind,
-                key.clone(),
-                value.clone(),
-                sequence,
-                ttl,
-            ),
+            Some(ttl) if ttl > 0 => {
+                WalRecord::new_with_ttl(cf_id, op_kind, key.clone(), value.clone(), sequence, ttl)
+            }
             _ => WalRecord::new_cf(cf_id, op_kind, key.clone(), value.clone(), sequence),
         };
 

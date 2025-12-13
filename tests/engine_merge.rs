@@ -1,4 +1,4 @@
-﻿//! Merge Operator Tests
+//! Merge Operator Tests
 //!
 //! Tests for merge operator functionality - associative operations that allow
 //! efficient read-modify-write patterns without full get/put cycles.
@@ -115,7 +115,9 @@ fn should_merge_without_base_value_given_no_existing_key_when_merging() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new(",");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).unwrap();
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .unwrap();
 
         // Act
         engine.merge_cf(cf, b"key1", b"value1").unwrap();
@@ -133,7 +135,9 @@ fn should_merge_with_existing_base_value_given_put_when_merging() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new(",");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).unwrap();
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .unwrap();
         engine.put(cf, b"key1", b"base").unwrap();
 
         // Act
@@ -152,7 +156,9 @@ fn should_apply_multiple_merges_sequentially_given_repeated_operations_when_read
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new(",");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).unwrap();
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .unwrap();
 
         // Act
         engine.merge_cf(cf, b"key1", b"a").unwrap();
@@ -172,7 +178,9 @@ fn should_merge_after_delete_given_tombstone_when_treating_as_missing() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new(",");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).unwrap();
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .unwrap();
         engine.put(cf, b"key1", b"old").unwrap();
         engine.delete(cf, b"key1").unwrap();
 
@@ -192,7 +200,9 @@ fn should_handle_merge_with_put_interleaved_given_mixed_ops_when_reading() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new(",");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).unwrap();
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .unwrap();
 
         // Act
         engine.merge_cf(cf, b"key1", b"a").unwrap();
@@ -216,7 +226,9 @@ fn should_use_string_append_operator_given_delimiter_when_merging() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new("::");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).unwrap();
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .unwrap();
 
         // Act
         engine.merge_cf(cf, b"key1", b"foo").unwrap();
@@ -235,7 +247,9 @@ fn should_string_append_with_base_value_given_initial_put_when_merging() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new("|");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).unwrap();
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .unwrap();
         engine.put(cf, b"key1", b"start").unwrap();
 
         // Act
@@ -255,7 +269,9 @@ fn should_handle_empty_merge_operand_given_empty_bytes_when_appending() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new(",");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).unwrap();
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .unwrap();
 
         // Act
         engine.merge_cf(cf, b"key1", b"a").unwrap();

@@ -70,8 +70,8 @@
 //! let event = rx.recv().unwrap();
 //! ```
 
-pub mod azure;
 pub mod aws;
+pub mod azure;
 pub mod gcs;
 pub mod minio;
 pub mod oci;
@@ -79,8 +79,8 @@ pub mod s3;
 pub mod wasabi;
 
 // Re-export for convenience
-pub use azure::AzureProvider;
 pub use aws::AwsS3Provider;
+pub use azure::AzureProvider;
 pub use gcs::GcsProvider;
 pub use minio::MinioProvider;
 pub use oci::OciProvider;

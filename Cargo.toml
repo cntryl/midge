@@ -57,7 +57,12 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# OpenTelemetry (Observability)
+opentelemetry = { version = "0.20", optional = true }
+opentelemetry-otlp = { version = "0.13", optional = true }
+tracing-opentelemetry = { version = "0.21", optional = true }
 
 # System Utilities
 byteorder = "1.5"
@@ -109,7 +114,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [features]
 default = ["cloud-common"]
-logging = ["dep:tracing-subscriber"]
+telemetry = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
+telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
 uring = ["dep:io-uring"]
 
 # Cloud Storage Backends

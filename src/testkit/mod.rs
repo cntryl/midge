@@ -128,7 +128,7 @@ impl Default for MidgeOptions {
 
 impl MidgeOptions {
     /// Set memory budget for transaction spilling (in bytes)
-    /// 
+    ///
     /// When a transaction exceeds this memory limit, it will spill to disk.
     /// Set to None for unlimited memory.
     pub fn memory_budget(mut self, bytes: usize) -> Self {
@@ -163,7 +163,7 @@ pub fn memory_storage_modes() -> Vec<&'static str> {
 }
 
 /// Create memory-only options for testing
-/// 
+///
 /// Convenience helper for creating MidgeOptions with memory storage mode.
 pub fn memory_opts() -> MidgeOptions {
     opts_for_mode("memory")

@@ -19,7 +19,9 @@ use cntryl_midge::sst::bloom::{writer::BloomFilterOps, BloomWriter};
 use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::sst::sparse_index::{IndexEntry, SparseIndexReader};
 use cntryl_midge::sst::types::BlockHandle;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
@@ -83,11 +85,7 @@ fn build_mock_sst(sst_id: u64) -> MockSst {
         .enumerate()
         .map(|(block_idx, key)| {
             let offset = (block_idx * 4096) as u64;
-            IndexEntry::new(
-                key.to_vec(),
-                BlockHandle::new(offset, 4096),
-                block_idx,
-            )
+            IndexEntry::new(key.to_vec(), BlockHandle::new(offset, 4096), block_idx)
         })
         .collect();
     let sparse_index = SparseIndexReader::new(entries).unwrap();
@@ -243,8 +241,11 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
                     for key in hits.iter().chain(misses.iter()) {
                         if sst.bloom.contains(key).might_be_present() {
                             let range = sst.sparse_index.find_block_range(key);
-                            for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                                let cache_key = CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
+                            for block_idx in
+                                range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
+                            {
+                                let cache_key =
+                                    CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
                                 if sst.cache.get(&cache_key).is_none() {
                                     blocks_read += 1;
                                 }
@@ -261,7 +262,8 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
 
                     for key in hits.iter().chain(misses.iter()) {
                         let range = sst.sparse_index.find_block_range(key);
-                        for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
+                        for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
+                        {
                             let cache_key = CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
                             if sst.cache.get(&cache_key).is_none() {
                                 blocks_read += 1;

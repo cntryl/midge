@@ -92,4 +92,3 @@ mod tests {
         let _ = provider.inner();
     }
 }
-

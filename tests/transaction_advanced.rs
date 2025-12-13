@@ -1,4 +1,4 @@
-﻿//! Tests for transaction crash recovery and durability semantics
+//! Tests for transaction crash recovery and durability semantics
 //!
 //! All tests parametrized across durable storage modes only (LocalDisk, CloudBacked)
 //! Pattern: for_each_storage_mode(&durable_storage_modes(), |mode, opts| { ... })
@@ -26,8 +26,10 @@ fn should_persist_atomic_transactions_after_restart() {
             let cf = engine.default_column_family();
 
             let mut tx = engine.transaction();
-            tx.put(cf.id(), b"tx_key1".to_vec(), b"tx_value1".to_vec()).expect("put");
-            tx.put(cf.id(), b"tx_key2".to_vec(), b"tx_value2".to_vec()).expect("put");
+            tx.put(cf.id(), b"tx_key1".to_vec(), b"tx_value1".to_vec())
+                .expect("put");
+            tx.put(cf.id(), b"tx_key2".to_vec(), b"tx_value2".to_vec())
+                .expect("put");
             engine.commit_transaction(tx).expect("commit");
             // engine dropped, crash simulation
         }
@@ -72,8 +74,12 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
             let cf = engine.default_column_family();
 
             let mut tx = engine.transaction();
-            tx.put(cf.id(), b"uncommitted_key".to_vec(), b"uncommitted_value".to_vec())
-                .expect("put");
+            tx.put(
+                cf.id(),
+                b"uncommitted_key".to_vec(),
+                b"uncommitted_value".to_vec(),
+            )
+            .expect("put");
             // No commit - engine dropped, crash before commit
         }
 
@@ -83,11 +89,7 @@ fn should_not_persist_uncommitted_transaction_after_restart() {
             let cf = engine.default_column_family();
 
             let got = engine.get(cf, b"uncommitted_key").expect("get");
-            assert_eq!(
-                got, None,
-                "uncommitted data persisted in mode: {}",
-                mode
-            );
+            assert_eq!(got, None, "uncommitted data persisted in mode: {}", mode);
         }
     });
 }
@@ -107,7 +109,9 @@ fn should_recover_after_abort_given_transaction_with_delete_range_when_restart()
             let cf = engine.default_column_family();
             for i in 0..10 {
                 let key = format!("key{}", i);
-                engine.put(cf, key.as_bytes(), b"initial_value").expect("put");
+                engine
+                    .put(cf, key.as_bytes(), b"initial_value")
+                    .expect("put");
             }
         }
 
@@ -241,8 +245,7 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
                 assert_eq!(
                     got, None,
                     "uncommitted spill data {} recovered in mode: {}",
-                    key,
-                    mode
+                    key, mode
                 );
             }
         }
@@ -356,12 +359,7 @@ fn should_recover_large_transaction_given_crash_during_spill() {
             for i in 0..500 {
                 let key = format!("large_key{:04}", i);
                 let got = engine.get(cf, key.as_bytes()).expect("get");
-                assert!(
-                    got.is_some(),
-                    "large key {} missing in mode: {}",
-                    key,
-                    mode
-                );
+                assert!(got.is_some(), "large key {} missing in mode: {}", key, mode);
             }
         }
     });
@@ -379,8 +377,12 @@ fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
             let cf = engine.default_column_family();
 
             let mut tx = engine.transaction();
-            tx.put(cf.id(), b"wal_test_key".to_vec(), b"wal_test_value".to_vec())
-                .expect("put");
+            tx.put(
+                cf.id(),
+                b"wal_test_key".to_vec(),
+                b"wal_test_value".to_vec(),
+            )
+            .expect("put");
             engine.commit_transaction(tx).expect("commit");
         }
 

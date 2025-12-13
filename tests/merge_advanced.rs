@@ -1,4 +1,4 @@
-﻿//! Advanced Merge Operator Tests
+//! Advanced Merge Operator Tests
 //!
 //! Tests advanced merge operator scenarios: tombstone interactions, error handling,
 //! and complex merge patterns. Validates that merge operators behave correctly when
@@ -11,8 +11,8 @@
 
 use bytes::Bytes;
 use cntryl_midge::engine::api::WriteBatch;
-use cntryl_midge::{MergeOperator, MidgeResult};
 use cntryl_midge::testkit::*;
+use cntryl_midge::{MergeOperator, MidgeResult};
 use std::sync::Arc;
 
 // ============================================================================
@@ -71,17 +71,25 @@ fn should_apply_merge_given_delete_then_merge_when_tombstone_base() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new("");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).expect("register");
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .expect("register");
 
         engine.put(cf, b"key", b"initial").expect("put");
         engine.delete(cf, b"key").expect("delete"); // Creates tombstone
 
         // Act: Merge on tombstone
-        engine.merge_cf(cf, b"key", b"merged").expect("merge on tombstone");
+        engine
+            .merge_cf(cf, b"key", b"merged")
+            .expect("merge on tombstone");
 
         // Assert: Merge applies to tombstone state (treats as empty)
         let got = engine.get(cf, b"key").expect("get");
-        assert!(got.is_some(), "merge did not apply to tombstone in mode: {}", mode);
+        assert!(
+            got.is_some(),
+            "merge did not apply to tombstone in mode: {}",
+            mode
+        );
     });
 }
 
@@ -93,16 +101,24 @@ fn should_delete_after_merge_given_merge_then_delete_when_sequence() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new("");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).expect("register");
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .expect("register");
 
         // Act: Merge creates value, then delete
         engine.merge_cf(cf, b"key", b"value1").expect("first merge");
-        engine.merge_cf(cf, b"key", b"value2").expect("second merge");
+        engine
+            .merge_cf(cf, b"key", b"value2")
+            .expect("second merge");
         engine.delete(cf, b"key").expect("delete after merge");
 
         // Assert: Delete wins
         let got = engine.get(cf, b"key").expect("get");
-        assert_eq!(got, None, "delete did not remove merged value in mode: {}", mode);
+        assert_eq!(
+            got, None,
+            "delete did not remove merged value in mode: {}",
+            mode
+        );
     });
 }
 
@@ -114,18 +130,28 @@ fn should_handle_merge_on_many_tombstones_given_delete_merge_cycles_when_repeate
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new("");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).expect("register");
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .expect("register");
 
         // Act: Repeat delete/merge cycles
         for i in 0..3 {
-            engine.put(cf, b"key", format!("value_{i}").as_bytes()).expect("put");
+            engine
+                .put(cf, b"key", format!("value_{i}").as_bytes())
+                .expect("put");
             engine.delete(cf, b"key").expect("delete");
-            engine.merge_cf(cf, b"key", format!("merged_{i}").as_bytes()).expect("merge");
+            engine
+                .merge_cf(cf, b"key", format!("merged_{i}").as_bytes())
+                .expect("merge");
         }
 
         // Assert: Final state after last merge
         let got = engine.get(cf, b"key").expect("get");
-        assert!(got.is_some(), "merge state lost after multiple delete/merge cycles in mode: {}", mode);
+        assert!(
+            got.is_some(),
+            "merge state lost after multiple delete/merge cycles in mode: {}",
+            mode
+        );
     });
 }
 
@@ -146,9 +172,18 @@ fn should_apply_multiple_merges_in_batch_given_write_batch_when_committed() {
         // Act: Write batch with multiple puts (merges require custom operator)
         // For now, test with puts to validate batch ordering
         let mut batch = WriteBatch::new();
-        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value1"));
-        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value2"));
-        batch.put(bytes::Bytes::copy_from_slice(b"key"), bytes::Bytes::copy_from_slice(b"value3"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value1"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value2"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value3"),
+        );
         engine.write_batch(&batch).expect("commit batch");
 
         // Assert: Last put in batch wins
@@ -174,17 +209,25 @@ fn should_accumulate_values_given_10_sequential_merges_when_applying() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new("-");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).expect("register");
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .expect("register");
 
         // Act: Apply 10 sequential merges (no base value)
         for i in 0..10 {
             let operand = format!("_{i}");
-            engine.merge_cf(cf, b"accumulate", operand.as_bytes()).expect("merge");
+            engine
+                .merge_cf(cf, b"accumulate", operand.as_bytes())
+                .expect("merge");
         }
 
         // Assert: Accumulated result exists
         let got = engine.get(cf, b"accumulate").expect("get");
-        assert!(got.is_some(), "10 sequential merges did not produce value in mode: {}", mode);
+        assert!(
+            got.is_some(),
+            "10 sequential merges did not produce value in mode: {}",
+            mode
+        );
     });
 }
 
@@ -196,7 +239,9 @@ fn should_preserve_merge_with_empty_operand_given_empty_bytes_when_merging() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new(",");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).expect("register");
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .expect("register");
 
         engine.put(cf, b"key", b"base").expect("put base");
 
@@ -225,14 +270,20 @@ fn should_handle_binary_data_in_merge_given_non_utf8_when_merging() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new("");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).expect("register");
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .expect("register");
 
         let binary_key = vec![0x00, 0x01, 0x02, 0xFF, 0xFE];
         let binary_operand = vec![0x42, 0x43, 0x44, 0x00];
 
         // Act: Put base with binary data
-        engine.put(cf, &binary_key, &[0xAA, 0xBB]).expect("put binary");
-        engine.merge_cf(cf, &binary_key, &binary_operand).expect("merge binary");
+        engine
+            .put(cf, &binary_key, &[0xAA, 0xBB])
+            .expect("put binary");
+        engine
+            .merge_cf(cf, &binary_key, &binary_operand)
+            .expect("merge binary");
 
         // Assert: Binary data preserved through merge
         let got = engine.get(cf, &binary_key).expect("get");
@@ -248,7 +299,9 @@ fn should_handle_special_characters_in_string_merge_given_delimiters_when_append
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let op = StringAppendOperator::new("|");
-        engine.register_merge_operator(cf.id().as_u32(), Box::new(op)).expect("register");
+        engine
+            .register_merge_operator(cf.id().as_u32(), Box::new(op))
+            .expect("register");
 
         // Act: Write base and merge with special characters
         engine.put(cf, b"key", b"base").expect("put");
@@ -289,7 +342,10 @@ fn should_accumulate_multiple_merges_on_different_keys_when_batch() {
         let mut batch = WriteBatch::new();
         for i in 0..5 {
             let key = format!("key_{i}");
-            batch.put(key.as_bytes().to_vec().into(), format!("_update{i}").as_bytes().to_vec().into());
+            batch.put(
+                key.as_bytes().to_vec().into(),
+                format!("_update{i}").as_bytes().to_vec().into(),
+            );
         }
         engine.write_batch(&batch).expect("commit batch");
 

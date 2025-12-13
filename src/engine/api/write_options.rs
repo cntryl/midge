@@ -161,9 +161,7 @@ mod tests {
     #[test]
     fn should_return_self_for_chaining_when_calling_sync() {
         // Arrange & Act
-        let opts = WriteOptions::new()
-            .sync()
-            .disable_wal();
+        let opts = WriteOptions::new().sync().disable_wal();
 
         // Assert
         assert!(opts.sync);
@@ -173,9 +171,7 @@ mod tests {
     #[test]
     fn should_keep_sync_true_when_calling_sync_multiple_times() {
         // Arrange & Act
-        let opts = WriteOptions::new()
-            .sync()
-            .sync();
+        let opts = WriteOptions::new().sync().sync();
 
         // Assert
         assert!(opts.sync);
@@ -197,9 +193,7 @@ mod tests {
     #[test]
     fn should_return_self_for_chaining_when_calling_disable_wal() {
         // Arrange & Act
-        let opts = WriteOptions::new()
-            .disable_wal()
-            .sync();
+        let opts = WriteOptions::new().disable_wal().sync();
 
         // Assert
         assert!(opts.sync);
@@ -209,9 +203,7 @@ mod tests {
     #[test]
     fn should_keep_disable_wal_true_when_calling_disable_wal_multiple_times() {
         // Arrange & Act
-        let opts = WriteOptions::new()
-            .disable_wal()
-            .disable_wal();
+        let opts = WriteOptions::new().disable_wal().disable_wal();
 
         // Assert
         assert!(opts.disable_wal);
@@ -262,9 +254,7 @@ mod tests {
     #[test]
     fn should_clone_options_with_both_flags_set() {
         // Arrange
-        let original = WriteOptions::new()
-            .sync()
-            .disable_wal();
+        let original = WriteOptions::new().sync().disable_wal();
 
         // Act
         let cloned = original.clone();
@@ -316,9 +306,7 @@ mod tests {
     #[test]
     fn should_support_full_fluent_api_chain() {
         // Arrange & Act
-        let opts = WriteOptions::new()
-            .sync()
-            .disable_wal();
+        let opts = WriteOptions::new().sync().disable_wal();
 
         // Assert
         assert!(opts.sync);
@@ -328,13 +316,9 @@ mod tests {
     #[test]
     fn should_allow_methods_in_any_order() {
         // Arrange
-        let opts1 = WriteOptions::new()
-            .sync()
-            .disable_wal();
+        let opts1 = WriteOptions::new().sync().disable_wal();
 
-        let opts2 = WriteOptions::new()
-            .disable_wal()
-            .sync();
+        let opts2 = WriteOptions::new().disable_wal().sync();
 
         // Act & Assert
         assert_eq!(opts1.sync, opts2.sync);
@@ -346,10 +330,7 @@ mod tests {
     #[test]
     fn should_handle_multiple_sync_calls() {
         // Arrange & Act
-        let opts = WriteOptions::new()
-            .sync()
-            .sync()
-            .sync();
+        let opts = WriteOptions::new().sync().sync().sync();
 
         // Assert
         assert!(opts.sync);

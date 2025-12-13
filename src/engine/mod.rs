@@ -14,7 +14,10 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{
     next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse, RuntimeState,
 };
+use crate::telemetry::{spans::OperationType, MidgeSpan};
 use std::path::PathBuf;
+use std::time::Instant;
+use tracing::info_span;
 
 pub mod api;
 pub mod context;
@@ -89,7 +92,8 @@ pub struct MidgeEngine {
     /// Next snapshot ID counter (local only, not related to sequence numbers)
     next_snapshot_id: std::sync::atomic::AtomicU64,
     /// Merge operators registered per column family
-    merge_operators: std::sync::RwLock<std::collections::HashMap<u32, std::sync::Arc<dyn MergeOperator>>>,
+    merge_operators:
+        std::sync::RwLock<std::collections::HashMap<u32, std::sync::Arc<dyn MergeOperator>>>,
     /// Column families registry (CF ID -> Handle)
     column_families: std::sync::RwLock<std::collections::HashMap<u32, ColumnFamilyHandle>>,
 }
@@ -144,10 +148,8 @@ impl MidgeEngine {
         let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
         for cf_meta in &manifest.column_families {
             if cf_meta.id != 0 {
-                let handle = ColumnFamilyHandle::new(
-                    ColumnFamilyId(cf_meta.id),
-                    cf_meta.name.clone(),
-                );
+                let handle =
+                    ColumnFamilyHandle::new(ColumnFamilyId(cf_meta.id), cf_meta.name.clone());
                 column_families.insert(cf_meta.id, handle);
             }
         }
@@ -195,10 +197,8 @@ impl MidgeEngine {
             let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
             for cf_meta in &manifest.column_families {
                 if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
-                    let handle = ColumnFamilyHandle::new(
-                        ColumnFamilyId(cf_meta.id),
-                        cf_meta.name.clone(),
-                    );
+                    let handle =
+                        ColumnFamilyHandle::new(ColumnFamilyId(cf_meta.id), cf_meta.name.clone());
                     column_families.insert(cf_meta.id, handle);
                 }
             }
@@ -223,7 +223,12 @@ impl MidgeEngine {
     /// Put a key-value pair into a specific column family
     pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         // Check if CF still exists
-        if !self.column_families.read().expect("column_families lock poisoned").contains_key(&cf.id().as_u32()) {
+        if !self
+            .column_families
+            .read()
+            .expect("column_families lock poisoned")
+            .contains_key(&cf.id().as_u32())
+        {
             return Err(MidgeError::Internal(format!(
                 "Column family '{}' (id={}) has been dropped",
                 cf.name(),
@@ -243,6 +248,26 @@ impl MidgeEngine {
         ttl_seconds: u64,
     ) -> MidgeResult<()> {
         let cf_id = cf.id.0;
+        let key_size = key.len();
+        let value_size = value.len();
+        let start = Instant::now();
+
+        // Create span for this put operation
+        let span = info_span!(
+            "put_operation",
+            cf_id = cf_id,
+            key_size = key_size,
+            value_size = value_size,
+            ttl_seconds = ttl_seconds,
+        );
+        let _enter = span.enter();
+
+        // Record telemetry attributes
+        let _midge_span = MidgeSpan::new("put_operation")
+            .with_operation(OperationType::Put)
+            .with_cf(cf_id)
+            .with_key_size(key_size)
+            .with_value_size(value_size);
 
         // Request seqno from runtime (actor-owned allocation)
         let seqno = self.request_seqno(cf_id)?;
@@ -264,8 +289,17 @@ impl MidgeEngine {
 
         // Check for errors from runtime
         match response {
-            RuntimeResponse::Ok { .. } => Ok(()),
+            RuntimeResponse::Ok { .. } => {
+                let elapsed = start.elapsed();
+                tracing::debug!(
+                    elapsed_us = elapsed.as_micros(),
+                    status = "success",
+                    "put completed"
+                );
+                Ok(())
+            }
             RuntimeResponse::Error { message, .. } => {
+                tracing::warn!(error = %message, status = "error", "put failed");
                 // Check if it's a write stall - if so, propagate it
                 if message.contains("Write stall") {
                     Err(MidgeError::WriteStall(message))
@@ -273,9 +307,15 @@ impl MidgeEngine {
                     Err(MidgeError::Internal(message))
                 }
             }
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to put".to_string(),
-            )),
+            _ => {
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "put got unexpected response"
+                );
+                Err(MidgeError::Internal(
+                    "Unexpected response to put".to_string(),
+                ))
+            }
         }
     }
 
@@ -286,6 +326,17 @@ impl MidgeEngine {
 
     /// Get a value from a specific column family
     pub fn get(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+        let key_size = key.len();
+        let start = Instant::now();
+
+        let span = info_span!("get_operation", cf_id = cf.id.0, key_size = key_size,);
+        let _enter = span.enter();
+
+        let _midge_span = MidgeSpan::new("get_operation")
+            .with_operation(OperationType::Get)
+            .with_cf(cf.id.0)
+            .with_key_size(key_size);
+
         // CRITICAL: Reads must go through runtime to query authoritative state
         // (active memtable + immutable memtables + SSTs).
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
@@ -296,11 +347,30 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::ReadValue { value, .. } => Ok(value.map(bytes::Bytes::from)),
-            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to get".to_string(),
-            )),
+            RuntimeResponse::ReadValue { value, .. } => {
+                let elapsed = start.elapsed();
+                let found = value.is_some();
+                tracing::debug!(
+                    elapsed_us = elapsed.as_micros(),
+                    found = found,
+                    status = "success",
+                    "get completed"
+                );
+                Ok(value.map(bytes::Bytes::from))
+            }
+            RuntimeResponse::Error { message, .. } => {
+                tracing::warn!(error = %message, status = "error", "get failed");
+                Err(MidgeError::Internal(message))
+            }
+            _ => {
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "get got unexpected response"
+                );
+                Err(MidgeError::Internal(
+                    "Unexpected response to get".to_string(),
+                ))
+            }
         }
     }
 
@@ -343,6 +413,17 @@ impl MidgeEngine {
 
     /// Delete a key from a specific column family
     pub fn delete(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
+        let key_size = key.len();
+        let start = Instant::now();
+
+        let span = info_span!("delete_operation", cf_id = cf.id.0, key_size = key_size,);
+        let _enter = span.enter();
+
+        let _midge_span = MidgeSpan::new("delete_operation")
+            .with_operation(OperationType::Delete)
+            .with_cf(cf.id.0)
+            .with_key_size(key_size);
+
         // CRITICAL: Use send_and_wait to ensure tombstone is durable.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
@@ -355,11 +436,28 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::Ok { .. } => Ok(()),
-            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to delete".to_string(),
-            )),
+            RuntimeResponse::Ok { .. } => {
+                let elapsed = start.elapsed();
+                tracing::debug!(
+                    elapsed_us = elapsed.as_micros(),
+                    status = "success",
+                    "delete completed"
+                );
+                Ok(())
+            }
+            RuntimeResponse::Error { message, .. } => {
+                tracing::warn!(error = %message, status = "error", "delete failed");
+                Err(MidgeError::Internal(message))
+            }
+            _ => {
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "delete got unexpected response"
+                );
+                Err(MidgeError::Internal(
+                    "Unexpected response to delete".to_string(),
+                ))
+            }
         }
     }
 
@@ -390,11 +488,13 @@ impl MidgeEngine {
         }
 
         // Send to runtime
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::RegisterMergeOperator {
-            request_id: next_request_id(),
-            cf_id,
-            operator: operator_arc,
-        })?;
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::RegisterMergeOperator {
+                request_id: next_request_id(),
+                cf_id,
+                operator: operator_arc,
+            })?;
 
         match response {
             RuntimeResponse::Ok { .. } => Ok(()),
@@ -412,12 +512,31 @@ impl MidgeEngine {
 
     /// Apply a merge operation to a specific column family
     pub fn merge_cf(&self, cf: &ColumnFamilyHandle, key: &[u8], operand: &[u8]) -> MidgeResult<()> {
+        let key_size = key.len();
+        let operand_size = operand.len();
+        let start = Instant::now();
+
+        let span = info_span!(
+            "merge_operation",
+            cf_id = cf.id.0,
+            key_size = key_size,
+            operand_size = operand_size,
+        );
+        let _enter = span.enter();
+
+        let _midge_span = MidgeSpan::new("merge_operation")
+            .with_operation(OperationType::Merge)
+            .with_cf(cf.id.0)
+            .with_key_size(key_size)
+            .with_value_size(operand_size);
+
         // Check that merge operator is registered
         {
             let ops = self.merge_operators.read().map_err(|e| {
                 MidgeError::Internal(format!("Failed to acquire merge operators lock: {}", e))
             })?;
             if !ops.contains_key(&cf.id.0) {
+                tracing::warn!(cf_id = cf.id.0, "merge operator not registered");
                 return Err(MidgeError::InvalidArgument(format!(
                     "No merge operator registered for column family {}",
                     cf.id.0
@@ -435,11 +554,28 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::Ok { .. } => Ok(()),
-            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to merge".to_string(),
-            )),
+            RuntimeResponse::Ok { .. } => {
+                let elapsed = start.elapsed();
+                tracing::debug!(
+                    elapsed_us = elapsed.as_micros(),
+                    status = "success",
+                    "merge completed"
+                );
+                Ok(())
+            }
+            RuntimeResponse::Error { message, .. } => {
+                tracing::warn!(error = %message, status = "error", "merge failed");
+                Err(MidgeError::Internal(message))
+            }
+            _ => {
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "merge got unexpected response"
+                );
+                Err(MidgeError::Internal(
+                    "Unexpected response to merge".to_string(),
+                ))
+            }
         }
     }
 
@@ -474,6 +610,23 @@ impl MidgeEngine {
         end: &[u8],
         sequence: u64,
     ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+        let start_size = start.len();
+        let end_size = end.len();
+        let start_ts = Instant::now();
+
+        let span = info_span!(
+            "range_scan_operation",
+            cf_id = cf.id.0,
+            start_size = start_size,
+            end_size = end_size,
+        );
+        let _enter = span.enter();
+
+        let _midge_span = MidgeSpan::new("range_scan_operation")
+            .with_operation(OperationType::Range)
+            .with_cf(cf.id.0)
+            .with_key_size(start_size);
+
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
             request_id: next_request_id(),
             cf_id: cf.id.0,
@@ -483,14 +636,33 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::RangeScanResults { results, .. } => Ok(results
-                .into_iter()
-                .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
-                .collect()),
-            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to range scan".to_string(),
-            )),
+            RuntimeResponse::RangeScanResults { results, .. } => {
+                let elapsed = start_ts.elapsed();
+                let result_count = results.len();
+                tracing::debug!(
+                    elapsed_us = elapsed.as_micros(),
+                    result_count = result_count,
+                    status = "success",
+                    "range scan completed"
+                );
+                Ok(results
+                    .into_iter()
+                    .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
+                    .collect())
+            }
+            RuntimeResponse::Error { message, .. } => {
+                tracing::warn!(error = %message, status = "error", "range scan failed");
+                Err(MidgeError::Internal(message))
+            }
+            _ => {
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "range scan got unexpected response"
+                );
+                Err(MidgeError::Internal(
+                    "Unexpected response to range scan".to_string(),
+                ))
+            }
         }
     }
 
@@ -871,7 +1043,9 @@ impl MidgeEngine {
         // TODO: Add RuntimeMsg::CommitTransaction for true atomic commit.
         for intent in write_intents {
             match &intent {
-                api::WriteIntent::Put { cf_id, key, value, .. } => {
+                api::WriteIntent::Put {
+                    cf_id, key, value, ..
+                } => {
                     let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                         request_id: next_request_id(),
                         cf_id: cf_id.as_u32(),
@@ -901,22 +1075,28 @@ impl MidgeEngine {
                         return Err(MidgeError::Internal(message));
                     }
                 }
-                api::WriteIntent::DeleteRange { cf_id, start_key, end_key, .. } => {
+                api::WriteIntent::DeleteRange {
+                    cf_id,
+                    start_key,
+                    end_key,
+                    ..
+                } => {
                     // Delete range by scanning and deleting each key
                     // TODO: Implement efficient range deletion at WAL level
                     // For now, only support default CF (limitation of current API)
                     let cf_handle = ColumnFamilyHandle::new(*cf_id, "default".to_string());
                     let keys = self.range(&cf_handle, start_key, end_key)?;
                     for (key, _) in keys {
-                        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
-                            request_id: next_request_id(),
-                            cf_id: cf_id.as_u32(),
-                            key: key.to_vec(),
-                            value: None,
-                            sequence: self.next_sequence(),
-                            ttl_seconds: None,
-                            insert_only: false,
-                        })?;
+                        let response =
+                            self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+                                request_id: next_request_id(),
+                                cf_id: cf_id.as_u32(),
+                                key: key.to_vec(),
+                                value: None,
+                                sequence: self.next_sequence(),
+                                ttl_seconds: None,
+                                insert_only: false,
+                            })?;
                         if let RuntimeResponse::Error { message, .. } = response {
                             txn.mark_failed()?;
                             return Err(MidgeError::Internal(message));
@@ -960,20 +1140,20 @@ impl MidgeEngine {
 
         match response {
             RuntimeResponse::ColumnFamilyCreated { cf_id, .. } => {
-                let handle = ColumnFamilyHandle::new(
-                    ColumnFamilyId(cf_id),
-                    name.to_string(),
-                );
+                let handle = ColumnFamilyHandle::new(ColumnFamilyId(cf_id), name.to_string());
                 // Register CF in local registry
-                self.column_families.write().expect("column_families lock poisoned").insert(cf_id, handle.clone());
-                
+                self.column_families
+                    .write()
+                    .expect("column_families lock poisoned")
+                    .insert(cf_id, handle.clone());
+
                 // Persist manifest to disk
-                let _persist_response = self.runtime_handle.send_and_wait(
-                    RuntimeMsg::ManifestPersist {
-                        request_id: next_request_id(),
-                    },
-                )?;
-                
+                let _persist_response =
+                    self.runtime_handle
+                        .send_and_wait(RuntimeMsg::ManifestPersist {
+                            request_id: next_request_id(),
+                        })?;
+
                 Ok(handle)
             }
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
@@ -1001,15 +1181,18 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::Ok { .. } => {
                 // Remove from local registry
-                self.column_families.write().expect("column_families lock poisoned").remove(&cf_id.as_u32());
-                
+                self.column_families
+                    .write()
+                    .expect("column_families lock poisoned")
+                    .remove(&cf_id.as_u32());
+
                 // Persist manifest to disk
-                let _persist_response = self.runtime_handle.send_and_wait(
-                    RuntimeMsg::ManifestPersist {
-                        request_id: next_request_id(),
-                    },
-                )?;
-                
+                let _persist_response =
+                    self.runtime_handle
+                        .send_and_wait(RuntimeMsg::ManifestPersist {
+                            request_id: next_request_id(),
+                        })?;
+
                 Ok(())
             }
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
@@ -1021,7 +1204,13 @@ impl MidgeEngine {
 
     /// List all active column families
     pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
-        Ok(self.column_families.read().expect("column_families lock poisoned").values().cloned().collect())
+        Ok(self
+            .column_families
+            .read()
+            .expect("column_families lock poisoned")
+            .values()
+            .cloned()
+            .collect())
     }
 
     /// Compact all data (stub - not implemented)
@@ -1055,7 +1244,9 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::SeqnoAllocated { seqno, .. } => Ok(seqno),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal("Unexpected response from AllocSeqno".to_string())),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response from AllocSeqno".to_string(),
+            )),
         }
     }
 
@@ -1296,13 +1487,18 @@ mod tests {
     #[test]
     fn should_distinguish_between_different_column_family_ids() {
         // Arrange
-        let id_vec = [ColumnFamilyId(0),
+        let id_vec = [
+            ColumnFamilyId(0),
             ColumnFamilyId(1),
             ColumnFamilyId(100),
-            ColumnFamilyId(u32::MAX)];
+            ColumnFamilyId(u32::MAX),
+        ];
 
         // Act
-        let unique_count = id_vec.iter().collect::<std::collections::HashSet<_>>().len();
+        let unique_count = id_vec
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
 
         // Assert: all IDs are unique
         assert_eq!(unique_count, 4);
@@ -1419,8 +1615,14 @@ mod tests {
         let mut handles = Vec::new();
 
         // Act
-        handles.push(ColumnFamilyHandle::new(ColumnFamilyId(0), "default".to_string()));
-        handles.push(ColumnFamilyHandle::new(ColumnFamilyId(1), "secondary".to_string()));
+        handles.push(ColumnFamilyHandle::new(
+            ColumnFamilyId(0),
+            "default".to_string(),
+        ));
+        handles.push(ColumnFamilyHandle::new(
+            ColumnFamilyId(1),
+            "secondary".to_string(),
+        ));
 
         // Assert
         assert_eq!(handles.len(), 2);

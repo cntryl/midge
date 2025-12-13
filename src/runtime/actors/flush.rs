@@ -139,8 +139,9 @@ impl FlushActor {
         path: &Path,
     ) -> MidgeResult<()> {
         // Create SST writer (should not reach here in memory mode, but be defensive)
-        let sst_factory = self.sst_factory.as_ref()
-            .ok_or_else(|| MidgeError::Internal("SST factory not available in memory mode".to_string()))?;
+        let sst_factory = self.sst_factory.as_ref().ok_or_else(|| {
+            MidgeError::Internal("SST factory not available in memory mode".to_string())
+        })?;
         let mut writer = sst_factory.create()?;
 
         // Get all entries from memtable and write to SST

@@ -362,11 +362,11 @@ mod tests {
         // Create and write SST
         let temp_dir = tempfile::tempdir()?;
         let mut writer = crate::sst::fs::writer::FsSstWriter::new(temp_dir.path(), 4096)?;
-        
+
         for (key, value) in entries {
             writer.add(key, value)?;
         }
-        
+
         Box::new(writer).finish_bytes()
     }
 
@@ -387,10 +387,7 @@ mod tests {
     fn should_open_valid_sst_file() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
-        let entries = vec![
-            (b"key1" as &[u8], b"value1" as &[u8]),
-            (b"key2", b"value2"),
-        ];
+        let entries = vec![(b"key1" as &[u8], b"value1" as &[u8]), (b"key2", b"value2")];
         let bytes = create_test_sst(&entries)?;
         let path = temp_dir.path().join("test.sst");
         std::fs::write(&path, &bytes)?;
@@ -544,10 +541,8 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let path = temp_dir.path().join("test.sst");
-        let bytes = create_test_sst(&[
-            (b"key1" as &[u8], b"value1" as &[u8]),
-            (b"key2", b"value2"),
-        ])?;
+        let bytes =
+            create_test_sst(&[(b"key1" as &[u8], b"value1" as &[u8]), (b"key2", b"value2")])?;
         std::fs::write(&path, &bytes)?;
 
         // Act
@@ -579,11 +574,7 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let path = temp_dir.path().join("test.sst");
-        let entries: Vec<(&[u8], &[u8])> = vec![
-            (b"aaa", b"v1"),
-            (b"bbb", b"v2"),
-            (b"ccc", b"v3"),
-        ];
+        let entries: Vec<(&[u8], &[u8])> = vec![(b"aaa", b"v1"), (b"bbb", b"v2"), (b"ccc", b"v3")];
         let bytes = create_test_sst(&entries)?;
         std::fs::write(&path, &bytes)?;
 
@@ -600,10 +591,7 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let path = temp_dir.path().join("test.sst");
-        let bytes = create_test_sst(&[
-            (b"aaa" as &[u8], b"v1" as &[u8]),
-            (b"bbb", b"v2"),
-        ])?;
+        let bytes = create_test_sst(&[(b"aaa" as &[u8], b"v1" as &[u8]), (b"bbb", b"v2")])?;
         std::fs::write(&path, &bytes)?;
 
         // Act
@@ -619,10 +607,7 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let path = temp_dir.path().join("test.sst");
-        let bytes = create_test_sst(&[
-            (b"aaa" as &[u8], b"v1" as &[u8]),
-            (b"bbb", b"v2"),
-        ])?;
+        let bytes = create_test_sst(&[(b"aaa" as &[u8], b"v1" as &[u8]), (b"bbb", b"v2")])?;
         std::fs::write(&path, &bytes)?;
 
         // Act
@@ -670,10 +655,8 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let path = temp_dir.path().join("test.sst");
-        let bytes = create_test_sst(&[
-            (b"key1" as &[u8], b"value1" as &[u8]),
-            (b"key2", b"value2"),
-        ])?;
+        let bytes =
+            create_test_sst(&[(b"key1" as &[u8], b"value1" as &[u8]), (b"key2", b"value2")])?;
         std::fs::write(&path, &bytes)?;
 
         // Act
@@ -746,7 +729,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
             .collect();
-        
+
         let path = temp_dir.path().join("test.sst");
         let bytes = create_test_sst(&entry_refs)?;
         std::fs::write(&path, &bytes)?;
@@ -764,10 +747,8 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let path = temp_dir.path().join("test.sst");
-        let bytes = create_test_sst(&[
-            (b"key1" as &[u8], b"value1" as &[u8]),
-            (b"key2", b"value2"),
-        ])?;
+        let bytes =
+            create_test_sst(&[(b"key1" as &[u8], b"value1" as &[u8]), (b"key2", b"value2")])?;
         std::fs::write(&path, &bytes)?;
 
         // Act

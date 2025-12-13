@@ -18,7 +18,9 @@ pub mod scheduler;
 pub mod state;
 pub mod task;
 
-pub use actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, SeqnoAllocActor, WalActor};
+pub use actors::{
+    CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, SeqnoAllocActor, WalActor,
+};
 pub use dispatch::Dispatcher;
 pub use event_loop::EventLoop;
 pub use scheduler::Scheduler;
@@ -73,11 +75,17 @@ pub enum IntentLogEntry {
     /// Flush plan created
     FlushPlanned { cf_id: u32, seqno_range: (u64, u64) },
     /// Compaction plan created
-    CompactionPlanned { input_files: Vec<String>, output_level: u32 },
+    CompactionPlanned {
+        input_files: Vec<String>,
+        output_level: u32,
+    },
     /// Manifest updated with new SST
     SstAdded { file_meta: FileMeta },
     /// Manifest updated after compaction
-    CompactionApplied { removed: Vec<String>, added: Vec<String> },
+    CompactionApplied {
+        removed: Vec<String>,
+        added: Vec<String>,
+    },
     /// WAL segment synced
     WalSynced { segment_id: u64, seqno: u64 },
     /// Data uploaded to cloud
@@ -669,13 +677,9 @@ mod tests {
         .request_id()
         .is_some());
 
-        assert!(RuntimeMsg::CheckGc { request_id: 4 }
-            .request_id()
-            .is_some());
+        assert!(RuntimeMsg::CheckGc { request_id: 4 }.request_id().is_some());
 
-        assert!(RuntimeMsg::Noop { request_id: 5 }
-            .request_id()
-            .is_some());
+        assert!(RuntimeMsg::Noop { request_id: 5 }.request_id().is_some());
 
         assert!(RuntimeMsg::StartupPing { request_id: 6 }
             .request_id()
@@ -699,10 +703,7 @@ mod tests {
     #[test]
     fn should_extract_request_id_from_all_responses() {
         // Arrange & Act & Assert
-        assert_eq!(
-            RuntimeResponse::Ok { request_id: 1 }.request_id(),
-            1
-        );
+        assert_eq!(RuntimeResponse::Ok { request_id: 1 }.request_id(), 1);
 
         assert_eq!(
             RuntimeResponse::Error {

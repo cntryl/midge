@@ -139,8 +139,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
 
         // Act
-        let factory = FsSstFactory::new(temp_dir.path(), 1024)
-            .with_block_size(2048);
+        let factory = FsSstFactory::new(temp_dir.path(), 1024).with_block_size(2048);
         let mut writer = factory.create()?;
         writer.add(b"key", b"value")?;
         let bytes = writer.finish_bytes()?;

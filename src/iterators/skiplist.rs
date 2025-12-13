@@ -1052,7 +1052,11 @@ mod tests {
         let sl = SkipList::new();
 
         // Act
-        sl.upsert(Bytes::from_static(b"key"), Some(Bytes::from_static(b"value")), 1);
+        sl.upsert(
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            1,
+        );
 
         // Assert
         assert_eq!(sl.get(b"key", u64::MAX), Some(Bytes::from_static(b"value")));
@@ -1118,11 +1122,7 @@ mod tests {
         let binary_val = Bytes::from(vec![0u8, 127u8, 255u8]);
 
         // Act
-        sl.upsert(
-            Bytes::from_static(b"key"),
-            Some(binary_val.clone()),
-            1,
-        );
+        sl.upsert(Bytes::from_static(b"key"), Some(binary_val.clone()), 1);
 
         // Assert
         assert_eq!(sl.get(b"key", u64::MAX), Some(binary_val));
@@ -1210,8 +1210,16 @@ mod tests {
     fn should_hide_future_versions() {
         // Arrange
         let sl = SkipList::new();
-        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v1")), 10);
-        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v2")), 20);
+        sl.upsert(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v1")),
+            10,
+        );
+        sl.upsert(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v2")),
+            20,
+        );
 
         // Act: query at sequence 15 (between 10 and 20)
         let result = sl.get(b"k", 15);
@@ -1225,8 +1233,16 @@ mod tests {
         // Arrange
         let sl = SkipList::new();
         sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v1")), 5);
-        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v2")), 10);
-        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v3")), 15);
+        sl.upsert(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v2")),
+            10,
+        );
+        sl.upsert(
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v3")),
+            15,
+        );
 
         // Act
         let v_at_7 = sl.get(b"k", 7);
@@ -1374,10 +1390,7 @@ mod tests {
 
         // Assert
         let result = sl.get_visible_with_exp(b"k", u64::MAX);
-        assert_eq!(
-            result,
-            Some(Some((Bytes::from_static(b"v"), Some(123456))))
-        );
+        assert_eq!(result, Some(Some((Bytes::from_static(b"v"), Some(123456)))));
     }
 
     #[test]
@@ -1454,18 +1467,12 @@ mod tests {
         );
 
         // Act
-        sl.upsert_exp(
-            Bytes::from_static(b"k"),
-            None,
-            2,
-            None,
-            OpType::Delete,
-        );
+        sl.upsert_exp(Bytes::from_static(b"k"), None, 2, None, OpType::Delete);
 
         // Assert
         let versions = sl.get_versions_for_merge(b"k", u64::MAX);
         assert_eq!(versions[0].2, OpType::Delete); // Most recent
-        assert_eq!(versions[1].2, OpType::Put);    // Older
+        assert_eq!(versions[1].2, OpType::Put); // Older
     }
 
     // ========================================================================
@@ -1587,7 +1594,11 @@ mod tests {
         // Arrange
         let sl = SkipList::new();
         sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"v1")), 5);
-        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"v2")), 15);
+        sl.upsert(
+            Bytes::from_static(b"a"),
+            Some(Bytes::from_static(b"v2")),
+            15,
+        );
         sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"v")), 10);
 
         // Act: snapshot at seq 12
@@ -1608,8 +1619,8 @@ mod tests {
         sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"2")), 10);
 
         // Act: query at different snapshots
-        let at_3 = sl.range_visible(None, None, 3);  // Before delete
-        let at_7 = sl.range_visible(None, None, 7);  // After delete
+        let at_3 = sl.range_visible(None, None, 3); // Before delete
+        let at_7 = sl.range_visible(None, None, 7); // After delete
         let at_15 = sl.range_visible(None, None, 15); // After resurrection
 
         // Assert

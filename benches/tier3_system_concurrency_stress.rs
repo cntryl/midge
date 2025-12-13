@@ -359,9 +359,7 @@ fn bench_concurrent_multi_cf(c: &mut Criterion) {
                             let engine = setup_engine_arc("multi_cf", mode);
                             // Create N column families
                             for i in 1..pairs {
-                                engine
-                                    .create_column_family(&format!("cf{}", i))
-                                    .ok();
+                                engine.create_column_family(&format!("cf{}", i)).ok();
                             }
                             engine
                         },

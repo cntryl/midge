@@ -10,7 +10,7 @@
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
 
-use cntryl_midge::sst::{SkipListMemtable, Memtable};
+use cntryl_midge::sst::{Memtable, SkipListMemtable};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;

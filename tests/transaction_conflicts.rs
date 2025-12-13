@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2025 Cntryl, Inc.
+// Copyright (c) 2025 Cntryl, Inc.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 //! Transaction conflict tests - validates LWW semantics, write conflict handling, and concurrent transaction behavior.
@@ -20,17 +20,19 @@ fn should_allow_concurrent_puts_to_same_key_given_lww_semantics() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.put(cf.id(), b"key".to_vec(), b"value1".to_vec()).unwrap();
-        txn2.put(cf.id(), b"key".to_vec(), b"value2".to_vec()).unwrap();
-        
+
+        txn1.put(cf.id(), b"key".to_vec(), b"value1".to_vec())
+            .unwrap();
+        txn2.put(cf.id(), b"key".to_vec(), b"value2".to_vec())
+            .unwrap();
+
         engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
-        
+
         // Assert - last committed wins
         let value = engine.get(cf, b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"value2")));
@@ -43,20 +45,22 @@ fn should_allow_both_puts_to_succeed_given_concurrent_writes_when_lww() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act
         let result1 = {
             let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key".to_vec(), b"value1".to_vec()).unwrap();
+            txn.put(cf.id(), b"key".to_vec(), b"value1".to_vec())
+                .unwrap();
             engine.commit_transaction(txn)
         };
-        
+
         let result2 = {
             let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key".to_vec(), b"value2".to_vec()).unwrap();
+            txn.put(cf.id(), b"key".to_vec(), b"value2".to_vec())
+                .unwrap();
             engine.commit_transaction(txn)
         };
-        
+
         // Assert - both commits succeed
         assert!(result1.is_ok());
         assert!(result2.is_ok());
@@ -72,20 +76,20 @@ fn should_accept_both_committers_given_concurrent_puts_when_lww() {
         let cf_id = cf.id();
         let engine1 = Arc::clone(&engine);
         let engine2 = Arc::clone(&engine);
-        
+
         // Act
         let handle1 = std::thread::spawn(move || {
             let mut txn = engine1.transaction();
             txn.put(cf_id, b"key".to_vec(), b"value1".to_vec()).unwrap();
             engine1.commit_transaction(txn)
         });
-        
+
         let handle2 = std::thread::spawn(move || {
             let mut txn = engine2.transaction();
             txn.put(cf_id, b"key".to_vec(), b"value2".to_vec()).unwrap();
             engine2.commit_transaction(txn)
         });
-        
+
         // Assert - both commits succeed
         assert!(handle1.join().unwrap().is_ok());
         assert!(handle2.join().unwrap().is_ok());
@@ -98,16 +102,18 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act
         let mut txn1 = engine.transaction();
-        txn1.put(cf.id(), b"key".to_vec(), b"value1".to_vec()).unwrap();
+        txn1.put(cf.id(), b"key".to_vec(), b"value1".to_vec())
+            .unwrap();
         engine.commit_transaction(txn1).unwrap();
-        
+
         let mut txn2 = engine.transaction();
-        txn2.put(cf.id(), b"key".to_vec(), b"value2".to_vec()).unwrap();
+        txn2.put(cf.id(), b"key".to_vec(), b"value2".to_vec())
+            .unwrap();
         drop(txn2); // Rollback
-        
+
         // Assert
         let value = engine.get(cf, b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"value1")));
@@ -121,17 +127,18 @@ fn should_allow_concurrent_delete_put_operations_given_lww_semantics() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         engine.put(cf, b"key", b"initial").unwrap();
-        
+
         // Act
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
+
         txn1.delete(cf.id(), b"key".to_vec()).unwrap();
-        txn2.put(cf.id(), b"key".to_vec(), b"value".to_vec()).unwrap();
-        
+        txn2.put(cf.id(), b"key".to_vec(), b"value".to_vec())
+            .unwrap();
+
         engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
-        
+
         // Assert - last operation wins
         let value = engine.get(cf, b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"value")));
@@ -146,17 +153,19 @@ fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
         let cf = engine.default_column_family();
         engine.put(cf, b"key1", b"value1").unwrap();
         engine.put(cf, b"key2", b"value2").unwrap();
-        
+
         // Act
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec()).unwrap();
-        txn2.put(cf.id(), b"key2".to_vec(), b"newvalue".to_vec()).unwrap();
-        
+
+        txn1.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec())
+            .unwrap();
+        txn2.put(cf.id(), b"key2".to_vec(), b"newvalue".to_vec())
+            .unwrap();
+
         engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
-        
+
         // Assert
         let value = engine.get(cf, b"key2").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"newvalue")));
@@ -169,17 +178,19 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.put(cf.id(), b"key".to_vec(), b"value".to_vec()).unwrap();
-        txn2.delete_range(cf.id(), b"key".to_vec(), b"keyz".to_vec()).unwrap();
-        
+
+        txn1.put(cf.id(), b"key".to_vec(), b"value".to_vec())
+            .unwrap();
+        txn2.delete_range(cf.id(), b"key".to_vec(), b"keyz".to_vec())
+            .unwrap();
+
         engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
-        
+
         // Assert
         let value = engine.get(cf, b"key").unwrap();
         assert_eq!(value, None);
@@ -194,17 +205,19 @@ fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
         let cf = engine.default_column_family();
         engine.put(cf, b"key1", b"value1").unwrap();
         engine.put(cf, b"key2", b"value2").unwrap();
-        
+
         // Act
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec()).unwrap();
-        txn2.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec()).unwrap();
-        
+
+        txn1.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec())
+            .unwrap();
+        txn2.delete_range(cf.id(), b"key1".to_vec(), b"key3".to_vec())
+            .unwrap();
+
         engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
-        
+
         // Assert - both succeed
         assert!(engine.get(cf, b"key1").unwrap().is_none());
     });
@@ -217,17 +230,18 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         engine.put(cf, b"key", b"value").unwrap();
-        
+
         // Act
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.delete_range(cf.id(), b"key".to_vec(), b"keyz".to_vec()).unwrap();
+
+        txn1.delete_range(cf.id(), b"key".to_vec(), b"keyz".to_vec())
+            .unwrap();
         txn2.delete(cf.id(), b"key".to_vec()).unwrap();
-        
+
         engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
-        
+
         // Assert
         assert!(engine.get(cf, b"key").unwrap().is_none());
     });
@@ -243,17 +257,19 @@ fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first()
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act - both transactions try to put same key
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.put(cf.id(), b"key".to_vec(), b"value1".to_vec()).unwrap();
-        txn2.put(cf.id(), b"key".to_vec(), b"value2".to_vec()).unwrap();
-        
+
+        txn1.put(cf.id(), b"key".to_vec(), b"value1".to_vec())
+            .unwrap();
+        txn2.put(cf.id(), b"key".to_vec(), b"value2".to_vec())
+            .unwrap();
+
         let result1 = engine.commit_transaction(txn1);
         let result2 = engine.commit_transaction(txn2);
-        
+
         // Assert - both succeed with LWW semantics (last write wins)
         assert!(result1.is_ok());
         assert!(result2.is_ok());
@@ -269,12 +285,13 @@ fn should_conflict_on_insert_given_key_already_exists_when_committed() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         engine.put(cf, b"key", b"existing").unwrap();
-        
+
         // Act - transaction attempts put on existing key
         let mut txn = engine.transaction();
-        txn.put(cf.id(), b"key".to_vec(), b"newvalue".to_vec()).unwrap();
+        txn.put(cf.id(), b"key".to_vec(), b"newvalue".to_vec())
+            .unwrap();
         let result = engine.commit_transaction(txn);
-        
+
         // Assert - put succeeds (LWW semantics, not insert semantics)
         assert!(result.is_ok());
         let value = engine.get(cf, b"key").unwrap();
@@ -293,19 +310,21 @@ fn should_allow_lost_update_given_put_read_modify_write_when_concurrent() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         engine.put(cf, b"counter", b"0").unwrap();
-        
+
         // Act - simulate lost update with LWW semantics
         let _val1 = engine.get(cf, b"counter").unwrap().unwrap();
         let _val2 = engine.get(cf, b"counter").unwrap().unwrap();
-        
+
         let mut txn1 = engine.transaction();
-        txn1.put(cf.id(), b"counter".to_vec(), b"1".to_vec()).unwrap();
+        txn1.put(cf.id(), b"counter".to_vec(), b"1".to_vec())
+            .unwrap();
         engine.commit_transaction(txn1).unwrap();
-        
+
         let mut txn2 = engine.transaction();
-        txn2.put(cf.id(), b"counter".to_vec(), b"1".to_vec()).unwrap();
+        txn2.put(cf.id(), b"counter".to_vec(), b"1".to_vec())
+            .unwrap();
         engine.commit_transaction(txn2).unwrap();
-        
+
         // Assert - lost update allowed with LWW
         let final_value = engine.get(cf, b"counter").unwrap();
         assert_eq!(final_value, Some(Bytes::from_static(b"1")));
@@ -319,21 +338,24 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         engine.put(cf, b"counter", b"0").unwrap();
-        
+
         // Act - read-modify-write pattern with concurrent modification
         let original = engine.get(cf, b"counter").unwrap().unwrap();
         assert_eq!(original, Bytes::from_static(b"0"));
-        
+
         // Concurrent transaction modifies the counter
         let mut txn_concurrent = engine.transaction();
-        txn_concurrent.put(cf.id(), b"counter".to_vec(), b"2".to_vec()).unwrap();
+        txn_concurrent
+            .put(cf.id(), b"counter".to_vec(), b"2".to_vec())
+            .unwrap();
         engine.commit_transaction(txn_concurrent).unwrap();
-        
+
         // Original transaction continues with stale value
         let mut txn = engine.transaction();
-        txn.put(cf.id(), b"counter".to_vec(), b"1".to_vec()).unwrap();
+        txn.put(cf.id(), b"counter".to_vec(), b"1".to_vec())
+            .unwrap();
         let result = engine.commit_transaction(txn);
-        
+
         // Assert - LWW semantics mean last write wins (value is 1)
         assert!(result.is_ok());
         let value = engine.get(cf, b"counter").unwrap();
@@ -351,20 +373,28 @@ fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commi
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
-        
+
+        txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+            .unwrap();
+        txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
+            .unwrap();
+
         engine.commit_transaction(txn1).unwrap();
         engine.commit_transaction(txn2).unwrap();
-        
+
         // Assert
-        assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
-        assert_eq!(engine.get(cf, b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+        assert_eq!(
+            engine.get(cf, b"key1").unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(
+            engine.get(cf, b"key2").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
     });
 }
 
@@ -374,15 +404,19 @@ fn should_commit_transaction_given_no_conflicts() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act
         let mut txn = engine.transaction();
-        txn.put(cf.id(), b"key".to_vec(), b"value".to_vec()).unwrap();
+        txn.put(cf.id(), b"key".to_vec(), b"value".to_vec())
+            .unwrap();
         let result = engine.commit_transaction(txn);
-        
+
         // Assert
         assert!(result.is_ok());
-        assert_eq!(engine.get(cf, b"key").unwrap(), Some(Bytes::from_static(b"value")));
+        assert_eq!(
+            engine.get(cf, b"key").unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
     });
 }
 
@@ -395,25 +429,33 @@ fn should_commit_transaction_given_concurrent_modifications_to_different_keys() 
         let cf_id = cf.id();
         let engine1 = Arc::clone(&engine);
         let engine2 = Arc::clone(&engine);
-        
+
         // Act
         let handle1 = std::thread::spawn(move || {
             let mut txn = engine1.transaction();
-            txn.put(cf_id, b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            txn.put(cf_id, b"key1".to_vec(), b"value1".to_vec())
+                .unwrap();
             engine1.commit_transaction(txn)
         });
-        
+
         let handle2 = std::thread::spawn(move || {
             let mut txn = engine2.transaction();
-            txn.put(cf_id, b"key2".to_vec(), b"value2".to_vec()).unwrap();
+            txn.put(cf_id, b"key2".to_vec(), b"value2".to_vec())
+                .unwrap();
             engine2.commit_transaction(txn)
         });
-        
+
         // Assert
         assert!(handle1.join().unwrap().is_ok());
         assert!(handle2.join().unwrap().is_ok());
-        assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
-        assert_eq!(engine.get(cf, b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+        assert_eq!(
+            engine.get(cf, b"key1").unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(
+            engine.get(cf, b"key2").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
     });
 }
 
@@ -424,11 +466,11 @@ fn should_read_values_within_transaction() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         engine.put(cf, b"key", b"value").unwrap();
-        
+
         // Act
         let txn = engine.transaction();
         let value = engine.get_transactional(cf, b"key", &txn).unwrap();
-        
+
         // Assert - should read committed value at transaction start
         assert_eq!(value, Some(Bytes::from_static(b"value")));
     });
@@ -440,14 +482,18 @@ fn should_commit_new_key_given_clean_transaction() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act
         let mut txn = engine.transaction();
-        txn.put(cf.id(), b"newkey".to_vec(), b"newvalue".to_vec()).unwrap();
+        txn.put(cf.id(), b"newkey".to_vec(), b"newvalue".to_vec())
+            .unwrap();
         engine.commit_transaction(txn).unwrap();
-        
+
         // Assert
-        assert_eq!(engine.get(cf, b"newkey").unwrap(), Some(Bytes::from_static(b"newvalue")));
+        assert_eq!(
+            engine.get(cf, b"newkey").unwrap(),
+            Some(Bytes::from_static(b"newvalue"))
+        );
     });
 }
 
@@ -463,7 +509,7 @@ fn should_allow_concurrent_writes_to_different_keys() {
         let cf = engine.default_column_family();
         let cf_id = cf.id();
         let mut handles = vec![];
-        
+
         // Act - spawn 10 threads writing different keys
         for i in 0..10 {
             let engine_clone = Arc::clone(&engine);
@@ -471,21 +517,25 @@ fn should_allow_concurrent_writes_to_different_keys() {
                 let mut txn = engine_clone.transaction();
                 let key = format!("key{}", i);
                 let value = format!("value{}", i);
-                txn.put(cf_id, key.as_bytes().to_vec(), value.as_bytes().to_vec()).unwrap();
+                txn.put(cf_id, key.as_bytes().to_vec(), value.as_bytes().to_vec())
+                    .unwrap();
                 engine_clone.commit_transaction(txn)
             });
             handles.push(handle);
         }
-        
+
         // Assert - all commits succeed
         for handle in handles {
             assert!(handle.join().unwrap().is_ok());
         }
-        
+
         for i in 0..10 {
             let key = format!("key{}", i);
             let expected = format!("value{}", i);
-            assert_eq!(engine.get(cf, key.as_bytes()).unwrap(), Some(Bytes::from(expected.as_bytes().to_vec())));
+            assert_eq!(
+                engine.get(cf, key.as_bytes()).unwrap(),
+                Some(Bytes::from(expected.as_bytes().to_vec()))
+            );
         }
     });
 }
@@ -498,24 +548,25 @@ fn should_handle_high_contention_writes_without_panic() {
         let cf = engine.default_column_family();
         let cf_id = cf.id();
         let mut handles = vec![];
-        
+
         // Act - 20 threads writing to same key
         for i in 0..20 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
                 let mut txn = engine_clone.transaction();
                 let value = format!("value{}", i);
-                txn.put(cf_id, b"hotkey".to_vec(), value.as_bytes().to_vec()).unwrap();
+                txn.put(cf_id, b"hotkey".to_vec(), value.as_bytes().to_vec())
+                    .unwrap();
                 engine_clone.commit_transaction(txn)
             });
             handles.push(handle);
         }
-        
+
         // Assert - all commits succeed (LWW semantics)
         for handle in handles {
             assert!(handle.join().unwrap().is_ok());
         }
-        
+
         // One of the values should win
         assert!(engine.get(cf, b"hotkey").unwrap().is_some());
     });
@@ -530,7 +581,7 @@ fn should_handle_concurrent_read_modify_writes_without_panic() {
         let cf_id = cf.id();
         engine.put(cf, b"counter", b"0").unwrap();
         let mut handles = vec![];
-        
+
         // Act - 10 threads incrementing counter
         for i in 0..10 {
             let engine_clone = Arc::clone(&engine);
@@ -539,12 +590,13 @@ fn should_handle_concurrent_read_modify_writes_without_panic() {
                 let _value = engine_clone.get(cf, b"counter").unwrap();
                 let mut txn = engine_clone.transaction();
                 let new_value = format!("{}", i);
-                txn.put(cf_id, b"counter".to_vec(), new_value.as_bytes().to_vec()).unwrap();
+                txn.put(cf_id, b"counter".to_vec(), new_value.as_bytes().to_vec())
+                    .unwrap();
                 engine_clone.commit_transaction(txn)
             });
             handles.push(handle);
         }
-        
+
         // Assert - all commits succeed
         for handle in handles {
             assert!(handle.join().unwrap().is_ok());
@@ -560,7 +612,7 @@ fn should_handle_high_concurrency_optimistic_locking() {
         let cf = engine.default_column_family();
         let cf_id = cf.id();
         let mut handles = vec![];
-        
+
         // Act - 50 threads performing optimistic lock pattern (read then write)
         for i in 0..50 {
             let engine_clone = Arc::clone(&engine);
@@ -568,21 +620,22 @@ fn should_handle_high_concurrency_optimistic_locking() {
                 let cf = engine_clone.default_column_family();
                 // Optimistic lock pattern: read first
                 let _current = engine_clone.get(cf, b"value").unwrap();
-                
+
                 // Then write in transaction
                 let mut txn = engine_clone.transaction();
                 let write_val = format!("{}", i);
-                txn.put(cf_id, b"value".to_vec(), write_val.as_bytes().to_vec()).unwrap();
+                txn.put(cf_id, b"value".to_vec(), write_val.as_bytes().to_vec())
+                    .unwrap();
                 engine_clone.commit_transaction(txn)
             });
             handles.push(handle);
         }
-        
+
         // Assert - all transactions succeed
         for handle in handles {
             assert!(handle.join().unwrap().is_ok());
         }
-        
+
         // Final value should be one of the writes
         assert!(engine.get(cf, b"value").unwrap().is_some());
     });
@@ -608,24 +661,26 @@ fn should_recover_conflict_state_after_engine_restart() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
-            
+
             // Create conflicting transactions where last-write wins
             let mut txn1 = engine.transaction();
-            txn1.put(cf.id(), b"conflict_key".to_vec(), b"value1".to_vec()).unwrap();
+            txn1.put(cf.id(), b"conflict_key".to_vec(), b"value1".to_vec())
+                .unwrap();
             engine.commit_transaction(txn1).unwrap();
-            
+
             let mut txn2 = engine.transaction();
-            txn2.put(cf.id(), b"conflict_key".to_vec(), b"value2".to_vec()).unwrap();
+            txn2.put(cf.id(), b"conflict_key".to_vec(), b"value2".to_vec())
+                .unwrap();
             engine.commit_transaction(txn2).unwrap();
-            
+
             // Engine dropped (simulated crash)
         }
-        
+
         // Act Phase 2 - restart and verify
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // Assert - last written value persists
             let value = engine.get(cf, b"conflict_key").unwrap();
             assert_eq!(value, Some(Bytes::from_static(b"value2")));
@@ -640,27 +695,29 @@ fn should_persist_lost_update_prevention_after_restart() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
-            
+
             // Initial value
             engine.put(cf, b"counter", b"0").unwrap();
-            
+
             // Two transactions attempt concurrent increment
             let mut txn1 = engine.transaction();
-            txn1.put(cf.id(), b"counter".to_vec(), b"1".to_vec()).unwrap();
+            txn1.put(cf.id(), b"counter".to_vec(), b"1".to_vec())
+                .unwrap();
             engine.commit_transaction(txn1).unwrap();
-            
+
             let mut txn2 = engine.transaction();
-            txn2.put(cf.id(), b"counter".to_vec(), b"2".to_vec()).unwrap();
+            txn2.put(cf.id(), b"counter".to_vec(), b"2".to_vec())
+                .unwrap();
             engine.commit_transaction(txn2).unwrap();
-            
+
             // Engine dropped (simulated crash)
         }
-        
+
         // Act Phase 2 - restart and verify
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // Assert - last written value (2) persists
             let value = engine.get(cf, b"counter").unwrap();
             assert_eq!(value, Some(Bytes::from_static(b"2")));

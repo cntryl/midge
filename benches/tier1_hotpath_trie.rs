@@ -139,7 +139,8 @@ fn bench_trie_key_patterns(c: &mut Criterion) {
 
     group.bench_function("long_keys_shared_prefix", |b| {
         b.iter(|| {
-            let block_id = reader_long.find_block(black_box(b"very_long_shared_prefix_key_0000000050"));
+            let block_id =
+                reader_long.find_block(black_box(b"very_long_shared_prefix_key_0000000050"));
             black_box(block_id);
         })
     });

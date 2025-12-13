@@ -99,7 +99,11 @@ impl Database {
     /// Create snapshot of current state
     fn snapshot(&mut self) -> DataSnapshot {
         self.version += 1;
-        let data: Vec<_> = self.data.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let data: Vec<_> = self
+            .data
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         DataSnapshot::new(self.version, data)
     }
 
@@ -155,7 +159,11 @@ impl ReaderStats {
         if self.snapshot_latencies.is_empty() {
             0.0
         } else {
-            self.snapshot_latencies.iter().map(|x| *x as f64).sum::<f64>() / self.snapshot_latencies.len() as f64
+            self.snapshot_latencies
+                .iter()
+                .map(|x| *x as f64)
+                .sum::<f64>()
+                / self.snapshot_latencies.len() as f64
         }
     }
 
@@ -257,7 +265,9 @@ fn bench_snapshot_consistency_concurrent_writes(c: &mut Criterion) {
 
                     for handle in reader_handles {
                         let stats = handle.join().unwrap();
-                        combined_stats.snapshot_latencies.extend(stats.snapshot_latencies);
+                        combined_stats
+                            .snapshot_latencies
+                            .extend(stats.snapshot_latencies);
                         combined_stats.scan_latencies.extend(stats.scan_latencies);
                         total_violations += stats.consistency_violations;
                     }
@@ -266,10 +276,22 @@ fn bench_snapshot_consistency_concurrent_writes(c: &mut Criterion) {
                     println!("\n=== SNAPSHOT CONSISTENCY ({} readers) ===", num_readers);
                     println!("Total snapshots: {}", combined_stats.total_snapshots);
                     println!("Consistency violations: {}", total_violations);
-                    println!("Avg snapshot latency: {:.1}μs", combined_stats.avg_snapshot_latency());
-                    println!("Scan latency p50: {}μs", combined_stats.scan_latency_percentile(50));
-                    println!("Scan latency p95: {}μs", combined_stats.scan_latency_percentile(95));
-                    println!("Scan latency p99: {}μs", combined_stats.scan_latency_percentile(99));
+                    println!(
+                        "Avg snapshot latency: {:.1}μs",
+                        combined_stats.avg_snapshot_latency()
+                    );
+                    println!(
+                        "Scan latency p50: {}μs",
+                        combined_stats.scan_latency_percentile(50)
+                    );
+                    println!(
+                        "Scan latency p95: {}μs",
+                        combined_stats.scan_latency_percentile(95)
+                    );
+                    println!(
+                        "Scan latency p99: {}μs",
+                        combined_stats.scan_latency_percentile(99)
+                    );
 
                     let db_final = db.lock().unwrap();
                     println!("Final write count: {}", db_final.write_count());

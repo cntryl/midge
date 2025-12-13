@@ -16,7 +16,9 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
@@ -119,7 +121,10 @@ struct CompactionSimulator {
 }
 
 impl CompactionSimulator {
-    fn new(input_ssts: Vec<SstSimulator>, cache: std::sync::Arc<std::sync::Mutex<SharedCache>>) -> Self {
+    fn new(
+        input_ssts: Vec<SstSimulator>,
+        cache: std::sync::Arc<std::sync::Mutex<SharedCache>>,
+    ) -> Self {
         let total_blocks: usize = input_ssts.iter().map(|s| s.block_count).sum();
         let output_blocks = (total_blocks as f64 * 0.7) as usize; // Assume 30% reduction from compaction
 
@@ -173,9 +178,11 @@ fn measure_read_latency_with_compaction(
     ];
 
     // Create foreground SSTs (read-optimized layout)
-    let read_ssts = [SstSimulator::new(1, 0, 10_000),
+    let read_ssts = [
+        SstSimulator::new(1, 0, 10_000),
         SstSimulator::new(2, 10_000, 10_000),
-        SstSimulator::new(3, 20_000, 10_000)];
+        SstSimulator::new(3, 20_000, 10_000),
+    ];
 
     let mut compaction = CompactionSimulator::new(input_ssts, cache.clone());
 
@@ -279,7 +286,8 @@ fn bench_compaction_interference_comparison(c: &mut Criterion) {
             &with_compaction,
             |b, &with_compaction| {
                 b.iter(|| {
-                    let (latencies, p50, p99) = measure_read_latency_with_compaction(1000, with_compaction);
+                    let (latencies, p50, p99) =
+                        measure_read_latency_with_compaction(1000, with_compaction);
                     black_box((latencies.len(), p50, p99))
                 })
             },

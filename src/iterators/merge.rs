@@ -334,8 +334,7 @@ mod tests {
     fn should_set_start_bound() {
         // Arrange
         let source = Box::new(MockIterator::new(vec![]));
-        let merge = MergeIterator::new(vec![source])
-            .start(b"x".to_vec());
+        let merge = MergeIterator::new(vec![source]).start(b"x".to_vec());
 
         // Assert: start is set
         assert!(merge.start.is_some());
@@ -346,8 +345,7 @@ mod tests {
     fn should_set_end_bound() {
         // Arrange
         let source = Box::new(MockIterator::new(vec![]));
-        let merge = MergeIterator::new(vec![source])
-            .end(b"z".to_vec());
+        let merge = MergeIterator::new(vec![source]).end(b"z".to_vec());
 
         // Assert: end is set
         assert!(merge.end.is_some());
@@ -431,12 +429,11 @@ mod tests {
             (b"b".to_vec(), b"2".to_vec()),
             (b"c".to_vec(), b"3".to_vec()),
         ]));
-        let mut merge = MergeIterator::new(vec![source])
-            .end(b"c".to_vec());
+        let mut merge = MergeIterator::new(vec![source]).end(b"c".to_vec());
 
         // Act
         merge.init().unwrap();
-        
+
         // Assert: heap contains items a and b (c is filtered by end bound)
         // The heap will have loaded the first item that matches bounds
         assert!(merge.count() > 0);
@@ -553,8 +550,7 @@ mod tests {
             (b"b".to_vec(), b"2".to_vec()),
             (b"c".to_vec(), b"3".to_vec()),
         ]));
-        let mut merge = MergeIterator::new(vec![source])
-            .end(b"b".to_vec());
+        let mut merge = MergeIterator::new(vec![source]).end(b"b".to_vec());
 
         // Act
         merge.init().unwrap();
@@ -574,8 +570,7 @@ mod tests {
             (b"b".to_vec(), b"2".to_vec()),
             (b"c".to_vec(), b"3".to_vec()),
         ]));
-        let mut merge = MergeIterator::new(vec![source])
-            .start(b"b".to_vec());
+        let mut merge = MergeIterator::new(vec![source]).start(b"b".to_vec());
 
         // Act
         merge.init().unwrap();
@@ -672,9 +667,10 @@ mod tests {
     fn should_handle_large_values() {
         // Arrange: large value (1MB)
         let large_val = vec![42u8; 1024 * 1024];
-        let source = Box::new(MockIterator::new(vec![
-            (b"key".to_vec(), large_val.clone()),
-        ]));
+        let source = Box::new(MockIterator::new(vec![(
+            b"key".to_vec(),
+            large_val.clone(),
+        )]));
         let mut merge = MergeIterator::new(vec![source]);
 
         // Act

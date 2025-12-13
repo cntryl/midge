@@ -1,4 +1,4 @@
-﻿//! Memory Mode Isolation Tests
+//! Memory Mode Isolation Tests
 //!
 //! Tests that memory mode creates no persistent filesystem artifacts and isolates
 //! data between engine instances. Memory mode operates entirely in RAM with zero
@@ -25,12 +25,8 @@ fn should_not_create_filesystem_artifacts_when_memory_mode() {
     let engine = open_with_mode(opts, "memory");
     let cf = engine.default_column_family();
 
-    engine
-        .put(cf, b"test_key_1", b"test_value_1")
-        .expect("put");
-    engine
-        .put(cf, b"test_key_2", b"test_value_2")
-        .expect("put");
+    engine.put(cf, b"test_key_1", b"test_value_1").expect("put");
+    engine.put(cf, b"test_key_2", b"test_value_2").expect("put");
     // engine dropped here - memory mode stores nothing on disk
 
     // Assert: Memory mode produces no persistent artifacts
@@ -48,7 +44,9 @@ fn should_not_persist_data_across_restart_given_memory_mode_when_reopening() {
         let cf = engine.default_column_family();
 
         // Act: Write to memory engine
-        engine.put(cf, b"persist_test", b"should_not_persist").expect("put");
+        engine
+            .put(cf, b"persist_test", b"should_not_persist")
+            .expect("put");
         // engine dropped
     }
 
@@ -168,7 +166,16 @@ fn should_handle_mixed_operations_efficiently_when_put_delete_overwrite() {
     engine.put(cf, b"key3", b"v3").expect("put");
 
     // Assert: Correct final state
-    assert_eq!(engine.get(cf, b"key1").expect("get"), Some(Bytes::from_static(b"v1_new")));
-    assert_eq!(engine.get(cf, b"key2").expect("get"), Some(Bytes::from_static(b"v2")));
-    assert_eq!(engine.get(cf, b"key3").expect("get"), Some(Bytes::from_static(b"v3")));
+    assert_eq!(
+        engine.get(cf, b"key1").expect("get"),
+        Some(Bytes::from_static(b"v1_new"))
+    );
+    assert_eq!(
+        engine.get(cf, b"key2").expect("get"),
+        Some(Bytes::from_static(b"v2"))
+    );
+    assert_eq!(
+        engine.get(cf, b"key3").expect("get"),
+        Some(Bytes::from_static(b"v3"))
+    );
 }

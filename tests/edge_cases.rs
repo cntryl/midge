@@ -1,4 +1,4 @@
-﻿//! Edge Cases Tests
+//! Edge Cases Tests
 //!
 //! Tests boundary conditions and unusual scenarios:
 //! - Very large keys (1MB+) and values (100MB+)
@@ -57,10 +57,7 @@ fn should_store_and_retrieve_very_large_values_when_hundred_megabytes() {
         let got = engine.get(cf, small_key).expect("get");
 
         // Assert: Verify size and content
-        assert!(
-            got.is_some(),
-            "failed to retrieve 10MB value in {mode}"
-        );
+        assert!(got.is_some(), "failed to retrieve 10MB value in {mode}");
         assert_eq!(
             got.as_ref().map(|b| b.len()),
             Some(10_000_000),
@@ -78,9 +75,7 @@ fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
 
         // Act: Store values of wildly different sizes
         engine.put(cf, b"tiny", b"x").expect("put");
-        engine
-            .put(cf, b"small", &[42u8; 100])
-            .expect("put");
+        engine.put(cf, b"small", &[42u8; 100]).expect("put");
         engine
             .put(cf, b"medium", &vec![42u8; 100_000])
             .expect("put");
@@ -89,10 +84,22 @@ fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
             .expect("put");
 
         // Assert: Retrieve all and verify
-        assert_eq!(engine.get(cf, b"tiny").expect("get").map(|b| b.len()), Some(1));
-        assert_eq!(engine.get(cf, b"small").expect("get").map(|b| b.len()), Some(100));
-        assert_eq!(engine.get(cf, b"medium").expect("get").map(|b| b.len()), Some(100_000));
-        assert_eq!(engine.get(cf, b"large").expect("get").map(|b| b.len()), Some(1_000_000));
+        assert_eq!(
+            engine.get(cf, b"tiny").expect("get").map(|b| b.len()),
+            Some(1)
+        );
+        assert_eq!(
+            engine.get(cf, b"small").expect("get").map(|b| b.len()),
+            Some(100)
+        );
+        assert_eq!(
+            engine.get(cf, b"medium").expect("get").map(|b| b.len()),
+            Some(100_000)
+        );
+        assert_eq!(
+            engine.get(cf, b"large").expect("get").map(|b| b.len()),
+            Some(1_000_000)
+        );
     });
 }
 
@@ -146,7 +153,10 @@ fn should_handle_empty_database_when_no_keys_written() {
         let got = engine.get(cf, b"nonexistent").expect("get");
 
         // Assert
-        assert_eq!(got, None, "empty database returned unexpected value in {mode:?}");
+        assert_eq!(
+            got, None,
+            "empty database returned unexpected value in {mode:?}"
+        );
     });
 }
 
@@ -170,7 +180,10 @@ fn should_handle_single_record_database_when_one_key_value_pair() {
 
         // Assert: Other keys don't exist
         let not_got = engine.get(cf, b"other_key").expect("get");
-        assert_eq!(not_got, None, "unexpected key found in single-record database");
+        assert_eq!(
+            not_got, None,
+            "unexpected key found in single-record database"
+        );
     });
 }
 
@@ -190,9 +203,19 @@ fn should_handle_range_query_at_boundaries_when_first_last_and_missing() {
         }
 
         // Assert: Boundary keys are retrievable
-        assert!(engine.get(cf, b"key_00").expect("get").is_some(), "first key not found");
-        assert!(engine.get(cf, b"key_04").expect("get").is_some(), "last key not found");
-        assert_eq!(engine.get(cf, b"key_99").expect("get"), None, "non-existent key should be None");
+        assert!(
+            engine.get(cf, b"key_00").expect("get").is_some(),
+            "first key not found"
+        );
+        assert!(
+            engine.get(cf, b"key_04").expect("get").is_some(),
+            "last key not found"
+        );
+        assert_eq!(
+            engine.get(cf, b"key_99").expect("get"),
+            None,
+            "non-existent key should be None"
+        );
     });
 }
 
@@ -233,9 +256,7 @@ fn should_handle_delete_all_pattern_when_writing_then_deleting_all_keys() {
 
         for i in 0..100 {
             let key = format!("del_test_{i:03}");
-            engine
-                .put(cf, key.as_bytes(), b"delete_me")
-                .expect("put");
+            engine.put(cf, key.as_bytes(), b"delete_me").expect("put");
         }
 
         // Act: Delete all keys
@@ -271,10 +292,7 @@ fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
 
         // Assert: Final state is deleted (tombstone wins)
         let got = engine.get(cf, b"tombstone_test").expect("get");
-        assert_eq!(
-            got, None,
-            "tombstone did not win over old put in {mode}"
-        );
+        assert_eq!(got, None, "tombstone did not win over old put in {mode}");
     });
 }
 

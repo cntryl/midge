@@ -467,7 +467,7 @@ mod tests {
     fn should_handle_fpr_values_respecting_extreme_cases() {
         // Arrange & Act
         let size_0 = BloomWriter::calculate_bit_size(100, 0.0001); // Very low FPR
-        let size_1 = BloomWriter::calculate_bit_size(100, 0.99);  // Very high FPR
+        let size_1 = BloomWriter::calculate_bit_size(100, 0.99); // Very high FPR
 
         // Assert
         assert!(size_0 > 0);

@@ -1,11 +1,11 @@
-﻿//! Column Family Integration Tests
+//! Column Family Integration Tests
 //!
 //! Tests for column family lifecycle, isolation, and persistence.
 
-use std::sync::Arc;
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use cntryl_midge::ColumnFamilyId;
+use std::sync::Arc;
 
 // ============================================================================
 // Column Family Creation
@@ -337,7 +337,7 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf1 = engine.create_column_family("cf1").unwrap();
         let cf2 = engine.create_column_family("cf2").unwrap();
-        
+
         // Write data to both CFs
         for i in 0..50 {
             let key = format!("key{}", i);
@@ -349,8 +349,14 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
         // engine.compact_column_family(&cf1).unwrap();
 
         // Assert - both should still have their data
-        assert_eq!(engine.get(&cf1, b"key25").unwrap(), Some(Bytes::from_static(b"value1")));
-        assert_eq!(engine.get(&cf2, b"key25").unwrap(), Some(Bytes::from_static(b"value2")));
+        assert_eq!(
+            engine.get(&cf1, b"key25").unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(
+            engine.get(&cf2, b"key25").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
     });
 }
 
@@ -503,15 +509,21 @@ fn should_isolate_cf_after_flush_given_same_key_when_reading() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf1 = engine.create_column_family("cf1").unwrap();
         let cf2 = engine.create_column_family("cf2").unwrap();
-        
+
         // Act
         engine.put(&cf1, b"key1", b"value1").unwrap();
         engine.put(&cf2, b"key1", b"value2").unwrap();
         // Flush would happen here if we had flush API
 
         // Assert - isolation maintained even after flush
-        assert_eq!(engine.get(&cf1, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
-        assert_eq!(engine.get(&cf2, b"key1").unwrap(), Some(Bytes::from_static(b"value2")));
+        assert_eq!(
+            engine.get(&cf1, b"key1").unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(
+            engine.get(&cf2, b"key1").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
     });
 }
 
@@ -528,7 +540,10 @@ fn should_handle_operations_on_default_cf_given_custom_cfs_exist_when_operating(
         engine.put(default_cf, b"key1", b"default_value").unwrap();
 
         // Assert
-        assert_eq!(engine.get(default_cf, b"key1").unwrap(), Some(Bytes::from_static(b"default_value")));
+        assert_eq!(
+            engine.get(default_cf, b"key1").unwrap(),
+            Some(Bytes::from_static(b"default_value"))
+        );
     });
 }
 

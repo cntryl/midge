@@ -108,7 +108,10 @@ mod tests {
         }
 
         // Assert (with 100 keys and 16 shards, we should see multiple shards)
-        assert!(seen_shards.len() > 1, "Keys should distribute across multiple shards");
+        assert!(
+            seen_shards.len() > 1,
+            "Keys should distribute across multiple shards"
+        );
     }
 
     #[test]

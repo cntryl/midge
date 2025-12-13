@@ -315,7 +315,7 @@ mod tests {
     fn should_encode_and_decode_with_expiration() {
         // Arrange
         let exp = 1234567890u64;
-        
+
         // Act
         let encoded = encode(b"key", 0, None, 0, 0, Some(exp));
         let (entry, _) = decode(&encoded, 0).unwrap();
@@ -338,7 +338,7 @@ mod tests {
     fn should_return_bytes_consumed() {
         // Arrange
         let encoded = encode(b"key", 0, Some(b"val"), 42, 0, None);
-        
+
         // Act
         let (_entry, consumed) = decode(&encoded, 0).unwrap();
 
@@ -373,7 +373,7 @@ mod tests {
     fn should_handle_binary_keys() {
         // Arrange
         let binary_key = vec![0u8, 1u8, 255u8, 254u8, 128u8];
-        
+
         // Act
         let encoded = encode(&binary_key, 0, Some(b"val"), 0, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
@@ -386,7 +386,7 @@ mod tests {
     fn should_decode_from_offset_zero() {
         // Arrange
         let encoded = encode(b"key", 0, Some(b"val"), 0, 0, None);
-        
+
         // Act
         let (entry, _) = decode(&encoded, 0).unwrap();
 
@@ -398,7 +398,7 @@ mod tests {
     fn should_handle_invalid_offset_beyond_data() {
         // Arrange
         let encoded = encode(b"key", 0, Some(b"val"), 0, 0, None);
-        
+
         // Act
         let result = decode(&encoded, encoded.len() + 100);
 
@@ -420,7 +420,7 @@ mod tests {
     fn should_create_tlv_entry_from_decode() {
         // Arrange
         let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
-        
+
         // Act
         let (entry, _) = decode(&encoded, 0).unwrap();
 
@@ -438,7 +438,7 @@ mod tests {
         // Arrange
         let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
         let (entry, _) = decode(&encoded, 0).unwrap();
-        
+
         // Act
         let cloned = entry.clone();
 
@@ -453,7 +453,7 @@ mod tests {
         // Arrange
         let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
         let (entry, _) = decode(&encoded, 0).unwrap();
-        
+
         // Act
         let debug_str = format!("{:?}", entry);
 

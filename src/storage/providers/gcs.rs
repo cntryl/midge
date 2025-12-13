@@ -8,7 +8,7 @@
 use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 
 /// Google Cloud Storage provider
-/// 
+///
 /// Lightweight implementation that sends responses via callbacks.
 /// Full async HTTP implementation can be added via feature flag without SDK dependency.
 ///
@@ -262,10 +262,7 @@ mod tests {
     #[test]
     fn should_handle_special_characters_in_bucket() {
         // Arrange & Act
-        let provider = GcsProvider::new(
-            "my-bucket-123".to_string(),
-            "my_project-123".to_string(),
-        );
+        let provider = GcsProvider::new("my-bucket-123".to_string(), "my_project-123".to_string());
 
         // Assert
         assert_eq!(provider.bucket, "my-bucket-123");

@@ -16,7 +16,9 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
@@ -233,7 +235,8 @@ impl ZipfianDistribution {
         } else if uz < (1.0 + 0.5_f64.powf(self.alpha)) {
             1
         } else {
-            ((self.max_key as f64) * (uz - 1.0).powf(-1.0 / self.alpha)).min(self.max_key as f64 - 1.0) as usize
+            ((self.max_key as f64) * (uz - 1.0).powf(-1.0 / self.alpha))
+                .min(self.max_key as f64 - 1.0) as usize
         }
     }
 }
@@ -360,33 +363,41 @@ fn bench_read_amp_cache_effectiveness(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1000));
 
     for &with_cache in &[true, false] {
-        let label = if with_cache { "with_cache" } else { "without_cache" };
-        group.bench_with_input(BenchmarkId::from_parameter(label), &with_cache, |b, &with_cache| {
-            b.iter(|| {
-                let mut lsm = LsmSimulator::new_zipfian();
+        let label = if with_cache {
+            "with_cache"
+        } else {
+            "without_cache"
+        };
+        group.bench_with_input(
+            BenchmarkId::from_parameter(label),
+            &with_cache,
+            |b, &with_cache| {
+                b.iter(|| {
+                    let mut lsm = LsmSimulator::new_zipfian();
 
-                // If no cache, clear it
-                if !with_cache {
-                    lsm.cache_capacity = 0;
-                }
-
-                let mut zipf = ZipfianDistribution::new(40_000, 1.5);
-                let mut total_blocks_read = 0u32;
-                let mut total_found = 0u32;
-
-                for _ in 0..1000 {
-                    let key_idx = zipf.next();
-                    let key = Bytes::from(format!("key:{:010}", key_idx));
-                    let (br, _, found) = lsm.get(&key);
-                    total_blocks_read += br;
-                    if found {
-                        total_found += 1;
+                    // If no cache, clear it
+                    if !with_cache {
+                        lsm.cache_capacity = 0;
                     }
-                }
 
-                black_box((total_blocks_read, total_found))
-            })
-        });
+                    let mut zipf = ZipfianDistribution::new(40_000, 1.5);
+                    let mut total_blocks_read = 0u32;
+                    let mut total_found = 0u32;
+
+                    for _ in 0..1000 {
+                        let key_idx = zipf.next();
+                        let key = Bytes::from(format!("key:{:010}", key_idx));
+                        let (br, _, found) = lsm.get(&key);
+                        total_blocks_read += br;
+                        if found {
+                            total_found += 1;
+                        }
+                    }
+
+                    black_box((total_blocks_read, total_found))
+                })
+            },
+        );
     }
 
     group.finish();

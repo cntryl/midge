@@ -182,8 +182,7 @@ fn bench_workload_f(c: &mut Criterion) {
 
             // Create additional CFs
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"));
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
 
             // Pre-load full dataset once per engine
@@ -212,8 +211,7 @@ fn bench_workload_f(c: &mut Criterion) {
             let (engine, _t) = setup_engine_fs_nosync();
 
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"));
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
             load_full_dataset(&engine);
 

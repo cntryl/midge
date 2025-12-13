@@ -747,7 +747,13 @@ mod tests {
     #[test]
     fn should_entry_handle_max_expiration() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(u64::MAX));
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            1,
+            0,
+            Some(u64::MAX),
+        );
 
         // Act & Assert
         assert!(!entry.is_expired(u64::MAX - 1));
@@ -756,7 +762,13 @@ mod tests {
     #[test]
     fn should_entry_clone() {
         // Arrange
-        let entry1 = SstEntry::new(b"key".to_vec(), Some(Bytes::from("value")), 100, 0, Some(500));
+        let entry1 = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("value")),
+            100,
+            0,
+            Some(500),
+        );
 
         // Act
         let entry2 = entry1.clone();

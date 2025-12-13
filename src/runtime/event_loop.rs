@@ -119,10 +119,7 @@ impl EventLoop {
                 // =============================================================
                 RuntimeMsg::AllocSeqno { request_id, cf_id } => {
                     let resp = SeqnoAllocActor::alloc_seqno(&mut self.state, cf_id)
-                        .map(|(seqno, _)| RuntimeResponse::SeqnoAllocated {
-                            request_id,
-                            seqno,
-                        })
+                        .map(|(seqno, _)| RuntimeResponse::SeqnoAllocated { request_id, seqno })
                         .unwrap_or_else(|e| RuntimeResponse::Error {
                             request_id,
                             message: e.to_string(),
@@ -722,7 +719,7 @@ mod tests {
     fn should_set_hybrid_storage() {
         // Arrange
         let event_loop = create_test_event_loop().expect("Should create event loop");
-        
+
         // Create a mock hybrid storage (we need to use a real one or skip this test)
         // For now, we'll skip detailed testing of set_hybrid_storage since it requires
         // complex setup with actual HybridStorage instance

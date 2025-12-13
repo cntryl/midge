@@ -595,7 +595,11 @@ mod tests {
             .as_millis() as u64;
 
         // Assert: deleted_at is set and within time window
-        let cf = manifest.column_families.iter().find(|cf| cf.id == cf_id).unwrap();
+        let cf = manifest
+            .column_families
+            .iter()
+            .find(|cf| cf.id == cf_id)
+            .unwrap();
         assert!(cf.deleted_at.is_some());
         let deleted_at = cf.deleted_at.unwrap();
         assert!(deleted_at >= before);

@@ -147,7 +147,7 @@ mod tests {
 
             for (k, v) in &self.data {
                 let k_bytes = k.as_slice();
-                
+
                 // Check start bound
                 if let Some(start_key) = start {
                     if k_bytes < start_key {
@@ -162,10 +162,7 @@ mod tests {
                     }
                 }
 
-                results.push((
-                    Bytes::copy_from_slice(k),
-                    Bytes::copy_from_slice(v),
-                ));
+                results.push((Bytes::copy_from_slice(k), Bytes::copy_from_slice(v)));
             }
 
             Ok(results)

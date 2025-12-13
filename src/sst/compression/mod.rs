@@ -501,7 +501,7 @@ mod tests {
 
         // Assert - should not panic
         match policy {
-            CompressionPolicy::None => {},
+            CompressionPolicy::None => {}
             _ => panic!("wrong policy variant"),
         }
     }
@@ -580,7 +580,9 @@ mod tests {
 
         // Assert
         match cloned {
-            CompressionPolicy::Adaptive { min_savings_bytes, .. } => {
+            CompressionPolicy::Adaptive {
+                min_savings_bytes, ..
+            } => {
                 assert_eq!(min_savings_bytes, 256);
             }
             _ => panic!("clone should preserve variant"),
@@ -727,7 +729,11 @@ mod tests {
 
         // Assert - should return something
         assert!(!compressed.is_empty());
-        assert!(algo == CompressionAlgo::None || algo == CompressionAlgo::Lz4 || algo == CompressionAlgo::Zstd3);
+        assert!(
+            algo == CompressionAlgo::None
+                || algo == CompressionAlgo::Lz4
+                || algo == CompressionAlgo::Zstd3
+        );
     }
 
     #[test]

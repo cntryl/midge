@@ -213,8 +213,7 @@ mod tests {
         let s0: Vec<MergeEntry> = vec![];
 
         // Act
-        let merged: Vec<MergeEntry> =
-            MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
+        let merged: Vec<MergeEntry> = MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
 
         // Assert
         assert!(merged.is_empty());
@@ -234,22 +233,26 @@ mod tests {
         ];
 
         // Act
-        let merged: Vec<MergeEntry> =
-            MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
+        let merged: Vec<MergeEntry> = MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
         let keys: Vec<Vec<u8>> = merged.iter().map(|e| e.key.to_vec()).collect();
 
         // Assert
-        assert_eq!(
-            keys,
-            vec![b"a".to_vec(), b"c".to_vec(), b"e".to_vec()]
-        );
+        assert_eq!(keys, vec![b"a".to_vec(), b"c".to_vec(), b"e".to_vec()]);
     }
 
     #[test]
     fn should_merge_into_global_ascending_key_order_when_interleaved_inputs() {
         // Arrange: inputs with alternating keys
-        let s0 = vec![entry("a", "a0", 1), entry("c", "c0", 1), entry("e", "e0", 1)];
-        let s1 = vec![entry("b", "b1", 1), entry("d", "d1", 1), entry("f", "f1", 1)];
+        let s0 = vec![
+            entry("a", "a0", 1),
+            entry("c", "c0", 1),
+            entry("e", "e0", 1),
+        ];
+        let s1 = vec![
+            entry("b", "b1", 1),
+            entry("d", "d1", 1),
+            entry("f", "f1", 1),
+        ];
 
         // Act
         let merged: Vec<MergeEntry> =
@@ -278,12 +281,9 @@ mod tests {
         let s2 = vec![entry("c", "c2", 1), entry("f", "f2", 1)];
 
         // Act
-        let merged: Vec<MergeEntry> = MergeIterator::from_iterators(vec![
-            s0.into_iter(),
-            s1.into_iter(),
-            s2.into_iter(),
-        ])
-        .collect();
+        let merged: Vec<MergeEntry> =
+            MergeIterator::from_iterators(vec![s0.into_iter(), s1.into_iter(), s2.into_iter()])
+                .collect();
         let keys: Vec<Vec<u8>> = merged.iter().map(|e| e.key.to_vec()).collect();
 
         // Assert
@@ -314,8 +314,7 @@ mod tests {
         ];
 
         // Act
-        let merged: Vec<MergeEntry> =
-            MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
+        let merged: Vec<MergeEntry> = MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
         let seqs: Vec<u64> = merged.iter().map(|e| e.seq).collect();
 
         // Assert: sequences for "x" should be 5, 3, 1 (descending)
@@ -403,12 +402,9 @@ mod tests {
         ]; // 3 entries
 
         // Act
-        let merged: Vec<MergeEntry> = MergeIterator::from_iterators(vec![
-            s0.into_iter(),
-            s1.into_iter(),
-            s2.into_iter(),
-        ])
-        .collect();
+        let merged: Vec<MergeEntry> =
+            MergeIterator::from_iterators(vec![s0.into_iter(), s1.into_iter(), s2.into_iter()])
+                .collect();
 
         // Assert: total 6 entries, all present
         assert_eq!(merged.len(), 6);
@@ -422,20 +418,14 @@ mod tests {
         let s2 = vec![entry("c", "v", 1)];
 
         // Act
-        let merged: Vec<MergeEntry> = MergeIterator::from_iterators(vec![
-            s0.into_iter(),
-            s1.into_iter(),
-            s2.into_iter(),
-        ])
-        .collect();
+        let merged: Vec<MergeEntry> =
+            MergeIterator::from_iterators(vec![s0.into_iter(), s1.into_iter(), s2.into_iter()])
+                .collect();
 
         // Assert: all entries present, none duplicated
         assert_eq!(merged.len(), 3);
         let keys: Vec<Vec<u8>> = merged.iter().map(|e| e.key.to_vec()).collect();
-        assert_eq!(
-            keys,
-            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
-        );
+        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 
     // ============================================================================
@@ -452,8 +442,7 @@ mod tests {
         ];
 
         // Act
-        let merged: Vec<MergeEntry> =
-            MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
+        let merged: Vec<MergeEntry> = MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
 
         // Assert: all 3 entries present in descending sequence order
         assert_eq!(merged.len(), 3);
@@ -504,8 +493,7 @@ mod tests {
         let s0 = vec![entry("k", "v", 0)];
 
         // Act
-        let merged: Vec<MergeEntry> =
-            MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
+        let merged: Vec<MergeEntry> = MergeIterator::from_iterators(vec![s0.into_iter()]).collect();
 
         // Assert
         assert_eq!(merged[0].seq, 0);

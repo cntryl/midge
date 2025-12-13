@@ -171,9 +171,7 @@ mod tests {
         let end1 = Bytes::from_static(b"z");
 
         // Act
-        let query = Query::new()
-            .start_key(start1.clone())
-            .end_key(end1.clone());
+        let query = Query::new().start_key(start1.clone()).end_key(end1.clone());
 
         // Assert - both start and end should be set
         assert_eq!(query.start, Some(start1));
@@ -187,9 +185,7 @@ mod tests {
         let start2 = Bytes::from_static(b"key2");
 
         // Act
-        let query = Query::new()
-            .start_key(start1)
-            .start_key(start2.clone());
+        let query = Query::new().start_key(start1).start_key(start2.clone());
 
         // Assert
         assert_eq!(query.start, Some(start2));
@@ -260,9 +256,7 @@ mod tests {
         let end2 = Bytes::from_static(b"end2");
 
         // Act
-        let query = Query::new()
-            .end_key(end1)
-            .end_key(end2.clone());
+        let query = Query::new().end_key(end1).end_key(end2.clone());
 
         // Assert
         assert_eq!(query.end, Some(end2));
@@ -302,9 +296,7 @@ mod tests {
         let limit = 10;
 
         // Act
-        let query = Query::new()
-            .prefix(prefix.clone())
-            .limit(limit);
+        let query = Query::new().prefix(prefix.clone()).limit(limit);
 
         // Assert
         assert_eq!(query.prefix, Some(prefix));
@@ -318,9 +310,7 @@ mod tests {
         let prefix2 = Bytes::from_static(b"pre2");
 
         // Act
-        let query = Query::new()
-            .prefix(prefix1)
-            .prefix(prefix2.clone());
+        let query = Query::new().prefix(prefix1).prefix(prefix2.clone());
 
         // Assert
         assert_eq!(query.prefix, Some(prefix2));
@@ -353,9 +343,7 @@ mod tests {
     #[test]
     fn should_return_self_for_chaining_when_calling_limit() {
         // Arrange & Act
-        let query = Query::new()
-            .limit(10)
-            .reverse();
+        let query = Query::new().limit(10).reverse();
 
         // Assert
         assert_eq!(query.limit, Some(10));
@@ -365,9 +353,7 @@ mod tests {
     #[test]
     fn should_overwrite_limit_when_calling_limit_twice() {
         // Arrange & Act
-        let query = Query::new()
-            .limit(10)
-            .limit(20);
+        let query = Query::new().limit(10).limit(20);
 
         // Assert
         assert_eq!(query.limit, Some(20));
@@ -409,9 +395,7 @@ mod tests {
         let start = Bytes::from_static(b"a");
 
         // Act
-        let query = Query::new()
-            .start_key(start.clone())
-            .reverse();
+        let query = Query::new().start_key(start.clone()).reverse();
 
         // Assert
         assert_eq!(query.start, Some(start));
@@ -421,9 +405,7 @@ mod tests {
     #[test]
     fn should_keep_reverse_true_when_calling_reverse_multiple_times() {
         // Arrange & Act
-        let query = Query::new()
-            .reverse()
-            .reverse();
+        let query = Query::new().reverse().reverse();
 
         // Assert
         assert!(query.reverse);
@@ -441,10 +423,7 @@ mod tests {
             .start_key(start.clone())
             .end_key(end.clone());
 
-        let query2 = Query::new()
-            .start_key(start)
-            .reverse()
-            .end_key(end);
+        let query2 = Query::new().start_key(start).reverse().end_key(end);
 
         // Assert - reverse should be true in both
         assert!(query1.reverse);
@@ -480,9 +459,7 @@ mod tests {
         // Arrange
         let start_a = Bytes::from_static(b"a");
         let start_b = Bytes::from_static(b"b");
-        let query1 = Query::new()
-            .start_key(start_a.clone())
-            .limit(10);
+        let query1 = Query::new().start_key(start_a.clone()).limit(10);
 
         // Act
         let query2 = query1.clone();
@@ -529,9 +506,7 @@ mod tests {
         // Arrange
         let start = Bytes::from_static(b"start");
         let prefix = Bytes::from_static(b"prefix");
-        let query = Query::new()
-            .prefix(prefix)
-            .start_key(start);
+        let query = Query::new().prefix(prefix).start_key(start);
 
         // Act
         let effective = query.effective_start();
@@ -612,9 +587,7 @@ mod tests {
         // Arrange
         let end = Bytes::from_static(b"end");
         let prefix = Bytes::from_static(b"prefix");
-        let query = Query::new()
-            .prefix(prefix)
-            .end_key(end);
+        let query = Query::new().prefix(prefix).end_key(end);
 
         // Act
         let effective = query.effective_end();
@@ -722,10 +695,7 @@ mod tests {
         let prefix = Bytes::from_static(b"user:");
 
         // Act
-        let query = Query::new()
-            .prefix(prefix.clone())
-            .limit(100)
-            .reverse();
+        let query = Query::new().prefix(prefix.clone()).limit(100).reverse();
 
         // Assert
         assert_eq!(query.prefix, Some(prefix));
@@ -778,9 +748,7 @@ mod tests {
         let prefix = Bytes::from_static(b"prefix");
 
         // Act
-        let query = Query::new()
-            .prefix(prefix.clone())
-            .start_key(start.clone());
+        let query = Query::new().prefix(prefix.clone()).start_key(start.clone());
 
         // Assert
         assert_eq!(query.start, Some(start));
@@ -796,9 +764,7 @@ mod tests {
         let prefix = Bytes::from_static(b"pre");
 
         // Act
-        let query = Query::new()
-            .prefix(prefix.clone())
-            .end_key(end.clone());
+        let query = Query::new().prefix(prefix.clone()).end_key(end.clone());
 
         // Assert
         assert_eq!(query.end, Some(end));

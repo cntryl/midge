@@ -474,7 +474,9 @@ mod tests {
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Act
-        let cf_id = state.create_cf("test_cf".to_string()).expect("create_cf should succeed");
+        let cf_id = state
+            .create_cf("test_cf".to_string())
+            .expect("create_cf should succeed");
 
         // Assert
         assert_eq!(cf_id, 1); // After default (0)
@@ -487,7 +489,9 @@ mod tests {
     fn should_get_column_family_by_id() {
         // Arrange
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-        state.create_cf("my_cf".to_string()).expect("create_cf should succeed");
+        state
+            .create_cf("my_cf".to_string())
+            .expect("create_cf should succeed");
 
         // Act
         let cf = state.get_cf(1);
@@ -510,12 +514,16 @@ mod tests {
     fn should_get_mutable_column_family() {
         // Arrange
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-        state.create_cf("mutable_cf".to_string()).expect("create_cf should succeed");
+        state
+            .create_cf("mutable_cf".to_string())
+            .expect("create_cf should succeed");
 
         // Act
         {
             let cf_mut = state.get_cf_mut(1).expect("get_cf_mut should succeed");
-            cf_mut.immutable_memtables.push(Arc::new(SkipListMemtable::new()));
+            cf_mut
+                .immutable_memtables
+                .push(Arc::new(SkipListMemtable::new()));
         }
 
         // Assert
@@ -543,7 +551,10 @@ mod tests {
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Act
-        state.compaction.compacting_ssts.push("sst_001.sst".to_string());
+        state
+            .compaction
+            .compacting_ssts
+            .push("sst_001.sst".to_string());
         state.compaction.pending_tasks = 3;
 
         // Assert
@@ -557,7 +568,10 @@ mod tests {
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Act
-        state.cloud.pending_uploads.push("sst_remote.sst".to_string());
+        state
+            .cloud
+            .pending_uploads
+            .push("sst_remote.sst".to_string());
         state.cloud.last_cloud_checkpoint_seq = 50;
 
         // Assert
@@ -596,9 +610,15 @@ mod tests {
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Act
-        let cf1 = state.create_cf("cf1".to_string()).expect("create_cf should succeed");
-        let cf2 = state.create_cf("cf2".to_string()).expect("create_cf should succeed");
-        let cf3 = state.create_cf("cf3".to_string()).expect("create_cf should succeed");
+        let cf1 = state
+            .create_cf("cf1".to_string())
+            .expect("create_cf should succeed");
+        let cf2 = state
+            .create_cf("cf2".to_string())
+            .expect("create_cf should succeed");
+        let cf3 = state
+            .create_cf("cf3".to_string())
+            .expect("create_cf should succeed");
 
         // Assert
         assert_eq!(state.column_families.len(), 4); // default + 3 created

@@ -133,8 +133,8 @@ mod tests {
         let factory = BloomFactory::new();
 
         // Act
-        let writer_strict = factory.create_writer(100, 0.001);  // Stricter FPR
-        let writer_loose = factory.create_writer(100, 0.1);    // Looser FPR
+        let writer_strict = factory.create_writer(100, 0.001); // Stricter FPR
+        let writer_loose = factory.create_writer(100, 0.1); // Looser FPR
 
         // Assert
         assert!(writer_strict.size_bytes() > writer_loose.size_bytes());
@@ -224,7 +224,10 @@ mod tests {
         // Assert
         assert!(result.is_ok());
         let reader = result.unwrap();
-        assert_eq!(reader.contains(b"polymorphic"), BloomTestResult::MightBePresent);
+        assert_eq!(
+            reader.contains(b"polymorphic"),
+            BloomTestResult::MightBePresent
+        );
     }
 
     #[test]

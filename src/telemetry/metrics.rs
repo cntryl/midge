@@ -1,0 +1,292 @@
+//! Metrics collection for Midge
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use crate::common::MidgeResult;
+use crate::telemetry::config::TelemetryConfig;
+
+/// Metric counters (atomic, zero-copy)
+#[derive(Debug)]
+pub struct Metrics {
+    // Write operations
+    pub puts: Arc<AtomicU64>,
+    pub deletes: Arc<AtomicU64>,
+    pub merges: Arc<AtomicU64>,
+
+    // WAL operations
+    pub wal_appends: Arc<AtomicU64>,
+    pub wal_syncs: Arc<AtomicU64>,
+    pub wal_bytes_written: Arc<AtomicU64>,
+
+    // SST operations
+    pub sst_created: Arc<AtomicU64>,
+    pub sst_loaded: Arc<AtomicU64>,
+
+    // Compaction
+    pub compactions_run: Arc<AtomicU64>,
+    pub compaction_bytes_rewritten: Arc<AtomicU64>,
+
+    // Cloud operations
+    pub cloud_uploads: Arc<AtomicU64>,
+    pub cloud_downloads: Arc<AtomicU64>,
+    pub cloud_bytes_uploaded: Arc<AtomicU64>,
+    pub cloud_bytes_downloaded: Arc<AtomicU64>,
+
+    // Cache
+    pub cache_hits: Arc<AtomicU64>,
+    pub cache_misses: Arc<AtomicU64>,
+
+    // Write stalls
+    pub write_stalls: Arc<AtomicU64>,
+
+    enabled: bool,
+}
+
+impl Metrics {
+    /// Create a new metrics collector
+    pub fn new(_config: &TelemetryConfig) -> MidgeResult<Self> {
+        Ok(Self {
+            puts: Arc::new(AtomicU64::new(0)),
+            deletes: Arc::new(AtomicU64::new(0)),
+            merges: Arc::new(AtomicU64::new(0)),
+            wal_appends: Arc::new(AtomicU64::new(0)),
+            wal_syncs: Arc::new(AtomicU64::new(0)),
+            wal_bytes_written: Arc::new(AtomicU64::new(0)),
+            sst_created: Arc::new(AtomicU64::new(0)),
+            sst_loaded: Arc::new(AtomicU64::new(0)),
+            compactions_run: Arc::new(AtomicU64::new(0)),
+            compaction_bytes_rewritten: Arc::new(AtomicU64::new(0)),
+            cloud_uploads: Arc::new(AtomicU64::new(0)),
+            cloud_downloads: Arc::new(AtomicU64::new(0)),
+            cloud_bytes_uploaded: Arc::new(AtomicU64::new(0)),
+            cloud_bytes_downloaded: Arc::new(AtomicU64::new(0)),
+            cache_hits: Arc::new(AtomicU64::new(0)),
+            cache_misses: Arc::new(AtomicU64::new(0)),
+            write_stalls: Arc::new(AtomicU64::new(0)),
+            enabled: _config.enabled && _config.enable_metrics,
+        })
+    }
+
+    /// Record a put operation
+    #[inline]
+    pub fn record_put(&self) {
+        if self.enabled {
+            self.puts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a delete operation
+    #[inline]
+    pub fn record_delete(&self) {
+        if self.enabled {
+            self.deletes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a merge operation
+    #[inline]
+    pub fn record_merge(&self) {
+        if self.enabled {
+            self.merges.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a WAL append
+    #[inline]
+    pub fn record_wal_append(&self, bytes: u64) {
+        if self.enabled {
+            self.wal_appends.fetch_add(1, Ordering::Relaxed);
+            self.wal_bytes_written.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a WAL sync
+    #[inline]
+    pub fn record_wal_sync(&self) {
+        if self.enabled {
+            self.wal_syncs.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record SST creation
+    #[inline]
+    pub fn record_sst_created(&self) {
+        if self.enabled {
+            self.sst_created.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record SST load
+    #[inline]
+    pub fn record_sst_loaded(&self) {
+        if self.enabled {
+            self.sst_loaded.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a compaction
+    #[inline]
+    pub fn record_compaction(&self, bytes_rewritten: u64) {
+        if self.enabled {
+            self.compactions_run.fetch_add(1, Ordering::Relaxed);
+            self.compaction_bytes_rewritten
+                .fetch_add(bytes_rewritten, Ordering::Relaxed);
+        }
+    }
+
+    /// Record cloud upload
+    #[inline]
+    pub fn record_cloud_upload(&self, bytes: u64) {
+        if self.enabled {
+            self.cloud_uploads.fetch_add(1, Ordering::Relaxed);
+            self.cloud_bytes_uploaded
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Record cloud download
+    #[inline]
+    pub fn record_cloud_download(&self, bytes: u64) {
+        if self.enabled {
+            self.cloud_downloads.fetch_add(1, Ordering::Relaxed);
+            self.cloud_bytes_downloaded
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Record cache hit
+    #[inline]
+    pub fn record_cache_hit(&self) {
+        if self.enabled {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record cache miss
+    #[inline]
+    pub fn record_cache_miss(&self) {
+        if self.enabled {
+            self.cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record write stall
+    #[inline]
+    pub fn record_write_stall(&self) {
+        if self.enabled {
+            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Get all metrics as a snapshot
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            puts: self.puts.load(Ordering::Relaxed),
+            deletes: self.deletes.load(Ordering::Relaxed),
+            merges: self.merges.load(Ordering::Relaxed),
+            wal_appends: self.wal_appends.load(Ordering::Relaxed),
+            wal_syncs: self.wal_syncs.load(Ordering::Relaxed),
+            wal_bytes_written: self.wal_bytes_written.load(Ordering::Relaxed),
+            sst_created: self.sst_created.load(Ordering::Relaxed),
+            sst_loaded: self.sst_loaded.load(Ordering::Relaxed),
+            compactions_run: self.compactions_run.load(Ordering::Relaxed),
+            compaction_bytes_rewritten: self.compaction_bytes_rewritten.load(Ordering::Relaxed),
+            cloud_uploads: self.cloud_uploads.load(Ordering::Relaxed),
+            cloud_downloads: self.cloud_downloads.load(Ordering::Relaxed),
+            cloud_bytes_uploaded: self.cloud_bytes_uploaded.load(Ordering::Relaxed),
+            cloud_bytes_downloaded: self.cloud_bytes_downloaded.load(Ordering::Relaxed),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            write_stalls: self.write_stalls.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Point-in-time metrics snapshot
+#[derive(Debug, Clone)]
+pub struct MetricsSnapshot {
+    pub puts: u64,
+    pub deletes: u64,
+    pub merges: u64,
+    pub wal_appends: u64,
+    pub wal_syncs: u64,
+    pub wal_bytes_written: u64,
+    pub sst_created: u64,
+    pub sst_loaded: u64,
+    pub compactions_run: u64,
+    pub compaction_bytes_rewritten: u64,
+    pub cloud_uploads: u64,
+    pub cloud_downloads: u64,
+    pub cloud_bytes_uploaded: u64,
+    pub cloud_bytes_downloaded: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub write_stalls: u64,
+}
+
+impl MetricsSnapshot {
+    /// Calculate cache hit ratio (0.0..=1.0)
+    pub fn cache_hit_ratio(&self) -> f64 {
+        let total = self.cache_hits + self.cache_misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.cache_hits as f64 / total as f64
+        }
+    }
+
+    /// Total write operations
+    pub fn total_writes(&self) -> u64 {
+        self.puts + self.deletes + self.merges
+    }
+
+    /// Total cloud bytes transferred
+    pub fn total_cloud_bytes(&self) -> u64 {
+        self.cloud_bytes_uploaded + self.cloud_bytes_downloaded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_record_metrics_atomically() {
+        let config = TelemetryConfig::default().with_enabled(true);
+        let metrics = Metrics::new(&config).unwrap();
+
+        metrics.record_put();
+        metrics.record_put();
+        metrics.record_delete();
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.puts, 2);
+        assert_eq!(snap.deletes, 1);
+    }
+
+    #[test]
+    fn should_calculate_cache_hit_ratio() {
+        let config = TelemetryConfig::default().with_enabled(true);
+        let metrics = Metrics::new(&config).unwrap();
+
+        metrics.record_cache_hit();
+        metrics.record_cache_hit();
+        metrics.record_cache_miss();
+
+        let snap = metrics.snapshot();
+        assert!((snap.cache_hit_ratio() - (2.0 / 3.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_not_record_when_disabled() {
+        let config = TelemetryConfig::default().with_enabled(false);
+        let metrics = Metrics::new(&config).unwrap();
+
+        metrics.record_put();
+        metrics.record_put();
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.puts, 0);
+    }
+}

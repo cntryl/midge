@@ -140,7 +140,10 @@ pub use cloud::CloudStorage;
 pub use filesystem::FileSystem;
 pub use hybrid::{HybridStorage, UploadState, UploadStatus};
 pub use paths::Paths;
-pub use providers::{AwsS3Provider, AzureProvider, GcsProvider, MinioProvider, OciProvider, S3Config, S3Provider, WasabiProvider};
+pub use providers::{
+    AwsS3Provider, AzureProvider, GcsProvider, MinioProvider, OciProvider, S3Config, S3Provider,
+    WasabiProvider,
+};
 
 use crate::common::MidgeResult;
 

@@ -24,6 +24,9 @@
 // Foundation - no dependencies
 pub mod common;
 
+// Telemetry (observability)
+pub mod telemetry;
+
 // Storage abstraction
 pub mod storage;
 
@@ -146,13 +149,13 @@ pub mod prelude {
         Key,
         KvPair,
 
+        // Merge operators
+        MergeOperator,
         // Engine
         MidgeEngine,
         // Errors
         MidgeError,
         MidgeResult,
-        // Merge operators
-        MergeOperator,
         // Configuration
         OpenOptions,
 

@@ -5,8 +5,8 @@
 //! - AWS credential handling (access key, secret key, optional session token)
 //! - Region-specific endpoint routing
 
-use crate::storage::cloud::executor::AwsCredentials;
 use super::s3::S3Provider;
+use crate::storage::cloud::executor::AwsCredentials;
 
 /// AWS S3 provider with SigV4 authentication
 ///

@@ -171,7 +171,7 @@ impl WalReaderDyn for FsWalReader {
 mod tests {
     use super::*;
     use crate::wal::fs::FsWalWriter;
-    use crate::wal::traits::{WalWriter, WalReader};
+    use crate::wal::traits::{WalReader, WalWriter};
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
     use std::fs;
@@ -183,7 +183,7 @@ mod tests {
     fn should_create_reader_for_existing_wal_log() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        
+
         // Create a writer to write some data
         let writer = FsWalWriter::new(dir.path()).unwrap();
         let record = WalRecord {
@@ -287,7 +287,7 @@ mod tests {
     fn should_detect_corruption_on_partial_record() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        
+
         // Write a complete record
         let writer = FsWalWriter::new(dir.path()).unwrap();
         let record = WalRecord {
@@ -638,8 +638,12 @@ mod tests {
 
         // Act
         let mut reader = FsWalReader::new(dir.path()).unwrap();
-        let r1 = WalReader::read_at(&mut reader, positions[0]).unwrap().unwrap();
-        let r2 = WalReader::read_at(&mut reader, positions[1]).unwrap().unwrap();
+        let r1 = WalReader::read_at(&mut reader, positions[0])
+            .unwrap()
+            .unwrap();
+        let r2 = WalReader::read_at(&mut reader, positions[1])
+            .unwrap()
+            .unwrap();
 
         // Assert
         assert_eq!(r1.key, Bytes::from("key1"));
@@ -675,4 +679,3 @@ mod tests {
         assert!(read_record.value.is_none());
     }
 }
-

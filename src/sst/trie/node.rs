@@ -137,7 +137,7 @@ mod tests {
     fn should_create_node_with_large_key_delta() {
         // Arrange
         let large_key: Vec<u8> = vec![42; 1000];
-        
+
         // Act
         let node = TrieNode::new(0, large_key.clone(), Some(1));
 
@@ -214,7 +214,10 @@ mod tests {
         // Assert
         assert_eq!(node.children.len(), 26);
         for i in 0..26 {
-            assert_eq!(node.children[i].first_byte, b"abcdefghijklmnopqrstuvwxyz"[i]);
+            assert_eq!(
+                node.children[i].first_byte,
+                b"abcdefghijklmnopqrstuvwxyz"[i]
+            );
         }
     }
 
@@ -229,10 +232,10 @@ mod tests {
         // Act & Assert
         assert!(node.find_child(b'a').is_some());
         assert_eq!(node.find_child(b'a').unwrap().child_index, 0);
-        
+
         assert!(node.find_child(b'b').is_some());
         assert_eq!(node.find_child(b'b').unwrap().child_index, 1);
-        
+
         assert!(node.find_child(b'c').is_some());
         assert_eq!(node.find_child(b'c').unwrap().child_index, 2);
     }

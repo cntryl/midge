@@ -14,9 +14,7 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{
-    criterion_group, criterion_main, Criterion, SamplingMode, Throughput,
-};
+use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 
 use cntryl_midge::wal::encoding::{decode, encode};
@@ -211,8 +209,6 @@ fn bench_wal_encode_sizes(c: &mut Criterion) {
 
     group.finish();
 }
-
-
 
 criterion_group! {
     name = tier1_hotpath_wal;

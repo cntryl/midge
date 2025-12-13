@@ -7,18 +7,18 @@
 //! - Oracle Cloud Infrastructure (OCI S3 compatibility)
 //! - Any other S3-compatible service
 
-use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 use crate::common::{MidgeError, MidgeResult};
 use crate::storage::cloud::executor::AwsCredentials;
 use crate::storage::cloud::{
     CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
+use crate::storage::cloud::{CloudCallback, CloudEvent, CloudOutcome};
 use chrono::Utc;
 use hex;
 use hmac::{Hmac, Mac};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::Method;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use url::Url;
 use urlencoding::encode;
@@ -477,10 +477,7 @@ impl CloudSigner for SigV4Signer {
 
         let auth_header = format!(
             "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-            self.creds.access_key,
-            credential_scope,
-            signed_headers,
-            signature
+            self.creds.access_key, credential_scope, signed_headers, signature
         );
 
         request.headers.push(("Authorization".into(), auth_header));

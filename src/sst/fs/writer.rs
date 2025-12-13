@@ -445,7 +445,7 @@ mod tests {
         // Act - track offset progression
         let initial_offset = writer.offset;
         writer.add(b"key1", b"value1")?;
-        
+
         // Flush by exceeding block size significantly
         for i in 0..100 {
             let key = format!("k{:04}", i);

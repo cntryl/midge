@@ -15,7 +15,9 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::collections::BinaryHeap;
 use std::hint::black_box;
@@ -85,7 +87,10 @@ struct HeapEntry {
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse order for min-heap
-        other.key.cmp(&self.key).then_with(|| other.sst_id.cmp(&self.sst_id))
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.sst_id.cmp(&self.sst_id))
     }
 }
 

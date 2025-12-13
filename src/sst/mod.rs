@@ -250,7 +250,11 @@ pub trait Memtable: Send + Sync {
     fn get_versions_for_merge(
         &self,
         key: &[u8],
-    ) -> Vec<(Option<bytes::Bytes>, Option<u64>, crate::iterators::skiplist::OpType)>;
+    ) -> Vec<(
+        Option<bytes::Bytes>,
+        Option<u64>,
+        crate::iterators::skiplist::OpType,
+    )>;
 }
 
 /// SkipList-based Memtable (lock-free, MVCC-aware)
@@ -315,11 +319,7 @@ impl SkipListMemtable {
     }
 
     /// Store a merge operand
-    pub fn merge(
-        &self,
-        key: Vec<u8>,
-        operand: Vec<u8>,
-    ) -> MidgeResult<()> {
+    pub fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> MidgeResult<()> {
         let seq = self.next_seq();
         let size_delta = key.len() + operand.len() + 16;
         self.skiplist.upsert_exp(
@@ -384,7 +384,11 @@ impl Memtable for SkipListMemtable {
     fn get_versions_for_merge(
         &self,
         key: &[u8],
-    ) -> Vec<(Option<bytes::Bytes>, Option<u64>, crate::iterators::skiplist::OpType)> {
+    ) -> Vec<(
+        Option<bytes::Bytes>,
+        Option<u64>,
+        crate::iterators::skiplist::OpType,
+    )> {
         self.skiplist.get_versions_for_merge(key, u64::MAX)
     }
 }

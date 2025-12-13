@@ -316,7 +316,6 @@ impl CloudStorage {
     pub fn submit_head(&self, key: String, callback: CloudCallback) {
         self.backend.submit_head(self.full_path(&key), callback);
     }
-
 }
 
 impl StorageBackend for CloudStorage {
@@ -503,7 +502,7 @@ mod tests {
     fn should_route_and_namespace_get_operation() {
         // Arrange
         let storage = CloudStorage::with_mock();
-        
+
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
         storage.submit_put("testfile".into(), vec![1, 2, 3], put_tx);
@@ -548,12 +547,12 @@ mod tests {
     fn should_route_list_and_apply_namespace() {
         // Arrange
         let storage = CloudStorage::with_mock();
-        
+
         // First put multiple files
         let (tx, rx) = mpsc::channel();
         storage.submit_put("prefix/file1".into(), vec![1], tx);
         let _ = rx.recv();
-        
+
         let (tx, rx) = mpsc::channel();
         storage.submit_put("prefix/file2".into(), vec![2], tx);
         let _ = rx.recv();
@@ -582,7 +581,7 @@ mod tests {
     fn should_route_head_and_return_metadata() {
         // Arrange
         let storage = CloudStorage::with_mock();
-        
+
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
         storage.submit_put("testfile".into(), vec![1, 2, 3], put_tx);
@@ -612,7 +611,7 @@ mod tests {
     fn should_route_get_range_with_bounds() {
         // Arrange
         let storage = CloudStorage::with_mock();
-        
+
         // First put a file
         let (put_tx, put_rx) = mpsc::channel();
         storage.submit_put("rangefile".into(), vec![1, 2, 3, 4, 5], put_tx);
@@ -625,7 +624,12 @@ mod tests {
 
         // Assert
         match event {
-            CloudEvent::GetRangeComplete { key, start, end, result } => {
+            CloudEvent::GetRangeComplete {
+                key,
+                start,
+                end,
+                result,
+            } => {
                 assert!(key.starts_with("midge/"));
                 assert_eq!(start, 1);
                 assert_eq!(end, Some(4));
@@ -682,7 +686,7 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let (tx, rx) = mpsc::channel();
-        
+
         // First put a file so we can get it
         let (put_tx, put_rx) = mpsc::channel();
         storage.submit_put("testfile".into(), vec![1, 2, 3], put_tx);
@@ -709,7 +713,7 @@ mod tests {
         let (put_tx, put_rx) = mpsc::channel();
         storage.submit_put("prefix/file1".into(), vec![1], put_tx);
         let _ = put_rx.recv();
-        
+
         let (put_tx, put_rx) = mpsc::channel();
         storage.submit_put("prefix/file2".into(), vec![2], put_tx);
         let _ = put_rx.recv();
@@ -756,21 +760,19 @@ mod tests {
             }
             _ => panic!("Expected PutComplete"),
         }
-        
+
         // Verify we can retrieve it
         let (tx, rx) = mpsc::channel();
         storage.submit_get("largefile".into(), tx);
         let event = rx.recv().unwrap();
-        
+
         match event {
-            CloudEvent::GetComplete { result, .. } => {
-                match result {
-                    CloudOutcome::Ok(data) => {
-                        assert_eq!(data.len(), 1_000_000);
-                    }
-                    _ => panic!("Expected Ok"),
+            CloudEvent::GetComplete { result, .. } => match result {
+                CloudOutcome::Ok(data) => {
+                    assert_eq!(data.len(), 1_000_000);
                 }
-            }
+                _ => panic!("Expected Ok"),
+            },
             _ => panic!("Expected GetComplete"),
         }
     }
@@ -780,12 +782,12 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
         let binary_data = vec![0u8, 1u8, 255u8, 254u8, 127u8, 128u8];
-        
+
         // Act - put the binary file
         let (put_tx, put_rx) = mpsc::channel();
         storage.submit_put("binaryfile".into(), binary_data.clone(), put_tx);
         let _ = put_rx.recv();
-        
+
         // Act - get it back
         let (tx, rx) = mpsc::channel();
         storage.submit_get("binaryfile".into(), tx);
@@ -793,14 +795,12 @@ mod tests {
 
         // Assert
         match event {
-            CloudEvent::GetComplete { result, .. } => {
-                match result {
-                    CloudOutcome::Ok(data) => {
-                        assert_eq!(data, binary_data, "binary data must be preserved exactly");
-                    }
-                    _ => panic!("Expected Ok result"),
+            CloudEvent::GetComplete { result, .. } => match result {
+                CloudOutcome::Ok(data) => {
+                    assert_eq!(data, binary_data, "binary data must be preserved exactly");
                 }
-            }
+                _ => panic!("Expected Ok result"),
+            },
             _ => panic!("Expected GetComplete"),
         }
     }
@@ -813,23 +813,23 @@ mod tests {
         // Put operation
         let (tx, _rx) = mpsc::channel();
         storage.submit_put("f1".into(), vec![1, 2], tx);
-        
+
         // Get operation
         let (tx, _rx) = mpsc::channel();
         storage.submit_get("f2".into(), tx);
-        
+
         // Delete operation
         let (tx, _rx) = mpsc::channel();
         storage.submit_delete("f3".into(), tx);
-        
+
         // List operation
         let (tx, _rx) = mpsc::channel();
         storage.submit_list("prefix".into(), tx);
-        
+
         // Head operation
         let (tx, _rx) = mpsc::channel();
         storage.submit_head("f4".into(), tx);
-        
+
         // Get range operation
         let (tx, _rx) = mpsc::channel();
         storage.submit_get_range("f5".into(), 0, Some(100), tx);
@@ -861,12 +861,12 @@ mod tests {
     fn should_handle_metadata_for_empty_files() {
         // Arrange
         let storage = CloudStorage::with_mock();
-        
+
         // Put an empty file
         let (put_tx, put_rx) = mpsc::channel();
         storage.submit_put("emptyfile".into(), vec![], put_tx);
         let _ = put_rx.recv();
-        
+
         // Act
         let (tx, rx) = mpsc::channel();
         storage.submit_head("emptyfile".into(), tx);
@@ -874,14 +874,12 @@ mod tests {
 
         // Assert
         match event {
-            CloudEvent::HeadComplete { result, .. } => {
-                match result {
-                    CloudOutcome::Ok(metadata) => {
-                        assert_eq!(metadata.size, 0);
-                    }
-                    _ => panic!("Expected Ok metadata"),
+            CloudEvent::HeadComplete { result, .. } => match result {
+                CloudOutcome::Ok(metadata) => {
+                    assert_eq!(metadata.size, 0);
                 }
-            }
+                _ => panic!("Expected Ok metadata"),
+            },
             _ => panic!("Expected HeadComplete"),
         }
     }

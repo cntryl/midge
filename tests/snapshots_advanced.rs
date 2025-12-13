@@ -1,6 +1,6 @@
-﻿//! Advanced Snapshot Tests
+//! Advanced Snapshot Tests
 //!
-//! Tests advanced snapshot scenarios: stress conditions, interaction with 
+//! Tests advanced snapshot scenarios: stress conditions, interaction with
 //! compaction/flush, memory pressure, and edge cases. Validates snapshots
 //! don't block critical operations and handle concurrent scenarios correctly.
 //!
@@ -10,8 +10,8 @@
 //! All tests run on ALL storage modes.
 
 use bytes::Bytes;
-use cntryl_midge::testkit::*;
 use cntryl_midge::engine::api::WriteBatch;
+use cntryl_midge::testkit::*;
 
 // ============================================================================
 // COMPACTION/FLUSH INTERACTION TESTS
@@ -67,7 +67,11 @@ fn should_not_block_flush_given_held_snapshot_when_flush_triggered() {
 
         // Assert: Snapshot remains valid
         let got = snapshot.get(cf, b"flush_test_00").expect("snapshot get");
-        assert!(got.is_some(), "snapshot invalid after flush in mode: {}", mode);
+        assert!(
+            got.is_some(),
+            "snapshot invalid after flush in mode: {}",
+            mode
+        );
     });
 }
 
@@ -156,17 +160,32 @@ fn should_see_consistent_state_given_snapshot_across_write_batch_when_committed(
 
         // Commit write batch
         let mut batch = WriteBatch::new();
-        batch.put(bytes::Bytes::copy_from_slice(b"key1"), bytes::Bytes::copy_from_slice(b"v1_updated"));
-        batch.put(bytes::Bytes::copy_from_slice(b"key2"), bytes::Bytes::copy_from_slice(b"v2"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key1"),
+            bytes::Bytes::copy_from_slice(b"v1_updated"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key2"),
+            bytes::Bytes::copy_from_slice(b"v2"),
+        );
         engine.write_batch(&batch).expect("batch");
 
         // Assert: Snapshot still works (note: may not isolate from batch in current impl)
         let snap_got1 = snapshot.get(cf, b"key1").expect("snapshot get");
-        assert!(snap_got1.is_some(), "snapshot unable to get key in mode: {}", mode);
+        assert!(
+            snap_got1.is_some(),
+            "snapshot unable to get key in mode: {}",
+            mode
+        );
 
         // New reads see post-batch
         let main_got1 = engine.get(cf, b"key1").expect("main get");
-        assert_eq!(main_got1, Some(Bytes::from_static(b"v1_updated")), "batch write not visible in mode: {}", mode);
+        assert_eq!(
+            main_got1,
+            Some(Bytes::from_static(b"v1_updated")),
+            "batch write not visible in mode: {}",
+            mode
+        );
     });
 }
 
@@ -223,7 +242,11 @@ fn should_cleanup_resources_given_snapshot_drop_when_no_longer_needed() {
 
         // Assert: New snapshot works fine
         let got = snapshot2.get(cf, b"key").expect("new snapshot get");
-        assert!(got.is_some(), "cleanup failed to free resources in mode: {}", mode);
+        assert!(
+            got.is_some(),
+            "cleanup failed to free resources in mode: {}",
+            mode
+        );
     });
 }
 
@@ -241,8 +264,12 @@ fn should_preserve_snapshot_across_multiple_column_families_when_created() {
             .unwrap_or_else(|_| cf_default.clone());
 
         // Write to both CFs
-        engine.put(cf_default, b"key", b"cf_default").expect("put cf_default");
-        engine.put(&cf_other, b"key", b"cf_other").expect("put cf_other");
+        engine
+            .put(cf_default, b"key", b"cf_default")
+            .expect("put cf_default");
+        engine
+            .put(&cf_other, b"key", b"cf_other")
+            .expect("put cf_other");
 
         // Act: Create snapshot
         let snapshot = engine.snapshot();
@@ -254,7 +281,15 @@ fn should_preserve_snapshot_across_multiple_column_families_when_created() {
         let snap_def = snapshot.get(cf_default, b"key").expect("snap def get");
         let snap_other = snapshot.get(&cf_other, b"key").expect("snap other get");
 
-        assert!(snap_def.is_some(), "cf_default snapshot invalid in mode: {}", mode);
-        assert!(snap_other.is_some(), "cf_other snapshot invalid in mode: {}", mode);
+        assert!(
+            snap_def.is_some(),
+            "cf_default snapshot invalid in mode: {}",
+            mode
+        );
+        assert!(
+            snap_other.is_some(),
+            "cf_other snapshot invalid in mode: {}",
+            mode
+        );
     });
 }

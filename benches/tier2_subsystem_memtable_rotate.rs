@@ -38,7 +38,9 @@ fn bench_memtable_rotate_small(c: &mut Criterion) {
         b.iter(|| {
             let memtable = SkipListMemtable::new();
             for (key, value) in &kv_pairs {
-                memtable.put_with_exp(key.clone(), value.clone(), None).unwrap();
+                memtable
+                    .put_with_exp(key.clone(), value.clone(), None)
+                    .unwrap();
             }
             // Drain (simulate rotation)
             black_box(memtable.iter_all(u64::MAX))
@@ -60,7 +62,9 @@ fn bench_memtable_rotate_large(c: &mut Criterion) {
         b.iter(|| {
             let memtable = SkipListMemtable::new();
             for (key, value) in &kv_pairs {
-                memtable.put_with_exp(key.clone(), value.clone(), None).unwrap();
+                memtable
+                    .put_with_exp(key.clone(), value.clone(), None)
+                    .unwrap();
             }
             // Drain (simulate rotation)
             black_box(memtable.iter_all(u64::MAX))

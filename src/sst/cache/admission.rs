@@ -257,7 +257,7 @@ mod tests {
         // Act
         counter.record_access(b"");
         counter.record_access(&[255u8; 256]); // All 0xFF bytes
-        counter.record_access(&[0u8; 256]);   // All 0x00 bytes
+        counter.record_access(&[0u8; 256]); // All 0x00 bytes
 
         // Assert
         assert!(counter.estimate(b""));

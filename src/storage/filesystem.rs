@@ -327,12 +327,10 @@ mod tests {
 
         // Assert
         match event {
-            StorageEvent::ReadComplete { result, .. } => {
-                match result {
-                    StorageOutcome::Ok(content) => assert_eq!(content, data),
-                    StorageOutcome::Err(e) => panic!("Read failed: {}", e),
-                }
-            }
+            StorageEvent::ReadComplete { result, .. } => match result {
+                StorageOutcome::Ok(content) => assert_eq!(content, data),
+                StorageOutcome::Err(e) => panic!("Read failed: {}", e),
+            },
             _ => panic!("Expected ReadComplete"),
         }
     }
@@ -351,12 +349,10 @@ mod tests {
 
         // Assert
         match event {
-            StorageEvent::ReadComplete { result, .. } => {
-                match result {
-                    StorageOutcome::Ok(content) => assert!(content.is_empty()),
-                    StorageOutcome::Err(e) => panic!("Read failed: {}", e),
-                }
-            }
+            StorageEvent::ReadComplete { result, .. } => match result {
+                StorageOutcome::Ok(content) => assert!(content.is_empty()),
+                StorageOutcome::Err(e) => panic!("Read failed: {}", e),
+            },
             _ => panic!("Expected ReadComplete"),
         }
     }
@@ -376,12 +372,10 @@ mod tests {
 
         // Assert
         match event {
-            StorageEvent::ReadComplete { result, .. } => {
-                match result {
-                    StorageOutcome::Ok(content) => assert_eq!(content, data),
-                    StorageOutcome::Err(e) => panic!("Read failed: {}", e),
-                }
-            }
+            StorageEvent::ReadComplete { result, .. } => match result {
+                StorageOutcome::Ok(content) => assert_eq!(content, data),
+                StorageOutcome::Err(e) => panic!("Read failed: {}", e),
+            },
             _ => panic!("Expected ReadComplete"),
         }
     }
@@ -472,16 +466,14 @@ mod tests {
 
         // Assert
         match event {
-            StorageEvent::ListComplete { result, .. } => {
-                match result {
-                    StorageOutcome::Ok(items) => {
-                        assert_eq!(items.len(), 2);
-                        assert!(items.contains(&"file1.txt".to_string()));
-                        assert!(items.contains(&"file2.txt".to_string()));
-                    }
-                    StorageOutcome::Err(e) => panic!("List failed: {}", e),
+            StorageEvent::ListComplete { result, .. } => match result {
+                StorageOutcome::Ok(items) => {
+                    assert_eq!(items.len(), 2);
+                    assert!(items.contains(&"file1.txt".to_string()));
+                    assert!(items.contains(&"file2.txt".to_string()));
                 }
-            }
+                StorageOutcome::Err(e) => panic!("List failed: {}", e),
+            },
             _ => panic!("Expected ListComplete"),
         }
     }
@@ -499,12 +491,10 @@ mod tests {
 
         // Assert
         match event {
-            StorageEvent::ListComplete { result, .. } => {
-                match result {
-                    StorageOutcome::Ok(items) => assert!(items.is_empty()),
-                    StorageOutcome::Err(e) => panic!("List failed: {}", e),
-                }
-            }
+            StorageEvent::ListComplete { result, .. } => match result {
+                StorageOutcome::Ok(items) => assert!(items.is_empty()),
+                StorageOutcome::Err(e) => panic!("List failed: {}", e),
+            },
             _ => panic!("Expected ListComplete"),
         }
     }
@@ -522,12 +512,10 @@ mod tests {
 
         // Assert
         match event {
-            StorageEvent::ListComplete { result, .. } => {
-                match result {
-                    StorageOutcome::Ok(items) => assert!(items.is_empty()),
-                    StorageOutcome::Err(e) => panic!("List failed: {}", e),
-                }
-            }
+            StorageEvent::ListComplete { result, .. } => match result {
+                StorageOutcome::Ok(items) => assert!(items.is_empty()),
+                StorageOutcome::Err(e) => panic!("List failed: {}", e),
+            },
             _ => panic!("Expected ListComplete"),
         }
     }

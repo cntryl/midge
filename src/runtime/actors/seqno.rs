@@ -36,13 +36,11 @@ impl SeqnoAllocActor {
             if memtable_size > state.memtable_flush_threshold {
                 // Memtable is too large - signal write stall
                 state.write_stalled = true;
-                return Err(crate::common::MidgeError::WriteStall(
-                    format!(
-                        "memtable full: {}MB > threshold {}MB",
-                        memtable_size / (1024 * 1024),
-                        state.memtable_flush_threshold / (1024 * 1024)
-                    ),
-                ));
+                return Err(crate::common::MidgeError::WriteStall(format!(
+                    "memtable full: {}MB > threshold {}MB",
+                    memtable_size / (1024 * 1024),
+                    state.memtable_flush_threshold / (1024 * 1024)
+                )));
             }
         }
 
@@ -55,6 +53,12 @@ impl SeqnoAllocActor {
             .intent_log
             .push(IntentLogEntry::SeqnoAllocated { seqno, cf_id });
 
-        Ok((seqno, RuntimeResponse::SeqnoAllocated { seqno, request_id: 0 }))
+        Ok((
+            seqno,
+            RuntimeResponse::SeqnoAllocated {
+                seqno,
+                request_id: 0,
+            },
+        ))
     }
 }

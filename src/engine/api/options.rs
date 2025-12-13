@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn should_derive_parameters_when_building() {
         let opts = OpenOptions::new().goal(Goal::Latency).build();
-        
+
         assert!(opts.block_size > 0);
         assert!(opts.memtable_size_limit > 0);
         assert!(opts.target_sst_size > 0);
@@ -525,19 +525,15 @@ mod tests {
 
     #[test]
     fn should_set_wal_sync_for_strict_durability() {
-        let opts = OpenOptions::new()
-            .durability(Durability::Strict)
-            .build();
-        
+        let opts = OpenOptions::new().durability(Durability::Strict).build();
+
         assert!(opts.wal_sync_on_write);
     }
 
     #[test]
     fn should_not_set_wal_sync_for_steady_durability() {
-        let opts = OpenOptions::new()
-            .durability(Durability::Steady)
-            .build();
-        
+        let opts = OpenOptions::new().durability(Durability::Steady).build();
+
         assert!(!opts.wal_sync_on_write);
     }
 
@@ -545,26 +541,24 @@ mod tests {
     fn should_use_different_block_sizes_for_different_goals() {
         let latency_opts = OpenOptions::new().goal(Goal::Latency).build();
         let throughput_opts = OpenOptions::new().goal(Goal::Throughput).build();
-        
+
         assert_ne!(latency_opts.block_size, throughput_opts.block_size);
     }
 
     #[test]
     fn should_use_different_memtable_sizes_for_different_workloads() {
-        let normal = OpenOptions::new()
-            .workload(WorkloadProfile::Mixed)
-            .build();
+        let normal = OpenOptions::new().workload(WorkloadProfile::Mixed).build();
         let write_heavy = OpenOptions::new()
             .workload(WorkloadProfile::WriteHeavy)
             .build();
-        
+
         assert!(write_heavy.memtable_size_limit >= normal.memtable_size_limit);
     }
 
     #[test]
     fn should_derive_parameters_from_default() {
         let opts = OpenOptions::default().build();
-        
+
         assert_eq!(opts.goal, Goal::Latency);
         assert!(opts.block_size > 0);
         assert!(opts.memtable_size_limit > 0);
@@ -573,7 +567,7 @@ mod tests {
     #[test]
     fn should_provide_getter_methods() {
         let opts = OpenOptions::new().build();
-        
+
         let _ = opts.block_size();
         let _ = opts.memtable_size_limit();
         let _ = opts.target_sst_size();
@@ -593,10 +587,8 @@ mod tests {
     fn should_respect_explicit_memory_budget() {
         // Use a realistic budget larger than 2x memtable size to have cache allocation
         let budget = MemoryBudget::Bytes(512 * 1024 * 1024); // 512MB
-        let opts = OpenOptions::new()
-            .memory_budget(budget)
-            .build();
-        
+        let opts = OpenOptions::new().memory_budget(budget).build();
+
         // With explicit budget, cache size should be derived from it
         assert!(opts.block_cache_size > 0);
     }
@@ -607,7 +599,7 @@ mod tests {
             .goal(Goal::Throughput)
             .durability(Durability::Strict);
         let cloned = original.clone();
-        
+
         assert_eq!(cloned.goal, original.goal);
         assert_eq!(cloned.durability, original.durability);
     }

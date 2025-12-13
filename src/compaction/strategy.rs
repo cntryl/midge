@@ -365,7 +365,10 @@ mod tests {
 
         // Act & Assert: verify exponential growth
         assert_eq!(compactor.level_target_size(2), l1_target * multiplier);
-        assert_eq!(compactor.level_target_size(3), l1_target * multiplier * multiplier);
+        assert_eq!(
+            compactor.level_target_size(3),
+            l1_target * multiplier * multiplier
+        );
         assert_eq!(
             compactor.level_target_size(4),
             l1_target * multiplier * multiplier * multiplier
@@ -407,7 +410,10 @@ mod tests {
         let config = LeveledCompactionConfig::default();
 
         // Assert: L1 = L0 * multiplier
-        assert_eq!(config.l1_target_size, config.l0_compaction_threshold * config.level_multiplier);
+        assert_eq!(
+            config.l1_target_size,
+            config.l0_compaction_threshold * config.level_multiplier
+        );
     }
 
     // ============================================================================
@@ -432,8 +438,22 @@ mod tests {
         // Arrange
         let compactor = Compactor::new();
         let files = vec![
-            make_file("file1.sst", 0, 0, 1000, Some(b"a".to_vec()), Some(b"b".to_vec())),
-            make_file("file2.sst", 0, 0, 1000, Some(b"c".to_vec()), Some(b"d".to_vec())),
+            make_file(
+                "file1.sst",
+                0,
+                0,
+                1000,
+                Some(b"a".to_vec()),
+                Some(b"b".to_vec()),
+            ),
+            make_file(
+                "file2.sst",
+                0,
+                0,
+                1000,
+                Some(b"c".to_vec()),
+                Some(b"d".to_vec()),
+            ),
         ];
 
         // Act: request compaction for different CF
@@ -512,7 +532,14 @@ mod tests {
 
         let files = vec![
             // L1 files exceeding target size
-            make_file("file1.sst", 0, 1, l1_target / 2 + 1, Some(b"a".to_vec()), Some(b"m".to_vec())),
+            make_file(
+                "file1.sst",
+                0,
+                1,
+                l1_target / 2 + 1,
+                Some(b"a".to_vec()),
+                Some(b"m".to_vec()),
+            ),
             make_file(
                 "file2.sst",
                 0,
@@ -542,10 +569,31 @@ mod tests {
 
         let files = vec![
             // L0 exceeding threshold
-            make_file("l0_file1.sst", 0, 0, l0_threshold / 2 + 1, Some(b"a".to_vec()), Some(b"m".to_vec())),
-            make_file("l0_file2.sst", 0, 0, l0_threshold / 2 + 1, Some(b"n".to_vec()), Some(b"z".to_vec())),
+            make_file(
+                "l0_file1.sst",
+                0,
+                0,
+                l0_threshold / 2 + 1,
+                Some(b"a".to_vec()),
+                Some(b"m".to_vec()),
+            ),
+            make_file(
+                "l0_file2.sst",
+                0,
+                0,
+                l0_threshold / 2 + 1,
+                Some(b"n".to_vec()),
+                Some(b"z".to_vec()),
+            ),
             // L1 also exceeding target
-            make_file("l1_file1.sst", 0, 1, l1_target / 2 + 1, Some(b"a".to_vec()), Some(b"z".to_vec())),
+            make_file(
+                "l1_file1.sst",
+                0,
+                1,
+                l1_target / 2 + 1,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
         ];
 
         // Act
@@ -562,8 +610,22 @@ mod tests {
         let compactor = Compactor::new();
 
         let files = vec![
-            make_file("file1.sst", 0, 1, 1000, Some(b"a".to_vec()), Some(b"z".to_vec())),
-            make_file("file2.sst", 0, 2, 1000, Some(b"a".to_vec()), Some(b"z".to_vec())),
+            make_file(
+                "file1.sst",
+                0,
+                1,
+                1000,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
+            make_file(
+                "file2.sst",
+                0,
+                2,
+                1000,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
         ];
 
         // Act
@@ -676,7 +738,11 @@ mod tests {
 
         // Assert: no duplicates in input_files
         let plan = plan.unwrap();
-        let unique_count = plan.input_files.iter().collect::<std::collections::HashSet<_>>().len();
+        let unique_count = plan
+            .input_files
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         assert_eq!(unique_count, plan.input_files.len());
     }
 
@@ -687,9 +753,30 @@ mod tests {
         let threshold = compactor.config.l0_compaction_threshold;
 
         let files = vec![
-            make_file("z_file.sst", 0, 0, threshold / 2 + 1, Some(b"z".to_vec()), Some(b"zz".to_vec())),
-            make_file("a_file.sst", 0, 0, threshold / 2 + 1, Some(b"a".to_vec()), Some(b"aa".to_vec())),
-            make_file("m_file.sst", 0, 0, threshold / 2 + 1, Some(b"m".to_vec()), Some(b"mm".to_vec())),
+            make_file(
+                "z_file.sst",
+                0,
+                0,
+                threshold / 2 + 1,
+                Some(b"z".to_vec()),
+                Some(b"zz".to_vec()),
+            ),
+            make_file(
+                "a_file.sst",
+                0,
+                0,
+                threshold / 2 + 1,
+                Some(b"a".to_vec()),
+                Some(b"aa".to_vec()),
+            ),
+            make_file(
+                "m_file.sst",
+                0,
+                0,
+                threshold / 2 + 1,
+                Some(b"m".to_vec()),
+                Some(b"mm".to_vec()),
+            ),
         ];
 
         // Act
@@ -713,8 +800,22 @@ mod tests {
         let threshold = compactor.config.l0_compaction_threshold;
 
         let files = vec![
-            make_file("l0_file.sst", 0, 0, threshold + 1, Some(b"a".to_vec()), Some(b"z".to_vec())),
-            make_file("l1_file.sst", 0, 1, 1000, Some(b"a".to_vec()), Some(b"z".to_vec())),
+            make_file(
+                "l0_file.sst",
+                0,
+                0,
+                threshold + 1,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
+            make_file(
+                "l1_file.sst",
+                0,
+                1,
+                1000,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
         ];
 
         // Act: run pick_compaction twice
@@ -757,7 +858,14 @@ mod tests {
                 Some(b"n".to_vec()),
                 Some(b"z".to_vec()),
             ),
-            make_file("cf1_file.sst", 1, 0, threshold + 1, Some(b"a".to_vec()), Some(b"z".to_vec())),
+            make_file(
+                "cf1_file.sst",
+                1,
+                0,
+                threshold + 1,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
         ];
 
         // Act

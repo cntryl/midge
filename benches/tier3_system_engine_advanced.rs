@@ -139,9 +139,7 @@ fn bench_column_family_scaling(c: &mut Criterion) {
                                 mode,
                             );
                             for i in 1..cf_count {
-                                engine
-                                    .create_column_family(&format!("cf{}", i))
-                                    .unwrap();
+                                engine.create_column_family(&format!("cf{}", i)).unwrap();
                             }
                             engine
                         },

@@ -37,12 +37,12 @@ fn make_value(size: usize) -> Bytes {
 fn create_populated_skiplist(count: usize) -> SkipList {
     let sl = SkipList::new();
     let value = make_value(64);
-    
+
     for i in 0..count {
         let key = make_key(i);
         sl.upsert(key, Some(value.clone()), i as u64);
     }
-    
+
     sl
 }
 
@@ -56,7 +56,7 @@ fn bench_iter_sequential(c: &mut Criterion) {
     // Small dataset for tier-1 speed
     for &count in &[10, 50, 100] {
         let sl = create_populated_skiplist(count);
-        
+
         group.throughput(Throughput::Elements(count as u64));
         group.bench_function(format!("{}_keys", count), |b| {
             b.iter(|| {
@@ -77,11 +77,11 @@ fn bench_range_bounded(c: &mut Criterion) {
 
     // Pre-populate with 100 keys
     let sl = create_populated_skiplist(100);
-    
+
     // Precompute range bounds (avoid allocation in hot path)
     let start_key_narrow = make_key(40);
     let end_key_narrow = make_key(60);
-    
+
     let start_key_wide = make_key(10);
     let end_key_wide = make_key(90);
 
@@ -119,7 +119,7 @@ fn bench_iter_single_step(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     let sl = create_populated_skiplist(100);
-    
+
     // Precompute start key
     let start_key = make_key(50);
 
@@ -127,7 +127,10 @@ fn bench_iter_single_step(c: &mut Criterion) {
     group.bench_function("next_after_seek", |b| {
         b.iter(|| {
             // Seek to position, then get one entry
-            let entries = sl.range(Some(black_box(start_key.as_ref())), Some(black_box(&make_key(51))));
+            let entries = sl.range(
+                Some(black_box(start_key.as_ref())),
+                Some(black_box(&make_key(51))),
+            );
             black_box(entries.first());
         })
     });
@@ -142,14 +145,14 @@ fn bench_range_position(c: &mut Criterion) {
     group.throughput(Throughput::Elements(10));
 
     let sl = create_populated_skiplist(100);
-    
+
     // Precompute range keys
     let start_beginning = make_key(0);
     let end_beginning = make_key(10);
-    
+
     let start_middle = make_key(45);
     let end_middle = make_key(55);
-    
+
     let start_end = make_key(90);
     let end_end = make_key(100);
 
@@ -193,7 +196,7 @@ fn bench_range_bounds_vs_unbounded(c: &mut Criterion) {
     group.throughput(Throughput::Elements(50));
 
     let sl = create_populated_skiplist(50);
-    
+
     let start_key = make_key(0);
     let end_key = make_key(50);
 

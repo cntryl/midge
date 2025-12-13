@@ -194,7 +194,11 @@ mod tests {
     #[test]
     fn should_preserve_input_files_when_creating_task() {
         // Arrange
-        let input_files = vec!["file1.sst".to_string(), "file2.sst".to_string(), "file3.sst".to_string()];
+        let input_files = vec![
+            "file1.sst".to_string(),
+            "file2.sst".to_string(),
+            "file3.sst".to_string(),
+        ];
 
         // Act
         let task = CompactionTask::new(1, 0, 0, 1, input_files.clone());
@@ -449,7 +453,11 @@ mod tests {
     fn should_preserve_input_file_order_when_adding_task() {
         // Arrange
         let mut log = CompactionLog::new();
-        let input_files = vec!["z.sst".to_string(), "a.sst".to_string(), "m.sst".to_string()];
+        let input_files = vec![
+            "z.sst".to_string(),
+            "a.sst".to_string(),
+            "m.sst".to_string(),
+        ];
 
         // Act
         log.add_task(0, 0, 1, input_files.clone());
@@ -557,7 +565,11 @@ mod tests {
         // Arrange
         let mut log = CompactionLog::new();
         let id = log.add_task(0, 0, 1, vec!["input.sst".to_string()]);
-        let output_files = vec!["out1.sst".to_string(), "out2.sst".to_string(), "out3.sst".to_string()];
+        let output_files = vec![
+            "out1.sst".to_string(),
+            "out2.sst".to_string(),
+            "out3.sst".to_string(),
+        ];
 
         // Act
         log.complete_task(id, output_files.clone());
@@ -580,7 +592,10 @@ mod tests {
         log.complete_task(id, vec!["second.sst".to_string()]);
 
         // Assert: latest output set wins
-        assert_eq!(log.get_task(id).unwrap().output_files, vec!["second.sst".to_string()]);
+        assert_eq!(
+            log.get_task(id).unwrap().output_files,
+            vec!["second.sst".to_string()]
+        );
     }
 
     // ============================================================================

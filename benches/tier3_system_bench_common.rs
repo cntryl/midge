@@ -148,10 +148,8 @@ impl BenchStorageMode {
 
 /// All storage modes for comprehensive benchmarking.
 #[allow(dead_code)]
-pub const ALL_STORAGE_MODES: [BenchStorageMode; 2] = [
-    BenchStorageMode::Memory,
-    BenchStorageMode::LocalDisk,
-];
+pub const ALL_STORAGE_MODES: [BenchStorageMode; 2] =
+    [BenchStorageMode::Memory, BenchStorageMode::LocalDisk];
 
 /// Fast storage modes (excludes cloud for quick iteration).
 #[allow(dead_code)]
@@ -160,8 +158,7 @@ pub const FAST_STORAGE_MODES: [BenchStorageMode; 2] =
 
 /// Durable storage modes (excludes memory).
 #[allow(dead_code)]
-pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] =
-    [BenchStorageMode::LocalDisk];
+pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] = [BenchStorageMode::LocalDisk];
 
 // ============================================================================
 // Engine Setup Functions
@@ -225,7 +222,7 @@ impl BenchEngineConfig {
 #[allow(dead_code)]
 pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
     let path = unique_bench_path(prefix);
-    
+
     // Only clean up filesystem paths (memory mode doesn't need cleanup)
     if config.storage_mode != BenchStorageMode::Memory {
         let _ = std::fs::remove_dir_all(&path);

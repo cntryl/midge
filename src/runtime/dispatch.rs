@@ -36,9 +36,11 @@ impl Dispatcher {
             }
 
             // WAL
-            WalAppend { .. } | WalMerge { .. } | WalSync { .. } | WalRotate { .. } | WalSyncComplete { .. } => {
-                TaskKind::Wal
-            }
+            WalAppend { .. }
+            | WalMerge { .. }
+            | WalSync { .. }
+            | WalRotate { .. }
+            | WalSyncComplete { .. } => TaskKind::Wal,
 
             // Cloud
             CloudUploadSst { .. } | CloudUploadWal { .. } | CloudUploadComplete { .. } => {
@@ -469,7 +471,7 @@ mod tests {
     fn should_route_register_merge_operator_to_user() {
         // Arrange
         let dispatcher = create_dispatcher();
-        
+
         // Create a mock merge operator for testing
         use std::sync::Arc;
         #[derive(Debug)]
@@ -488,7 +490,7 @@ mod tests {
                 "mock"
             }
         }
-        
+
         let operator = Arc::new(MockOperator) as Arc<dyn crate::engine::MergeOperator>;
         let msg = RuntimeMsg::RegisterMergeOperator {
             request_id: 1,

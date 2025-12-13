@@ -66,7 +66,9 @@ fn run_workload_d(
     cf_count: usize,
     seed: u64,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families().expect("failed to list column families");
+    let cf_list = engine
+        .list_column_families()
+        .expect("failed to list column families");
 
     let keys = PREGEN_KEYS.get().unwrap();
     let values = PREGEN_VALUES.get().unwrap();
@@ -121,7 +123,9 @@ fn run_workload_d_concurrent(
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families().expect("failed to list column families");
+    let cf_list = engine
+        .list_column_families()
+        .expect("failed to list column families");
 
     let keys = PREGEN_KEYS.get().unwrap();
     let values = PREGEN_VALUES.get().unwrap();
@@ -204,8 +208,7 @@ fn bench_workload_d(c: &mut Criterion) {
 
             // CFs up front, no metadata changes during benchmark
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"));
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
 
             // Load full dataset once per scenario

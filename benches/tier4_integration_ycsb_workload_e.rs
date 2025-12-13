@@ -63,7 +63,9 @@ fn run_workload_e(
     cf_count: usize,
     seed: u64,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families().expect("failed to list column families");
+    let cf_list = engine
+        .list_column_families()
+        .expect("failed to list column families");
     let mut rng = StdRng::seed_from_u64(seed);
     let mut hist = Histogram::<u64>::new(3).unwrap();
 
@@ -79,12 +81,7 @@ fn run_workload_e(
         let query = Query::new()
             .start_key(start_key.clone())
             .end_key(end_key.clone());
-        let iter = engine
-            .scan(
-                cf,
-                &query,
-            )
-            .unwrap();
+        let iter = engine.scan(cf, &query).unwrap();
         for item in &iter {
             black_box(item);
         }
@@ -107,7 +104,9 @@ fn run_workload_e_concurrent(
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families().expect("failed to list column families");
+    let cf_list = engine
+        .list_column_families()
+        .expect("failed to list column families");
     let mut rng = make_thread_rng(thread_id, 0xABCDEF01);
 
     let mut hist = Histogram::<u64>::new(3).unwrap();
@@ -124,12 +123,7 @@ fn run_workload_e_concurrent(
         let query = Query::new()
             .start_key(start_key.clone())
             .end_key(end_key.clone());
-        let iter = engine
-            .scan(
-                cf,
-                &query,
-            )
-            .unwrap();
+        let iter = engine.scan(cf, &query).unwrap();
         for item in &iter {
             black_box(item);
         }
@@ -177,8 +171,7 @@ fn bench_workload_e(c: &mut Criterion) {
             };
 
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"));
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
 
             load_full_dataset(&engine);
@@ -202,8 +195,7 @@ fn bench_workload_e(c: &mut Criterion) {
         for &threads in &THREAD_COUNTS {
             let (engine, _t) = setup_engine_fs_nosync();
             for i in 1..cf_count {
-                let _ =
-                    engine.create_column_family(&format!("cf{cf_count}_{i}"));
+                let _ = engine.create_column_family(&format!("cf{cf_count}_{i}"));
             }
             load_full_dataset(&engine);
 

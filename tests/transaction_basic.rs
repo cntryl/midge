@@ -1,4 +1,4 @@
-﻿//! Transaction Basic Tests
+//! Transaction Basic Tests
 //!
 //! Core transaction functionality: begin, commit, rollback, isolation.
 
@@ -19,14 +19,22 @@ fn should_commit_transaction_given_multiple_operations_when_committed() {
 
         // Act
         let mut txn = engine.transaction();
-        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
+        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+            .unwrap();
+        txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
+            .unwrap();
         txn.delete(cf.id(), b"key3".to_vec()).unwrap();
         engine.commit_transaction(txn).unwrap();
 
         // Assert
-        assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
-        assert_eq!(engine.get(cf, b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+        assert_eq!(
+            engine.get(cf, b"key1").unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
+        assert_eq!(
+            engine.get(cf, b"key2").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
         assert_eq!(engine.get(cf, b"key3").unwrap(), None);
     });
 }
@@ -57,7 +65,8 @@ fn should_succeed_given_read_only_transaction_when_committed() {
         // Act
         let mut txn = engine.transaction();
         let _value = engine.get(cf, b"key1").unwrap();
-        txn.read(cf.id(), b"key1", Some(b"value1".to_vec()), 1).unwrap();
+        txn.read(cf.id(), b"key1", Some(b"value1".to_vec()), 1)
+            .unwrap();
         let result = engine.commit_transaction(txn);
 
         // Assert
@@ -79,7 +88,8 @@ fn should_rollback_transaction_given_uncommitted_when_dropped() {
         // Act
         {
             let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+                .unwrap();
             // txn dropped here without commit
         }
 
@@ -99,14 +109,19 @@ fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
         // Act
         {
             let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key1".to_vec(), b"updated".to_vec()).unwrap();
-            txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
+            txn.put(cf.id(), b"key1".to_vec(), b"updated".to_vec())
+                .unwrap();
+            txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
+                .unwrap();
             txn.delete(cf.id(), b"key3".to_vec()).unwrap();
             // txn dropped without commit
         }
 
         // Assert - original value preserved, new writes not visible
-        assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"original")));
+        assert_eq!(
+            engine.get(cf, b"key1").unwrap(),
+            Some(Bytes::from_static(b"original"))
+        );
         assert_eq!(engine.get(cf, b"key2").unwrap(), None);
     });
 }
@@ -121,17 +136,22 @@ fn should_release_locks_given_aborted_transaction_when_cleanup() {
         // Act - first txn acquires lock and aborts
         {
             let mut txn1 = engine.transaction();
-            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+                .unwrap();
             // Dropped without commit - should release lock
         }
 
         // Second txn should be able to acquire the lock
         let mut txn2 = engine.transaction();
-        txn2.put(cf.id(), b"key1".to_vec(), b"value2".to_vec()).unwrap();
+        txn2.put(cf.id(), b"key1".to_vec(), b"value2".to_vec())
+            .unwrap();
         engine.commit_transaction(txn2).unwrap();
 
         // Assert
-        assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"value2")));
+        assert_eq!(
+            engine.get(cf, b"key1").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
     });
 }
 
@@ -149,7 +169,7 @@ fn should_provide_snapshot_isolation_given_concurrent_writes_when_transaction_ac
 
         // Act - start transaction (captures snapshot)
         let txn = engine.transaction();
-        
+
         // Concurrent write happens outside transaction
         engine.put(cf, b"key1", b"v2").unwrap();
 
@@ -157,8 +177,10 @@ fn should_provide_snapshot_isolation_given_concurrent_writes_when_transaction_ac
         // (This requires snapshot-based reads in transaction, which may not be implemented yet)
         // For now, transactions see latest committed data
         let value = engine.get(cf, b"key1").unwrap();
-        assert!(value == Some(Bytes::from_static(b"v1")) || value == Some(Bytes::from_static(b"v2")));
-        
+        assert!(
+            value == Some(Bytes::from_static(b"v1")) || value == Some(Bytes::from_static(b"v2"))
+        );
+
         // Drop transaction
         drop(txn);
     });
@@ -173,14 +195,15 @@ fn should_read_own_writes_given_transaction_when_reading() {
 
         // Act
         let mut txn = engine.transaction();
-        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        
+        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+            .unwrap();
+
         // Read within same transaction using get_transactional
         let value = engine.get_transactional(cf, b"key1", &txn).unwrap();
-        
+
         // Assert - should see own uncommitted write
         assert_eq!(value, Some(Bytes::from_static(b"value1")));
-        
+
         engine.commit_transaction(txn).unwrap();
     });
 }
@@ -199,11 +222,15 @@ fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
         // Act
         let mut txn = engine.transaction();
         // txn.insert(b"key1", b"value1").unwrap(); // Need insert API
-        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+            .unwrap();
         engine.commit_transaction(txn).unwrap();
 
         // Assert
-        assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
+        assert_eq!(
+            engine.get(cf, b"key1").unwrap(),
+            Some(Bytes::from_static(b"value1"))
+        );
     });
 }
 
@@ -225,7 +252,10 @@ fn should_delete_range_given_committed_transaction_when_delete_range() {
         // Assert
         assert_eq!(engine.get(cf, b"key1").unwrap(), None);
         assert_eq!(engine.get(cf, b"key2").unwrap(), None);
-        assert_eq!(engine.get(cf, b"key3").unwrap(), Some(Bytes::from_static(b"v3")));
+        assert_eq!(
+            engine.get(cf, b"key3").unwrap(),
+            Some(Bytes::from_static(b"v3"))
+        );
     });
 }
 
@@ -242,7 +272,7 @@ fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
         // Act
         let mut _txn = engine.transaction();
         engine.delete_range(cf, b"key1", b"key3").unwrap();
-        
+
         // Scan within transaction (need txn.range_scan API)
         // let results = txn.range_scan(b"key0", b"key9").unwrap();
 
@@ -263,7 +293,7 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
         let mut _txn = engine.transaction();
         // txn.put(b"key1", b"value1").unwrap();
         // txn.put(b"key2", b"value2").unwrap();
-        
+
         // Scan within transaction
         // let results = txn.range_scan(b"key0", b"key9").unwrap();
 
@@ -286,18 +316,23 @@ fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
         // Act - first transaction fails (simulated disk full)
         {
             let mut txn1 = engine.transaction();
-            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+                .unwrap();
             // Simulate commit failure
             // let _result = engine.commit_transaction(txn1); // Would fail
         }
 
         // Second transaction should work
         let mut txn2 = engine.transaction();
-        txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
+        txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
+            .unwrap();
         engine.commit_transaction(txn2).unwrap();
 
         // Assert
-        assert_eq!(engine.get(cf, b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+        assert_eq!(
+            engine.get(cf, b"key2").unwrap(),
+            Some(Bytes::from_static(b"value2"))
+        );
     });
 }
 
@@ -313,7 +348,8 @@ fn should_persist_transaction_given_commit_when_crash_after() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
             let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+                .unwrap();
             engine.commit_transaction(txn).unwrap();
             // Engine dropped (simulated crash)
         }
@@ -336,7 +372,8 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
             let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+                .unwrap();
             // Txn dropped without commit
             // Engine dropped (simulated crash)
         }
@@ -358,16 +395,18 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
-            
+
             // Multiple transactions
             let mut txn1 = engine.transaction();
-            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
+            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+                .unwrap();
             engine.commit_transaction(txn1).unwrap();
 
             let mut txn2 = engine.transaction();
-            txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
+            txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
+                .unwrap();
             engine.commit_transaction(txn2).unwrap();
-            
+
             // Engine dropped
         }
 
@@ -375,8 +414,14 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            assert_eq!(engine.get(cf, b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
-            assert_eq!(engine.get(cf, b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
+            assert_eq!(
+                engine.get(cf, b"key1").unwrap(),
+                Some(Bytes::from_static(b"value1"))
+            );
+            assert_eq!(
+                engine.get(cf, b"key2").unwrap(),
+                Some(Bytes::from_static(b"value2"))
+            );
         }
     });
 }

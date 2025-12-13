@@ -116,7 +116,12 @@ impl BlockCache {
 
         // LRU eviction if needed
         if self.blocks.len() >= self.capacity {
-            if let Some(&oldest_id) = self.blocks.iter().min_by_key(|(_, &time)| time).map(|(id, _)| id) {
+            if let Some(&oldest_id) = self
+                .blocks
+                .iter()
+                .min_by_key(|(_, &time)| time)
+                .map(|(id, _)| id)
+            {
                 self.blocks.remove(&oldest_id);
             }
         }
@@ -141,7 +146,12 @@ impl BlockCache {
         if self.blocks.len() > self.capacity {
             // Evict oldest entries
             while self.blocks.len() > self.capacity {
-                if let Some(&oldest_id) = self.blocks.iter().min_by_key(|(_, &time)| time).map(|(id, _)| id) {
+                if let Some(&oldest_id) = self
+                    .blocks
+                    .iter()
+                    .min_by_key(|(_, &time)| time)
+                    .map(|(id, _)| id)
+                {
                     self.blocks.remove(&oldest_id);
                 }
             }
@@ -265,8 +275,14 @@ fn bench_read_latency_during_flush(c: &mut Criterion) {
 
             println!("\n=== IMPACT ===");
             println!("p99 regression: {:.1}%", p99_regression);
-            println!("Cache hit rate (baseline): {:.1}%", baseline_latencies.avg() / 12.0 * 100.0);
-            println!("Cache hit rate (contention): {:.1}%", contention_latencies.avg() / 12.0 * 100.0);
+            println!(
+                "Cache hit rate (baseline): {:.1}%",
+                baseline_latencies.avg() / 12.0 * 100.0
+            );
+            println!(
+                "Cache hit rate (contention): {:.1}%",
+                contention_latencies.avg() / 12.0 * 100.0
+            );
 
             black_box((baseline_latencies, contention_latencies))
         })

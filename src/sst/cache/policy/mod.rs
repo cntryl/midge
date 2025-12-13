@@ -142,19 +142,19 @@ mod tests {
         // Act & Assert - all policies should handle the same sequence
         for policy_type in &policy_types {
             let policy = policy_type.create();
-            
+
             // Add keys
             for key in &keys {
                 policy.on_access(*key);
             }
-            
+
             // Pick victims
             for _ in 0..5 {
                 let victim = policy.pick_victim();
                 // Some policies may or may not have victims
                 let _ = victim;
             }
-            
+
             // Clear
             policy.clear();
             assert_eq!(policy.pick_victim(), None);
@@ -252,4 +252,3 @@ mod tests {
         }
     }
 }
-

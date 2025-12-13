@@ -1,4 +1,4 @@
-﻿//! Tests for transaction spill behavior and memory management
+//! Tests for transaction spill behavior and memory management
 //!
 //! Tests 1-12: durable storage modes (LocalDisk, CloudBacked) with spill
 //! Test 13: memory-only mode (no spill files)
@@ -106,7 +106,12 @@ fn should_preserve_data_integrity_given_large_transaction_with_specific_values()
             let expected = format!("pattern_{}_{}", i % 10, "x".repeat(50));
             let got = engine.get(cf, key.as_bytes()).expect("get");
             let got_str = got.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
-            assert_eq!(got_str, Some(expected), "integrity check failed for key {}", key);
+            assert_eq!(
+                got_str,
+                Some(expected),
+                "integrity check failed for key {}",
+                key
+            );
         }
     });
 }
@@ -133,7 +138,12 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
         for i in 0..200 {
             let key = format!("order_test_{:04}", i);
             let got = engine.get(cf, key.as_bytes()).expect("get");
-            assert_eq!(got, Some(Bytes::from_static(b"v")), "order check failed for key {}", key);
+            assert_eq!(
+                got,
+                Some(Bytes::from_static(b"v")),
+                "order check failed for key {}",
+                key
+            );
         }
     });
 }
@@ -185,7 +195,11 @@ fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
 
         engine.put(cf, b"test", b"value").expect("put");
         let got = engine.get(cf, b"test").expect("get");
-        assert_eq!(got, Some(Bytes::from_static(b"value")), "engine broken after spill cleanup");
+        assert_eq!(
+            got,
+            Some(Bytes::from_static(b"value")),
+            "engine broken after spill cleanup"
+        );
     });
 }
 
@@ -247,7 +261,11 @@ fn should_recover_committed_spill_given_restart_after_commit() {
             let cf = engine.default_column_family();
 
             let got = engine.get(cf, b"com_spill_0000").expect("get");
-            assert_eq!(got, Some(Bytes::from_static(b"value")), "committed spill not recovered");
+            assert_eq!(
+                got,
+                Some(Bytes::from_static(b"value")),
+                "committed spill not recovered"
+            );
         }
     });
 }
@@ -274,7 +292,11 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
         engine.commit_transaction(tx).expect("commit");
 
         let fg = engine.get(cf, b"foreground").expect("get");
-        assert_eq!(fg, Some(Bytes::from_static(b"works")), "foreground write lost");
+        assert_eq!(
+            fg,
+            Some(Bytes::from_static(b"works")),
+            "foreground write lost"
+        );
     });
 }
 
@@ -318,8 +340,16 @@ fn should_handle_concurrent_large_transactions_given_memory_pressure() {
         let cf = engine.default_column_family();
         let got1 = engine.get(cf, b"t1_key_0000").expect("get");
         let got2 = engine.get(cf, b"t2_key_0000").expect("get");
-        assert_eq!(got1, Some(Bytes::from_static(b"t1_value")), "t1 data missing");
-        assert_eq!(got2, Some(Bytes::from_static(b"t2_value")), "t2 data missing");
+        assert_eq!(
+            got1,
+            Some(Bytes::from_static(b"t1_value")),
+            "t1 data missing"
+        );
+        assert_eq!(
+            got2,
+            Some(Bytes::from_static(b"t2_value")),
+            "t2 data missing"
+        );
     });
 }
 
@@ -369,7 +399,8 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
             } else {
                 vec![b'y'; 1024]
             };
-            tx.put(cf.id(), key.as_bytes().to_vec(), value).expect("put");
+            tx.put(cf.id(), key.as_bytes().to_vec(), value)
+                .expect("put");
         }
         engine.commit_transaction(tx).expect("commit");
 
@@ -377,10 +408,18 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
         assert!(got_tiny.is_some(), "tiny value lost");
 
         let got_med = engine.get(cf, b"mixed_0001").expect("get");
-        assert_eq!(got_med.as_ref().map(|b| b.len()), Some(512), "medium size wrong");
+        assert_eq!(
+            got_med.as_ref().map(|b| b.len()),
+            Some(512),
+            "medium size wrong"
+        );
 
         let got_large = engine.get(cf, b"mixed_0002").expect("get");
-        assert_eq!(got_large.as_ref().map(|b| b.len()), Some(1024), "large size wrong");
+        assert_eq!(
+            got_large.as_ref().map(|b| b.len()),
+            Some(1024),
+            "large size wrong"
+        );
     });
 }
 
@@ -402,6 +441,9 @@ fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
     engine.commit_transaction(tx).expect("commit");
 
     let got = engine.get(cf, b"mem_only_0000").expect("get");
-    assert_eq!(got, Some(Bytes::from_static(b"value")), "memory mode data lost");
+    assert_eq!(
+        got,
+        Some(Bytes::from_static(b"value")),
+        "memory mode data lost"
+    );
 }
-

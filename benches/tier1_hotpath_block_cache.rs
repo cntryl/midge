@@ -43,10 +43,7 @@ fn create_cache(capacity: u64) -> BlockCache {
     BlockCache::new(capacity, 16, CachePolicyType::Lru)
 }
 
-fn precompute_keys_and_blocks(
-    num_blocks: usize,
-    block_size: usize,
-) -> (Vec<CacheKey>, Vec<Bytes>) {
+fn precompute_keys_and_blocks(num_blocks: usize, block_size: usize) -> (Vec<CacheKey>, Vec<Bytes>) {
     let mut keys = Vec::with_capacity(num_blocks);
     let mut blocks = Vec::with_capacity(num_blocks);
     for i in 0..num_blocks {

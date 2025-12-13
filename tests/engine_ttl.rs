@@ -1,4 +1,4 @@
-﻿//! Integration tests for TTL (Time-To-Live) support
+//! Integration tests for TTL (Time-To-Live) support
 
 use std::sync::Arc;
 use std::thread;
@@ -73,9 +73,9 @@ fn should_persist_ttl_metadata_given_restart_when_reopening() {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
             engine.put_with_ttl(cf, b"key1", b"value1", 3600).unwrap(); // 1 hour
-            // Engine dropped
+                                                                        // Engine dropped
         }
-        
+
         // Assert (Phase 2)
         {
             let engine = open_with_mode(opts, mode);
@@ -95,9 +95,9 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
             let cf = engine.default_column_family();
             engine.put_with_ttl(cf, b"key1", b"value1", 1).unwrap(); // 1 second
             thread::sleep(Duration::from_millis(1100)); // Wait for expiration
-            // Engine dropped
+                                                        // Engine dropped
         }
-        
+
         // Assert (Phase 2)
         {
             let engine = open_with_mode(opts, mode);
@@ -198,7 +198,7 @@ fn should_apply_ttl_given_write_batch_with_ttl_when_committed() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let _cf = engine.default_column_family();
-        
+
         // Act - write batch with TTL (need WriteBatch::put_with_ttl API)
         // let mut batch = engine.create_write_batch();
         // batch.put_with_ttl(cf, b"key1", b"value1", 1).unwrap();

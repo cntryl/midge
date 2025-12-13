@@ -557,7 +557,11 @@ mod tests {
     #[test]
     fn should_return_full_count_when_remaining_called_on_new_iterator() {
         // Arrange
-        let results = vec![(vec![1], vec![10]), (vec![2], vec![20]), (vec![3], vec![30])];
+        let results = vec![
+            (vec![1], vec![10]),
+            (vec![2], vec![20]),
+            (vec![3], vec![30]),
+        ];
 
         // Act
         let iter = Iterator::forward(results);
@@ -880,10 +884,16 @@ mod tests {
     #[test]
     fn should_set_include_end_false_when_using_range_method() {
         // Arrange
-        let results = vec![(vec![1], vec![10]), (vec![2], vec![20]), (vec![3], vec![30])];
+        let results = vec![
+            (vec![1], vec![10]),
+            (vec![2], vec![20]),
+            (vec![3], vec![30]),
+        ];
 
         // Act
-        let mut iter = IteratorBuilder::new().range(vec![1], vec![3]).build(results);
+        let mut iter = IteratorBuilder::new()
+            .range(vec![1], vec![3])
+            .build(results);
         let collected = iter.collect_all();
 
         // Assert - 3 should be excluded

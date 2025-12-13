@@ -11,8 +11,8 @@
 mod criterion_helper;
 
 use bytes::Bytes;
-use cntryl_midge::sst::bloom::BloomWriter;
 use cntryl_midge::sst::bloom::writer::BloomFilterOps;
+use cntryl_midge::sst::bloom::BloomWriter;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;

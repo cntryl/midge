@@ -1,4 +1,4 @@
-﻿//! Engine API Errors
+//! Engine API Errors
 //!
 //! API-level error types for engine operations.
 //! These wrap the common MidgeError with additional context.
@@ -295,7 +295,9 @@ mod tests {
 
         // Assert
         match api_error {
-            ApiError::Internal(msg) => assert!(msg.contains("test error") || msg.contains("Internal error")),
+            ApiError::Internal(msg) => {
+                assert!(msg.contains("test error") || msg.contains("Internal error"))
+            }
             _ => panic!("Expected Internal error"),
         }
     }

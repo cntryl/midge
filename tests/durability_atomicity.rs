@@ -1,4 +1,4 @@
-﻿//! Manifest Atomicity Tests
+//! Manifest Atomicity Tests
 //!
 //! Tests manifest atomicity and consistency guarantees, ensuring:
 //! - SST files are not exposed without manifest entries
@@ -30,7 +30,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
             // Write and flush to create SST file
             engine.put(cf, b"key1", b"value1").expect("put");
             engine.flush().expect("flush");
-            
+
             // Write more data (will create another SST)
             engine.put(cf, b"key2", b"value2").expect("put");
             // Crash before manifest is updated with new SST (orphan SST file)
@@ -40,10 +40,14 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // key1 should be visible (from first SST, manifest entry exists)
-            assert!(engine.get(cf, b"key1").expect("get").is_some(), "mode: {}", mode);
-            
+            assert!(
+                engine.get(cf, b"key1").expect("get").is_some(),
+                "mode: {}",
+                mode
+            );
+
             // key2 may or may not be visible depending on whether orphan SST was recovered
             // But engine should not crash or corrupt data
             let _ = engine.get(cf, b"key2").expect("get");
@@ -65,7 +69,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
                 engine.put(cf, key.as_bytes(), b"value").expect("put");
             }
             engine.flush().expect("flush");
-            
+
             // Write more after manifest update (in WAL only)
             for i in 0..10 {
                 let key = format!("unflushed_{:02}", i);
@@ -78,15 +82,23 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // All data should be recovered (flushed + WAL)
             for i in 0..10 {
                 let key = format!("flushed_{:02}", i);
-                assert!(engine.get(cf, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
             }
             for i in 0..10 {
                 let key = format!("unflushed_{:02}", i);
-                assert!(engine.get(cf, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
             }
         }
     });
@@ -103,7 +115,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
             // Write, flush, then overwrite
             engine.put(cf, b"key", b"value_old").expect("put");
             engine.flush().expect("flush");
-            
+
             engine.put(cf, b"key", b"value_new").expect("put");
             // Crash before flush (WAL has new value)
         }
@@ -112,9 +124,14 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // WAL should take precedence over SST when both exist
-            assert_eq!(engine.get(cf, b"key").expect("get"), Some(Bytes::from_static(b"value_new")), "mode: {}", mode);
+            assert_eq!(
+                engine.get(cf, b"key").expect("get"),
+                Some(Bytes::from_static(b"value_new")),
+                "mode: {}",
+                mode
+            );
         }
     });
 }
@@ -130,7 +147,7 @@ fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
             // Create SST
             engine.put(cf, b"key", b"value").expect("put");
             engine.flush().expect("flush");
-            
+
             // Delete the key (creates tombstone in WAL)
             engine.delete(cf, b"key").expect("delete");
             // Crash before tombstone is reflected in manifest
@@ -140,7 +157,7 @@ fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // Manifest authority: SST has value, but WAL has delete
             // Recovery should respect WAL ordering
             let result = engine.get(cf, b"key").expect("get");
@@ -168,7 +185,7 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
                 engine.put(cf, key.as_bytes(), b"value").expect("put");
             }
             engine.flush().expect("flush");
-            
+
             // Immediately crash before manifest persist
         }
 
@@ -176,11 +193,15 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // Data should still be visible (recovered from WAL or SST)
             for i in 0..50 {
                 let key = format!("key_{:03}", i);
-                assert!(engine.get(cf, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
             }
         }
     });
@@ -201,15 +222,19 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
                 let handle = std::thread::spawn(move || {
                     for i in 0..10 {
                         let key = format!("t_{}_k_{:02}", thread_id, i);
-                        engine_clone.put(engine_clone.default_column_family(),
-                                       key.as_bytes(),
-                                       b"value").expect("put");
+                        engine_clone
+                            .put(
+                                engine_clone.default_column_family(),
+                                key.as_bytes(),
+                                b"value",
+                            )
+                            .expect("put");
                     }
                     engine_clone.flush().expect("flush");
                 });
                 handles.push(handle);
             }
-            
+
             for handle in handles {
                 handle.join().expect("thread join");
             }
@@ -220,12 +245,16 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // All writes should be recoverable (no partial updates)
             for thread_id in 0..3 {
                 for i in 0..10 {
                     let key = format!("t_{}_k_{:02}", thread_id, i);
-                    assert!(engine.get(cf, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                    assert!(
+                        engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                        "mode: {}",
+                        mode
+                    );
                 }
             }
         }
@@ -243,12 +272,14 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             // Write to default CF (simpler than multi-CF for now)
             for i in 0..10 {
                 let key = format!("key_{:02}", i);
-                engine.put(cf_default, key.as_bytes(), b"value").expect("put");
+                engine
+                    .put(cf_default, key.as_bytes(), b"value")
+                    .expect("put");
             }
-            
+
             // Flush (concurrent manifest updates)
             engine.flush().expect("flush");
-            
+
             // Crash during manifest sync
         }
 
@@ -256,11 +287,18 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
         {
             let engine = open_with_mode(opts, mode);
             let cf_default = engine.default_column_family();
-            
+
             // All data should be recoverable in order
             for i in 0..10 {
                 let key = format!("key_{:02}", i);
-                assert!(engine.get(cf_default, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(
+                    engine
+                        .get(cf_default, key.as_bytes())
+                        .expect("get")
+                        .is_some(),
+                    "mode: {}",
+                    mode
+                );
             }
         }
     });
@@ -277,10 +315,12 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
             // Create enough data to trigger compaction
             for i in 0..100 {
                 let key = format!("key_{:03}", i);
-                engine.put(cf, key.as_bytes(), format!("value_{:03}", i).as_bytes()).expect("put");
+                engine
+                    .put(cf, key.as_bytes(), format!("value_{:03}", i).as_bytes())
+                    .expect("put");
             }
             engine.flush().expect("flush");
-            
+
             // Note: compaction may not trigger automatically, but if it does, crash during manifest update
         }
 
@@ -288,11 +328,15 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // All data should still be present
             for i in 0..100 {
                 let key = format!("key_{:03}", i);
-                assert!(engine.get(cf, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
             }
         }
     });
@@ -312,7 +356,7 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
                 engine.put(cf, key.as_bytes(), b"value").expect("put");
             }
             engine.flush().expect("flush");
-            
+
             // Crash (if compaction was in progress, partial output should be cleaned)
         }
 
@@ -320,11 +364,15 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // All original data should be present
             for i in 0..50 {
                 let key = format!("key_{:02}", i);
-                assert!(engine.get(cf, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
             }
         }
     });
@@ -344,14 +392,14 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
                 engine.put(cf, key.as_bytes(), b"value").expect("put");
             }
             engine.flush().expect("flush");
-            
+
             // Overwrite (would trigger compaction)
             for i in 0..30 {
                 let key = format!("old_{:02}", i);
                 engine.put(cf, key.as_bytes(), b"new_value").expect("put");
             }
             engine.flush().expect("flush");
-            
+
             // Crash before old SST cleanup
         }
 
@@ -359,11 +407,15 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // Updated data should be present
             for i in 0..30 {
                 let key = format!("old_{:02}", i);
-                assert!(engine.get(cf, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
             }
         }
     });
@@ -382,7 +434,7 @@ fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopenin
                 let key = format!("valid_{:02}", i);
                 engine.put(cf, key.as_bytes(), b"value").expect("put");
             }
-            
+
             // Crash with truncated WAL append
         }
 
@@ -390,11 +442,15 @@ fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopenin
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            
+
             // Valid records before truncation should be recovered
             for i in 0..25 {
                 let key = format!("valid_{:02}", i);
-                assert!(engine.get(cf, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
             }
             // No crash on truncated tail
         }

@@ -133,17 +133,25 @@ mod tests {
 
         // Assert: filenames should sort correctly lexicographically
         let mut filenames = vec![
-            filename_high.file_name().and_then(|n| n.to_str()).unwrap().to_string(),
-            filename_low.file_name().and_then(|n| n.to_str()).unwrap().to_string(),
-            filename_mid.file_name().and_then(|n| n.to_str()).unwrap().to_string(),
+            filename_high
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap()
+                .to_string(),
+            filename_low
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap()
+                .to_string(),
+            filename_mid
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap()
+                .to_string(),
         ];
         filenames.sort();
 
-        let expected = vec![
-            "00000001.sst",
-            "00000010.sst",
-            "00000100.sst",
-        ];
+        let expected = vec!["00000001.sst", "00000010.sst", "00000100.sst"];
         assert_eq!(filenames, expected);
     }
 

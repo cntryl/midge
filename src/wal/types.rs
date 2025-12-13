@@ -257,12 +257,7 @@ mod tests {
     #[test]
     fn should_estimate_size_without_value() {
         // Arrange
-        let record = WalRecord::new(
-            WalOpKind::Delete,
-            Bytes::from_static(b"key"),
-            None,
-            1,
-        );
+        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 1);
 
         // Act
         let size = record.estimated_size();
@@ -309,9 +304,15 @@ mod tests {
         assert_eq!(WalOpKind::from_wire_format(0).unwrap(), WalOpKind::Put);
         assert_eq!(WalOpKind::from_wire_format(1).unwrap(), WalOpKind::Insert);
         assert_eq!(WalOpKind::from_wire_format(2).unwrap(), WalOpKind::Delete);
-        assert_eq!(WalOpKind::from_wire_format(3).unwrap(), WalOpKind::DeleteRange);
+        assert_eq!(
+            WalOpKind::from_wire_format(3).unwrap(),
+            WalOpKind::DeleteRange
+        );
         assert_eq!(WalOpKind::from_wire_format(4).unwrap(), WalOpKind::TxnBegin);
-        assert_eq!(WalOpKind::from_wire_format(5).unwrap(), WalOpKind::TxnCommit);
+        assert_eq!(
+            WalOpKind::from_wire_format(5).unwrap(),
+            WalOpKind::TxnCommit
+        );
         assert_eq!(WalOpKind::from_wire_format(6).unwrap(), WalOpKind::Merge);
     }
 
@@ -322,6 +323,9 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid WAL operation"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid WAL operation"));
     }
 }

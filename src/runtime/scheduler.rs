@@ -518,7 +518,8 @@ mod tests {
 
         // Schedule: low flush, high compaction, normal wal
         scheduler.schedule(Task::new(TaskKind::Flush, "flush").with_priority(TaskPriority::Low));
-        scheduler.schedule(Task::new(TaskKind::Compaction, "compact").with_priority(TaskPriority::High));
+        scheduler
+            .schedule(Task::new(TaskKind::Compaction, "compact").with_priority(TaskPriority::High));
         scheduler.schedule(Task::new(TaskKind::Wal, "wal").with_priority(TaskPriority::Normal));
 
         // Act - All should be available (different kinds)

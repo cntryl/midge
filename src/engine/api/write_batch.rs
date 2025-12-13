@@ -42,7 +42,12 @@ impl WriteBatch {
     }
 
     /// Add a put operation to the batch for a specific column family
-    pub fn put_cf(&mut self, cf_id: ColumnFamilyId, key: bytes::Bytes, value: bytes::Bytes) -> &mut Self {
+    pub fn put_cf(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        key: bytes::Bytes,
+        value: bytes::Bytes,
+    ) -> &mut Self {
         self.operations.push(BatchOp::Put {
             cf_id,
             key: key.to_vec(),
@@ -81,7 +86,10 @@ impl WriteBatch {
 
     /// Add a delete operation to the batch for a specific column family
     pub fn delete_cf(&mut self, cf_id: ColumnFamilyId, key: bytes::Bytes) -> &mut Self {
-        self.operations.push(BatchOp::Delete { cf_id, key: key.to_vec() });
+        self.operations.push(BatchOp::Delete {
+            cf_id,
+            key: key.to_vec(),
+        });
         self
     }
 
@@ -94,7 +102,12 @@ impl WriteBatch {
     }
 
     /// Add a put operation with owned Vec<u8> to a specific column family (fast path)
-    pub fn put_owned_cf(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>) -> &mut Self {
+    pub fn put_owned_cf(
+        &mut self,
+        cf_id: ColumnFamilyId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> &mut Self {
         self.operations.push(BatchOp::Put {
             cf_id,
             key,
@@ -192,7 +205,10 @@ mod tests {
         let mut batch = WriteBatch::new();
 
         // Act
-        batch.put(bytes::Bytes::from(vec![1, 2, 3]), bytes::Bytes::from(vec![4, 5, 6]));
+        batch.put(
+            bytes::Bytes::from(vec![1, 2, 3]),
+            bytes::Bytes::from(vec![4, 5, 6]),
+        );
         batch.put(bytes::Bytes::from(vec![7, 8]), bytes::Bytes::from(vec![9]));
 
         // Assert
@@ -242,8 +258,16 @@ mod tests {
         let cf2 = ColumnFamilyId(2);
 
         // Act
-        batch.put_cf(cf1, bytes::Bytes::from(vec![1, 2]), bytes::Bytes::from(vec![3, 4]));
-        batch.put_cf(cf2, bytes::Bytes::from(vec![5, 6]), bytes::Bytes::from(vec![7, 8]));
+        batch.put_cf(
+            cf1,
+            bytes::Bytes::from(vec![1, 2]),
+            bytes::Bytes::from(vec![3, 4]),
+        );
+        batch.put_cf(
+            cf2,
+            bytes::Bytes::from(vec![5, 6]),
+            bytes::Bytes::from(vec![7, 8]),
+        );
 
         // Assert
         let puts: Vec<_> = batch.iter_puts().collect();
@@ -278,7 +302,11 @@ mod tests {
             let mut b = WriteBatch::new();
             b.put(bytes::Bytes::from(vec![1]), bytes::Bytes::from(vec![2]))
                 .delete(bytes::Bytes::from(vec![3]))
-                .put_cf(cf1, bytes::Bytes::from(vec![4]), bytes::Bytes::from(vec![5]));
+                .put_cf(
+                    cf1,
+                    bytes::Bytes::from(vec![4]),
+                    bytes::Bytes::from(vec![5]),
+                );
             b
         };
 

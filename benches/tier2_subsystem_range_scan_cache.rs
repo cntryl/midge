@@ -16,7 +16,9 @@ mod criterion_helper;
 
 use bytes::Bytes;
 use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
+};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
@@ -173,8 +175,10 @@ fn bench_range_scan_cache_comparison(c: &mut Criterion) {
     group.throughput(Throughput::Elements(num_blocks as u64));
 
     for &mode in &["warm", "cold", "partial_50pct"] {
-        group.bench_with_input(BenchmarkId::from_parameter(mode), &mode, |b, &mode| {
-            match mode {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(mode),
+            &mode,
+            |b, &mode| match mode {
                 "warm" => {
                     let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
                     populate_cache(&cache, SST_ID, 0, num_blocks);
@@ -185,19 +189,17 @@ fn bench_range_scan_cache_comparison(c: &mut Criterion) {
                         black_box((blocks_read, cache_hits))
                     })
                 }
-                "cold" => {
-                    b.iter_batched(
-                        || {
-                            let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
-                            (cache, RangeScan::new(0, num_blocks))
-                        },
-                        |(cache, scan)| {
-                            let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID);
-                            black_box((blocks_read, cache_hits))
-                        },
-                        criterion::BatchSize::SmallInput,
-                    )
-                }
+                "cold" => b.iter_batched(
+                    || {
+                        let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
+                        (cache, RangeScan::new(0, num_blocks))
+                    },
+                    |(cache, scan)| {
+                        let (blocks_read, cache_hits) = scan.execute(&cache, SST_ID);
+                        black_box((blocks_read, cache_hits))
+                    },
+                    criterion::BatchSize::SmallInput,
+                ),
                 "partial_50pct" => {
                     let cache = BlockCache::new(10 * 1024 * 1024, 16, CachePolicyType::Lru);
                     populate_cache(&cache, SST_ID, 0, num_blocks / 2);
@@ -209,8 +211,8 @@ fn bench_range_scan_cache_comparison(c: &mut Criterion) {
                     })
                 }
                 _ => unreachable!(),
-            }
-        });
+            },
+        );
     }
 
     group.finish();

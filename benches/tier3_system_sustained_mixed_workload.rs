@@ -20,7 +20,7 @@
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
 
-use cntryl_midge::{MidgeEngine, testkit::MidgeOptions, testkit::StorageMode};
+use cntryl_midge::{testkit::MidgeOptions, testkit::StorageMode, MidgeEngine};
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
@@ -131,9 +131,8 @@ fn bench_sustained_mixed_workload_with_compaction(c: &mut Criterion) {
                 enable_compaction: true,
                 memory_budget: None,
             };
-            
-            let engine = MidgeEngine::open_with_options(opts)
-                .expect("Failed to open engine");
+
+            let engine = MidgeEngine::open_with_options(opts).expect("Failed to open engine");
             let cf = engine.default_column_family();
 
             let mut latencies_warmup = LatencyTracker::new();
@@ -168,7 +167,7 @@ fn bench_sustained_mixed_workload_with_compaction(c: &mut Criterion) {
                 let is_write = ((op as f64) % 1.0) < WRITE_RATIO;
 
                 let op_start = Instant::now();
-                
+
                 if is_write {
                     let key_idx = zipf.next();
                     let key = format!("key:{:010}", key_idx);
@@ -179,7 +178,7 @@ fn bench_sustained_mixed_workload_with_compaction(c: &mut Criterion) {
                     let key = format!("key:{:010}", key_idx);
                     let _ = engine.get(cf, key.as_bytes());
                 }
-                
+
                 let op_time = op_start.elapsed().as_nanos() as u64;
                 latencies_steady.record(op_time);
                 ops_in_window += 1;
@@ -202,20 +201,27 @@ fn bench_sustained_mixed_workload_with_compaction(c: &mut Criterion) {
             println!("\n=== WARMUP PHASE ===");
             println!("Operations: {}", WARMUP_OPS);
             println!("Time: {:.2}ms", warmup_time.as_secs_f64() * 1000.0);
-            println!("Throughput: {:.0} ops/sec", WARMUP_OPS as f64 / warmup_time.as_secs_f64());
+            println!(
+                "Throughput: {:.0} ops/sec",
+                WARMUP_OPS as f64 / warmup_time.as_secs_f64()
+            );
             println!("Latency p50: {:.2}μs", latencies_warmup.percentile_us(50));
             println!("Latency p99: {:.2}μs", latencies_warmup.percentile_us(99));
 
             println!("\n=== STEADY-STATE PHASE ===");
             println!("Operations: {}", STEADY_STATE_OPS);
             println!("Time: {:.2}ms", steady_time.as_secs_f64() * 1000.0);
-            println!("Overall throughput: {:.0} ops/sec", STEADY_STATE_OPS as f64 / steady_time.as_secs_f64());
-            
+            println!(
+                "Overall throughput: {:.0} ops/sec",
+                STEADY_STATE_OPS as f64 / steady_time.as_secs_f64()
+            );
+
             if !window_throughputs.is_empty() {
-                let avg_window_tp = window_throughputs.iter().sum::<f64>() / window_throughputs.len() as f64;
+                let avg_window_tp =
+                    window_throughputs.iter().sum::<f64>() / window_throughputs.len() as f64;
                 println!("Avg window throughput: {:.0} ops/sec", avg_window_tp);
             }
-            
+
             println!("Latency p50: {:.2}μs", latencies_steady.percentile_us(50));
             println!("Latency p95: {:.2}μs", latencies_steady.percentile_us(95));
             println!("Latency p99: {:.2}μs", latencies_steady.percentile_us(99));

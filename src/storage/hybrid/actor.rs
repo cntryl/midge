@@ -348,8 +348,6 @@ mod tests {
         assert_eq!(result, Some(ReservationResult::RejectNoSpace));
     }
 
-
-
     #[test]
     fn should_track_flush_completion() {
         // Arrange

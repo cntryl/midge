@@ -102,7 +102,9 @@ impl WriteIntent {
 
     pub fn cf_id(&self) -> ColumnFamilyId {
         match self {
-            Self::Put { cf_id, .. } | Self::Delete { cf_id, .. } | Self::DeleteRange { cf_id, .. } => *cf_id,
+            Self::Put { cf_id, .. }
+            | Self::Delete { cf_id, .. }
+            | Self::DeleteRange { cf_id, .. } => *cf_id,
         }
     }
 
@@ -281,7 +283,7 @@ impl Transaction {
     }
 
     /// Read a key from the transaction's write set (read-your-own-writes)
-    /// 
+    ///
     /// Returns the value from write intents if present (including tombstones).
     /// Returns None if key not in write set (caller should check engine).
     pub fn get_from_write_set(&self, cf_id: ColumnFamilyId, key: &[u8]) -> Option<Option<Vec<u8>>> {
@@ -295,7 +297,9 @@ impl Transaction {
                     WriteIntent::Delete { key: k, .. } if k.as_slice() == key => {
                         return Some(None); // Tombstone
                     }
-                    WriteIntent::DeleteRange { start_key, end_key, .. } => {
+                    WriteIntent::DeleteRange {
+                        start_key, end_key, ..
+                    } => {
                         // Check if key falls in range [start_key, end_key)
                         if key >= start_key.as_slice() && key < end_key.as_slice() {
                             return Some(None); // Deleted by range
@@ -344,7 +348,7 @@ impl Transaction {
     }
 
     /// Result-like expect wrapper for Transaction errors
-    /// 
+    ///
     /// Returns self if transaction is valid and active.
     /// Panics with message if transaction is in invalid state.
     pub fn expect(self, msg: &str) -> Self {
@@ -421,7 +425,9 @@ impl Drop for Transaction {
     fn drop(&mut self) {
         // If transaction is still active or in read phase, automatically rollback
         match self.state {
-            TransactionState::Active | TransactionState::ReadPhase | TransactionState::Committing => {
+            TransactionState::Active
+            | TransactionState::ReadPhase
+            | TransactionState::Committing => {
                 let _ = self.mark_rolled_back();
             }
             TransactionState::Committed

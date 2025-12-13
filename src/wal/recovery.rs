@@ -646,10 +646,8 @@ mod tests {
     #[test]
     fn should_track_bytes_accounting_correctly() {
         // Arrange
-        let temp_dir = std::env::temp_dir().join(format!(
-            "midge_recovery_test_bytes_{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_bytes_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -658,7 +656,7 @@ mod tests {
             let writer = FsWalWriter::new(&wal_dir).unwrap();
             let record = WalRecord::new(
                 WalOpKind::Put,
-                Bytes::from_static(b"key123"), // 6 bytes
+                Bytes::from_static(b"key123"),         // 6 bytes
                 Some(Bytes::from_static(b"value456")), // 8 bytes
                 1,
             );
@@ -727,10 +725,8 @@ mod tests {
     #[test]
     fn should_handle_merge_operations() {
         // Arrange
-        let temp_dir = std::env::temp_dir().join(format!(
-            "midge_recovery_test_merge_{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_merge_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -762,10 +758,8 @@ mod tests {
     #[test]
     fn should_handle_transaction_markers() {
         // Arrange
-        let temp_dir = std::env::temp_dir().join(format!(
-            "midge_recovery_test_txn_{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("midge_recovery_test_txn_{}", std::process::id()));
         let wal_dir = temp_dir.join("wal");
         let _ = std::fs::remove_dir_all(&wal_dir);
         std::fs::create_dir_all(&wal_dir).ok();
@@ -773,12 +767,8 @@ mod tests {
         {
             let writer = FsWalWriter::new(&wal_dir).unwrap();
 
-            let begin_record = WalRecord::new(
-                WalOpKind::TxnBegin,
-                Bytes::from_static(b"txn_key"),
-                None,
-                1,
-            );
+            let begin_record =
+                WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn_key"), None, 1);
             writer.append_record(&begin_record).unwrap();
 
             let put_record = WalRecord::new(
@@ -814,4 +804,5 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
-    }}
+    }
+}

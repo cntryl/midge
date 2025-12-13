@@ -298,7 +298,11 @@ mod tests {
 
         // Add child nodes
         for i in 0..100 {
-            children.push(TrieNode::new(0, format!("child{}", i).into_bytes(), Some(i as u32)));
+            children.push(TrieNode::new(
+                0,
+                format!("child{}", i).into_bytes(),
+                Some(i as u32),
+            ));
         }
 
         // Act

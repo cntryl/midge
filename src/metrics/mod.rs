@@ -39,7 +39,10 @@ impl LatencyMetric {
         // Update max
         let mut current_max = self.max.load(Ordering::Relaxed);
         while nanos > current_max
-            && self.max.compare_exchange_weak(current_max, nanos, Ordering::Relaxed, Ordering::Relaxed).is_err()
+            && self
+                .max
+                .compare_exchange_weak(current_max, nanos, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
         {
             current_max = self.max.load(Ordering::Relaxed);
         }
@@ -47,7 +50,10 @@ impl LatencyMetric {
         // Update min
         let mut current_min = self.min.load(Ordering::Relaxed);
         while nanos < current_min
-            && self.min.compare_exchange_weak(current_min, nanos, Ordering::Relaxed, Ordering::Relaxed).is_err()
+            && self
+                .min
+                .compare_exchange_weak(current_min, nanos, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
         {
             current_min = self.min.load(Ordering::Relaxed);
         }
@@ -72,7 +78,11 @@ impl LatencyMetric {
 
     pub fn min_nanos(&self) -> u64 {
         let min = self.min.load(Ordering::Relaxed);
-        if min == u64::MAX { 0 } else { min }
+        if min == u64::MAX {
+            0
+        } else {
+            min
+        }
     }
 }
 
@@ -179,7 +189,8 @@ impl EngineMetrics {
 
     pub fn record_range_scan(&self, bytes_read: u64) {
         self.range_ops.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
+        self.total_bytes_read
+            .fetch_add(bytes_read, Ordering::Relaxed);
     }
 
     // Compaction recording
@@ -192,8 +203,10 @@ impl EngineMetrics {
     }
 
     pub fn record_compaction_bytes(&self, read: u64, written: u64) {
-        self.compaction_bytes_read.fetch_add(read, Ordering::Relaxed);
-        self.compaction_bytes_written.fetch_add(written, Ordering::Relaxed);
+        self.compaction_bytes_read
+            .fetch_add(read, Ordering::Relaxed);
+        self.compaction_bytes_written
+            .fetch_add(written, Ordering::Relaxed);
     }
 
     // Cache metrics
@@ -241,7 +254,11 @@ impl EngineMetrics {
     pub fn compaction_ratio(&self) -> f64 {
         let read = self.compaction_bytes_read.load(Ordering::Relaxed);
         let written = self.compaction_bytes_written.load(Ordering::Relaxed);
-        if read == 0 { 0.0 } else { written as f64 / read as f64 }
+        if read == 0 {
+            0.0
+        } else {
+            written as f64 / read as f64
+        }
     }
 }
 
@@ -260,7 +277,9 @@ pub struct CompactionGuard {
 impl Drop for CompactionGuard {
     fn drop(&mut self) {
         let elapsed = self.start_time.elapsed();
-        self.metrics.compaction_duration_ns.record(elapsed.as_nanos() as u64);
+        self.metrics
+            .compaction_duration_ns
+            .record(elapsed.as_nanos() as u64);
     }
 }
 
@@ -405,8 +424,14 @@ mod tests {
 
         // Assert
         assert_eq!(metrics.compaction_runs.load(Ordering::Relaxed), 1);
-        assert_eq!(metrics.compaction_bytes_read.load(Ordering::Relaxed), 10_000_000);
-        assert_eq!(metrics.compaction_bytes_written.load(Ordering::Relaxed), 8_000_000);
+        assert_eq!(
+            metrics.compaction_bytes_read.load(Ordering::Relaxed),
+            10_000_000
+        );
+        assert_eq!(
+            metrics.compaction_bytes_written.load(Ordering::Relaxed),
+            8_000_000
+        );
         assert!(metrics.compaction_duration_ns.count() > 0);
     }
 
@@ -767,10 +792,7 @@ mod tests {
         metrics.record_write(300, 1000);
 
         // Assert: total is sum of all bytes
-        assert_eq!(
-            metrics.total_bytes_written.load(Ordering::Relaxed),
-            600
-        );
+        assert_eq!(metrics.total_bytes_written.load(Ordering::Relaxed), 600);
     }
 
     #[test]
