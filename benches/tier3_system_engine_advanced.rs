@@ -145,7 +145,7 @@ fn bench_column_family_scaling(c: &mut Criterion) {
                             }
                             engine
                         },
-                        |(engine)| {
+                        |engine| {
                             let cf_list = engine.list_column_families().unwrap_or_default();
                             for i in 0..num_ops {
                                 let cf = &cf_list[i % cf_count];
