@@ -71,18 +71,6 @@ impl LatencyTracker {
     fn percentile_us(&self, pct: usize) -> f64 {
         self.percentile(pct) as f64 / 1000.0
     }
-
-    fn avg_us(&self) -> f64 {
-        if self.latencies.is_empty() {
-            0.0
-        } else {
-            self.latencies.iter().sum::<u64>() as f64 / (self.latencies.len() as f64 * 1000.0)
-        }
-    }
-
-    fn count(&self) -> usize {
-        self.latencies.len()
-    }
 }
 
 // ─── Zipfian Distribution for Hot Keys ──────────────────────────────────────
@@ -107,8 +95,8 @@ impl ZipfianGenerator {
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let u = ((self.seed >> 32) as f64) / (u32::MAX as f64);
 
-        // Simplified Zipfian: bias towards lower indices
-        let z = 1.0 + u * (self.max_key as f64).ln();
+        // Zipfian: bias towards lower indices using alpha parameter
+        let z = 1.0 + self.alpha * u * (self.max_key as f64).ln();
         ((self.max_key as f64) * (-z).exp()).min(self.max_key as f64 - 1.0) as usize
     }
 }

@@ -129,14 +129,6 @@ impl BlockCache {
         self.blocks.insert(block_id, self.current_time);
     }
 
-    fn hit_rate(&self) -> f64 {
-        if self.blocks.is_empty() {
-            0.0
-        } else {
-            self.blocks.len() as f64 / self.capacity as f64
-        }
-    }
-
     /// Simulate flush clearing cache (realistic: flush reads many blocks)
     fn flush_clear(&mut self) {
         // Flush access pattern: reads many blocks sequentially

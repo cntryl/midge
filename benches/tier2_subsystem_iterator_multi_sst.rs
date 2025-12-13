@@ -71,10 +71,6 @@ impl<'a> SstIterator<'a> {
             None
         }
     }
-
-    fn peek(&self) -> Option<&Bytes> {
-        self.keys.get(self.current)
-    }
 }
 
 /// Entry in merge heap (reverse order for min-heap)
@@ -112,8 +108,7 @@ impl<'a> MergeIterator<'a> {
         let mut heap = BinaryHeap::new();
 
         // Initialize heap with first key from each iterator
-        #[allow(clippy::enumerate_iter)]
-        for (_idx, iter) in iterators.iter_mut().enumerate() {
+        for iter in iterators.iter_mut() {
             if let Some((key, sst_id)) = iter.next() {
                 heap.push(HeapEntry { key, sst_id });
             }

@@ -44,24 +44,13 @@ const CONCURRENT_READERS: &[usize] = &[1, 4, 8];
 /// A single data snapshot at a point in time
 #[derive(Debug, Clone)]
 struct DataSnapshot {
-    /// Snapshot ID (version number)
-    version: u64,
     /// Data visible in this snapshot
     data: Vec<(Vec<u8>, Vec<u8>)>,
-    /// Timestamp when snapshot was created
-    created_at_us: u128,
 }
 
 impl DataSnapshot {
-    fn new(version: u64, data: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
-        Self {
-            version,
-            data,
-            created_at_us: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_micros(),
-        }
+    fn new(_version: u64, data: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        Self { data }
     }
 
     /// Full scan of snapshot data
