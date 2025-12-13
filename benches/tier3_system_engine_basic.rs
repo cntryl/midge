@@ -181,7 +181,7 @@ fn bench_batch_put(c: &mut Criterion) {
                             let end = start + batch_size;
 
                             for (k, v) in keys[start..end].iter().zip(&vals[start..end]) {
-                                batch.put(cf.id(), k.clone(), v.clone());
+                                batch.put(k.clone(), v.clone());
                             }
 
                             engine.write_batch(&batch).unwrap();

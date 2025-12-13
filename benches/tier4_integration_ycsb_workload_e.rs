@@ -63,26 +63,26 @@ fn run_workload_e(
     cf_count: usize,
     seed: u64,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families();
+    let cf_list = engine.list_column_families().expect("failed to list column families");
     let mut rng = StdRng::seed_from_u64(seed);
     let mut hist = Histogram::<u64>::new(3).unwrap();
 
     // Use actual CF list length to avoid index out of bounds
-    let cf_list_unwrapped = cf_list.as_ref().unwrap();
-    let actual_cf_count = cf_list_unwrapped.len().min(cf_count);
+    let actual_cf_count = cf_list.len().min(cf_count);
 
     for (start_key, end_key) in ranges.iter() {
-        let cf = &cf_list_unwrapped[rng.gen_range(0..actual_cf_count)];
+        let cf = &cf_list[rng.gen_range(0..actual_cf_count)];
 
         let start = Instant::now();
 
         // Execute the scan
+        let query = Query::new()
+            .start_key(start_key.clone())
+            .end_key(end_key.clone());
         let iter = engine
             .scan(
                 cf,
-                Query::new()
-                    .start_key(start_key.clone())
-                    .end_key(end_key.clone()),
+                &query,
             )
             .unwrap();
         for item in &iter {
@@ -107,7 +107,7 @@ fn run_workload_e_concurrent(
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families();
+    let cf_list = engine.list_column_families().expect("failed to list column families");
     let mut rng = make_thread_rng(thread_id, 0xABCDEF01);
 
     let mut hist = Histogram::<u64>::new(3).unwrap();
@@ -121,12 +121,13 @@ fn run_workload_e_concurrent(
 
         let start = Instant::now();
 
+        let query = Query::new()
+            .start_key(start_key.clone())
+            .end_key(end_key.clone());
         let iter = engine
             .scan(
                 cf,
-                Query::new()
-                    .start_key(start_key.clone())
-                    .end_key(end_key.clone()),
+                &query,
             )
             .unwrap();
         for item in &iter {

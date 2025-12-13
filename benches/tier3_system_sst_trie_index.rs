@@ -105,7 +105,7 @@ fn bench_full_scans(c: &mut Criterion) {
             |engine| {
                 let cf = engine.default_column_family();
                 let query = Query::new();
-                let results = engine.scan(&cf, query).expect("scan failed");
+                let results = engine.scan(&cf, &query).expect("scan failed");
                 black_box(results.len());
                 engine
             },
@@ -150,7 +150,7 @@ fn bench_prefix_scans(c: &mut Criterion) {
                 let start = make_key(1);
                 let end = make_key(1000);
                 let query = Query::new().start_key(start).end_key(end);
-                let results = engine.scan(&cf, query).expect("scan failed");
+                let results = engine.scan(&cf, &query).expect("scan failed");
                 black_box(results.len());
                 engine
             },

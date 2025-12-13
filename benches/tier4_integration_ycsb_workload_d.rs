@@ -66,7 +66,7 @@ fn run_workload_d(
     cf_count: usize,
     seed: u64,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families();
+    let cf_list = engine.list_column_families().expect("failed to list column families");
 
     let keys = PREGEN_KEYS.get().unwrap();
     let values = PREGEN_VALUES.get().unwrap();
@@ -121,7 +121,7 @@ fn run_workload_d_concurrent(
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families();
+    let cf_list = engine.list_column_families().expect("failed to list column families");
 
     let keys = PREGEN_KEYS.get().unwrap();
     let values = PREGEN_VALUES.get().unwrap();

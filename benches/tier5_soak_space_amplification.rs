@@ -67,7 +67,7 @@ fn bench_space_amplification(c: &mut Criterion) {
             let before_compact = estimate_disk_usage(&path);
 
             // Trigger compaction to remove obsolete versions
-            let _ = engine.compact_level(&cf, 0);
+            let _ = engine.compact_all();
             engine.flush().unwrap();
 
             // Measure space after compaction
