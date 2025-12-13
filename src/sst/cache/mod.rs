@@ -45,7 +45,7 @@ impl BlockCache {
         let mut shards = Vec::with_capacity(num_shards);
 
         for _ in 0..num_shards {
-            shards.push(Arc::new(CacheShard::new(shard_capacity, policy_type)));
+            shards.push(CacheShard::new(shard_capacity, policy_type));
         }
 
         Self { shards, num_shards }
@@ -72,6 +72,14 @@ impl BlockCache {
     /// Returns true if inserted, false if rejected by admission control
     pub fn put(&self, key: CacheKey, value: Bytes) -> bool {
         self.get_shard(&key).put(key, value)
+    }
+
+    /// Insert a block into the cache synchronously (for tests)
+    ///
+    /// Performs admission, insert, and eviction synchronously.
+    #[cfg(test)]
+    pub fn put_sync(&self, key: CacheKey, value: Bytes) {
+        self.get_shard(&key).put_sync(key, value)
     }
 
     /// Remove a block from the cache
@@ -160,7 +168,7 @@ mod tests {
         let value = Bytes::from(&b"test_block"[..]);
 
         // Act
-        cache.put(key, value.clone());
+        cache.put_sync(key, value.clone());
         let retrieved = cache.get(&key);
 
         // Assert
@@ -175,7 +183,7 @@ mod tests {
         let key = CacheKey::for_data(1, 0);
 
         // Act
-        cache.put(key, Bytes::from(&b"data"[..]));
+        cache.put_sync(key, Bytes::from(&b"data"[..]));
         let removed = cache.remove(&key);
         let retrieved = cache.get(&key);
 
@@ -192,7 +200,7 @@ mod tests {
         // Act
         for sst_id in 0..100 {
             let key = CacheKey::for_data(sst_id, 0);
-            cache.put(key, Bytes::from(vec![1u8; 1024]));
+            cache.put_sync(key, Bytes::from(vec![1u8; 1024]));
         }
 
         // Assert - entries should be distributed
@@ -211,7 +219,7 @@ mod tests {
         let cache = BlockCache::new_default(1024 * 1024);
         for i in 0..10 {
             let key = CacheKey::for_data(i, 0);
-            cache.put(key, Bytes::from(vec![1u8; 100]));
+            cache.put_sync(key, Bytes::from(vec![1u8; 100]));
         }
 
         // Act
@@ -230,7 +238,7 @@ mod tests {
         let key = CacheKey::for_data(1, 0);
 
         // Act
-        cache.put(key, Bytes::from(&b"test"[..]));
+        cache.put_sync(key, Bytes::from(&b"test"[..]));
         cache.get(&key);
         cache.get(&key);
         let _ = cache.get(&CacheKey::for_data(999, 999));
@@ -249,8 +257,8 @@ mod tests {
         let data2 = vec![b'y'; 60];
 
         // Act
-        cache.put(CacheKey::for_data(1, 0), Bytes::from(data1));
-        cache.put(CacheKey::for_data(2, 0), Bytes::from(data2));
+        cache.put_sync(CacheKey::for_data(1, 0), Bytes::from(data1));
+        cache.put_sync(CacheKey::for_data(2, 0), Bytes::from(data2));
 
         // Assert - one should be evicted
         let metrics = cache.metrics();
