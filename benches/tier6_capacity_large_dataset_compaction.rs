@@ -52,7 +52,7 @@ fn bench_large_dataset_compaction(c: &mut Criterion) {
 
             // Measure compaction time: L0 → L1
             let start = std::time::Instant::now();
-            let _ = engine.compact_level(&cf, 0);
+            let _ = engine.compact_all();
             let elapsed = start.elapsed();
 
             black_box(elapsed);

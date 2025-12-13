@@ -79,7 +79,7 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
 
                         // Trigger compactions to spread data across levels
                         engine.flush().expect("final flush failed");
-                        let _ = engine.compact_level(&cf, 0);
+                        let _ = engine.compact_all();
 
                         engine
                     },
@@ -88,7 +88,7 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         let query = Query::new().start_key(start.clone()).end_key(end.clone());
 
-                        let results = engine.scan(&cf, query).expect("scan failed");
+                        let results = engine.scan(&cf, &query).expect("scan failed");
                         black_box(results.len());
 
                         engine

@@ -90,7 +90,7 @@ fn run_workload_c_concurrent(
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {
-    let cf_list = engine.list_column_families();
+    let cf_list = engine.list_column_families().expect("failed to list column families");
 
     let keys = PREGEN_KEYS.get().unwrap();
     let zipf = ZIPF_DEFAULT.get().unwrap();
