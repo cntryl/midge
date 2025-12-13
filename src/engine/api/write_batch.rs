@@ -85,6 +85,37 @@ impl WriteBatch {
         self
     }
 
+    /// Add a put operation with owned Vec<u8> (fast path, no materialization)
+    ///
+    /// Use this when you already have `Vec<u8>` to avoid the Bytes → Vec<u8> clone.
+    pub fn put_owned(&mut self, key: Vec<u8>, value: Vec<u8>) -> &mut Self {
+        self.put_owned_cf(ColumnFamilyId::DEFAULT, key, value);
+        self
+    }
+
+    /// Add a put operation with owned Vec<u8> to a specific column family (fast path)
+    pub fn put_owned_cf(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>) -> &mut Self {
+        self.operations.push(BatchOp::Put {
+            cf_id,
+            key,
+            value,
+            ttl_seconds: None,
+        });
+        self
+    }
+
+    /// Add a delete operation with owned Vec<u8> (fast path)
+    pub fn delete_owned(&mut self, key: Vec<u8>) -> &mut Self {
+        self.delete_owned_cf(ColumnFamilyId::DEFAULT, key);
+        self
+    }
+
+    /// Add a delete operation with owned Vec<u8> to a specific column family (fast path)
+    pub fn delete_owned_cf(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>) -> &mut Self {
+        self.operations.push(BatchOp::Delete { cf_id, key });
+        self
+    }
+
     /// Get the number of operations in this batch
     pub fn len(&self) -> usize {
         self.operations.len()
