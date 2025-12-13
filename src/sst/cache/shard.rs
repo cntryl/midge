@@ -63,6 +63,11 @@ impl CacheShard {
         self.admission
             .record_access(key.sst_id.to_le_bytes().as_ref());
 
+        // Check type-aware admission policy
+        if !self.admission.should_admit(&key) {
+            return false;
+        }
+
         let cache_value = CacheValue::new(value);
         let value_size = cache_value.size_bytes() as u64;
 
@@ -85,14 +90,27 @@ impl CacheShard {
         self.policy.on_access(key);
 
         // Evict if over capacity
+        // Strategy: Never evict index/filter blocks unless we have no choice
+        use crate::sst::cache::BlockType;
         while self.metrics.memory_bytes() > self.max_bytes {
-            if let Some(victim) = self.policy.pick_victim() {
+            // Try to evict data blocks first (protect index/filter)
+            if let Some(victim) = self.policy.pick_victim(&[BlockType::Index, BlockType::Filter]) {
                 if let Some(evicted) = entries.remove(&victim) {
                     self.metrics.remove_memory(evicted.size_bytes() as u64);
                     self.metrics.record_eviction();
                 }
+            } else if self.metrics.memory_bytes() > self.max_bytes * 2 {
+                // Emergency: Cache is severely over capacity, evict anything
+                if let Some(victim) = self.policy.pick_victim(&[]) {
+                    if let Some(evicted) = entries.remove(&victim) {
+                        self.metrics.remove_memory(evicted.size_bytes() as u64);
+                        self.metrics.record_eviction();
+                    }
+                } else {
+                    break; // Can't evict more
+                }
             } else {
-                break; // Can't evict more
+                break; // Can't evict more data blocks, stop
             }
         }
 
@@ -149,7 +167,7 @@ mod tests {
     fn should_retrieve_value_after_store() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         let value = Bytes::from(&b"hello world"[..]);
 
         // Act
@@ -165,8 +183,8 @@ mod tests {
     fn should_evict_on_overflow() {
         // Arrange
         let shard = CacheShard::new(100, CachePolicyType::Lru);
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
         let data1 = vec![b'x'; 80];
         let data2 = vec![b'y'; 80];
 
@@ -183,7 +201,7 @@ mod tests {
     fn should_track_metrics() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         let value = Bytes::from(&b"test_data"[..]);
 
         // Act
@@ -203,7 +221,7 @@ mod tests {
 
         // Act
         for i in 0..5 {
-            let key = CacheKey::new(i, 0);
+            let key = CacheKey::for_data(i, 0);
             shard.put(key, Bytes::from(format!("value_{}", i).into_bytes()));
         }
         shard.clear();
@@ -221,7 +239,7 @@ mod tests {
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
 
         // Act
-        let result = shard.get(&CacheKey::new(999, 999));
+        let result = shard.get(&CacheKey::for_data(999, 999));
 
         // Assert
         assert!(result.is_none());
@@ -233,7 +251,7 @@ mod tests {
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
 
         // Act
-        let _ = shard.get(&CacheKey::new(999, 999));
+        let _ = shard.get(&CacheKey::for_data(999, 999));
         let metrics = shard.metrics();
 
         // Assert
@@ -244,7 +262,7 @@ mod tests {
     fn should_update_existing_entry() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         let value1 = Bytes::from(&b"original"[..]);
         let value2 = Bytes::from(&b"updated"[..]);
         let expected = value2.clone();
@@ -263,7 +281,7 @@ mod tests {
     fn should_remove_entry() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         let value = Bytes::from(&b"data"[..]);
 
         // Act
@@ -282,7 +300,7 @@ mod tests {
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
 
         // Act
-        let result = shard.remove(&CacheKey::new(999, 999));
+        let result = shard.remove(&CacheKey::for_data(999, 999));
 
         // Assert
         assert!(result.is_none());
@@ -303,7 +321,7 @@ mod tests {
     fn should_handle_empty_data() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         let empty = Bytes::new();
 
         // Act
@@ -319,7 +337,7 @@ mod tests {
     fn should_handle_large_values() {
         // Arrange
         let shard = CacheShard::new(100_000, CachePolicyType::Lru);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         let large = Bytes::from(vec![42u8; 50_000]);
 
         // Act
@@ -338,7 +356,7 @@ mod tests {
 
         // Act & Assert
         for i in 0..10 {
-            let key = CacheKey::new(i, 0);
+            let key = CacheKey::for_data(i, 0);
             shard.put(key, Bytes::from(format!("data_{}", i).into_bytes()));
             assert_eq!(shard.len(), (i + 1) as usize);
         }
@@ -348,8 +366,8 @@ mod tests {
     fn should_track_memory_usage() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         // Act
         shard.put(key1, Bytes::from(&b"1000B"[..])); // 5 bytes
@@ -370,7 +388,7 @@ mod tests {
 
         // Act & Assert (both should work, just with different eviction strategies)
         for i in 0..5 {
-            let key = CacheKey::new(i, 0);
+            let key = CacheKey::for_data(i, 0);
             shard_lru.put(key, Bytes::from(format!("data{}", i).into_bytes()));
             shard_tinyfu.put(key, Bytes::from(format!("data{}", i).into_bytes()));
         }
@@ -384,7 +402,7 @@ mod tests {
         let shard = CacheShard::new(0, CachePolicyType::Lru);
 
         // Act
-        shard.put(CacheKey::new(1, 0), Bytes::from(&b"data"[..]));
+        shard.put(CacheKey::for_data(1, 0), Bytes::from(&b"data"[..]));
 
         // Assert (should immediately evict)
         assert!(shard.is_empty() || shard.len() == 1);
@@ -394,8 +412,8 @@ mod tests {
     fn should_handle_single_entry_eviction() {
         // Arrange
         let shard = CacheShard::new(10, CachePolicyType::Lru); // Very small cache
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         // Act
         shard.put(key1, Bytes::from(&b"12345"[..])); // 5 bytes
@@ -410,7 +428,7 @@ mod tests {
     fn should_track_hit_and_miss_metrics() {
         // Arrange
         let shard = CacheShard::new(1024 * 1024, CachePolicyType::Lru);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
 
         // Act
         shard.get(&key); // miss
@@ -431,7 +449,7 @@ mod tests {
 
         // Act
         for i in 0..5 {
-            let key = CacheKey::new(i, 0);
+            let key = CacheKey::for_data(i, 0);
             shard.put(key, Bytes::from(vec![0u8; 15]));
         }
         let metrics = shard.metrics();
@@ -440,3 +458,4 @@ mod tests {
         assert!(metrics.eviction_count() > 0);
     }
 }
+

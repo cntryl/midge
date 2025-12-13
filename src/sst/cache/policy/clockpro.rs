@@ -135,7 +135,7 @@ impl CachePolicy for ClockProPolicy {
         }
     }
 
-    fn pick_victim(&self) -> Option<CacheKey> {
+    fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
         let mut slots = self.slots.lock().expect("slots lock");
         let mut key_to_slot = self.key_to_slot.lock().expect("key_to_slot lock");
         let mut hand = self.hand.lock().expect("hand lock");
@@ -147,7 +147,7 @@ impl CachePolicy for ClockProPolicy {
             return None;
         }
 
-        // Scan for a victim: cold entry with ref_bit clear
+        // Scan for a victim: cold entry with ref_bit clear (excluding protected types)
         let max_scans = slots.len() + 1;
         for _ in 0..max_scans {
             let idx = *hand;
@@ -164,6 +164,13 @@ impl CachePolicy for ClockProPolicy {
                 continue;
             }
 
+            let key = slot.key.unwrap();
+
+            // Skip excluded block types
+            if exclude_types.contains(&key.block_type) {
+                continue;
+            }
+
             // If ref_bit is set, clear it and continue scanning
             if slot.ref_bit {
                 slots[idx].ref_bit = false;
@@ -173,24 +180,20 @@ impl CachePolicy for ClockProPolicy {
             // Victim found: cold entry with ref_bit clear, or hot entry at end of hot set
             if !slot.hot_bit {
                 // Evict cold entry
-                if let Some(key) = slot.key {
-                    let evicted_key = key;
-                    slots[idx].key = None; // Ghost entry
-                    key_to_slot.remove(&evicted_key);
-                    *resident_count = resident_count.saturating_sub(1);
-                    return Some(evicted_key);
-                }
+                let evicted_key = key;
+                slots[idx].key = None; // Ghost entry
+                key_to_slot.remove(&evicted_key);
+                *resident_count = resident_count.saturating_sub(1);
+                return Some(evicted_key);
             } else if *hot_count > *hot_target {
                 // Evict from hot set if oversized
-                if let Some(key) = slot.key {
-                    let evicted_key = key;
-                    slots[idx].key = None;
-                    key_to_slot.remove(&evicted_key);
-                    *resident_count = resident_count.saturating_sub(1);
-                    *hot_count = hot_count.saturating_sub(1);
-                    Self::on_hot_evict(&mut hot_target);
-                    return Some(evicted_key);
-                }
+                let evicted_key = key;
+                slots[idx].key = None;
+                key_to_slot.remove(&evicted_key);
+                *resident_count = resident_count.saturating_sub(1);
+                *hot_count = hot_count.saturating_sub(1);
+                Self::on_hot_evict(&mut hot_target);
+                return Some(evicted_key);
             }
         }
 
@@ -231,7 +234,7 @@ mod tests {
     fn should_evict_after_access() {
         // Arrange
         let policy = ClockProPolicy::new();
-        let key1 = CacheKey::new(1, 0);
+        let key1 = CacheKey::for_data(1, 0);
 
         // Act
         policy.on_access(key1);
@@ -246,8 +249,8 @@ mod tests {
     fn should_track_accessed_keys() {
         // Arrange
         let policy = ClockProPolicy::new();
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         // Act
         policy.on_access(key1);
@@ -267,7 +270,7 @@ mod tests {
         // Arrange
         let policy = ClockProPolicy::new();
         for i in 0..5 {
-            policy.on_access(CacheKey::new(i, 0));
+            policy.on_access(CacheKey::for_data(i, 0));
         }
 
         // Act
@@ -284,7 +287,7 @@ mod tests {
         let policy = ClockProPolicy::new();
 
         // Act
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert
         assert!(victim.is_none());
@@ -296,8 +299,8 @@ mod tests {
         let policy = ClockProPolicy::default();
 
         // Act
-        policy.on_access(CacheKey::new(1, 0));
-        let victim = policy.pick_victim();
+        policy.on_access(CacheKey::for_data(1, 0));
+        let victim = policy.pick_victim(&[]);
 
         // Assert
         assert!(victim.is_some());
@@ -309,7 +312,7 @@ mod tests {
         let policy = ClockProPolicy::with_capacity(512);
 
         // Act
-        policy.on_access(CacheKey::new(1, 0));
+        policy.on_access(CacheKey::for_data(1, 0));
 
         // Assert
         let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
@@ -322,7 +325,7 @@ mod tests {
         let policy = ClockProPolicy::with_capacity(1); // Very small
 
         // Act
-        policy.on_access(CacheKey::new(1, 0));
+        policy.on_access(CacheKey::for_data(1, 0));
 
         // Assert
         let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
@@ -333,8 +336,8 @@ mod tests {
     fn should_remove_key_from_tracking() {
         // Arrange
         let policy = ClockProPolicy::new();
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         // Act
         policy.on_access(key1);
@@ -351,7 +354,7 @@ mod tests {
     fn should_handle_mixed_accesses_and_removals() {
         // Arrange
         let policy = ClockProPolicy::new();
-        let keys: Vec<CacheKey> = (1..=5).map(|i| CacheKey::new(i, 0)).collect();
+        let keys: Vec<CacheKey> = (1..=5).map(|i| CacheKey::for_data(i, 0)).collect();
 
         // Act
         for key in &keys[..3] {
@@ -373,10 +376,10 @@ mod tests {
         let policy = ClockProPolicy::new();
 
         // Act
-        policy.remove(CacheKey::new(999, 999)); // Remove non-existent key
+        policy.remove(CacheKey::for_data(999, 999)); // Remove non-existent key
 
         // Assert - should not panic
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
         assert!(victim.is_none());
     }
 
@@ -384,7 +387,7 @@ mod tests {
     fn should_handle_duplicate_accesses() {
         // Arrange
         let policy = ClockProPolicy::new();
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
 
         // Act
         policy.on_access(key);
@@ -400,7 +403,7 @@ mod tests {
     fn should_build_circular_structure() {
         // Arrange
         let policy = ClockProPolicy::new();
-        let keys: Vec<CacheKey> = (0..100).map(|i| CacheKey::new(i, 0)).collect();
+        let keys: Vec<CacheKey> = (0..100).map(|i| CacheKey::for_data(i, 0)).collect();
 
         // Act
         for key in &keys {
@@ -412,3 +415,5 @@ mod tests {
         assert_eq!(key_map.len(), 100);
     }
 }
+
+

@@ -53,6 +53,24 @@ impl AdmissionCounter {
         counter > 0
     }
 
+    /// Check if a cache key should be admitted based on block type
+    ///
+    /// Index and filter blocks are always admitted (no check).
+    /// Data blocks use second-access policy (must be seen before).
+    pub fn should_admit(&self, key: &crate::sst::cache::CacheKey) -> bool {
+        use crate::sst::cache::BlockType;
+        match key.block_type {
+            BlockType::Index | BlockType::Filter => {
+                // Always admit index and filter blocks
+                true
+            }
+            BlockType::Data => {
+                // Data blocks: admit on second access
+                self.estimate(&key.sst_id.to_le_bytes())
+            }
+        }
+    }
+
     /// Record an access to a key
     pub fn record_access(&self, key: &[u8]) {
         let cell_idx = (Self::hash_key(key) as usize) % self.cells.len();

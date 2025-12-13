@@ -3,27 +3,63 @@
 //! A cache key uniquely identifies a block by combining:
 //! - SST file ID (u64)
 //! - Block offset within the SST (u64)
+//! - Block type (Index, Data, Filter)
+//!
+//! Block types enable differentiated caching policies:
+//! - Index blocks: Always admitted, protected from eviction
+//! - Filter blocks: Always admitted, protected from eviction
+//! - Data blocks: Admission control, evictable
 
 use std::hash::{Hash, Hasher};
 
+/// Type of cached block
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BlockType {
+    /// Index block (sparse index, block index)
+    Index,
+    /// Data block (KV pairs)
+    Data,
+    /// Filter block (bloom filter)
+    Filter,
+}
+
 /// Unique identifier for a cached block
 ///
-/// Combines SST ID and block offset to uniquely identify a block within the database.
+/// Combines SST ID, block offset, and block type to uniquely identify a block
+/// and enable type-aware caching policies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct CacheKey {
     /// SST file ID
     pub sst_id: u64,
     /// Block offset in bytes within the SST file
     pub block_offset: u64,
+    /// Type of block (determines caching policy)
+    pub block_type: BlockType,
 }
 
 impl CacheKey {
     /// Create a new cache key for a block
-    pub fn new(sst_id: u64, block_offset: u64) -> Self {
+    pub fn new(sst_id: u64, block_offset: u64, block_type: BlockType) -> Self {
         Self {
             sst_id,
             block_offset,
+            block_type,
         }
+    }
+
+    /// Create a cache key for a data block
+    pub fn for_data(sst_id: u64, block_offset: u64) -> Self {
+        Self::new(sst_id, block_offset, BlockType::Data)
+    }
+
+    /// Create a cache key for an index block
+    pub fn for_index(sst_id: u64, block_offset: u64) -> Self {
+        Self::new(sst_id, block_offset, BlockType::Index)
+    }
+
+    /// Create a cache key for a filter block
+    pub fn for_filter(sst_id: u64, block_offset: u64) -> Self {
+        Self::new(sst_id, block_offset, BlockType::Filter)
     }
 
     /// Get the shard index for this key (0..num_shards)
@@ -42,18 +78,46 @@ mod tests {
     #[test]
     fn should_create_cache_key_with_values() {
         // Arrange & Act
-        let key = CacheKey::new(42, 1024);
+        let key = CacheKey::for_data(42, 1024);
 
         // Assert
         assert_eq!(key.sst_id, 42);
         assert_eq!(key.block_offset, 1024);
+        assert_eq!(key.block_type, BlockType::Data);
+    }
+
+    #[test]
+    fn should_create_data_block_key() {
+        // Arrange & Act
+        let key = CacheKey::for_data(1, 100);
+
+        // Assert
+        assert_eq!(key.block_type, BlockType::Data);
+    }
+
+    #[test]
+    fn should_create_index_block_key() {
+        // Arrange & Act
+        let key = CacheKey::for_index(1, 100);
+
+        // Assert
+        assert_eq!(key.block_type, BlockType::Index);
+    }
+
+    #[test]
+    fn should_create_filter_block_key() {
+        // Arrange & Act
+        let key = CacheKey::for_filter(1, 100);
+
+        // Assert
+        assert_eq!(key.block_type, BlockType::Filter);
     }
 
     #[test]
     fn should_distinguish_keys_with_different_sst_ids() {
         // Arrange
-        let key1 = CacheKey::new(1, 100);
-        let key2 = CacheKey::new(2, 100);
+        let key1 = CacheKey::for_data(1, 100);
+        let key2 = CacheKey::for_data(2, 100);
 
         // Assert
         assert_ne!(key1, key2);
@@ -62,8 +126,18 @@ mod tests {
     #[test]
     fn should_distinguish_keys_with_different_offsets() {
         // Arrange
-        let key1 = CacheKey::new(1, 100);
-        let key2 = CacheKey::new(1, 200);
+        let key1 = CacheKey::for_data(1, 100);
+        let key2 = CacheKey::for_data(1, 200);
+
+        // Assert
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn should_distinguish_keys_with_different_block_types() {
+        // Arrange
+        let key1 = CacheKey::for_data(1, 100);
+        let key2 = CacheKey::for_index(1, 100);
 
         // Assert
         assert_ne!(key1, key2);
@@ -72,8 +146,8 @@ mod tests {
     #[test]
     fn should_recognize_identical_keys() {
         // Arrange
-        let key1 = CacheKey::new(1, 100);
-        let key2 = CacheKey::new(1, 100);
+        let key1 = CacheKey::for_data(1, 100);
+        let key2 = CacheKey::for_data(1, 100);
 
         // Assert
         assert_eq!(key1, key2);
@@ -82,7 +156,7 @@ mod tests {
     #[test]
     fn should_compute_consistent_shard_index() {
         // Arrange
-        let key = CacheKey::new(1, 100);
+        let key = CacheKey::for_data(1, 100);
         let num_shards = 16;
 
         // Act
@@ -102,7 +176,7 @@ mod tests {
 
         // Act
         for i in 0..100 {
-            let key = CacheKey::new(i, 0);
+            let key = CacheKey::for_data(i, 0);
             let shard_idx = key.shard_index(num_shards);
             seen_shards.insert(shard_idx);
         }
@@ -117,7 +191,7 @@ mod tests {
     #[test]
     fn should_handle_shard_index_with_different_shard_counts() {
         // Arrange
-        let key = CacheKey::new(42, 1024);
+        let key = CacheKey::for_data(42, 1024);
 
         // Act
         let index_4 = key.shard_index(4);
@@ -133,7 +207,7 @@ mod tests {
     #[test]
     fn should_hash_consistently() {
         // Arrange
-        let key = CacheKey::new(1, 100);
+        let key = CacheKey::for_data(1, 100);
 
         // Act
         let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
@@ -148,7 +222,7 @@ mod tests {
     #[test]
     fn should_be_copyable() {
         // Arrange
-        let key1 = CacheKey::new(1, 100);
+        let key1 = CacheKey::for_data(1, 100);
 
         // Act
         let key2 = key1;
@@ -162,7 +236,7 @@ mod tests {
     #[test]
     fn should_handle_max_u64_values() {
         // Arrange & Act
-        let key = CacheKey::new(u64::MAX, u64::MAX);
+        let key = CacheKey::for_data(u64::MAX, u64::MAX);
 
         // Assert
         assert_eq!(key.sst_id, u64::MAX);
@@ -173,7 +247,7 @@ mod tests {
     #[test]
     fn should_handle_zero_values() {
         // Arrange & Act
-        let key = CacheKey::new(0, 0);
+        let key = CacheKey::for_data(0, 0);
 
         // Assert
         assert_eq!(key.sst_id, 0);
@@ -182,3 +256,4 @@ mod tests {
         assert!(shard_idx < 16);
     }
 }
+

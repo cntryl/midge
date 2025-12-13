@@ -52,14 +52,24 @@ impl CachePolicy for LruPolicy {
         positions.insert(key, queue.len() - 1);
     }
 
-    fn pick_victim(&self) -> Option<CacheKey> {
+    fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
         let mut queue = self.queue.lock().expect("LRU queue lock");
         let mut positions = self.positions.lock().expect("LRU positions lock");
 
-        if let Some(victim) = queue.pop_front() {
-            // Update all positions
+        // Find first victim not in exclude list
+        let mut victim_idx = None;
+        for (idx, key) in queue.iter().enumerate() {
+            if !exclude_types.contains(&key.block_type) {
+                victim_idx = Some(idx);
+                break;
+            }
+        }
+
+        if let Some(idx) = victim_idx {
+            let victim = queue.remove(idx).expect("victim exists");
+            // Update all positions after the removed element
             for (_, p) in positions.iter_mut() {
-                if *p > 0 {
+                if *p > idx {
                     *p -= 1;
                 }
             }
@@ -101,15 +111,15 @@ mod tests {
     fn should_evict_least_recently_used() {
         // Arrange
         let policy = LruPolicy::new();
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
-        let key3 = CacheKey::new(3, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
+        let key3 = CacheKey::for_data(3, 0);
 
         // Act
         policy.on_access(key1);
         policy.on_access(key2);
         policy.on_access(key3);
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert - key1 should be evicted (least recently used)
         assert_eq!(victim, Some(key1));
@@ -119,14 +129,14 @@ mod tests {
     fn should_update_lru_on_reaccess() {
         // Arrange
         let policy = LruPolicy::new();
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         // Act
         policy.on_access(key1);
         policy.on_access(key2);
         policy.on_access(key1); // Re-access key1 (move to end)
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert - key2 should be evicted (now least recently used)
         assert_eq!(victim, Some(key2));
@@ -136,14 +146,14 @@ mod tests {
     fn should_remove_key_from_tracking() {
         // Arrange
         let policy = LruPolicy::new();
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         // Act
         policy.on_access(key1);
         policy.on_access(key2);
         policy.remove(key1);
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert - key2 should be evicted (key1 was removed)
         assert_eq!(victim, Some(key2));
@@ -156,12 +166,12 @@ mod tests {
         // Arrange
         let policy = LruPolicy::new();
         for i in 0..5 {
-            policy.on_access(CacheKey::new(i, 0));
+            policy.on_access(CacheKey::for_data(i, 0));
         }
 
         // Act
         policy.clear();
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert
         assert!(victim.is_none());
@@ -173,7 +183,7 @@ mod tests {
         let policy = LruPolicy::new();
 
         // Act
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert
         assert!(victim.is_none());
@@ -185,18 +195,18 @@ mod tests {
         let policy = LruPolicy::default();
 
         // Act
-        policy.on_access(CacheKey::new(1, 0));
-        let victim = policy.pick_victim();
+        policy.on_access(CacheKey::for_data(1, 0));
+        let victim = policy.pick_victim(&[]);
 
         // Assert
-        assert_eq!(victim, Some(CacheKey::new(1, 0)));
+        assert_eq!(victim, Some(CacheKey::for_data(1, 0)));
     }
 
     #[test]
     fn should_handle_fifo_order_for_sequential_accesses() {
         // Arrange
         let policy = LruPolicy::new();
-        let keys: Vec<CacheKey> = (1..=10).map(|i| CacheKey::new(i, 0)).collect();
+        let keys: Vec<CacheKey> = (1..=10).map(|i| CacheKey::for_data(i, 0)).collect();
 
         // Act
         for key in &keys {
@@ -205,7 +215,7 @@ mod tests {
 
         // Assert - evict in FIFO order
         for key in &keys {
-            let victim = policy.pick_victim();
+            let victim = policy.pick_victim(&[]);
             assert_eq!(victim, Some(*key));
         }
     }
@@ -214,17 +224,17 @@ mod tests {
     fn should_handle_mixed_accesses_and_removals() {
         // Arrange
         let policy = LruPolicy::new();
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
-        let key3 = CacheKey::new(3, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
+        let key3 = CacheKey::for_data(3, 0);
 
         // Act
         policy.on_access(key1);
         policy.on_access(key2);
         policy.remove(key2);
         policy.on_access(key3);
-        let victim1 = policy.pick_victim();
-        let victim2 = policy.pick_victim();
+        let victim1 = policy.pick_victim(&[]);
+        let victim2 = policy.pick_victim(&[]);
 
         // Assert
         assert_eq!(victim1, Some(key1));
@@ -235,7 +245,7 @@ mod tests {
     fn should_move_key_to_end_on_reaccess() {
         // Arrange
         let policy = LruPolicy::new();
-        let keys: Vec<CacheKey> = (1..=5).map(|i| CacheKey::new(i, 0)).collect();
+        let keys: Vec<CacheKey> = (1..=5).map(|i| CacheKey::for_data(i, 0)).collect();
 
         // Act
         for key in &keys {
@@ -245,7 +255,7 @@ mod tests {
         policy.on_access(keys[1]); // key 2
 
         // Assert - victim should be key 1 (oldest after re-access)
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
         assert_eq!(victim, Some(keys[0]));
     }
 
@@ -255,8 +265,8 @@ mod tests {
         let policy = LruPolicy::new();
 
         // Act
-        policy.remove(CacheKey::new(999, 999)); // Remove non-existent key
-        let victim = policy.pick_victim();
+        policy.remove(CacheKey::for_data(999, 999)); // Remove non-existent key
+        let victim = policy.pick_victim(&[]);
 
         // Assert - should not panic
         assert!(victim.is_none());
@@ -266,16 +276,18 @@ mod tests {
     fn should_handle_duplicate_accesses() {
         // Arrange
         let policy = LruPolicy::new();
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
 
         // Act
         policy.on_access(key);
         policy.on_access(key); // Access again
         policy.on_access(key); // And again
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert - key should still be evicted once
         assert_eq!(victim, Some(key));
-        assert_eq!(policy.pick_victim(), None);
+        assert_eq!(policy.pick_victim(&[]), None);
     }
 }
+
+

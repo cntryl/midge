@@ -13,15 +13,18 @@ pub use clockpro::ClockProPolicy;
 pub use lru::LruPolicy;
 pub use tinylfu::TinyLfuPolicy;
 
-use crate::sst::cache::key::CacheKey;
+use crate::sst::cache::key::{BlockType, CacheKey};
 
 /// Eviction policy trait
 pub trait CachePolicy: Send + Sync {
     /// Record an access to a key (for policy state tracking)
     fn on_access(&self, key: CacheKey);
 
-    /// Pick a key to evict (returns None if nothing should be evicted)
-    fn pick_victim(&self) -> Option<CacheKey>;
+    /// Pick a key to evict, excluding specified block types
+    ///
+    /// `exclude_types`: Block types to protect from eviction (e.g., Index, Filter)
+    /// Returns None if no suitable victim is found
+    fn pick_victim(&self, exclude_types: &[BlockType]) -> Option<CacheKey>;
 
     /// Remove key from policy tracking
     fn remove(&self, key: CacheKey);
@@ -59,7 +62,7 @@ mod tests {
         let policy = CachePolicyType::Lru.create();
 
         // Assert - trait object should work
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         policy.on_access(key);
         // Should not panic
     }
@@ -70,7 +73,7 @@ mod tests {
         let policy = CachePolicyType::TinyLfu.create();
 
         // Assert
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         policy.on_access(key);
         // Should not panic
     }
@@ -81,7 +84,7 @@ mod tests {
         let policy = CachePolicyType::ClockPro.create();
 
         // Assert
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         policy.on_access(key);
         // Should not panic
     }
@@ -98,10 +101,10 @@ mod tests {
         // Act
         for policy in &policies {
             for i in 0..5 {
-                let key = CacheKey::new(i, 0);
+                let key = CacheKey::for_data(i, 0);
                 policy.on_access(key);
             }
-            policy.pick_victim();
+            policy.pick_victim(&[]);
             policy.clear();
         }
 
@@ -117,7 +120,7 @@ mod tests {
             CachePolicyType::TinyLfu.create(),
             CachePolicyType::ClockPro.create(),
         ];
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
 
         // Act
         for policy in &policies {
@@ -137,7 +140,7 @@ mod tests {
             CachePolicyType::TinyLfu,
             CachePolicyType::ClockPro,
         ];
-        let keys: Vec<CacheKey> = (0..10).map(|i| CacheKey::new(i, 0)).collect();
+        let keys: Vec<CacheKey> = (0..10).map(|i| CacheKey::for_data(i, 0)).collect();
 
         // Act & Assert - all policies should handle the same sequence
         for policy_type in &policy_types {
@@ -150,14 +153,14 @@ mod tests {
 
             // Pick victims
             for _ in 0..5 {
-                let victim = policy.pick_victim();
+                let victim = policy.pick_victim(&[]);
                 // Some policies may or may not have victims
                 let _ = victim;
             }
 
             // Clear
             policy.clear();
-            assert_eq!(policy.pick_victim(), None);
+            assert_eq!(policy.pick_victim(&[]), None);
         }
     }
 
@@ -173,7 +176,7 @@ mod tests {
         let policy1 = policy_type.create();
         let policy2 = policy_type_copy.create();
 
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         policy1.on_access(key);
         policy2.on_access(key);
         // Both should work independently
@@ -189,15 +192,15 @@ mod tests {
         let policy2 = policy_type.create();
 
         // Assert - independent instances
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         policy1.on_access(key1);
         policy2.on_access(key2);
 
         // Both should work independently
-        let victim1 = policy1.pick_victim();
-        let victim2 = policy2.pick_victim();
+        let victim1 = policy1.pick_victim(&[]);
+        let victim2 = policy2.pick_victim(&[]);
 
         assert!(victim1.is_some() || victim1.is_none()); // Can be either
         assert!(victim2.is_some() || victim2.is_none()); // Can be either
@@ -207,9 +210,9 @@ mod tests {
     fn should_handle_policy_trait_bound() {
         // Arrange
         fn use_policy(policy: &dyn CachePolicy) {
-            let key = CacheKey::new(1, 0);
+            let key = CacheKey::for_data(1, 0);
             policy.on_access(key);
-            let _ = policy.pick_victim();
+            let _ = policy.pick_victim(&[]);
             policy.clear();
         }
 
@@ -236,19 +239,21 @@ mod tests {
         // Act & Assert
         for policy in &policies {
             // Add keys in order
-            let keys: Vec<CacheKey> = (0..5).map(|i| CacheKey::new(i, 0)).collect();
+            let keys: Vec<CacheKey> = (0..5).map(|i| CacheKey::for_data(i, 0)).collect();
             for key in &keys {
                 policy.on_access(*key);
             }
 
             // Should be able to pick victims (or return None)
-            let _ = policy.pick_victim();
+            let _ = policy.pick_victim(&[]);
 
             // Clear should work
             policy.clear();
 
             // After clear, should have no victims
-            assert_eq!(policy.pick_victim(), None);
+            assert_eq!(policy.pick_victim(&[]), None);
         }
     }
 }
+
+

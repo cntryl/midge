@@ -14,7 +14,7 @@ pub mod shard;
 pub mod value;
 
 pub use admission::AdmissionCounter;
-pub use key::CacheKey;
+pub use key::{BlockType, CacheKey};
 pub use metrics::CacheMetrics;
 pub use policy::{CachePolicy, CachePolicyType};
 pub use shard::CacheShard;
@@ -156,7 +156,7 @@ mod tests {
     fn should_retrieve_value_after_put() {
         // Arrange
         let cache = BlockCache::new_default(1024 * 1024);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
         let value = Bytes::from(&b"test_block"[..]);
 
         // Act
@@ -172,7 +172,7 @@ mod tests {
     fn should_remove_entry() {
         // Arrange
         let cache = BlockCache::new_default(1024 * 1024);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
 
         // Act
         cache.put(key, Bytes::from(&b"data"[..]));
@@ -191,7 +191,7 @@ mod tests {
 
         // Act
         for sst_id in 0..100 {
-            let key = CacheKey::new(sst_id, 0);
+            let key = CacheKey::for_data(sst_id, 0);
             cache.put(key, Bytes::from(vec![1u8; 1024]));
         }
 
@@ -210,7 +210,7 @@ mod tests {
         // Arrange
         let cache = BlockCache::new_default(1024 * 1024);
         for i in 0..10 {
-            let key = CacheKey::new(i, 0);
+            let key = CacheKey::for_data(i, 0);
             cache.put(key, Bytes::from(vec![1u8; 100]));
         }
 
@@ -227,13 +227,13 @@ mod tests {
     fn should_track_metrics() {
         // Arrange
         let cache = BlockCache::new_default(1024 * 1024);
-        let key = CacheKey::new(1, 0);
+        let key = CacheKey::for_data(1, 0);
 
         // Act
         cache.put(key, Bytes::from(&b"test"[..]));
         cache.get(&key);
         cache.get(&key);
-        let _ = cache.get(&CacheKey::new(999, 999));
+        let _ = cache.get(&CacheKey::for_data(999, 999));
 
         // Assert
         let metrics = cache.metrics();
@@ -249,8 +249,8 @@ mod tests {
         let data2 = vec![b'y'; 60];
 
         // Act
-        cache.put(CacheKey::new(1, 0), Bytes::from(data1));
-        cache.put(CacheKey::new(2, 0), Bytes::from(data2));
+        cache.put(CacheKey::for_data(1, 0), Bytes::from(data1));
+        cache.put(CacheKey::for_data(2, 0), Bytes::from(data2));
 
         // Assert - one should be evicted
         let metrics = cache.metrics();
@@ -270,3 +270,4 @@ mod tests {
         assert!(clockpro_cache.is_empty());
     }
 }
+

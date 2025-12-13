@@ -316,7 +316,7 @@ impl crate::sst::SstReader for SstFile {
 
         if let Some(handle) = block_handle {
             // Step 3: Check block cache (if available)
-            let cache_key = CacheKey::new(self.sst_id, handle.offset);
+            let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
 
             let block_data = if let Some(ref cache) = self.block_cache {
                 // Try to get from cache

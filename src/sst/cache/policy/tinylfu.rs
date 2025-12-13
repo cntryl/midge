@@ -50,15 +50,20 @@ impl CachePolicy for TinyLfuPolicy {
         *frequencies.entry(key).or_insert(0) += 1;
     }
 
-    fn pick_victim(&self) -> Option<CacheKey> {
+    fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
         let mut recent = self.recent.lock().expect("TinyLFU recent lock");
         let frequencies = self.frequencies.lock().expect("TinyLFU frequencies lock");
 
-        // Find victim with lowest frequency among recent accesses
+        // Find victim with lowest frequency among recent accesses (excluding protected types)
         let mut victim: Option<CacheKey> = None;
         let mut min_freq = u32::MAX;
 
         for &key in recent.iter() {
+            // Skip excluded block types
+            if exclude_types.contains(&key.block_type) {
+                continue;
+            }
+            
             let freq = *frequencies.get(&key).unwrap_or(&0);
             if freq < min_freq {
                 min_freq = freq;
@@ -98,8 +103,8 @@ mod tests {
     fn should_prefer_frequent_over_recent() {
         // Arrange
         let policy = TinyLfuPolicy::new();
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         // Act
         // Access key1 multiple times (higher frequency)
@@ -110,7 +115,7 @@ mod tests {
         policy.on_access(key2);
 
         // Assert - key2 should be evicted (lower frequency)
-        if let Some(victim) = policy.pick_victim() {
+        if let Some(victim) = policy.pick_victim(&[]) {
             assert_eq!(victim, key2);
         }
     }
@@ -119,7 +124,7 @@ mod tests {
     fn should_track_frequencies() {
         // Arrange
         let policy = TinyLfuPolicy::new();
-        let key1 = CacheKey::new(1, 0);
+        let key1 = CacheKey::for_data(1, 0);
 
         // Act
         policy.on_access(key1);
@@ -127,7 +132,7 @@ mod tests {
         policy.on_access(key1);
 
         // Assert - can pick victim (frequencies tracked internally)
-        let _ = policy.pick_victim();
+        let _ = policy.pick_victim(&[]);
     }
 
     // ===== New comprehensive tests =====
@@ -137,12 +142,12 @@ mod tests {
         // Arrange
         let policy = TinyLfuPolicy::new();
         for i in 0..5 {
-            policy.on_access(CacheKey::new(i, 0));
+            policy.on_access(CacheKey::for_data(i, 0));
         }
 
         // Act
         policy.clear();
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert
         assert!(victim.is_none());
@@ -154,7 +159,7 @@ mod tests {
         let policy = TinyLfuPolicy::new();
 
         // Act
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
 
         // Assert
         assert!(victim.is_none());
@@ -166,8 +171,8 @@ mod tests {
         let policy = TinyLfuPolicy::default();
 
         // Act
-        policy.on_access(CacheKey::new(1, 0));
-        let victim = policy.pick_victim();
+        policy.on_access(CacheKey::for_data(1, 0));
+        let victim = policy.pick_victim(&[]);
 
         // Assert
         assert!(victim.is_some());
@@ -177,8 +182,8 @@ mod tests {
     fn should_remove_key_from_tracking() {
         // Arrange
         let policy = TinyLfuPolicy::new();
-        let key1 = CacheKey::new(1, 0);
-        let key2 = CacheKey::new(2, 0);
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
 
         // Act
         policy.on_access(key1);
@@ -186,7 +191,7 @@ mod tests {
         policy.remove(key1);
 
         // Assert - key1 should not be picked
-        if let Some(victim) = policy.pick_victim() {
+        if let Some(victim) = policy.pick_victim(&[]) {
             assert_ne!(victim, key1);
         }
     }
@@ -198,11 +203,11 @@ mod tests {
 
         // Act - access more keys than window size
         for i in 0..200 {
-            policy.on_access(CacheKey::new(i, 0));
+            policy.on_access(CacheKey::for_data(i, 0));
         }
 
         // Assert - should handle gracefully
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
         assert!(victim.is_some());
     }
 
@@ -210,8 +215,8 @@ mod tests {
     fn should_prefer_high_frequency_over_low() {
         // Arrange
         let policy = TinyLfuPolicy::new();
-        let freq_high = CacheKey::new(1, 0);
-        let freq_low = CacheKey::new(2, 0);
+        let freq_high = CacheKey::for_data(1, 0);
+        let freq_low = CacheKey::for_data(2, 0);
 
         // Act
         for _ in 0..10 {
@@ -220,7 +225,7 @@ mod tests {
         policy.on_access(freq_low);
 
         // Assert - low frequency key should be evicted first
-        if let Some(victim) = policy.pick_victim() {
+        if let Some(victim) = policy.pick_victim(&[]) {
             assert_eq!(victim, freq_low);
         }
     }
@@ -229,7 +234,7 @@ mod tests {
     fn should_handle_mixed_frequencies() {
         // Arrange
         let policy = TinyLfuPolicy::new();
-        let keys: Vec<CacheKey> = (0..5).map(|i| CacheKey::new(i, 0)).collect();
+        let keys: Vec<CacheKey> = (0..5).map(|i| CacheKey::for_data(i, 0)).collect();
 
         // Act - varying frequencies
         policy.on_access(keys[0]); // 1 access
@@ -245,7 +250,7 @@ mod tests {
         policy.on_access(keys[4]); // 1 access
 
         // Assert - lowest frequency should be picked
-        if let Some(victim) = policy.pick_victim() {
+        if let Some(victim) = policy.pick_victim(&[]) {
             assert!(victim == keys[0] || victim == keys[4]);
         }
     }
@@ -256,10 +261,12 @@ mod tests {
         let policy = TinyLfuPolicy::new();
 
         // Act
-        policy.remove(CacheKey::new(999, 999));
+        policy.remove(CacheKey::for_data(999, 999));
 
         // Assert - should not panic
-        let victim = policy.pick_victim();
+        let victim = policy.pick_victim(&[]);
         assert!(victim.is_none());
     }
 }
+
+
