@@ -67,6 +67,7 @@ impl Telemetry {
     }
 
     #[cfg(feature = "telemetry")]
+    #[allow(dead_code)]
     fn setup_tracing(_config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;

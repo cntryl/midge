@@ -805,7 +805,7 @@ mod tests {
         // Act & Assert
         let state = KeyState::Absent;
         match state {
-            KeyState::Absent => assert!(true),
+            KeyState::Absent => {}
             _ => panic!("Expected Absent state"),
         }
     }

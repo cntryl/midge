@@ -11,6 +11,12 @@ use crate::sst::Memtable;
 /// SeqnoAllocActor - allocates monotonic sequence numbers
 pub struct SeqnoAllocActor;
 
+impl Default for SeqnoAllocActor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SeqnoAllocActor {
     pub fn new() -> Self {
         Self

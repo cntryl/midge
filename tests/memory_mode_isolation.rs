@@ -31,7 +31,7 @@ fn should_not_create_filesystem_artifacts_when_memory_mode() {
 
     // Assert: Memory mode produces no persistent artifacts
     // This is implicitly validated by memory mode operations (no disk writes)
-    assert!(true, "memory mode completed without filesystem operations");
+    // Memory mode completed without filesystem operations
 }
 
 #[test]

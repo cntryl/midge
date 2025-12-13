@@ -326,13 +326,13 @@ mod tests {
     #[test]
     fn should_maintain_wal_durability_frontiers() {
         // Arrange
-        let mut wal = WalState::default();
-
-        // Act - Simulate sequence progression
-        wal.last_synced_seq = 10;
-        wal.local_durable_seq = 10;
-        wal.pending_writes = 5;
-        wal.cloud_durable_seq = 8;
+        let wal = WalState {
+            last_synced_seq: 10,
+            local_durable_seq: 10,
+            pending_writes: 5,
+            cloud_durable_seq: 8,
+            ..Default::default()
+        };
 
         // Assert - Verify monotonicity constraints
         assert!(wal.cloud_durable_seq <= wal.local_durable_seq);

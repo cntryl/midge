@@ -124,7 +124,8 @@ impl Metrics {
     #[inline]
     pub fn record_write_latency_us(&self, latency_us: u64) {
         if self.enabled {
-            self.write_latency_us.fetch_add(latency_us, Ordering::Relaxed);
+            self.write_latency_us
+                .fetch_add(latency_us, Ordering::Relaxed);
         }
     }
 
@@ -132,7 +133,8 @@ impl Metrics {
     #[inline]
     pub fn record_read_latency_us(&self, latency_us: u64) {
         if self.enabled {
-            self.read_latency_us.fetch_add(latency_us, Ordering::Relaxed);
+            self.read_latency_us
+                .fetch_add(latency_us, Ordering::Relaxed);
         }
     }
 

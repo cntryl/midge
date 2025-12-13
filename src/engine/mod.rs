@@ -27,6 +27,11 @@ pub use api::*;
 pub use context::Context;
 pub use open::open_engine;
 
+/// Registry of merge operators, keyed by column family ID
+type MergeOperatorRegistry = dashmap::DashMap<u32, std::sync::Arc<dyn MergeOperator>>;
+/// Registry of column families, keyed by column family ID
+type ColumnFamilyRegistry = dashmap::DashMap<u32, ColumnFamilyHandle>;
+
 /// Trait for types that can be converted to engine open parameters
 /// Allows both PathBuf and MidgeOptions to be used with MidgeEngine::open
 pub trait OpenParam {
@@ -92,9 +97,9 @@ pub struct MidgeEngine {
     /// Next snapshot ID counter (local only, not related to sequence numbers)
     next_snapshot_id: std::sync::atomic::AtomicU64,
     /// Merge operators registered per column family
-    merge_operators: std::sync::RwLock<std::collections::HashMap<u32, std::sync::Arc<dyn MergeOperator>>>,
+    merge_operators: MergeOperatorRegistry,
     /// Column families registry (CF ID -> Handle)
-    column_families: std::sync::RwLock<std::collections::HashMap<u32, ColumnFamilyHandle>>,
+    column_families: ColumnFamilyRegistry,
 }
 
 impl OpenParam for PathBuf {
@@ -140,17 +145,15 @@ impl MidgeEngine {
         let runtime_handle = runtime.start(state)?;
 
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
-        let mut column_families = std::collections::HashMap::new();
+        let column_families = dashmap::DashMap::new();
         column_families.insert(0, default_cf.clone());
 
         // Load existing CFs from manifest
         let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
         for cf_meta in &manifest.column_families {
             if cf_meta.id != 0 {
-                let handle = ColumnFamilyHandle::new(
-                    ColumnFamilyId(cf_meta.id),
-                    cf_meta.name.clone(),
-                );
+                let handle =
+                    ColumnFamilyHandle::new(ColumnFamilyId(cf_meta.id), cf_meta.name.clone());
                 column_families.insert(cf_meta.id, handle);
             }
         }
@@ -161,8 +164,8 @@ impl MidgeEngine {
             default_cf,
             sequence: std::sync::atomic::AtomicU64::new(0),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
-            merge_operators: std::sync::RwLock::new(std::collections::HashMap::new()),
-            column_families: std::sync::RwLock::new(column_families),
+            merge_operators: dashmap::DashMap::new(),
+            column_families,
         })
     }
 
@@ -190,7 +193,7 @@ impl MidgeEngine {
         let runtime_handle = runtime.start(state)?;
 
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
-        let mut column_families = std::collections::HashMap::new();
+        let column_families = dashmap::DashMap::new();
         column_families.insert(0, default_cf.clone());
 
         // Load existing CFs from manifest (skip in memory mode and deleted CFs)
@@ -198,10 +201,8 @@ impl MidgeEngine {
             let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
             for cf_meta in &manifest.column_families {
                 if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
-                    let handle = ColumnFamilyHandle::new(
-                        ColumnFamilyId(cf_meta.id),
-                        cf_meta.name.clone(),
-                    );
+                    let handle =
+                        ColumnFamilyHandle::new(ColumnFamilyId(cf_meta.id), cf_meta.name.clone());
                     column_families.insert(cf_meta.id, handle);
                 }
             }
@@ -213,12 +214,11 @@ impl MidgeEngine {
             default_cf,
             sequence: std::sync::atomic::AtomicU64::new(0),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
-            merge_operators: std::sync::RwLock::new(std::collections::HashMap::new()),
-            column_families: std::sync::RwLock::new(column_families),
+            merge_operators: dashmap::DashMap::new(),
+            column_families,
         })
     }
 
-    /// Get the default column family
     pub fn default_column_family(&self) -> &ColumnFamilyHandle {
         &self.default_cf
     }
@@ -226,7 +226,7 @@ impl MidgeEngine {
     /// Put a key-value pair into a specific column family
     pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         // Check if CF still exists
-        if !self.column_families.read().expect("column_families lock poisoned").contains_key(&cf.id().as_u32()) {
+        if !self.column_families.contains_key(&cf.id().as_u32()) {
             return Err(MidgeError::Internal(format!(
                 "Column family '{}' (id={}) has been dropped",
                 cf.name(),
@@ -289,13 +289,15 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::Ok { .. } => {
                 let elapsed = start.elapsed();
-                
+
                 // Record metrics
                 if let Some(telemetry) = Telemetry::global() {
                     telemetry.metrics().record_put();
-                    telemetry.metrics().record_write_latency_us(elapsed.as_micros() as u64);
+                    telemetry
+                        .metrics()
+                        .record_write_latency_us(elapsed.as_micros() as u64);
                 }
-                
+
                 tracing::debug!(
                     elapsed_us = elapsed.as_micros(),
                     status = "success",
@@ -305,14 +307,14 @@ impl MidgeEngine {
             }
             RuntimeResponse::Error { message, .. } => {
                 tracing::warn!(error = %message, status = "error", "put failed");
-                
+
                 // Record write stall metric if applicable
                 if message.contains("Write stall") {
                     if let Some(telemetry) = Telemetry::global() {
                         telemetry.metrics().record_write_stall();
                     }
                 }
-                
+
                 // Check if it's a write stall - if so, propagate it
                 if message.contains("Write stall") {
                     Err(MidgeError::WriteStall(message))
@@ -321,7 +323,10 @@ impl MidgeEngine {
                 }
             }
             _ => {
-                tracing::warn!(status = "unexpected_response", "put got unexpected response");
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "put got unexpected response"
+                );
                 Err(MidgeError::Internal(
                     "Unexpected response to put".to_string(),
                 ))
@@ -339,11 +344,7 @@ impl MidgeEngine {
         let key_size = key.len();
         let start = Instant::now();
 
-        let span = info_span!(
-            "get_operation",
-            cf_id = cf.id.0,
-            key_size = key_size,
-        );
+        let span = info_span!("get_operation", cf_id = cf.id.0, key_size = key_size,);
         let _enter = span.enter();
 
         let _midge_span = MidgeSpan::new("get_operation")
@@ -364,16 +365,18 @@ impl MidgeEngine {
             RuntimeResponse::ReadValue { value, .. } => {
                 let elapsed = start.elapsed();
                 let found = value.is_some();
-                
+
                 // Record metrics
                 if let Some(telemetry) = Telemetry::global() {
                     telemetry.metrics().record_get();
-                    telemetry.metrics().record_read_latency_us(elapsed.as_micros() as u64);
+                    telemetry
+                        .metrics()
+                        .record_read_latency_us(elapsed.as_micros() as u64);
                     if !found {
                         telemetry.metrics().record_cache_miss();
                     }
                 }
-                
+
                 tracing::debug!(
                     elapsed_us = elapsed.as_micros(),
                     found = found,
@@ -387,7 +390,10 @@ impl MidgeEngine {
                 Err(MidgeError::Internal(message))
             }
             _ => {
-                tracing::warn!(status = "unexpected_response", "get got unexpected response");
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "get got unexpected response"
+                );
                 Err(MidgeError::Internal(
                     "Unexpected response to get".to_string(),
                 ))
@@ -437,11 +443,7 @@ impl MidgeEngine {
         let key_size = key.len();
         let start = Instant::now();
 
-        let span = info_span!(
-            "delete_operation",
-            cf_id = cf.id.0,
-            key_size = key_size,
-        );
+        let span = info_span!("delete_operation", cf_id = cf.id.0, key_size = key_size,);
         let _enter = span.enter();
 
         let _midge_span = MidgeSpan::new("delete_operation")
@@ -475,7 +477,10 @@ impl MidgeEngine {
                 Err(MidgeError::Internal(message))
             }
             _ => {
-                tracing::warn!(status = "unexpected_response", "delete got unexpected response");
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "delete got unexpected response"
+                );
                 Err(MidgeError::Internal(
                     "Unexpected response to delete".to_string(),
                 ))
@@ -501,20 +506,17 @@ impl MidgeEngine {
         // Convert to Arc so it can be shared
         let operator_arc: std::sync::Arc<dyn MergeOperator> = operator.into();
 
-        // Store locally
-        {
-            let mut ops = self.merge_operators.write().map_err(|e| {
-                MidgeError::Internal(format!("Failed to acquire merge operators lock: {}", e))
-            })?;
-            ops.insert(cf_id, operator_arc.clone());
-        }
+        // Store locally (DashMap provides lock-free concurrent access)
+        self.merge_operators.insert(cf_id, operator_arc.clone());
 
         // Send to runtime
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::RegisterMergeOperator {
-            request_id: next_request_id(),
-            cf_id,
-            operator: operator_arc,
-        })?;
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::RegisterMergeOperator {
+                request_id: next_request_id(),
+                cf_id,
+                operator: operator_arc,
+            })?;
 
         match response {
             RuntimeResponse::Ok { .. } => Ok(()),
@@ -551,20 +553,12 @@ impl MidgeEngine {
             .with_value_size(operand_size);
 
         // Check that merge operator is registered
-        {
-            let ops = self.merge_operators.read().map_err(|e| {
-                MidgeError::Internal(format!("Failed to acquire merge operators lock: {}", e))
-            })?;
-            if !ops.contains_key(&cf.id.0) {
-                tracing::warn!(
-                    cf_id = cf.id.0,
-                    "merge operator not registered"
-                );
-                return Err(MidgeError::InvalidArgument(format!(
-                    "No merge operator registered for column family {}",
-                    cf.id.0
-                )));
-            }
+        if !self.merge_operators.contains_key(&cf.id.0) {
+            tracing::warn!(cf_id = cf.id.0, "merge operator not registered");
+            return Err(MidgeError::InvalidArgument(format!(
+                "No merge operator registered for column family {}",
+                cf.id.0
+            )));
         }
 
         // Send merge operation to runtime
@@ -579,13 +573,15 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::Ok { .. } => {
                 let elapsed = start.elapsed();
-                
+
                 // Record metrics
                 if let Some(telemetry) = Telemetry::global() {
                     telemetry.metrics().record_merge();
-                    telemetry.metrics().record_write_latency_us(elapsed.as_micros() as u64);
+                    telemetry
+                        .metrics()
+                        .record_write_latency_us(elapsed.as_micros() as u64);
                 }
-                
+
                 tracing::debug!(
                     elapsed_us = elapsed.as_micros(),
                     status = "success",
@@ -598,7 +594,10 @@ impl MidgeEngine {
                 Err(MidgeError::Internal(message))
             }
             _ => {
-                tracing::warn!(status = "unexpected_response", "merge got unexpected response");
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "merge got unexpected response"
+                );
                 Err(MidgeError::Internal(
                     "Unexpected response to merge".to_string(),
                 ))
@@ -666,13 +665,15 @@ impl MidgeEngine {
             RuntimeResponse::RangeScanResults { results, .. } => {
                 let elapsed = start_ts.elapsed();
                 let result_count = results.len();
-                
+
                 // Record metrics
                 if let Some(telemetry) = Telemetry::global() {
                     telemetry.metrics().record_range_scan();
-                    telemetry.metrics().record_read_latency_us(elapsed.as_micros() as u64);
+                    telemetry
+                        .metrics()
+                        .record_read_latency_us(elapsed.as_micros() as u64);
                 }
-                
+
                 tracing::debug!(
                     elapsed_us = elapsed.as_micros(),
                     result_count = result_count,
@@ -689,7 +690,10 @@ impl MidgeEngine {
                 Err(MidgeError::Internal(message))
             }
             _ => {
-                tracing::warn!(status = "unexpected_response", "range scan got unexpected response");
+                tracing::warn!(
+                    status = "unexpected_response",
+                    "range scan got unexpected response"
+                );
                 Err(MidgeError::Internal(
                     "Unexpected response to range scan".to_string(),
                 ))
@@ -1074,7 +1078,9 @@ impl MidgeEngine {
         // TODO: Add RuntimeMsg::CommitTransaction for true atomic commit.
         for intent in write_intents {
             match &intent {
-                api::WriteIntent::Put { cf_id, key, value, .. } => {
+                api::WriteIntent::Put {
+                    cf_id, key, value, ..
+                } => {
                     let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                         request_id: next_request_id(),
                         cf_id: cf_id.as_u32(),
@@ -1104,22 +1110,28 @@ impl MidgeEngine {
                         return Err(MidgeError::Internal(message));
                     }
                 }
-                api::WriteIntent::DeleteRange { cf_id, start_key, end_key, .. } => {
+                api::WriteIntent::DeleteRange {
+                    cf_id,
+                    start_key,
+                    end_key,
+                    ..
+                } => {
                     // Delete range by scanning and deleting each key
                     // TODO: Implement efficient range deletion at WAL level
                     // For now, only support default CF (limitation of current API)
                     let cf_handle = ColumnFamilyHandle::new(*cf_id, "default".to_string());
                     let keys = self.range(&cf_handle, start_key, end_key)?;
                     for (key, _) in keys {
-                        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
-                            request_id: next_request_id(),
-                            cf_id: cf_id.as_u32(),
-                            key: key.to_vec(),
-                            value: None,
-                            sequence: self.next_sequence(),
-                            ttl_seconds: None,
-                            insert_only: false,
-                        })?;
+                        let response =
+                            self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+                                request_id: next_request_id(),
+                                cf_id: cf_id.as_u32(),
+                                key: key.to_vec(),
+                                value: None,
+                                sequence: self.next_sequence(),
+                                ttl_seconds: None,
+                                insert_only: false,
+                            })?;
                         if let RuntimeResponse::Error { message, .. } = response {
                             txn.mark_failed()?;
                             return Err(MidgeError::Internal(message));
@@ -1163,20 +1175,17 @@ impl MidgeEngine {
 
         match response {
             RuntimeResponse::ColumnFamilyCreated { cf_id, .. } => {
-                let handle = ColumnFamilyHandle::new(
-                    ColumnFamilyId(cf_id),
-                    name.to_string(),
-                );
+                let handle = ColumnFamilyHandle::new(ColumnFamilyId(cf_id), name.to_string());
                 // Register CF in local registry
-                self.column_families.write().expect("column_families lock poisoned").insert(cf_id, handle.clone());
-                
+                self.column_families.insert(cf_id, handle.clone());
+
                 // Persist manifest to disk
-                let _persist_response = self.runtime_handle.send_and_wait(
-                    RuntimeMsg::ManifestPersist {
-                        request_id: next_request_id(),
-                    },
-                )?;
-                
+                let _persist_response =
+                    self.runtime_handle
+                        .send_and_wait(RuntimeMsg::ManifestPersist {
+                            request_id: next_request_id(),
+                        })?;
+
                 Ok(handle)
             }
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
@@ -1204,15 +1213,15 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::Ok { .. } => {
                 // Remove from local registry
-                self.column_families.write().expect("column_families lock poisoned").remove(&cf_id.as_u32());
-                
+                self.column_families.remove(&cf_id.as_u32());
+
                 // Persist manifest to disk
-                let _persist_response = self.runtime_handle.send_and_wait(
-                    RuntimeMsg::ManifestPersist {
-                        request_id: next_request_id(),
-                    },
-                )?;
-                
+                let _persist_response =
+                    self.runtime_handle
+                        .send_and_wait(RuntimeMsg::ManifestPersist {
+                            request_id: next_request_id(),
+                        })?;
+
                 Ok(())
             }
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
@@ -1224,7 +1233,11 @@ impl MidgeEngine {
 
     /// List all active column families
     pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
-        Ok(self.column_families.read().expect("column_families lock poisoned").values().cloned().collect())
+        Ok(self
+            .column_families
+            .iter()
+            .map(|ref_multi| ref_multi.value().clone())
+            .collect())
     }
 
     /// Compact all data (stub - not implemented)
@@ -1258,7 +1271,9 @@ impl MidgeEngine {
         match response {
             RuntimeResponse::SeqnoAllocated { seqno, .. } => Ok(seqno),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal("Unexpected response from AllocSeqno".to_string())),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response from AllocSeqno".to_string(),
+            )),
         }
     }
 
@@ -1499,13 +1514,18 @@ mod tests {
     #[test]
     fn should_distinguish_between_different_column_family_ids() {
         // Arrange
-        let id_vec = [ColumnFamilyId(0),
+        let id_vec = [
+            ColumnFamilyId(0),
             ColumnFamilyId(1),
             ColumnFamilyId(100),
-            ColumnFamilyId(u32::MAX)];
+            ColumnFamilyId(u32::MAX),
+        ];
 
         // Act
-        let unique_count = id_vec.iter().collect::<std::collections::HashSet<_>>().len();
+        let unique_count = id_vec
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
 
         // Assert: all IDs are unique
         assert_eq!(unique_count, 4);
@@ -1619,11 +1639,11 @@ mod tests {
     #[test]
     fn should_support_column_family_handle_in_vector() {
         // Arrange
-        let mut handles = Vec::new();
-
         // Act
-        handles.push(ColumnFamilyHandle::new(ColumnFamilyId(0), "default".to_string()));
-        handles.push(ColumnFamilyHandle::new(ColumnFamilyId(1), "secondary".to_string()));
+        let handles = vec![
+            ColumnFamilyHandle::new(ColumnFamilyId(0), "default".to_string()),
+            ColumnFamilyHandle::new(ColumnFamilyId(1), "secondary".to_string()),
+        ];
 
         // Assert
         assert_eq!(handles.len(), 2);
@@ -1656,6 +1676,6 @@ mod tests {
         let hash_value = hasher.finish();
 
         // Assert: should be hashable without panicking
-        assert!(hash_value >= 0); // Just verify it produced a hash
+        assert_ne!(hash_value, 0); // Just verify it produced a hash
     }
 }

@@ -132,7 +132,7 @@ fn run_workload_b_concurrent(
         let key = &keys[key_id];
 
         let cf = &cf_list[rng.gen_range(0..cf_count)];
-        let cf_id = cf.id();
+        let _cf_id = cf.id();
 
         let start = Instant::now();
 

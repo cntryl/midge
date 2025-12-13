@@ -293,7 +293,7 @@ mod tests {
 
         // Assert
         match cred {
-            AzureCredential::ManagedIdentity => assert!(true),
+            AzureCredential::ManagedIdentity => {} // OK
             _ => panic!("Expected ManagedIdentity credential"),
         }
     }
@@ -433,7 +433,7 @@ mod tests {
         // Assert
         assert_eq!(provider.account_name, "myaccount");
         match &provider.credential {
-            AzureCredential::ManagedIdentity => assert!(true),
+            AzureCredential::ManagedIdentity => {} // OK
             _ => panic!("Expected ManagedIdentity credential"),
         }
     }
@@ -445,7 +445,7 @@ mod tests {
 
         // Assert
         match &provider.credential {
-            AzureCredential::ManagedIdentity => assert!(true),
+            AzureCredential::ManagedIdentity => {} // OK
             _ => panic!("Expected ManagedIdentity credential as default"),
         }
     }

@@ -247,7 +247,7 @@ mod tests {
 
         // Assert
         assert!(opt_value.is_some());
-        assert_eq!(opt_value.unwrap().as_ref(), b"value");
+        assert_eq!(opt_value.as_ref().map(|v| v.as_ref()), Some(&b"value"[..]));
     }
 
     #[test]
@@ -265,10 +265,10 @@ mod tests {
         let opt_value: OptionalValue = Some(value(b"original"));
 
         // Act
-        let mapped = opt_value;
+        let mapped = opt_value.as_ref().map(|v| v.as_ref());
 
         // Assert
-        assert_eq!(mapped.unwrap().as_ref(), b"original");
+        assert_eq!(mapped, Some(&b"original"[..]));
     }
 
     // ========== Type Conversion Tests ==========

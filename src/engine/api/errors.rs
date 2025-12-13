@@ -312,7 +312,7 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
+        assert_eq!(result, Ok(42));
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ApiError::NotFound);
+        assert_eq!(result, Err(ApiError::NotFound));
     }
 
     #[test]

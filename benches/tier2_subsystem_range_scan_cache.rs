@@ -25,7 +25,7 @@ use std::hint::black_box;
 // ─── Test Configuration ──────────────────────────────────────────────────────
 
 const BLOCK_SIZE: usize = 4096;
-const KEYS_PER_BLOCK: usize = 100;
+const _KEYS_PER_BLOCK: usize = 100;
 const SST_ID: u64 = 1;
 
 /// Represents a range scan over consecutive blocks
@@ -82,7 +82,7 @@ fn populate_cache(cache: &BlockCache, sst_id: u64, start_block: usize, num_block
 
 /// Benchmark range scan with warm cache (all blocks cached)
 fn bench_range_scan_warm_cache(c: &mut Criterion) {
-    let block_data = precompute_block_data();
+    let _block_data = precompute_block_data();
 
     for &num_blocks in &[10, 100, 1000] {
         let mut group = c.benchmark_group(format!("range_scan_warm_cache_{}_blocks", num_blocks));
@@ -138,7 +138,7 @@ fn bench_range_scan_cold_cache(c: &mut Criterion) {
 
 /// Benchmark range scan with partially warm cache (50% cached)
 fn bench_range_scan_partial_cache(c: &mut Criterion) {
-    let block_data = precompute_block_data();
+    let _block_data = precompute_block_data();
 
     for &num_blocks in &[100, 1000] {
         let mut group =
@@ -168,7 +168,7 @@ fn bench_range_scan_partial_cache(c: &mut Criterion) {
 /// Direct comparison: warm vs cold cache on same 100-block scan
 fn bench_range_scan_cache_comparison(c: &mut Criterion) {
     let num_blocks = 100;
-    let block_data = precompute_block_data();
+    let _block_data = precompute_block_data();
 
     let mut group = c.benchmark_group("range_scan_cache_comparison");
     group.sampling_mode(SamplingMode::Flat);
