@@ -116,9 +116,6 @@ impl ColumnFamilyHandle {
 ///
 /// This is a thin façade over the runtime. All state and background work
 /// is managed by the runtime actors.
-///
-/// Note: Engine maintains a sequence counter for now. This will be moved to
-/// runtime once we implement centralized sequence allocation there.
 pub struct MidgeEngine {
     /// Handle to submit work to the runtime
     runtime_handle: RuntimeHandle,
@@ -127,7 +124,10 @@ pub struct MidgeEngine {
     db_path: PathBuf,
     /// Default column family for convenience
     default_cf: ColumnFamilyHandle,
-    /// Sequence number for write ordering (TODO: move to runtime)
+    /// Latest committed sequence observed by the engine.
+    ///
+    /// Sequence numbers are allocated inside the runtime (at WAL append time) and
+    /// returned via `RuntimeResponse::WalAppended { sequence, .. }`.
     sequence: std::sync::atomic::AtomicU64,
     /// Next snapshot ID counter (local only, not related to sequence numbers)
     next_snapshot_id: std::sync::atomic::AtomicU64,
@@ -308,7 +308,6 @@ impl MidgeEngine {
             cf_id,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: 0,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -493,7 +492,6 @@ impl MidgeEngine {
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: None, // Tombstone
-            sequence: 0,
             ttl_seconds: None,
             insert_only: false,
         })?;
@@ -607,7 +605,6 @@ impl MidgeEngine {
             cf_id: cf.id.0,
             key: key.to_vec(),
             operand: operand.to_vec(),
-            sequence: 0,
         })?;
 
         match response {
@@ -835,7 +832,6 @@ impl MidgeEngine {
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: 0,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -884,7 +880,6 @@ impl MidgeEngine {
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: 0,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -1003,7 +998,6 @@ impl MidgeEngine {
                 cf_id: cf_id.as_u32(),
                 key: key.to_vec(),
                 value: Some(value.to_vec()),
-                sequence: 0,
                 ttl_seconds: None,
                 insert_only: false,
             })?;
@@ -1030,7 +1024,6 @@ impl MidgeEngine {
                 cf_id: cf_id.as_u32(),
                 key: key.to_vec(),
                 value: None,
-                sequence: 0,
                 ttl_seconds: None,
                 insert_only: false,
             })?;
@@ -1164,7 +1157,6 @@ impl MidgeEngine {
                         cf_id: cf_id.as_u32(),
                         key: key.clone(),
                         value: Some(value.clone()),
-                        sequence: 0,
                         ttl_seconds: None,
                         insert_only: false,
                     })?;
@@ -1192,7 +1184,6 @@ impl MidgeEngine {
                         cf_id: cf_id.as_u32(),
                         key: key.clone(),
                         value: None,
-                        sequence: 0,
                         ttl_seconds: None,
                         insert_only: false,
                     })?;
@@ -1232,7 +1223,6 @@ impl MidgeEngine {
                                 cf_id: cf_id.as_u32(),
                                 key: key.to_vec(),
                                 value: None,
-                                sequence: 0,
                                 ttl_seconds: None,
                                 insert_only: false,
                             })?;

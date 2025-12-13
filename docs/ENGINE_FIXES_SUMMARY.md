@@ -123,7 +123,6 @@ for (cf_id, key, value) in batch.iter_puts() {
         cf_id: cf_id.as_u32(),
         key: key.to_vec(),
         value: Some(value.to_vec()),
-        sequence: 0, // Runtime assigns
     })?;
     if let RuntimeResponse::Error { message, .. } = response {
         return Err(MidgeError::Internal(message));
@@ -152,7 +151,6 @@ for intent in txn.iter_writes() {
         cf_id: intent.cf_id().as_u32(),
         key: intent.key().to_vec(),
         value: intent.value().map(|v| v.to_vec()),
-        sequence: 0,
     })?;
     if let RuntimeResponse::Error { message, .. } = response {
         return Err(MidgeError::Internal(message));
@@ -166,7 +164,7 @@ for intent in txn.iter_writes() {
 
 **Problem**: Engine allocated its own sequence numbers via `self.next_sequence()`.
 
-**Fix**: All sequence numbers are now assigned by runtime. Engine passes `sequence: 0` in `WalAppend` messages, and runtime fills in the actual sequence.
+**Fix**: All sequence numbers are now assigned by the runtime at WAL append time. The `WalAppend`/`WalMerge` messages no longer accept a caller-provided sequence number, and the runtime returns the assigned sequence via `RuntimeResponse::WalAppended { sequence, .. }`.
 
 **Snapshot/Transaction IDs**: Engine still maintains `next_snapshot_id` for local tracking of snapshots and transactions. This is separate from sequence numbers and is fine.
 

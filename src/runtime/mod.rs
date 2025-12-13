@@ -227,14 +227,14 @@ impl RuntimeMsg {
     pub fn request_id(&self) -> Option<u64> {
         use RuntimeMsg::*;
         match self {
-            AllocSeqno { request_id, .. }
-            | FlushMemtable { request_id, .. }
+            FlushMemtable { request_id, .. }
             | FlushComplete { request_id, .. }
             | CheckCompaction { request_id }
             | RunCompaction { request_id, .. }
             | CompactionComplete { request_id, .. }
             | WalAppend { request_id, .. }
             | WalMerge { request_id, .. }
+            | WalSync { request_id }
             | WalRotate { request_id }
             | WalSyncComplete { request_id, .. }
             | CloudUploadSst { request_id, .. }
@@ -320,7 +320,6 @@ impl RuntimeResponse {
             RuntimeResponse::Ok { request_id }
             | RuntimeResponse::WalAppended { request_id, .. }
             | RuntimeResponse::Error { request_id, .. }
-            | RuntimeResponse::SeqnoAllocated { request_id, .. }
             | RuntimeResponse::ReadValue { request_id, .. }
             | RuntimeResponse::RangeScanResults { request_id, .. }
             | RuntimeResponse::FlushComplete { request_id, .. }
@@ -684,7 +683,6 @@ mod tests {
             cf_id: 0,
             key: vec![],
             value: None,
-            sequence: 0,
             ttl_seconds: None,
             insert_only: false
         }

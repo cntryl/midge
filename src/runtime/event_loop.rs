@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::actors::{
     CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor,
-    SeqnoAllocActor, WalActor,
+    WalActor,
 };
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
@@ -136,20 +136,6 @@ impl EventLoop {
                 }
 
                 // =============================================================
-                // Seqno Allocation
-                // =============================================================
-                RuntimeMsg::AllocSeqno { request_id, cf_id } => {
-                    let resp = SeqnoAllocActor::alloc_seqno(&mut self.state, cf_id)
-                        .map(|(seqno, _)| RuntimeResponse::SeqnoAllocated { request_id, seqno })
-                        .unwrap_or_else(|e| RuntimeResponse::Error {
-                            request_id,
-                            message: e.to_string(),
-                        });
-
-                    self.respond(request_id, resp);
-                }
-
-                // =============================================================
                 // Flush
                 // =============================================================
                 RuntimeMsg::FlushMemtable { request_id, cf_id } => {
@@ -247,7 +233,6 @@ impl EventLoop {
                     cf_id,
                     key,
                     value,
-                    sequence,
                     ttl_seconds,
                     insert_only,
                 } => {
@@ -256,7 +241,6 @@ impl EventLoop {
                         cf_id,
                         bytes::Bytes::from(key),
                         value.map(bytes::Bytes::from),
-                        sequence,
                         insert_only,
                         ttl_seconds,
                     );
@@ -284,14 +268,12 @@ impl EventLoop {
                     cf_id,
                     key,
                     operand,
-                    sequence,
                 } => {
                     let result = self.wal_actor.append_merge(
                         &mut self.state,
                         cf_id,
                         bytes::Bytes::from(key),
                         bytes::Bytes::from(operand),
-                        sequence,
                     );
 
                     // Auto-sync if batched threshold exceeded

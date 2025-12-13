@@ -15,6 +15,12 @@
 //! - Does NOT block event loop waiting for cloud
 //! - Queues pending requests and completes them when cloud_durable_seq advances
 //!
+//! NOTE: `DurabilityPolicy::CloudFirst` is not fully wired end-to-end yet.
+//! The actor has scaffolding for queuing pending cloud writes, but the runtime
+//! event loop currently responds to WAL append requests immediately.
+//! Do not enable CloudFirst until response deferral + cloud ACK completion are
+//! implemented in the runtime.
+//!
 //! CLOUD-DURABLE MEMTABLE RULE:
 //! In Durability::CloudFirst mode, writes are NOT visible in memtable
 //! until cloud storage acknowledges durability. Local WAL is ephemeral;
@@ -102,7 +108,6 @@ impl WalActor {
         cf_id: u32,
         key: Bytes,
         value: Option<Bytes>,
-        _sequence: u64,
         insert_only: bool,
         ttl_seconds: Option<u64>,
     ) -> MidgeResult<u64> {
@@ -188,7 +193,6 @@ impl WalActor {
         cf_id: u32,
         key: Bytes,
         operand: Bytes,
-        _sequence: u64,
     ) -> MidgeResult<u64> {
         // Allocate sequence number at append time to preserve a total order under concurrency.
         let sequence = state.next_sequence();

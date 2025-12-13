@@ -24,9 +24,6 @@ impl Dispatcher {
         use RuntimeMsg::*;
 
         match msg {
-            // Seqno Allocation
-            AllocSeqno { .. } => TaskKind::User,
-
             // Flush
             FlushMemtable { .. } | FlushComplete { .. } => TaskKind::Flush,
 
@@ -185,7 +182,6 @@ mod tests {
             cf_id: 0,
             key: b"key".to_vec(),
             value: Some(b"value".to_vec()),
-            sequence: 1,
             ttl_seconds: None,
             insert_only: false,
         };
@@ -206,7 +202,6 @@ mod tests {
             cf_id: 0,
             key: b"key".to_vec(),
             operand: b"operand".to_vec(),
-            sequence: 1,
         };
 
         // Act
