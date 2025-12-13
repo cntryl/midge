@@ -242,13 +242,18 @@ impl MidgeEngine {
         value: &[u8],
         ttl_seconds: u64,
     ) -> MidgeResult<()> {
+        let cf_id = cf.id.0;
+
+        // Request seqno from runtime (actor-owned allocation)
+        let seqno = self.request_seqno(cf_id)?;
+
         // CRITICAL: Use send_and_wait to ensure durability before returning.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
-            cf_id: cf.id.0,
+            cf_id,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: self.next_sequence(),
+            sequence: seqno,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -260,7 +265,14 @@ impl MidgeEngine {
         // Check for errors from runtime
         match response {
             RuntimeResponse::Ok { .. } => Ok(()),
-            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            RuntimeResponse::Error { message, .. } => {
+                // Check if it's a write stall - if so, propagate it
+                if message.contains("Write stall") {
+                    Err(MidgeError::WriteStall(message))
+                } else {
+                    Err(MidgeError::Internal(message))
+                }
+            }
             _ => Err(MidgeError::Internal(
                 "Unexpected response to put".to_string(),
             )),
@@ -1032,6 +1044,22 @@ impl MidgeEngine {
 
     // === Internal helpers ===
 
+    /// Request a new sequence number from the runtime
+    /// This ensures seqnos are allocated by the actor, not locally
+    fn request_seqno(&self, cf_id: u32) -> MidgeResult<u64> {
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::AllocSeqno {
+            request_id: next_request_id(),
+            cf_id,
+        })?;
+
+        match response {
+            RuntimeResponse::SeqnoAllocated { seqno, .. } => Ok(seqno),
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal("Unexpected response from AllocSeqno".to_string())),
+        }
+    }
+
+    /// Fallback: use local sequence if runtime allocation unavailable
     fn next_sequence(&self) -> u64 {
         self.sequence
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)

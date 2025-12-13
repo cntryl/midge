@@ -24,6 +24,9 @@ impl Dispatcher {
         use RuntimeMsg::*;
 
         match msg {
+            // Seqno Allocation
+            AllocSeqno { .. } => TaskKind::User,
+
             // Flush
             FlushMemtable { .. } | FlushComplete { .. } => TaskKind::Flush,
 

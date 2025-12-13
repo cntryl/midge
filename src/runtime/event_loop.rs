@@ -12,7 +12,8 @@ use crossbeam::channel::Receiver;
 use std::sync::Arc;
 
 use super::actors::{
-    CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
+    CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor,
+    SeqnoAllocActor, WalActor,
 };
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
@@ -111,6 +112,23 @@ impl EventLoop {
 
                 RuntimeMsg::StartupPing { request_id } => {
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
+
+                // =============================================================
+                // Seqno Allocation
+                // =============================================================
+                RuntimeMsg::AllocSeqno { request_id, cf_id } => {
+                    let resp = SeqnoAllocActor::alloc_seqno(&mut self.state, cf_id)
+                        .map(|(seqno, _)| RuntimeResponse::SeqnoAllocated {
+                            request_id,
+                            seqno,
+                        })
+                        .unwrap_or_else(|e| RuntimeResponse::Error {
+                            request_id,
+                            message: e.to_string(),
+                        });
+
+                    self.respond(request_id, resp);
                 }
 
                 // =============================================================

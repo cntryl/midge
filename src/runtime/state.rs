@@ -5,6 +5,7 @@
 
 use crate::common::MidgeResult;
 use crate::metadata::Manifest;
+use crate::runtime::IntentLogEntry;
 use crate::sst::SkipListMemtable;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -114,6 +115,16 @@ pub struct RuntimeState {
     pub read_only: bool,
     /// If true, never touch filesystem (pure in-memory mode)
     pub memory_mode: bool,
+
+    // === Intent Log & Determinism ===
+    /// Deterministic intent log for recovery and replay
+    pub intent_log: Vec<IntentLogEntry>,
+    /// Maximum size of any memtable before write stall
+    pub memtable_flush_threshold: usize,
+    /// Write stall active flag
+    pub write_stalled: bool,
+    /// Total size of all memtables (in-memory)
+    pub total_memtable_bytes: usize,
 }
 
 impl RuntimeState {
@@ -217,6 +228,10 @@ impl RuntimeState {
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             read_only: false,
             memory_mode,
+            intent_log: Vec::new(),
+            memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
+            write_stalled: false,
+            total_memtable_bytes: 0,
         }
     }
 

@@ -18,7 +18,7 @@ pub mod scheduler;
 pub mod state;
 pub mod task;
 
-pub use actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
+pub use actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, SeqnoAllocActor, WalActor};
 pub use dispatch::Dispatcher;
 pub use event_loop::EventLoop;
 pub use scheduler::Scheduler;
@@ -65,11 +65,35 @@ pub struct FileMeta {
     pub largest_seq: Option<u64>,
 }
 
+/// Intent log entry - records all state transitions for deterministic replay
+#[derive(Debug, Clone)]
+pub enum IntentLogEntry {
+    /// Sequence number was allocated
+    SeqnoAllocated { seqno: u64, cf_id: u32 },
+    /// Flush plan created
+    FlushPlanned { cf_id: u32, seqno_range: (u64, u64) },
+    /// Compaction plan created
+    CompactionPlanned { input_files: Vec<String>, output_level: u32 },
+    /// Manifest updated with new SST
+    SstAdded { file_meta: FileMeta },
+    /// Manifest updated after compaction
+    CompactionApplied { removed: Vec<String>, added: Vec<String> },
+    /// WAL segment synced
+    WalSynced { segment_id: u64, seqno: u64 },
+    /// Data uploaded to cloud
+    CloudUploadComplete { resource: String, seqno: u64 },
+}
+
 /// Messages that can be sent to the runtime.
 ///
 /// Copilot: each variant that expects a response MUST carry a `request_id: u64`.
 #[derive(Debug)]
 pub enum RuntimeMsg {
+    // === Seqno Allocation ===
+    /// Request a new sequence number for a write operation.
+    /// Returns SeqnoAllocated response with the assigned seqno.
+    AllocSeqno { request_id: u64, cf_id: u32 },
+
     // === Flush Actor ===
     /// Request memtable flush for a column family.
     FlushMemtable { request_id: u64, cf_id: u32 },
@@ -200,7 +224,8 @@ impl RuntimeMsg {
     pub fn request_id(&self) -> Option<u64> {
         use RuntimeMsg::*;
         match self {
-            FlushMemtable { request_id, .. }
+            AllocSeqno { request_id, .. }
+            | FlushMemtable { request_id, .. }
             | FlushComplete { request_id, .. }
             | CheckCompaction { request_id }
             | RunCompaction { request_id, .. }
@@ -243,6 +268,10 @@ pub enum RuntimeResponse {
         request_id: u64,
         message: String,
     },
+    SeqnoAllocated {
+        request_id: u64,
+        seqno: u64,
+    },
     ReadValue {
         request_id: u64,
         value: Option<Vec<u8>>,
@@ -270,6 +299,7 @@ impl RuntimeResponse {
         match self {
             RuntimeResponse::Ok { request_id }
             | RuntimeResponse::Error { request_id, .. }
+            | RuntimeResponse::SeqnoAllocated { request_id, .. }
             | RuntimeResponse::ReadValue { request_id, .. }
             | RuntimeResponse::RangeScanResults { request_id, .. }
             | RuntimeResponse::FlushComplete { request_id, .. }
