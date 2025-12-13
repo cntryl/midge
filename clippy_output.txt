@@ -1,4 +1,0 @@
-warning: error finalizing incremental compilation session directory `\\?\D:\repos\cntryl\midge\target\debug\incremental\cntryl_midge-2lo90tyqdnl8h\s-hdv2q1k98k-1rujjl5-working`: Access is denied. (os error 5)
-
-warning: `cntryl-midge` (lib) generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s

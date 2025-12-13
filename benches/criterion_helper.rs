@@ -119,7 +119,7 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         BenchTier::Tier6Capacity => Criterion::default()
             .warm_up_time(Duration::from_secs(2))
             .measurement_time(Duration::from_secs(30))
-            .sample_size(3)
+            .sample_size(10)
             .noise_threshold(0.20)
             .confidence_level(0.80)
             .significance_level(0.20)

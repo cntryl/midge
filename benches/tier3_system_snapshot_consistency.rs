@@ -170,7 +170,7 @@ impl ReaderStats {
 
 fn bench_snapshot_consistency_concurrent_writes(c: &mut Criterion) {
     let mut group = c.benchmark_group("tier3_snapshot_consistency");
-    group.sample_size(3);
+    group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
 
     for &num_readers in CONCURRENT_READERS {
