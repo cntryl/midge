@@ -210,6 +210,13 @@ pub enum RuntimeMsg {
     /// Get read amplification metrics snapshot.
     GetReadAmpMetrics { request_id: u64 },
 
+    // === Sequencing ===
+    /// Get the runtime's authoritative current sequence number.
+    ///
+    /// This is the sequence maintained by the runtime state and advanced at
+    /// WAL append time.
+    GetCurrentSequence { request_id: u64 },
+
     // === Control ===
     /// Shutdown the runtime (no request_id; fire-and-forget).
     Shutdown,
@@ -251,6 +258,7 @@ impl RuntimeMsg {
             | Read { request_id, .. }
             | RangeScan { request_id, .. }
             | GetReadAmpMetrics { request_id }
+            | GetCurrentSequence { request_id }
             | Noop { request_id }
             | StartupPing { request_id } => Some(*request_id),
 
@@ -312,6 +320,12 @@ pub enum RuntimeResponse {
         sst_budget_violation_rate: f64,
         block_budget_violation_rate: f64,
     },
+
+    /// Current authoritative runtime sequence.
+    CurrentSequence {
+        request_id: u64,
+        sequence: u64,
+    },
 }
 
 impl RuntimeResponse {
@@ -325,7 +339,8 @@ impl RuntimeResponse {
             | RuntimeResponse::FlushComplete { request_id, .. }
             | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
-            | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. } => *request_id,
+            | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
+            | RuntimeResponse::CurrentSequence { request_id, .. } => *request_id,
         }
     }
 }
@@ -696,6 +711,10 @@ mod tests {
         assert!(RuntimeMsg::StartupPing { request_id: 6 }
             .request_id()
             .is_some());
+
+        assert!(RuntimeMsg::GetCurrentSequence { request_id: 7 }
+            .request_id()
+            .is_some());
     }
 
     // =========== RuntimeResponse Tests ===========
@@ -769,6 +788,15 @@ mod tests {
             }
             .request_id(),
             7
+        );
+
+        assert_eq!(
+            RuntimeResponse::CurrentSequence {
+                request_id: 8,
+                sequence: 123
+            }
+            .request_id(),
+            8
         );
     }
 

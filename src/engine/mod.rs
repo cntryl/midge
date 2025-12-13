@@ -1052,7 +1052,15 @@ impl MidgeEngine {
         let snapshot_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let request_id = next_request_id();
+        let sequence = match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
+        {
+            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
+            _ => fallback_sequence,
+        };
         api::Snapshot::new(sequence, None, snapshot_id, self.runtime_handle.clone())
     }
 
@@ -1061,7 +1069,15 @@ impl MidgeEngine {
         let snapshot_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let request_id = next_request_id();
+        let sequence = match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
+        {
+            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
+            _ => fallback_sequence,
+        };
         api::Snapshot::new(
             sequence,
             Some(cf.id),
@@ -1079,8 +1095,16 @@ impl MidgeEngine {
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // TODO: Query runtime's current sequence for snapshot isolation.
-        let inner = api::Transaction::new(txn_id, api::IsolationLevel::Serializable, txn_id);
+        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let request_id = next_request_id();
+        let start_sequence = match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
+        {
+            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
+            _ => fallback_sequence,
+        };
+        let inner = api::Transaction::new(txn_id, api::IsolationLevel::Serializable, start_sequence);
         let txn = api::TransactionImpl::new(cf.id(), inner);
         Ok(Box::new(txn))
     }
@@ -1094,8 +1118,16 @@ impl MidgeEngine {
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // TODO: Query runtime's current sequence.
-        let inner = api::Transaction::new(txn_id, isolation, txn_id);
+        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let request_id = next_request_id();
+        let start_sequence = match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
+        {
+            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
+            _ => fallback_sequence,
+        };
+        let inner = api::Transaction::new(txn_id, isolation, start_sequence);
         let txn = api::TransactionImpl::new(cf.id(), inner);
         Ok(Box::new(txn))
     }
@@ -1104,8 +1136,16 @@ impl MidgeEngine {
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // TODO: Query runtime's current sequence.
-        api::Transaction::new(txn_id, api::IsolationLevel::Serializable, txn_id)
+        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let request_id = next_request_id();
+        let start_sequence = match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
+        {
+            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
+            _ => fallback_sequence,
+        };
+        api::Transaction::new(txn_id, api::IsolationLevel::Serializable, start_sequence)
     }
 
     /// Create a new transaction with the specified isolation level
@@ -1113,8 +1153,16 @@ impl MidgeEngine {
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // TODO: Query runtime's current sequence.
-        api::Transaction::new(txn_id, isolation, txn_id)
+        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
+        let request_id = next_request_id();
+        let start_sequence = match self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
+        {
+            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
+            _ => fallback_sequence,
+        };
+        api::Transaction::new(txn_id, isolation, start_sequence)
     }
 
     /// Commit a transaction atomically (high-level API with WriteOptions)

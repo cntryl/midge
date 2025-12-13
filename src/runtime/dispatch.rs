@@ -59,6 +59,7 @@ impl Dispatcher {
             | RangeScan { .. }
             | RegisterMergeOperator { .. }
             | GetReadAmpMetrics { .. }
+            | GetCurrentSequence { .. }
             | Shutdown
             | Noop { .. }
             | StartupPing { .. } => TaskKind::User,

@@ -135,6 +135,16 @@ impl EventLoop {
                     );
                 }
 
+                RuntimeMsg::GetCurrentSequence { request_id } => {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::CurrentSequence {
+                            request_id,
+                            sequence: self.state.sequence,
+                        },
+                    );
+                }
+
                 // =============================================================
                 // Flush
                 // =============================================================
