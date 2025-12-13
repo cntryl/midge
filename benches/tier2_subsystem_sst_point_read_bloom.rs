@@ -96,7 +96,7 @@ fn build_mock_sst(sst_id: u64) -> MockSst {
     // Populate cache with some blocks (simulate warm cache)
     let block_data = Bytes::from_static(&[0xAB; 4096]);
     for block_idx in 0..25 {
-        let key = CacheKey::new(sst_id, (block_idx * 4096) as u64);
+        let key = CacheKey::for_data(sst_id, (block_idx * 4096) as u64);
         cache.put(key, block_data.clone());
     }
 
@@ -133,7 +133,7 @@ fn bench_point_read_bloom_enabled(c: &mut Criterion) {
                     // Bloom says maybe present, check sparse index
                     let range = sst.sparse_index.find_block_range(key);
                     for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                        let cache_key = CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
+                        let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
                         if sst.cache.get(&cache_key).is_some() {
                             cache_hits += 1;
                         } else {
@@ -152,7 +152,7 @@ fn bench_point_read_bloom_enabled(c: &mut Criterion) {
                     // False positive - must check sparse index
                     let range = sst.sparse_index.find_block_range(key);
                     for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                        let cache_key = CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
+                        let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
                         if sst.cache.get(&cache_key).is_some() {
                             cache_hits += 1;
                         } else {
@@ -191,7 +191,7 @@ fn bench_point_read_bloom_disabled(c: &mut Criterion) {
             for key in &hits {
                 let range = sst.sparse_index.find_block_range(key);
                 for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                    let cache_key = CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
+                    let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
                     if sst.cache.get(&cache_key).is_some() {
                         cache_hits += 1;
                     } else {
@@ -204,7 +204,7 @@ fn bench_point_read_bloom_disabled(c: &mut Criterion) {
             for key in &misses {
                 let range = sst.sparse_index.find_block_range(key);
                 for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1) {
-                    let cache_key = CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
+                    let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
                     if sst.cache.get(&cache_key).is_some() {
                         cache_hits += 1;
                     } else {
@@ -245,7 +245,7 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
                                 range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
                             {
                                 let cache_key =
-                                    CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
+                                    CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
                                 if sst.cache.get(&cache_key).is_none() {
                                     blocks_read += 1;
                                 }
@@ -264,7 +264,7 @@ fn bench_point_read_bloom_comparison(c: &mut Criterion) {
                         let range = sst.sparse_index.find_block_range(key);
                         for block_idx in range.start_block..=range.end_block.min(BLOCKS_PER_SST - 1)
                         {
-                            let cache_key = CacheKey::new(sst.sst_id, (block_idx * 4096) as u64);
+                            let cache_key = CacheKey::for_data(sst.sst_id, (block_idx * 4096) as u64);
                             if sst.cache.get(&cache_key).is_none() {
                                 blocks_read += 1;
                             }

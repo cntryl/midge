@@ -48,7 +48,7 @@ impl RangeScan {
         let mut cache_hits = 0u32;
 
         for block_idx in self.start_block..(self.start_block + self.num_blocks) {
-            let key = CacheKey::new(sst_id, (block_idx * BLOCK_SIZE) as u64);
+            let key = CacheKey::for_data(sst_id, (block_idx * BLOCK_SIZE) as u64);
 
             if cache.get(&key).is_some() {
                 cache_hits += 1;
@@ -73,7 +73,7 @@ fn precompute_block_data() -> Bytes {
 fn populate_cache(cache: &BlockCache, sst_id: u64, start_block: usize, num_blocks: usize) {
     let block_data = precompute_block_data();
     for block_idx in start_block..(start_block + num_blocks) {
-        let key = CacheKey::new(sst_id, (block_idx * BLOCK_SIZE) as u64);
+        let key = CacheKey::for_data(sst_id, (block_idx * BLOCK_SIZE) as u64);
         cache.put(key, block_data.clone());
     }
 }
@@ -237,7 +237,7 @@ fn bench_range_scan_strided_access(c: &mut Criterion) {
                 // Pre-populate strided blocks
                 for i in 0..num_accesses {
                     let block_idx = i * stride;
-                    let key = CacheKey::new(SST_ID, (block_idx * BLOCK_SIZE) as u64);
+                    let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
                     cache.put(key, block_data.clone());
                 }
 
@@ -245,7 +245,7 @@ fn bench_range_scan_strided_access(c: &mut Criterion) {
                     let mut cache_hits = 0u32;
                     for i in 0..num_accesses {
                         let block_idx = i * stride;
-                        let key = CacheKey::new(SST_ID, (block_idx * BLOCK_SIZE) as u64);
+                        let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
                         if cache.get(&key).is_some() {
                             cache_hits += 1;
                         }
@@ -259,7 +259,7 @@ fn bench_range_scan_strided_access(c: &mut Criterion) {
                         let mut blocks_read = 0u32;
                         for i in 0..num_accesses {
                             let block_idx = i * stride;
-                            let key = CacheKey::new(SST_ID, (block_idx * BLOCK_SIZE) as u64);
+                            let key = CacheKey::for_data(SST_ID, (block_idx * BLOCK_SIZE) as u64);
                             if cache.get(&key).is_none() {
                                 blocks_read += 1;
                                 cache.put(key, block_data.clone());

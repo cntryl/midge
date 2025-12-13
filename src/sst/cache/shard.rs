@@ -75,7 +75,7 @@ impl CacheShard {
             value.increment_access();
             self.policy.on_access(*key);
             self.metrics.record_hit();
-            Some(value.clone())
+            Some(value)
         } else {
             self.metrics.record_miss();
             None

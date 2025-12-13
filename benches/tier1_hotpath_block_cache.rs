@@ -25,13 +25,13 @@ use std::hint::black_box;
 /// Pre-create a cache key with SST file 1.
 #[inline]
 fn make_cache_key(block_offset: u64) -> CacheKey {
-    CacheKey::new(1, block_offset)
+    CacheKey::for_data(1, block_offset)
 }
 
 /// Pre-create a cache key with specified SST file.
 #[inline]
 fn make_cache_key_with_sst(sst_id: u64, block_offset: u64) -> CacheKey {
-    CacheKey::new(sst_id, block_offset)
+    CacheKey::for_data(sst_id, block_offset)
 }
 
 /// Pre-allocated block data to avoid allocation in benchmark hot path.
