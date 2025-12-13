@@ -245,6 +245,16 @@ name = "tier2_subsystem_memtable_rotate"
 path = "benches/tier2_subsystem/memtable_rotate.rs"
 harness = false
 
+[[bench]]
+name = "tier2_subsystem_read_amplification"
+path = "benches/tier2_subsystem/read_amplification.rs"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_compaction_interference"
+path = "benches/tier2_subsystem/compaction_interference.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 3: System (10-120s)
 # =============================================================================
