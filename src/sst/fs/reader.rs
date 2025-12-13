@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::bloom::writer::BloomTestResult;
-use crate::sst::bloom::{writer::BloomFilterOps, BloomReader};
+use crate::sst::bloom::{writer::BloomFilterOps, BlockBloomFilter, BloomReader};
 use crate::sst::cache::{BlockCache, CacheKey};
 use crate::sst::encoding;
 use crate::sst::sparse_index::SparseIndexReader;
@@ -22,6 +22,7 @@ pub struct SstFile {
     cached_file: std::sync::Mutex<Option<File>>,
     sst_id: u64,
     bloom_reader: Option<BloomReader>,
+    block_bloom_filter: Option<BlockBloomFilter>,
     sparse_index: Option<Arc<SparseIndexReader>>,
     block_cache: Option<Arc<BlockCache>>,
 }
@@ -34,6 +35,7 @@ impl SstFile {
             cached_file: std::sync::Mutex::new(None),
             sst_id: 0,
             bloom_reader: None,
+            block_bloom_filter: None,
             sparse_index: None,
             block_cache: None,
         }
@@ -49,6 +51,24 @@ impl SstFile {
     pub fn with_bloom(mut self, bloom: BloomReader) -> Self {
         self.bloom_reader = Some(bloom);
         self
+    }
+
+    /// Enable block bloom filter for this reader
+    pub fn with_block_bloom(mut self, block_bloom: BlockBloomFilter) -> Self {
+        self.block_bloom_filter = Some(block_bloom);
+        self
+    }
+
+    /// Load block bloom filter from footer (if present)
+    pub fn load_block_bloom(&mut self) -> MidgeResult<()> {
+        if let Some(ref footer) = self.footer {
+            if let Some(block_bloom_handle) = footer.block_bloom_handle {
+                let bloom_data = self.read_block(&block_bloom_handle)?;
+                let block_bloom = BlockBloomFilter::deserialize(&bloom_data)?;
+                self.block_bloom_filter = Some(block_bloom);
+            }
+        }
+        Ok(())
     }
 
     /// Enable sparse index for this reader
@@ -77,9 +97,17 @@ impl SstFile {
             return Err(MidgeError::Corruption("SST file too small".into()));
         }
 
-        // Read footer (48 bytes from end)
-        file.seek(SeekFrom::End(-48))?;
-        let mut footer_data = [0u8; 48];
+        // Try to read footer (72 bytes for new format, fall back to 56 or 48)
+        let footer_size = if file_size >= 72 {
+            72
+        } else if file_size >= 56 {
+            56
+        } else {
+            48
+        };
+        
+        file.seek(SeekFrom::End(-(footer_size as i64)))?;
+        let mut footer_data = vec![0u8; footer_size];
         file.read_exact(&mut footer_data)?;
 
         self.footer = Some(Footer::decode(&footer_data)?);
@@ -238,6 +266,7 @@ impl crate::sst::SstReader for SstFile {
 
             // Find the specific block handle within the narrowed range
             let mut found_handle = None;
+            let mut found_block_idx = None;
             for (idx, (first_key, handle)) in index.iter().enumerate() {
                 if idx < block_range.start_block {
                     continue;
@@ -248,19 +277,40 @@ impl crate::sst::SstReader for SstFile {
 
                 if key <= first_key.as_slice() || idx == block_range.end_block {
                     found_handle = Some(*handle);
+                    found_block_idx = Some(idx);
                     break;
                 }
             }
+            
+            // Step 2.5: Check block bloom filter (if available)
+            if let (Some(block_idx), Some(ref block_bloom)) = (found_block_idx, &self.block_bloom_filter) {
+                if block_bloom.might_contain_in_block(block_idx, key).definitely_not_present() {
+                    // Block bloom says key definitely not in this block
+                    return Ok(None);
+                }
+            }
+            
             found_handle
         } else {
             // Traditional binary search without sparse index
             let mut found_handle = None;
+            let mut found_block_idx = None;
             for (idx, (first_key, handle)) in index.iter().enumerate() {
                 if key <= first_key.as_slice() || idx == index.len() - 1 {
                     found_handle = Some(*handle);
+                    found_block_idx = Some(idx);
                     break;
                 }
             }
+            
+            // Step 2.5: Check block bloom filter (if available)
+            if let (Some(block_idx), Some(ref block_bloom)) = (found_block_idx, &self.block_bloom_filter) {
+                if block_bloom.might_contain_in_block(block_idx, key).definitely_not_present() {
+                    // Block bloom says key definitely not in this block
+                    return Ok(None);
+                }
+            }
+            
             found_handle
         };
 

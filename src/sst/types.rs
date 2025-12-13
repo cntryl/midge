@@ -47,6 +47,7 @@ pub struct Footer {
     pub meta_index_handle: BlockHandle,
     pub index_handle: BlockHandle,
     pub trie_handle: Option<BlockHandle>,
+    pub block_bloom_handle: Option<BlockHandle>,
 }
 
 impl Footer {
@@ -55,6 +56,7 @@ impl Footer {
             meta_index_handle,
             index_handle,
             trie_handle: None,
+            block_bloom_handle: None,
         }
     }
 
@@ -62,16 +64,22 @@ impl Footer {
         self.trie_handle = Some(trie_handle);
         self
     }
+    
+    pub fn with_block_bloom(mut self, block_bloom_handle: BlockHandle) -> Self {
+        self.block_bloom_handle = Some(block_bloom_handle);
+        self
+    }
 
-    /// Encode footer to exactly 48 bytes (compatible with RocksDB format)
+    /// Encode footer to exactly 72 bytes
     /// Layout:
     ///   [meta_index_handle: 16 bytes]
     ///   [index_handle: 16 bytes]
     ///   [trie_handle: 16 bytes (optional, 0 if None)]
+    ///   [block_bloom_handle: 16 bytes (optional, 0 if None)]
     ///   [magic: 8 bytes]
-    /// Total: 56 bytes (extended from 48 for trie support)
+    /// Total: 72 bytes (extended from 56 for block bloom support)
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = vec![0u8; 56];
+        let mut buf = vec![0u8; 72];
         // Store handles as fixed 16 bytes each
         // meta_index: offset (8) + size (8)
         buf[0..8].copy_from_slice(&self.meta_index_handle.offset.to_le_bytes());
@@ -84,12 +92,17 @@ impl Footer {
             buf[32..40].copy_from_slice(&trie.offset.to_le_bytes());
             buf[40..48].copy_from_slice(&trie.size.to_le_bytes());
         }
-        // Magic number at end [48..56]
-        buf[48..56].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
+        // block_bloom: offset (8) + size (8) - zero if None
+        if let Some(block_bloom) = self.block_bloom_handle {
+            buf[48..56].copy_from_slice(&block_bloom.offset.to_le_bytes());
+            buf[56..64].copy_from_slice(&block_bloom.size.to_le_bytes());
+        }
+        // Magic number at end [64..72]
+        buf[64..72].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
         buf
     }
 
-    /// Decode footer from 48 or 56 bytes (backward compatible)
+    /// Decode footer from 48, 56, or 72 bytes (backward compatible)
     pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
         if data.len() < 48 {
             return Err(crate::common::MidgeError::Corruption(
@@ -97,11 +110,18 @@ impl Footer {
             ));
         }
 
-        // Check if this is old format (48 bytes) or new format (56 bytes)
-        let is_extended = data.len() >= 56;
+        // Determine format: 48 (original), 56 (with trie), or 72 (with block bloom)
+        let has_trie = data.len() >= 56;
+        let has_block_bloom = data.len() >= 72;
 
         // Validate magic number
-        let magic_offset = if is_extended { 48 } else { 40 };
+        let magic_offset = if has_block_bloom {
+            64
+        } else if has_trie {
+            48
+        } else {
+            40
+        };
         let magic = u64::from_le_bytes([
             data[magic_offset],
             data[magic_offset + 1],
@@ -132,8 +152,8 @@ impl Footer {
             data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
         ]);
 
-        // Read trie handle if extended format
-        let trie_handle = if is_extended {
+        // Read trie handle if format supports it
+        let trie_handle = if has_trie {
             let trie_offset = u64::from_le_bytes([
                 data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
             ]);
@@ -149,10 +169,28 @@ impl Footer {
             None
         };
 
+        // Read block bloom handle if format supports it
+        let block_bloom_handle = if has_block_bloom {
+            let bloom_offset = u64::from_le_bytes([
+                data[48], data[49], data[50], data[51], data[52], data[53], data[54], data[55],
+            ]);
+            let bloom_size = u64::from_le_bytes([
+                data[56], data[57], data[58], data[59], data[60], data[61], data[62], data[63],
+            ]);
+            if bloom_offset == 0 && bloom_size == 0 {
+                None
+            } else {
+                Some(BlockHandle::new(bloom_offset, bloom_size))
+            }
+        } else {
+            None
+        };
+
         Ok(Footer {
             meta_index_handle: BlockHandle::new(meta_offset, meta_size),
             index_handle: BlockHandle::new(idx_offset, idx_size),
             trie_handle,
+            block_bloom_handle,
         })
     }
 }
@@ -373,7 +411,7 @@ mod tests {
     // =========== Footer Encoding/Decoding Tests ===========
 
     #[test]
-    fn should_encode_footer_to_56_bytes() {
+    fn should_encode_footer_to_72_bytes() {
         // Arrange
         let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
 
@@ -381,7 +419,7 @@ mod tests {
         let encoded = footer.encode();
 
         // Assert
-        assert_eq!(encoded.len(), 56);
+        assert_eq!(encoded.len(), 72);
     }
 
     #[test]
@@ -393,7 +431,7 @@ mod tests {
         let encoded = footer.encode();
 
         // Assert
-        assert_eq!(encoded.len(), 56);
+        assert_eq!(encoded.len(), 72);
         let decoded = Footer::decode(&encoded).unwrap();
         assert_eq!(decoded.meta_index_handle.offset, 0);
         assert_eq!(decoded.index_handle.offset, 0);
@@ -411,7 +449,7 @@ mod tests {
         let encoded = footer.encode();
 
         // Assert
-        assert_eq!(encoded.len(), 56);
+        assert_eq!(encoded.len(), 72);
         let decoded = Footer::decode(&encoded).unwrap();
         assert_eq!(decoded.meta_index_handle.offset, u64::MAX - 1000);
         assert_eq!(decoded.index_handle.offset, u64::MAX - 500);
