@@ -85,7 +85,6 @@ fn bench_engine_heavy_write_contention(c: &mut Criterion) {
     let total_bytes = total_ops * (THREAD_KEY_SIZE + VALUE_SIZE);
     group.throughput(Throughput::Bytes(total_bytes as u64));
     group.measurement_time(std::time::Duration::from_secs(3));
-    group.sample_size(10);
 
     // Pre-compute all keys and values outside the benchmark loop
     let keys: Vec<Vec<Vec<u8>>> = (0..num_threads)
@@ -158,7 +157,6 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
     // Throughput in reads (elements) since read data varies
     group.throughput(Throughput::Elements(total_reads as u64));
     group.measurement_time(std::time::Duration::from_secs(3));
-    group.sample_size(10);
 
     // Pre-compute keys and values outside the benchmark loop
     let keys: Vec<_> = (0..num_keys).map(make_key).collect();
@@ -235,7 +233,6 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
     let total_bytes = (total_ops / 2) * (KEY_SIZE + VALUE_SIZE);
     group.throughput(Throughput::Bytes(total_bytes as u64));
     group.measurement_time(std::time::Duration::from_secs(3));
-    group.sample_size(10);
 
     // Pre-compute keys outside the benchmark loop
     let keys: Vec<_> = (0..ops_per_thread).map(make_key).collect();

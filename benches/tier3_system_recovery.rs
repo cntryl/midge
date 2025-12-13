@@ -55,7 +55,6 @@ const BENCH_LARGE_VALS: &str = "large_vals";
 fn bench_recovery_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_recovery_throughput");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(15);
 
     for &op_count in &[10_000usize, 50_000] {
         // Reduced from 100k for faster runs
@@ -202,7 +201,6 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
 fn bench_recovery_with_l0_data(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_recovery_with_l0");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(12);
 
     for &op_count in &[25_000usize, 50_000] {
         // Reduced from 50k/100k
@@ -290,7 +288,6 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
 fn bench_recovery_speed_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_recovery_comparison");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(12);
 
     let op_count = 50_000usize; // Reduced from 100k for faster runs
 

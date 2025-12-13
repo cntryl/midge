@@ -20,7 +20,6 @@ fn bench_large_dataset_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("capacity_large_dataset_insert");
     group.sampling_mode(SamplingMode::Flat);
     group.measurement_time(std::time::Duration::from_secs(30));
-    group.sample_size(10);
     group.throughput(Throughput::Elements(100_000));
 
     group.bench_function("sequential_insert_100k_keys", |b| {

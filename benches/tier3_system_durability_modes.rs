@@ -106,7 +106,6 @@ fn bench_durability_async_wal(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability/async_wal");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
-    group.sample_size(20);
 
     // Pre-compute keys and values outside benchmark
     let keys: Vec<Bytes> = (0..RECORD_COUNT).map(make_key).collect();
@@ -149,7 +148,6 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability/sync_wal");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
-    group.sample_size(10); // Fewer samples since it's slow
 
     // Pre-compute keys and values outside benchmark
     let keys: Vec<Bytes> = (0..RECORD_COUNT).map(make_key).collect();
@@ -191,7 +189,6 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
 fn bench_durability_concurrent(c: &mut Criterion) {
     let mut group = c.benchmark_group("durability/concurrent");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(15);
 
     let total_ops = 4 * OPS_PER_THREAD;
     group.throughput(Throughput::Elements(total_ops as u64));
@@ -299,8 +296,6 @@ fn bench_durability_write_heavy(c: &mut Criterion) {
         for &wal_sync in &[false, true] {
             let sync_name = if wal_sync { "sync" } else { "async" };
             let bench_name = format!("{}/{}", mode.as_str(), sync_name);
-
-            group.sample_size(if wal_sync { 10 } else { 15 });
 
             group.bench_with_input(
                 BenchmarkId::new("100pct_writes", &bench_name),

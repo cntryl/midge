@@ -71,7 +71,6 @@ fn bench_bloom_build_1m_keys(c: &mut Criterion) {
     let mut group = c.benchmark_group("subsystem_bloom_build_1m_keys");
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(1_000_000));
-    group.sample_size(10); // Fewer samples for long-running benchmark
 
     group.bench_function("build_1m_keys", |b| {
         b.iter(|| {

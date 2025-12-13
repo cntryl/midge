@@ -21,7 +21,6 @@ fn bench_space_amplification(c: &mut Criterion) {
     let mut group = c.benchmark_group("soak_space_amplification");
     group.sampling_mode(SamplingMode::Flat);
     group.measurement_time(std::time::Duration::from_secs(20));
-    group.sample_size(10);
 
     group.bench_function("update_heavy_15k_ops", |b| {
         b.iter(|| {

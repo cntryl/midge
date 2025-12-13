@@ -20,7 +20,6 @@ fn bench_cold_start_large(c: &mut Criterion) {
     let mut group = c.benchmark_group("capacity_cold_start_large");
     group.sampling_mode(SamplingMode::Flat);
     group.measurement_time(std::time::Duration::from_secs(30));
-    group.sample_size(10);
 
     // Pre-create large dataset once
     let tmp = TempDir::new().expect("tempdir");

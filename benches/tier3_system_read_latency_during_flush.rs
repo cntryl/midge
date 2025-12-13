@@ -157,7 +157,6 @@ impl BlockCache {
 
 fn bench_read_latency_during_flush(c: &mut Criterion) {
     let mut group = c.benchmark_group("tier3_read_latency_during_flush");
-    group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
 
     group.bench_function("baseline_vs_with_flush", |b| {

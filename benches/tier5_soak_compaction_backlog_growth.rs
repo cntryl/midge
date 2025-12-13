@@ -20,7 +20,6 @@ fn bench_compaction_backlog_growth(c: &mut Criterion) {
     let mut group = c.benchmark_group("soak_compaction_backlog_growth");
     group.sampling_mode(SamplingMode::Flat);
     group.measurement_time(std::time::Duration::from_secs(20));
-    group.sample_size(10);
 
     group.bench_function("sustained_writes_10k_ops", |b| {
         b.iter(|| {

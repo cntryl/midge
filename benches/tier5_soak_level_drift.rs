@@ -20,7 +20,6 @@ fn bench_level_drift(c: &mut Criterion) {
     let mut group = c.benchmark_group("soak_level_drift");
     group.sampling_mode(SamplingMode::Flat);
     group.measurement_time(std::time::Duration::from_secs(20));
-    group.sample_size(10);
 
     group.bench_function("mixed_workload_20k_ops", |b| {
         b.iter(|| {

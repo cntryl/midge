@@ -105,7 +105,6 @@ impl ZipfianGenerator {
 
 fn bench_sustained_mixed_workload_with_compaction(c: &mut Criterion) {
     let mut group = c.benchmark_group("tier3_sustained_mixed_workload");
-    group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
 
     group.bench_function("mixed_70read_30write_100k_ops", |b| {

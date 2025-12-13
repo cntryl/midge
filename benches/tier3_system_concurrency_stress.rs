@@ -43,7 +43,6 @@ use std::thread;
 fn bench_concurrent_puts(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_concurrent_puts");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(15);
 
     let max_threads = 16;
     let n_ops = 3_000; // Reduced from 5000 for faster runs
@@ -106,7 +105,6 @@ fn bench_concurrent_puts(c: &mut Criterion) {
 fn bench_mixed_read_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_read_write_contention");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(15);
 
     // Precompute data to avoid allocations in hot path
     let prefill_keys: Vec<_> = (0..5_000).map(make_key).collect(); // Reduced from 10000
@@ -196,7 +194,6 @@ fn bench_mixed_read_write(c: &mut Criterion) {
 fn bench_compaction_pressure(c: &mut Criterion) {
     let mut group = c.benchmark_group("system_compaction_pressure");
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(10);
 
     // Precompute data - reduced from 25k for faster runs
     let compaction_keys: Vec<_> = (0..15_000).map(make_key).collect();

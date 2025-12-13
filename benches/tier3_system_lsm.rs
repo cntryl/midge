@@ -90,7 +90,6 @@ fn precompute_kv(n: usize) -> (Vec<Bytes>, Vec<Bytes>) {
 fn bench_system_wal_write(c: &mut Criterion) {
     let mut g = c.benchmark_group("system_lsm/wal_write");
     g.sampling_mode(SamplingMode::Flat);
-    g.sample_size(15);
 
     for &entries in &[1_000, 10_000, 50_000] {
         let (keys, vals) = precompute_kv(entries);
@@ -141,7 +140,6 @@ fn bench_system_wal_write(c: &mut Criterion) {
 fn bench_system_flush_reopen_read(c: &mut Criterion) {
     let mut g = c.benchmark_group("system_lsm/flush_reopen_read");
     g.sampling_mode(SamplingMode::Flat);
-    g.sample_size(15);
 
     for &entries in &[10_000, 50_000] {
         let (keys, vals) = precompute_kv(entries);
@@ -210,7 +208,6 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
 fn bench_system_l0_compaction(c: &mut Criterion) {
     let mut g = c.benchmark_group("system_lsm/l0_compaction");
     g.sampling_mode(SamplingMode::Flat);
-    g.sample_size(12);
 
     for &entries in &[25_000, 50_000] {
         let (keys, vals) = precompute_kv(entries);
@@ -270,7 +267,6 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
 fn bench_system_mixed_workload(c: &mut Criterion) {
     let mut g = c.benchmark_group("system_lsm/mixed_workload");
     g.sampling_mode(SamplingMode::Flat);
-    g.sample_size(15);
 
     let hot_set_size = 10_000;
     let total_ops = 50_000;
