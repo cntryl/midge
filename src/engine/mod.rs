@@ -323,6 +323,9 @@ impl MidgeEngine {
         // Check for errors from runtime
         match response {
             RuntimeResponse::Ok { .. } => {
+                // Update engine's sequence to reflect completed write
+                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+
                 let elapsed = start.elapsed();
 
                 // Record metrics
@@ -486,19 +489,25 @@ impl MidgeEngine {
             .with_cf(cf.id.0)
             .with_key_size(key_size);
 
+        // Request seqno from runtime (actor-owned allocation)
+        let seqno = self.request_seqno(cf.id.0)?;
+
         // CRITICAL: Use send_and_wait to ensure tombstone is durable.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: None, // Tombstone
-            sequence: self.next_sequence(),
+            sequence: seqno,
             ttl_seconds: None,
             insert_only: false,
         })?;
 
         match response {
             RuntimeResponse::Ok { .. } => {
+                // Update engine's sequence to reflect completed delete
+                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+
                 let elapsed = start.elapsed();
                 tracing::debug!(
                     elapsed_us = elapsed.as_micros(),
@@ -596,17 +605,23 @@ impl MidgeEngine {
             )));
         }
 
+        // Request seqno from runtime (actor-owned allocation)
+        let seqno = self.request_seqno(cf.id.0)?;
+
         // Send merge operation to runtime
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalMerge {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             operand: operand.to_vec(),
-            sequence: self.next_sequence(),
+            sequence: seqno,
         })?;
 
         match response {
             RuntimeResponse::Ok { .. } => {
+                // Update engine's sequence to reflect completed merge
+                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+
                 let elapsed = start.elapsed();
 
                 // Record metrics
@@ -820,13 +835,16 @@ impl MidgeEngine {
         value: &[u8],
         ttl_seconds: u64,
     ) -> MidgeResult<bool> {
+        // Request seqno from runtime (actor-owned allocation)
+        let seqno = self.request_seqno(cf.id.0)?;
+
         // Send insert-only WAL append; runtime will enforce uniqueness
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: self.next_sequence(),
+            sequence: seqno,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -836,7 +854,11 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::Ok { .. } => Ok(true),
+            RuntimeResponse::Ok { .. } => {
+                // Update engine's sequence to reflect completed insert
+                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+                Ok(true)
+            }
             RuntimeResponse::Error { message, .. } if message.contains("already exists") => {
                 Ok(false)
             }
@@ -865,12 +887,15 @@ impl MidgeEngine {
         value: &[u8],
         ttl_seconds: u64,
     ) -> MidgeResult<api::InsertResult> {
+        // Request seqno from runtime (actor-owned allocation)
+        let seqno = self.request_seqno(cf.id.0)?;
+
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: self.next_sequence(),
+            sequence: seqno,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -880,7 +905,11 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::Ok { .. } => Ok(api::InsertResult::Ok),
+            RuntimeResponse::Ok { .. } => {
+                // Update engine's sequence to reflect completed insert
+                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+                Ok(api::InsertResult::Ok)
+            }
             RuntimeResponse::Error { message, .. } if message.contains("already exists") => {
                 // We need the existing value; fall back to a read
                 let existing = self.get(cf, key)?;
@@ -979,33 +1008,39 @@ impl MidgeEngine {
         // This is a known limitation until batch message is added.
 
         for (cf_id, key, value) in batch.iter_puts() {
+            let seqno = self.request_seqno(cf_id.as_u32())?;
             let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                 request_id: next_request_id(),
                 cf_id: cf_id.as_u32(),
                 key: key.to_vec(),
                 value: Some(value.to_vec()),
-                sequence: self.next_sequence(),
+                sequence: seqno,
                 ttl_seconds: None,
                 insert_only: false,
             })?;
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
             }
+            // Update engine's sequence to reflect completed write
+            self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
         }
 
         for (cf_id, key) in batch.iter_deletes() {
+            let seqno = self.request_seqno(cf_id.as_u32())?;
             let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                 request_id: next_request_id(),
                 cf_id: cf_id.as_u32(),
                 key: key.to_vec(),
                 value: None,
-                sequence: self.next_sequence(),
+                sequence: seqno,
                 ttl_seconds: None,
                 insert_only: false,
             })?;
             if let RuntimeResponse::Error { message, .. } = response {
                 return Err(MidgeError::Internal(message));
             }
+            // Update engine's sequence to reflect completed delete
+            self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
         }
 
         Ok(())
@@ -1116,12 +1151,13 @@ impl MidgeEngine {
                 api::WriteIntent::Put {
                     cf_id, key, value, ..
                 } => {
+                    let seqno = self.request_seqno(cf_id.as_u32())?;
                     let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                         request_id: next_request_id(),
                         cf_id: cf_id.as_u32(),
                         key: key.clone(),
                         value: Some(value.clone()),
-                        sequence: self.next_sequence(),
+                        sequence: seqno,
                         ttl_seconds: None,
                         insert_only: false,
                     })?;
@@ -1129,14 +1165,17 @@ impl MidgeEngine {
                         txn.mark_failed()?;
                         return Err(MidgeError::Internal(message));
                     }
+                    // Update engine's sequence to reflect completed write
+                    self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
                 }
                 api::WriteIntent::Delete { cf_id, key, .. } => {
+                    let seqno = self.request_seqno(cf_id.as_u32())?;
                     let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                         request_id: next_request_id(),
                         cf_id: cf_id.as_u32(),
                         key: key.clone(),
                         value: None,
-                        sequence: self.next_sequence(),
+                        sequence: seqno,
                         ttl_seconds: None,
                         insert_only: false,
                     })?;
@@ -1144,6 +1183,8 @@ impl MidgeEngine {
                         txn.mark_failed()?;
                         return Err(MidgeError::Internal(message));
                     }
+                    // Update engine's sequence to reflect completed delete
+                    self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
                 }
                 api::WriteIntent::DeleteRange {
                     cf_id,
@@ -1157,13 +1198,14 @@ impl MidgeEngine {
                     let cf_handle = ColumnFamilyHandle::new(*cf_id, "default".to_string());
                     let keys = self.range(&cf_handle, start_key, end_key)?;
                     for (key, _) in keys {
+                        let seqno = self.request_seqno(cf_id.as_u32())?;
                         let response =
                             self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                                 request_id: next_request_id(),
                                 cf_id: cf_id.as_u32(),
                                 key: key.to_vec(),
                                 value: None,
-                                sequence: self.next_sequence(),
+                                sequence: seqno,
                                 ttl_seconds: None,
                                 insert_only: false,
                             })?;
@@ -1171,6 +1213,8 @@ impl MidgeEngine {
                             txn.mark_failed()?;
                             return Err(MidgeError::Internal(message));
                         }
+                        // Update engine's sequence to reflect completed delete
+                        self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
@@ -1359,11 +1403,6 @@ impl MidgeEngine {
         }
     }
 
-    /// Fallback: use local sequence if runtime allocation unavailable
-    fn next_sequence(&self) -> u64 {
-        self.sequence
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    }
 }
 
 #[cfg(test)]
