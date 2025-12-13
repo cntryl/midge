@@ -48,7 +48,7 @@ struct PendingCloudWrite {
 
 /// Actor handling WAL operations
 pub struct WalActor {
-    /// Current WAL writer (always FsWalWriter via factory)
+    /// WAL writer (owned by this actor)
     writer: Option<Box<dyn WalWriter>>,
     /// WAL directory
     wal_dir: PathBuf,
@@ -69,14 +69,9 @@ impl WalActor {
         durability_policy: DurabilityPolicy,
         memory_mode: bool,
     ) -> MidgeResult<Self> {
-        // In memory mode, don't create any filesystem resources
         let writer = if memory_mode {
-            None // No WAL writer in memory mode
+            None
         } else {
-            // Create WAL directory only if not in memory mode
-            std::fs::create_dir_all(&wal_dir).map_err(crate::common::MidgeError::Io)?;
-
-            // Create writer via factory (always FsWalWriter - never create backends)
             let factory = FsWalFactory;
             Some(factory.create_writer(&wal_dir)?)
         };
@@ -139,7 +134,7 @@ impl WalActor {
         let record_size = record.key.len() + record.value.as_ref().map_or(0, |v| v.len());
 
         // ALWAYS append to local WAL first (FsWalWriter)
-        if let Some(writer) = &self.writer {
+        if let Some(writer) = &mut self.writer {
             writer.append_record(&record)?;
         }
 
@@ -328,7 +323,7 @@ impl WalActor {
 
     /// Internal sync helper - fsyncs the writer
     fn sync_internal(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
-        if let Some(writer) = &self.writer {
+        if let Some(writer) = &mut self.writer {
             writer.sync()?;
         }
 

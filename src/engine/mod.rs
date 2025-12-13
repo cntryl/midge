@@ -122,8 +122,6 @@ impl ColumnFamilyHandle {
 pub struct MidgeEngine {
     /// Handle to submit work to the runtime
     runtime_handle: RuntimeHandle,
-    /// Fast path writer (bypasses actor for hot-path puts)
-    fast_path: Option<crate::runtime::FastPathState>,
     /// Database path
     #[allow(dead_code)]
     db_path: PathBuf,
@@ -197,7 +195,6 @@ impl MidgeEngine {
 
         Ok(Self {
             runtime_handle,
-            fast_path: None,
             db_path,
             default_cf,
             sequence: std::sync::atomic::AtomicU64::new(0),
@@ -248,7 +245,6 @@ impl MidgeEngine {
 
         Ok(Self {
             runtime_handle,
-            fast_path: None,
             db_path,
             default_cf,
             sequence: std::sync::atomic::AtomicU64::new(0),
@@ -306,15 +302,23 @@ impl MidgeEngine {
             .with_key_size(key_size)
             .with_value_size(value_size);
 
-        // Fast path: WAL-first + memtable (no actor await)
-        let ttl_opt = if ttl_seconds == 0 {
-            None
-        } else {
-            Some(ttl_seconds)
-        };
-        let _seqno = self.runtime_handle.fast_put(cf_id, key, value, ttl_opt)?;
+        // Request seqno from runtime (actor-owned allocation)
+        let seqno = self.request_seqno(cf_id)?;
 
-        let response = RuntimeResponse::Ok { request_id: 0 };
+        // CRITICAL: Use send_and_wait to ensure durability before returning.
+        let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+            request_id: next_request_id(),
+            cf_id,
+            key: key.to_vec(),
+            value: Some(value.to_vec()),
+            sequence: seqno,
+            ttl_seconds: if ttl_seconds == 0 {
+                None
+            } else {
+                Some(ttl_seconds)
+            },
+            insert_only: false,
+        })?;
 
         // Check for errors from runtime
         match response {

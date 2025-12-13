@@ -14,7 +14,6 @@
 pub mod actors;
 pub mod dispatch;
 pub mod event_loop;
-pub mod fastpath;
 pub mod scheduler;
 pub mod state;
 pub mod task;
@@ -24,7 +23,6 @@ pub use actors::{
 };
 pub use dispatch::Dispatcher;
 pub use event_loop::EventLoop;
-pub use fastpath::FastPathState;
 pub use scheduler::Scheduler;
 pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
@@ -402,8 +400,6 @@ impl ResponseRouter {
 pub struct RuntimeHandle {
     msg_tx: Sender<RuntimeMsg>,
     router: Arc<ResponseRouter>,
-    /// Fast path for hot-path writes (bypasses actor await)
-    fast_path: Option<FastPathState>,
 }
 
 impl RuntimeHandle {
@@ -466,77 +462,6 @@ impl RuntimeHandle {
     pub fn shutdown(&self) -> MidgeResult<()> {
         self.send(RuntimeMsg::Shutdown)
     }
-
-    /// Fast path put - bypasses actor request-response
-    ///
-    /// Writes directly to WAL + memtable. Returns immediately after write completes.
-    /// Actor is notified asynchronously for observability/flush scheduling.
-    pub fn fast_put(
-        &self,
-        cf_id: u32,
-        key: &[u8],
-        value: &[u8],
-        ttl_seconds: Option<u64>,
-    ) -> MidgeResult<u64> {
-        if let Some(ref fast_path) = self.fast_path {
-            fast_path.put(cf_id, key, value, ttl_seconds)
-        } else {
-            // Fallback to slow path if fast path not available
-            let seqno = self.send_and_wait(RuntimeMsg::AllocSeqno {
-                request_id: next_request_id(),
-                cf_id,
-            })?;
-            let sequence = match seqno {
-                RuntimeResponse::SeqnoAllocated { seqno, .. } => seqno,
-                _ => {
-                    return Err(MidgeError::Internal("unexpected response".to_string()));
-                }
-            };
-
-            self.send_and_wait(RuntimeMsg::WalAppend {
-                request_id: next_request_id(),
-                cf_id,
-                key: key.to_vec(),
-                value: Some(value.to_vec()),
-                sequence,
-                ttl_seconds,
-                insert_only: false,
-            })?;
-
-            Ok(sequence)
-        }
-    }
-
-    /// Fast path delete - bypasses actor request-response
-    pub fn fast_delete(&self, cf_id: u32, key: &[u8]) -> MidgeResult<u64> {
-        if let Some(ref fast_path) = self.fast_path {
-            fast_path.delete(cf_id, key)
-        } else {
-            // Fallback to slow path if fast path not available
-            let seqno = self.send_and_wait(RuntimeMsg::AllocSeqno {
-                request_id: next_request_id(),
-                cf_id,
-            })?;
-            let sequence = match seqno {
-                RuntimeResponse::SeqnoAllocated { seqno, .. } => seqno,
-                _ => {
-                    return Err(MidgeError::Internal("unexpected response".to_string()));
-                }
-            };
-
-            self.send_and_wait(RuntimeMsg::WalAppend {
-                request_id: next_request_id(),
-                cf_id,
-                key: key.to_vec(),
-                value: None,
-                sequence,
-                ttl_seconds: None,
-                insert_only: false,
-            })?;
-
-            Ok(sequence)
-        }
-    }
 }
 
 /// Main runtime for background operations.
@@ -569,7 +494,6 @@ impl Runtime {
         let handle = RuntimeHandle {
             msg_tx: msg_tx.clone(),
             router: router.clone(),
-            fast_path: None, // Will be initialized in Runtime::start()
         };
 
         let runtime = Self {
@@ -591,19 +515,6 @@ impl Runtime {
         let trace_enabled = self.trace_enabled;
         let router = self.router.clone();
 
-        // Initialize fast path state before starting event loop
-        let fast_path = FastPathState::new(
-            state.wal_dir.clone(),
-            crate::wal::DurabilityPolicy::Batched,
-            state.memory_mode,
-            state.sequence,
-        )?;
-
-        // Register memtables for all column families
-        for (cf_id, cf_state) in &state.column_families {
-            fast_path.register_memtable(*cf_id, cf_state.memtable.clone());
-        }
-
         // Channel to signal successful event loop initialization
         let (init_tx, init_rx) = channel::bounded::<Result<(), String>>(1);
 
@@ -611,7 +522,6 @@ impl Runtime {
         let handle = RuntimeHandle {
             msg_tx: self.msg_tx.clone(),
             router: router.clone(),
-            fast_path: Some(fast_path),
         };
 
         let event_loop_handle = thread::Builder::new()
