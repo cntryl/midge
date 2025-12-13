@@ -128,8 +128,9 @@ impl MidgeEngine {
     /// Open a database from flexible parameters (PathBuf or MidgeOptions)
     pub fn open<P: OpenParam>(param: P) -> MidgeResult<Self> {
         let db_path = param.to_path();
-        // Create runtime state (not in memory mode for regular open)
-        let state = RuntimeState::new(db_path.clone(), false);
+        // Detect memory mode from path (":memory:" sentinel)
+        let memory_mode = db_path.to_string_lossy() == ":memory:";
+        let state = RuntimeState::new(db_path.clone(), memory_mode);
 
         // Start runtime
         let (runtime, _) = Runtime::new()?;

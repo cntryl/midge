@@ -50,24 +50,16 @@ impl EventLoop {
         let sst_dir = state.sst_dir.clone();
         let memory_mode = state.memory_mode;
 
-        let sst_factory = Arc::new(
-            super::super::sst::FsSstFactory::new(&sst_dir, 64 * 1024), // 64KB block size
-        );
-
-        // Only create filesystem-based actors if not in memory mode
-        let (flush_actor, wal_actor) = if memory_mode {
-            // In memory mode, create stub actors that don't touch filesystem
-            // For now, create them anyway but they won't be used for actual operations
-            (
-                FlushActor::new(&sst_dir)?,
-                WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched, memory_mode)?,
-            )
+        let sst_factory = if memory_mode {
+            // Don't create SST factory in memory mode
+            Arc::new(crate::sst::FsSstFactory::new(&sst_dir, 64 * 1024)) // Dummy, won't be used
         } else {
-            (
-                FlushActor::new(&sst_dir)?,
-                WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched, memory_mode)?,
-            )
+            Arc::new(super::super::sst::FsSstFactory::new(&sst_dir, 64 * 1024)) // 64KB block size
         };
+
+        // Create actors - they handle memory_mode internally
+        let flush_actor = FlushActor::new(&sst_dir, memory_mode)?;
+        let wal_actor = WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched, memory_mode)?;
 
         Ok(Self {
             state,

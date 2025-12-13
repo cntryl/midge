@@ -13,18 +13,25 @@ use std::path::Path;
 pub struct FlushActor {
     /// Number of flushes in progress
     in_progress: usize,
-    /// SST factory for creating writers
-    sst_factory: std::sync::Arc<dyn crate::sst::SstFactory>,
+    /// SST factory for creating writers (None in memory mode)
+    sst_factory: Option<std::sync::Arc<dyn crate::sst::SstFactory>>,
+    /// Whether we're in memory-only mode (no disk operations)
+    memory_mode: bool,
 }
 
 impl FlushActor {
-    pub fn new(sst_dir: &Path) -> MidgeResult<Self> {
-        let sst_factory = std::sync::Arc::new(
-            crate::sst::FsSstFactory::new(sst_dir, 64 * 1024), // 64KB block size
-        );
+    pub fn new(sst_dir: &Path, memory_mode: bool) -> MidgeResult<Self> {
+        let sst_factory: Option<std::sync::Arc<dyn crate::sst::SstFactory>> = if memory_mode {
+            None // Don't create factory in memory mode
+        } else {
+            Some(std::sync::Arc::new(
+                crate::sst::FsSstFactory::new(sst_dir, 64 * 1024), // 64KB block size
+            ))
+        };
         Ok(Self {
             in_progress: 0,
             sst_factory,
+            memory_mode,
         })
     }
 
@@ -41,6 +48,11 @@ impl FlushActor {
         cf_id: u32,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<String> {
+        // In memory mode, flushes are no-ops (everything stays in memory)
+        if self.memory_mode {
+            return Ok(format!("memory_flush_{}", state.sequence));
+        }
+
         // Estimate SST size: approximate as active memtable size
         let est_size = 1024 * 1024; // 1MB estimate; could be more precise
 
@@ -126,8 +138,10 @@ impl FlushActor {
         memtable: &std::sync::Arc<crate::sst::SkipListMemtable>,
         path: &Path,
     ) -> MidgeResult<()> {
-        // Create SST writer
-        let mut writer = self.sst_factory.create()?;
+        // Create SST writer (should not reach here in memory mode, but be defensive)
+        let sst_factory = self.sst_factory.as_ref()
+            .ok_or_else(|| MidgeError::Internal("SST factory not available in memory mode".to_string()))?;
+        let mut writer = sst_factory.create()?;
 
         // Get all entries from memtable and write to SST
         let entries = memtable.iter_all(u64::MAX);
@@ -177,7 +191,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn create_test_flush_actor() -> MidgeResult<FlushActor> {
-        FlushActor::new(&PathBuf::from("/tmp"))
+        FlushActor::new(&PathBuf::from("/tmp"), false)
     }
 
     #[test]

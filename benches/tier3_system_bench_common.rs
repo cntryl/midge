@@ -225,7 +225,11 @@ impl BenchEngineConfig {
 #[allow(dead_code)]
 pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
     let path = unique_bench_path(prefix);
-    let _ = std::fs::remove_dir_all(&path);
+    
+    // Only clean up filesystem paths (memory mode doesn't need cleanup)
+    if config.storage_mode != BenchStorageMode::Memory {
+        let _ = std::fs::remove_dir_all(&path);
+    }
 
     let storage_mode = match config.storage_mode {
         BenchStorageMode::Memory => StorageMode::Memory,
