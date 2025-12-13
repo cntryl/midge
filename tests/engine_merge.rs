@@ -55,6 +55,7 @@ impl MergeOperator for StringAppendOperator {
 
 /// Integer add merge operator (little-endian u64)
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct IntegerAddOperator;
 
 impl MergeOperator for IntegerAddOperator {
@@ -85,6 +86,7 @@ impl MergeOperator for IntegerAddOperator {
 
 /// Merge operator that always fails (for error testing)
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct FailingOperator;
 
 impl MergeOperator for FailingOperator {

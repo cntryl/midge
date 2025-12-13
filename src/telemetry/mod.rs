@@ -110,6 +110,7 @@ impl Telemetry {
     }
 
     #[cfg(not(feature = "telemetry"))]
+    #[allow(dead_code)]
     fn setup_tracing(_config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
         Ok(())
     }

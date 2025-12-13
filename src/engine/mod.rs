@@ -1640,7 +1640,7 @@ mod tests {
     fn should_support_column_family_handle_in_vector() {
         // Arrange
         // Act
-        let handles = vec![
+        let handles = [
             ColumnFamilyHandle::new(ColumnFamilyId(0), "default".to_string()),
             ColumnFamilyHandle::new(ColumnFamilyId(1), "secondary".to_string()),
         ];

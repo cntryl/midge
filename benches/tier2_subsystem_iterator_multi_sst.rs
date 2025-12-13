@@ -44,7 +44,7 @@ impl MockSst {
     }
 
     /// Create iterator starting at index
-    fn iter_from(&self, idx: usize) -> SstIterator {
+    fn iter_from(&self, idx: usize) -> SstIterator<'_> {
         SstIterator {
             sst_id: self.id,
             keys: &self.keys,
@@ -112,7 +112,8 @@ impl<'a> MergeIterator<'a> {
         let mut heap = BinaryHeap::new();
 
         // Initialize heap with first key from each iterator
-        for (idx, iter) in iterators.iter_mut().enumerate() {
+        #[allow(clippy::enumerate_iter)]
+        for (_idx, iter) in iterators.iter_mut().enumerate() {
             if let Some((key, sst_id)) = iter.next() {
                 heap.push(HeapEntry { key, sst_id });
             }

@@ -174,7 +174,7 @@ fn bench_batch_put(c: &mut Criterion) {
                 b.iter_batched(
                     || setup_engine_with_mode("batch_put", mode),
                     |engine| {
-                        let cf = engine.default_column_family();
+                        let _cf = engine.default_column_family();
                         for batch_idx in 0..num_batches {
                             let mut batch = WriteBatch::new();
                             let start = batch_idx * batch_size;

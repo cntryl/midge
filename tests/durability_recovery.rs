@@ -285,7 +285,7 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
-            let cf = engine.default_column_family();
+            let _cf = engine.default_column_family();
 
             // Write batch (atomic operation)
             let mut batch = WriteBatch::new();
