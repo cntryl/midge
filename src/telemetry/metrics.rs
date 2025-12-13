@@ -14,6 +14,14 @@ pub struct Metrics {
     pub deletes: Arc<AtomicU64>,
     pub merges: Arc<AtomicU64>,
 
+    // Read operations
+    pub gets: Arc<AtomicU64>,
+    pub range_scans: Arc<AtomicU64>,
+
+    // Latency (microseconds)
+    pub write_latency_us: Arc<AtomicU64>,
+    pub read_latency_us: Arc<AtomicU64>,
+
     // WAL operations
     pub wal_appends: Arc<AtomicU64>,
     pub wal_syncs: Arc<AtomicU64>,
@@ -50,6 +58,10 @@ impl Metrics {
             puts: Arc::new(AtomicU64::new(0)),
             deletes: Arc::new(AtomicU64::new(0)),
             merges: Arc::new(AtomicU64::new(0)),
+            gets: Arc::new(AtomicU64::new(0)),
+            range_scans: Arc::new(AtomicU64::new(0)),
+            write_latency_us: Arc::new(AtomicU64::new(0)),
+            read_latency_us: Arc::new(AtomicU64::new(0)),
             wal_appends: Arc::new(AtomicU64::new(0)),
             wal_syncs: Arc::new(AtomicU64::new(0)),
             wal_bytes_written: Arc::new(AtomicU64::new(0)),
@@ -89,6 +101,38 @@ impl Metrics {
     pub fn record_merge(&self) {
         if self.enabled {
             self.merges.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a get operation
+    #[inline]
+    pub fn record_get(&self) {
+        if self.enabled {
+            self.gets.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a range scan operation
+    #[inline]
+    pub fn record_range_scan(&self) {
+        if self.enabled {
+            self.range_scans.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record write operation latency (microseconds)
+    #[inline]
+    pub fn record_write_latency_us(&self, latency_us: u64) {
+        if self.enabled {
+            self.write_latency_us.fetch_add(latency_us, Ordering::Relaxed);
+        }
+    }
+
+    /// Record read operation latency (microseconds)
+    #[inline]
+    pub fn record_read_latency_us(&self, latency_us: u64) {
+        if self.enabled {
+            self.read_latency_us.fetch_add(latency_us, Ordering::Relaxed);
         }
     }
 
@@ -185,6 +229,10 @@ impl Metrics {
             puts: self.puts.load(Ordering::Relaxed),
             deletes: self.deletes.load(Ordering::Relaxed),
             merges: self.merges.load(Ordering::Relaxed),
+            gets: self.gets.load(Ordering::Relaxed),
+            range_scans: self.range_scans.load(Ordering::Relaxed),
+            write_latency_us: self.write_latency_us.load(Ordering::Relaxed),
+            read_latency_us: self.read_latency_us.load(Ordering::Relaxed),
             wal_appends: self.wal_appends.load(Ordering::Relaxed),
             wal_syncs: self.wal_syncs.load(Ordering::Relaxed),
             wal_bytes_written: self.wal_bytes_written.load(Ordering::Relaxed),
@@ -209,6 +257,10 @@ pub struct MetricsSnapshot {
     pub puts: u64,
     pub deletes: u64,
     pub merges: u64,
+    pub gets: u64,
+    pub range_scans: u64,
+    pub write_latency_us: u64,
+    pub read_latency_us: u64,
     pub wal_appends: u64,
     pub wal_syncs: u64,
     pub wal_bytes_written: u64,
