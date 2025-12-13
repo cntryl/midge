@@ -235,11 +235,6 @@ path = "benches/tier2_subsystem_bloom_build.rs"
 harness = false
 
 [[bench]]
-name = "tier2_subsystem_bloom_false_positive_rate"
-path = "benches/tier2_subsystem_bloom_false_positive_rate.rs"
-harness = false
-
-[[bench]]
 name = "tier2_subsystem_sst_point_read_bloom"
 path = "benches/tier2_subsystem_sst_point_read_bloom.rs"
 harness = false
@@ -262,11 +257,6 @@ harness = false
 [[bench]]
 name = "tier2_subsystem_read_amplification"
 path = "benches/tier2_subsystem_read_amplification.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_compaction_interference"
-path = "benches/tier2_subsystem_compaction_interference.rs"
 harness = false
 
 # =============================================================================
