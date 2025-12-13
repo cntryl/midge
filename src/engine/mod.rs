@@ -302,16 +302,13 @@ impl MidgeEngine {
             .with_key_size(key_size)
             .with_value_size(value_size);
 
-        // Request seqno from runtime (actor-owned allocation)
-        let seqno = self.request_seqno(cf_id)?;
-
-        // CRITICAL: Use send_and_wait to ensure durability before returning.
+        // Sequence numbers are allocated inside the runtime at append time.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
             cf_id,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: seqno,
+            sequence: 0,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -322,9 +319,10 @@ impl MidgeEngine {
 
         // Check for errors from runtime
         match response {
-            RuntimeResponse::Ok { .. } => {
+            RuntimeResponse::WalAppended { sequence, .. } => {
                 // Update engine's sequence to reflect completed write
-                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+                self.sequence
+                    .store(sequence, std::sync::atomic::Ordering::SeqCst);
 
                 let elapsed = start.elapsed();
 
@@ -489,24 +487,22 @@ impl MidgeEngine {
             .with_cf(cf.id.0)
             .with_key_size(key_size);
 
-        // Request seqno from runtime (actor-owned allocation)
-        let seqno = self.request_seqno(cf.id.0)?;
-
         // CRITICAL: Use send_and_wait to ensure tombstone is durable.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: None, // Tombstone
-            sequence: seqno,
+            sequence: 0,
             ttl_seconds: None,
             insert_only: false,
         })?;
 
         match response {
-            RuntimeResponse::Ok { .. } => {
+            RuntimeResponse::WalAppended { sequence, .. } => {
                 // Update engine's sequence to reflect completed delete
-                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+                self.sequence
+                    .store(sequence, std::sync::atomic::Ordering::SeqCst);
 
                 let elapsed = start.elapsed();
                 tracing::debug!(
@@ -605,22 +601,20 @@ impl MidgeEngine {
             )));
         }
 
-        // Request seqno from runtime (actor-owned allocation)
-        let seqno = self.request_seqno(cf.id.0)?;
-
-        // Send merge operation to runtime
+        // Send merge operation to runtime; runtime assigns a seqno.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalMerge {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             operand: operand.to_vec(),
-            sequence: seqno,
+            sequence: 0,
         })?;
 
         match response {
-            RuntimeResponse::Ok { .. } => {
+            RuntimeResponse::WalAppended { sequence, .. } => {
                 // Update engine's sequence to reflect completed merge
-                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+                self.sequence
+                    .store(sequence, std::sync::atomic::Ordering::SeqCst);
 
                 let elapsed = start.elapsed();
 
@@ -835,16 +829,13 @@ impl MidgeEngine {
         value: &[u8],
         ttl_seconds: u64,
     ) -> MidgeResult<bool> {
-        // Request seqno from runtime (actor-owned allocation)
-        let seqno = self.request_seqno(cf.id.0)?;
-
         // Send insert-only WAL append; runtime will enforce uniqueness
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: seqno,
+            sequence: 0,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -854,9 +845,10 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::Ok { .. } => {
+            RuntimeResponse::WalAppended { sequence, .. } => {
                 // Update engine's sequence to reflect completed insert
-                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+                self.sequence
+                    .store(sequence, std::sync::atomic::Ordering::SeqCst);
                 Ok(true)
             }
             RuntimeResponse::Error { message, .. } if message.contains("already exists") => {
@@ -887,15 +879,12 @@ impl MidgeEngine {
         value: &[u8],
         ttl_seconds: u64,
     ) -> MidgeResult<api::InsertResult> {
-        // Request seqno from runtime (actor-owned allocation)
-        let seqno = self.request_seqno(cf.id.0)?;
-
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             value: Some(value.to_vec()),
-            sequence: seqno,
+            sequence: 0,
             ttl_seconds: if ttl_seconds == 0 {
                 None
             } else {
@@ -905,9 +894,10 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::Ok { .. } => {
+            RuntimeResponse::WalAppended { sequence, .. } => {
                 // Update engine's sequence to reflect completed insert
-                self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
+                self.sequence
+                    .store(sequence, std::sync::atomic::Ordering::SeqCst);
                 Ok(api::InsertResult::Ok)
             }
             RuntimeResponse::Error { message, .. } if message.contains("already exists") => {
@@ -1008,39 +998,57 @@ impl MidgeEngine {
         // This is a known limitation until batch message is added.
 
         for (cf_id, key, value) in batch.iter_puts() {
-            let seqno = self.request_seqno(cf_id.as_u32())?;
             let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                 request_id: next_request_id(),
                 cf_id: cf_id.as_u32(),
                 key: key.to_vec(),
                 value: Some(value.to_vec()),
-                sequence: seqno,
+                sequence: 0,
                 ttl_seconds: None,
                 insert_only: false,
             })?;
-            if let RuntimeResponse::Error { message, .. } = response {
-                return Err(MidgeError::Internal(message));
+            match response {
+                RuntimeResponse::WalAppended { sequence, .. } => {
+                    // Update engine's sequence to reflect completed write
+                    self.sequence
+                        .store(sequence, std::sync::atomic::Ordering::SeqCst);
+                }
+                RuntimeResponse::Error { message, .. } => {
+                    return Err(MidgeError::Internal(message))
+                }
+                _ => {
+                    return Err(MidgeError::Internal(
+                        "Unexpected response to write_batch put".to_string(),
+                    ))
+                }
             }
-            // Update engine's sequence to reflect completed write
-            self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
         }
 
         for (cf_id, key) in batch.iter_deletes() {
-            let seqno = self.request_seqno(cf_id.as_u32())?;
             let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                 request_id: next_request_id(),
                 cf_id: cf_id.as_u32(),
                 key: key.to_vec(),
                 value: None,
-                sequence: seqno,
+                sequence: 0,
                 ttl_seconds: None,
                 insert_only: false,
             })?;
-            if let RuntimeResponse::Error { message, .. } = response {
-                return Err(MidgeError::Internal(message));
+            match response {
+                RuntimeResponse::WalAppended { sequence, .. } => {
+                    // Update engine's sequence to reflect completed delete
+                    self.sequence
+                        .store(sequence, std::sync::atomic::Ordering::SeqCst);
+                }
+                RuntimeResponse::Error { message, .. } => {
+                    return Err(MidgeError::Internal(message))
+                }
+                _ => {
+                    return Err(MidgeError::Internal(
+                        "Unexpected response to write_batch delete".to_string(),
+                    ))
+                }
             }
-            // Update engine's sequence to reflect completed delete
-            self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
         }
 
         Ok(())
@@ -1151,40 +1159,60 @@ impl MidgeEngine {
                 api::WriteIntent::Put {
                     cf_id, key, value, ..
                 } => {
-                    let seqno = self.request_seqno(cf_id.as_u32())?;
                     let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                         request_id: next_request_id(),
                         cf_id: cf_id.as_u32(),
                         key: key.clone(),
                         value: Some(value.clone()),
-                        sequence: seqno,
+                        sequence: 0,
                         ttl_seconds: None,
                         insert_only: false,
                     })?;
-                    if let RuntimeResponse::Error { message, .. } = response {
-                        txn.mark_failed()?;
-                        return Err(MidgeError::Internal(message));
+                    match response {
+                        RuntimeResponse::WalAppended { sequence, .. } => {
+                            // Update engine's sequence to reflect completed write
+                            self.sequence
+                                .store(sequence, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        RuntimeResponse::Error { message, .. } => {
+                            txn.mark_failed()?;
+                            return Err(MidgeError::Internal(message));
+                        }
+                        _ => {
+                            txn.mark_failed()?;
+                            return Err(MidgeError::Internal(
+                                "Unexpected response to transaction put".to_string(),
+                            ));
+                        }
                     }
-                    // Update engine's sequence to reflect completed write
-                    self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
                 }
                 api::WriteIntent::Delete { cf_id, key, .. } => {
-                    let seqno = self.request_seqno(cf_id.as_u32())?;
                     let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                         request_id: next_request_id(),
                         cf_id: cf_id.as_u32(),
                         key: key.clone(),
                         value: None,
-                        sequence: seqno,
+                        sequence: 0,
                         ttl_seconds: None,
                         insert_only: false,
                     })?;
-                    if let RuntimeResponse::Error { message, .. } = response {
-                        txn.mark_failed()?;
-                        return Err(MidgeError::Internal(message));
+                    match response {
+                        RuntimeResponse::WalAppended { sequence, .. } => {
+                            // Update engine's sequence to reflect completed delete
+                            self.sequence
+                                .store(sequence, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        RuntimeResponse::Error { message, .. } => {
+                            txn.mark_failed()?;
+                            return Err(MidgeError::Internal(message));
+                        }
+                        _ => {
+                            txn.mark_failed()?;
+                            return Err(MidgeError::Internal(
+                                "Unexpected response to transaction delete".to_string(),
+                            ));
+                        }
                     }
-                    // Update engine's sequence to reflect completed delete
-                    self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
                 }
                 api::WriteIntent::DeleteRange {
                     cf_id,
@@ -1198,23 +1226,33 @@ impl MidgeEngine {
                     let cf_handle = ColumnFamilyHandle::new(*cf_id, "default".to_string());
                     let keys = self.range(&cf_handle, start_key, end_key)?;
                     for (key, _) in keys {
-                        let seqno = self.request_seqno(cf_id.as_u32())?;
                         let response =
                             self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                                 request_id: next_request_id(),
                                 cf_id: cf_id.as_u32(),
                                 key: key.to_vec(),
                                 value: None,
-                                sequence: seqno,
+                                sequence: 0,
                                 ttl_seconds: None,
                                 insert_only: false,
                             })?;
-                        if let RuntimeResponse::Error { message, .. } = response {
-                            txn.mark_failed()?;
-                            return Err(MidgeError::Internal(message));
+                        match response {
+                            RuntimeResponse::WalAppended { sequence, .. } => {
+                                // Update engine's sequence to reflect completed delete
+                                self.sequence
+                                    .store(sequence, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            RuntimeResponse::Error { message, .. } => {
+                                txn.mark_failed()?;
+                                return Err(MidgeError::Internal(message));
+                            }
+                            _ => {
+                                txn.mark_failed()?;
+                                return Err(MidgeError::Internal(
+                                    "Unexpected response to transaction delete_range".to_string(),
+                                ));
+                            }
                         }
-                        // Update engine's sequence to reflect completed delete
-                        self.sequence.store(seqno, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
@@ -1385,24 +1423,6 @@ impl MidgeEngine {
     }
 
     // === Internal helpers ===
-
-    /// Request a new sequence number from the runtime
-    /// This ensures seqnos are allocated by the actor, not locally
-    fn request_seqno(&self, cf_id: u32) -> MidgeResult<u64> {
-        let response = self.runtime_handle.send_and_wait(RuntimeMsg::AllocSeqno {
-            request_id: next_request_id(),
-            cf_id,
-        })?;
-
-        match response {
-            RuntimeResponse::SeqnoAllocated { seqno, .. } => Ok(seqno),
-            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response from AllocSeqno".to_string(),
-            )),
-        }
-    }
-
 }
 
 #[cfg(test)]

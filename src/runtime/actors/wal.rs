@@ -102,7 +102,7 @@ impl WalActor {
         cf_id: u32,
         key: Bytes,
         value: Option<Bytes>,
-        sequence: u64,
+        _sequence: u64,
         insert_only: bool,
         ttl_seconds: Option<u64>,
     ) -> MidgeResult<u64> {
@@ -112,28 +112,8 @@ impl WalActor {
                 "key already exists".to_string(),
             ));
         }
-        // Sequence numbers are actor-owned.
-        //
-        // Typical path:
-        // - Engine asks SeqnoAllocActor (AllocSeqno) which advances `state.sequence`
-        // - Engine sends WalAppend including that seqno
-        //
-        // To avoid double-allocation, we *consume* the provided seqno here.
-        // If callers pass 0, we allocate one locally for internal/runtime uses.
-        let sequence = if sequence == 0 {
-            state.next_sequence()
-        } else {
-            // Never allow the WAL to move the sequence number backwards.
-            if sequence < state.sequence {
-                return Err(MidgeError::InvalidArgument(format!(
-                    "non-monotonic sequence: {} < {}",
-                    sequence, state.sequence
-                )));
-            }
-            // Keep runtime's global counter in sync for downstream consumers.
-            state.sequence = sequence;
-            sequence
-        };
+        // Allocate sequence number at append time to preserve a total order under concurrency.
+        let sequence = state.next_sequence();
 
         // Determine operation kind: Delete if value is None, Put otherwise
         let op_kind = if value.is_none() {
@@ -208,21 +188,10 @@ impl WalActor {
         cf_id: u32,
         key: Bytes,
         operand: Bytes,
-        sequence: u64,
+        _sequence: u64,
     ) -> MidgeResult<u64> {
-        // Same sequence ownership rule as `append()`.
-        let sequence = if sequence == 0 {
-            state.next_sequence()
-        } else {
-            if sequence < state.sequence {
-                return Err(MidgeError::InvalidArgument(format!(
-                    "non-monotonic sequence: {} < {}",
-                    sequence, state.sequence
-                )));
-            }
-            state.sequence = sequence;
-            sequence
-        };
+        // Allocate sequence number at append time to preserve a total order under concurrency.
+        let sequence = state.next_sequence();
 
         // Create WAL record for merge
         let record = WalRecord::new_cf(

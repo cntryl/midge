@@ -261,7 +261,10 @@ impl EventLoop {
                         ttl_seconds,
                     );
                     let resp = result
-                        .map(|_| RuntimeResponse::Ok { request_id })
+                        .map(|seq| RuntimeResponse::WalAppended {
+                            request_id,
+                            sequence: seq,
+                        })
                         .unwrap_or_else(|e| RuntimeResponse::Error {
                             request_id,
                             message: e.to_string(),
@@ -298,7 +301,10 @@ impl EventLoop {
                         }
                     }
                     let resp = result
-                        .map(|_| RuntimeResponse::Ok { request_id })
+                        .map(|seq| RuntimeResponse::WalAppended {
+                            request_id,
+                            sequence: seq,
+                        })
                         .unwrap_or_else(|e| RuntimeResponse::Error {
                             request_id,
                             message: e.to_string(),

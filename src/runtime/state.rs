@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-
 /// Column family state
 pub struct ColumnFamilyState {
     pub id: u32,

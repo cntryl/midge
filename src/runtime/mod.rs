@@ -19,7 +19,7 @@ pub mod state;
 pub mod task;
 
 pub use actors::{
-    CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, SeqnoAllocActor, WalActor,
+    CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor,
 };
 pub use dispatch::Dispatcher;
 pub use event_loop::EventLoop;
@@ -70,8 +70,6 @@ pub struct FileMeta {
 /// Intent log entry - records all state transitions for deterministic replay
 #[derive(Debug, Clone)]
 pub enum IntentLogEntry {
-    /// Sequence number was allocated
-    SeqnoAllocated { seqno: u64, cf_id: u32 },
     /// Flush plan created
     FlushPlanned { cf_id: u32, seqno_range: (u64, u64) },
     /// Compaction plan created
@@ -97,11 +95,6 @@ pub enum IntentLogEntry {
 /// Copilot: each variant that expects a response MUST carry a `request_id: u64`.
 #[derive(Debug)]
 pub enum RuntimeMsg {
-    // === Seqno Allocation ===
-    /// Request a new sequence number for a write operation.
-    /// Returns SeqnoAllocated response with the assigned seqno.
-    AllocSeqno { request_id: u64, cf_id: u32 },
-
     // === Flush Actor ===
     /// Request memtable flush for a column family.
     FlushMemtable { request_id: u64, cf_id: u32 },
@@ -135,7 +128,6 @@ pub enum RuntimeMsg {
         cf_id: u32,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
-        sequence: u64,
         ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
         insert_only: bool,        // When true, fail if key already exists
     },
@@ -145,7 +137,6 @@ pub enum RuntimeMsg {
         cf_id: u32,
         key: Vec<u8>,
         operand: Vec<u8>,
-        sequence: u64,
     },
     /// Sync WAL to disk.
     WalSync { request_id: u64 },
@@ -244,7 +235,6 @@ impl RuntimeMsg {
             | CompactionComplete { request_id, .. }
             | WalAppend { request_id, .. }
             | WalMerge { request_id, .. }
-            | WalSync { request_id }
             | WalRotate { request_id }
             | WalSyncComplete { request_id, .. }
             | CloudUploadSst { request_id, .. }
@@ -277,13 +267,17 @@ pub enum RuntimeResponse {
     Ok {
         request_id: u64,
     },
+    /// WAL write accepted and assigned a sequence number.
+    ///
+    /// Note: Sequence numbers are allocated inside the runtime at append time
+    /// to preserve a total order under concurrency.
+    WalAppended {
+        request_id: u64,
+        sequence: u64,
+    },
     Error {
         request_id: u64,
         message: String,
-    },
-    SeqnoAllocated {
-        request_id: u64,
-        seqno: u64,
     },
     ReadValue {
         request_id: u64,
@@ -324,6 +318,7 @@ impl RuntimeResponse {
     pub fn request_id(&self) -> u64 {
         match self {
             RuntimeResponse::Ok { request_id }
+            | RuntimeResponse::WalAppended { request_id, .. }
             | RuntimeResponse::Error { request_id, .. }
             | RuntimeResponse::SeqnoAllocated { request_id, .. }
             | RuntimeResponse::ReadValue { request_id, .. }
