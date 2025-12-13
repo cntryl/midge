@@ -64,7 +64,7 @@ impl Footer {
         self.trie_handle = Some(trie_handle);
         self
     }
-    
+
     pub fn with_block_bloom(mut self, block_bloom_handle: BlockHandle) -> Self {
         self.block_bloom_handle = Some(block_bloom_handle);
         self

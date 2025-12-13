@@ -278,4 +278,3 @@ mod tests {
         assert!(clockpro_cache.is_empty());
     }
 }
-

@@ -204,6 +204,7 @@ mod tests {
             smallest_seq: Some(10),
             largest_seq: Some(20),
             sublevel: 0,
+            read_count: Default::default(),
         });
 
         // Act

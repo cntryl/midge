@@ -11,6 +11,7 @@ use crate::sst::bloom::writer::BloomTestResult;
 use crate::sst::bloom::{writer::BloomFilterOps, BlockBloomFilter, BloomMetrics, BloomReader};
 use crate::sst::cache::{BlockCache, CacheKey};
 use crate::sst::encoding;
+use crate::sst::read_amp_metrics::ReadAmpMetrics;
 use crate::sst::sparse_index::SparseIndexReader;
 use crate::sst::traits::SstReader;
 use crate::sst::types::{BlockHandle, Footer};
@@ -24,6 +25,7 @@ pub struct SstFile {
     bloom_reader: Option<BloomReader>,
     block_bloom_filter: Option<BlockBloomFilter>,
     bloom_metrics: BloomMetrics,
+    read_amp_metrics: ReadAmpMetrics,
     sparse_index: Option<Arc<SparseIndexReader>>,
     block_cache: Option<Arc<BlockCache>>,
 }
@@ -38,6 +40,7 @@ impl SstFile {
             bloom_reader: None,
             block_bloom_filter: None,
             bloom_metrics: BloomMetrics::new(),
+            read_amp_metrics: ReadAmpMetrics::new(),
             sparse_index: None,
             block_cache: None,
         }
@@ -96,6 +99,11 @@ impl SstFile {
         &self.bloom_metrics
     }
 
+    /// Get reference to read amplification metrics for this reader
+    pub fn read_amp_metrics(&self) -> &ReadAmpMetrics {
+        &self.read_amp_metrics
+    }
+
     fn load_metadata(&mut self) -> MidgeResult<()> {
         let mut file = File::open(&self.path)?;
         let file_size = std::fs::metadata(&self.path)?.len();
@@ -112,7 +120,7 @@ impl SstFile {
         } else {
             48
         };
-        
+
         file.seek(SeekFrom::End(-(footer_size as i64)))?;
         let mut footer_data = vec![0u8; footer_size];
         file.read_exact(&mut footer_data)?;
@@ -256,16 +264,14 @@ impl SstFile {
     fn check_block_bloom(&self, block_idx: usize, key: &[u8]) -> bool {
         if let Some(ref block_bloom) = self.block_bloom_filter {
             self.bloom_metrics.record_check();
-            
+
             match block_bloom.might_contain_in_block(block_idx, key) {
                 BloomTestResult::DefinitelyNotPresent => {
                     self.bloom_metrics.record_negative();
                     self.bloom_metrics.record_block_skipped();
                     false
                 }
-                BloomTestResult::MightBePresent => {
-                    true
-                }
+                BloomTestResult::MightBePresent => true,
             }
         } else {
             // No bloom filter - default to MAYBE (safe)
@@ -276,10 +282,15 @@ impl SstFile {
 
 impl crate::sst::SstReader for SstFile {
     fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+        // Track blocks read for this operation
+        let mut blocks_read = 0u64;
+
         // Step 1: Check SST-level bloom filter (negative lookup)
         if let Some(ref bloom) = self.bloom_reader {
             match bloom.contains(key) {
                 BloomTestResult::DefinitelyNotPresent => {
+                    // Record read with bloom rejection (no blocks accessed)
+                    self.read_amp_metrics.record_read(1, 0, 0);
                     return Ok(None); // Key definitely not in SST
                 }
                 BloomTestResult::MightBePresent => {
@@ -289,6 +300,7 @@ impl crate::sst::SstReader for SstFile {
         }
 
         let index = self.scan_index()?;
+        blocks_read += 1; // Index block read
 
         // Step 2: Use sparse index to narrow block search range (if available)
         let block_handle = if let Some(ref sparse_idx) = self.sparse_index {
@@ -309,13 +321,14 @@ impl crate::sst::SstReader for SstFile {
                     // Check block bloom BEFORE selecting this block
                     if !self.check_block_bloom(idx, key) {
                         // Block bloom rejected - key definitely not here
+                        self.read_amp_metrics.record_read(1, 0, blocks_read);
                         return Ok(None);
                     }
                     found_handle = Some(*handle);
                     break;
                 }
             }
-            
+
             found_handle
         } else {
             // Traditional binary search without sparse index
@@ -325,18 +338,20 @@ impl crate::sst::SstReader for SstFile {
                     // Check block bloom BEFORE selecting this block
                     if !self.check_block_bloom(idx, key) {
                         // Block bloom rejected - key definitely not here
+                        self.read_amp_metrics.record_read(1, 0, blocks_read);
                         return Ok(None);
                     }
                     found_handle = Some(*handle);
                     break;
                 }
             }
-            
+
             found_handle
         };
 
         if let Some(handle) = block_handle {
-            // Step 3: Check block cache (if available)
+            blocks_read += 1; // Data block will be read
+                              // Step 3: Check block cache (if available)
             let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
 
             let block_data = if let Some(ref cache) = self.block_cache {
@@ -362,11 +377,15 @@ impl crate::sst::SstReader for SstFile {
             let entries = self.scan_block_from_bytes(&block_data)?;
             for (entry_key, value) in entries {
                 if entry_key == key {
+                    // Record successful read
+                    self.read_amp_metrics.record_read(1, 0, blocks_read);
                     return Ok(value);
                 }
             }
         }
 
+        // Record read with no key found
+        self.read_amp_metrics.record_read(1, 0, blocks_read);
         Ok(None)
     }
 

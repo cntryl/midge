@@ -6,7 +6,7 @@
 use crate::common::MidgeResult;
 use crate::metadata::Manifest;
 use crate::runtime::IntentLogEntry;
-use crate::sst::SkipListMemtable;
+use crate::sst::{ReadAmpMetrics, SkipListMemtable};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -125,6 +125,10 @@ pub struct RuntimeState {
     pub write_stalled: bool,
     /// Total size of all memtables (in-memory)
     pub total_memtable_bytes: usize,
+
+    // === Observability ===
+    /// Read amplification metrics across all reads
+    pub read_amp_metrics: ReadAmpMetrics,
 }
 
 impl RuntimeState {
@@ -232,6 +236,7 @@ impl RuntimeState {
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             write_stalled: false,
             total_memtable_bytes: 0,
+            read_amp_metrics: ReadAmpMetrics::new(),
         }
     }
 

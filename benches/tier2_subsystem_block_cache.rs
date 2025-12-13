@@ -31,7 +31,10 @@ impl PrecomputedKeys {
         let mut keys = Vec::with_capacity(file_count * blocks_per_file);
         for file_idx in 0..file_count {
             for block_idx in 0..blocks_per_file {
-                keys.push(CacheKey::for_data(file_idx as u64, (block_idx * 4096) as u64));
+                keys.push(CacheKey::for_data(
+                    file_idx as u64,
+                    (block_idx * 4096) as u64,
+                ));
             }
         }
         Self { keys }

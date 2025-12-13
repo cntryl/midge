@@ -208,12 +208,15 @@ impl CacheShard {
     /// Try to evict a victim, excluding specified block types
     ///
     /// Uses retry loop to handle stale keys from concurrent access
-    fn try_evict_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheValue> {
+    fn try_evict_victim(
+        &self,
+        exclude_types: &[crate::sst::cache::BlockType],
+    ) -> Option<CacheValue> {
         const MAX_RETRIES: usize = 10;
 
         for _ in 0..MAX_RETRIES {
             let victim_key = self.policy.pick_victim(exclude_types)?;
-            
+
             if let Some((_, value)) = self.entries.remove(&victim_key) {
                 // Successfully evicted - notify policy
                 self.policy.on_remove(victim_key);
@@ -572,4 +575,3 @@ mod tests {
         assert!(metrics.eviction_count() > 0);
     }
 }
-

@@ -17,6 +17,7 @@ use super::actors::{
 };
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
+use crate::sst::traits::SstReader;
 use crate::sst::Memtable;
 
 /// Main synchronous event loop for the runtime.
@@ -112,6 +113,26 @@ impl EventLoop {
 
                 RuntimeMsg::StartupPing { request_id } => {
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
+
+                RuntimeMsg::GetReadAmpMetrics { request_id } => {
+                    let metrics = &self.state.read_amp_metrics;
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::ReadAmpMetricsSnapshot {
+                            request_id,
+                            reads_total: metrics.reads_total(),
+                            ssts_touched_total: metrics.ssts_touched_total(),
+                            l0_ssts_touched_total: metrics.l0_ssts_touched_total(),
+                            blocks_read_total: metrics.blocks_read_total(),
+                            avg_ssts_per_read: metrics.avg_ssts_per_read(),
+                            avg_l0_ssts_per_read: metrics.avg_l0_ssts_per_read(),
+                            avg_blocks_per_read: metrics.avg_blocks_per_read(),
+                            l0_overlap_rate: metrics.l0_overlap_rate(),
+                            sst_budget_violation_rate: metrics.sst_budget_violation_rate(),
+                            block_budget_violation_rate: metrics.block_budget_violation_rate(),
+                        },
+                    );
                 }
 
                 // =============================================================
@@ -574,7 +595,92 @@ impl EventLoop {
             }
         }
 
-        // SST lookup temporarily disabled
+        // SST lookup: check files from newest to oldest across all levels
+        let mut ssts_checked = 0u64;
+        let mut l0_ssts_checked = 0u64;
+        let mut blocks_read = 0u64;
+
+        // Get all SST files for this CF, grouped by level
+        let mut files_by_level: std::collections::BTreeMap<u32, Vec<_>> =
+            std::collections::BTreeMap::new();
+        for file in &self.state.manifest.files {
+            if file.cf_id == cf_id {
+                files_by_level
+                    .entry(file.level)
+                    .or_default()
+                    .push(file.clone());
+            }
+        }
+
+        // Search L0 first (newest to oldest), then L1, L2, etc.
+        // L0 files may overlap, so we must check all of them
+        if let Some(l0_files) = files_by_level.get(&0) {
+            for file_meta in l0_files.iter().rev() {
+                ssts_checked += 1;
+                l0_ssts_checked += 1;
+
+                // Track read access for compaction prioritization
+                file_meta.record_read();
+
+                // Try to open and read from this SST
+                let sst_path = self.state.sst_dir.join(&file_meta.name);
+                if let Ok(reader) = crate::sst::fs::SstFile::open(&sst_path) {
+                    blocks_read += 1; // At minimum, we read index block
+                    if let Ok(Some(value)) = reader.get(key) {
+                        // Found! Record metrics and return
+                        self.state.read_amp_metrics.record_read(
+                            ssts_checked,
+                            l0_ssts_checked,
+                            blocks_read,
+                        );
+                        return Some(value.to_vec());
+                    }
+                }
+            }
+        }
+
+        // Check higher levels (L1, L2, ...) - these are sorted and non-overlapping
+        for (&level, files) in files_by_level.iter() {
+            if level == 0 {
+                continue; // Already checked L0
+            }
+
+            for file_meta in files.iter().rev() {
+                // Check if key is in range for this SST
+                if let (Some(ref smallest), Some(ref largest)) =
+                    (&file_meta.smallest_key, &file_meta.largest_key)
+                {
+                    if key < smallest.as_slice() || key > largest.as_slice() {
+                        continue; // Key not in this SST's range
+                    }
+                }
+
+                ssts_checked += 1;
+
+                // Track read access for compaction prioritization
+                file_meta.record_read();
+
+                // Try to open and read from this SST
+                let sst_path = self.state.sst_dir.join(&file_meta.name);
+                if let Ok(reader) = crate::sst::fs::SstFile::open(&sst_path) {
+                    blocks_read += 1; // At minimum, we read index block
+                    if let Ok(Some(value)) = reader.get(key) {
+                        // Found! Record metrics and return
+                        self.state.read_amp_metrics.record_read(
+                            ssts_checked,
+                            l0_ssts_checked,
+                            blocks_read,
+                        );
+                        return Some(value.to_vec());
+                    }
+                }
+            }
+        }
+
+        // Key not found in any SST - record miss
+        self.state
+            .read_amp_metrics
+            .record_read(ssts_checked, l0_ssts_checked, blocks_read);
         None
     }
 

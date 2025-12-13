@@ -63,7 +63,7 @@ impl CachePolicy for TinyLfuPolicy {
             if exclude_types.contains(&key.block_type) {
                 continue;
             }
-            
+
             let freq = *frequencies.get(&key).unwrap_or(&0);
             if freq < min_freq {
                 min_freq = freq;
@@ -282,5 +282,3 @@ mod tests {
         assert!(victim.is_none());
     }
 }
-
-

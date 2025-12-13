@@ -17,7 +17,7 @@ pub struct FsSstWriter {
 
     // Current block being built
     current_entries: Vec<Vec<u8>>, // Pre-encoded entry bytes
-    current_keys: Vec<Vec<u8>>,   // Keys for bloom filter
+    current_keys: Vec<Vec<u8>>,    // Keys for bloom filter
     current_size: usize,
     offset: u64,
 
@@ -25,7 +25,7 @@ pub struct FsSstWriter {
     data_block_offsets: Vec<(Vec<u8>, BlockHandle)>,
     #[allow(dead_code)]
     index_entries: Vec<(Vec<u8>, BlockHandle)>,
-    
+
     // Block-level bloom filters
     block_blooms: BlockBloomFilter,
 }
@@ -86,7 +86,7 @@ impl FsSstWriter {
         if self.current_entries.is_empty() {
             return Ok(());
         }
-        
+
         // Build bloom filter for this block
         let mut block_bloom = BloomWriter::with_defaults(self.current_keys.len().max(10));
         for key in &self.current_keys {
@@ -198,7 +198,8 @@ impl crate::sst::DynSstWriter for FsSstWriter {
         let meta_index_handle = BlockHandle::new(self.offset, 4);
 
         // Footer (with block bloom handle)
-        let footer = Footer::new(meta_index_handle, index_handle).with_block_bloom(block_bloom_handle);
+        let footer =
+            Footer::new(meta_index_handle, index_handle).with_block_bloom(block_bloom_handle);
         let footer_bytes = footer.encode();
         self.file.write_all(&footer_bytes)?;
 

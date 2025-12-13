@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Core manifest structure tracking all SSTs and metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +92,27 @@ pub struct FileMeta {
     pub largest_seq: Option<u64>,
     #[serde(default)]
     pub sublevel: u32,
+    /// Read counter for compaction prioritization (not persisted)
+    /// Tracks how many times this SST has been accessed by reads
+    #[serde(skip)]
+    pub read_count: Arc<AtomicU64>,
+}
+
+impl FileMeta {
+    /// Record a read access to this SST
+    pub fn record_read(&self) {
+        self.read_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get current read count
+    pub fn get_read_count(&self) -> u64 {
+        self.read_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset read counter (useful after compaction)
+    pub fn reset_read_count(&self) {
+        self.read_count.store(0, Ordering::Relaxed);
+    }
 }
 
 impl Manifest {

@@ -81,6 +81,36 @@ impl Compactor {
         Self { config }
     }
 
+    /// Check if compaction should be triggered based on read amplification.
+    ///
+    /// **Priority 1: L0 overlap control**
+    /// Returns true if:
+    /// - L0 file count exceeds threshold (causes excessive overlap)
+    /// - Average reads per operation suggests high L0 fanout
+    ///
+    /// This is the **highest priority** trigger for read amp control.
+    pub fn should_compact_for_read_amp(
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
+        avg_ssts_per_read: f64,
+    ) -> bool {
+        let cf_files: Vec<&FileMeta> = files.iter().filter(|f| f.cf_id == cf_id).collect();
+        let l0_count = cf_files.iter().filter(|f| f.level == 0).count();
+
+        // Aggressive L0 threshold: compact when L0 starts causing fanout
+        if l0_count >= 3 {
+            return true;
+        }
+
+        // Read amp threshold: if point reads touch >3 SSTs on average, compact L0
+        if avg_ssts_per_read > 3.0 && l0_count > 0 {
+            return true;
+        }
+
+        false
+    }
+
     /// Pick compaction using leveled strategy:
     ///   1. Check L0 → L1 first.
     ///   2. Check L1+ levels for size-overflow.
@@ -147,15 +177,26 @@ impl Compactor {
     }
 
     /// Build a compaction plan for L0 → L1.
+    ///
+    /// **Read-aware compaction**: Prioritizes files by read heat to reduce
+    /// read amplification. Hot files (frequently accessed) are compacted first.
     fn plan_zero_level(&self, levels: &[Vec<&FileMeta>], cf_id: u32) -> Option<CompactionPlan> {
         if levels[0].is_empty() {
             return None;
         }
 
-        let mut input_files: Vec<String> = levels[0].iter().map(|f| f.name.clone()).collect();
+        // Sort L0 files by read heat (hottest first)
+        let mut l0_sorted = levels[0].clone();
+        l0_sorted.sort_by_key(|f| std::cmp::Reverse(f.get_read_count()));
 
-        // Overlap detection: find L1 files whose ranges overlap L0's range.
-        let (min_key, max_key) = smallest_and_largest(levels[0].as_slice())?;
+        // Pick top files to compact (limit batch size for incremental compaction)
+        let batch_size = std::cmp::min(l0_sorted.len(), 4); // Max 4 files per batch
+        let l0_batch: Vec<&FileMeta> = l0_sorted.into_iter().take(batch_size).collect();
+
+        let mut input_files: Vec<String> = l0_batch.iter().map(|f| f.name.clone()).collect();
+
+        // Overlap detection: find L1 files whose ranges overlap the selected L0 batch
+        let (min_key, max_key) = smallest_and_largest(l0_batch.as_slice())?;
         let mut l1_overlapping = overlap_with_range(&levels[1], &min_key, &max_key);
 
         input_files.append(&mut l1_overlapping);
@@ -264,6 +305,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             sublevel: 0,
+            read_count: Default::default(),
         }
     }
 

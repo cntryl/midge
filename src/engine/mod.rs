@@ -63,6 +63,41 @@ pub struct ColumnFamilyHandle {
     name: String,
 }
 
+/// Snapshot of read amplification metrics
+///
+/// Provides visibility into read performance characteristics:
+/// - How many SSTs are being touched per read
+/// - L0 overlap patterns (most expensive)
+/// - Budget violation rates
+///
+/// Use these metrics to:
+/// - Monitor read amplification trends
+/// - Tune compaction triggers
+/// - Identify hot access patterns
+#[derive(Debug, Clone)]
+pub struct ReadAmpMetricsSnapshot {
+    /// Total read operations performed
+    pub reads_total: u64,
+    /// Total SSTs touched across all reads
+    pub ssts_touched_total: u64,
+    /// Total L0 SSTs touched (always fully scanned due to overlap)
+    pub l0_ssts_touched_total: u64,
+    /// Total blocks read across all operations
+    pub blocks_read_total: u64,
+    /// Average SSTs touched per read
+    pub avg_ssts_per_read: f64,
+    /// Average L0 SSTs touched per read
+    pub avg_l0_ssts_per_read: f64,
+    /// Average blocks read per operation
+    pub avg_blocks_per_read: f64,
+    /// L0 overlap rate (fraction of SST touches that are L0)
+    pub l0_overlap_rate: f64,
+    /// SST budget violation rate (reads exceeding MAX_SSTS_PER_READ)
+    pub sst_budget_violation_rate: f64,
+    /// Block budget violation rate (reads exceeding MAX_BLOCKS_PER_READ)
+    pub block_budget_violation_rate: f64,
+}
+
 impl ColumnFamilyHandle {
     pub fn new(id: ColumnFamilyId, name: String) -> Self {
         Self { id, name }
@@ -1245,6 +1280,53 @@ impl MidgeEngine {
         // Stub implementation: trigger a flush as a proxy for compaction
         // In a full LSM, this would compact all levels
         self.flush()
+    }
+
+    /// Get read amplification metrics snapshot
+    ///
+    /// Returns current read amplification statistics including:
+    /// - SSTs touched per read
+    /// - L0 overlap patterns
+    /// - Budget violation rates
+    ///
+    /// Use this for monitoring read performance and tuning compaction triggers.
+    pub fn get_read_amp_metrics(&self) -> MidgeResult<ReadAmpMetricsSnapshot> {
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetReadAmpMetrics {
+                request_id: next_request_id(),
+            })?;
+
+        match response {
+            RuntimeResponse::ReadAmpMetricsSnapshot {
+                reads_total,
+                ssts_touched_total,
+                l0_ssts_touched_total,
+                blocks_read_total,
+                avg_ssts_per_read,
+                avg_l0_ssts_per_read,
+                avg_blocks_per_read,
+                l0_overlap_rate,
+                sst_budget_violation_rate,
+                block_budget_violation_rate,
+                ..
+            } => Ok(ReadAmpMetricsSnapshot {
+                reads_total,
+                ssts_touched_total,
+                l0_ssts_touched_total,
+                blocks_read_total,
+                avg_ssts_per_read,
+                avg_l0_ssts_per_read,
+                avg_blocks_per_read,
+                l0_overlap_rate,
+                sst_budget_violation_rate,
+                block_budget_violation_rate,
+            }),
+            RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response from GetReadAmpMetrics".to_string(),
+            )),
+        }
     }
 
     /// Get a value at a specific snapshot (stub)

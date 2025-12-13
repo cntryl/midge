@@ -294,5 +294,3 @@ mod tests {
         assert_eq!(policy.pick_victim(&[]), None);
     }
 }
-
-

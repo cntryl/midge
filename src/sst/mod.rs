@@ -214,6 +214,7 @@ pub mod compression;
 pub mod encoding;
 pub mod fs;
 pub mod index;
+pub mod read_amp_metrics;
 pub mod sparse_index;
 pub mod traits;
 pub mod trie;
@@ -227,6 +228,7 @@ pub use compression::{
 };
 pub use fs::FsSstFactory;
 pub use index::{IndexKind, IndexTuner, KeyStructureProfile, KeyStructureProfiler};
+pub use read_amp_metrics::ReadAmpMetrics;
 pub use sparse_index::{BlockRange, IndexEntry, SparseIndexReader, SparseIndexWriter};
 pub use traits::{DynSstWriter, SstFactory, SstReader, SstStateReader, SstWriter};
 pub use trie::{TrieBuilder, TrieReader, TrieWriter};

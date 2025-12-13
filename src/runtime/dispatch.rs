@@ -57,10 +57,11 @@ impl Dispatcher {
             | ManifestCreateColumnFamily { .. }
             | ManifestDropColumnFamily { .. } => TaskKind::Manifest,
 
-            // User-level (reads, control, registration)
+            // User-level (reads, control, registration, observability)
             Read { .. }
             | RangeScan { .. }
             | RegisterMergeOperator { .. }
+            | GetReadAmpMetrics { .. }
             | Shutdown
             | Noop { .. }
             | StartupPing { .. } => TaskKind::User,

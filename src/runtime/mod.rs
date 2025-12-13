@@ -215,6 +215,10 @@ pub enum RuntimeMsg {
         sequence: u64, // Read at this sequence number or earlier.
     },
 
+    // === Observability ===
+    /// Get read amplification metrics snapshot.
+    GetReadAmpMetrics { request_id: u64 },
+
     // === Control ===
     /// Shutdown the runtime (no request_id; fire-and-forget).
     Shutdown,
@@ -256,6 +260,7 @@ impl RuntimeMsg {
             | RegisterMergeOperator { request_id, .. }
             | Read { request_id, .. }
             | RangeScan { request_id, .. }
+            | GetReadAmpMetrics { request_id }
             | Noop { request_id }
             | StartupPing { request_id } => Some(*request_id),
 
@@ -300,6 +305,19 @@ pub enum RuntimeResponse {
         request_id: u64,
         cf_id: u32,
     },
+    ReadAmpMetricsSnapshot {
+        request_id: u64,
+        reads_total: u64,
+        ssts_touched_total: u64,
+        l0_ssts_touched_total: u64,
+        blocks_read_total: u64,
+        avg_ssts_per_read: f64,
+        avg_l0_ssts_per_read: f64,
+        avg_blocks_per_read: f64,
+        l0_overlap_rate: f64,
+        sst_budget_violation_rate: f64,
+        block_budget_violation_rate: f64,
+    },
 }
 
 impl RuntimeResponse {
@@ -312,7 +330,8 @@ impl RuntimeResponse {
             | RuntimeResponse::RangeScanResults { request_id, .. }
             | RuntimeResponse::FlushComplete { request_id, .. }
             | RuntimeResponse::CompactionComplete { request_id, .. }
-            | RuntimeResponse::ColumnFamilyCreated { request_id, .. } => *request_id,
+            | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
+            | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. } => *request_id,
         }
     }
 }

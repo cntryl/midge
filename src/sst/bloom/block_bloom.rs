@@ -39,7 +39,7 @@ impl BlockBloomFilter {
     pub fn add_block_bloom(&mut self, bloom: &BloomWriter) {
         let serialized = bloom.serialize();
         let offset = self.bloom_data.len() as u32;
-        
+
         self.offsets.push(offset);
         self.bloom_data.extend_from_slice(&serialized);
         self.num_blocks += 1;
@@ -48,18 +48,18 @@ impl BlockBloomFilter {
     /// Serialize the entire block bloom structure
     pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        
+
         // Write header: [num_blocks: u32]
         result.extend_from_slice(&(self.num_blocks as u32).to_le_bytes());
-        
+
         // Write offsets array: [offset0, offset1, ..., offsetN]
         for &offset in &self.offsets {
             result.extend_from_slice(&offset.to_le_bytes());
         }
-        
+
         // Write bloom data
         result.extend_from_slice(&self.bloom_data);
-        
+
         result
     }
 
@@ -218,12 +218,12 @@ mod tests {
     fn should_check_key_in_correct_block() {
         // Arrange
         let mut filter = BlockBloomFilter::new();
-        
+
         // Block 0: contains "key0"
         let mut bloom0 = BloomWriter::with_defaults(100);
         bloom0.insert(b"key0");
         filter.add_block_bloom(&bloom0);
-        
+
         // Block 1: contains "key1"
         let mut bloom1 = BloomWriter::with_defaults(100);
         bloom1.insert(b"key1");
@@ -327,7 +327,7 @@ mod tests {
         // Arrange
         let mut filter = BlockBloomFilter::new();
         let mut bloom = BloomWriter::with_defaults(1000);
-        
+
         // Insert 100 keys
         for i in 0..100 {
             bloom.insert(format!("key{:04}", i).as_bytes());
@@ -340,25 +340,19 @@ mod tests {
 
         // Assert - all inserted keys should be "might be present"
         for i in 0..100 {
-            let result = deserialized.might_contain_in_block(
-                0,
-                format!("key{:04}", i).as_bytes(),
-            );
+            let result = deserialized.might_contain_in_block(0, format!("key{:04}", i).as_bytes());
             assert_eq!(result, BloomTestResult::MightBePresent);
         }
 
         // Assert - most non-inserted keys should be "definitely not present"
         let mut rejections = 0;
         for i in 1000..1100 {
-            let result = deserialized.might_contain_in_block(
-                0,
-                format!("key{:04}", i).as_bytes(),
-            );
+            let result = deserialized.might_contain_in_block(0, format!("key{:04}", i).as_bytes());
             if result == BloomTestResult::DefinitelyNotPresent {
                 rejections += 1;
             }
         }
-        
+
         // Expect >90% rejection rate for absent keys
         assert!(rejections > 90);
         Ok(())

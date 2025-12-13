@@ -256,4 +256,3 @@ mod tests {
         assert!(shard_idx < 16);
     }
 }
-
