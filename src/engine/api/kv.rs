@@ -265,7 +265,7 @@ mod tests {
         let opt_value: OptionalValue = Some(value(b"original"));
 
         // Act
-        let mapped = opt_value.map(|v| v);
+        let mapped = opt_value;
 
         // Assert
         assert_eq!(mapped.unwrap().as_ref(), b"original");

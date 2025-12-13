@@ -96,7 +96,7 @@ mod tests {
         let size = entry.size_bytes();
 
         // Assert
-        assert_eq!(size, 4 + 0 + 16 + 8);
+        assert_eq!(size, 4 + 16 + 8);
     }
 
     #[test]

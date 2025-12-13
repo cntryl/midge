@@ -49,12 +49,12 @@ impl PrecomputedKeys {
 
     #[inline]
     fn get(&self, file_idx: usize, block_idx: usize, blocks_per_file: usize) -> CacheKey {
-        self.keys[file_idx * blocks_per_file + block_idx].clone()
+        self.keys[file_idx * blocks_per_file + block_idx]
     }
 
     #[inline]
     fn get_linear(&self, idx: usize) -> CacheKey {
-        self.keys[idx].clone()
+        self.keys[idx]
     }
 }
 

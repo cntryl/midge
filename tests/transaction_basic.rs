@@ -176,7 +176,7 @@ fn should_read_own_writes_given_transaction_when_reading() {
         txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
         
         // Read within same transaction using get_transactional
-        let value = engine.get_transactional(&cf, b"key1", &txn).unwrap();
+        let value = engine.get_transactional(cf, b"key1", &txn).unwrap();
         
         // Assert - should see own uncommitted write
         assert_eq!(value, Some(Bytes::from_static(b"value1")));

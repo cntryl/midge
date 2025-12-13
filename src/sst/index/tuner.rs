@@ -342,7 +342,7 @@ mod tests {
 
         // Act
         let kind2 = kind1;
-        let kind3 = kind1.clone();
+        let kind3 = kind1;
 
         // Assert
         assert_eq!(kind1, kind2);

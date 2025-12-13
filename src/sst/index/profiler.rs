@@ -362,7 +362,7 @@ mod tests {
         let profile = profiler.finish();
 
         // Assert
-        assert!(profile.prefix_heat.len() > 0);
+        assert!(!profile.prefix_heat.is_empty());
         let (_, count) = &profile.prefix_heat[0];
         assert_eq!(*count, 2); // "aa__" appears twice
     }

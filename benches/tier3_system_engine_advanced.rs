@@ -62,7 +62,7 @@ fn bench_ttl(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         for i in 0..num_ops {
                             engine
-                                .put_with_ttl(&cf, &keys[i], &vals[i], ttl_secs)
+                                .put_with_ttl(cf, &keys[i], &vals[i], ttl_secs)
                                 .unwrap();
                         }
                         engine
@@ -91,7 +91,7 @@ fn bench_ttl(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         for i in 0..num_ops {
                             engine
-                                .put_with_ttl(&cf, &keys[i], &vals[i], ttl_secs)
+                                .put_with_ttl(cf, &keys[i], &vals[i], ttl_secs)
                                 .unwrap();
                         }
                         engine
@@ -99,7 +99,7 @@ fn bench_ttl(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         for &i in &read_indices {
-                            black_box(engine.get(&cf, &keys[i]).unwrap());
+                            black_box(engine.get(cf, &keys[i]).unwrap());
                         }
                         engine
                     },
@@ -198,7 +198,7 @@ fn bench_large_values(c: &mut Criterion) {
                         |engine| {
                             let cf = engine.default_column_family();
                             for i in 0..num_ops {
-                                engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                                engine.put(cf, &keys[i], &vals[i]).unwrap();
                             }
                             engine
                         },
@@ -222,14 +222,14 @@ fn bench_large_values(c: &mut Criterion) {
                             );
                             let cf = engine.default_column_family();
                             for i in 0..num_ops {
-                                engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                                engine.put(cf, &keys[i], &vals[i]).unwrap();
                             }
                             engine
                         },
                         |engine| {
                             let cf = engine.default_column_family();
                             for k in &keys {
-                                black_box(engine.get(&cf, k).unwrap());
+                                black_box(engine.get(cf, k).unwrap());
                             }
                             engine
                         },
@@ -273,14 +273,14 @@ fn bench_delete_heavy(c: &mut Criterion) {
                         let engine = setup_engine_with_mode("delete_heavy_50", mode);
                         let cf = engine.default_column_family();
                         for i in 0..num_keys {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                            engine.put(cf, &keys[i], &vals[i]).unwrap();
                         }
                         engine
                     },
                     |engine| {
                         let cf = engine.default_column_family();
                         for &i in &delete_50_indices {
-                            engine.delete(&cf, &keys[i]).unwrap();
+                            engine.delete(cf, &keys[i]).unwrap();
                         }
                         engine
                     },
@@ -308,14 +308,14 @@ fn bench_delete_heavy(c: &mut Criterion) {
                         let engine = setup_engine_with_mode("delete_heavy_90", mode);
                         let cf = engine.default_column_family();
                         for i in 0..num_keys {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                            engine.put(cf, &keys[i], &vals[i]).unwrap();
                         }
                         engine
                     },
                     |engine| {
                         let cf = engine.default_column_family();
                         for key in keys.iter().take(delete_90_count) {
-                            engine.delete(&cf, key).unwrap();
+                            engine.delete(cf, key).unwrap();
                         }
                         engine
                     },

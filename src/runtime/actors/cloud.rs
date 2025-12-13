@@ -169,7 +169,7 @@ mod tests {
 
         // Note: Would need MockRuntimeState for full test
         // For now, verify the counter increment logic
-        actor.uploads_in_progress = actor.uploads_in_progress + 1;
+        actor.uploads_in_progress += 1;
 
         // Assert
         assert_eq!(actor.uploads_in_progress(), sst_count_before + 1);

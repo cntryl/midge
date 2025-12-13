@@ -68,7 +68,7 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
 
                             for i in 0..num_ops {
                                 engine
-                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .put(cf, &keys_ref[i], &vals_ref[i])
                                     .expect("put failed");
                             }
                             // DO NOT flush - keep data only in WAL
@@ -83,7 +83,7 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
                         // Verify data was recovered from WAL
                         let cf = engine.default_column_family();
                         let key = black_box(&keys_ref[25_000]);
-                        black_box(engine.get(&cf, key).expect("get failed"));
+                        black_box(engine.get(cf, key).expect("get failed"));
 
                         engine
                     },

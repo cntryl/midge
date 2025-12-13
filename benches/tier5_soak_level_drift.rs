@@ -41,7 +41,7 @@ fn bench_level_drift(c: &mut Criterion) {
             for i in 0..10_000 {
                 let key = format!("key_{:010}", i);
                 let val = format!("initial_value_{}", i);
-                engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
+                engine.put(cf, key.as_bytes(), val.as_bytes()).unwrap();
             }
             engine.flush().unwrap();
             let _ = engine.compact_all(); // Compact all levels
@@ -53,18 +53,18 @@ fn bench_level_drift(c: &mut Criterion) {
                         // Update existing key
                         let key = format!("key_{:010}", i % 10_000);
                         let val = format!("updated_value_{}", i);
-                        engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
+                        engine.put(cf, key.as_bytes(), val.as_bytes()).unwrap();
                     }
                     1 => {
                         // Delete old key
                         let key = format!("key_{:010}", i % 10_000);
-                        engine.delete(&cf, key.as_bytes()).unwrap();
+                        engine.delete(cf, key.as_bytes()).unwrap();
                     }
                     _ => {
                         // Insert new key
                         let key = format!("new_key_{:010}", i);
                         let val = format!("new_value_{}", i);
-                        engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
+                        engine.put(cf, key.as_bytes(), val.as_bytes()).unwrap();
                     }
                 }
 

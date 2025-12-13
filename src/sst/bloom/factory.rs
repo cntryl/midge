@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn should_handle_factory_default_creation() {
         // Arrange
-        let factory = BloomFactory::default();
+        let factory = BloomFactory;
 
         // Act
         let writer = factory.create_writer(100, 0.01);

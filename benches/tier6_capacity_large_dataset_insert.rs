@@ -43,7 +43,7 @@ fn bench_large_dataset_insert(c: &mut Criterion) {
             for i in 0..100_000 {
                 let key = format!("insert_key_{:010}", i);
                 let val = vec![b'v'; 256]; // 256-byte values (~25MB total)
-                engine.put(&cf, key.as_bytes(), &val).unwrap();
+                engine.put(cf, key.as_bytes(), &val).unwrap();
             }
             engine.flush().unwrap();
             let elapsed = start.elapsed();

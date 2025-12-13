@@ -79,7 +79,7 @@ fn should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes() {
         // Act: Store values of wildly different sizes
         engine.put(cf, b"tiny", b"x").expect("put");
         engine
-            .put(cf, b"small", &vec![42u8; 100])
+            .put(cf, b"small", &[42u8; 100])
             .expect("put");
         engine
             .put(cf, b"medium", &vec![42u8; 100_000])
@@ -104,7 +104,7 @@ fn should_handle_special_characters_in_keys_when_utf8_and_binary_mixed() {
         let cf = engine.default_column_family();
 
         // Act: Store keys with special characters and binary data
-        let keys = vec![
+        let keys = [
             b"normal_key" as &[u8],
             "unicode_ðŸ˜€_key".as_bytes(),
             b"\x00\x01\x02\x03", // Binary nulls

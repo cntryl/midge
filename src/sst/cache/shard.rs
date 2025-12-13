@@ -387,7 +387,7 @@ mod tests {
         shard.put(CacheKey::new(1, 0), Bytes::from(&b"data"[..]));
 
         // Assert (should immediately evict)
-        assert!(shard.len() == 0 || shard.len() == 1);
+        assert!(shard.is_empty() || shard.len() == 1);
     }
 
     #[test]

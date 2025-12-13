@@ -56,7 +56,7 @@ fn bench_point_lookups(c: &mut Criterion) {
                 let engine = setup_engine("sst_point_lookup", &config);
                 let cf = engine.default_column_family();
                 for (k, v) in keys.iter().zip(vals.iter()) {
-                    engine.put(&cf, k, v).unwrap();
+                    engine.put(cf, k, v).unwrap();
                 }
                 engine.flush().unwrap();
                 engine
@@ -64,7 +64,7 @@ fn bench_point_lookups(c: &mut Criterion) {
             |engine| {
                 let cf = engine.default_column_family();
                 for &idx in &lookup_indices {
-                    let result = engine.get(&cf, &keys[idx]).unwrap();
+                    let result = engine.get(cf, &keys[idx]).unwrap();
                     black_box(result);
                 }
                 engine
@@ -97,7 +97,7 @@ fn bench_full_scans(c: &mut Criterion) {
                 let engine = setup_engine("sst_full_scan", &config);
                 let cf = engine.default_column_family();
                 for (k, v) in keys.iter().zip(vals.iter()) {
-                    engine.put(&cf, k, v).unwrap();
+                    engine.put(cf, k, v).unwrap();
                 }
                 engine.flush().unwrap();
                 engine
@@ -105,7 +105,7 @@ fn bench_full_scans(c: &mut Criterion) {
             |engine| {
                 let cf = engine.default_column_family();
                 let query = Query::new();
-                let results = engine.scan(&cf, &query).expect("scan failed");
+                let results = engine.scan(cf, &query).expect("scan failed");
                 black_box(results.len());
                 engine
             },
@@ -139,7 +139,7 @@ fn bench_prefix_scans(c: &mut Criterion) {
                 let engine = setup_engine("sst_prefix_scan", &config);
                 let cf = engine.default_column_family();
                 for (k, v) in keys.iter().zip(vals.iter()) {
-                    engine.put(&cf, k, v).unwrap();
+                    engine.put(cf, k, v).unwrap();
                 }
                 engine.flush().unwrap();
                 engine
@@ -150,7 +150,7 @@ fn bench_prefix_scans(c: &mut Criterion) {
                 let start = make_key(1);
                 let end = make_key(1000);
                 let query = Query::new().start_key(start).end_key(end);
-                let results = engine.scan(&cf, &query).expect("scan failed");
+                let results = engine.scan(cf, &query).expect("scan failed");
                 black_box(results.len());
                 engine
             },

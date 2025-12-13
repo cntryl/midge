@@ -241,17 +241,17 @@ fn should_preserve_snapshot_across_multiple_column_families_when_created() {
             .unwrap_or_else(|_| cf_default.clone());
 
         // Write to both CFs
-        engine.put(&cf_default, b"key", b"cf_default").expect("put cf_default");
+        engine.put(cf_default, b"key", b"cf_default").expect("put cf_default");
         engine.put(&cf_other, b"key", b"cf_other").expect("put cf_other");
 
         // Act: Create snapshot
         let snapshot = engine.snapshot();
 
         // Update after snapshot
-        engine.put(&cf_default, b"key", b"cf_default_v2").ok();
+        engine.put(cf_default, b"key", b"cf_default_v2").ok();
 
         // Assert: Snapshot sees consistent state across CFs
-        let snap_def = snapshot.get(&cf_default, b"key").expect("snap def get");
+        let snap_def = snapshot.get(cf_default, b"key").expect("snap def get");
         let snap_other = snapshot.get(&cf_other, b"key").expect("snap other get");
 
         assert!(snap_def.is_some(), "cf_default snapshot invalid in mode: {}", mode);

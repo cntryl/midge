@@ -231,7 +231,7 @@ fn should_handle_binary_data_in_merge_given_non_utf8_when_merging() {
         let binary_operand = vec![0x42, 0x43, 0x44, 0x00];
 
         // Act: Put base with binary data
-        engine.put(cf, &binary_key, &vec![0xAA, 0xBB]).expect("put binary");
+        engine.put(cf, &binary_key, &[0xAA, 0xBB]).expect("put binary");
         engine.merge_cf(cf, &binary_key, &binary_operand).expect("merge binary");
 
         // Assert: Binary data preserved through merge

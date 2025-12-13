@@ -40,7 +40,7 @@ impl SstSimulator {
             .map(|i| Bytes::from(format!("key:{:010}", i)))
             .collect();
 
-        let num_blocks = (num_keys + KEYS_PER_BLOCK - 1) / KEYS_PER_BLOCK;
+        let num_blocks = num_keys.div_ceil(KEYS_PER_BLOCK);
         let block_layout = (0..num_blocks)
             .map(|block_idx| {
                 let start = block_idx * KEYS_PER_BLOCK;

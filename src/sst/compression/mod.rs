@@ -726,7 +726,7 @@ mod tests {
         let (compressed, algo) = compress_block(&data, &policy).unwrap();
 
         // Assert - should return something
-        assert!(compressed.len() > 0);
+        assert!(!compressed.is_empty());
         assert!(algo == CompressionAlgo::None || algo == CompressionAlgo::Lz4 || algo == CompressionAlgo::Zstd3);
     }
 
@@ -777,7 +777,7 @@ mod tests {
         let (compressed, _algo) = compress_block(&data, &CompressionPolicy::default()).unwrap();
 
         // Assert
-        assert!(compressed.len() > 0);
+        assert!(!compressed.is_empty());
     }
 
     #[test]
@@ -789,7 +789,7 @@ mod tests {
         let (compressed, _algo) = compress_block(&data, &CompressionPolicy::default()).unwrap();
 
         // Assert
-        assert!(compressed.len() > 0);
+        assert!(!compressed.is_empty());
     }
 
     // ====================== decompress_block Tests ======================

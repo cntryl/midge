@@ -92,7 +92,7 @@ fn bench_recovery_throughput(c: &mut Criterion) {
                             // Write records to create WAL entries
                             for i in 0..num_ops {
                                 engine
-                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .put(cf, &keys_ref[i], &vals_ref[i])
                                     .expect("put failed");
                             }
 
@@ -108,7 +108,7 @@ fn bench_recovery_throughput(c: &mut Criterion) {
                             let cf = engine.default_column_family();
                             for i in (0..num_ops).step_by(1_000) {
                                 let key = black_box(&keys_ref[i]);
-                                let val = engine.get(&cf, key).expect("get failed");
+                                let val = engine.get(cf, key).expect("get failed");
                                 assert!(val.is_some(), "key not recovered: {}", i);
                             }
 
@@ -165,7 +165,7 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
 
                             for i in 0..num_ops {
                                 engine
-                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .put(cf, &keys_ref[i], &vals_ref[i])
                                     .expect("put failed");
                             }
 
@@ -179,7 +179,7 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
                             let cf = engine.default_column_family();
                             for i in (0..num_ops).step_by(10_000) {
                                 let key = black_box(&keys_ref[i]);
-                                black_box(engine.get(&cf, key).expect("get failed"));
+                                black_box(engine.get(cf, key).expect("get failed"));
                             }
 
                             engine
@@ -242,7 +242,7 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
                             // Write half the data
                             for i in 0..(num_ops / 2) {
                                 engine
-                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .put(cf, &keys_ref[i], &vals_ref[i])
                                     .expect("put failed");
                             }
 
@@ -252,7 +252,7 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
                             // Write remaining data (stays in WAL)
                             for i in (num_ops / 2)..num_ops {
                                 engine
-                                    .put(&cf, &keys_ref[i], &vals_ref[i])
+                                    .put(cf, &keys_ref[i], &vals_ref[i])
                                     .expect("put failed");
                             }
 
@@ -266,7 +266,7 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
                             let cf = engine.default_column_family();
                             for i in (0..num_ops).step_by(5_000) {
                                 let key = black_box(&keys_ref[i]);
-                                let val = engine.get(&cf, key).expect("get failed");
+                                let val = engine.get(cf, key).expect("get failed");
                                 assert!(val.is_some(), "key {} not recovered", i);
                             }
 
@@ -326,7 +326,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
                         for i in 0..op_count {
                             engine
-                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .put(cf, &keys_ref[i], &vals_ref[i])
                                 .expect("put failed");
                         }
 
@@ -338,7 +338,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
                         let cf = engine.default_column_family();
                         let key = black_box(&keys_ref[25_000]);
-                        black_box(engine.get(&cf, key).expect("get failed"));
+                        black_box(engine.get(cf, key).expect("get failed"));
 
                         engine
                     },
@@ -380,7 +380,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
                         for i in 0..op_count {
                             engine
-                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .put(cf, &keys_ref[i], &vals_ref[i])
                                 .expect("put failed");
                         }
 
@@ -392,7 +392,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
 
                         let cf = engine.default_column_family();
                         let key = black_box(&keys_ref[25_000]);
-                        black_box(engine.get(&cf, key).expect("get failed"));
+                        black_box(engine.get(cf, key).expect("get failed"));
 
                         engine
                     },

@@ -45,7 +45,7 @@ fn bench_space_amplification(c: &mut Criterion) {
             for i in 0..5_000 {
                 let key = format!("key_{:010}", i);
                 let val = vec![b'a'; value_size];
-                engine.put(&cf, key.as_bytes(), &val).unwrap();
+                engine.put(cf, key.as_bytes(), &val).unwrap();
             }
             engine.flush().unwrap();
 
@@ -58,7 +58,7 @@ fn bench_space_amplification(c: &mut Criterion) {
                 for i in 0..5_000 {
                     let key = format!("key_{:010}", i);
                     let val = vec![b'b' + round as u8; value_size];
-                    engine.put(&cf, key.as_bytes(), &val).unwrap();
+                    engine.put(cf, key.as_bytes(), &val).unwrap();
                 }
                 engine.flush().unwrap();
             }

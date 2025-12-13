@@ -208,7 +208,7 @@ mod tests {
 
         // Assert
         assert_eq!(entries.len(), 0);
-        assert_eq!(entries.iter().count(), 0);
+        assert_eq!(entries.len(), 0);
     }
 
     #[test]

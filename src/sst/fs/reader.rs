@@ -367,7 +367,7 @@ mod tests {
             writer.add(key, value)?;
         }
         
-        Ok(Box::new(writer).finish_bytes()?)
+        Box::new(writer).finish_bytes()
     }
 
     #[test]

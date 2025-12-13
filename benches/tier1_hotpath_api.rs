@@ -108,7 +108,7 @@ fn bench_single_get(c: &mut Criterion) {
 
     // Pre-populate with data (NO flush - keep in memtable for hot path)
     for i in 0..num_keys {
-        engine.put(&cf, &keys[i], &vals[i]).unwrap();
+        engine.put(cf, &keys[i], &vals[i]).unwrap();
     }
     // Note: intentionally NOT flushing to keep data in memtable
 
@@ -118,7 +118,7 @@ fn bench_single_get(c: &mut Criterion) {
         b.iter(|| {
             let idx = counter % num_keys;
             counter += 1;
-            let result = engine.get(&cf, black_box(&keys[idx]));
+            let result = engine.get(cf, black_box(&keys[idx]));
             black_box(result)
         })
     });
@@ -138,7 +138,7 @@ fn bench_single_get(c: &mut Criterion) {
         b.iter(|| {
             let idx = miss_counter % num_keys;
             miss_counter += 1;
-            let result = engine.get(&cf, black_box(&miss_keys[idx]));
+            let result = engine.get(cf, black_box(&miss_keys[idx]));
             black_box(result)
         })
     });
@@ -164,7 +164,7 @@ fn bench_single_put(c: &mut Criterion) {
         b.iter(|| {
             let idx = counter % num_ops;
             counter += 1;
-            engine.put(&cf, &keys[idx], &vals[idx]).unwrap();
+            engine.put(cf, &keys[idx], &vals[idx]).unwrap();
             black_box(());
         })
     });

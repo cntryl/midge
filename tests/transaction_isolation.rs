@@ -95,7 +95,7 @@ fn should_read_uncommitted_value_given_put_in_same_transaction_when_reading() {
         // Act
         let mut txn = engine.transaction();
         txn.put(cf.id(), b"key".to_vec(), b"value".to_vec()).unwrap();
-        let value = engine.get_transactional(&cf, b"key", &txn).unwrap();
+        let value = engine.get_transactional(cf, b"key", &txn).unwrap();
         
         // Assert - should read own uncommitted write
         assert_eq!(value, Some(Bytes::from_static(b"value")));
@@ -114,8 +114,8 @@ fn should_see_own_writes_given_transaction_when_reading() {
         txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
         txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
         
-        let val1 = engine.get_transactional(&cf, b"key1", &txn).unwrap();
-        let val2 = engine.get_transactional(&cf, b"key2", &txn).unwrap();
+        let val1 = engine.get_transactional(cf, b"key1", &txn).unwrap();
+        let val2 = engine.get_transactional(cf, b"key2", &txn).unwrap();
         
         // Assert - should see both own writes
         assert_eq!(val1, Some(Bytes::from_static(b"value1")));

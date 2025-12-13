@@ -44,7 +44,7 @@ fn bench_cold_start_large(c: &mut Criterion) {
         for i in 0..100_000 {
             let key = format!("large_key_{:010}", i);
             let val = format!("large_value_{}", i);
-            engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
+            engine.put(cf, key.as_bytes(), val.as_bytes()).unwrap();
 
             if i % 5000 == 0 {
                 engine.flush().unwrap();
@@ -71,7 +71,7 @@ fn bench_cold_start_large(c: &mut Criterion) {
 
             // Verify database is accessible
             let cf = engine.default_column_family();
-            let result = engine.get(&cf, b"large_key_0000000000").unwrap();
+            let result = engine.get(cf, b"large_key_0000000000").unwrap();
 
             black_box((engine, result));
         })

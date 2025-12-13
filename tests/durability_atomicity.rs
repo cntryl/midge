@@ -21,7 +21,7 @@ use cntryl_midge::testkit::*;
 
 #[test]
 fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recovering() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -53,7 +53,7 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
 
 #[test]
 fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recovering() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -94,7 +94,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
 
 #[test]
 fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -121,7 +121,7 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
 
 #[test]
 fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -156,7 +156,7 @@ fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
 
 #[test]
 fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -188,7 +188,7 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
 
 #[test]
 fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
@@ -234,7 +234,7 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
 
 #[test]
 fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_manifest() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -243,7 +243,7 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             // Write to default CF (simpler than multi-CF for now)
             for i in 0..10 {
                 let key = format!("key_{:02}", i);
-                engine.put(&cf_default, key.as_bytes(), b"value").expect("put");
+                engine.put(cf_default, key.as_bytes(), b"value").expect("put");
             }
             
             // Flush (concurrent manifest updates)
@@ -260,7 +260,7 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             // All data should be recoverable in order
             for i in 0..10 {
                 let key = format!("key_{:02}", i);
-                assert!(engine.get(&cf_default, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
+                assert!(engine.get(cf_default, key.as_bytes()).expect("get").is_some(), "mode: {}", mode);
             }
         }
     });
@@ -268,7 +268,7 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
 
 #[test]
 fn should_commit_ssts_manifest_together_given_compaction_success_when_completing() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -300,7 +300,7 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
 
 #[test]
 fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -332,7 +332,7 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
 
 #[test]
 fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -371,7 +371,7 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
 
 #[test]
 fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopening() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);

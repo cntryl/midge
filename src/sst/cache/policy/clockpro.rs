@@ -326,7 +326,7 @@ mod tests {
 
         // Assert
         let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
-        assert!(key_map.len() > 0);
+        assert!(!key_map.is_empty());
     }
 
     #[test]

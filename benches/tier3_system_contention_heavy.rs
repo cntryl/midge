@@ -188,7 +188,7 @@ fn bench_engine_heavy_read_contention(c: &mut Criterion) {
                         // Pre-populate with data
                         for i in 0..num_keys {
                             engine
-                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .put(cf, &keys_ref[i], &vals_ref[i])
                                 .expect("put failed");
                         }
                         engine.flush().expect("flush failed");
@@ -272,7 +272,7 @@ fn bench_engine_mixed_contention(c: &mut Criterion) {
 
                         // Pre-populate with init values
                         for key in keys_ref.iter().take(ops_per_thread) {
-                            engine.put(&cf, key, init_ref).expect("put failed");
+                            engine.put(cf, key, init_ref).expect("put failed");
                         }
                         engine
                     },

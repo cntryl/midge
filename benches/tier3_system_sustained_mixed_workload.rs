@@ -149,7 +149,7 @@ fn bench_sustained_mixed_workload_with_compaction(c: &mut Criterion) {
                 let value = format!("value:{:010}", i);
 
                 let op_start = Instant::now();
-                let _ = engine.put(&cf, key.as_bytes(), value.as_bytes());
+                let _ = engine.put(cf, key.as_bytes(), value.as_bytes());
                 let op_time = op_start.elapsed().as_nanos() as u64;
 
                 latencies_warmup.record(op_time);
@@ -173,11 +173,11 @@ fn bench_sustained_mixed_workload_with_compaction(c: &mut Criterion) {
                     let key_idx = zipf.next();
                     let key = format!("key:{:010}", key_idx);
                     let value = format!("value:{}", op);
-                    let _ = engine.put(&cf, key.as_bytes(), value.as_bytes());
+                    let _ = engine.put(cf, key.as_bytes(), value.as_bytes());
                 } else {
                     let key_idx = zipf.next();
                     let key = format!("key:{:010}", key_idx);
-                    let _ = engine.get(&cf, key.as_bytes());
+                    let _ = engine.get(cf, key.as_bytes());
                 }
                 
                 let op_time = op_start.elapsed().as_nanos() as u64;

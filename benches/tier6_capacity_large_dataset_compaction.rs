@@ -42,7 +42,7 @@ fn bench_large_dataset_compaction(c: &mut Criterion) {
             for i in 0..100_000 {
                 let key = format!("compact_key_{:010}", i);
                 let val = vec![b'x'; 128]; // 128-byte values
-                engine.put(&cf, key.as_bytes(), &val).unwrap();
+                engine.put(cf, key.as_bytes(), &val).unwrap();
 
                 if i % 2000 == 0 {
                     engine.flush().unwrap(); // Create L0 file

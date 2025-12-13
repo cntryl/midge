@@ -269,15 +269,13 @@ mod tests {
     #[test]
     fn should_have_all_task_kinds() {
         // Arrange & Act
-        let kinds = vec![
-            TaskKind::Flush,
+        let kinds = [TaskKind::Flush,
             TaskKind::Compaction,
             TaskKind::Wal,
             TaskKind::Cloud,
             TaskKind::Gc,
             TaskKind::Manifest,
-            TaskKind::User,
-        ];
+            TaskKind::User];
 
         // Assert
         assert_eq!(kinds.len(), 7);
@@ -396,12 +394,10 @@ mod tests {
     #[test]
     fn should_create_tasks_with_all_priorities() {
         // Arrange & Act
-        let tasks = vec![
-            Task::new(TaskKind::Flush, "t1").with_priority(TaskPriority::Low),
+        let tasks = [Task::new(TaskKind::Flush, "t1").with_priority(TaskPriority::Low),
             Task::new(TaskKind::Flush, "t2").with_priority(TaskPriority::Normal),
             Task::new(TaskKind::Flush, "t3").with_priority(TaskPriority::High),
-            Task::new(TaskKind::Flush, "t4").with_priority(TaskPriority::Critical),
-        ];
+            Task::new(TaskKind::Flush, "t4").with_priority(TaskPriority::Critical)];
 
         // Assert
         assert_eq!(tasks[0].priority, TaskPriority::Low);

@@ -37,7 +37,7 @@ impl SstSimulator {
             .map(|i| Bytes::from(format!("key:{:010}", i)))
             .collect();
 
-        let block_count = (num_keys + KEYS_PER_BLOCK - 1) / KEYS_PER_BLOCK;
+        let block_count = num_keys.div_ceil(KEYS_PER_BLOCK);
 
         Self {
             sst_id,
@@ -173,11 +173,9 @@ fn measure_read_latency_with_compaction(
     ];
 
     // Create foreground SSTs (read-optimized layout)
-    let read_ssts = vec![
-        SstSimulator::new(1, 0, 10_000),
+    let read_ssts = [SstSimulator::new(1, 0, 10_000),
         SstSimulator::new(2, 10_000, 10_000),
-        SstSimulator::new(3, 20_000, 10_000),
-    ];
+        SstSimulator::new(3, 20_000, 10_000)];
 
     let mut compaction = CompactionSimulator::new(input_ssts, cache.clone());
 

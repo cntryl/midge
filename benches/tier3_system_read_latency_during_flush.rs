@@ -24,7 +24,6 @@ mod criterion_helper;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::time::Instant;
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 

@@ -95,7 +95,7 @@ impl ManifestActor {
 
         // Use ManifestPersistence to save in YAML format
         crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
-            .map_err(|e| crate::common::MidgeError::Internal(e))?;
+            .map_err(crate::common::MidgeError::Internal)?;
 
         tracing::debug!("Manifest persisted");
 

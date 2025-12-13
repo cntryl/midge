@@ -772,7 +772,7 @@ mod tests {
         // We verify it exists by checking the struct compiles with it
 
         // Assert - Just verify event_loop is created
-        assert!(event_loop.trace_enabled == false);
+        assert!(!event_loop.trace_enabled);
     }
 
     #[test]
@@ -783,7 +783,7 @@ mod tests {
         // Act - Similar to handle_read, verify method exists
 
         // Assert
-        assert!(event_loop.trace_enabled == false);
+        assert!(!event_loop.trace_enabled);
     }
 
     // =========== Trace Flag Tests ===========

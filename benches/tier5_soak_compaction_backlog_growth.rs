@@ -44,7 +44,7 @@ fn bench_compaction_backlog_growth(c: &mut Criterion) {
             for i in 0..10_000 {
                 let key = format!("soak_key_{:010}", i);
                 let val = format!("value_{}", i);
-                engine.put(&cf, key.as_bytes(), val.as_bytes()).unwrap();
+                engine.put(cf, key.as_bytes(), val.as_bytes()).unwrap();
 
                 // Sample L0 file count periodically
                 if i % 500 == 0 {

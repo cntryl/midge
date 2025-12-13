@@ -62,7 +62,7 @@ fn bench_single_thread_baseline(c: &mut Criterion) {
                     |engine| {
                         let cf = engine.default_column_family();
                         for i in 0..num_ops {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                            engine.put(cf, &keys[i], &vals[i]).unwrap();
                         }
                         engine // prevent Drop during timing
                     },
@@ -86,14 +86,14 @@ fn bench_single_thread_baseline(c: &mut Criterion) {
                         let engine = setup_engine_with_mode("baseline_get", mode);
                         let cf = engine.default_column_family();
                         for i in 0..num_ops {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                            engine.put(cf, &keys[i], &vals[i]).unwrap();
                         }
                         engine
                     },
                     |engine| {
                         let cf = engine.default_column_family();
                         for i in (0..num_ops).step_by(5) {
-                            black_box(engine.get(&cf, &keys[i]).unwrap());
+                            black_box(engine.get(cf, &keys[i]).unwrap());
                         }
                         engine
                     },
@@ -182,7 +182,7 @@ fn bench_contention_breakdown(c: &mut Criterion) {
                         let vals: Vec<Bytes> =
                             (0..10_000).map(|_| make_value_fixed(VALUE_SIZE)).collect();
                         for i in 0..10_000 {
-                            engine.put(&cf, &read_keys[i], &vals[i]).unwrap();
+                            engine.put(cf, &read_keys[i], &vals[i]).unwrap();
                         }
                         engine
                     },
@@ -243,7 +243,7 @@ fn bench_contention_breakdown(c: &mut Criterion) {
                         let engine = setup_engine_arc("mixed_contention", mode);
                         let cf = engine.default_column_family();
                         for i in 0..prefill_count {
-                            engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
+                            engine.put(cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
                         }
                         engine
                     },
@@ -329,7 +329,7 @@ fn bench_snapshot_stress(c: &mut Criterion) {
                         let engine = setup_engine_arc("snapshot_stress", mode);
                         let cf = engine.default_column_family();
                         for i in 0..prefill_count {
-                            engine.put(&cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
+                            engine.put(cf, &prefill_keys[i], &prefill_vals[i]).unwrap();
                         }
                         engine
                     },

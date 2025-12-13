@@ -21,7 +21,7 @@ use cntryl_midge::testkit::*;
 
 #[test]
 fn should_recover_writes_given_unflushed_memtable_when_reopening() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -46,7 +46,7 @@ fn should_recover_writes_given_unflushed_memtable_when_reopening() {
 
 #[test]
 fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -73,7 +73,7 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
 
 #[test]
 fn should_call_fsync_given_wal_sync_enabled_when_put() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
@@ -92,7 +92,7 @@ fn should_call_fsync_given_wal_sync_enabled_when_put() {
 
 #[test]
 fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -127,7 +127,7 @@ fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
 
 #[test]
 fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -162,7 +162,7 @@ fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
 
 #[test]
 fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = std::sync::Arc::new(open_with_mode(opts.clone(), mode));
@@ -212,7 +212,7 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
 
 #[test]
 fn should_handle_gracefully_given_truncated_wal_tail_when_recovering() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -240,7 +240,7 @@ fn should_handle_gracefully_given_truncated_wal_tail_when_recovering() {
 
 #[test]
 fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
@@ -269,7 +269,7 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
 
 #[test]
 fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange: This tests the expected behavior of non-fsync mode
         
         // Act (Phase 1)
@@ -296,7 +296,7 @@ fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
 
 #[test]
 fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
-    for_each_storage_mode(&durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);

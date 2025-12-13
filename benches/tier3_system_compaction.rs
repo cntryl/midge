@@ -157,7 +157,7 @@ fn bench_flush(c: &mut Criterion) {
                             );
                             let cf = engine.default_column_family();
                             for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
-                                engine.put(&cf, k, v).expect("put failed");
+                                engine.put(cf, k, v).expect("put failed");
                             }
                             engine
                         },
@@ -211,7 +211,7 @@ fn bench_compact_all(c: &mut Criterion) {
                             );
                             let cf = engine.default_column_family();
                             for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
-                                engine.put(&cf, k, v).expect("put failed");
+                                engine.put(cf, k, v).expect("put failed");
                             }
                             engine.flush().expect("flush failed");
                             engine
@@ -264,7 +264,7 @@ fn bench_flush_throughput(c: &mut Criterion) {
                             );
                             let cf = engine.default_column_family();
                             for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
-                                engine.put(&cf, k, v).expect("put failed");
+                                engine.put(cf, k, v).expect("put failed");
                             }
                             engine
                         },
@@ -328,7 +328,7 @@ fn bench_incremental_compact(c: &mut Criterion) {
                             let end = start + num_keys_per_batch;
                             for idx in start..end {
                                 engine
-                                    .put(&cf, &kv_ref.keys[idx], &kv_ref.values[idx])
+                                    .put(cf, &kv_ref.keys[idx], &kv_ref.values[idx])
                                     .expect("put failed");
                             }
                             engine.flush().expect("flush failed");
@@ -404,7 +404,7 @@ fn bench_flush_concurrent(c: &mut Criterion) {
                     ));
                     let cf = engine.default_column_family();
                     for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
-                        engine.put(&cf, k, v).expect("put failed");
+                        engine.put(cf, k, v).expect("put failed");
                     }
                     engine
                 },

@@ -544,7 +544,7 @@ mod tests {
     #[test]
     fn should_create_dispatcher_with_default() {
         // Arrange & Act
-        let dispatcher = Dispatcher::default();
+        let dispatcher = Dispatcher;
 
         // Assert - Just verify it's usable
         let msg = RuntimeMsg::Noop { request_id: 1 };

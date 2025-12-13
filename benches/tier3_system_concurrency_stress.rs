@@ -140,7 +140,7 @@ fn bench_mixed_read_write(c: &mut Criterion) {
                         // Prefill in setup
                         for i in 0..5_000 {
                             engine
-                                .put(&cf, &prefill_keys_ref[i], &prefill_vals_ref[i])
+                                .put(cf, &prefill_keys_ref[i], &prefill_vals_ref[i])
                                 .expect("prefill failed");
                         }
                         engine
@@ -236,7 +236,7 @@ fn bench_compaction_pressure(c: &mut Criterion) {
                             for i in 0..3_000 {
                                 let idx = round * 3_000 + i;
                                 engine
-                                    .put(&cf, &keys_ref[idx], &vals_ref[idx])
+                                    .put(cf, &keys_ref[idx], &vals_ref[idx])
                                     .expect("write failed");
                             }
                             // Small yield to allow compaction progress
@@ -244,7 +244,7 @@ fn bench_compaction_pressure(c: &mut Criterion) {
                         }
                         // Verify a few reads during/after compaction
                         for key in verify_ref {
-                            let _ = engine.get(&cf, key);
+                            let _ = engine.get(cf, key);
                         }
                         engine // prevent Drop during timing
                     },
@@ -291,7 +291,7 @@ fn bench_concurrent_deletes(c: &mut Criterion) {
                             // Prefill with 10k keys
                             for i in 0..10_000 {
                                 engine
-                                    .put(&cf, &prefill_keys_ref[i], &prefill_vals_ref[i])
+                                    .put(cf, &prefill_keys_ref[i], &prefill_vals_ref[i])
                                     .expect("prefill failed");
                             }
                             engine

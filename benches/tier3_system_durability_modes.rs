@@ -76,7 +76,7 @@ fn load_data_batched(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes]) {
     for chunk in keys.chunks(BATCH_SIZE) {
         for (i, key) in chunk.iter().enumerate() {
             let val_idx = i % values.len();
-            engine.put(&cf, key, &values[val_idx]).unwrap();
+            engine.put(cf, key, &values[val_idx]).unwrap();
         }
     }
 }
@@ -89,11 +89,11 @@ fn run_mixed_workload(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], op
         let key_idx = i % keys.len();
         if i % 2 == 0 {
             // Read
-            let _ = black_box(engine.get(&cf, &keys[key_idx]));
+            let _ = black_box(engine.get(cf, &keys[key_idx]));
         } else {
             // Write
             let val_idx = i % values.len();
-            let _ = engine.put(&cf, &keys[key_idx], &values[val_idx]);
+            let _ = engine.put(cf, &keys[key_idx], &values[val_idx]);
         }
     }
 }
@@ -230,7 +230,7 @@ fn bench_durability_concurrent(c: &mut Criterion) {
                             // Load data outside timed section
                             let cf = engine.default_column_family();
                             for (i, key) in keys.iter().take(RECORD_COUNT).enumerate() {
-                                engine.put(&cf, key, &values[i % values.len()]).unwrap();
+                                engine.put(cf, key, &values[i % values.len()]).unwrap();
                             }
                             Arc::new(engine)
                         },
@@ -275,7 +275,7 @@ fn run_write_heavy_workload(
     for i in 0..operations {
         let key_idx = i % keys.len();
         let val_idx = i % values.len();
-        let _ = engine.put(&cf, &keys[key_idx], &values[val_idx]);
+        let _ = engine.put(cf, &keys[key_idx], &values[val_idx]);
     }
 }
 

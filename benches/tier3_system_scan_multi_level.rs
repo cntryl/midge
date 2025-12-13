@@ -68,7 +68,7 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
                         // Populate with 50k keys to trigger multiple flushes and compactions
                         for i in 0..num_keys {
                             engine
-                                .put(&cf, &keys_ref[i], &vals_ref[i])
+                                .put(cf, &keys_ref[i], &vals_ref[i])
                                 .expect("put failed");
 
                             // Flush periodically to create multiple files
@@ -88,7 +88,7 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         let query = Query::new().start_key(start.clone()).end_key(end.clone());
 
-                        let results = engine.scan(&cf, &query).expect("scan failed");
+                        let results = engine.scan(cf, &query).expect("scan failed");
                         black_box(results.len());
 
                         engine

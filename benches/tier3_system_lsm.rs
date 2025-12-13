@@ -120,7 +120,7 @@ fn bench_system_wal_write(c: &mut Criterion) {
                         |engine| {
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(cf, &keys_ref[i], &vals_ref[i]).unwrap();
                             }
                             engine
                         },
@@ -175,7 +175,7 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
                             let cf = engine.default_column_family();
 
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(cf, &keys_ref[i], &vals_ref[i]).unwrap();
                             }
                             engine.flush().unwrap();
                             drop(engine);
@@ -188,7 +188,7 @@ fn bench_system_flush_reopen_read(c: &mut Criterion) {
 
                             for &idx in read_indices_ref {
                                 let key = black_box(&keys_ref[idx]);
-                                black_box(engine.get(&cf, key).unwrap());
+                                black_box(engine.get(cf, key).unwrap());
                             }
 
                             engine
@@ -243,7 +243,7 @@ fn bench_system_l0_compaction(c: &mut Criterion) {
 
                             let cf = engine.default_column_family();
                             for i in 0..n {
-                                engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                                engine.put(cf, &keys_ref[i], &vals_ref[i]).unwrap();
                             }
                             engine.flush().unwrap(); // creates L0
 
@@ -315,7 +315,7 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
 
                         let cf = engine.default_column_family();
                         for i in 0..hot_set_size {
-                            engine.put(&cf, &keys_ref[i], &vals_ref[i]).unwrap();
+                            engine.put(cf, &keys_ref[i], &vals_ref[i]).unwrap();
                         }
                         engine.flush().unwrap(); // baseline L0
 
@@ -327,10 +327,10 @@ fn bench_system_mixed_workload(c: &mut Criterion) {
                         for &(idx, is_read) in ops_ref {
                             let key = black_box(&keys_ref[idx]);
                             if is_read {
-                                black_box(engine.get(&cf, key).unwrap());
+                                black_box(engine.get(cf, key).unwrap());
                             } else {
                                 let val = black_box(&vals_ref[idx]);
-                                engine.put(&cf, key, val).unwrap();
+                                engine.put(cf, key, val).unwrap();
                             }
                         }
 

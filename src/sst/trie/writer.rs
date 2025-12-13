@@ -391,7 +391,7 @@ mod tests {
     fn should_maintain_block_ids_after_write() {
         // Arrange
         let mut writer = TrieWriter::new(true);
-        let block_ids = vec![0, 5, 10, 100, 1000, u32::MAX - 1];
+        let block_ids = [0, 5, 10, 100, 1000, u32::MAX - 1];
 
         // Act
         for (idx, &bid) in block_ids.iter().enumerate() {

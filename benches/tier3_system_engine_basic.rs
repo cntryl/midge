@@ -50,7 +50,7 @@ fn bench_single_put(c: &mut Criterion) {
                 |engine| {
                     let cf = engine.default_column_family();
                     for i in 0..num_ops {
-                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                        engine.put(cf, &keys[i], &vals[i]).unwrap();
                     }
                     engine // prevent Drop during timing
                 },
@@ -87,14 +87,14 @@ fn bench_single_get(c: &mut Criterion) {
                     let engine = setup_engine_with_mode("single_get", mode);
                     let cf = engine.default_column_family();
                     for i in 0..num_keys {
-                        engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                        engine.put(cf, &keys[i], &vals[i]).unwrap();
                     }
                     engine
                 },
                 |engine| {
                     let cf = engine.default_column_family();
                     for &idx in &read_indices {
-                        black_box(engine.get(&cf, &keys[idx]).unwrap());
+                        black_box(engine.get(cf, &keys[idx]).unwrap());
                     }
                     engine // prevent Drop during timing
                 },
@@ -130,14 +130,14 @@ fn bench_single_delete(c: &mut Criterion) {
                         let engine = setup_engine_with_mode("single_delete", mode);
                         let cf = engine.default_column_family();
                         for (key, val) in keys.iter().zip(vals.iter()) {
-                            engine.put(&cf, key, val).unwrap();
+                            engine.put(cf, key, val).unwrap();
                         }
                         engine
                     },
                     |engine| {
                         let cf = engine.default_column_family();
                         for key in &keys {
-                            engine.delete(&cf, key).unwrap();
+                            engine.delete(cf, key).unwrap();
                         }
                         engine // prevent Drop during timing
                     },
@@ -242,7 +242,7 @@ fn bench_mixed_crud(c: &mut Criterion) {
                         let cf = engine.default_column_family();
                         // Preload half of keys
                         for i in 0..(num_keys / 2) {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                            engine.put(cf, &keys[i], &vals[i]).unwrap();
                         }
                         engine
                     },
@@ -251,13 +251,13 @@ fn bench_mixed_crud(c: &mut Criterion) {
                         for op in &ops {
                             match *op {
                                 Op::Put(idx) => {
-                                    engine.put(&cf, &keys[idx], &vals[idx]).unwrap();
+                                    engine.put(cf, &keys[idx], &vals[idx]).unwrap();
                                 }
                                 Op::Get(idx) => {
-                                    let _ = engine.get(&cf, &keys[idx]);
+                                    let _ = engine.get(cf, &keys[idx]);
                                 }
                                 Op::Delete(idx) => {
-                                    let _ = engine.delete(&cf, &keys[idx]);
+                                    let _ = engine.delete(cf, &keys[idx]);
                                 }
                             }
                         }
@@ -307,7 +307,7 @@ fn bench_concurrent_reads(c: &mut Criterion) {
                         let engine = setup_engine_arc("concurrent_reads", mode);
                         let cf = engine.default_column_family();
                         for i in 0..num_keys {
-                            engine.put(&cf, &keys[i], &vals[i]).unwrap();
+                            engine.put(cf, &keys[i], &vals[i]).unwrap();
                         }
                         engine
                     },
@@ -427,14 +427,14 @@ fn bench_point_lookup_miss(c: &mut Criterion) {
                         let engine = setup_engine_with_mode("point_miss", mode);
                         let cf = engine.default_column_family();
                         for i in 0..num_keys {
-                            engine.put(&cf, &even_keys[i], &vals[i]).unwrap();
+                            engine.put(cf, &even_keys[i], &vals[i]).unwrap();
                         }
                         engine
                     },
                     |engine| {
                         let cf = engine.default_column_family();
                         for key in &odd_keys {
-                            black_box(engine.get(&cf, key).unwrap());
+                            black_box(engine.get(cf, key).unwrap());
                         }
                         engine // prevent Drop during timing
                     },

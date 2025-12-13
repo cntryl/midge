@@ -423,11 +423,11 @@ fn should_read_values_within_transaction() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(&cf, b"key", b"value").unwrap();
+        engine.put(cf, b"key", b"value").unwrap();
         
         // Act
         let txn = engine.transaction();
-        let value = engine.get_transactional(&cf, b"key", &txn).unwrap();
+        let value = engine.get_transactional(cf, b"key", &txn).unwrap();
         
         // Assert - should read committed value at transaction start
         assert_eq!(value, Some(Bytes::from_static(b"value")));
