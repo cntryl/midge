@@ -23,8 +23,8 @@ impl IntentPersistence {
             return Ok(Vec::new());
         }
 
-        let contents = fs::read_to_string(&p)
-            .map_err(|e| format!("failed to read intent file: {}", e))?;
+        let contents =
+            fs::read_to_string(&p).map_err(|e| format!("failed to read intent file: {}", e))?;
 
         let intents: Vec<IntentLogEntry> = serde_yaml::from_str(&contents)
             .map_err(|e| format!("failed to parse intent YAML: {}", e))?;
@@ -84,7 +84,10 @@ mod tests {
     #[test]
     fn should_roundtrip_intent_log() {
         let test_dir = create_test_dir();
-        let intents = vec![IntentLogEntry::WalSynced { segment_id: 1, seqno: 42 }];
+        let intents = vec![IntentLogEntry::WalSynced {
+            segment_id: 1,
+            seqno: 42,
+        }];
 
         IntentPersistence::save(&test_dir, &intents).expect("save should succeed");
         let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");

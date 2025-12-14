@@ -236,11 +236,12 @@ impl MidgeEngine {
                     std::sync::Arc::new(crate::storage::FileSystem::new(cloud_root.clone())?);
 
                 let (tx, rx) = crossbeam::channel::unbounded::<crate::storage::StorageEvent>();
-                let hybrid = std::sync::Arc::new(crate::storage::HybridStorage::new_with_event_sender(
-                    local_backend,
-                    cloud_backend,
-                    tx,
-                ));
+                let hybrid =
+                    std::sync::Arc::new(crate::storage::HybridStorage::new_with_event_sender(
+                        local_backend,
+                        cloud_backend,
+                        tx,
+                    ));
 
                 runtime_config.wal_durability_policy = crate::wal::DurabilityPolicy::CloudFirst;
                 runtime_config.hybrid_storage = Some(hybrid);

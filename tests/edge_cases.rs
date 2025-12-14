@@ -330,9 +330,9 @@ fn should_batch_concurrent_puts_when_cloudfirst_mode() {
     // Arrange
     for_each_storage_mode(&["cloud"], |mode, opts| {
         let cloud_wal_dir = match &opts.storage_mode {
-            cntryl_midge::testkit::StorageMode::CloudBacked { local_cache_path } => local_cache_path
-                .join("cloud_store")
-                .join("wal"),
+            cntryl_midge::testkit::StorageMode::CloudBacked { local_cache_path } => {
+                local_cache_path.join("cloud_store").join("wal")
+            }
             _ => panic!("expected cloud storage mode"),
         };
 

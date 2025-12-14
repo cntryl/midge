@@ -10,9 +10,7 @@
 mod criterion_helper;
 
 use cntryl_midge::common::Accumulator;
-use criterion::{
-    criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput,
-};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 

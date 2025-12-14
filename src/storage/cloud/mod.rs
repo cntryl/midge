@@ -23,8 +23,8 @@
 //! - Events are received asynchronously but callback processing is synchronous
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
-pub mod executor;
 pub mod aws;
+pub mod executor;
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use crate::common::MidgeError;

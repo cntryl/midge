@@ -14,18 +14,18 @@
 pub mod actors;
 pub mod dispatch;
 pub mod event_loop;
+pub mod intent_persistence;
 pub mod scheduler;
 pub mod state;
-pub mod intent_persistence;
 pub mod task;
 
 pub use actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
 pub use dispatch::Dispatcher;
 pub use event_loop::EventLoop;
+pub use intent_persistence::IntentPersistence;
 pub use scheduler::Scheduler;
 pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
-pub use intent_persistence::IntentPersistence;
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::DurabilityPolicy;

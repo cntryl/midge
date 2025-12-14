@@ -620,14 +620,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&test_dir);
         std::fs::create_dir_all(&test_dir).expect("create test dir");
 
-        let intents = vec![crate::runtime::IntentLogEntry::WalSynced { segment_id: 2, seqno: 99 }];
+        let intents = vec![crate::runtime::IntentLogEntry::WalSynced {
+            segment_id: 2,
+            seqno: 99,
+        }];
         crate::runtime::IntentPersistence::save(&test_dir, &intents).expect("save intents");
 
         // Act: create runtime state for that path (not memory mode)
         let state = RuntimeState::new(test_dir.clone(), false);
 
         // Assert: intent log was loaded
-        assert!(!state.intent_log.is_empty(), "intent log should be loaded from disk");
+        assert!(
+            !state.intent_log.is_empty(),
+            "intent log should be loaded from disk"
+        );
         match &state.intent_log[0] {
             crate::runtime::IntentLogEntry::WalSynced { segment_id, seqno } => {
                 assert_eq!(*segment_id, 2);

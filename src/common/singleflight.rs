@@ -71,7 +71,10 @@ where
 
     /// Join the current generation for the current key.
     pub fn join(&self, waiter: W) {
-        let mut state = self.state.lock().expect("keyed group commit mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("keyed group commit mutex poisoned");
         state.pending.push(waiter);
     }
 
@@ -79,7 +82,10 @@ where
     ///
     /// Returns the sealed key + number of waiters moved to inflight, if any.
     pub fn rotate_to(&self, new_key: K) -> Option<(K, usize)> {
-        let mut state = self.state.lock().expect("keyed group commit mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("keyed group commit mutex poisoned");
 
         let old_key = state.current_key.clone();
         state.current_key = new_key;
@@ -96,13 +102,19 @@ where
 
     /// Drain all waiters for the given key.
     pub fn complete(&self, key: &K) -> Vec<W> {
-        let mut state = self.state.lock().expect("keyed group commit mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("keyed group commit mutex poisoned");
         state.inflight.remove(key).unwrap_or_default()
     }
 
     /// Drain all pending + inflight waiters.
     pub fn drain_all(&self) -> Vec<W> {
-        let mut state = self.state.lock().expect("keyed group commit mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("keyed group commit mutex poisoned");
         let mut out = Vec::new();
 
         out.extend(state.pending.drain(..));
@@ -113,12 +125,18 @@ where
     }
 
     pub fn pending_len(&self) -> usize {
-        let state = self.state.lock().expect("keyed group commit mutex poisoned");
+        let state = self
+            .state
+            .lock()
+            .expect("keyed group commit mutex poisoned");
         state.pending.len()
     }
 
     pub fn inflight_len(&self) -> usize {
-        let state = self.state.lock().expect("keyed group commit mutex poisoned");
+        let state = self
+            .state
+            .lock()
+            .expect("keyed group commit mutex poisoned");
         state.inflight.len()
     }
 }
@@ -163,9 +181,9 @@ impl<T, R> Accumulator<T, R> {
         state.pending.push(item);
 
         // A pending item always belongs to a generation.
-        let gen = state
-            .generation
-            .get_or_insert_with(|| Generation { waiters: Vec::new() });
+        let gen = state.generation.get_or_insert_with(|| Generation {
+            waiters: Vec::new(),
+        });
         gen.waiters.push(tx);
 
         rx
@@ -267,8 +285,8 @@ impl<T> FlushPolicy<T> for LenFlushPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn should_fan_out_one_flush_result_to_many_waiters() {

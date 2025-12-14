@@ -26,7 +26,10 @@ use crate::sst::Memtable;
 
 #[derive(Debug, Clone)]
 enum CloudFirstWaiter {
-    WalAppend { request_id: u64, sequence: u64 },
+    WalAppend {
+        request_id: u64,
+        sequence: u64,
+    },
     WriteBatch {
         request_id: u64,
         last_sequence: u64,
@@ -197,7 +200,10 @@ impl EventLoop {
 
                         for w in waiters {
                             match w {
-                                CloudFirstWaiter::WalAppend { request_id, sequence } => {
+                                CloudFirstWaiter::WalAppend {
+                                    request_id,
+                                    sequence,
+                                } => {
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WalAppended {
@@ -231,7 +237,8 @@ impl EventLoop {
             crate::storage::StorageEvent::CloudFail { segment_id, error } => {
                 // Drop inflight timing; the corresponding writes will error.
                 let _ = self.cloudfirst_inflight.remove(&segment_id);
-                self.wal_actor.handle_cloud_upload_failed(segment_id, &error);
+                self.wal_actor
+                    .handle_cloud_upload_failed(segment_id, &error);
 
                 if let Some(waiters) = self.cloudfirst_waiters.as_ref().map(|w| w.drain_all()) {
                     for w in waiters {
