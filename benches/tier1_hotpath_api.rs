@@ -15,7 +15,7 @@ mod criterion_helper;
 use bytes::Bytes;
 use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
 use criterion::{
-    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
@@ -35,17 +35,22 @@ fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
 }
 
 fn setup_db(name: &str) -> MidgeEngine {
-    let path = std::env::temp_dir().join(format!("midge_bench_hotpath_api_{}", name));
-    let _ = std::fs::remove_dir_all(&path);
+    let _ = name;
 
+    // Tier 1 benches must be memtable-only: avoid filesystem/WAL I/O and avoid
+    // background work triggered by frequent memtable flushes.
     let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path },
-        memtable_size: 16 * 1024 * 1024,
+        storage_mode: StorageMode::Memory,
+        wal_sync: false,
+        // Keep the memtable large enough that we do not trigger flush/compaction
+        // during the measurement window.
+        memtable_size: 1024 * 1024 * 1024, // 1 GiB
+        compression: false,
         enable_compaction: false,
-        ..Default::default()
+        memory_budget: None,
     };
 
-    MidgeEngine::open(opts).unwrap()
+    MidgeEngine::open_with_options(opts).unwrap()
 }
 
 /// Benchmark batch put operations (hot path for write throughput)
@@ -59,30 +64,24 @@ fn bench_batch_put(c: &mut Criterion) {
     let cf_id = cf.id();
 
     for &batch_size in &[100, 1_000] {
-        // Precompute keys and values outside the loop
+        // Precompute keys/values and the WriteBatch ONCE.
+        // Note: `iter_batched` would re-run the setup closure many times and can
+        // dominate wall-clock runtime even if setup is excluded from timing.
         let (keys, vals) = make_fixed_kv(batch_size);
-        group.throughput(Throughput::Elements(batch_size as u64));
+        let mut batch = WriteBatch::new();
+        for i in 0..batch_size {
+            batch.put_cf(cf_id, keys[i].clone(), vals[i].clone());
+        }
 
+        group.throughput(Throughput::Elements(batch_size as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
-            &batch_size,
-            |b, &size| {
-                b.iter_batched(
-                    || {
-                        // Only prepare a WriteBatch in setup (no allocations)
-                        let mut batch = WriteBatch::new();
-                        for i in 0..size {
-                            batch.put_cf(cf_id, keys[i].clone(), vals[i].clone());
-                        }
-                        batch
-                    },
-                    |batch| {
-                        // Only measure the batch operation itself (writes to default CF)
-                        engine.write_batch(&batch).unwrap();
-                        black_box(());
-                    },
-                    BatchSize::SmallInput,
-                )
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    engine.write_batch(black_box(batch)).unwrap();
+                    black_box(())
+                })
             },
         );
     }

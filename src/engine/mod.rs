@@ -221,7 +221,7 @@ impl MidgeEngine {
         };
 
         let mut runtime_config = crate::runtime::RuntimeConfig::default();
-        let state = match &opts.storage_mode {
+        let mut state = match &opts.storage_mode {
             crate::testkit::StorageMode::CloudBacked { .. } => {
                 // Local cache is ephemeral; cloud WAL is the source of truth.
                 // Simulate cloud with a separate filesystem-backed store under db_path.
@@ -262,6 +262,13 @@ impl MidgeEngine {
                 RuntimeState::new(db_path.clone(), memory_mode)
             }
         };
+
+        // Apply tuning knobs from options.
+        // Keep thresholds sane if caller passes 0.
+        if opts.memtable_size > 0 {
+            state.memtable_size_limit = opts.memtable_size;
+            state.memtable_flush_threshold = opts.memtable_size;
+        }
 
         // Start runtime
         let (runtime, _) = Runtime::new()?;

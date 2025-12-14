@@ -11,7 +11,7 @@
 mod criterion_helper;
 
 use cntryl_midge::sst::{Memtable, SkipListMemtable};
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
 
@@ -55,27 +55,45 @@ fn bench_put_single(c: &mut Criterion) {
     let mut counter = 100usize;
 
     group.bench_function("64b_value", |b| {
-        b.iter(|| {
-            let idx = counter % keys.len();
-            counter = counter.wrapping_add(1);
-            let _ = memtable.put(black_box(keys[idx].clone()), black_box(small_val.clone()));
-        })
+        b.iter_batched(
+            || {
+                let idx = counter % keys.len();
+                counter = counter.wrapping_add(1);
+                (keys[idx].clone(), small_val.clone())
+            },
+            |(key, value)| {
+                let _ = memtable.put(black_box(key), black_box(value));
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.bench_function("1kb_value", |b| {
-        b.iter(|| {
-            let idx = counter % keys.len();
-            counter = counter.wrapping_add(1);
-            let _ = memtable.put(black_box(keys[idx].clone()), black_box(medium_val.clone()));
-        })
+        b.iter_batched(
+            || {
+                let idx = counter % keys.len();
+                counter = counter.wrapping_add(1);
+                (keys[idx].clone(), medium_val.clone())
+            },
+            |(key, value)| {
+                let _ = memtable.put(black_box(key), black_box(value));
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.bench_function("4kb_value", |b| {
-        b.iter(|| {
-            let idx = counter % keys.len();
-            counter = counter.wrapping_add(1);
-            let _ = memtable.put(black_box(keys[idx].clone()), black_box(large_val.clone()));
-        })
+        b.iter_batched(
+            || {
+                let idx = counter % keys.len();
+                counter = counter.wrapping_add(1);
+                (keys[idx].clone(), large_val.clone())
+            },
+            |(key, value)| {
+                let _ = memtable.put(black_box(key), black_box(value));
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -92,13 +110,23 @@ fn bench_put_batch(c: &mut Criterion) {
     let value = make_value(128);
 
     group.bench_function("100_inserts", |b| {
-        b.iter(|| {
-            let memtable = SkipListMemtable::new();
-            for key in &keys {
-                let _ = memtable.put(black_box(key.clone()), black_box(value.clone()));
-            }
-            black_box(memtable)
-        })
+        b.iter_batched(
+            || {
+                let memtable = SkipListMemtable::new();
+                let items: Vec<(Vec<u8>, Vec<u8>)> = keys
+                    .iter()
+                    .map(|key| (key.clone(), value.clone()))
+                    .collect();
+                (memtable, items)
+            },
+            |(memtable, items)| {
+                for (key, val) in items {
+                    let _ = memtable.put(black_box(key), black_box(val));
+                }
+                black_box(memtable)
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -160,11 +188,17 @@ fn bench_delete(c: &mut Criterion) {
     let mut counter = 0usize;
 
     group.bench_function("delete", |b| {
-        b.iter(|| {
-            let idx = counter % keys.len();
-            counter = counter.wrapping_add(1);
-            let _ = memtable.delete(black_box(keys[idx].clone()));
-        })
+        b.iter_batched(
+            || {
+                let idx = counter % keys.len();
+                counter = counter.wrapping_add(1);
+                keys[idx].clone()
+            },
+            |key| {
+                let _ = memtable.delete(black_box(key));
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
