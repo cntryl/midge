@@ -49,6 +49,12 @@ enum PendingCloudWrite {
         sequence: u64,
         expiration: Option<u64>,
     },
+    Merge {
+        cf_id: u32,
+        key: Vec<u8>,
+        operand: Vec<u8>,
+        sequence: u64,
+    },
     Batch {
         commit_sequence: u64,
         ops: Vec<BatchApplyOp>,
@@ -420,12 +426,7 @@ impl WalActor {
         cf_id: u32,
         key: Bytes,
         operand: Bytes,
-    ) -> MidgeResult<u64> {
-        if self.is_cloud_first() {
-            return Err(MidgeError::InvalidArgument(
-                "CloudFirst durability does not support merge yet".to_string(),
-            ));
-        }
+    ) -> MidgeResult<(u64, bool)> {
         // Allocate sequence number at append time to preserve a total order under concurrency.
         let sequence = state.next_sequence();
 
@@ -479,9 +480,14 @@ impl WalActor {
             DurabilityPolicy::CloudFirst => {}
         }
 
+        if self.is_cloud_first() {
+            // CloudFirst: gate visibility (and response) on cloud durability.
+            self.queue_cloud_merge(cf_id, key.to_vec(), operand.to_vec(), sequence);
+        }
+
         tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL merge append");
 
-        Ok(sequence)
+        Ok((sequence, self.is_cloud_first()))
     }
 
     /// Checks current in-memory view (active + immutable memtables) for existence
@@ -511,6 +517,15 @@ impl WalActor {
         for pending in &self.pending_cloud_writes {
             match pending {
                 PendingCloudWrite::Single {
+                    cf_id: p_cf,
+                    key: p_key,
+                    ..
+                } => {
+                    if *p_cf == cf_id && p_key.as_slice() == key {
+                        return true;
+                    }
+                }
+                PendingCloudWrite::Merge {
                     cf_id: p_cf,
                     key: p_key,
                     ..
@@ -711,6 +726,7 @@ impl WalActor {
         while let Some(pending) = self.pending_cloud_writes.front() {
             let gate_seq = match pending {
                 PendingCloudWrite::Single { sequence, .. } => *sequence,
+                PendingCloudWrite::Merge { sequence, .. } => *sequence,
                 PendingCloudWrite::Batch {
                     commit_sequence, ..
                 } => *commit_sequence,
@@ -736,6 +752,16 @@ impl WalActor {
                     let key_bytes = Bytes::from(key);
                     let value_bytes = value.map(Bytes::from);
                     self.apply_to_memtable(state, cf_id, &key_bytes, &value_bytes, expiration)?;
+                    let _ = sequence;
+                }
+                PendingCloudWrite::Merge {
+                    cf_id,
+                    key,
+                    operand,
+                    sequence,
+                } => {
+                    let operand_bytes = Bytes::from(operand);
+                    self.apply_merge_to_memtable(state, cf_id, &key, &operand_bytes)?;
                     let _ = sequence;
                 }
                 PendingCloudWrite::Batch {
@@ -778,7 +804,9 @@ impl WalActor {
         // We cannot claim durability for any queued writes.
         while let Some(pending) = self.pending_cloud_writes.pop_front() {
             match pending {
-                PendingCloudWrite::Single { .. } | PendingCloudWrite::Batch { .. } => {}
+                PendingCloudWrite::Single { .. }
+                | PendingCloudWrite::Merge { .. }
+                | PendingCloudWrite::Batch { .. } => {}
             }
         }
     }
@@ -802,6 +830,19 @@ impl WalActor {
             });
 
         tracing::trace!(sequence, "Queued write for cloud durability");
+    }
+
+    /// Queue a merge operand waiting for cloud durability (CloudFirst mode)
+    pub fn queue_cloud_merge(&mut self, cf_id: u32, key: Vec<u8>, operand: Vec<u8>, sequence: u64) {
+        self.pending_cloud_writes
+            .push_back(PendingCloudWrite::Merge {
+                cf_id,
+                key,
+                operand,
+                sequence,
+            });
+
+        tracing::trace!(sequence, "Queued merge for cloud durability");
     }
 
     /// Handle sync completion notification

@@ -696,22 +696,42 @@ impl EventLoop {
                         bytes::Bytes::from(operand),
                     );
 
+                    match result {
+                        Ok((seq, deferred)) => {
+                            if !deferred {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WalAppended {
+                                        request_id,
+                                        sequence: seq,
+                                    },
+                                );
+                            } else if let Some(waiters) = &self.cloudfirst_waiters {
+                                waiters.join(CloudFirstWaiter::WalAppend {
+                                    request_id,
+                                    sequence: seq,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            );
+                        }
+                    }
+
                     // Auto-sync if batched threshold exceeded
-                    if self.wal_actor.should_sync_batch() {
+                    if !self.wal_actor.is_cloud_first() && self.wal_actor.should_sync_batch() {
                         if let Err(e) = self.wal_actor.sync(&mut self.state) {
                             tracing::warn!(error = %e, "failed to auto-sync WAL batch");
                         }
                     }
-                    let resp = result
-                        .map(|seq| RuntimeResponse::WalAppended {
-                            request_id,
-                            sequence: seq,
-                        })
-                        .unwrap_or_else(|e| RuntimeResponse::Error {
-                            request_id,
-                            message: e.to_string(),
-                        });
-                    self.respond(request_id, resp);
+
+                    self.maybe_flush_cloudfirst_wal();
                 }
 
                 RuntimeMsg::RegisterMergeOperator {
