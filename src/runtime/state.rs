@@ -186,6 +186,19 @@ impl RuntimeState {
             Manifest::default()
         };
 
+        // Load intent log if present
+        let intent_log = if !memory_mode {
+            match crate::runtime::IntentPersistence::load(&db_path) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load intent log, starting empty");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         let mut column_families = HashMap::new();
         column_families.insert(0, ColumnFamilyState::new(0, "default".into()));
 
@@ -285,7 +298,7 @@ impl RuntimeState {
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             read_only: false,
             memory_mode,
-            intent_log: Vec::new(),
+            intent_log: intent_log,
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             write_stalled: false,
             total_memtable_bytes: 0,
@@ -302,6 +315,17 @@ impl RuntimeState {
     pub fn next_txn_id(&mut self) -> u64 {
         self.next_txn_id += 1;
         self.next_txn_id
+    }
+
+    /// Append an intent entry and persist the intent log to disk.
+    pub fn append_intent(&mut self, entry: crate::runtime::IntentLogEntry) -> MidgeResult<()> {
+        self.intent_log.push(entry);
+        // Persist intent log unless running in memory mode
+        if !self.memory_mode {
+            crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
+                .map_err(crate::common::MidgeError::Internal)?;
+        }
+        Ok(())
     }
 
     pub fn get_cf(&self, cf_id: u32) -> Option<&ColumnFamilyState> {
@@ -587,6 +611,30 @@ mod tests {
         // Assert
         let cf = state.get_cf(1).expect("CF should exist");
         assert_eq!(cf.immutable_memtables.len(), 1);
+    }
+
+    #[test]
+    fn should_load_intent_log_on_startup() {
+        // Arrange: write an intent file to the test dir and then create RuntimeState
+        let test_dir = std::env::temp_dir().join("midge_state_intent_test");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).expect("create test dir");
+
+        let intents = vec![crate::runtime::IntentLogEntry::WalSynced { segment_id: 2, seqno: 99 }];
+        crate::runtime::IntentPersistence::save(&test_dir, &intents).expect("save intents");
+
+        // Act: create runtime state for that path (not memory mode)
+        let state = RuntimeState::new(test_dir.clone(), false);
+
+        // Assert: intent log was loaded
+        assert!(!state.intent_log.is_empty(), "intent log should be loaded from disk");
+        match &state.intent_log[0] {
+            crate::runtime::IntentLogEntry::WalSynced { segment_id, seqno } => {
+                assert_eq!(*segment_id, 2);
+                assert_eq!(*seqno, 99);
+            }
+            _ => panic!("unexpected intent variant"),
+        }
     }
 
     #[test]

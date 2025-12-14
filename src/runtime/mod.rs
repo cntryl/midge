@@ -16,6 +16,7 @@ pub mod dispatch;
 pub mod event_loop;
 pub mod scheduler;
 pub mod state;
+pub mod intent_persistence;
 pub mod task;
 
 pub use actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
@@ -24,6 +25,7 @@ pub use event_loop::EventLoop;
 pub use scheduler::Scheduler;
 pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
+pub use intent_persistence::IntentPersistence;
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::DurabilityPolicy;
@@ -62,8 +64,10 @@ pub(crate) fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst)
 }
 
+use serde::{Deserialize, Serialize};
+
 /// Simplified compaction plan for message passing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionPlan {
     pub input_files: Vec<String>,
     pub source_level: u32,
@@ -72,7 +76,7 @@ pub struct CompactionPlan {
 }
 
 /// Simplified file metadata for message passing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMeta {
     pub name: String,
     pub level: u32,
@@ -103,8 +107,10 @@ pub enum WriteBatchOp {
 }
 
 /// Intent log entry - records all state transitions for deterministic replay
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IntentLogEntry {
+    /// Seqno allocated
+    SeqnoAllocated { seqno: u64, cf_id: u32 },
     /// Flush plan created
     FlushPlanned { cf_id: u32, seqno_range: (u64, u64) },
     /// Compaction plan created

@@ -54,10 +54,8 @@ impl SeqnoAllocActor {
         state.sequence += 1;
         let seqno = state.sequence;
 
-        // Log intent
-        state
-            .intent_log
-            .push(IntentLogEntry::SeqnoAllocated { seqno, cf_id });
+        // Log intent and persist
+        state.append_intent(IntentLogEntry::SeqnoAllocated { seqno, cf_id })?;
 
         Ok((
             seqno,
