@@ -342,12 +342,15 @@ impl MidgeEngine {
         );
         let _enter = span.enter();
 
-        // Record telemetry attributes
-        let _midge_span = MidgeSpan::new("put_operation")
-            .with_operation(OperationType::Put)
-            .with_cf(cf_id)
-            .with_key_size(key_size)
-            .with_value_size(value_size);
+        // Record telemetry attributes (only allocate span if telemetry enabled)
+        if Telemetry::global().is_some() {
+            let _midge_span = MidgeSpan::new("put_operation")
+                .with_operation(OperationType::Put)
+                .with_cf(cf_id)
+                .with_key_size(key_size)
+                .with_value_size(value_size);
+            let _ = &_midge_span; // keep unused-binding in this scope
+        }
 
         // Sequence numbers are allocated inside the runtime at append time.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
