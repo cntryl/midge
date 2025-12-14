@@ -39,6 +39,7 @@ use bytes::Bytes;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use crate::runtime::IntentLogEntry;
 
 #[derive(Debug)]
 enum PendingCloudWrite {
@@ -267,11 +268,27 @@ impl WalActor {
         // Marker key is unused by semantics but required by the record format.
         let marker_key = Bytes::from_static(b"txn");
 
-        let begin_seq = state.next_sequence();
-        let mut begin_record =
-            WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
-        begin_record.txn_id = Some(txn_id);
+        // Preallocate sequence range for batch: begin, per-op, commit
+        let ops_count = ops.len();
+        let ops_count_u64 = ops_count as u64;
+        // sequences: begin_seq, op_seqs[0..ops_count-1], commit_seq
+        let begin_seq = state.sequence + 1;
+        let first_op_seq = begin_seq + 1;
+        let commit_seq = begin_seq + 1 + ops_count_u64;
 
+        // Advance global sequence to commit_seq
+        state.sequence = commit_seq;
+
+        // Log seqno allocations for intent tracing
+        // Begin seq (cf_id 0)
+        state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: begin_seq, cf_id: 0 })?;
+        // Per-op seqs will be logged below when we know cf_id
+        // Commit seq
+        state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: commit_seq, cf_id: 0 })?;
+
+        // Create and write begin record
+        let mut begin_record = WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
+        begin_record.txn_id = Some(txn_id);
         if let Some(writer) = &mut self.writer {
             writer.append_record(&begin_record)?;
         }
@@ -280,17 +297,13 @@ impl WalActor {
         self.pending_sync_count += 1;
         self.bytes_since_sync += begin_record.estimated_size();
 
-        let mut apply_ops: Vec<BatchApplyOp> = Vec::with_capacity(ops.len());
+        let mut apply_ops: Vec<BatchApplyOp> = Vec::with_capacity(ops_count);
 
-        for op in ops {
+        // Now write op records using deterministic sequences
+        for (i, op) in ops.into_iter().enumerate() {
+            let seq = first_op_seq + i as u64;
             match op {
-                crate::runtime::WriteBatchOp::Put {
-                    cf_id,
-                    key,
-                    value,
-                    ttl_seconds,
-                } => {
-                    let seq = state.next_sequence();
+                crate::runtime::WriteBatchOp::Put { cf_id, key, value, ttl_seconds } => {
                     let key_b = Bytes::from(key);
                     let value_b = Bytes::from(value);
 
@@ -303,19 +316,16 @@ impl WalActor {
                             seq,
                             ttl,
                         ),
-                        _ => WalRecord::new_cf(
-                            cf_id,
-                            WalOpKind::Put,
-                            key_b.clone(),
-                            Some(value_b.clone()),
-                            seq,
-                        ),
+                        _ => WalRecord::new_cf(cf_id, WalOpKind::Put, key_b.clone(), Some(value_b.clone()), seq),
                     };
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
                         writer.append_record(&record)?;
                     }
+
+                    // Log seq allocation for this CF
+                    state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id })?;
 
                     state.wal.pending_writes += 1;
                     self.pending_sync_count += 1;
@@ -329,35 +339,30 @@ impl WalActor {
                     });
                 }
                 crate::runtime::WriteBatchOp::Delete { cf_id, key } => {
-                    let seq = state.next_sequence();
                     let key_b = Bytes::from(key);
 
-                    let mut record =
-                        WalRecord::new_cf(cf_id, WalOpKind::Delete, key_b.clone(), None, seq);
+                    let mut record = WalRecord::new_cf(cf_id, WalOpKind::Delete, key_b.clone(), None, seq);
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
                         writer.append_record(&record)?;
                     }
 
+                    state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id })?;
+
                     state.wal.pending_writes += 1;
                     self.pending_sync_count += 1;
                     self.bytes_since_sync += record.estimated_size();
 
-                    apply_ops.push(BatchApplyOp::Delete {
-                        cf_id,
-                        key: key_b.to_vec(),
-                    });
+                    apply_ops.push(BatchApplyOp::Delete { cf_id, key: key_b.to_vec() });
                 }
             }
         }
 
-        let commit_seq = state.next_sequence();
+        // Write commit record
         let last_sequence = commit_seq;
-        let mut commit_record =
-            WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
+        let mut commit_record = WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
         commit_record.txn_id = Some(txn_id);
-
         if let Some(writer) = &mut self.writer {
             writer.append_record(&commit_record)?;
         }
