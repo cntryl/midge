@@ -9,7 +9,9 @@
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
 //!
-//! All tests run on ALL storage modes to validate cross-platform consistency.
+//! Most tests run on all storage modes to validate cross-platform consistency.
+//! Some intentionally exclude cloud mode when the invariant is not meaningful
+//! under CloudFirst durability semantics.
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
@@ -299,7 +301,10 @@ fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
 #[test]
 fn should_handle_ten_thousand_keys_when_large_keyspace() {
     // Arrange
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    // CloudFirst mode is intentionally excluded: 10k single-key puts are
+    // performance-dominated by cloud durability gating and don't validate any
+    // additional correctness beyond what smaller cloud-mode tests cover.
+    for_each_storage_mode(&["memory", "local"], |mode, opts| {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 

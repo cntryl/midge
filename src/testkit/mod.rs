@@ -258,6 +258,15 @@ where
     F: Fn(&str, MidgeOptions),
 {
     for mode in modes {
+        if let Some(only) = std::env::var_os("MIDGE_TEST_ONLY_MODE") {
+            if only.as_os_str() != std::ffi::OsStr::new(mode) {
+                continue;
+            }
+        }
+
+        if std::env::var_os("MIDGE_TEST_TRACE_MODES").is_some() {
+            eprintln!("[midge-test] mode={mode}");
+        }
         test_fn(mode, opts_for_mode(mode));
     }
 }

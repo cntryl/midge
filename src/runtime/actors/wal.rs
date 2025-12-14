@@ -668,6 +668,11 @@ impl WalActor {
     pub fn rotate(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         let old_segment = state.wal.current_segment_id;
 
+        // IMPORTANT (Windows): the active `wal.log` must be closed before `fs::rename`.
+        // `FsWalFactory::rotate_writer` renames `wal.log` to `{segment_id}.wal`.
+        // Renaming an open file is denied on Windows, so drop the writer first.
+        let _ = self.writer.take();
+
         // Rotate via factory
         let factory = FsWalFactory;
         self.writer = Some(factory.rotate_writer(&self.wal_dir, old_segment)?);

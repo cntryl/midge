@@ -330,10 +330,9 @@ impl HybridStorage {
         }
 
         // If we have an external event channel, CloudAck/CloudFail were already pushed.
-        // Returning them here would cause double-application in the runtime.
-        if self.external_event_tx.is_some() {
-            return Vec::new();
-        }
+        // We still must schedule uploads here; we only suppress returning events to
+        // avoid double-application in the runtime.
+        let suppress_return_events = self.external_event_tx.is_some();
 
         // 3) Schedule any eligible uploads.
         let now = Instant::now();
@@ -360,7 +359,11 @@ impl HybridStorage {
             _ => true,
         });
 
-        drained_events
+        if suppress_return_events {
+            Vec::new()
+        } else {
+            drained_events
+        }
     }
 
     /// Try to reserve space for an upcoming flush.
