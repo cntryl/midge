@@ -29,6 +29,8 @@ pub mod telemetry;
 
 // Storage abstraction
 pub mod storage;
+// Filesystem abstraction (Engine-facing traits)
+pub mod fs;
 
 // Data structures
 pub mod iterators;
