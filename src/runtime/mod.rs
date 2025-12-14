@@ -310,6 +310,41 @@ impl RuntimeMsg {
             Shutdown => None,
         }
     }
+
+    pub fn kind_name(&self) -> &'static str {
+        use RuntimeMsg::*;
+        match self {
+            FlushMemtable { .. } => "FlushMemtable",
+            FlushComplete { .. } => "FlushComplete",
+            CheckCompaction { .. } => "CheckCompaction",
+            RunCompaction { .. } => "RunCompaction",
+            CompactionComplete { .. } => "CompactionComplete",
+            WalAppend { .. } => "WalAppend",
+            WalMerge { .. } => "WalMerge",
+            WriteBatch { .. } => "WriteBatch",
+            WalSync { .. } => "WalSync",
+            WalRotate { .. } => "WalRotate",
+            WalSyncComplete { .. } => "WalSyncComplete",
+            CloudUploadSst { .. } => "CloudUploadSst",
+            CloudUploadWal { .. } => "CloudUploadWal",
+            CloudUploadComplete { .. } => "CloudUploadComplete",
+            CheckGc { .. } => "CheckGc",
+            DeleteObsoleteSsts { .. } => "DeleteObsoleteSsts",
+            ManifestAddSst { .. } => "ManifestAddSst",
+            ManifestCompactionComplete { .. } => "ManifestCompactionComplete",
+            ManifestPersist { .. } => "ManifestPersist",
+            ManifestCreateColumnFamily { .. } => "ManifestCreateColumnFamily",
+            ManifestDropColumnFamily { .. } => "ManifestDropColumnFamily",
+            RegisterMergeOperator { .. } => "RegisterMergeOperator",
+            Read { .. } => "Read",
+            RangeScan { .. } => "RangeScan",
+            GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
+            GetCurrentSequence { .. } => "GetCurrentSequence",
+            Shutdown => "Shutdown",
+            Noop { .. } => "Noop",
+            StartupPing { .. } => "StartupPing",
+        }
+    }
 }
 
 /// Response from runtime operations.
@@ -488,6 +523,8 @@ impl RuntimeHandle {
             )
         })?;
 
+        let msg_kind = msg.kind_name();
+
         // Register for the response before sending the request.
         let rx = self.router.register(request_id);
 
@@ -496,6 +533,29 @@ impl RuntimeHandle {
             .map_err(|_| MidgeError::Internal("Runtime channel closed".to_string()))?;
 
         // Block waiting for the single response.
+        // If debug-wait mode is enabled, emit a periodic warning to help
+        // diagnose hangs (e.g., CloudFirst waiting on CloudAck).
+        if std::env::var_os("MIDGE_DEBUG_WAIT").is_some() {
+            let mut waited = std::time::Duration::from_secs(0);
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    Ok(resp) => return Ok(resp),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                        waited += std::time::Duration::from_secs(2);
+                        eprintln!(
+                            "[midge] still waiting for response: request_id={request_id} kind={msg_kind} waited={:?}",
+                            waited
+                        );
+                    }
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        return Err(MidgeError::Internal(
+                            "Response channel closed".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
         rx.recv()
             .map_err(|_| MidgeError::Internal("Response channel closed".to_string()))
     }
@@ -574,7 +634,7 @@ impl Runtime {
     /// Start the runtime event loop in a background thread.
     ///
     /// The returned handle can be used from any thread to submit work.
-    pub fn start(mut self, state: RuntimeState) -> MidgeResult<RuntimeHandle> {
+    pub fn start(self, state: RuntimeState) -> MidgeResult<RuntimeHandle> {
         self.start_with_config(state, RuntimeConfig::default())
     }
 

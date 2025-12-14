@@ -132,6 +132,14 @@ impl WalActor {
         !self.pending_cloud_writes.is_empty()
     }
 
+    pub fn pending_cloud_writes_len(&self) -> usize {
+        self.pending_cloud_writes.len()
+    }
+
+    pub fn bytes_since_sync(&self) -> usize {
+        self.bytes_since_sync
+    }
+
     /// Append a record to the WAL
     ///
     /// - Strict: fsync immediately + apply to memtable + respond
@@ -612,6 +620,34 @@ impl WalActor {
             synced_seq = state.wal.last_synced_seq,
             local_durable = state.wal.local_durable_seq,
             "WAL sync"
+        );
+
+        Ok(())
+    }
+
+    /// Flush WAL buffers without fsync.
+    ///
+    /// This is used by CloudFirst durability, where local WAL durability is
+    /// not the source of truth. We still need bytes to be readable from the
+    /// local segment file before upload, but we avoid the cost of fsync.
+    pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+        let pending = state.wal.pending_writes;
+
+        if let Some(writer) = &mut self.writer {
+            writer.flush()?;
+        }
+
+        // Treat everything appended so far as ready-to-ship.
+        state.wal.last_synced_seq = state.sequence;
+        state.wal.local_durable_seq = state.sequence;
+        state.wal.pending_writes = 0;
+        self.pending_sync_count = 0;
+        self.bytes_since_sync = 0;
+
+        tracing::debug!(
+            pending_writes = pending,
+            flushed_seq = state.wal.last_synced_seq,
+            "WAL flush (CloudFirst upload)"
         );
 
         Ok(())

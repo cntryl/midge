@@ -29,6 +29,7 @@ use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutco
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 
 /// Status of a cloud upload operation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,9 @@ pub struct HybridStorage {
     upload_queue: Arc<Mutex<VecDeque<UploadState>>>,
     /// Completed events ready for polling
     event_queue: Arc<Mutex<VecDeque<StorageEvent>>>,
+
+    /// Dedicated WAL upload worker sender.
+    wal_upload_tx: mpsc::Sender<UploadState>,
 }
 
 impl HybridStorage {
@@ -84,12 +88,129 @@ impl HybridStorage {
         policy: policy::StorageBudgetPolicy,
     ) -> Self {
         let budget_actor = actor::StorageBudgetActor::new(policy);
+
+        let upload_queue: Arc<Mutex<VecDeque<UploadState>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let event_queue: Arc<Mutex<VecDeque<StorageEvent>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+        // Single background worker for WAL uploads.
+        // This avoids spawning one OS thread per segment, which is extremely
+        // expensive under CloudFirst + synchronous write APIs (e.g. 10k puts).
+        let (wal_upload_tx, wal_upload_rx) = mpsc::channel::<UploadState>();
+        {
+            let cloud = Arc::clone(&cloud);
+            let event_queue = Arc::clone(&event_queue);
+            let upload_queue = Arc::clone(&upload_queue);
+
+            std::thread::Builder::new()
+                .name("midge-wal-uploader".to_string())
+                .spawn(move || {
+                    while let Ok(upload) = wal_upload_rx.recv() {
+                        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
+                            && upload.segment_id % 1000 == 0
+                        {
+                            eprintln!(
+                                "[midge] CloudFirst upload start: segment_id={} max_sequence={} path={:?}",
+                                upload.segment_id, upload.max_sequence, upload.local_path
+                            );
+                        }
+                        match std::fs::read(&upload.local_path) {
+                            Ok(data) => {
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                let cloud_key = format!("wal/{}.wal", upload.segment_id);
+                                cloud.submit_write(cloud_key, data, tx);
+
+                                match rx.recv() {
+                                    Ok(StorageEvent::WriteComplete { result, .. }) if result.is_ok() => {
+                                        let mut events = event_queue
+                                            .lock()
+                                            .expect("event_queue lock poisoned");
+                                        events.push_back(StorageEvent::CloudAck {
+                                            segment_id: upload.segment_id,
+                                            max_sequence: upload.max_sequence,
+                                        });
+
+                                        let mut queue = upload_queue
+                                            .lock()
+                                            .expect("upload_queue lock poisoned");
+                                        if let Some(item) =
+                                            queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
+                                        {
+                                            item.status = UploadStatus::Completed;
+                                        }
+
+                                        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
+                                            && upload.segment_id % 1000 == 0
+                                        {
+                                            eprintln!(
+                                                "[midge] CloudFirst upload ack: segment_id={} max_sequence={}",
+                                                upload.segment_id, upload.max_sequence
+                                            );
+                                        }
+                                    }
+                                    Ok(StorageEvent::WriteComplete { result, .. }) => {
+                                        let error = match result {
+                                            StorageOutcome::Err(e) => e,
+                                            _ => "Unknown error".to_string(),
+                                        };
+                                        let mut events = event_queue
+                                            .lock()
+                                            .expect("event_queue lock poisoned");
+                                        events.push_back(StorageEvent::CloudFail {
+                                            segment_id: upload.segment_id,
+                                            error: error.clone(),
+                                        });
+
+                                        let mut queue = upload_queue
+                                            .lock()
+                                            .expect("upload_queue lock poisoned");
+                                        if let Some(item) =
+                                            queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
+                                        {
+                                            item.status = UploadStatus::Failed(error);
+                                        }
+                                    }
+                                    _ => {
+                                        let mut events = event_queue
+                                            .lock()
+                                            .expect("event_queue lock poisoned");
+                                        events.push_back(StorageEvent::CloudFail {
+                                            segment_id: upload.segment_id,
+                                            error: "Channel error".to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let mut events =
+                                    event_queue.lock().expect("event_queue lock poisoned");
+                                events.push_back(StorageEvent::CloudFail {
+                                    segment_id: upload.segment_id,
+                                    error: format!("Failed to read local WAL segment: {e}"),
+                                });
+
+                                let mut queue =
+                                    upload_queue.lock().expect("upload_queue lock poisoned");
+                                if let Some(item) =
+                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
+                                {
+                                    item.status = UploadStatus::Failed(format!(
+                                        "Failed to read local WAL segment: {e}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                })
+                .expect("failed to spawn WAL upload worker");
+        }
+
         Self {
             local,
             cloud,
             budget_actor: Arc::new(Mutex::new(budget_actor)),
-            upload_queue: Arc::new(Mutex::new(VecDeque::new())),
-            event_queue: Arc::new(Mutex::new(VecDeque::new())),
+            upload_queue,
+            event_queue,
+            wal_upload_tx,
         }
     }
 
@@ -163,7 +284,8 @@ impl HybridStorage {
                 UploadStatus::Pending => {
                     // Start upload
                     upload.status = UploadStatus::InProgress;
-                    self.initiate_cloud_upload(upload.clone());
+                    // Send to the dedicated worker; avoid per-upload thread spawn.
+                    let _ = self.wal_upload_tx.send(upload.clone());
                 }
                 UploadStatus::Completed => {
                     completed_indices.push(idx);
@@ -195,100 +317,7 @@ impl HybridStorage {
         }
     }
 
-    /// Initiate cloud upload for a WAL segment
-    ///
-    /// **WAL DURABILITY PIPELINE ONLY**
-    ///
-    /// This method directly calls cloud.submit_write() for WAL segments.
-    /// It does NOT go through HybridStorage::submit_write().
-    /// This ensures WAL durability is independent of object storage logic.
-    fn initiate_cloud_upload(&self, upload: UploadState) {
-        let cloud = Arc::clone(&self.cloud);
-        let event_queue = Arc::clone(&self.event_queue);
-        let upload_queue = Arc::clone(&self.upload_queue);
-
-        // Read local file and upload to cloud
-        // This happens asynchronously in the cloud backend
-        std::thread::spawn(move || {
-            match std::fs::read(&upload.local_path) {
-                Ok(data) => {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let cloud_key = format!("wal/{}.wal", upload.segment_id);
-
-                    cloud.submit_write(cloud_key, data, tx);
-
-                    match rx.recv() {
-                        Ok(StorageEvent::WriteComplete { result, .. }) => {
-                            if result.is_ok() {
-                                // Upload successful - emit CloudAck
-                                let mut events =
-                                    event_queue.lock().expect("event_queue lock poisoned");
-                                events.push_back(StorageEvent::CloudAck {
-                                    segment_id: upload.segment_id,
-                                    max_sequence: upload.max_sequence,
-                                });
-
-                                // Mark as completed in upload queue
-                                let mut queue =
-                                    upload_queue.lock().expect("upload_queue lock poisoned");
-                                if let Some(item) =
-                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
-                                {
-                                    item.status = UploadStatus::Completed;
-                                }
-
-                                tracing::info!(
-                                    segment_id = upload.segment_id,
-                                    max_sequence = upload.max_sequence,
-                                    "Cloud upload successful"
-                                );
-                            } else {
-                                // Upload failed - emit CloudFail
-                                let error = match result {
-                                    StorageOutcome::Err(e) => e,
-                                    _ => "Unknown error".to_string(),
-                                };
-
-                                let mut events =
-                                    event_queue.lock().expect("event_queue lock poisoned");
-                                events.push_back(StorageEvent::CloudFail {
-                                    segment_id: upload.segment_id,
-                                    error: error.clone(),
-                                });
-
-                                // Mark as failed in upload queue
-                                let mut queue =
-                                    upload_queue.lock().expect("upload_queue lock poisoned");
-                                if let Some(item) =
-                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
-                                {
-                                    item.status = UploadStatus::Failed(error);
-                                }
-                            }
-                        }
-                        _ => {
-                            // Channel error - mark as failed
-                            let mut events = event_queue.lock().expect("event_queue lock poisoned");
-                            events.push_back(StorageEvent::CloudFail {
-                                segment_id: upload.segment_id,
-                                error: "Channel error".to_string(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Failed to read local file
-                    let mut events = event_queue.lock().expect("event_queue lock poisoned");
-                    events.push_back(StorageEvent::CloudFail {
-                        segment_id: upload.segment_id,
-                        error: format!("Failed to read local file: {:?}", e),
-                    });
-                }
-            }
-        });
-    }
-
-    /// Try to reserve space for a flush; returns the reservation result
+    /// Try to reserve space for an upcoming flush.
     pub fn reserve_for_flush(&self, est_size: u64) -> actor::ReservationResult {
         let mut actor = self
             .budget_actor

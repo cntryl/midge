@@ -178,20 +178,33 @@ impl EventLoop {
             return;
         }
 
-        // In CloudFirst, synchronous callers block until CloudAck.
-        // If we only flush on a timer, tight loops can effectively become
-        // "one upload per 25ms", which looks like a hang.
+        // CloudFirst rotate/upload policy.
+        //
+        // Goals:
+        // - Guarantee forward progress for a single synchronous caller (upper-bound latency).
+        // - Allow batching under concurrency (avoid 1 upload per write).
+        //
+        // Note: A single-threaded caller awaiting CloudAck cannot contribute additional writes
+        // to the batch, so max-delay ensures we still flush promptly in that case.
+        const CLOUDFIRST_MIN_SEGMENT_BYTES: usize = 64 * 1024; // reuse batched threshold
+        const CLOUDFIRST_MAX_FLUSH_DELAY: Duration = Duration::from_millis(1);
+        const CLOUDFIRST_MAX_PENDING_WRITES: usize = 128;
+
+        let cloud_pending = self.wal_actor.pending_cloud_writes_len();
+        let bytes_buffered = self.wal_actor.bytes_since_sync();
         let flush_due = self.wal_actor.should_sync_batch()
-            || self.wal_actor.has_pending_cloud_writes()
-            || self.last_cloud_flush.elapsed() >= Duration::from_millis(25);
+            || (cloud_pending > 0
+                && (bytes_buffered >= CLOUDFIRST_MIN_SEGMENT_BYTES
+                    || cloud_pending >= CLOUDFIRST_MAX_PENDING_WRITES
+                    || self.last_cloud_flush.elapsed() >= CLOUDFIRST_MAX_FLUSH_DELAY));
         if !flush_due {
             return;
         }
 
         let segment_id = self.state.wal.current_segment_id;
 
-        if let Err(e) = self.wal_actor.sync(&mut self.state) {
-            tracing::error!(error = %e, "CloudFirst: WAL sync failed");
+        if let Err(e) = self.wal_actor.flush_for_cloud_upload(&mut self.state) {
+            tracing::error!(error = %e, "CloudFirst: WAL flush failed");
             return;
         }
 
@@ -203,6 +216,16 @@ impl EventLoop {
         let max_sequence = self.state.wal.local_durable_seq;
         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
+
+        if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some() {
+            // Throttle: log every 1000 segments to avoid noise.
+            if segment_id.is_multiple_of(1000) {
+                eprintln!(
+                    "[midge] CloudFirst flush: segment_id={segment_id} max_sequence={max_sequence} pending_cloud={} ",
+                    self.wal_actor.has_pending_cloud_writes()
+                );
+            }
+        }
         self.last_cloud_flush = Instant::now();
     }
 
@@ -225,11 +248,26 @@ impl EventLoop {
     /// Main event loop — runs until Shutdown message or channel close.
     pub fn run(&mut self, msg_rx: Receiver<RuntimeMsg>) {
         loop {
-            let msg = match msg_rx.recv_timeout(Duration::from_millis(5)) {
+            // CloudFirst needs fast ticking while callers are blocked waiting for CloudAck.
+            // A fixed 5ms recv_timeout creates a hard floor of ~5ms per write.
+            let cloudfirst_draining = self.wal_actor.is_cloud_first() && self.wal_actor.has_pending_cloud_writes();
+            let timeout = if cloudfirst_draining {
+                // No artificial delay while synchronous callers are waiting.
+                Duration::from_micros(0)
+            } else {
+                Duration::from_millis(5)
+            };
+
+            let msg = match msg_rx.recv_timeout(timeout) {
                 Ok(msg) => msg,
                 Err(RecvTimeoutError::Timeout) => {
                     self.maybe_flush_cloudfirst_wal();
                     self.tick_hybrid_storage();
+
+                    // Avoid pegging a core when we're actively draining CloudFirst.
+                    if cloudfirst_draining {
+                        std::thread::yield_now();
+                    }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
