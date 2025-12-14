@@ -28,11 +28,28 @@ pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::wal::DurabilityPolicy;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+
+/// Runtime configuration for wiring durability/storage behavior.
+#[derive(Clone)]
+pub struct RuntimeConfig {
+    pub wal_durability_policy: DurabilityPolicy,
+    pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            wal_durability_policy: DurabilityPolicy::Batched,
+            hybrid_storage: None,
+        }
+    }
+}
 
 /// Global request ID counter for routing responses to correct requesters.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -558,6 +575,15 @@ impl Runtime {
     ///
     /// The returned handle can be used from any thread to submit work.
     pub fn start(mut self, state: RuntimeState) -> MidgeResult<RuntimeHandle> {
+        self.start_with_config(state, RuntimeConfig::default())
+    }
+
+    /// Start the runtime event loop with explicit configuration.
+    pub fn start_with_config(
+        mut self,
+        state: RuntimeState,
+        config: RuntimeConfig,
+    ) -> MidgeResult<RuntimeHandle> {
         let msg_rx = self.msg_rx;
         let trace_enabled = self.trace_enabled;
         let router = self.router.clone();
@@ -574,7 +600,7 @@ impl Runtime {
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
             .spawn(move || {
-                match EventLoop::new(state, trace_enabled, router) {
+                match EventLoop::new(state, trace_enabled, router, config) {
                     Ok(mut event_loop) => {
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));

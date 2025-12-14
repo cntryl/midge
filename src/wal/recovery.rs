@@ -1,15 +1,17 @@
-//! WAL recovery - replay WAL segments to restore state after crash
+//! WAL recovery - replay WAL files to restore state after crash
 //!
-//! On startup, all persistent WAL segments are replayed to reconstruct the
-//! memtables for each column family. This ensures durability: any operation
-//! written to WAL before crash is recovered.
+//! On startup, persistent WAL files are replayed to reconstruct the
+//! memtables for each column family.
+//!
+//! Recovery order:
+//! 1) Rotated segment files: `{segment_id}.wal` in ascending segment_id order
+//! 2) Active file: `wal.log` (if present)
 
-use super::fs::FsWalReader;
-use super::traits::WalReader;
 use super::types::{ColumnFamilyId, WalOpKind, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::{Memtable, SkipListMemtable};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::instrument;
@@ -88,51 +90,52 @@ pub fn replay_wal(
 
     tracing::info!(dir = ?wal_dir, "starting wal replay");
 
-    let mut reader = match FsWalReader::new(wal_dir) {
-        Ok(r) => r,
-        Err(MidgeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(stats),
-        Err(e) => return Err(e),
-    };
+    // Collect replay files: rotated segments first, then wal.log.
+    let mut segment_files: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    let mut wal_log_path: Option<std::path::PathBuf> = None;
 
-    let result = reader.replay(0, |record| {
-        // Always count records, even if buffered/ignored.
-        stats.record(record);
+    for entry in std::fs::read_dir(wal_dir).map_err(MidgeError::Io)? {
+        let entry = entry.map_err(MidgeError::Io)?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
 
-        match record.op {
-            WalOpKind::TxnBegin => {
-                if let Some(txn_id) = record.txn_id {
-                    begun_txns.insert(txn_id);
-                    open_txns.entry(txn_id).or_default();
-                }
-                Ok(())
-            }
-            WalOpKind::TxnCommit => {
-                if let Some(txn_id) = record.txn_id {
-                    if begun_txns.remove(&txn_id) {
-                        if let Some(records) = open_txns.remove(&txn_id) {
-                            for buffered in &records {
-                                apply_record(buffered, memtables)?;
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
-            _ => {
-                if let Some(txn_id) = record.txn_id {
-                    if begun_txns.contains(&txn_id) {
-                        open_txns
-                            .entry(txn_id)
-                            .or_default()
-                            .push(record.clone());
-                        return Ok(());
-                    }
-                }
+        if file_name == "wal.log" {
+            wal_log_path = Some(path);
+            continue;
+        }
 
-                apply_record(record, memtables)
+        // Match `{segment_id}.wal`
+        if let Some(segment_str) = file_name.strip_suffix(".wal") {
+            if let Ok(segment_id) = segment_str.parse::<u64>() {
+                segment_files.push((segment_id, path));
             }
         }
-    });
+    }
+
+    segment_files.sort_by_key(|(id, _)| *id);
+
+    let mut replay_paths: Vec<std::path::PathBuf> =
+        segment_files.into_iter().map(|(_, p)| p).collect();
+    if let Some(wal_log) = wal_log_path {
+        replay_paths.push(wal_log);
+    }
+
+    // Replay each file in order.
+    let mut result: MidgeResult<()> = Ok(());
+    for file_path in replay_paths {
+        result = replay_wal_file(
+            &file_path,
+            &mut stats,
+            memtables,
+            &mut open_txns,
+            &mut begun_txns,
+        );
+        if result.is_err() {
+            break;
+        }
+    }
 
     match result {
         Ok(()) => {
@@ -156,6 +159,86 @@ pub fn replay_wal(
             Err(e)
         }
     }
+}
+
+fn replay_wal_file(
+    file_path: &Path,
+    stats: &mut RecoveryStats,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
+    begun_txns: &mut std::collections::HashSet<u64>,
+) -> MidgeResult<()> {
+    let mut file = match std::fs::File::open(file_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(MidgeError::Io(e)),
+    };
+
+    let mut pos: u64 = 0;
+    loop {
+        // Read 4-byte length prefix
+        let mut len_buf = [0u8; 4];
+        match file.read_exact(&mut len_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // clean EOF
+            Err(e) => return Err(MidgeError::Io(e)),
+        }
+
+        let len = u32::from_le_bytes(len_buf) as usize;
+
+        // Read record payload
+        let mut buf = vec![0u8; len];
+        match file.read_exact(&mut buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(MidgeError::Corruption(format!(
+                    "Incomplete WAL record at pos {} in {:?} (len={})",
+                    pos, file_path, len
+                )))
+            }
+            Err(e) => return Err(MidgeError::Io(e)),
+        }
+
+        let record = super::encoding::decode(&buf[..])?;
+
+        // Always count records, even if buffered/ignored.
+        stats.record(&record);
+
+        match record.op {
+            WalOpKind::TxnBegin => {
+                if let Some(txn_id) = record.txn_id {
+                    begun_txns.insert(txn_id);
+                    open_txns.entry(txn_id).or_default();
+                }
+            }
+            WalOpKind::TxnCommit => {
+                if let Some(txn_id) = record.txn_id {
+                    if begun_txns.remove(&txn_id) {
+                        if let Some(records) = open_txns.remove(&txn_id) {
+                            for buffered in &records {
+                                apply_record(buffered, memtables)?;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                if let Some(txn_id) = record.txn_id {
+                    if begun_txns.contains(&txn_id) {
+                        open_txns.entry(txn_id).or_default().push(record);
+                        pos += 4 + len as u64;
+                        continue;
+                    }
+                }
+
+                apply_record(&record, memtables)?;
+            }
+        }
+
+        pos += 4 + len as u64;
+    }
+
+    Ok(())
 }
 
 #[instrument(

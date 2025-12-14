@@ -220,12 +220,45 @@ impl MidgeEngine {
             }
         };
 
-        // Create runtime state with memory_mode flag
-        let state = RuntimeState::new(db_path.clone(), memory_mode);
+        let mut runtime_config = crate::runtime::RuntimeConfig::default();
+        let state = match &opts.storage_mode {
+            crate::testkit::StorageMode::CloudBacked { .. } => {
+                // Local cache is ephemeral; cloud WAL is the source of truth.
+                // Simulate cloud with a separate filesystem-backed store under db_path.
+                let cloud_root = db_path.join("cloud_store");
+                let cloud_wal_dir = cloud_root.join("wal");
+                let _ = std::fs::create_dir_all(&cloud_wal_dir);
+
+                let local_backend = std::sync::Arc::new(crate::storage::FileSystem::new(
+                    db_path.join("hybrid_local"),
+                )?);
+                let cloud_backend = std::sync::Arc::new(crate::storage::FileSystem::new(
+                    cloud_root.clone(),
+                )?);
+
+                let hybrid = std::sync::Arc::new(crate::storage::HybridStorage::new(
+                    local_backend,
+                    cloud_backend,
+                ));
+
+                runtime_config.wal_durability_policy = crate::wal::DurabilityPolicy::CloudFirst;
+                runtime_config.hybrid_storage = Some(hybrid);
+
+                RuntimeState::new_with_recovery_dir(db_path.clone(), memory_mode, Some(cloud_wal_dir))
+            }
+            _ => {
+                runtime_config.wal_durability_policy = if opts.wal_sync {
+                    crate::wal::DurabilityPolicy::Strict
+                } else {
+                    crate::wal::DurabilityPolicy::Batched
+                };
+                RuntimeState::new(db_path.clone(), memory_mode)
+            }
+        };
 
         // Start runtime
         let (runtime, _) = Runtime::new()?;
-        let runtime_handle = runtime.start(state)?;
+        let runtime_handle = runtime.start_with_config(state, runtime_config)?;
 
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
         let column_families = dashmap::DashMap::new();

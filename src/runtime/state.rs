@@ -136,6 +136,19 @@ impl RuntimeState {
     /// Create new runtime state with the given database path.
     /// If memory_mode is true, filesystem is never touched.
     pub fn new(db_path: PathBuf, memory_mode: bool) -> Self {
+        Self::new_with_recovery_dir(db_path, memory_mode, None)
+    }
+
+    /// Create new runtime state with an optional override for WAL recovery.
+    ///
+    /// When `recovery_wal_dir` is provided, recovery replays WAL from that
+    /// directory (instead of `db_path/wal`). This is used for CloudFirst mode
+    /// where cloud WAL is the source of truth.
+    pub fn new_with_recovery_dir(
+        db_path: PathBuf,
+        memory_mode: bool,
+        recovery_wal_dir: Option<PathBuf>,
+    ) -> Self {
         // Only touch filesystem if not in memory mode
         if !memory_mode {
             if let Err(e) = std::fs::create_dir_all(&db_path) {
@@ -187,14 +200,16 @@ impl RuntimeState {
         }
 
         // WAL recovery (skip in memory mode)
-        let recovered_sequence = if !memory_mode && wal_dir.exists() {
+        let replay_dir = recovery_wal_dir.as_deref().unwrap_or(&wal_dir);
+        let recovered_sequence = if !memory_mode && replay_dir.exists() {
             let mut recovery_memtables = HashMap::new();
-            match crate::wal::recovery::replay_wal(&wal_dir, &mut recovery_memtables) {
+            match crate::wal::recovery::replay_wal(replay_dir, &mut recovery_memtables) {
                 Ok(stats) => {
                     tracing::info!(
                         records_recovered = stats.record_count,
                         bytes_recovered = stats.bytes,
                         max_sequence = ?stats.max_sequence,
+                        replay_dir = ?replay_dir,
                         "WAL recovery completed successfully"
                     );
                     for (cf_id, recovered_memtable) in recovery_memtables {
@@ -219,6 +234,40 @@ impl RuntimeState {
             0
         };
 
+        // WAL segment id recovery:
+        // On restart, we must continue segment ids beyond the highest existing rotated segment
+        // to avoid overwriting previously-uploaded cloud WAL segments (CloudFirst) or local
+        // WAL segments (LocalDisk). The source of truth is the replay directory.
+        let recovered_next_segment_id = if !memory_mode && replay_dir.exists() {
+            let mut max_segment_id: u64 = 0;
+
+            if let Ok(entries) = std::fs::read_dir(replay_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("wal") {
+                        continue;
+                    }
+                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+
+                    // Skip the active WAL file name if it happens to match the extension.
+                    if stem.eq_ignore_ascii_case("wal") {
+                        continue;
+                    }
+
+                    if let Ok(id) = stem.parse::<u64>() {
+                        max_segment_id = max_segment_id.max(id);
+                    }
+                }
+            }
+
+            // Segment ids start at 1.
+            max_segment_id.saturating_add(1).max(1)
+        } else {
+            1
+        };
+
         Self {
             db_path,
             wal_dir,
@@ -227,7 +276,10 @@ impl RuntimeState {
             next_txn_id: 0,
             column_families,
             manifest,
-            wal: WalState::default(),
+            wal: WalState {
+                current_segment_id: recovered_next_segment_id,
+                ..WalState::default()
+            },
             compaction: CompactionState::default(),
             cloud: CloudState::default(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB

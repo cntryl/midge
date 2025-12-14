@@ -9,7 +9,9 @@
 //! - All actor responses flow through `respond()`.
 
 use crossbeam::channel::Receiver;
+use crossbeam::channel::RecvTimeoutError;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::actors::{
     CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor,
@@ -38,6 +40,8 @@ pub struct EventLoop {
     hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     trace_enabled: bool,
 
+    last_cloud_flush: Instant,
+
     /// Per-request router (oneshot channels)
     router: Arc<ResponseRouter>,
 }
@@ -47,6 +51,7 @@ impl EventLoop {
         state: RuntimeState,
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
+        config: super::RuntimeConfig,
     ) -> crate::common::MidgeResult<Self> {
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
@@ -61,9 +66,9 @@ impl EventLoop {
 
         // Create actors - they handle memory_mode internally
         let flush_actor = FlushActor::new(&sst_dir, memory_mode)?;
-        let wal_actor = WalActor::new(wal_dir, crate::wal::DurabilityPolicy::Batched, memory_mode)?;
+        let wal_actor = WalActor::new(wal_dir, config.wal_durability_policy, memory_mode)?;
 
-        Ok(Self {
+        let mut event_loop = Self {
             state,
             flush_actor,
             compaction_actor: CompactionActor::new(sst_factory),
@@ -74,8 +79,131 @@ impl EventLoop {
             eviction_actor: None,
             hybrid_storage: None,
             trace_enabled,
+            last_cloud_flush: Instant::now(),
             router,
-        })
+        };
+
+        if let Some(storage) = config.hybrid_storage {
+            event_loop.set_hybrid_storage(storage);
+        }
+
+        Ok(event_loop)
+    }
+
+    fn tick_hybrid_storage(&mut self) {
+        let Some(storage) = &self.hybrid_storage else {
+            return;
+        };
+
+        // Drive the WAL upload pipeline.
+        storage.process_uploads();
+
+        // Consume completion events.
+        for event in storage.poll() {
+            match event {
+                crate::storage::StorageEvent::CloudAck {
+                    segment_id,
+                    max_sequence,
+                } => match self
+                    .wal_actor
+                    .handle_cloud_upload_complete(&mut self.state, segment_id, max_sequence)
+                {
+                    Ok(completions) => {
+                        for completion in completions {
+                            match completion {
+                                crate::runtime::actors::wal::CloudCompletion::WalAppend {
+                                    request_id,
+                                    sequence,
+                                } => {
+                                    self.respond(
+                                        request_id,
+                                        RuntimeResponse::WalAppended {
+                                            request_id,
+                                            sequence,
+                                        },
+                                    );
+                                }
+                                crate::runtime::actors::wal::CloudCompletion::WriteBatch {
+                                    request_id,
+                                    last_sequence,
+                                    op_count,
+                                } => {
+                                    self.respond(
+                                        request_id,
+                                        RuntimeResponse::WriteBatchAppended {
+                                            request_id,
+                                            last_sequence,
+                                            op_count,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to apply cloud ack");
+                    }
+                },
+                crate::storage::StorageEvent::CloudFail { segment_id, error } => {
+                    let request_ids = self.wal_actor.handle_cloud_upload_failed(segment_id, &error);
+                    for request_id in request_ids {
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: format!("Cloud durability failed: {error}"),
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn maybe_flush_cloudfirst_wal(&mut self) {
+        if !self.wal_actor.is_cloud_first() {
+            return;
+        }
+        let Some(storage) = &self.hybrid_storage else {
+            return;
+        };
+
+        if self.state.memory_mode {
+            return;
+        }
+
+        // No pending local records to ship.
+        if self.state.wal.pending_writes == 0 {
+            return;
+        }
+
+        // In CloudFirst, synchronous callers block until CloudAck.
+        // If we only flush on a timer, tight loops can effectively become
+        // "one upload per 25ms", which looks like a hang.
+        let flush_due = self.wal_actor.should_sync_batch()
+            || self.wal_actor.has_pending_cloud_writes()
+            || self.last_cloud_flush.elapsed() >= Duration::from_millis(25);
+        if !flush_due {
+            return;
+        }
+
+        let segment_id = self.state.wal.current_segment_id;
+
+        if let Err(e) = self.wal_actor.sync(&mut self.state) {
+            tracing::error!(error = %e, "CloudFirst: WAL sync failed");
+            return;
+        }
+
+        if let Err(e) = self.wal_actor.rotate(&mut self.state) {
+            tracing::error!(error = %e, "CloudFirst: WAL rotate failed");
+            return;
+        }
+
+        let max_sequence = self.state.wal.local_durable_seq;
+        let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
+        storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
+        self.last_cloud_flush = Instant::now();
     }
 
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
@@ -96,7 +224,20 @@ impl EventLoop {
 
     /// Main event loop — runs until Shutdown message or channel close.
     pub fn run(&mut self, msg_rx: Receiver<RuntimeMsg>) {
-        while let Ok(msg) = msg_rx.recv() {
+        loop {
+            let msg = match msg_rx.recv_timeout(Duration::from_millis(5)) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.maybe_flush_cloudfirst_wal();
+                    self.tick_hybrid_storage();
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+
+            self.maybe_flush_cloudfirst_wal();
+            self.tick_hybrid_storage();
+
             if self.trace_enabled {
                 tracing::trace!(?msg, "runtime received message");
             }
@@ -146,21 +287,41 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::WriteBatch { request_id, ops } => {
-                    let op_count = ops.len();
-                    let resp = self
-                        .wal_actor
-                        .append_batch(&mut self.state, ops)
-                        .map(|last_sequence| RuntimeResponse::WriteBatchAppended {
+                    if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
+                        self.respond(
                             request_id,
-                            last_sequence,
-                            op_count,
-                        })
-                        .unwrap_or_else(|e| RuntimeResponse::Error {
-                            request_id,
-                            message: e.to_string(),
-                        });
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "CloudFirst requires HybridStorage".to_string(),
+                            },
+                        );
+                    } else {
+                        match self.wal_actor.append_batch(&mut self.state, request_id, ops) {
+                            Ok((last_sequence, op_count, deferred)) => {
+                                if !deferred {
+                                    self.respond(
+                                        request_id,
+                                        RuntimeResponse::WriteBatchAppended {
+                                            request_id,
+                                            last_sequence,
+                                            op_count,
+                                        },
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::Error {
+                                        request_id,
+                                        message: e.to_string(),
+                                    },
+                                );
+                            }
+                        }
+                    }
 
-                    self.respond(request_id, resp);
+                    self.maybe_flush_cloudfirst_wal();
                 }
 
                 // =============================================================
@@ -264,31 +425,57 @@ impl EventLoop {
                     ttl_seconds,
                     insert_only,
                 } => {
+                    if self.wal_actor.is_cloud_first() && self.hybrid_storage.is_none() {
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "CloudFirst requires HybridStorage".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     let result = self.wal_actor.append(
                         &mut self.state,
+                        request_id,
                         cf_id,
                         bytes::Bytes::from(key),
                         value.map(bytes::Bytes::from),
                         insert_only,
                         ttl_seconds,
                     );
-                    let resp = result
-                        .map(|seq| RuntimeResponse::WalAppended {
-                            request_id,
-                            sequence: seq,
-                        })
-                        .unwrap_or_else(|e| RuntimeResponse::Error {
-                            request_id,
-                            message: e.to_string(),
-                        });
-                    self.respond(request_id, resp);
+                    match result {
+                        Ok((seq, deferred)) => {
+                            if !deferred {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WalAppended {
+                                        request_id,
+                                        sequence: seq,
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            );
+                        }
+                    }
 
                     // Auto-sync if batched threshold exceeded
-                    if self.wal_actor.should_sync_batch() {
+                    if !self.wal_actor.is_cloud_first() && self.wal_actor.should_sync_batch() {
                         if let Err(e) = self.wal_actor.sync(&mut self.state) {
                             tracing::warn!(error = %e, "failed to auto-sync WAL batch");
                         }
                     }
+
+                    self.maybe_flush_cloudfirst_wal();
                 }
 
                 RuntimeMsg::WalMerge {
@@ -789,7 +976,7 @@ mod tests {
     fn create_test_event_loop() -> crate::common::MidgeResult<EventLoop> {
         let state = create_test_state();
         let router = Arc::new(ResponseRouter::new());
-        EventLoop::new(state, false, router)
+        EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default())
     }
 
     // =========== EventLoop Creation Tests ===========
@@ -820,7 +1007,7 @@ mod tests {
         let router = Arc::new(ResponseRouter::new());
 
         // Act
-        let event_loop = EventLoop::new(state, false, router);
+        let event_loop = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default());
 
         // Assert
         assert!(event_loop.is_ok());
@@ -833,7 +1020,7 @@ mod tests {
         let router = Arc::new(ResponseRouter::new());
 
         // Act
-        let event_loop = EventLoop::new(state, true, router);
+        let event_loop = EventLoop::new(state, true, router, crate::runtime::RuntimeConfig::default());
 
         // Assert
         assert!(event_loop.is_ok());
@@ -879,7 +1066,7 @@ mod tests {
         let router = Arc::new(ResponseRouter::new());
 
         // Act
-        let event_loop = EventLoop::new(state, false, router.clone());
+        let event_loop = EventLoop::new(state, false, router.clone(), crate::runtime::RuntimeConfig::default());
 
         // Assert
         assert!(event_loop.is_ok());
@@ -895,7 +1082,7 @@ mod tests {
 
         // Act - Create event loop (should not modify state invariants during init)
         let router = Arc::new(ResponseRouter::new());
-        let result = EventLoop::new(state, false, router);
+        let result = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default());
 
         // Assert
         assert!(result.is_ok());
@@ -940,8 +1127,8 @@ mod tests {
         let router2 = Arc::new(ResponseRouter::new());
 
         // Act
-        let event_loop1 = EventLoop::new(state1, false, router1).expect("Should create");
-        let event_loop2 = EventLoop::new(state2, true, router2).expect("Should create");
+        let event_loop1 = EventLoop::new(state1, false, router1, crate::runtime::RuntimeConfig::default()).expect("Should create");
+        let event_loop2 = EventLoop::new(state2, true, router2, crate::runtime::RuntimeConfig::default()).expect("Should create");
 
         // Assert
         assert!(!event_loop1.trace_enabled);
@@ -1027,7 +1214,7 @@ mod tests {
         let router_clone = router.clone();
 
         // Act
-        let _event_loop = EventLoop::new(state, false, router).expect("Should create");
+        let _event_loop = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default()).expect("Should create");
 
         // Assert - Router is properly stored
         // The router's methods can be called independently
@@ -1063,7 +1250,7 @@ mod tests {
 
         // Act
         let router = Arc::new(ResponseRouter::new());
-        let result = EventLoop::new(state, false, router);
+        let result = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default());
 
         // Assert
         assert!(result.is_ok());
@@ -1076,7 +1263,7 @@ mod tests {
 
         // Act
         let router = Arc::new(ResponseRouter::new());
-        let result = EventLoop::new(state, false, router);
+        let result = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default());
 
         // Assert
         assert!(result.is_ok());
