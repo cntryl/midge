@@ -40,24 +40,9 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// Completion produced after a CloudAck advances cloud durability.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CloudCompletion {
-    WalAppend {
-        request_id: u64,
-        sequence: u64,
-    },
-    WriteBatch {
-        request_id: u64,
-        last_sequence: u64,
-        op_count: usize,
-    },
-}
-
 #[derive(Debug)]
 enum PendingCloudWrite {
     Single {
-        request_id: u64,
         cf_id: u32,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
@@ -65,9 +50,7 @@ enum PendingCloudWrite {
         expiration: Option<u64>,
     },
     Batch {
-        request_id: u64,
         commit_sequence: u64,
-        op_count: usize,
         ops: Vec<BatchApplyOp>,
     },
 }
@@ -165,7 +148,7 @@ impl WalActor {
     pub fn append(
         &mut self,
         state: &mut RuntimeState,
-        request_id: u64,
+        _request_id: u64,
         cf_id: u32,
         key: Bytes,
         value: Option<Bytes>,
@@ -239,7 +222,6 @@ impl WalActor {
                 // Queue write for cloud durability confirmation.
                 // Memtable update + response happen in handle_cloud_upload_complete.
                 self.queue_cloud_write(
-                    request_id,
                     cf_id,
                     key.to_vec(),
                     value.as_ref().map(|v| v.to_vec()),
@@ -267,7 +249,7 @@ impl WalActor {
     pub fn append_batch(
         &mut self,
         state: &mut RuntimeState,
-        request_id: u64,
+        _request_id: u64,
         ops: Vec<crate::runtime::WriteBatchOp>,
     ) -> MidgeResult<(u64, usize, bool)> {
         if ops.is_empty() {
@@ -398,9 +380,7 @@ impl WalActor {
             // Atomic visibility after cloud durability (gate on commit seq).
             self.pending_cloud_writes
                 .push_back(PendingCloudWrite::Batch {
-                    request_id,
                     commit_sequence: last_sequence,
-                    op_count,
                     ops: apply_ops,
                 });
         } else {
@@ -659,7 +639,6 @@ impl WalActor {
 
         if let Some(writer) = &mut self.writer {
             writer.flush()?;
-            writer.sync()?;
         }
 
         // Treat everything appended so far as ready-to-ship.
@@ -707,13 +686,13 @@ impl WalActor {
     /// Handle cloud upload completion (CloudFirst durability)
     ///
     /// Updates cloud_durable_seq and completes any pending writes
-    /// by applying them to memtable and returning request_ids to complete.
+    /// by applying them to memtable.
     pub fn handle_cloud_upload_complete(
         &mut self,
         state: &mut RuntimeState,
         segment_id: u64,
         max_seq_in_segment: u64,
-    ) -> MidgeResult<Vec<CloudCompletion>> {
+    ) -> MidgeResult<()> {
         // Update cloud durability frontier
         state.wal.cloud_durable_seq = state.wal.cloud_durable_seq.max(max_seq_in_segment);
 
@@ -723,9 +702,7 @@ impl WalActor {
             "Cloud upload complete"
         );
 
-        // Apply pending writes to memtable and collect completed request_ids
-        let mut completed = Vec::new();
-
+        // Apply pending writes to memtable.
         while let Some(pending) = self.pending_cloud_writes.front() {
             let gate_seq = match pending {
                 PendingCloudWrite::Single { sequence, .. } => *sequence,
@@ -745,7 +722,6 @@ impl WalActor {
 
             match pending {
                 PendingCloudWrite::Single {
-                    request_id,
                     cf_id,
                     key,
                     value,
@@ -755,16 +731,10 @@ impl WalActor {
                     let key_bytes = Bytes::from(key);
                     let value_bytes = value.map(Bytes::from);
                     self.apply_to_memtable(state, cf_id, &key_bytes, &value_bytes, expiration)?;
-
-                    completed.push(CloudCompletion::WalAppend {
-                        request_id,
-                        sequence,
-                    });
+                    let _ = sequence;
                 }
                 PendingCloudWrite::Batch {
-                    request_id,
                     commit_sequence,
-                    op_count,
                     ops,
                 } => {
                     for op in ops {
@@ -788,39 +758,29 @@ impl WalActor {
                             }
                         }
                     }
-
-                    completed.push(CloudCompletion::WriteBatch {
-                        request_id,
-                        last_sequence: commit_sequence,
-                        op_count,
-                    });
+                    let _ = commit_sequence;
                 }
             }
         }
 
-        Ok(completed)
+        Ok(())
     }
 
-    pub fn handle_cloud_upload_failed(&mut self, segment_id: u64, error: &str) -> Vec<u64> {
+    pub fn handle_cloud_upload_failed(&mut self, segment_id: u64, error: &str) {
         tracing::error!(segment_id, error, "Cloud upload failed");
 
         // Conservative behavior: fail all pending CloudFirst requests.
         // We cannot claim durability for any queued writes.
-        let mut request_ids = Vec::new();
         while let Some(pending) = self.pending_cloud_writes.pop_front() {
             match pending {
-                PendingCloudWrite::Single { request_id, .. }
-                | PendingCloudWrite::Batch { request_id, .. } => request_ids.push(request_id),
+                PendingCloudWrite::Single { .. } | PendingCloudWrite::Batch { .. } => {}
             }
         }
-
-        request_ids
     }
 
     /// Queue a write waiting for cloud durability (CloudFirst mode)
     pub fn queue_cloud_write(
         &mut self,
-        request_id: u64,
         cf_id: u32,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
@@ -829,7 +789,6 @@ impl WalActor {
     ) {
         self.pending_cloud_writes
             .push_back(PendingCloudWrite::Single {
-                request_id,
                 cf_id,
                 key,
                 value,
@@ -837,7 +796,7 @@ impl WalActor {
                 expiration,
             });
 
-        tracing::trace!(request_id, sequence, "Queued write for cloud durability");
+        tracing::trace!(sequence, "Queued write for cloud durability");
     }
 
     /// Handle sync completion notification

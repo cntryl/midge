@@ -10,6 +10,7 @@
 
 use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
+use crossbeam::channel::TryRecvError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,8 +20,25 @@ use super::actors::{
 };
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
+use crate::common::KeyedGroupCommit;
 use crate::sst::traits::SstReader;
 use crate::sst::Memtable;
+
+#[derive(Debug, Clone)]
+enum CloudFirstWaiter {
+    WalAppend { request_id: u64, sequence: u64 },
+    WriteBatch {
+        request_id: u64,
+        last_sequence: u64,
+        op_count: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct CloudFirstInflightSegment {
+    enqueued_at: Instant,
+    max_sequence: u64,
+}
 
 /// Main synchronous event loop for the runtime.
 ///
@@ -38,12 +56,16 @@ pub struct EventLoop {
     eviction_actor: Option<EvictionActor>,
 
     hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+    hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     trace_enabled: bool,
 
     last_cloud_flush: Instant,
 
     // CloudFirst: track enqueue->ack per WAL segment.
-    cloudfirst_inflight: HashMap<u64, Instant>,
+    cloudfirst_inflight: HashMap<u64, CloudFirstInflightSegment>,
+
+    // CloudFirst: waiters grouped by WAL segment id.
+    cloudfirst_waiters: Option<KeyedGroupCommit<u64, CloudFirstWaiter>>,
 
     /// Per-request router (oneshot channels)
     router: Arc<ResponseRouter>,
@@ -59,6 +81,7 @@ impl EventLoop {
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
         let memory_mode = state.memory_mode;
+        let initial_segment_id = state.wal.current_segment_id;
 
         let sst_factory = if memory_mode {
             // Don't create SST factory in memory mode
@@ -81,11 +104,17 @@ impl EventLoop {
             manifest_actor: ManifestActor::new(),
             eviction_actor: None,
             hybrid_storage: None,
+            hybrid_storage_events: config.hybrid_storage_events.clone(),
             trace_enabled,
             last_cloud_flush: Instant::now(),
             cloudfirst_inflight: HashMap::new(),
+            cloudfirst_waiters: None,
             router,
         };
+
+        if event_loop.wal_actor.is_cloud_first() {
+            event_loop.cloudfirst_waiters = Some(KeyedGroupCommit::new(initial_segment_id));
+        }
 
         if let Some(storage) = config.hybrid_storage {
             event_loop.set_hybrid_storage(storage);
@@ -99,34 +128,76 @@ impl EventLoop {
             return;
         };
 
-            // Drive async storage uploads and drain completion events.
-            let storage_events = storage.process_uploads();
+        // Drive async storage uploads.
+        // In push-channel mode, completion events are delivered via `hybrid_storage_events`.
+        // In polling mode, `process_uploads()` returns completion events.
+        let storage_events = storage.process_uploads();
+        for event in storage_events {
+            self.handle_storage_event(event);
+        }
+    }
 
-            // Handle async storage completion events.
-            for event in storage_events {
-            match event {
-                crate::storage::StorageEvent::CloudAck {
-                    segment_id,
-                    max_sequence,
-                } => match self.wal_actor.handle_cloud_upload_complete(
-                    &mut self.state,
-                    segment_id,
-                    max_sequence,
-                ) {
-                    Ok(completions) => {
-                        if let Some(start) = self.cloudfirst_inflight.remove(&segment_id) {
+    fn drain_hybrid_storage_events(&mut self) {
+        let Some(rx) = &self.hybrid_storage_events else {
+            return;
+        };
+
+        let rx = rx.clone();
+
+        loop {
+            match rx.try_recv() {
+                Ok(event) => self.handle_storage_event(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn handle_storage_event(&mut self, event: crate::storage::StorageEvent) {
+        match event {
+            crate::storage::StorageEvent::CloudAck {
+                segment_id,
+                max_sequence,
+            } => match self.wal_actor.handle_cloud_upload_complete(
+                &mut self.state,
+                segment_id,
+                max_sequence,
+            ) {
+                Ok(()) => {
+                    // If cloud_durable_seq advanced past multiple segments,
+                    // complete all inflight segments whose max_sequence is now durable.
+                    let durable = self.state.wal.cloud_durable_seq;
+                    let mut ready: Vec<u64> = self
+                        .cloudfirst_inflight
+                        .iter()
+                        .filter_map(|(seg, info)| {
+                            if info.max_sequence <= durable {
+                                Some(*seg)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    ready.sort_unstable();
+
+                    for seg_id in ready {
+                        if let Some(info) = self.cloudfirst_inflight.remove(&seg_id) {
                             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                                 telemetry.metrics().record_cloudfirst_wal_ack_latency_us(
-                                    start.elapsed().as_micros() as u64,
+                                    info.enqueued_at.elapsed().as_micros() as u64,
                                 );
                             }
                         }
-                        for completion in completions {
-                            match completion {
-                                crate::runtime::actors::wal::CloudCompletion::WalAppend {
-                                    request_id,
-                                    sequence,
-                                } => {
+
+                        let waiters = self
+                            .cloudfirst_waiters
+                            .as_ref()
+                            .map(|w| w.complete(&seg_id))
+                            .unwrap_or_default();
+
+                        for w in waiters {
+                            match w {
+                                CloudFirstWaiter::WalAppend { request_id, sequence } => {
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WalAppended {
@@ -135,7 +206,7 @@ impl EventLoop {
                                         },
                                     );
                                 }
-                                crate::runtime::actors::wal::CloudCompletion::WriteBatch {
+                                CloudFirstWaiter::WriteBatch {
                                     request_id,
                                     last_sequence,
                                     op_count,
@@ -152,17 +223,22 @@ impl EventLoop {
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to apply cloud ack");
-                    }
-                },
-                crate::storage::StorageEvent::CloudFail { segment_id, error } => {
-                    // Drop inflight timing; the corresponding writes will error.
-                    let _ = self.cloudfirst_inflight.remove(&segment_id);
-                    let request_ids = self
-                        .wal_actor
-                        .handle_cloud_upload_failed(segment_id, &error);
-                    for request_id in request_ids {
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to apply cloud ack");
+                }
+            },
+            crate::storage::StorageEvent::CloudFail { segment_id, error } => {
+                // Drop inflight timing; the corresponding writes will error.
+                let _ = self.cloudfirst_inflight.remove(&segment_id);
+                self.wal_actor.handle_cloud_upload_failed(segment_id, &error);
+
+                if let Some(waiters) = self.cloudfirst_waiters.as_ref().map(|w| w.drain_all()) {
+                    for w in waiters {
+                        let request_id = match w {
+                            CloudFirstWaiter::WalAppend { request_id, .. }
+                            | CloudFirstWaiter::WriteBatch { request_id, .. } => request_id,
+                        };
                         self.respond(
                             request_id,
                             RuntimeResponse::Error {
@@ -172,8 +248,10 @@ impl EventLoop {
                         );
                     }
                 }
-                _ => {}
+
+                self.cloudfirst_inflight.clear();
             }
+            _ => {}
         }
     }
 
@@ -243,11 +321,22 @@ impl EventLoop {
             return;
         }
 
+        // Move waiters for the sealed segment into an inflight bucket keyed by `segment_id`.
+        if let Some(waiters) = &self.cloudfirst_waiters {
+            let _ = waiters.rotate_to(self.state.wal.current_segment_id);
+        }
+
         let max_sequence = self.state.wal.local_durable_seq;
         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
 
-        self.cloudfirst_inflight.insert(segment_id, Instant::now());
+        self.cloudfirst_inflight.insert(
+            segment_id,
+            CloudFirstInflightSegment {
+                enqueued_at: Instant::now(),
+                max_sequence,
+            },
+        );
 
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry
@@ -297,18 +386,48 @@ impl EventLoop {
                 Duration::from_millis(5)
             };
 
-            let msg = match msg_rx.recv_timeout(timeout) {
-                Ok(msg) => msg,
-                Err(RecvTimeoutError::Timeout) => {
-                    self.maybe_flush_cloudfirst_wal();
-                    self.tick_hybrid_storage();
-                    continue;
+            // Prefer reacting to storage events immediately (no polling floor).
+            let storage_rx_opt = self.hybrid_storage_events.clone();
+            let msg = if let Some(storage_rx) = storage_rx_opt {
+                crossbeam::channel::select! {
+                    recv(msg_rx) -> msg => match msg {
+                        Ok(msg) => Some(msg),
+                        Err(_) => None,
+                    },
+                    recv(storage_rx) -> ev => {
+                        if let Ok(ev) = ev {
+                            self.handle_storage_event(ev);
+                        }
+                        // Continue the loop; we didn't consume a RuntimeMsg.
+                        continue;
+                    },
+                    default(timeout) => {
+                        self.maybe_flush_cloudfirst_wal();
+                        self.tick_hybrid_storage();
+                        // Drain any push-channel events that arrived between ticks.
+                        self.drain_hybrid_storage_events();
+                        continue;
+                    }
                 }
-                Err(RecvTimeoutError::Disconnected) => break,
+            } else {
+                match msg_rx.recv_timeout(timeout) {
+                    Ok(msg) => Some(msg),
+                    Err(RecvTimeoutError::Timeout) => {
+                        self.maybe_flush_cloudfirst_wal();
+                        self.tick_hybrid_storage();
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => None,
+                }
+            };
+
+            let Some(msg) = msg else {
+                break;
             };
 
             self.maybe_flush_cloudfirst_wal();
             self.tick_hybrid_storage();
+            self.drain_hybrid_storage_events();
 
             if self.trace_enabled {
                 tracing::trace!(?msg, "runtime received message");
@@ -382,6 +501,12 @@ impl EventLoop {
                                             op_count,
                                         },
                                     );
+                                } else if let Some(waiters) = &self.cloudfirst_waiters {
+                                    waiters.join(CloudFirstWaiter::WriteBatch {
+                                        request_id,
+                                        last_sequence,
+                                        op_count,
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -530,6 +655,11 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
+                            } else if let Some(waiters) = &self.cloudfirst_waiters {
+                                waiters.join(CloudFirstWaiter::WalAppend {
+                                    request_id,
+                                    sequence: seq,
+                                });
                             }
                         }
                         Err(e) => {

@@ -319,3 +319,61 @@ fn should_handle_ten_thousand_keys_when_large_keyspace() {
         }
     });
 }
+
+#[test]
+fn should_batch_concurrent_puts_when_cloudfirst_mode() {
+    // Arrange
+    for_each_storage_mode(&["cloud"], |mode, opts| {
+        let cloud_wal_dir = match &opts.storage_mode {
+            cntryl_midge::testkit::StorageMode::CloudBacked { local_cache_path } => local_cache_path
+                .join("cloud_store")
+                .join("wal"),
+            _ => panic!("expected cloud storage mode"),
+        };
+
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family().clone();
+
+        let threads: usize = 16;
+        let puts_per_thread: usize = 200;
+        let total_puts: usize = threads * puts_per_thread;
+
+        // Act: concurrent single puts (each put still blocks on CloudAck)
+        std::thread::scope(|s| {
+            let engine_ref = &engine;
+            for t in 0..threads {
+                let cf = cf.clone();
+                s.spawn(move || {
+                    for i in 0..puts_per_thread {
+                        let key = format!("k_{t}_{i}");
+                        engine_ref.put(&cf, key.as_bytes(), b"value").expect("put");
+                    }
+                });
+            }
+        });
+
+        // Assert: correctness (spot-check)
+        for t in 0..threads {
+            for i in [0, puts_per_thread / 2, puts_per_thread - 1] {
+                let key = format!("k_{t}_{i}");
+                let got = engine.get(&cf, key.as_bytes()).expect("get");
+                assert!(got.is_some(), "missing key {key}");
+            }
+        }
+
+        // Assert: batching occurred (uploads/segments < puts)
+        let uploads: usize = std::fs::read_dir(&cloud_wal_dir)
+            .unwrap_or_else(|e| panic!("read_dir({cloud_wal_dir:?}) failed: {e}"))
+            .filter_map(|e| e.ok())
+            .filter(|e| match e.path().extension().and_then(|s| s.to_str()) {
+                Some("wal") => true,
+                _ => false,
+            })
+            .count();
+
+        assert!(
+            uploads < total_puts,
+            "expected batching: uploads={uploads} puts={total_puts}"
+        );
+    });
+}

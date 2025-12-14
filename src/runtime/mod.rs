@@ -38,6 +38,7 @@ use std::thread::{self, JoinHandle};
 pub struct RuntimeConfig {
     pub wal_durability_policy: DurabilityPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+    pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
 }
 
 impl Default for RuntimeConfig {
@@ -45,6 +46,7 @@ impl Default for RuntimeConfig {
         Self {
             wal_durability_policy: DurabilityPolicy::Batched,
             hybrid_storage: None,
+            hybrid_storage_events: None,
         }
     }
 }

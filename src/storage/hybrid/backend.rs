@@ -26,6 +26,7 @@ use super::actor;
 use super::policy;
 use super::state;
 use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
+use crossbeam::channel as cb;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -71,6 +72,11 @@ pub struct HybridStorage {
     /// Completed events ready for polling
     event_queue: Arc<Mutex<VecDeque<StorageEvent>>>,
 
+    /// Optional external event sink for CloudAck/CloudFail.
+    /// When set, upload completions are pushed directly to the runtime event loop
+    /// to avoid polling latency.
+    external_event_tx: Option<cb::Sender<StorageEvent>>,
+
     /// Dedicated WAL upload worker sender.
     wal_upload_tx: mpsc::Sender<UploadState>,
 }
@@ -78,7 +84,25 @@ pub struct HybridStorage {
 impl HybridStorage {
     /// Create a new hybrid storage with local and cloud backends and default policy
     pub fn new(local: Arc<dyn StorageBackend>, cloud: Arc<dyn StorageBackend>) -> Self {
-        Self::with_policy(local, cloud, policy::StorageBudgetPolicy::default())
+        Self::with_policy_and_event_sender(local, cloud, policy::StorageBudgetPolicy::default(), None)
+    }
+
+    /// Create a new hybrid storage with an external event sender.
+    ///
+    /// When `external_event_tx` is provided, CloudAck/CloudFail will be sent to it
+    /// as soon as they occur (in addition to internal bookkeeping), allowing the
+    /// runtime to react without polling.
+    pub fn new_with_event_sender(
+        local: Arc<dyn StorageBackend>,
+        cloud: Arc<dyn StorageBackend>,
+        external_event_tx: cb::Sender<StorageEvent>,
+    ) -> Self {
+        Self::with_policy_and_event_sender(
+            local,
+            cloud,
+            policy::StorageBudgetPolicy::default(),
+            Some(external_event_tx),
+        )
     }
 
     /// Create a new hybrid storage with a custom storage budget policy
@@ -86,6 +110,15 @@ impl HybridStorage {
         local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
+    ) -> Self {
+        Self::with_policy_and_event_sender(local, cloud, policy, None)
+    }
+
+    pub fn with_policy_and_event_sender(
+        local: Arc<dyn StorageBackend>,
+        cloud: Arc<dyn StorageBackend>,
+        policy: policy::StorageBudgetPolicy,
+        external_event_tx: Option<cb::Sender<StorageEvent>>,
     ) -> Self {
         let budget_actor = actor::StorageBudgetActor::new(policy);
 
@@ -99,6 +132,7 @@ impl HybridStorage {
         {
             let cloud = Arc::clone(&cloud);
             let event_queue = Arc::clone(&event_queue);
+            let external_event_tx = external_event_tx.clone();
 
             std::thread::Builder::new()
                 .name("midge-wal-uploader".to_string())
@@ -150,10 +184,14 @@ impl HybridStorage {
                                 }
                                 let mut events =
                                     event_queue.lock().expect("event_queue lock poisoned");
-                                events.push_back(StorageEvent::CloudAck {
+                                let ack = StorageEvent::CloudAck {
                                     segment_id: upload.segment_id,
                                     max_sequence: upload.max_sequence,
-                                });
+                                };
+                                events.push_back(ack.clone());
+                                if let Some(tx) = &external_event_tx {
+                                    let _ = tx.send(ack);
+                                }
 
                                 if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
                                     && upload.segment_id % 1000 == 0
@@ -174,19 +212,27 @@ impl HybridStorage {
                                 };
                                 let mut events =
                                     event_queue.lock().expect("event_queue lock poisoned");
-                                events.push_back(StorageEvent::CloudFail {
+                                let fail = StorageEvent::CloudFail {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
-                                });
+                                };
+                                events.push_back(fail.clone());
+                                if let Some(tx) = &external_event_tx {
+                                    let _ = tx.send(fail);
+                                }
                             }
                             _ => {
                                 let error = "Channel error".to_string();
                                 let mut events =
                                     event_queue.lock().expect("event_queue lock poisoned");
-                                events.push_back(StorageEvent::CloudFail {
+                                let fail = StorageEvent::CloudFail {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
-                                });
+                                };
+                                events.push_back(fail.clone());
+                                if let Some(tx) = &external_event_tx {
+                                    let _ = tx.send(fail);
+                                }
                             }
                         }
                     }
@@ -200,6 +246,7 @@ impl HybridStorage {
             budget_actor: Arc::new(Mutex::new(budget_actor)),
             upload_queue,
             event_queue,
+            external_event_tx,
             wal_upload_tx,
         }
     }
@@ -280,6 +327,12 @@ impl HybridStorage {
                 }
                 _ => {}
             }
+        }
+
+        // If we have an external event channel, CloudAck/CloudFail were already pushed.
+        // Returning them here would cause double-application in the runtime.
+        if self.external_event_tx.is_some() {
+            return Vec::new();
         }
 
         // 3) Schedule any eligible uploads.

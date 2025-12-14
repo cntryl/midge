@@ -220,6 +220,11 @@ name = "tier1_hotpath_wal"
 path = "benches/tier1_hotpath_wal.rs"
 harness = false
 
+[[bench]]
+name = "tier1_hotpath_singleflight"
+path = "benches/tier1_hotpath_singleflight.rs"
+harness = false
+
 # =============================================================================
 # Benchmarks — Tier 2: Subsystem (<8s)
 # =============================================================================
