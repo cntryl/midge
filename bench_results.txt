@@ -1,0 +1,6 @@
+hotpath_batch_put/100   time:   [256.09 ms 300.90 ms 349.09 ms]
+                        thrpt:  [286.46  elem/s 332.33  elem/s 390.48  elem/s]
+                 change:
+                        time:   [−11.802% +6.6684% +29.606%] (p = 0.54 > 0.05)
+                        thrpt:  [−22.843% −6.2515% +13.382%]
+                        No change in performance detected.

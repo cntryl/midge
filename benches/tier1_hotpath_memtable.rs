@@ -87,7 +87,7 @@ fn bench_put_batch(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
     group.throughput(Throughput::Elements(100));
 
-    // Pre-create keys and values
+    // Pre-create keys and values outside the hot loop
     let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
     let value = make_value(128);
 
