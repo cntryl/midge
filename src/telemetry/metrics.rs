@@ -41,6 +41,18 @@ pub struct Metrics {
     pub cloud_bytes_uploaded: Arc<AtomicU64>,
     pub cloud_bytes_downloaded: Arc<AtomicU64>,
 
+    // CloudFirst WAL durability flow
+    pub cloudfirst_wal_segments_sealed: Arc<AtomicU64>,
+    pub cloudfirst_wal_bytes_sealed: Arc<AtomicU64>,
+    pub cloudfirst_wal_seal_latency_us: Arc<AtomicU64>,
+
+    pub cloudfirst_wal_uploads_started: Arc<AtomicU64>,
+    pub cloudfirst_wal_uploads_completed: Arc<AtomicU64>,
+    pub cloudfirst_wal_uploads_failed: Arc<AtomicU64>,
+    pub cloudfirst_wal_upload_latency_us: Arc<AtomicU64>,
+
+    pub cloudfirst_wal_ack_latency_us: Arc<AtomicU64>,
+
     // Cache
     pub cache_hits: Arc<AtomicU64>,
     pub cache_misses: Arc<AtomicU64>,
@@ -73,11 +85,68 @@ impl Metrics {
             cloud_downloads: Arc::new(AtomicU64::new(0)),
             cloud_bytes_uploaded: Arc::new(AtomicU64::new(0)),
             cloud_bytes_downloaded: Arc::new(AtomicU64::new(0)),
+
+            cloudfirst_wal_segments_sealed: Arc::new(AtomicU64::new(0)),
+            cloudfirst_wal_bytes_sealed: Arc::new(AtomicU64::new(0)),
+            cloudfirst_wal_seal_latency_us: Arc::new(AtomicU64::new(0)),
+
+            cloudfirst_wal_uploads_started: Arc::new(AtomicU64::new(0)),
+            cloudfirst_wal_uploads_completed: Arc::new(AtomicU64::new(0)),
+            cloudfirst_wal_uploads_failed: Arc::new(AtomicU64::new(0)),
+            cloudfirst_wal_upload_latency_us: Arc::new(AtomicU64::new(0)),
+
+            cloudfirst_wal_ack_latency_us: Arc::new(AtomicU64::new(0)),
             cache_hits: Arc::new(AtomicU64::new(0)),
             cache_misses: Arc::new(AtomicU64::new(0)),
             write_stalls: Arc::new(AtomicU64::new(0)),
             enabled: _config.enabled && _config.enable_metrics,
         })
+    }
+
+    #[inline]
+    pub fn record_cloudfirst_wal_segment_sealed(&self, bytes: u64, seal_latency_us: u64) {
+        if self.enabled {
+            self.cloudfirst_wal_segments_sealed
+                .fetch_add(1, Ordering::Relaxed);
+            self.cloudfirst_wal_bytes_sealed
+                .fetch_add(bytes, Ordering::Relaxed);
+            self.cloudfirst_wal_seal_latency_us
+                .fetch_add(seal_latency_us, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_cloudfirst_wal_upload_started(&self) {
+        if self.enabled {
+            self.cloudfirst_wal_uploads_started
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_cloudfirst_wal_upload_completed(&self, upload_latency_us: u64) {
+        if self.enabled {
+            self.cloudfirst_wal_uploads_completed
+                .fetch_add(1, Ordering::Relaxed);
+            self.cloudfirst_wal_upload_latency_us
+                .fetch_add(upload_latency_us, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_cloudfirst_wal_upload_failed(&self) {
+        if self.enabled {
+            self.cloudfirst_wal_uploads_failed
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_cloudfirst_wal_ack_latency_us(&self, ack_latency_us: u64) {
+        if self.enabled {
+            self.cloudfirst_wal_ack_latency_us
+                .fetch_add(ack_latency_us, Ordering::Relaxed);
+        }
     }
 
     /// Record a put operation

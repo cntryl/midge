@@ -10,12 +10,12 @@
 
 use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::actors::{
-    CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor,
-    WalActor,
+    CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
 };
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
@@ -41,6 +41,9 @@ pub struct EventLoop {
     trace_enabled: bool,
 
     last_cloud_flush: Instant,
+
+    // CloudFirst: track enqueue->ack per WAL segment.
+    cloudfirst_inflight: HashMap<u64, Instant>,
 
     /// Per-request router (oneshot channels)
     router: Arc<ResponseRouter>,
@@ -80,6 +83,7 @@ impl EventLoop {
             hybrid_storage: None,
             trace_enabled,
             last_cloud_flush: Instant::now(),
+            cloudfirst_inflight: HashMap::new(),
             router,
         };
 
@@ -104,11 +108,19 @@ impl EventLoop {
                 crate::storage::StorageEvent::CloudAck {
                     segment_id,
                     max_sequence,
-                } => match self
-                    .wal_actor
-                    .handle_cloud_upload_complete(&mut self.state, segment_id, max_sequence)
-                {
+                } => match self.wal_actor.handle_cloud_upload_complete(
+                    &mut self.state,
+                    segment_id,
+                    max_sequence,
+                ) {
                     Ok(completions) => {
+                        if let Some(start) = self.cloudfirst_inflight.remove(&segment_id) {
+                            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                                telemetry.metrics().record_cloudfirst_wal_ack_latency_us(
+                                    start.elapsed().as_micros() as u64,
+                                );
+                            }
+                        }
                         for completion in completions {
                             match completion {
                                 crate::runtime::actors::wal::CloudCompletion::WalAppend {
@@ -145,7 +157,11 @@ impl EventLoop {
                     }
                 },
                 crate::storage::StorageEvent::CloudFail { segment_id, error } => {
-                    let request_ids = self.wal_actor.handle_cloud_upload_failed(segment_id, &error);
+                    // Drop inflight timing; the corresponding writes will error.
+                    let _ = self.cloudfirst_inflight.remove(&segment_id);
+                    let request_ids = self
+                        .wal_actor
+                        .handle_cloud_upload_failed(segment_id, &error);
                     for request_id in request_ids {
                         self.respond(
                             request_id,
@@ -186,27 +202,41 @@ impl EventLoop {
         //
         // Note: A single-threaded caller awaiting CloudAck cannot contribute additional writes
         // to the batch, so max-delay ensures we still flush promptly in that case.
-        const CLOUDFIRST_MIN_SEGMENT_BYTES: usize = 64 * 1024; // reuse batched threshold
-        const CLOUDFIRST_MAX_FLUSH_DELAY: Duration = Duration::from_millis(1);
-        const CLOUDFIRST_MAX_PENDING_WRITES: usize = 128;
+        // For cloud object uploads, very small segments create disproportionate overhead.
+        // Under sustained load we want multi-MB segments, but when there's only a single
+        // synchronous waiter we still want prompt progress.
+        const CLOUDFIRST_MIN_SEGMENT_BYTES: usize = 8 * 1024 * 1024; // 8MB
+        const CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG: Duration = Duration::from_millis(25);
+        const CLOUDFIRST_MAX_PENDING_WRITES: usize = 2048;
 
         let cloud_pending = self.wal_actor.pending_cloud_writes_len();
         let bytes_buffered = self.wal_actor.bytes_since_sync();
-        let flush_due = self.wal_actor.should_sync_batch()
-            || (cloud_pending > 0
+
+        // Important: do NOT use `should_sync_batch()` here.
+        // That threshold is tuned for local durability batching (~64KB) and would cause
+        // CloudFirst to rotate/upload far too frequently.
+        let flush_due = if cloud_pending <= 1 {
+            // Single synchronous waiter: cannot build a multi-write segment, so flush immediately
+            // to minimize added latency (don't wait for a timer).
+            cloud_pending > 0
+        } else {
+            cloud_pending > 0
                 && (bytes_buffered >= CLOUDFIRST_MIN_SEGMENT_BYTES
                     || cloud_pending >= CLOUDFIRST_MAX_PENDING_WRITES
-                    || self.last_cloud_flush.elapsed() >= CLOUDFIRST_MAX_FLUSH_DELAY));
+                    || self.last_cloud_flush.elapsed() >= CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG)
+        };
         if !flush_due {
             return;
         }
 
         let segment_id = self.state.wal.current_segment_id;
 
+        let seal_start = Instant::now();
         if let Err(e) = self.wal_actor.flush_for_cloud_upload(&mut self.state) {
             tracing::error!(error = %e, "CloudFirst: WAL flush failed");
             return;
         }
+        let seal_latency_us = seal_start.elapsed().as_micros() as u64;
 
         if let Err(e) = self.wal_actor.rotate(&mut self.state) {
             tracing::error!(error = %e, "CloudFirst: WAL rotate failed");
@@ -216,6 +246,14 @@ impl EventLoop {
         let max_sequence = self.state.wal.local_durable_seq;
         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
+
+        self.cloudfirst_inflight.insert(segment_id, Instant::now());
+
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            telemetry
+                .metrics()
+                .record_cloudfirst_wal_segment_sealed(bytes_buffered as u64, seal_latency_us);
+        }
 
         if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some() {
             // Throttle: log every 1000 segments to avoid noise.
@@ -250,10 +288,11 @@ impl EventLoop {
         loop {
             // CloudFirst needs fast ticking while callers are blocked waiting for CloudAck.
             // A fixed 5ms recv_timeout creates a hard floor of ~5ms per write.
-            let cloudfirst_draining = self.wal_actor.is_cloud_first() && self.wal_actor.has_pending_cloud_writes();
+            let cloudfirst_draining =
+                self.wal_actor.is_cloud_first() && self.wal_actor.has_pending_cloud_writes();
             let timeout = if cloudfirst_draining {
-                // No artificial delay while synchronous callers are waiting.
-                Duration::from_micros(0)
+                // Drain quickly, but avoid a 0-timeout busy-spin.
+                Duration::from_millis(1)
             } else {
                 Duration::from_millis(5)
             };
@@ -263,11 +302,6 @@ impl EventLoop {
                 Err(RecvTimeoutError::Timeout) => {
                     self.maybe_flush_cloudfirst_wal();
                     self.tick_hybrid_storage();
-
-                    // Avoid pegging a core when we're actively draining CloudFirst.
-                    if cloudfirst_draining {
-                        std::thread::yield_now();
-                    }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -334,7 +368,10 @@ impl EventLoop {
                             },
                         );
                     } else {
-                        match self.wal_actor.append_batch(&mut self.state, request_id, ops) {
+                        match self
+                            .wal_actor
+                            .append_batch(&mut self.state, request_id, ops)
+                        {
                             Ok((last_sequence, op_count, deferred)) => {
                                 if !deferred {
                                     self.respond(
@@ -1014,7 +1051,12 @@ mod tests {
     fn create_test_event_loop() -> crate::common::MidgeResult<EventLoop> {
         let state = create_test_state();
         let router = Arc::new(ResponseRouter::new());
-        EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default())
+        EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+        )
     }
 
     // =========== EventLoop Creation Tests ===========
@@ -1045,7 +1087,12 @@ mod tests {
         let router = Arc::new(ResponseRouter::new());
 
         // Act
-        let event_loop = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default());
+        let event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+        );
 
         // Assert
         assert!(event_loop.is_ok());
@@ -1058,7 +1105,12 @@ mod tests {
         let router = Arc::new(ResponseRouter::new());
 
         // Act
-        let event_loop = EventLoop::new(state, true, router, crate::runtime::RuntimeConfig::default());
+        let event_loop = EventLoop::new(
+            state,
+            true,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+        );
 
         // Assert
         assert!(event_loop.is_ok());
@@ -1104,7 +1156,12 @@ mod tests {
         let router = Arc::new(ResponseRouter::new());
 
         // Act
-        let event_loop = EventLoop::new(state, false, router.clone(), crate::runtime::RuntimeConfig::default());
+        let event_loop = EventLoop::new(
+            state,
+            false,
+            router.clone(),
+            crate::runtime::RuntimeConfig::default(),
+        );
 
         // Assert
         assert!(event_loop.is_ok());
@@ -1120,7 +1177,12 @@ mod tests {
 
         // Act - Create event loop (should not modify state invariants during init)
         let router = Arc::new(ResponseRouter::new());
-        let result = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default());
+        let result = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+        );
 
         // Assert
         assert!(result.is_ok());
@@ -1165,8 +1227,20 @@ mod tests {
         let router2 = Arc::new(ResponseRouter::new());
 
         // Act
-        let event_loop1 = EventLoop::new(state1, false, router1, crate::runtime::RuntimeConfig::default()).expect("Should create");
-        let event_loop2 = EventLoop::new(state2, true, router2, crate::runtime::RuntimeConfig::default()).expect("Should create");
+        let event_loop1 = EventLoop::new(
+            state1,
+            false,
+            router1,
+            crate::runtime::RuntimeConfig::default(),
+        )
+        .expect("Should create");
+        let event_loop2 = EventLoop::new(
+            state2,
+            true,
+            router2,
+            crate::runtime::RuntimeConfig::default(),
+        )
+        .expect("Should create");
 
         // Assert
         assert!(!event_loop1.trace_enabled);
@@ -1252,7 +1326,13 @@ mod tests {
         let router_clone = router.clone();
 
         // Act
-        let _event_loop = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default()).expect("Should create");
+        let _event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+        )
+        .expect("Should create");
 
         // Assert - Router is properly stored
         // The router's methods can be called independently
@@ -1288,7 +1368,12 @@ mod tests {
 
         // Act
         let router = Arc::new(ResponseRouter::new());
-        let result = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default());
+        let result = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+        );
 
         // Assert
         assert!(result.is_ok());
@@ -1301,7 +1386,12 @@ mod tests {
 
         // Act
         let router = Arc::new(ResponseRouter::new());
-        let result = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default());
+        let result = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+        );
 
         // Assert
         assert!(result.is_ok());

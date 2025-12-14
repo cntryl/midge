@@ -18,9 +18,7 @@ pub mod scheduler;
 pub mod state;
 pub mod task;
 
-pub use actors::{
-    CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor,
-};
+pub use actors::{CloudActor, CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
 pub use dispatch::Dispatcher;
 pub use event_loop::EventLoop;
 pub use scheduler::Scheduler;
@@ -548,9 +546,7 @@ impl RuntimeHandle {
                         );
                     }
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                        return Err(MidgeError::Internal(
-                            "Response channel closed".to_string(),
-                        ));
+                        return Err(MidgeError::Internal("Response channel closed".to_string()));
                     }
                 }
             }

@@ -15,11 +15,10 @@
 //! - Does NOT block event loop waiting for cloud
 //! - Queues pending requests and completes them when cloud_durable_seq advances
 //!
-//! NOTE: `DurabilityPolicy::CloudFirst` is not fully wired end-to-end yet.
-//! The actor has scaffolding for queuing pending cloud writes, but the runtime
-//! event loop currently responds to WAL append requests immediately.
-//! Do not enable CloudFirst until response deferral + cloud ACK completion are
-//! implemented in the runtime.
+//! NOTE: `DurabilityPolicy::CloudFirst` is wired end-to-end.
+//! In CloudFirst mode, `append()` queues writes in `pending_cloud_writes` and
+//! defers visibility/response until `handle_cloud_upload_complete()` advances
+//! `cloud_durable_seq` on CloudAck.
 //!
 //! CLOUD-DURABLE MEMTABLE RULE:
 //! In Durability::CloudFirst mode, writes are NOT visible in memtable
@@ -39,11 +38,15 @@ use crate::wal::{DurabilityPolicy, FsWalFactory, WalFactory, WalOpKind, WalRecor
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// Completion produced after a CloudAck advances cloud durability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloudCompletion {
-    WalAppend { request_id: u64, sequence: u64 },
+    WalAppend {
+        request_id: u64,
+        sequence: u64,
+    },
     WriteBatch {
         request_id: u64,
         last_sequence: u64,
@@ -77,7 +80,10 @@ enum BatchApplyOp {
         value: Vec<u8>,
         expiration: Option<u64>,
     },
-    Delete { cf_id: u32, key: Vec<u8> },
+    Delete {
+        cf_id: u32,
+        key: Vec<u8>,
+    },
 }
 
 /// Actor handling WAL operations
@@ -95,6 +101,10 @@ pub struct WalActor {
     pending_cloud_writes: VecDeque<PendingCloudWrite>,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
+
+    // === Optional instrumentation ===
+    sync_calls: u64,
+    sync_total: Duration,
 }
 
 impl WalActor {
@@ -117,6 +127,8 @@ impl WalActor {
             durability_policy,
             pending_cloud_writes: VecDeque::new(),
             bytes_since_sync: 0,
+            sync_calls: 0,
+            sync_total: Duration::from_secs(0),
         })
     }
 
@@ -185,7 +197,7 @@ impl WalActor {
         };
 
         // Calculate record size for batching
-        let record_size = record.key.len() + record.value.as_ref().map_or(0, |v| v.len());
+        let record_size = record.estimated_size();
 
         // ALWAYS append to local WAL first (FsWalWriter)
         if let Some(writer) = &mut self.writer {
@@ -268,13 +280,8 @@ impl WalActor {
         let marker_key = Bytes::from_static(b"txn");
 
         let begin_seq = state.next_sequence();
-        let mut begin_record = WalRecord::new_cf(
-            0,
-            WalOpKind::TxnBegin,
-            marker_key.clone(),
-            None,
-            begin_seq,
-        );
+        let mut begin_record =
+            WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
         begin_record.txn_id = Some(txn_id);
 
         if let Some(writer) = &mut self.writer {
@@ -337,13 +344,8 @@ impl WalActor {
                     let seq = state.next_sequence();
                     let key_b = Bytes::from(key);
 
-                    let mut record = WalRecord::new_cf(
-                        cf_id,
-                        WalOpKind::Delete,
-                        key_b.clone(),
-                        None,
-                        seq,
-                    );
+                    let mut record =
+                        WalRecord::new_cf(cf_id, WalOpKind::Delete, key_b.clone(), None, seq);
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
@@ -364,13 +366,8 @@ impl WalActor {
 
         let commit_seq = state.next_sequence();
         let last_sequence = commit_seq;
-        let mut commit_record = WalRecord::new_cf(
-            0,
-            WalOpKind::TxnCommit,
-            marker_key,
-            None,
-            commit_seq,
-        );
+        let mut commit_record =
+            WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
         commit_record.txn_id = Some(txn_id);
 
         if let Some(writer) = &mut self.writer {
@@ -399,12 +396,13 @@ impl WalActor {
 
         if self.is_cloud_first() {
             // Atomic visibility after cloud durability (gate on commit seq).
-            self.pending_cloud_writes.push_back(PendingCloudWrite::Batch {
-                request_id,
-                commit_sequence: last_sequence,
-                op_count,
-                ops: apply_ops,
-            });
+            self.pending_cloud_writes
+                .push_back(PendingCloudWrite::Batch {
+                    request_id,
+                    commit_sequence: last_sequence,
+                    op_count,
+                    ops: apply_ops,
+                });
         } else {
             // Apply to memtables in-order (atomic visibility within the actor).
             for apply_op in apply_ops {
@@ -532,7 +530,11 @@ impl WalActor {
 
         for pending in &self.pending_cloud_writes {
             match pending {
-                PendingCloudWrite::Single { cf_id: p_cf, key: p_key, .. } => {
+                PendingCloudWrite::Single {
+                    cf_id: p_cf,
+                    key: p_key,
+                    ..
+                } => {
                     if *p_cf == cf_id && p_key.as_slice() == key {
                         return true;
                     }
@@ -540,8 +542,15 @@ impl WalActor {
                 PendingCloudWrite::Batch { ops, .. } => {
                     for op in ops {
                         match op {
-                            BatchApplyOp::Put { cf_id: p_cf, key: p_key, .. }
-                            | BatchApplyOp::Delete { cf_id: p_cf, key: p_key } => {
+                            BatchApplyOp::Put {
+                                cf_id: p_cf,
+                                key: p_key,
+                                ..
+                            }
+                            | BatchApplyOp::Delete {
+                                cf_id: p_cf,
+                                key: p_key,
+                            } => {
                                 if *p_cf == cf_id && p_key.as_slice() == key {
                                     return true;
                                 }
@@ -597,7 +606,22 @@ impl WalActor {
     /// Internal sync helper - fsyncs the writer
     fn sync_internal(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         if let Some(writer) = &mut self.writer {
+            let start = Instant::now();
             writer.sync()?;
+            let elapsed = start.elapsed();
+
+            self.sync_calls += 1;
+            self.sync_total += elapsed;
+
+            if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some() && self.sync_calls % 1000 == 0 {
+                let avg_ms = (self.sync_total.as_secs_f64() * 1000.0) / (self.sync_calls as f64);
+                eprintln!(
+                    "[midge] wal.sync: calls={} total_ms={:.2} avg_ms={:.3}",
+                    self.sync_calls,
+                    self.sync_total.as_secs_f64() * 1000.0,
+                    avg_ms
+                );
+            }
         }
 
         state.wal.last_synced_seq = state.sequence;
@@ -627,14 +651,15 @@ impl WalActor {
 
     /// Flush WAL buffers without fsync.
     ///
-    /// This is used by CloudFirst durability, where local WAL durability is
-    /// not the source of truth. We still need bytes to be readable from the
-    /// local segment file before upload, but we avoid the cost of fsync.
+    /// CloudFirst durability uses local WAL as a staging file for upload.
+    /// We avoid fsync on every write, but do a flush+fsync only when sealing
+    /// a segment right before upload so the uploader reads a complete file.
     pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         let pending = state.wal.pending_writes;
 
         if let Some(writer) = &mut self.writer {
             writer.flush()?;
+            writer.sync()?;
         }
 
         // Treat everything appended so far as ready-to-ship.
@@ -729,13 +754,7 @@ impl WalActor {
                 } => {
                     let key_bytes = Bytes::from(key);
                     let value_bytes = value.map(Bytes::from);
-                    self.apply_to_memtable(
-                        state,
-                        cf_id,
-                        &key_bytes,
-                        &value_bytes,
-                        expiration,
-                    )?;
+                    self.apply_to_memtable(state, cf_id, &key_bytes, &value_bytes, expiration)?;
 
                     completed.push(CloudCompletion::WalAppend {
                         request_id,

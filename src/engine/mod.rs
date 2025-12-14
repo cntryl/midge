@@ -232,9 +232,8 @@ impl MidgeEngine {
                 let local_backend = std::sync::Arc::new(crate::storage::FileSystem::new(
                     db_path.join("hybrid_local"),
                 )?);
-                let cloud_backend = std::sync::Arc::new(crate::storage::FileSystem::new(
-                    cloud_root.clone(),
-                )?);
+                let cloud_backend =
+                    std::sync::Arc::new(crate::storage::FileSystem::new(cloud_root.clone())?);
 
                 let hybrid = std::sync::Arc::new(crate::storage::HybridStorage::new(
                     local_backend,
@@ -244,7 +243,11 @@ impl MidgeEngine {
                 runtime_config.wal_durability_policy = crate::wal::DurabilityPolicy::CloudFirst;
                 runtime_config.hybrid_storage = Some(hybrid);
 
-                RuntimeState::new_with_recovery_dir(db_path.clone(), memory_mode, Some(cloud_wal_dir))
+                RuntimeState::new_with_recovery_dir(
+                    db_path.clone(),
+                    memory_mode,
+                    Some(cloud_wal_dir),
+                )
             }
             _ => {
                 runtime_config.wal_durability_policy = if opts.wal_sync {
@@ -1121,7 +1124,8 @@ impl MidgeEngine {
             Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
             _ => fallback_sequence,
         };
-        let inner = api::Transaction::new(txn_id, api::IsolationLevel::Serializable, start_sequence);
+        let inner =
+            api::Transaction::new(txn_id, api::IsolationLevel::Serializable, start_sequence);
         let txn = api::TransactionImpl::new(cf.id(), inner);
         Ok(Box::new(txn))
     }
