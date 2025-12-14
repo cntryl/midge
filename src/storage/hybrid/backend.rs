@@ -36,9 +36,9 @@ use std::time::Instant;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadStatus {
     Pending,
-    InProgress,
+    InFlight { started_at: Instant },
     Completed,
-    Failed(String),
+    Failed { error: String, retries: u32 },
 }
 
 /// State of a pending WAL segment upload
@@ -46,7 +46,6 @@ pub enum UploadStatus {
 pub struct UploadState {
     pub segment_id: u64,
     pub local_path: PathBuf,
-    pub retries: u32,
     pub status: UploadStatus,
     pub max_sequence: u64,
 }
@@ -100,7 +99,6 @@ impl HybridStorage {
         {
             let cloud = Arc::clone(&cloud);
             let event_queue = Arc::clone(&event_queue);
-            let upload_queue = Arc::clone(&upload_queue);
 
             std::thread::Builder::new()
                 .name("midge-wal-uploader".to_string())
@@ -130,14 +128,6 @@ impl HybridStorage {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
                                 });
-
-                                let mut queue =
-                                    upload_queue.lock().expect("upload_queue lock poisoned");
-                                if let Some(item) =
-                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
-                                {
-                                    item.status = UploadStatus::Failed(error);
-                                }
                                 continue;
                             }
                         };
@@ -165,14 +155,6 @@ impl HybridStorage {
                                     max_sequence: upload.max_sequence,
                                 });
 
-                                let mut queue =
-                                    upload_queue.lock().expect("upload_queue lock poisoned");
-                                if let Some(item) =
-                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
-                                {
-                                    item.status = UploadStatus::Completed;
-                                }
-
                                 if std::env::var_os("MIDGE_TRACE_CLOUDFIRST").is_some()
                                     && upload.segment_id % 1000 == 0
                                 {
@@ -196,14 +178,6 @@ impl HybridStorage {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
                                 });
-
-                                let mut queue =
-                                    upload_queue.lock().expect("upload_queue lock poisoned");
-                                if let Some(item) =
-                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
-                                {
-                                    item.status = UploadStatus::Failed(error);
-                                }
                             }
                             _ => {
                                 let error = "Channel error".to_string();
@@ -213,14 +187,6 @@ impl HybridStorage {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
                                 });
-
-                                let mut queue =
-                                    upload_queue.lock().expect("upload_queue lock poisoned");
-                                if let Some(item) =
-                                    queue.iter_mut().find(|u| u.segment_id == upload.segment_id)
-                                {
-                                    item.status = UploadStatus::Failed(error);
-                                }
                             }
                         }
                     }
@@ -245,7 +211,6 @@ impl HybridStorage {
         let upload_state = UploadState {
             segment_id,
             local_path: local_path.clone(),
-            retries: 0,
             status: UploadStatus::Pending,
             max_sequence,
         };
@@ -264,15 +229,6 @@ impl HybridStorage {
         );
     }
 
-    /// Poll for completed storage events (CloudAck, CloudFail, Backpressure)
-    ///
-    /// Called by Runtime event loop to process asynchronous storage completions.
-    /// Returns all pending events and clears the internal queue.
-    pub fn poll(&self) -> Vec<StorageEvent> {
-        let mut events = self.event_queue.lock().expect("event_queue lock poisoned");
-        events.drain(..).collect()
-    }
-
     /// Process pending uploads (should be called periodically by runtime)
     ///
     /// **WAL DURABILITY PIPELINE**
@@ -284,52 +240,74 @@ impl HybridStorage {
     /// - Handles retries on failure (up to 3 attempts)
     /// - Emits CloudAck/CloudFail events to event_queue
     ///
-    /// Non-blocking - actual uploads happen asynchronously in spawned threads.
-    pub fn process_uploads(&self) {
+    /// Non-blocking - actual uploads happen asynchronously in the dedicated worker thread.
+    ///
+    /// Returns any drained CloudAck/CloudFail events for the runtime to consume.
+    pub fn process_uploads(&self) -> Vec<StorageEvent> {
+        // 1) Drain worker completion events first.
+        let drained_events = {
+            let mut events = self.event_queue.lock().expect("event_queue lock poisoned");
+            events.drain(..).collect::<Vec<_>>()
+        };
+
         let mut queue = self
             .upload_queue
             .lock()
             .expect("upload_queue lock poisoned");
 
-        // Process each pending upload
-        let mut completed_indices = Vec::new();
-
-        for (idx, upload) in queue.iter_mut().enumerate() {
-            match upload.status {
-                UploadStatus::Pending => {
-                    // Start upload
-                    upload.status = UploadStatus::InProgress;
-                    // Send to the dedicated worker; avoid per-upload thread spawn.
-                    let _ = self.wal_upload_tx.send(upload.clone());
-                }
-                UploadStatus::Completed => {
-                    completed_indices.push(idx);
-                }
-                UploadStatus::Failed(_) => {
-                    if upload.retries < 3 {
-                        // Retry
-                        upload.retries += 1;
-                        upload.status = UploadStatus::Pending;
-                        tracing::warn!(
-                            segment_id = upload.segment_id,
-                            retry = upload.retries,
-                            "Retrying cloud upload"
-                        );
-                    } else {
-                        // Give up after 3 retries
-                        completed_indices.push(idx);
+        // 2) Apply drained events to the upload state machine.
+        for event in &drained_events {
+            match event {
+                StorageEvent::CloudAck {
+                    segment_id,
+                    max_sequence: _,
+                } => {
+                    if let Some(item) = queue.iter_mut().find(|u| &u.segment_id == segment_id) {
+                        item.status = UploadStatus::Completed;
                     }
                 }
-                UploadStatus::InProgress => {
-                    // Wait for completion
+                StorageEvent::CloudFail { segment_id, error } => {
+                    if let Some(item) = queue.iter_mut().find(|u| &u.segment_id == segment_id) {
+                        let prev_retries = match item.status {
+                            UploadStatus::Failed { retries, .. } => retries,
+                            _ => 0,
+                        };
+                        item.status = UploadStatus::Failed {
+                            error: error.clone(),
+                            retries: prev_retries.saturating_add(1),
+                        };
+                    }
                 }
+                _ => {}
             }
         }
 
-        // Remove completed items
-        for &idx in completed_indices.iter().rev() {
-            queue.remove(idx);
+        // 3) Schedule any eligible uploads.
+        let now = Instant::now();
+        for upload in queue.iter_mut() {
+            let eligible = match upload.status {
+                UploadStatus::Pending => true,
+                UploadStatus::Failed { retries, .. } => retries < 3,
+                UploadStatus::InFlight { .. } | UploadStatus::Completed => false,
+            };
+            if !eligible {
+                continue;
+            }
+
+            upload.status = UploadStatus::InFlight { started_at: now };
+
+            // Send to the dedicated worker; avoid per-upload thread spawn.
+            let _ = self.wal_upload_tx.send(upload.clone());
         }
+
+        // 4) Garbage-collect finished items (Completed or Failed after 3 retries).
+        queue.retain(|u| match &u.status {
+            UploadStatus::Completed => false,
+            UploadStatus::Failed { retries, .. } => *retries < 3,
+            _ => true,
+        });
+
+        drained_events
     }
 
     /// Try to reserve space for an upcoming flush.

@@ -6,7 +6,7 @@
 //! - Region-specific endpoint routing
 
 use super::s3::S3Provider;
-use crate::storage::cloud::executor::AwsCredentials;
+use crate::storage::cloud::AwsCredentials;
 
 /// AWS S3 provider with SigV4 authentication
 ///

@@ -8,7 +8,7 @@
 //! - Any other S3-compatible service
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::storage::cloud::executor::AwsCredentials;
+use crate::storage::cloud::AwsCredentials;
 use crate::storage::cloud::{
     CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };

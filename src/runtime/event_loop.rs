@@ -99,11 +99,11 @@ impl EventLoop {
             return;
         };
 
-        // Drive the WAL upload pipeline.
-        storage.process_uploads();
+            // Drive async storage uploads and drain completion events.
+            let storage_events = storage.process_uploads();
 
-        // Consume completion events.
-        for event in storage.poll() {
+            // Handle async storage completion events.
+            for event in storage_events {
             match event {
                 crate::storage::StorageEvent::CloudAck {
                     segment_id,

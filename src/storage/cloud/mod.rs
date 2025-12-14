@@ -24,13 +24,15 @@
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
 pub mod executor;
+pub mod aws;
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use crate::common::MidgeError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-pub use executor::{AwsCredentials, CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
+pub use aws::AwsCredentials;
+pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 
 /// Cloud operation outcome – cloneable wrapper around Result
 #[derive(Clone, Debug)]
