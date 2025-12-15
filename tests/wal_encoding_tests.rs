@@ -4,10 +4,10 @@ use cntryl_midge::wal::types::WalOpKind;
 #[test]
 fn should_use_last_occurrence_when_duplicate_tags() {
     // Build a minimal payload with duplicate SEQ tags (last wins)
-    use bytes::{BytesMut, BufMut};
+    use bytes::{BufMut, BytesMut};
 
     let mut payload = BytesMut::new();
-    payload.extend_from_slice(&[b'M', b'W']);
+    payload.extend_from_slice(b"MW");
     payload.put_u8(1u8); // version
 
     // OP (Put) TLV

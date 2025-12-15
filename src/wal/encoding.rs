@@ -130,12 +130,16 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
     capacity = capacity.checked_add(TLV_HEADER_LEN + 1).unwrap_or(capacity); // OP
     capacity = capacity.checked_add(TLV_HEADER_LEN + 4).unwrap_or(capacity); // CF_ID
     capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity); // SEQ
-    capacity = capacity.checked_add(TLV_HEADER_LEN + record.key.len()).unwrap_or(capacity);
+    capacity = capacity
+        .checked_add(TLV_HEADER_LEN + record.key.len())
+        .unwrap_or(capacity);
 
     // Preserve existing semantics: an empty VALUE behaves like None.
     if let Some(v) = &record.value {
         if !v.is_empty() {
-            capacity = capacity.checked_add(TLV_HEADER_LEN + v.len()).unwrap_or(capacity);
+            capacity = capacity
+                .checked_add(TLV_HEADER_LEN + v.len())
+                .unwrap_or(capacity);
         }
     }
 
@@ -143,7 +147,9 @@ pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
         capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity);
     }
     if let Some(r) = &record.range_end {
-        capacity = capacity.checked_add(TLV_HEADER_LEN + r.len()).unwrap_or(capacity);
+        capacity = capacity
+            .checked_add(TLV_HEADER_LEN + r.len())
+            .unwrap_or(capacity);
     }
     if record.txn_id.is_some() {
         capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity);
@@ -219,13 +225,15 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
                 if val.len() != 4 {
                     return Err(corruption(format!("bad CF_ID length: {}", val.len())));
                 }
-                cf_id = Some(u32::from_le_bytes(val[..4].try_into().unwrap()));
+                cf_id = Some(u32::from_le_bytes([val[0], val[1], val[2], val[3]]));
             }
             tags::SEQ => {
                 if val.len() != 8 {
                     return Err(corruption(format!("bad SEQ length: {}", val.len())));
                 }
-                seq = Some(u64::from_le_bytes(val[..8].try_into().unwrap()));
+                seq = Some(u64::from_le_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ]));
             }
             tags::KEY => {
                 key = Some(val);

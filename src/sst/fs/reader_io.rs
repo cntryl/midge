@@ -269,7 +269,14 @@ impl SstFileIo {
                 let key_bytes = block_data.slice(key_start..key_start + key_len);
 
                 let value_bytes = if let Some(val_off) = entry.value_offset {
-                    let val_len = entry.value.unwrap().len();
+                    let val_len = match entry.value {
+                        Some(v) => v.len(),
+                        None => {
+                            return Err(MidgeError::Corruption(
+                                "value offset present without value".into(),
+                            ))
+                        }
+                    };
                     Some(block_data.slice(val_off..val_off + val_len))
                 } else {
                     None
