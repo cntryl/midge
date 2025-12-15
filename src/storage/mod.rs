@@ -132,9 +132,7 @@
 
 pub(crate) mod cloud;
 pub(crate) mod filesystem;
-pub(crate) mod fs;
 pub(crate) mod hybrid;
-pub(crate) mod paths;
 pub(crate) mod providers;
 pub(crate) mod test_support;
 
