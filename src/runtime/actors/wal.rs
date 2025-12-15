@@ -431,6 +431,12 @@ impl WalActor {
 
         let op_count = apply_ops.len();
 
+        // For batched mode, mark the sequence range as pending atomicity
+        // Reads at sequences >= begin_seq must wait for the batch to become durable
+        if matches!(self.durability_policy, DurabilityPolicy::Batched) {
+            state.pending_batch_min_seq = Some(begin_seq);
+        }
+
         if self.is_cloud_first() {
             // Atomic visibility after cloud durability (gate on commit seq).
             self.pending_cloud_writes

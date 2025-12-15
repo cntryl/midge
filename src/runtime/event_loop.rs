@@ -106,6 +106,15 @@ impl EventLoop {
         let flush_actor = FlushActor::new(&sst_dir, memory_mode)?;
         let wal_actor = WalActor::new(wal_dir, config.wal_durability_policy, memory_mode)?;
 
+        // 🔑 CRITICAL: Use the correct key for durability_waiters based on mode
+        // - CloudFirst: key is segment_id (for rotate_to/complete calls)
+        // - Batched: key is flush_generation (returned from wal_actor.sync())
+        let initial_durability_key = if wal_actor.is_cloud_first() {
+            initial_segment_id
+        } else {
+            wal_actor.current_flush_generation()
+        };
+
         let mut event_loop = Self {
             state,
             flush_actor,
@@ -120,7 +129,7 @@ impl EventLoop {
             trace_enabled,
             last_cloud_flush: Instant::now(),
             cloudfirst_inflight: HashMap::new(),
-            durability_waiters: Some(KeyedGroupCommit::new(initial_segment_id)),
+            durability_waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
             router,
             pending_msg: None,
         };
@@ -558,11 +567,13 @@ impl EventLoop {
             return;
         }
 
-        // Maximize group commit: pull any immediately-available writes into this same sync.
-        // Note: if we encounter a non-write message, it will be buffered in `self.pending_msg`.
+        // 🔑 CRITICAL INVARIANT: If we have pending waiters, we MUST seal a generation.
+        // Even with zero bytes, the durability guarantee requires advancing the generation.
+        // Drain any available writes to maximize group commit.
         const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
         let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_BEFORE_SYNC);
 
+        // Always call sync - it advances the generation even with zero bytes
         match self.wal_actor.sync(&mut self.state) {
             Ok(sealed_gen) => {
                 // Rotate group commit to new generation and complete old one
@@ -588,6 +599,8 @@ impl EventLoop {
                                 last_sequence,
                                 op_count,
                             } => {
+                                // Batch has become durable - clear atomicity barrier
+                                self.state.pending_batch_min_seq = None;
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WriteBatchAppended {
@@ -639,17 +652,8 @@ impl EventLoop {
         const MAX_DRAIN: usize = 4096;
         let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
 
-        // Early return if no durable waiters are pending
-        if self
-            .durability_waiters
-            .as_ref()
-            .map(|w| w.pending_len() == 0)
-            .unwrap_or(true)
-        {
-            return;
-        }
-
-        // Always sync to establish durability barrier, even if no pending writes
+        // Always sync to establish durability barrier
+        // (even if no pending writes or waiters - we're being asked to guarantee durability)
         match self.wal_actor.sync(&mut self.state) {
             Ok(sealed_gen) => {
                 // Rotate and complete any pending waiters
@@ -675,6 +679,8 @@ impl EventLoop {
                                 last_sequence,
                                 op_count,
                             } => {
+                                // Batch has become durable - clear atomicity barrier
+                                self.state.pending_batch_min_seq = None;
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WriteBatchAppended {
@@ -743,6 +749,10 @@ impl EventLoop {
                             continue;
                         },
                         default(timeout) => {
+                            // 🔑 CRITICAL: Drive durability progress on idle ticks
+                            // If waiters exist but no new messages, sync them now
+                            self.sync_batched_wal_if_needed(&msg_rx);
+                            
                             self.maybe_flush_cloudfirst_wal();
                             self.tick_hybrid_storage();
                             // Drain any push-channel events that arrived between ticks.
@@ -754,6 +764,10 @@ impl EventLoop {
                     match msg_rx.recv_timeout(timeout) {
                         Ok(msg) => Some(msg),
                         Err(RecvTimeoutError::Timeout) => {
+                            // 🔑 CRITICAL: Drive durability progress on idle ticks
+                            // If waiters exist but no new messages, sync them now
+                            self.sync_batched_wal_if_needed(&msg_rx);
+                            
                             self.maybe_flush_cloudfirst_wal();
                             self.tick_hybrid_storage();
                             continue;
@@ -1269,6 +1283,13 @@ impl EventLoop {
                     // This ensures "write → await durable → read" patterns work correctly
                     self.sync_if_waiters_exist(&msg_rx);
 
+                    // 🔑 Read atomicity: if a WriteBatch is pending, reads at its sequence must wait
+                    if let Some(min_seq) = self.state.pending_batch_min_seq {
+                        if sequence >= min_seq {
+                            self.force_wal_sync(&msg_rx);
+                        }
+                    }
+
                     let value = self.handle_read(cf_id, &key, sequence);
                     self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
                 }
@@ -1283,6 +1304,13 @@ impl EventLoop {
                     // 🔑 Establish durability fence: if durability waiters exist, sync before scanning
                     // This ensures "write → await durable → range_scan" patterns work correctly
                     self.sync_if_waiters_exist(&msg_rx);
+
+                    // 🔑 Read atomicity: if a WriteBatch is pending, reads at its sequence must wait
+                    if let Some(min_seq) = self.state.pending_batch_min_seq {
+                        if sequence >= min_seq {
+                            self.force_wal_sync(&msg_rx);
+                        }
+                    }
 
                     let results = self.handle_range_scan(cf_id, &start, &end, sequence);
                     self.respond(

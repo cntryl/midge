@@ -99,6 +99,9 @@ pub struct RuntimeState {
     pub sequence: u64,
     /// Next transaction ID
     pub next_txn_id: u64,
+    /// Minimum sequence of a pending WriteBatch (for read atomicity)
+    /// When set, reads at sequences >= this value must wait for durability
+    pub pending_batch_min_seq: Option<u64>,
 
     // === Column Families ===
     pub column_families: HashMap<u32, ColumnFamilyState>,
@@ -297,6 +300,7 @@ impl RuntimeState {
             sst_dir,
             sequence: recovered_sequence,
             next_txn_id: 0,
+            pending_batch_min_seq: None,
             column_families,
             manifest,
             wal: WalState {
