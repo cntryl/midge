@@ -33,13 +33,13 @@
 use super::super::state::RuntimeState;
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
+use crate::runtime::IntentLogEntry;
 use crate::sst::Memtable;
 use crate::wal::{DurabilityPolicy, FsWalFactory, WalFactory, WalOpKind, WalRecord, WalWriter};
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use crate::runtime::IntentLogEntry;
 
 #[derive(Debug)]
 enum PendingCloudWrite {
@@ -281,13 +281,20 @@ impl WalActor {
 
         // Log seqno allocations for intent tracing
         // Begin seq (cf_id 0)
-        state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: begin_seq, cf_id: 0 })?;
+        state.append_intent(IntentLogEntry::SeqnoAllocated {
+            seqno: begin_seq,
+            cf_id: 0,
+        })?;
         // Per-op seqs will be logged below when we know cf_id
         // Commit seq
-        state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: commit_seq, cf_id: 0 })?;
+        state.append_intent(IntentLogEntry::SeqnoAllocated {
+            seqno: commit_seq,
+            cf_id: 0,
+        })?;
 
         // Create and write begin record
-        let mut begin_record = WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
+        let mut begin_record =
+            WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
         begin_record.txn_id = Some(txn_id);
         if let Some(writer) = &mut self.writer {
             writer.append_record(&begin_record)?;
@@ -303,7 +310,12 @@ impl WalActor {
         for (i, op) in ops.into_iter().enumerate() {
             let seq = first_op_seq + i as u64;
             match op {
-                crate::runtime::WriteBatchOp::Put { cf_id, key, value, ttl_seconds } => {
+                crate::runtime::WriteBatchOp::Put {
+                    cf_id,
+                    key,
+                    value,
+                    ttl_seconds,
+                } => {
                     let key_b = Bytes::from(key);
                     let value_b = Bytes::from(value);
 
@@ -316,7 +328,13 @@ impl WalActor {
                             seq,
                             ttl,
                         ),
-                        _ => WalRecord::new_cf(cf_id, WalOpKind::Put, key_b.clone(), Some(value_b.clone()), seq),
+                        _ => WalRecord::new_cf(
+                            cf_id,
+                            WalOpKind::Put,
+                            key_b.clone(),
+                            Some(value_b.clone()),
+                            seq,
+                        ),
                     };
                     record.txn_id = Some(txn_id);
 
@@ -341,7 +359,8 @@ impl WalActor {
                 crate::runtime::WriteBatchOp::Delete { cf_id, key } => {
                     let key_b = Bytes::from(key);
 
-                    let mut record = WalRecord::new_cf(cf_id, WalOpKind::Delete, key_b.clone(), None, seq);
+                    let mut record =
+                        WalRecord::new_cf(cf_id, WalOpKind::Delete, key_b.clone(), None, seq);
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
@@ -354,14 +373,18 @@ impl WalActor {
                     self.pending_sync_count += 1;
                     self.bytes_since_sync += record.estimated_size();
 
-                    apply_ops.push(BatchApplyOp::Delete { cf_id, key: key_b.to_vec() });
+                    apply_ops.push(BatchApplyOp::Delete {
+                        cf_id,
+                        key: key_b.to_vec(),
+                    });
                 }
             }
         }
 
         // Write commit record
         let last_sequence = commit_seq;
-        let mut commit_record = WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
+        let mut commit_record =
+            WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
         commit_record.txn_id = Some(txn_id);
         if let Some(writer) = &mut self.writer {
             writer.append_record(&commit_record)?;

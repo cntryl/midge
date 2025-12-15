@@ -58,7 +58,12 @@ pub trait EngineFs: Send + Sync + 'static {
 
     // ---------- MANIFEST ----------
     fn manifest_read(&self, cf: CfId) -> FsResult<Bytes>;
-    fn manifest_replace_atomic(&self, cf: CfId, new_contents: Bytes, dur: Durability) -> FsResult<()>;
+    fn manifest_replace_atomic(
+        &self,
+        cf: CfId,
+        new_contents: Bytes,
+        dur: Durability,
+    ) -> FsResult<()>;
 
     // ---------- MAINTENANCE ----------
     /// Best-effort directory sync where supported. No-op on backends that

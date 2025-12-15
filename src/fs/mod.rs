@@ -11,8 +11,8 @@ pub use traits::*;
 
 // Submodules (stubs / implementations)
 pub mod chaos;
-pub mod real;
 pub mod mock;
+pub mod real;
 
 #[cfg(test)]
 mod tests {

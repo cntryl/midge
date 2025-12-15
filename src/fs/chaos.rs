@@ -62,7 +62,12 @@ impl<F: EngineFs> EngineFs for ChaosFs<F> {
         self.inner.manifest_read(cf)
     }
 
-    fn manifest_replace_atomic(&self, cf: CfId, new_contents: Bytes, dur: Durability) -> FsResult<()> {
+    fn manifest_replace_atomic(
+        &self,
+        cf: CfId,
+        new_contents: Bytes,
+        dur: Durability,
+    ) -> FsResult<()> {
         self.inner.manifest_replace_atomic(cf, new_contents, dur)
     }
 
@@ -84,15 +89,38 @@ mod tests {
         fn wal_read(&self, _cf: CfId, _wal: WalId) -> FsResult<Box<dyn WalReader>> {
             Err(FsError::Unsupported("dummy".into()))
         }
-        fn wal_list(&self, _cf: CfId) -> FsResult<Vec<WalId>> { Ok(vec![]) }
-        fn wal_delete(&self, _cf: CfId, _wal: WalId) -> FsResult<()> { Ok(()) }
-        fn sst_create(&self, _cf: CfId, _sst: SstId) -> FsResult<Box<dyn SstWriter>> { Err(FsError::Unsupported("dummy".into())) }
-        fn sst_open(&self, _cf: CfId, _sst: SstId) -> FsResult<Box<dyn SstReader>> { Err(FsError::Unsupported("dummy".into())) }
-        fn sst_list(&self, _cf: CfId) -> FsResult<Vec<SstId>> { Ok(vec![]) }
-        fn sst_delete(&self, _cf: CfId, _sst: SstId) -> FsResult<()> { Ok(()) }
-        fn manifest_read(&self, _cf: CfId) -> FsResult<Bytes> { Ok(Bytes::new()) }
-        fn manifest_replace_atomic(&self, _cf: CfId, _new_contents: Bytes, _dur: Durability) -> FsResult<()> { Ok(()) }
-        fn sync_dir_if_supported(&self, _cf: CfId) -> FsResult<()> { Ok(()) }
+        fn wal_list(&self, _cf: CfId) -> FsResult<Vec<WalId>> {
+            Ok(vec![])
+        }
+        fn wal_delete(&self, _cf: CfId, _wal: WalId) -> FsResult<()> {
+            Ok(())
+        }
+        fn sst_create(&self, _cf: CfId, _sst: SstId) -> FsResult<Box<dyn SstWriter>> {
+            Err(FsError::Unsupported("dummy".into()))
+        }
+        fn sst_open(&self, _cf: CfId, _sst: SstId) -> FsResult<Box<dyn SstReader>> {
+            Err(FsError::Unsupported("dummy".into()))
+        }
+        fn sst_list(&self, _cf: CfId) -> FsResult<Vec<SstId>> {
+            Ok(vec![])
+        }
+        fn sst_delete(&self, _cf: CfId, _sst: SstId) -> FsResult<()> {
+            Ok(())
+        }
+        fn manifest_read(&self, _cf: CfId) -> FsResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        fn manifest_replace_atomic(
+            &self,
+            _cf: CfId,
+            _new_contents: Bytes,
+            _dur: Durability,
+        ) -> FsResult<()> {
+            Ok(())
+        }
+        fn sync_dir_if_supported(&self, _cf: CfId) -> FsResult<()> {
+            Ok(())
+        }
     }
 
     #[test]

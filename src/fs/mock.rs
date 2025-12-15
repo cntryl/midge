@@ -101,14 +101,18 @@ impl EngineFs for MockFs {
         let entry = store
             .entry(key)
             .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
-        Ok(Box::new(MockWalWriter { bucket: Arc::clone(entry) }))
+        Ok(Box::new(MockWalWriter {
+            bucket: Arc::clone(entry),
+        }))
     }
 
     fn wal_read(&self, cf: CfId, wal: WalId) -> FsResult<Box<dyn WalReader>> {
         let key = (cf, wal);
         let store = self.wal_store.lock().unwrap();
         if let Some(v) = store.get(&key) {
-            Ok(Box::new(MockWalReader { bucket: Arc::clone(v) }))
+            Ok(Box::new(MockWalReader {
+                bucket: Arc::clone(v),
+            }))
         } else {
             Err(FsError::NotFound("wal".into()))
         }
@@ -176,7 +180,12 @@ impl EngineFs for MockFs {
         }
     }
 
-    fn manifest_replace_atomic(&self, cf: CfId, new_contents: Bytes, _dur: Durability) -> FsResult<()> {
+    fn manifest_replace_atomic(
+        &self,
+        cf: CfId,
+        new_contents: Bytes,
+        _dur: Durability,
+    ) -> FsResult<()> {
         let mut store = self.manifest_store.lock().unwrap();
         store.insert(cf, new_contents);
         Ok(())

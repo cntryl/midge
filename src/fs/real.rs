@@ -66,7 +66,9 @@ impl WalWriter for RealWalWriter {
 
     fn commit(&mut self, dur: Durability) -> FsResult<()> {
         if let Durability::Durable = dur {
-            self.file.sync_all().map_err(|e| FsError::Io(e.to_string()))?;
+            self.file
+                .sync_all()
+                .map_err(|e| FsError::Io(e.to_string()))?;
         }
         Ok(())
     }
@@ -85,8 +87,12 @@ impl WalReader for RealWalReader {
     fn read_all(&mut self) -> FsResult<Vec<Bytes>> {
         let mut out = Vec::new();
         let mut buf = Vec::new();
-        self.file.seek(SeekFrom::Start(0)).map_err(|e| FsError::Io(e.to_string()))?;
-        self.file.read_to_end(&mut buf).map_err(|e| FsError::Io(e.to_string()))?;
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        self.file
+            .read_to_end(&mut buf)
+            .map_err(|e| FsError::Io(e.to_string()))?;
 
         let mut cursor: usize = 0;
         while cursor + 4 <= buf.len() {
@@ -124,7 +130,9 @@ impl SstWriter for RealSstWriter {
 
     fn finish(self: Box<Self>, dur: Durability) -> FsResult<()> {
         if let Durability::Durable = dur {
-            self.temp_file.sync_all().map_err(|e| FsError::Io(e.to_string()))?;
+            self.temp_file
+                .sync_all()
+                .map_err(|e| FsError::Io(e.to_string()))?;
         }
         drop(self.temp_file); // close temp file
         fs::rename(&self.final_path.with_extension("tmp"), &self.final_path)
@@ -147,14 +155,21 @@ struct RealSstReader {
 
 impl SstReader for RealSstReader {
     fn read_block(&mut self, offset: u64, len: u64) -> FsResult<Bytes> {
-        self.file.seek(SeekFrom::Start(offset)).map_err(|e| FsError::Io(e.to_string()))?;
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| FsError::Io(e.to_string()))?;
         let mut buf = vec![0; len as usize];
-        self.file.read_exact(&mut buf).map_err(|e| FsError::Io(e.to_string()))?;
+        self.file
+            .read_exact(&mut buf)
+            .map_err(|e| FsError::Io(e.to_string()))?;
         Ok(Bytes::from(buf))
     }
 
     fn len(&self) -> FsResult<u64> {
-        let meta = self.file.metadata().map_err(|e| FsError::Io(e.to_string()))?;
+        let meta = self
+            .file
+            .metadata()
+            .map_err(|e| FsError::Io(e.to_string()))?;
         Ok(meta.len())
     }
 }
@@ -263,11 +278,17 @@ impl EngineFs for RealFs {
         let p = self.manifest_path(cf);
         let mut f = File::open(&p).map_err(|e| FsError::Io(e.to_string()))?;
         let mut buf = Vec::new();
-        f.read_to_end(&mut buf).map_err(|e| FsError::Io(e.to_string()))?;
+        f.read_to_end(&mut buf)
+            .map_err(|e| FsError::Io(e.to_string()))?;
         Ok(Bytes::from(buf))
     }
 
-    fn manifest_replace_atomic(&self, cf: CfId, new_contents: Bytes, _dur: Durability) -> FsResult<()> {
+    fn manifest_replace_atomic(
+        &self,
+        cf: CfId,
+        new_contents: Bytes,
+        _dur: Durability,
+    ) -> FsResult<()> {
         self.ensure_cf_dir(cf)?;
         let tmp = self.cf_dir(cf).join("manifest.tmp");
         let finalp = self.manifest_path(cf);
@@ -279,7 +300,8 @@ impl EngineFs for RealFs {
                 .truncate(true)
                 .open(&tmp)
                 .map_err(|e| FsError::Io(e.to_string()))?;
-            f.write_all(&new_contents).map_err(|e| FsError::Io(e.to_string()))?;
+            f.write_all(&new_contents)
+                .map_err(|e| FsError::Io(e.to_string()))?;
             f.sync_all().map_err(|e| FsError::Io(e.to_string()))?;
         }
         fs::rename(&tmp, &finalp).map_err(|e| FsError::Io(e.to_string()))?;
@@ -300,8 +322,8 @@ impl EngineFs for RealFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use bytes::Bytes;
+    use tempfile::TempDir;
 
     #[test]
     fn realfs_new_compiles() {
@@ -334,7 +356,8 @@ mod tests {
         let fs = RealFs::new(td.path());
         let cf = CfId(2);
 
-        fs.manifest_replace_atomic(cf, Bytes::from("hello"), Durability::Durable).unwrap();
+        fs.manifest_replace_atomic(cf, Bytes::from("hello"), Durability::Durable)
+            .unwrap();
         let got = fs.manifest_read(cf).unwrap();
         assert_eq!(got, Bytes::from("hello"));
     }
@@ -422,7 +445,10 @@ mod tests {
 
         // Assert
         assert!(block.is_ok());
-        assert_eq!(block.unwrap(), Bytes::from(&[6,0,0,0, 98,108,111,99,107,49][..]));
+        assert_eq!(
+            block.unwrap(),
+            Bytes::from(&[6, 0, 0, 0, 98, 108, 111, 99, 107, 49][..])
+        );
     }
 
     #[test]
