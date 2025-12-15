@@ -224,24 +224,13 @@ impl MidgeEngine {
         let mut state = match &opts.storage_mode {
             crate::testkit::StorageMode::CloudBacked { .. } => {
                 // Local cache is ephemeral; cloud WAL is the source of truth.
-                // Simulate cloud with a separate filesystem-backed store under db_path.
-                let cloud_root = db_path.join("cloud_store");
-                let cloud_wal_dir = cloud_root.join("wal");
-                let _ = std::fs::create_dir_all(&cloud_wal_dir);
+                let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+                    &db_path,
+                )?;
 
-                let local_backend = std::sync::Arc::new(crate::storage::FileSystem::new(
-                    db_path.join("hybrid_local"),
-                )?);
-                let cloud_backend =
-                    std::sync::Arc::new(crate::storage::FileSystem::new(cloud_root.clone())?);
-
-                let (tx, rx) = crossbeam::channel::unbounded::<crate::storage::StorageEvent>();
-                let hybrid =
-                    std::sync::Arc::new(crate::storage::HybridStorage::new_with_event_sender(
-                        local_backend,
-                        cloud_backend,
-                        tx,
-                    ));
+                let hybrid = setup.hybrid_storage;
+                let rx = setup.events;
+                let cloud_wal_dir = setup.recovery_cloud_wal_dir;
 
                 runtime_config.wal_durability_policy = crate::wal::DurabilityPolicy::CloudFirst;
                 runtime_config.hybrid_storage = Some(hybrid);

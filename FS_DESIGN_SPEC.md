@@ -1,33 +1,26 @@
-Yep. Here’s a **filesystem / persistence abstraction** that’s *intent-based*, portable, chaos-injectable, and keeps your **WAL-before-visible** invariant enforceable.
+Yep — what you have is *EngineStorage*, not really “fs”. It’s clean, but the `wal_* / sst_* / manifest_*` surface bakes in LSM nouns, which makes it harder to reuse for chaos/fault injection, io-uring, Windows/Linux differences, etc.
 
-## Design goals
+A good way to “move closer to fs” is:
 
-* Engine code never touches `std::fs` (or S3/Azure SDK) directly.
-* Engine asks for **intent** (“append WAL + commit”, “publish SST atomically”, “replace manifest atomically”).
-* One seam for:
+* make the trait about **paths + file handles + ops** (open/create/read/write/sync/rename/list)
+* move “WAL/SST/manifest naming” into a **layout module** (pure functions that map `(cf, id)` → `Path`)
+* keep your `Durability` concept, but express it as **sync/commit semantics on files and directories**, not “WAL commit”
 
-  * `RealFs` (std::fs + OS quirks)
-  * `FastFs` (bench, in-memory / no sync)
-  * `ChaosFs` (faults + latency)
-  * `CloudFs` (object store / append service)
-* Keep the hard invariant: **memtable visibility waits for `wal.commit()` ack**.
+Here’s a concrete shape that keeps what you like (typed errors, durability) but strips LSM concepts out of the FS boundary.
 
----
-
-## Core types
-
-### Errors and durability
+## 1) Make FS generic: paths, handles, atomic ops
 
 ```rust
+use bytes::Bytes;
+use thiserror::Error;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durability {
-    /// Data is visible but may be lost on crash/power loss (bench / debug only).
     Unsafe,
-    /// Data is durable according to backend contract (fsync/commit acked).
     Durable,
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Error, Debug)]
 pub enum FsError {
     #[error("not found: {0}")]
     NotFound(String),
@@ -44,164 +37,112 @@ pub enum FsError {
 }
 
 pub type FsResult<T> = Result<T, FsError>;
-```
 
-### Engine paths are typed (avoid stringly-typed footguns)
+/// Your own tiny path type helps keep this portable (vs std::path leaking everywhere).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FsPath(pub String);
 
-```rust
-#[derive(Debug, Clone)]
-pub struct CfId(pub u32);
-
-#[derive(Debug, Clone)]
-pub struct WalId(pub u64);
-
-#[derive(Debug, Clone)]
-pub struct SstId(pub u64);
-```
-
----
-
-## The abstraction: `EngineFs`
-
-This is what your runtime/actors use. It is **not** a general filesystem.
-
-```rust
-use bytes::Bytes;
-
-pub trait EngineFs: Send + Sync + 'static {
-    // ---------- WAL ----------
-    fn wal_open(&self, cf: CfId, wal: WalId) -> FsResult<Box<dyn WalWriter>>;
-    fn wal_read(&self, cf: CfId, wal: WalId) -> FsResult<Box<dyn WalReader>>;
-    fn wal_list(&self, cf: CfId) -> FsResult<Vec<WalId>>;
-    fn wal_delete(&self, cf: CfId, wal: WalId) -> FsResult<()>;
-
-    // ---------- SST ----------
-    fn sst_create(&self, cf: CfId, sst: SstId) -> FsResult<Box<dyn SstWriter>>;
-    fn sst_open(&self, cf: CfId, sst: SstId) -> FsResult<Box<dyn SstReader>>;
-    fn sst_list(&self, cf: CfId) -> FsResult<Vec<SstId>>;
-    fn sst_delete(&self, cf: CfId, sst: SstId) -> FsResult<()>;
-
-    // ---------- MANIFEST ----------
-    fn manifest_read(&self, cf: CfId) -> FsResult<Bytes>;
-    fn manifest_replace_atomic(&self, cf: CfId, new_contents: Bytes, dur: Durability) -> FsResult<()>;
-
-    // ---------- MAINTENANCE ----------
-    fn sync_dir_if_supported(&self, cf: CfId) -> FsResult<()>; // no-op on backends that don't need it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMode {
+    ReadOnly,
+    ReadWrite,
 }
-```
 
-### WAL writer/reader (commit boundary lives here)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenOptions {
+    pub mode: OpenMode,
+    pub create: bool,
+    pub create_new: bool,
+    pub truncate: bool,
+}
 
-```rust
-pub trait WalWriter: Send {
-    /// Append a record. May buffer.
-    fn append(&mut self, record: Bytes) -> FsResult<()>;
+pub trait Fs: Send + Sync + 'static {
+    // --- Files ---
+    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>>;
+    fn remove_file(&self, path: &FsPath) -> FsResult<()>;
+    fn exists(&self, path: &FsPath) -> FsResult<bool>;
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata>;
 
-    /// Ensures prior appends are durable per backend contract.
-    /// Engine’s visibility boundary depends on this.
-    fn commit(&mut self, dur: Durability) -> FsResult<()>;
+    // --- Directories ---
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()>;
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>>;
+    fn remove_dir_all(&self, path: &FsPath) -> FsResult<()>;
+    fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()>;
 
-    /// Best-effort close (commit semantics still explicit).
+    // --- Atomicity ---
+    /// Must be atomic within the same filesystem/volume when supported.
+    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()>;
+}
+
+#[derive(Debug, Clone)]
+pub struct Metadata {
+    pub len: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+pub trait File: Send {
+    fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes>;
+    fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()>;
+
+    /// Common fast-path write (append-only logs).
+    fn append(&mut self, data: Bytes) -> FsResult<u64>; // returns starting offset
+
+    fn len(&self) -> FsResult<u64>;
+
+    /// The durability boundary (fsync / flush / multipart commit / etc.)
+    fn sync(&mut self, dur: Durability) -> FsResult<()>;
+
     fn close(self: Box<Self>) -> FsResult<()>;
 }
-
-pub trait WalReader: Send {
-    fn read_all(&mut self) -> FsResult<Vec<Bytes>>;
-}
 ```
 
-### SST writer/reader (publish is atomic)
+**What this buys you**
+
+* ChaosFs becomes trivial (wrap `Fs` + `File`, inject faults everywhere).
+* WindowsFs/LinuxFs are just implementations of generic operations.
+* io-uring fits naturally: your `File` impl can be backed by an io-uring reactor, but the engine doesn’t care.
+
+## 2) Put LSM naming in a layout module (pure mapping)
+
+Your current `CfId/WalId/SstId` types are great — just move them out of the FS trait and into a “layout” helper that produces `FsPath`.
 
 ```rust
-pub trait SstWriter: Send {
-    fn write_block(&mut self, block: Bytes) -> FsResult<()>;
-    fn finish(self: Box<Self>, dur: Durability) -> FsResult<()>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CfId(pub u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WalId(pub u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SstId(pub u64);
+
+pub struct EngineLayout {
+    pub root: FsPath,
 }
 
-pub trait SstReader: Send {
-    fn read_block(&mut self, offset: u64, len: u64) -> FsResult<Bytes>;
-    fn len(&self) -> u64;
-}
-```
+impl EngineLayout {
+    pub fn cf_dir(&self, cf: CfId) -> FsPath {
+        FsPath(format!("{}/cf_{:08}", self.root.0, cf.0))
+    }
 
-**Key:** `finish()` is where the backend guarantees “either the SST exists fully, or not at all”.
+    pub fn wal_path(&self, cf: CfId, wal: WalId) -> FsPath {
+        FsPath(format!("{}/wal/{:020}.wal", self.cf_dir(cf).0, wal.0))
+    }
 
----
+    pub fn sst_path(&self, cf: CfId, sst: SstId) -> FsPath {
+        FsPath(format!("{}/sst/{:020}.sst", self.cf_dir(cf).0, sst.0))
+    }
 
-## Required semantics (the contract)
+    pub fn manifest_path(&self, cf: CfId) -> FsPath {
+        FsPath(format!("{}/manifest.json", self.cf_dir(cf).0))
+    }
 
-These are the *only* semantics your engine assumes:
-
-### WAL
-
-* `append()` may buffer.
-* `commit(Durable)` is the durability ack:
-
-  * Local: `write + fsync(fd)` (and optionally directory sync when needed)
-  * Cloud: “server committed and acknowledged” (upload/append service ack)
-* Engine must **not** apply to memtable until `commit(Durable)` succeeds (in durable modes).
-
-### SST
-
-* `finish(Durable)` makes SST visible atomically.
-
-  * Local: write temp → fsync temp → rename → fsync dir (where required)
-  * Cloud: upload temp key → server-side finalize / atomic pointer swap (or content-addressed + manifest reference)
-
-### Manifest
-
-* `manifest_replace_atomic(Durable)` is **atomic replace**:
-
-  * Local: write temp → fsync → rename → fsync dir
-  * Cloud: write new manifest blob → update “current” pointer atomically (or versioned manifest + compare-and-swap)
-
----
-
-## Implementation sketch
-
-### RealFs (portable; hides OS quirks)
-
-* Uses `std::fs` and internal `cfg(windows)` strategies:
-
-  * Atomic replace via `write temp + rename` (Windows may require `replace_file` semantics).
-  * Optional `sync_dir_if_supported()` does the right thing on platforms that need it.
-
-### FastFs (bench)
-
-* In-memory map keyed by `(cf, wal/sst/manifest ids)`.
-* `commit(Unsafe)` is no-op; `commit(Durable)` can still be no-op but should simulate a boundary (or optionally block for deterministic “latency”).
-
-### ChaosFs (wrapper)
-
-Wrap any `EngineFs` and inject:
-
-* delay on specific operations (`wal.commit`, `sst.finish`, `manifest_replace_atomic`)
-* fail rates (e.g. 1% commit failures)
-* corruption injection for targeted reads (for recovery tests)
-
-```rust
-pub struct ChaosFs<F: EngineFs> {
-    inner: F,
-    // rules: latency, failure injection, deterministic seed, etc.
+    pub fn manifest_tmp_path(&self, cf: CfId) -> FsPath {
+        FsPath(format!("{}/manifest.json.tmp", self.cf_dir(cf).0))
+    }
 }
 ```
 
-### CloudFs
-
-* Still implements the same *intent* API.
-* If you later add `io-uring`, it’s **inside RealFs**, not visible in the trait.
-
----
-
-## How this plugs into your actors
-
-* WalActor owns a `WalWriter`.
-* Every “put” does:
-
-  1. `wal.append(record)`
-  2. `wal.commit(Durable)`  ✅ durability boundary
-  3. apply to memtable
-* FlushActor uses `sst_create → write_block… → finish(Durable)`
-* ManifestActor uses `manifest_replace_atomic(Durable)`
-
-No one else touches persistence.

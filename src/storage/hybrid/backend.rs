@@ -449,99 +449,99 @@ impl HybridStorage {
 }
 
 impl StorageBackend for HybridStorage {
-    fn submit_read(&self, path: String, callback: StorageCallback) {
+    fn submit_read(&self, key: String, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - reads SSTs, metadata, etc.
         // Try local first, fall back to cloud
 
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
-        let path_clone = path.clone();
+        let key_clone = key.clone();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        local_clone.submit_read(path_clone.clone(), tx);
+        local_clone.submit_read(key_clone.clone(), tx);
 
         match rx.recv() {
             Ok(StorageEvent::ReadComplete {
-                path: p,
+                key: k,
                 result: StorageOutcome::Ok(data),
             }) => {
                 // Success from local, return immediately
                 let _ = callback.send(StorageEvent::ReadComplete {
-                    path: p,
+                    key: k,
                     result: StorageOutcome::Ok(data),
                 });
             }
             Ok(StorageEvent::ReadComplete {
-                path: p,
+                key: k,
                 result: StorageOutcome::Err(_),
             }) => {
                 // Local miss, try cloud
                 let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
-                cloud_clone.submit_read(p, tx_cloud);
+                cloud_clone.submit_read(k, tx_cloud);
                 if let Ok(event) = rx_cloud.recv() {
                     let _ = callback.send(event);
                 }
             }
             _ => {
                 let _ = callback.send(StorageEvent::ReadComplete {
-                    path,
+                    key,
                     result: StorageOutcome::Err("Hybrid read failed".to_string()),
                 });
             }
         }
     }
 
-    fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
+    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - NOT for WAL durability
         // WAL durability uses enqueue_wal_segment() instead
 
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
-        let path_clone = path.clone();
+        let key_clone = key.clone();
         let data_clone = data.clone();
 
         // Always write to local first
         let (tx, rx) = std::sync::mpsc::channel();
-        local_clone.submit_write(path_clone, data_clone, tx);
+        local_clone.submit_write(key_clone, data_clone, tx);
 
         match rx.recv() {
             Ok(StorageEvent::WriteComplete { ref result, .. }) => {
                 // Send result back to caller immediately (local write complete)
                 let event = StorageEvent::WriteComplete {
-                    path: path.clone(),
+                    key: key.clone(),
                     result: result.clone(),
                 };
                 let _ = callback.send(event);
 
                 // Schedule cloud write ONLY for SST files (not WAL)
                 // WAL cloud uploads happen via enqueue_wal_segment() + process_uploads()
-                if path.starts_with("sst/") && result.is_ok() {
+                if key.starts_with("sst/") && result.is_ok() {
                     let (tx_cloud, _) = std::sync::mpsc::channel();
-                    cloud_clone.submit_write(path, data, tx_cloud);
+                    cloud_clone.submit_write(key, data, tx_cloud);
                 }
             }
             _ => {
                 let _ = callback.send(StorageEvent::WriteComplete {
-                    path,
+                    key,
                     result: StorageOutcome::Err("Hybrid write failed".to_string()),
                 });
             }
         }
     }
 
-    fn submit_delete(&self, path: String, callback: StorageCallback) {
+    fn submit_delete(&self, key: String, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - deletes SSTs, metadata, etc.
         // Delete from both local and cloud
 
         let local_clone = Arc::clone(&self.local);
         let cloud_clone = Arc::clone(&self.cloud);
-        let path_clone = path.clone();
+        let key_clone = key.clone();
 
         let (tx_local, rx_local) = std::sync::mpsc::channel();
-        local_clone.submit_delete(path_clone.clone(), tx_local);
+        local_clone.submit_delete(key_clone.clone(), tx_local);
 
         let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
-        cloud_clone.submit_delete(path_clone, tx_cloud);
+        cloud_clone.submit_delete(key_clone, tx_cloud);
 
         // Wait for both and report result
         let local_result = rx_local.recv().ok();
@@ -562,7 +562,7 @@ impl StorageBackend for HybridStorage {
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {
-            path,
+            key,
             result: combined_result,
         });
     }

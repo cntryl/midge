@@ -29,37 +29,37 @@ impl Default for MockStorage {
 }
 
 impl StorageBackend for MockStorage {
-    fn submit_read(&self, path: String, callback: StorageCallback) {
+    fn submit_read(&self, key: String, callback: StorageCallback) {
         let data = self.data.lock().expect("storage mutex poisoned");
         let result = data
-            .get(&path)
+            .get(&key)
             .cloned()
             .ok_or(crate::common::MidgeError::NotFound);
 
         let event = StorageEvent::ReadComplete {
-            path,
+            key,
             result: StorageOutcome::from_result(result),
         };
         let _ = callback.send(event);
     }
 
-    fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
+    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
         let mut storage = self.data.lock().expect("storage mutex poisoned");
-        storage.insert(path.clone(), data);
+        storage.insert(key.clone(), data);
 
         let event = StorageEvent::WriteComplete {
-            path,
+            key,
             result: StorageOutcome::Ok(()),
         };
         let _ = callback.send(event);
     }
 
-    fn submit_delete(&self, path: String, callback: StorageCallback) {
+    fn submit_delete(&self, key: String, callback: StorageCallback) {
         let mut storage = self.data.lock().expect("storage mutex poisoned");
-        storage.remove(&path);
+        storage.remove(&key);
 
         let event = StorageEvent::DeleteComplete {
-            path,
+            key,
             result: StorageOutcome::Ok(()),
         };
         let _ = callback.send(event);

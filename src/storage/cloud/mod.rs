@@ -321,48 +321,48 @@ impl CloudStorage {
 }
 
 impl StorageBackend for CloudStorage {
-    fn submit_read(&self, path: String, callback: StorageCallback) {
+    fn submit_read(&self, key: String, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_get(path.clone(), tx);
+        self.submit_get(key.clone(), tx);
         if let Ok(CloudEvent::GetComplete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(data) => StorageOutcome::Ok(data),
                 CloudOutcome::Err(err) => StorageOutcome::Err(err),
             };
             let event = StorageEvent::ReadComplete {
-                path: key,
+                key,
                 result: outcome,
             };
             let _ = callback.send(event);
         }
     }
 
-    fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
+    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_put(path.clone(), data, tx);
+        self.submit_put(key.clone(), data, tx);
         if let Ok(CloudEvent::PutComplete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
                 CloudOutcome::Err(err) => StorageOutcome::Err(err),
             };
             let event = StorageEvent::WriteComplete {
-                path: key,
+                key,
                 result: outcome,
             };
             let _ = callback.send(event);
         }
     }
 
-    fn submit_delete(&self, path: String, callback: StorageCallback) {
+    fn submit_delete(&self, key: String, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_delete(self, path.clone(), tx);
+        CloudStorage::submit_delete(self, key.clone(), tx);
         if let Ok(CloudEvent::DeleteComplete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
                 CloudOutcome::Err(err) => StorageOutcome::Err(err),
             };
             let event = StorageEvent::DeleteComplete {
-                path: key,
+                key,
                 result: outcome,
             };
             let _ = callback.send(event);

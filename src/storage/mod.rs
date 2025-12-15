@@ -130,20 +130,21 @@
 //! 3. **WAL ordering**: Local write → cloud upload → CloudAck → memtable update
 //! 4. **Deterministic testing**: `MockCloudBackend` for synchronous test execution
 
-pub mod cloud;
-pub mod filesystem;
-pub mod hybrid;
-pub mod paths;
-pub mod providers;
+pub(crate) mod cloud;
+pub(crate) mod filesystem;
+pub(crate) mod fs;
+pub(crate) mod hybrid;
+pub(crate) mod paths;
+pub(crate) mod providers;
+pub(crate) mod test_support;
 
-pub use cloud::CloudStorage;
-pub use filesystem::FileSystem;
-pub use hybrid::{HybridStorage, UploadState, UploadStatus};
-pub use paths::Paths;
-pub use providers::{
-    AwsS3Provider, AzureProvider, GcsProvider, MinioProvider, OciProvider, S3Config, S3Provider,
-    WasabiProvider,
-};
+/// Stable, filesystem-oriented storage abstraction.
+///
+/// This is the long-lived API contract intended for multiple backends (local,
+/// cloud object storage, and hybrids) without exposing engine concepts.
+pub mod abstraction;
+
+pub use hybrid::HybridStorage;
 
 use crate::common::MidgeResult;
 
@@ -202,17 +203,17 @@ use crate::common::MidgeResult;
 pub enum StorageEvent {
     /// Read operation completed
     ReadComplete {
-        path: String,
+        key: String,
         result: StorageOutcome<Vec<u8>>,
     },
     /// Write operation completed
     WriteComplete {
-        path: String,
+        key: String,
         result: StorageOutcome<()>,
     },
     /// Delete operation completed
     DeleteComplete {
-        path: String,
+        key: String,
         result: StorageOutcome<()>,
     },
     /// List operation completed
@@ -290,13 +291,13 @@ pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 /// - Ready for batching and pipelining
 pub trait StorageBackend: Send + Sync + 'static {
     /// Submit a read operation. Returns immediately.
-    fn submit_read(&self, path: String, callback: StorageCallback);
+    fn submit_read(&self, key: String, callback: StorageCallback);
 
     /// Submit a write operation. Returns immediately.
-    fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback);
+    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback);
 
     /// Submit a delete operation. Returns immediately.
-    fn submit_delete(&self, path: String, callback: StorageCallback);
+    fn submit_delete(&self, key: String, callback: StorageCallback);
 
     /// Submit a prefix list operation. Returns immediately.
     fn submit_list(&self, prefix: String, callback: StorageCallback);

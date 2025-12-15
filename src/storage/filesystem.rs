@@ -6,7 +6,7 @@
 use crate::common::MidgeResult;
 use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Filesystem-based storage backend
 ///
@@ -27,14 +27,24 @@ impl FileSystem {
     /// Compute a sanitized full path for a given key.
     fn full_path(&self, key: &str) -> PathBuf {
         // Prevent absolute paths or path traversal outside the base directory.
-        let sanitized = key.trim_start_matches('/');
-        self.base_path.join(sanitized)
+        // Treat the key as a relative, forward-slash-friendly path.
+        let mut out = self.base_path.clone();
+        for component in Path::new(key).components() {
+            match component {
+                Component::Normal(part) => out.push(part),
+                Component::CurDir => {}
+                Component::ParentDir => {}
+                Component::RootDir => {}
+                Component::Prefix(_) => {}
+            }
+        }
+        out
     }
 }
 
 impl StorageBackend for FileSystem {
-    fn submit_read(&self, path: String, callback: StorageCallback) {
-        let full_path = self.full_path(&path);
+    fn submit_read(&self, key: String, callback: StorageCallback) {
+        let full_path = self.full_path(&key);
 
         let outcome = match fs::read(&full_path) {
             Ok(bytes) => StorageOutcome::Ok(bytes),
@@ -42,13 +52,13 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::ReadComplete {
-            path,
+            key,
             result: outcome,
         });
     }
 
-    fn submit_write(&self, path: String, data: Vec<u8>, callback: StorageCallback) {
-        let full_path = self.full_path(&path);
+    fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
+        let full_path = self.full_path(&key);
 
         let outcome = {
             // Always try to create parent directories if present.
@@ -70,13 +80,13 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::WriteComplete {
-            path,
+            key,
             result: outcome,
         });
     }
 
-    fn submit_delete(&self, path: String, callback: StorageCallback) {
-        let full_path = self.full_path(&path);
+    fn submit_delete(&self, key: String, callback: StorageCallback) {
+        let full_path = self.full_path(&key);
 
         let outcome = match fs::remove_file(&full_path) {
             Ok(_) => StorageOutcome::Ok(()),
@@ -84,7 +94,7 @@ impl StorageBackend for FileSystem {
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {
-            path,
+            key,
             result: outcome,
         });
     }
@@ -140,8 +150,8 @@ mod tests {
 
         // Assert
         match event {
-            StorageEvent::WriteComplete { path, result } => {
-                assert_eq!(path, "test.txt");
+            StorageEvent::WriteComplete { key, result } => {
+                assert_eq!(key, "test.txt");
                 assert!(result.is_ok());
                 // Verify file was actually written
                 let content = std::fs::read(temp_dir.path().join("test.txt")).unwrap();
@@ -281,8 +291,8 @@ mod tests {
 
         // Assert
         match event {
-            StorageEvent::ReadComplete { path, result } => {
-                assert_eq!(path, "test.txt");
+            StorageEvent::ReadComplete { key, result } => {
+                assert_eq!(key, "test.txt");
                 match result {
                     StorageOutcome::Ok(content) => assert_eq!(content, data),
                     StorageOutcome::Err(e) => panic!("Read failed: {}", e),
@@ -528,15 +538,15 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act - Try to use path traversal
-        fs.submit_write("../etc/passwd".into(), b"x".to_vec(), tx);
+        fs.submit_write("../escape_dir/evil.txt".into(), b"x".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert - Should succeed but write inside base_path
         match event {
             StorageEvent::WriteComplete { result, .. } => {
                 assert!(result.is_ok());
-                // Verify it was written inside the temp dir, not outside
-                assert!(temp_dir.path().join("../etc/passwd").exists());
+                assert!(temp_dir.path().join("escape_dir/evil.txt").exists());
+                assert!(!temp_dir.path().join("../escape_dir/evil.txt").exists());
             }
             _ => panic!("Expected WriteComplete"),
         }
@@ -557,6 +567,7 @@ mod tests {
         match event {
             StorageEvent::WriteComplete { result, .. } => {
                 assert!(result.is_ok());
+                assert!(temp_dir.path().join("etc/passwd").exists());
             }
             _ => panic!("Expected WriteComplete"),
         }
