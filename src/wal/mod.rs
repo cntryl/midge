@@ -1,30 +1,28 @@
 //! Write-Ahead Log (WAL) subsystem
 //!
-//! Provides durable write-ahead logging with filesystem, in-memory,
-//! and cloud-backed implementations.
+//! Provides durable write-ahead logging with filesystem implementations.
 
-pub mod arena;
-pub mod cloud;
-pub mod controller;
-pub mod encode_pipeline;
 pub mod encoding;
 pub mod fs;
-pub mod mem;
+pub mod policy;
+pub mod recovery;
 pub mod traits;
 pub mod types;
 
-// Re-export main WAL types from types module
-pub use types::{WalOpKind, WalPos, WalRecord, WalRecoveryStats, WalSyncMode};
+// Re-export main WAL types
+pub use types::{ColumnFamilyId, WalOpKind, WalPos, WalRecord};
 
 // Re-export traits
 pub use traits::{WalFactory, WalReader, WalReaderDyn, WalWriter};
 
-// Re-export concrete implementations
-pub use cloud::{CloudWalReader, CloudWalWriter, WalBatchManager};
-pub use controller::WalController;
+// Re-export encoding functions
 pub use encoding::{decode, encode};
-pub use fs::{FsWalFactory, Wal};
-pub use mem::{MemWalFactory, WalMem, WalMemReader};
 
-// Convenience aliases
-pub use traits::WalFile;
+// Re-export filesystem implementations
+pub use fs::{FsWalFactory, FsWalReader, FsWalWriter};
+
+// Re-export recovery
+pub use recovery::{replay_wal, RecoveryStats};
+
+// Re-export policy types
+pub use policy::{BatchConfig, DurabilityPolicy};

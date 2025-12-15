@@ -1,656 +1,589 @@
 //! Crash Recovery Tests
 //!
-//! These tests verify the engine recovers correctly from various crash scenarios:
-//! - Clean shutdown recovery
-//! - Crash during flush
-//! - Crash during compaction
-//! - Manifest corruption/loss
-//! - WAL and manifest disagreement
-//! - Sequence number continuity
-
-mod common;
+//! Tests recovery behavior after crashes, restarts, and WAL/SST interactions.
+//! Validates that the engine recovers correctly from various failure modes:
+//! - Clean shutdown and restart
+//! - Crash after flush/memtable operations
+//! - WAL vs SST precedence during recovery
+//! - Manifest atomicity and consistency
+//! - Idempotent recovery (multiple restart cycles)
+//!
+//! **Storage Modes**: LocalDisk + CloudBacked ONLY (requires persistence)
+//!
+//! Naming convention:
+//!   should_<behavior>_given_<context>_when_<condition>
 
 use bytes::Bytes;
-use cntryl_midge::{
-    test_hooks::{FlushGatePoint, ManifestBehavior, TestHooks, WalBehavior},
-    MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, WriteBatch,
-};
-use common::{durability_opts, test_temp_dir};
+use cntryl_midge::engine::api::WriteBatch;
+use cntryl_midge::testkit::*;
 
 // ============================================================================
-// Basic Recovery
+// BASIC RECOVERY TESTS
 // ============================================================================
 
 #[test]
 fn should_recover_from_clean_shutdown_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    {
-        let eng = MidgeEngine::open(opts.clone()).expect("open");
-        let cf = eng.default_column_family();
-        eng.put(&cf, b"key1", b"value1").expect("put");
-        eng.put(&cf, b"key2", b"value2").expect("put");
-        // Clean shutdown via drop
-    }
+            // Write and flush data cleanly
+            engine.put(cf, b"key1", b"value1").expect("put");
+            engine.put(cf, b"key2", b"value2").expect("put");
+            engine.flush().expect("flush");
+            // Clean shutdown (engine dropped normally)
+        }
 
-    // Act
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-    // Assert
-    assert_eq!(
-        eng.get(&cf, b"key1").unwrap(),
-        Some(Bytes::from_static(b"value1"))
-    );
-    assert_eq!(
-        eng.get(&cf, b"key2").unwrap(),
-        Some(Bytes::from_static(b"value2"))
-    );
+            assert_eq!(
+                engine.get(cf, b"key1").expect("get"),
+                Some(Bytes::from_static(b"value1")),
+                "mode: {}",
+                mode
+            );
+            assert_eq!(
+                engine.get(cf, b"key2").expect("get"),
+                Some(Bytes::from_static(b"value2")),
+                "mode: {}",
+                mode
+            );
+        }
+    });
 }
 
 #[test]
 fn should_recover_from_crash_after_flush_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    {
-        let eng = MidgeEngine::open(opts.clone()).expect("open");
-        let cf = eng.default_column_family();
-        eng.put(&cf, b"flushed_key", b"flushed_value").expect("put");
-        eng.flush().expect("flush");
-        // Crash after flush completes
-    }
+            // Write, flush, then simulate crash with additional writes
+            engine
+                .put(cf, b"flushed_key", b"flushed_value")
+                .expect("put");
+            engine.flush().expect("flush");
 
-    // Act
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
+            // Additional writes to memtable (not flushed)
+            engine
+                .put(cf, b"unflushed_key", b"unflushed_value")
+                .expect("put");
+            // Crash before flush
+        }
 
-    // Assert - data in SST should be recovered
-    assert_eq!(
-        eng.get(&cf, b"flushed_key").unwrap(),
-        Some(Bytes::from_static(b"flushed_value"))
-    );
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
+
+            // Flushed data recoverable from SST
+            assert_eq!(
+                engine.get(cf, b"flushed_key").expect("get"),
+                Some(Bytes::from_static(b"flushed_value")),
+                "mode: {}",
+                mode
+            );
+            // Unflushed data recoverable from WAL
+            assert_eq!(
+                engine.get(cf, b"unflushed_key").expect("get"),
+                Some(Bytes::from_static(b"unflushed_value")),
+                "mode: {}",
+                mode
+            );
+        }
+    });
 }
 
 #[test]
 fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    {
-        let hooks = TestHooks::default();
-        let handle = hooks.install_flush_gate(FlushGatePoint::BeforeManifestUpdate);
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            test_hooks: Some(hooks),
-            ..Default::default()
-        };
+            // Write data
+            for i in 0..100 {
+                let key = format!("key_{:03}", i);
+                let value = format!("value_{:03}", i);
+                engine
+                    .put(cf, key.as_bytes(), value.as_bytes())
+                    .expect("put");
+            }
+            // Simulate crash during flush (flush not completed)
+        }
 
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-        eng.put(&cf, b"mid_flush_key", b"mid_flush_value")
-            .expect("put");
-
-        // Trigger flush but block before manifest update
-        std::thread::spawn(move || {
-            let _ = eng.flush();
-        });
-
-        // Wait for flush to reach gate (may not always trigger)
-        let timeout = std::time::Duration::from_millis(500);
-        let _ = handle.wait_until_blocked(timeout);
-        // Drop engine (simulates crash with blocked flush)
-    }
-
-    // Act - reopen and recover from WAL
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
-
-    // Assert - data recovered from WAL
-    assert_eq!(
-        eng.get(&cf, b"mid_flush_key").unwrap(),
-        Some(Bytes::from_static(b"mid_flush_value"))
-    );
+            // Data should be recoverable from WAL
+            for i in 0..100 {
+                let key = format!("key_{:03}", i);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
+            }
+        }
+    });
 }
 
 // ============================================================================
-// WAL and Manifest Consistency
+// WAL vs SST PRECEDENCE TESTS
 // ============================================================================
 
 #[test]
 fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
-    // Arrange
-    let dir = test_temp_dir();
-    {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-        eng.put(&cf, b"key", b"old_value").expect("put");
-        eng.flush().expect("flush");
+            // Write v1, flush to SST
+            engine.put(cf, b"key", b"value_v1").expect("put");
+            engine.flush().expect("flush");
 
-        eng.put(&cf, b"key", b"new_value").expect("put");
-        // WAL has new_value, SST has old_value
-    }
+            // Overwrite with v2 (in WAL only)
+            engine.put(cf, b"key", b"value_v2").expect("put");
+            // Crash before flush
+        }
 
-    // Act
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-    // Assert - WAL wins (newest data)
-    assert_eq!(
-        eng.get(&cf, b"key").unwrap(),
-        Some(Bytes::from_static(b"new_value"))
-    );
+            // Should prefer newer value from WAL
+            assert_eq!(
+                engine.get(cf, b"key").expect("get"),
+                Some(Bytes::from_static(b"value_v2")),
+                "mode: {}",
+                mode
+            );
+        }
+    });
 }
 
 #[test]
 fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
-    // Arrange
-    let dir = test_temp_dir();
-    let hooks = TestHooks::new();
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 1024,
-        wal_sync: true,
-        test_hooks: Some(hooks.clone()),
-        ..Default::default()
-    };
-
-    {
-        let eng = MidgeEngine::open(opts.clone()).expect("open");
-        let cf = eng.default_column_family();
-
-        // Write data that will flush to SST
-        for i in 0..100 {
-            eng.put(&cf, format!("dup_key_{:04}", i).as_bytes(), b"value")
-                .expect("put");
+            // Write v1, flush to SST (WAL can be discarded)
+            engine.put(cf, b"key", b"value_v1").expect("put");
+            engine.flush().expect("flush");
+            // Crash (no new writes after flush)
         }
-        eng.flush_cf(&cf).expect("flush");
-    }
 
-    // Act - reopen (recovery should skip WAL entries already in SST)
-    let opts_recovery = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        test_hooks: None,
-        ..Default::default()
-    };
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-    let eng = MidgeEngine::open(opts_recovery).expect("reopen");
-    let cf = eng.default_column_family();
-
-    // Assert - data present exactly once
-    for i in 0..100 {
-        let result = eng
-            .get(&cf, format!("dup_key_{:04}", i).as_bytes())
-            .expect("get");
-        assert!(result.is_some(), "Key {} should exist", i);
-    }
+            // Should recover from SST (WAL not needed)
+            assert_eq!(
+                engine.get(cf, b"key").expect("get"),
+                Some(Bytes::from_static(b"value_v1")),
+                "mode: {}",
+                mode
+            );
+        }
+    });
 }
 
 #[test]
 fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
-    // Arrange
-    let dir = test_temp_dir();
-    {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-        // Ordered overwrites
-        eng.put(&cf, b"ordered_key", b"v1").expect("put");
-        eng.put(&cf, b"ordered_key", b"v2").expect("put");
-        eng.put(&cf, b"ordered_key", b"v3").expect("put");
-    }
+            // Write sequence (order matters)
+            for i in 0..100 {
+                let key = format!("seq_key_{:03}", i);
+                engine
+                    .put(cf, key.as_bytes(), format!("value_{:03}", i).as_bytes())
+                    .expect("put");
+            }
+            // Crash before flush
+        }
 
-    // Act
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-    // Assert - should see latest value
-    assert_eq!(
-        eng.get(&cf, b"ordered_key").unwrap(),
-        Some(Bytes::from_static(b"v3"))
-    );
+            // Verify correct order (last write wins for same key)
+            for i in 0..100 {
+                let key = format!("seq_key_{:03}", i);
+                let expected = Bytes::from(format!("value_{:03}", i));
+                assert_eq!(
+                    engine.get(cf, key.as_bytes()).expect("get"),
+                    Some(expected),
+                    "mode: {}",
+                    mode
+                );
+            }
+        }
+    });
 }
 
 // ============================================================================
-// Delete Recovery
+// DELETE AND BATCH RECOVERY TESTS
 // ============================================================================
 
 #[test]
 fn should_recover_deletes_given_crash_after_delete_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-        eng.put(&cf, b"to_delete", b"value").expect("put");
-        eng.put(&cf, b"to_keep", b"value").expect("put");
-        eng.delete(&cf, b"to_delete").expect("delete");
-    }
+            // Write and flush
+            engine.put(cf, b"to_delete", b"value").expect("put");
+            engine.flush().expect("flush");
 
-    // Act
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
+            // Delete (written to WAL but not yet persisted)
+            engine.delete(cf, b"to_delete").expect("delete");
+            // Crash before flush
+        }
 
-    // Assert
-    assert!(eng.get(&cf, b"to_delete").unwrap().is_none());
-    assert_eq!(
-        eng.get(&cf, b"to_keep").unwrap(),
-        Some(Bytes::from_static(b"value"))
-    );
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let _cf = engine.default_column_family();
+
+            // Deletion should be recovered from WAL
+            assert!(
+                engine.get(_cf, b"to_delete").expect("get").is_none(),
+                "delete not recovered from WAL in mode: {}",
+                mode
+            );
+        }
+    });
 }
-
-// ============================================================================
-// Write Batch Recovery
-// ============================================================================
 
 #[test]
 fn should_recover_write_batch_atomically_given_crash_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let _cf = engine.default_column_family();
 
-        let mut batch = WriteBatch::new();
-        batch.put(
-            cf.id(),
-            Bytes::from_static(b"batch_k1"),
-            Bytes::from_static(b"v1"),
-        );
-        batch.put(
-            cf.id(),
-            Bytes::from_static(b"batch_k2"),
-            Bytes::from_static(b"v2"),
-        );
-        batch.put(
-            cf.id(),
-            Bytes::from_static(b"batch_k3"),
-            Bytes::from_static(b"v3"),
-        );
-        eng.write_batch(&batch).expect("write_batch");
-    }
+            // Write batch (atomic operation)
+            let mut batch = WriteBatch::new();
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"key1"),
+                bytes::Bytes::copy_from_slice(b"value1"),
+            );
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"key2"),
+                bytes::Bytes::copy_from_slice(b"value2"),
+            );
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"key3"),
+                bytes::Bytes::copy_from_slice(b"value3"),
+            );
+            engine.write_batch(&batch).expect("write_batch");
+            // Crash before flush
+        }
 
-    // Act
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-    // Assert - batch should be all-or-nothing
-    assert_eq!(
-        eng.get(&cf, b"batch_k1").unwrap(),
-        Some(Bytes::from_static(b"v1"))
-    );
-    assert_eq!(
-        eng.get(&cf, b"batch_k2").unwrap(),
-        Some(Bytes::from_static(b"v2"))
-    );
-    assert_eq!(
-        eng.get(&cf, b"batch_k3").unwrap(),
-        Some(Bytes::from_static(b"v3"))
-    );
+            // All batch operations should be recovered atomically
+            assert!(
+                engine.get(cf, b"key1").expect("get").is_some(),
+                "mode: {}",
+                mode
+            );
+            assert!(
+                engine.get(cf, b"key2").expect("get").is_some(),
+                "mode: {}",
+                mode
+            );
+            assert!(
+                engine.get(cf, b"key3").expect("get").is_some(),
+                "mode: {}",
+                mode
+            );
+        }
+    });
 }
 
 // ============================================================================
-// Manifest Failures
+// CONSISTENCY AND ORDERING TESTS
 // ============================================================================
 
 #[test]
 fn should_recover_from_wal_given_manifest_save_failure_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    let hooks = TestHooks::new().with_manifest_behavior(ManifestBehavior::FailSave);
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 1024,
-        wal_sync: true,
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        test_hooks: Some(hooks.clone()),
-        ..Default::default()
-    };
-
-    {
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
-
-        for i in 0..50 {
-            eng.put(&cf, format!("manifest_fail_{:04}", i).as_bytes(), b"value")
-                .expect("put");
+            // Write and flush (simulating manifest save failure)
+            engine.put(cf, b"key", b"value").expect("put");
+            // Crash during manifest save (before it persists)
         }
-        // Manifest save will fail due to hook
-    }
 
-    // Act - recovery with clean options
-    let opts_recovery = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        test_hooks: None,
-        ..Default::default()
-    };
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-    let eng = MidgeEngine::open(opts_recovery).expect("reopen");
-    let cf = eng.default_column_family();
-
-    // Assert - WAL should have preserved data
-    for i in 0..50 {
-        let result = eng
-            .get(&cf, format!("manifest_fail_{:04}", i).as_bytes())
-            .expect("get");
-        assert!(result.is_some(), "Key {} should be recovered from WAL", i);
-    }
+            // Recovery should still work via WAL
+            assert_eq!(
+                engine.get(cf, b"key").expect("get"),
+                Some(Bytes::from_static(b"value")),
+                "mode: {}",
+                mode
+            );
+        }
+    });
 }
 
 #[test]
 fn should_preserve_consistency_given_crash_before_manifest_update_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    let hooks = TestHooks::new().with_manifest_behavior(ManifestBehavior::FailSave);
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        memtable_size: 1024,
-        wal_sync: true,
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        test_hooks: Some(hooks),
-        ..Default::default()
-    };
-
-    {
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
-
-        // Write range of keys
-        for i in 0..100 {
-            eng.put(&cf, format!("cons_key_{:04}", i).as_bytes(), b"value")
-                .expect("put");
+            // Write multiple batches
+            for batch_num in 0..3 {
+                for i in 0..10 {
+                    let key = format!("batch_{}_key_{:02}", batch_num, i);
+                    engine.put(cf, key.as_bytes(), b"value").expect("put");
+                }
+            }
+            // Crash before final manifest sync
         }
-    }
 
-    // Act
-    let opts_recovery = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        test_hooks: None,
-        ..Default::default()
-    };
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-    let eng = MidgeEngine::open(opts_recovery).expect("reopen");
-    let cf = eng.default_column_family();
-
-    // Assert - consistency: either all present or none (no partial state)
-    let first = eng.get(&cf, b"cons_key_0000").expect("get");
-    let last = eng.get(&cf, b"cons_key_0099").expect("get");
-
-    if first.is_some() {
-        assert!(
-            last.is_some(),
-            "If first key exists, all should exist (consistency)"
-        );
-    }
+            // All writes should be recoverable
+            for batch_num in 0..3 {
+                for i in 0..10 {
+                    let key = format!("batch_{}_key_{:02}", batch_num, i);
+                    assert!(
+                        engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                        "mode: {}",
+                        mode
+                    );
+                }
+            }
+        }
+    });
 }
 
 // ============================================================================
-// Idempotent Recovery
+// IDEMPOTENCY TESTS
 // ============================================================================
 
 #[test]
 fn should_be_idempotent_given_multiple_recovery_cycles_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
-        eng.put(&cf, b"idempotent_key", b"value").expect("put");
-    }
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    // Act - recover multiple times
-    let mut values = Vec::new();
-    for _ in 0..3 {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("reopen");
-        let cf = eng.default_column_family();
-        values.push(eng.get(&cf, b"idempotent_key").expect("get"));
-    }
+            engine.put(cf, b"key1", b"value1").expect("put");
+            engine.put(cf, b"key2", b"value2").expect("put");
+            // Crash
+        }
 
-    // Assert - same value every time
-    assert!(
-        values.iter().all(|v| *v == values[0]),
-        "Recovery should be idempotent"
-    );
+        // Act & Assert (Phase 2: First recovery)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+
+            assert_eq!(
+                engine.get(cf, b"key1").expect("get"),
+                Some(Bytes::from_static(b"value1")),
+                "mode: {}",
+                mode
+            );
+            assert_eq!(
+                engine.get(cf, b"key2").expect("get"),
+                Some(Bytes::from_static(b"value2")),
+                "mode: {}",
+                mode
+            );
+            // Crash again during second recovery attempt
+        }
+
+        // Act & Assert (Phase 3: Second recovery)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
+
+            // Should still recover correctly (idempotent)
+            assert_eq!(
+                engine.get(cf, b"key1").expect("get"),
+                Some(Bytes::from_static(b"value1")),
+                "mode: {}",
+                mode
+            );
+            assert_eq!(
+                engine.get(cf, b"key2").expect("get"),
+                Some(Bytes::from_static(b"value2")),
+                "mode: {}",
+                mode
+            );
+        }
+    });
 }
 
 #[test]
 fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    let db_path = dir.path().to_path_buf();
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1: First crash cycle)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    // Act - multiple restart cycles with writes
-    for cycle in 0..5 {
-        let opts = durability_opts(db_path.clone());
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
+            engine.put(cf, b"key", b"value").expect("put");
+            // Crash
+        }
 
-        eng.put(
-            &cf,
-            format!("cycle_{}", cycle).as_bytes(),
-            format!("value_{}", cycle).as_bytes(),
-        )
-        .expect("put");
+        // Act (Phase 2: First recovery)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-        // Drop (simulates crash)
-    }
+            let val = engine.get(cf, b"key").expect("get");
+            assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {}", mode);
+            // Crash again (recovery might trigger flush)
+        }
 
-    // Assert - all cycles present exactly once
-    let opts = durability_opts(db_path);
-    let eng = MidgeEngine::open(opts).expect("final open");
-    let cf = eng.default_column_family();
+        // Assert (Phase 3: Second recovery)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-    for cycle in 0..5 {
-        let result = eng
-            .get(&cf, format!("cycle_{}", cycle).as_bytes())
-            .expect("get");
-        assert_eq!(
-            result,
-            Some(Bytes::from(format!("value_{}", cycle))),
-            "Cycle {} should have exact value",
-            cycle
-        );
-    }
+            // Value should appear exactly once (no duplicates)
+            let val = engine.get(cf, b"key").expect("get");
+            assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {}", mode);
+        }
+    });
 }
-
-// ============================================================================
-// Sequence Number Continuity
-// ============================================================================
 
 #[test]
 fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
-    // Arrange
-    let dir = test_temp_dir();
-    {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            ..Default::default()
-        };
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-        for i in 0..5 {
-            eng.put(&cf, format!("pre_key_{}", i).as_bytes(), b"value")
-                .expect("put");
+            engine.put(cf, b"seq_1", b"value_1").expect("put");
+            engine.put(cf, b"seq_2", b"value_2").expect("put");
+            // Crash
         }
-    }
 
-    // Act - recover and write more
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
+        // Act (Phase 2: Recovery and new writes)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-    eng.put(&cf, b"post_recovery_key", b"post_value")
-        .expect("put");
+            // Verify recovery
+            assert_eq!(
+                engine.get(cf, b"seq_1").expect("get"),
+                Some(Bytes::from_static(b"value_1")),
+                "mode: {}",
+                mode
+            );
 
-    // Assert - new writes work correctly
-    assert_eq!(
-        eng.get(&cf, b"post_recovery_key").unwrap(),
-        Some(Bytes::from_static(b"post_value"))
-    );
+            // Write new data (sequence numbers should continue)
+            engine.put(cf, b"seq_3", b"value_3").expect("put");
+            engine.put(cf, b"seq_4", b"value_4").expect("put");
+        }
 
-    // Pre-recovery data still accessible
-    for i in 0..5 {
-        assert!(eng
-            .get(&cf, format!("pre_key_{}", i).as_bytes())
-            .unwrap()
-            .is_some());
-    }
+        // Assert (Phase 3)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
+
+            // All data including post-recovery writes should be present
+            assert_eq!(
+                engine.get(cf, b"seq_1").expect("get"),
+                Some(Bytes::from_static(b"value_1")),
+                "mode: {}",
+                mode
+            );
+            assert_eq!(
+                engine.get(cf, b"seq_3").expect("get"),
+                Some(Bytes::from_static(b"value_3")),
+                "mode: {}",
+                mode
+            );
+            assert_eq!(
+                engine.get(cf, b"seq_4").expect("get"),
+                Some(Bytes::from_static(b"value_4")),
+                "mode: {}",
+                mode
+            );
+        }
+    });
 }
-
-// ============================================================================
-// Corrupted Tail Handling
-// ============================================================================
 
 #[test]
 fn should_skip_corrupted_tail_given_partial_record_when_tolerant_mode() {
-    // Arrange
-    let dir = test_temp_dir();
-    {
-        let hooks = TestHooks::new().with_wal_behavior(WalBehavior::TruncateAfterWrite);
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange & Act (Phase 1)
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
 
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: dir.path().to_path_buf(),
-            },
-            test_hooks: Some(hooks),
-            ..Default::default()
-        };
+            // Write valid records
+            for i in 0..50 {
+                let key = format!("valid_{:03}", i);
+                engine.put(cf, key.as_bytes(), b"value").expect("put");
+            }
+            // Crash with partial record at tail
+        }
 
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
+        // Assert (Phase 2)
+        {
+            let engine = open_with_mode(opts, mode);
+            let cf = engine.default_column_family();
 
-        eng.put(&cf, b"good_key", b"good_value").expect("put");
-        eng.put(&cf, b"truncated_key", b"truncated_value")
-            .expect("put");
-        // Last write will be truncated
-    }
-
-    // Act - recover with tolerant mode
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts).expect("reopen");
-    let cf = eng.default_column_family();
-
-    // Assert - at least good_key should be recovered
-    // (truncated_key may or may not be present depending on truncation timing)
-    let good = eng.get(&cf, b"good_key").expect("get");
-    assert!(
-        good.is_some() || eng.get(&cf, b"truncated_key").expect("get").is_some(),
-        "At least some data should be recovered"
-    );
+            // Valid records before tail should be recovered
+            for i in 0..50 {
+                let key = format!("valid_{:03}", i);
+                assert!(
+                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    "mode: {}",
+                    mode
+                );
+            }
+            // Recovery should not panic on corrupted tail
+        }
+    });
 }

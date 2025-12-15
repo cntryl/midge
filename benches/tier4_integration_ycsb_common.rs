@@ -1,0 +1,269 @@
+//! Common utilities for YCSB-style benchmarks
+//!
+//! - Deterministic key/value generation
+//! - No heap allocs or RNG in hot loops
+//! - Correct Zipfian distribution (YCSB-style)
+//! - Precomputed keys/values via OnceLock
+//! - Batched load helpers
+//! - FS + Cloud engine variants with configurable latency
+
+use bytes::Bytes;
+use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode, WriteBatch};
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
+use std::sync::OnceLock;
+use tempfile::TempDir;
+
+// ============================================================================
+// Workload Constants
+// ============================================================================
+
+#[allow(dead_code)]
+pub const OPS_PER_ITER: usize = 2_000; // Reduced from 5000 for faster iterations
+#[allow(dead_code)]
+pub const RECORD_COUNT: usize = 10_000; // Reduced from 25000 for faster load
+pub const VALUE_SIZE: usize = 1_000;
+pub const BATCH_SIZE: usize = 128; // Bumped from 100 for fewer flushes
+
+#[allow(dead_code)]
+pub const THREAD_COUNTS: [usize; 3] = [1, 2, 8];
+
+// ============================================================================
+// Key / Value Generation
+// ============================================================================
+
+pub fn generate_key(id: usize) -> Bytes {
+    // YCSB-style keys: "user000000000123"
+    Bytes::from(format!("user{:012}", id))
+}
+
+pub fn pregen_values(count: usize, seed: u64) -> Vec<Bytes> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    (0..count)
+        .map(|_| {
+            let mut buf = vec![0u8; VALUE_SIZE];
+            rng.fill_bytes(&mut buf);
+            Bytes::from(buf)
+        })
+        .collect()
+}
+
+// ---------- PRECOMPUTED KEYS AND VALUES (OnceLock) -------------------------
+
+#[allow(dead_code)]
+pub static PREGEN_KEYS: OnceLock<Vec<Bytes>> = OnceLock::new();
+#[allow(dead_code)]
+pub static PREGEN_VALUES: OnceLock<Vec<Bytes>> = OnceLock::new();
+
+#[allow(dead_code)]
+pub fn init_pregen() {
+    PREGEN_KEYS.get_or_init(|| (0..RECORD_COUNT).map(generate_key).collect());
+    PREGEN_VALUES.get_or_init(|| pregen_values(RECORD_COUNT, 0xD1CE_F00D_CAFE_F00D));
+}
+
+// ============================================================================
+// Zipfian Distribution
+// ============================================================================
+
+#[allow(dead_code)]
+pub struct ZipfianGenerator {
+    items: usize,
+    theta: f64,
+    zeta_n: f64,
+    alpha: f64,
+    eta: f64,
+}
+
+impl ZipfianGenerator {
+    pub fn new(items: usize, theta: f64) -> Self {
+        let zeta_n = Self::zeta(items, theta);
+        let zeta_2 = Self::zeta(2, theta);
+        let alpha = 1.0 / (1.0 - theta);
+        let eta = (1.0 - (2.0 / items as f64).powf(1.0 - theta)) / (1.0 - (zeta_2 / zeta_n));
+
+        Self {
+            items,
+            theta,
+            zeta_n,
+            alpha,
+            eta,
+        }
+    }
+
+    fn zeta(n: usize, theta: f64) -> f64 {
+        (1..=n).map(|i| 1.0 / (i as f64).powf(theta)).sum()
+    }
+
+    #[allow(dead_code)]
+    pub fn next(&self, rng: &mut StdRng) -> usize {
+        // Deterministic [0,1) from u64, no FP RNG in hot loop
+        let u: f64 = {
+            let r = rng.next_u64();
+            (r as f64) / 18446744073709551616.0 // 2^64
+        };
+
+        let uz = u * self.zeta_n;
+
+        if uz < 1.0 {
+            return 0;
+        }
+        if uz < 1.0 + 0.5_f64.powf(self.theta) {
+            return 1;
+        }
+
+        let v = self.eta * u - (self.eta - 1.0);
+        let idx = (self.items as f64 * v.powf(self.alpha)) as usize;
+
+        idx % self.items
+    }
+}
+
+// ---- Global Zipf (OnceLock) ----------------------------------------------
+
+#[allow(dead_code)]
+pub static ZIPF_DEFAULT: OnceLock<ZipfianGenerator> = OnceLock::new();
+
+#[allow(dead_code)]
+pub fn init_zipf() {
+    ZIPF_DEFAULT.get_or_init(|| ZipfianGenerator::new(RECORD_COUNT, 0.99));
+}
+
+/// Convenience for YCSB benches: call once at top of `bench_*`.
+#[allow(dead_code)]
+pub fn init_ycsb_globals() {
+    init_pregen();
+    init_zipf();
+}
+
+#[allow(dead_code)]
+pub fn make_thread_rng(thread_id: usize, workload_seed: u64) -> StdRng {
+    StdRng::seed_from_u64(workload_seed ^ ((thread_id as u64) << 32))
+}
+
+// ============================================================================
+// Batched Load
+// ============================================================================
+
+/// Load the full pre-generated dataset (RECORD_COUNT records) into the engine.
+#[allow(dead_code)]
+pub fn load_full_dataset(engine: &MidgeEngine) {
+    let keys = PREGEN_KEYS.get().expect("call init_ycsb_globals()");
+    let vals = PREGEN_VALUES.get().expect("call init_ycsb_globals()");
+    load_data_batched(engine, keys, vals, BATCH_SIZE);
+}
+
+/// Generic batched loader: no RNG, no allocations in hot loop.
+pub fn load_data_batched(
+    engine: &MidgeEngine,
+    keys: &[Bytes],
+    values: &[Bytes],
+    batch_size: usize,
+) {
+    let cf = engine.default_column_family();
+    let cf_id = cf.id();
+
+    let mut batch = WriteBatch::new();
+    for i in 0..keys.len() {
+        batch.put_cf(cf_id, keys[i].clone(), values[i].clone());
+        if batch.len() >= batch_size {
+            engine.write_batch(&batch).unwrap();
+            batch.clear();
+        }
+    }
+
+    if !batch.is_empty() {
+        engine.write_batch(&batch).unwrap();
+    }
+
+    let _ = engine.flush();
+}
+
+// ============================================================================
+// Scan Range Helpers (Workload E)
+// ============================================================================
+
+#[allow(dead_code)]
+pub fn pregen_scan_ranges(count: usize, scan_len: usize) -> Vec<(Bytes, Bytes)> {
+    let keys = PREGEN_KEYS.get().expect("call init_ycsb_globals()");
+    (0..count)
+        .map(|i| {
+            let start = keys[i].clone();
+            let end_idx = (i + scan_len).min(RECORD_COUNT - 1);
+            let end = keys[end_idx].clone();
+            (start, end)
+        })
+        .collect()
+}
+
+// ============================================================================
+// Engine Setup Variants (FS)
+// ============================================================================
+
+#[allow(dead_code)]
+pub fn setup_engine_fs_nosync() -> (MidgeEngine, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 64 * 1024 * 1024,
+        enable_compaction: true,
+        wal_sync: false,
+        ..Default::default()
+    };
+    (MidgeEngine::open(opts).unwrap(), dir)
+}
+
+#[allow(dead_code)]
+pub fn setup_engine_fs_sync() -> (MidgeEngine, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::LocalDisk {
+            db_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 64 * 1024 * 1024,
+        enable_compaction: true,
+        wal_sync: true,
+        ..Default::default()
+    };
+    (MidgeEngine::open(opts).unwrap(), dir)
+}
+
+// ============================================================================
+// Engine Setup Variants (Cloud-backed)
+// ============================================================================
+
+/// Setup cloud-backed engine with realistic latency simulation.
+#[allow(dead_code)]
+pub fn setup_engine_cloud_nosync() -> (MidgeEngine, TempDir) {
+    let dir = TempDir::new().unwrap();
+
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::CloudBacked {
+            local_cache_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 64 * 1024 * 1024,
+        enable_compaction: true,
+        wal_sync: false,
+        ..Default::default()
+    };
+
+    (MidgeEngine::open(opts).unwrap(), dir)
+}
+
+#[allow(dead_code)]
+pub fn setup_engine_cloud_sync() -> (MidgeEngine, TempDir) {
+    let dir = TempDir::new().unwrap();
+
+    let opts = MidgeOptions {
+        storage_mode: StorageMode::CloudBacked {
+            local_cache_path: dir.path().to_path_buf(),
+        },
+        memtable_size: 64 * 1024 * 1024,
+        enable_compaction: true,
+        wal_sync: true,
+        ..Default::default()
+    };
+
+    (MidgeEngine::open(opts).unwrap(), dir)
+}

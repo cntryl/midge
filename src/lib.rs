@@ -1,75 +1,175 @@
-//! Midge - A high-performance embedded key-value database
+//! Midge - High-performance embedded LSM-tree database
 //!
-//! # Architecture
+//! Clean architectural layers:
+//!   - `common`      - foundational types with zero dependencies
+//!   - `engine`      - main KV store and public API surface
+//!   - `runtime`     - background actors (compaction, flush, metrics)
+//!   - `metadata`    - manifest + version mgmt
+//!   - `wal`         - write-ahead log abstraction
+//!   - `sst`         - sorted-string table formats + readers/writers
+//!   - `storage`     - storage backend abstraction (fs, cloud, hybrid)
+//!   - `compaction`  - compaction planning + execution
+//!   - `iterators`   - iterator implementations
+//!   - `metrics`     - performance instrumentation
+//!   - `testkit`     - testing utilities
 //!
-//! Midge is organized into layers:
+//! # Public API Surface
 //!
-//! - [`api`]: Public API layer - traits and types for users
-//! - [`core`]: Engine implementation - LSM-tree, compaction, transactions, manifests
-//! - [`sst`]: SSTable storage format and bloom filters
-//! - [`wal`]: Write-ahead logging for durability
-//! - [`cloud`]: Cloud-backed storage implementations
-//! - [`compaction`]: User-extensible compaction filter API
+//! Only modules re-exported at the bottom of this file are intended to be
+//! stable for external consumption. Internal modules are free to evolve.
 
-// Lint enforcement for production code quality
-// Note: unwrap is allowed in test modules via #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
-// Foundational modules with no internal dependencies
+// Foundation - no dependencies
 pub mod common;
-pub mod metrics;
 
-// Re-export error types at crate root for convenience
-pub use common::error;
-pub use common::{MidgeError, MidgeResult};
-pub use metrics::PerformanceMetrics;
+// Telemetry (observability)
+pub mod telemetry;
 
-// Re-export test hooks for testing
-pub use common::test_hooks;
-
-// Core modules
-pub mod config;
-pub mod core;
+// Storage abstraction
+pub mod storage;
+// Filesystem abstraction (Engine-facing traits)
 pub mod fs;
 
-// Public API layer
-pub mod api;
+// Data structures
+pub mod iterators;
 
-// Feature modules (implementation details, but exposed for extensibility)
-pub mod cloud;
-pub mod health;
-pub mod sst;
+// Logging
 pub mod wal;
 
-// Re-export commonly used cloud types for convenience
-pub use cloud::{LatencyConfig, LatencySimulator, MockCloudBackend, StorageBackend};
+// SSTs and memtables
+pub mod sst;
 
-// Convenience re-exports from core (commonly needed internal types)
-pub use crate::core::backup;
-pub use crate::core::locking;
-pub use crate::core::manifest;
+// Metadata management
+pub mod metadata;
 
-// Compaction filter API for user-provided custom logic
-pub mod compaction {
-    //! Compaction filter API for custom compaction logic
-    pub use crate::core::compaction::executor::CompactionVersion;
-    pub use crate::core::compaction::filter::{CompactionFilter, FilterDecision};
+// Main engine
+pub mod engine;
+
+// Background processing
+pub mod runtime;
+
+// Data organization
+pub mod compaction;
+
+// Observability
+pub mod metrics;
+
+// Testing
+pub mod testkit;
+
+// ---------------------------------------------------------------------------
+// Public Export Surface
+// ---------------------------------------------------------------------------
+
+// Common types
+pub use common::{MidgeError, MidgeResult};
+
+// Main engine API
+pub use engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
+
+// High-level API types
+pub use engine::api::{
+    // Errors
+    ApiError,
+    ApiResult,
+    // Results
+    CasResult,
+    // Column families
+    ColumnFamily,
+
+    Direction,
+
+    Durability,
+    Goal,
+    InsertResult,
+
+    IsolationLevel,
+
+    Iterator,
+    // KV types
+    Key,
+    KvPair,
+
+    KvTransaction,
+    MemoryBudget,
+    // Merge operators
+    MergeOperator,
+    // Engine configuration
+    OpenOptions,
+    // Query + scans
+    Query,
+    // Snapshots
+    Snapshot,
+
+    // Transactions
+    Transaction,
+    Value,
+    WorkloadProfile,
+
+    // Writes
+    WriteBatch,
+    WriteOptions,
+};
+
+// Observability
+pub use metrics::{EngineMetrics, PerformanceMetrics};
+
+// Testing utilities
+pub use testkit::{MidgeOptions, MockStorage, StorageMode};
+
+// ---------------------------------------------------------------------------
+// Ergonomic Prelude
+// ---------------------------------------------------------------------------
+
+/// Prelude for ergonomic wildcard imports.
+///
+/// # Example
+///
+/// ```no_run
+/// use cntryl_midge::prelude::*;
+/// use std::path::PathBuf;
+///
+/// let engine = MidgeEngine::open(PathBuf::from("./db"))?;
+/// let mut batch = WriteBatch::new();
+/// batch.put(b"key".to_vec().into(), b"value".to_vec().into());
+/// engine.write_batch(&batch)?;
+/// # Ok::<(), cntryl_midge::MidgeError>(())
+/// ```
+pub mod prelude {
+    pub use crate::{
+        ApiError,
+        ApiResult,
+        ColumnFamily,
+
+        ColumnFamilyHandle,
+        Direction,
+
+        Iterator,
+        // Types
+        Key,
+        KvPair,
+
+        // Merge operators
+        MergeOperator,
+        // Engine
+        MidgeEngine,
+        // Errors
+        MidgeError,
+        MidgeResult,
+        // Configuration
+        OpenOptions,
+
+        // Query + iteration
+        Query,
+        Snapshot,
+
+        // Transactions + snapshots
+        Transaction,
+        Value,
+        // Writes
+        WriteBatch,
+        WriteOptions,
+    };
 }
-
-// Re-export commonly used types at crate root for convenience
-pub use crate::api::{
-    transaction::IsolationLevel, BytesAppendOperator, ColumnFamilyConfig, ColumnFamilyHandle,
-    ColumnFamilyId, DynKvStore, DynMergeOperator, IntegerAddOperator, KvStore, KvTransaction,
-    MergeOperator, Mutation, MutationOp, Query, Snapshot, StringAppendOperator, WriteBatch,
-    WriteOptions, DEFAULT_CF_ID, DEFAULT_CF_NAME,
-};
-pub use crate::config::{
-    CloudStorageBuilder, CompactionStyle, CompressionType, MidgeOptions, StorageMode,
-    WalRecoveryMode,
-};
-// Export EngineTransaction as the public Transaction type
-pub use crate::core::transaction::EngineTransaction as Transaction;
-// Re-export the engine API from the new `core` location
-pub use crate::core::engine::{CasResult, InsertResult, MidgeEngine};
-pub use crate::sst::bloom::Filter;

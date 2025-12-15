@@ -1,483 +1,327 @@
-//! Tests for the high-level ConfigBuilder API.
+//! Config API Integration Tests
 //!
-//! These tests verify that the recommended user-facing configuration API
-//! correctly derives parameters from high-level goals and durability settings.
+//! Tests the builder-based configuration system that derives low-level parameters
+//! from high-level optimization goals (latency/throughput/cost), durability
+//! requirements, memory budgets, and workload profiles.
+//!
+//! Naming convention:
+//!   should_<behavior>_given_<context>_when_<condition>
+//!
+//! These tests validate the config builder's behavior without requiring an
+//! engine instance, since configuration is orthogonal to storage modes.
 
-use cntryl_midge::config::{
-    CloudMode, ConfigBuilder, Durability, Goal, MemoryBudget, WorkloadProfile,
-};
-use tempfile::TempDir;
+use cntryl_midge::{Durability, Goal, MemoryBudget, OpenOptions, WorkloadProfile};
+use std::path::PathBuf;
 
-mod common;
-
-// =============================================================================
-// BASIC BUILDER TESTS
-// =============================================================================
+// ============================================================================
+// BUILDER INITIALIZATION TESTS
+// ============================================================================
 
 #[test]
 fn should_build_config_given_minimal_defaults_when_only_path_provided() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path).build().expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().path("./test_db").build();
 
     // Assert
-    assert_eq!(config.goal(), Goal::Latency); // Default goal
-    assert_eq!(config.durability(), Durability::Steady); // Default durability
-    assert_eq!(config.cloud_mode(), CloudMode::Off);
-    assert_eq!(config.memory_budget(), MemoryBudget::Auto);
-    assert!(!config.autotune_enabled());
+    assert_eq!(opts.path, PathBuf::from("./test_db"));
+    assert_eq!(opts.goal, Goal::Latency);
+    assert_eq!(opts.durability, Durability::Steady);
+    assert_eq!(opts.memory_budget, MemoryBudget::Auto);
+    assert_eq!(opts.workload, WorkloadProfile::Mixed);
 }
+
+// ============================================================================
+// GOAL SETTING TESTS
+// ============================================================================
 
 #[test]
 fn should_set_goal_given_latency_when_optimizing_for_p99() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path)
-        .goal(Goal::Latency)
-        .build()
-        .expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().goal(Goal::Latency).build();
 
     // Assert
-    assert_eq!(config.goal(), Goal::Latency);
-    let plan = config.plan();
-    // Latency mode should use smaller block sizes for faster reads
+    assert_eq!(opts.goal, Goal::Latency);
     assert!(
-        plan.block_size <= 16 * 1024,
-        "block size should be small for latency"
-    );
-    // Latency mode should have more aggressive bloom filters
-    assert!(
-        plan.bloom_bits_per_key >= 10,
-        "bloom bits should be high for latency"
+        opts.block_size() <= 32 * 1024,
+        "Latency goal should use small blocks"
     );
 }
 
 #[test]
 fn should_set_goal_given_throughput_when_optimizing_for_bulk_writes() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path)
-        .goal(Goal::Throughput)
-        .build()
-        .expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().goal(Goal::Throughput).build();
 
     // Assert
-    assert_eq!(config.goal(), Goal::Throughput);
-    let plan = config.plan();
-    // Throughput mode should use larger block sizes
+    assert_eq!(opts.goal, Goal::Throughput);
     assert!(
-        plan.block_size >= 32 * 1024,
-        "block size should be large for throughput"
-    );
-    // Throughput mode should have larger memtables
-    assert!(
-        plan.memtable_size >= 64 * 1024 * 1024,
-        "memtable should be large for throughput"
+        opts.block_size() >= 64 * 1024,
+        "Throughput goal should use larger blocks"
     );
 }
 
 #[test]
 fn should_set_goal_given_cost_when_minimizing_resources() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path)
-        .goal(Goal::Cost)
-        .build()
-        .expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().goal(Goal::Cost).build();
 
     // Assert
-    assert_eq!(config.goal(), Goal::Cost);
-    let plan = config.plan();
-    // Cost mode should use minimal cache
-    // Check relative allocation is lower (depends on implementation)
-    assert!(plan.block_cache_size > 0, "some cache should be allocated");
-    // Cost mode should have lower compaction concurrency
+    assert_eq!(opts.goal, Goal::Cost);
+    // Cost should allocate less to cache and memtables
     assert!(
-        plan.compaction_concurrency <= 2,
-        "compaction threads should be minimal"
+        opts.block_cache_size() <= 256 * 1024 * 1024,
+        "Cost should limit cache"
     );
 }
 
-// =============================================================================
-// DURABILITY TESTS
-// =============================================================================
+// ============================================================================
+// DURABILITY SETTING TESTS
+// ============================================================================
 
 #[test]
 fn should_set_durability_given_strict_when_fsync_per_write_required() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path)
-        .durability(Durability::Strict)
-        .build()
-        .expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().durability(Durability::Strict).build();
 
     // Assert
-    assert_eq!(config.durability(), Durability::Strict);
-    let plan = config.plan();
-    // Strict durability should sync every write
+    assert_eq!(opts.durability, Durability::Strict);
     assert!(
-        plan.wal_sync_per_write,
-        "strict durability must sync per write"
+        opts.wal_sync_on_write(),
+        "Strict durability must sync on every write"
     );
 }
 
 #[test]
 fn should_set_durability_given_steady_when_balanced_sync_needed() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path)
-        .durability(Durability::Steady)
-        .build()
-        .expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().durability(Durability::Steady).build();
 
     // Assert
-    assert_eq!(config.durability(), Durability::Steady);
-    let plan = config.plan();
-    // Steady durability should sync at intervals, not per write
+    assert_eq!(opts.durability, Durability::Steady);
     assert!(
-        !plan.wal_sync_per_write,
-        "steady durability should not sync per write"
-    );
-    assert!(
-        plan.wal_sync_interval.is_some(),
-        "steady durability should have sync interval"
-    );
-    let interval = plan.wal_sync_interval.unwrap();
-    assert!(
-        interval.as_millis() >= 10 && interval.as_millis() <= 100,
-        "sync interval should be reasonable"
+        !opts.wal_sync_on_write(),
+        "Steady durability should not sync every write"
     );
 }
 
-// =============================================================================
+// ============================================================================
 // MEMORY BUDGET TESTS
-// =============================================================================
+// ============================================================================
 
 #[test]
 fn should_respect_memory_budget_given_explicit_bytes_when_configured() {
     // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-    let budget_bytes = 256 * 1024 * 1024; // 256 MB
+    let budget = MemoryBudget::Bytes(256 * 1024 * 1024); // 256MB
 
     // Act
-    let config = ConfigBuilder::new(&path)
-        .memory_budget(MemoryBudget::Bytes(budget_bytes))
-        .build()
-        .expect("build config");
+    let opts = OpenOptions::new().memory_budget(budget).build();
 
     // Assert
-    let plan = config.plan();
-    // Total memory used should not exceed budget
-    let total_used = plan.block_cache_size + (plan.memtable_size * plan.memtable_count);
+    assert_eq!(opts.memory_budget, budget);
     assert!(
-        total_used <= budget_bytes,
-        "total memory {} should not exceed budget {}",
-        total_used,
-        budget_bytes
+        opts.block_cache_size() > 0,
+        "Cache should be allocated from budget"
     );
 }
 
 #[test]
 fn should_use_auto_memory_given_no_explicit_budget_when_default() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path).build().expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().build();
 
     // Assert
-    assert_eq!(config.memory_budget(), MemoryBudget::Auto);
-    let plan = config.plan();
-    // Auto budget should derive reasonable values
+    assert_eq!(opts.memory_budget, MemoryBudget::Auto);
+    // Auto should pick a sensible default
     assert!(
-        plan.total_memory_budget > 0,
-        "auto budget should derive positive value"
+        opts.block_cache_size() > 0,
+        "Auto budget should still allocate cache"
     );
 }
 
-// =============================================================================
-// WORKLOAD PROFILE TESTS
-// =============================================================================
+// ============================================================================
+// WORKLOAD PROFILE OPTIMIZATION TESTS
+// ============================================================================
 
 #[test]
 fn should_optimize_params_given_write_heavy_profile_when_configured() {
     // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
+    let normal = OpenOptions::new().workload(WorkloadProfile::Mixed).build();
 
     // Act
-    let config = ConfigBuilder::new(&path)
-        .workload_profile(WorkloadProfile::WriteHeavy)
-        .build()
-        .expect("build config");
+    let write_heavy = OpenOptions::new()
+        .workload(WorkloadProfile::WriteHeavy)
+        .build();
 
     // Assert
-    assert_eq!(config.workload_profile(), WorkloadProfile::WriteHeavy);
-    // Write-heavy profile should have larger memtables (relative to defaults)
-    let plan = config.plan();
-    assert!(plan.memtable_size > 0, "memtable should be allocated");
+    assert_eq!(write_heavy.workload, WorkloadProfile::WriteHeavy);
+    assert!(
+        write_heavy.memtable_size_limit() >= normal.memtable_size_limit(),
+        "Write-heavy should have larger memtables"
+    );
 }
 
 #[test]
 fn should_optimize_params_given_read_mostly_profile_when_configured() {
     // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
+    let normal = OpenOptions::new().workload(WorkloadProfile::Mixed).build();
 
     // Act
-    let config = ConfigBuilder::new(&path)
-        .workload_profile(WorkloadProfile::ReadMostly)
-        .build()
-        .expect("build config");
+    let read_mostly = OpenOptions::new()
+        .workload(WorkloadProfile::ReadMostly)
+        .build();
 
     // Assert
-    assert_eq!(config.workload_profile(), WorkloadProfile::ReadMostly);
-    let plan = config.plan();
-    // Read-mostly should prioritize cache and bloom filters
+    assert_eq!(read_mostly.workload, WorkloadProfile::ReadMostly);
     assert!(
-        plan.bloom_bits_per_key > 0,
-        "bloom filter should be enabled"
+        read_mostly.block_cache_size() >= normal.block_cache_size(),
+        "Read-mostly should prioritize cache"
     );
 }
 
 #[test]
 fn should_optimize_params_given_range_scan_profile_when_configured() {
     // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
+    let normal = OpenOptions::new().build();
 
     // Act
-    let config = ConfigBuilder::new(&path)
-        .workload_profile(WorkloadProfile::RangeScan)
-        .build()
-        .expect("build config");
-
-    // Assert
-    assert_eq!(config.workload_profile(), WorkloadProfile::RangeScan);
-    // Range scan should use larger blocks for sequential access
-    let plan = config.plan();
-    assert!(plan.block_size > 0, "block size should be set");
-}
-
-// =============================================================================
-// CLOUD MODE TESTS
-// =============================================================================
-
-#[test]
-fn should_require_cloud_config_given_cloud_mode_when_not_off() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let result = ConfigBuilder::new(&path)
-        .cloud_mode(CloudMode::Cache)
+    let range_scan = OpenOptions::new()
+        .workload(WorkloadProfile::RangeScan)
         .build();
 
     // Assert
-    assert!(result.is_err(), "cloud mode Cache requires cloud config");
+    assert_eq!(range_scan.workload, WorkloadProfile::RangeScan);
+    assert!(
+        range_scan.block_size() >= normal.block_size(),
+        "Range scan should use larger blocks"
+    );
 }
 
-#[test]
-fn should_allow_cloud_off_given_no_cloud_config_when_local_only() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path)
-        .cloud_mode(CloudMode::Off)
-        .build()
-        .expect("build config");
-
-    // Assert
-    assert_eq!(config.cloud_mode(), CloudMode::Off);
-    assert!(config.cloud_config().is_none());
-}
-
-// =============================================================================
-// AUTOTUNE TESTS
-// =============================================================================
-
-#[test]
-fn should_enable_autotune_given_flag_set_when_requested() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path)
-        .autotune(true)
-        .build()
-        .expect("build config");
-
-    // Assert
-    assert!(config.autotune_enabled());
-}
-
-#[test]
-fn should_disable_autotune_given_default_when_not_requested() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path).build().expect("build config");
-
-    // Assert
-    assert!(!config.autotune_enabled());
-}
-
-// =============================================================================
-// CONVERSION TO OPTIONS TESTS
-// =============================================================================
-
-#[test]
-fn should_convert_to_options_given_config_when_bridging_to_engine() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-
-    let config = ConfigBuilder::new(&path)
-        .goal(Goal::Latency)
-        .durability(Durability::Steady)
-        .build()
-        .expect("build config");
-
-    // Act
-    let options = config.to_options();
-
-    // Assert - options should reflect config's plan
-    let plan = config.plan();
-    assert_eq!(options.block_size, plan.block_size);
-}
-
-// =============================================================================
-// COMBINATION TESTS
-// =============================================================================
+// ============================================================================
+// INTERACTION TESTS (Multiple Knobs)
+// ============================================================================
 
 #[test]
 fn should_derive_consistent_params_given_all_knobs_set_when_building() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("test_db");
-    let budget = 512 * 1024 * 1024; // 512 MB
-
-    // Act
-    let config = ConfigBuilder::new(&path)
+    // Arrange & Act
+    let opts = OpenOptions::new()
+        .path("./integrated_db")
         .goal(Goal::Throughput)
-        .durability(Durability::Steady)
-        .memory_budget(MemoryBudget::Bytes(budget))
-        .workload_profile(WorkloadProfile::WriteHeavy)
-        .cloud_mode(CloudMode::Off)
-        .autotune(true)
-        .build()
-        .expect("build config");
+        .durability(Durability::Strict)
+        .memory_budget(MemoryBudget::Bytes(1024 * 1024 * 1024)) // 1GB
+        .workload(WorkloadProfile::WriteHeavy)
+        .build();
 
-    // Assert - all settings preserved
-    assert_eq!(config.goal(), Goal::Throughput);
-    assert_eq!(config.durability(), Durability::Steady);
-    assert_eq!(config.memory_budget(), MemoryBudget::Bytes(budget));
-    assert_eq!(config.workload_profile(), WorkloadProfile::WriteHeavy);
-    assert_eq!(config.cloud_mode(), CloudMode::Off);
-    assert!(config.autotune_enabled());
-
-    // Assert - plan derived correctly
-    let plan = config.plan();
-    assert!(plan.block_size > 0);
-    assert!(plan.memtable_size > 0);
-    assert!(plan.block_cache_size > 0);
+    // Assert
+    assert_eq!(opts.goal, Goal::Throughput);
+    assert_eq!(opts.durability, Durability::Strict);
+    assert!(opts.wal_sync_on_write());
+    assert!(
+        opts.memtable_size_limit() > 64 * 1024 * 1024,
+        "Write-heavy + throughput should have large memtables"
+    );
+    assert_eq!(opts.path, PathBuf::from("./integrated_db"));
 }
 
 #[test]
 fn should_derive_different_params_given_latency_vs_throughput_when_comparing() {
     // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let latency_path = temp_dir.path().join("latency_db");
-    let throughput_path = temp_dir.path().join("throughput_db");
+    let latency_opts = OpenOptions::new().goal(Goal::Latency).build();
 
     // Act
-    let latency_config = ConfigBuilder::new(&latency_path)
-        .goal(Goal::Latency)
-        .build()
-        .expect("build latency config");
+    let throughput_opts = OpenOptions::new().goal(Goal::Throughput).build();
 
-    let throughput_config = ConfigBuilder::new(&throughput_path)
-        .goal(Goal::Throughput)
-        .build()
-        .expect("build throughput config");
-
-    // Assert - different goals should yield different parameters
-    let latency_plan = latency_config.plan();
-    let throughput_plan = throughput_config.plan();
-
-    // Throughput mode uses larger blocks
-    assert!(
-        throughput_plan.block_size >= latency_plan.block_size,
-        "throughput block size {} should be >= latency block size {}",
-        throughput_plan.block_size,
-        latency_plan.block_size
+    // Assert
+    assert_ne!(
+        latency_opts.block_size(),
+        throughput_opts.block_size(),
+        "Latency and throughput should use different block sizes"
     );
-
-    // Throughput mode uses larger memtables
-    assert!(
-        throughput_plan.memtable_size >= latency_plan.memtable_size,
-        "throughput memtable {} should be >= latency memtable {}",
-        throughput_plan.memtable_size,
-        latency_plan.memtable_size
+    assert_ne!(
+        latency_opts.memtable_size_limit(),
+        throughput_opts.memtable_size_limit(),
+        "Latency and throughput should use different memtable sizes"
+    );
+    assert_ne!(
+        latency_opts.target_sst_size(),
+        throughput_opts.target_sst_size(),
+        "Latency and throughput should use different target SST sizes"
     );
 }
 
-// =============================================================================
-// PATH VALIDATION TESTS
-// =============================================================================
+// ============================================================================
+// GETTER TESTS
+// ============================================================================
+
+#[test]
+fn should_provide_getter_access_given_derived_params_when_querying() {
+    // Arrange & Act
+    let opts = OpenOptions::new().build();
+
+    // Assert - all getters should return positive values
+    assert!(opts.block_size() > 0);
+    assert!(opts.memtable_size_limit() > 0);
+    assert!(opts.target_sst_size() > 0);
+    assert!(opts.block_cache_size() > 0);
+    assert!(opts.wal_buffer_size() > 0);
+    assert!(opts.l0_compaction_trigger() > 0);
+}
+
+// ============================================================================
+// PATH HANDLING TESTS
+// ============================================================================
 
 #[test]
 fn should_store_path_given_relative_path_when_building() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("relative/path/to/db");
-
-    // Act
-    let config = ConfigBuilder::new(&path).build().expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().path("./relative/path").build();
 
     // Assert
-    assert!(config.path().to_string_lossy().contains("relative"));
+    assert_eq!(opts.path, PathBuf::from("./relative/path"));
 }
 
 #[test]
 fn should_store_path_given_absolute_path_when_building() {
-    // Arrange
-    let temp_dir = TempDir::new().expect("temp dir");
-    let path = temp_dir.path().join("absolute_db");
-
-    // Act
-    let config = ConfigBuilder::new(&path).build().expect("build config");
+    // Arrange & Act
+    let opts = OpenOptions::new().path("/absolute/path/to/db").build();
 
     // Assert
-    assert!(config.path().exists() || !config.path().exists()); // Path stored, may not exist
-    assert_eq!(
-        config.path().file_name().unwrap().to_string_lossy(),
-        "absolute_db"
-    );
+    assert_eq!(opts.path, PathBuf::from("/absolute/path/to/db"));
+}
+
+// ============================================================================
+// CLONE AND DEFAULT TESTS
+// ============================================================================
+
+#[test]
+fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloning() {
+    // Arrange
+    let original = OpenOptions::new()
+        .path("./db")
+        .goal(Goal::Throughput)
+        .durability(Durability::Strict)
+        .workload(WorkloadProfile::WriteHeavy)
+        .build();
+
+    // Act
+    let cloned = original.clone();
+
+    // Assert
+    assert_eq!(cloned.path, original.path);
+    assert_eq!(cloned.goal, original.goal);
+    assert_eq!(cloned.durability, original.durability);
+    assert_eq!(cloned.workload, original.workload);
+    assert_eq!(cloned.block_size(), original.block_size());
+    assert_eq!(cloned.memtable_size_limit(), original.memtable_size_limit());
+}
+
+#[test]
+fn should_use_sensible_defaults_given_no_configuration_when_using_default() {
+    // Arrange & Act
+    let opts = OpenOptions::default();
+
+    // Assert
+    assert_eq!(opts.goal, Goal::Latency);
+    assert_eq!(opts.durability, Durability::Steady);
+    assert_eq!(opts.memory_budget, MemoryBudget::Auto);
+    assert_eq!(opts.workload, WorkloadProfile::Mixed);
 }

@@ -1,9 +1,8 @@
 //! WAL trait definitions
 //!
 //! Clean trait contracts for WAL implementations.
-//! Types are defined in `types.rs`.
 
-use crate::error::MidgeResult;
+use crate::common::MidgeResult;
 use crate::wal::types::{WalOpKind, WalPos, WalRecord};
 use std::path::Path;
 
@@ -17,86 +16,43 @@ pub trait WalWriter: Send + Sync {
 
     /// Convenience: append a single operation (op kind, key, optional value).
     /// Returns the position where the operation was appended.
+    ///
+    /// ⚠️ **WARNING**: This method does not take a sequence number and implementations
+    /// may assign an invalid default (e.g., 0), breaking ordering guarantees.
+    /// **DO NOT USE** - prefer `append_op_with_seq()` or `append_record()` instead.
+    /// Many implementations return an error from this method.
     fn append_op(&self, kind: WalOpKind, key: &[u8], value: Option<&[u8]>) -> MidgeResult<WalPos>;
 
-    /// Append an operation with an explicit sequence number. Default implementation
-    /// falls back to `append_op` for implementations that don't track sequence.
+    /// Append an operation with an explicit sequence number.
     fn append_op_with_seq(
         &self,
         kind: WalOpKind,
         key: &[u8],
         value: Option<&[u8]>,
-        _seq: u64,
-    ) -> MidgeResult<WalPos> {
-        self.append_op(kind, key, value)
-    }
-
-    /// Append an operation with an explicit sequence number and TTL.
-    /// ttl_seconds: 0 means no expiration, otherwise the number of seconds until expiration.
-    fn append_op_with_seq_ttl(
-        &self,
-        kind: WalOpKind,
-        key: &[u8],
-        value: Option<&[u8]>,
         seq: u64,
-        ttl_seconds: u64,
     ) -> MidgeResult<WalPos> {
-        if ttl_seconds == 0 {
-            return self.append_op_with_seq(kind, key, value, seq);
-        }
-
-        let expiration = if ttl_seconds > 0 {
-            let now = crate::common::timestamp::now_millis();
-            Some(now + (ttl_seconds * 1000))
-        } else {
-            None
-        };
-
-        let record = WalRecord {
-            cf_id: 0,
-            op: kind,
-            key: bytes::Bytes::copy_from_slice(key),
-            value: value.map(bytes::Bytes::copy_from_slice),
+        let record = WalRecord::new(
+            kind,
+            bytes::Bytes::copy_from_slice(key),
+            value.map(bytes::Bytes::copy_from_slice),
             seq,
-            expiration,
-            range_end: None,
-            txn_id: None,
-            compression: None,
-        };
+        );
         self.append_record(&record)
     }
 
-    /// OPTIMIZED: Append with Bytes (zero-copy, just clones Arc pointers)
-    fn append_op_with_seq_ttl_bytes(
+    /// Append with Bytes (zero-copy)
+    fn append_op_bytes(
         &self,
         kind: WalOpKind,
         key: bytes::Bytes,
         value: Option<bytes::Bytes>,
         seq: u64,
-        ttl_seconds: u64,
     ) -> MidgeResult<WalPos> {
-        let expiration = if ttl_seconds > 0 {
-            let now = crate::common::timestamp::now_millis();
-            Some(now + (ttl_seconds * 1000))
-        } else {
-            None
-        };
-
-        let record = WalRecord {
-            cf_id: 0,
-            op: kind,
-            key,   // No copy! Just move the Bytes (Arc pointer)
-            value, // No copy!
-            seq,
-            expiration,
-            range_end: None,
-            txn_id: None,
-            compression: None,
-        };
+        let record = WalRecord::new(kind, key, value, seq);
         self.append_record(&record)
     }
 
-    /// OPTIMIZED: Batch append multiple records in a single write.
+    /// Batch append multiple records in a single write.
     /// This allows the WAL implementation to optimize encoding and I/O.
     fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
         // Default implementation: fall back to individual appends
@@ -115,8 +71,7 @@ pub trait WalWriter: Send + Sync {
     fn sync(&self) -> MidgeResult<()>;
 
     /// Sync only to *local* WAL storage (fsync/local durability) without
-    /// waiting for any external/cloud uploads. Default implementation falls
-    /// back to `sync()` so existing implementations remain compatible.
+    /// waiting for any external/cloud uploads.
     fn sync_local(&self) -> MidgeResult<()> {
         self.sync()
     }
@@ -128,12 +83,6 @@ pub trait WalWriter: Send + Sync {
     fn close(&self) -> MidgeResult<()>;
 
     /// Signal shutdown to background workers (optional, no-op by default).
-    ///
-    /// For WAL implementations with background upload threads (e.g., CloudWalWriter),
-    /// this signals workers to stop retry loops and exit cleanly. Must be called
-    /// before dropping the writer to avoid hanging on sync() or close().
-    ///
-    /// Default implementation does nothing (suitable for synchronous WAL writers).
     fn shutdown(&self) {
         // Default: no-op for synchronous implementations
     }
@@ -161,8 +110,7 @@ pub trait WalReader {
 /// Object-safe wrapper for WAL readers.
 ///
 /// The existing `WalReader` trait has generic methods which make it non-object-safe;
-/// this small adapter trait exposes the same capability using a boxed callback and
-/// can be returned from factories as a trait object.
+/// this small adapter trait exposes the same capability using a boxed callback.
 pub trait WalReaderDyn: Send {
     fn read_at(&mut self, pos: WalPos) -> MidgeResult<Option<WalRecord>>;
     fn replay_boxed(
@@ -178,113 +126,10 @@ pub trait WalFactory: Send + Sync {
     /// Create a new WAL writer for the given directory.
     fn create_writer(&self, dir: &Path) -> MidgeResult<Box<dyn WalWriter>>;
 
-    /// Create a new WAL writer with optional test hooks for fault injection.
-    fn create_writer_with_hooks(
-        &self,
-        dir: &Path,
-        test_hooks: Option<crate::common::test_hooks::TestHooks>,
-    ) -> MidgeResult<Box<dyn WalWriter>> {
-        // Default implementation ignores hooks for backward compatibility
-        let _ = test_hooks;
-        self.create_writer(dir)
-    }
-
     /// Create a new WAL reader for the given directory.
     fn create_reader(&self, dir: &Path) -> MidgeResult<Box<dyn WalReaderDyn>>;
 
     /// Rotate the active WAL file (e.g., rename active wal.log to wal-<seq>.log)
     /// and return a new writer for the active WAL.
     fn rotate_writer(&self, dir: &Path, seq: u64) -> MidgeResult<Box<dyn WalWriter>>;
-}
-
-// Convenience re-exports from implementations
-pub use crate::wal::fs::Wal as WalFile;
-pub use crate::wal::mem::WalMem;
-pub use crate::wal::mem::WalMem as WalMemWriter;
-pub use crate::wal::mem::WalMemReader as WalMemReaderHandle;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::column_family::ColumnFamilyId;
-    use bytes::Bytes;
-
-    #[test]
-    fn should_default_to_cf_zero_given_new_record() {
-        // Arrange - Create a WAL record without specifying CF
-
-        // Act
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from("key"),
-            Some(Bytes::from("value")),
-            100,
-        );
-
-        // Assert
-        assert_eq!(record.cf_id, 0);
-        assert_eq!(record.column_family_id().as_u32(), 0);
-        assert_eq!(record.seq, 100);
-    }
-
-    #[test]
-    fn should_use_custom_cf_given_new_cf_record() {
-        // Arrange
-        let cf_id = ColumnFamilyId::new(5);
-
-        // Act
-        let record = WalRecord::new_cf(cf_id, WalOpKind::Delete, Bytes::from("key"), None, 200);
-
-        // Assert
-        assert_eq!(record.cf_id, 5);
-        assert_eq!(record.column_family_id(), cf_id);
-        assert_eq!(record.seq, 200);
-    }
-
-    #[test]
-    fn should_roundtrip_record_given_serialization() {
-        // Arrange
-        let record = WalRecord::new_cf(
-            ColumnFamilyId::new(3),
-            WalOpKind::Put,
-            Bytes::from("test_key"),
-            Some(Bytes::from("test_value")),
-            42,
-        );
-
-        // Act
-        let encoded = bincode::serialize(&record).expect("serialize");
-        let decoded: WalRecord = bincode::deserialize(&encoded).expect("deserialize");
-
-        // Assert
-        assert_eq!(decoded.cf_id, 3);
-        assert_eq!(decoded.op, WalOpKind::Put);
-        assert_eq!(decoded.key, Bytes::from("test_key"));
-        assert_eq!(decoded.value, Some(Bytes::from("test_value")));
-        assert_eq!(decoded.seq, 42);
-    }
-
-    #[test]
-    fn should_maintain_backward_compatibility_given_default_cf() {
-        // Arrange - For backward compatibility with old WAL files that don't have cf_id,
-        // we can manually construct records with cf_id = 0 when reading old format.
-        // This test verifies that new records default to cf_id = 0.
-
-        // Act
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from("key"),
-            Some(Bytes::from("value")),
-            100,
-        );
-
-        // Assert - New records default to cf_id = 0
-        assert_eq!(record.cf_id, 0);
-
-        // Can serialize and deserialize with cf_id included
-        let encoded = bincode::serialize(&record).expect("serialize");
-        let decoded: WalRecord = bincode::deserialize(&encoded).expect("deserialize");
-        assert_eq!(decoded.cf_id, 0);
-        assert_eq!(decoded.seq, 100);
-    }
 }

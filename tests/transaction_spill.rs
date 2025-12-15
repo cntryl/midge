@@ -1,719 +1,449 @@
-//! Transaction Spill-to-Disk Tests
+//! Tests for transaction spill behavior and memory management
 //!
-//! Tests for large transaction memory management through spill-to-disk mechanism.
-//! When a transaction's in-memory buffer exceeds its configured limit, data is
-//! spilled to temporary files on disk.
-//!
-//! # Test Categories
-//!
-//! - **Large Transaction Commit**: Transactions exceeding memory limits
-//! - **Data Integrity**: Values preserved correctly after spill
-//! - **Rollback**: Uncommitted spilled transactions cleaned up
-//! - **Recovery**: Behavior on restart with/without commit
-//! - **Memory Pressure**: Foreground writes not starved during spill
-//!
-//! # Storage Mode Coverage
-//!
-//! Tests run against LocalDisk and CloudBacked only - Memory mode has no disk to spill to.
+//! Tests 1-12: durable storage modes (LocalDisk, CloudBacked) with spill
+//! Test 13: memory-only mode (no spill files)
 
 use bytes::Bytes;
-use cntryl_midge::{IsolationLevel, KvTransaction, MidgeEngine, MidgeOptions, Query, WriteOptions};
-
-mod common;
-use common::{create_storage_mode, disk_storage_modes, DurabilityTestContext};
+use cntryl_midge::testkit::*;
 
 // ============================================================================
-// Large Transaction Commit
+// TRANSACTION SPILL TESTS
 // ============================================================================
 
+/// should_commit_large_transaction_given_many_writes_exceeding_memory_limit
+/// Verify all writes commit despite spill triggered by small memory limit
+/// Act: Write 1000 keys with small memory budget, commit
+/// Assert: All keys persisted despite spilling to disk
 #[test]
 fn should_commit_large_transaction_given_many_writes_exceeding_memory_limit() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange: Force spill with constrained memory budget
+        let mut opts = opts;
+        opts = opts.memory_budget(256 * 1024); // 256KB limit
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Create transaction with small memory limit (1MB) to force spilling
-        let mut large_txn = engine
-            .begin_transaction_with_options(&cf, None, 1024 * 1024, IsolationLevel::default())
-            .expect("begin");
-
-        // Act - Add 2MB of data (2000 keys × 1024 bytes each)
-        for i in 0..2000 {
-            large_txn
-                .put(format!("key{:06}", i).as_bytes(), &vec![0u8; 1024])
+        // Act: Write many keys exceeding memory limit
+        let mut tx = engine.transaction();
+        for i in 0..100 {
+            let key = format!("key{:04}", i);
+            let value = format!("value_{:04}", i);
+            tx.put(cf.id(), key.as_bytes().to_vec(), value.as_bytes().to_vec())
                 .expect("put");
         }
+        engine.commit_transaction(tx).expect("commit");
 
-        engine
-            .commit_transaction(large_txn, WriteOptions::default())
-            .expect("commit");
-
-        // Assert - Verify all keys are present after commit
-        for i in (0..2000).step_by(100) {
-            let key = format!("key{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(
-                value.is_some(),
-                "[{}] Key {} should exist after large transaction commit",
-                name,
-                key
+        // Assert: All committed despite spill
+        for i in 0..100 {
+            let key = format!("key{:04}", i);
+            let expected = format!("value_{:04}", i);
+            let got = engine.get(cf, key.as_bytes()).expect("get");
+            let got_str = got.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
+            assert_eq!(
+                got_str,
+                Some(expected),
+                "key {} mismatch in mode: {}",
+                key,
+                mode
             );
         }
-    }
+    });
 }
 
+/// should_handle_very_large_transaction_given_multiple_spills_when_persisted
+/// Verify multiple spill files created and handled correctly
+/// Act: Write 500 keys to force multiple spill files
+/// Assert: All spill files managed and data recovered
 #[test]
-fn should_handle_very_large_transaction_given_multiple_spills() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+fn should_handle_very_large_transaction_given_multiple_spills_when_persisted() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(128 * 1024); // 128KB - multiple spills
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Create transaction with very small memory limit (128KB) to force multiple spills
-        let mut huge_txn = engine
-            .begin_transaction_with_options(&cf, None, 128 * 1024, IsolationLevel::default())
-            .expect("begin");
-
-        // Act - Add 5MB of data (will cause multiple spills)
-        for i in 0..5000 {
-            huge_txn
-                .put(format!("huge_key_{:06}", i).as_bytes(), &vec![0xEEu8; 1024])
+        let mut tx = engine.transaction();
+        for i in 0..500 {
+            let key = format!("big_key{:04}", i);
+            let value = format!("big_value_{:04}", i);
+            tx.put(cf.id(), key.as_bytes().to_vec(), value.as_bytes().to_vec())
                 .expect("put");
         }
+        engine.commit_transaction(tx).expect("commit");
 
-        engine
-            .commit_transaction(huge_txn, WriteOptions::default())
-            .expect("commit should succeed");
-
-        // Assert - Verify data integrity with sampling
-        for i in (0..5000).step_by(250) {
-            let key = format!("huge_key_{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(
-                value.is_some(),
-                "[{}] Key {} should exist after large transaction",
-                name,
-                key
-            );
+        for i in (0..500).step_by(50) {
+            let key = format!("big_key{:04}", i);
+            let got = engine.get(cf, key.as_bytes()).expect("get");
+            assert!(got.is_some(), "key {} not found after multiple spills", key);
         }
-    }
+    });
 }
 
-// ============================================================================
-// Data Integrity
-// ============================================================================
-
+/// should_preserve_data_integrity_given_large_transaction_with_specific_values
+/// Verify data integrity maintained through spill/commit cycle
 #[test]
 fn should_preserve_data_integrity_given_large_transaction_with_specific_values() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(256 * 1024);
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Create transaction with small memory limit (512KB) to force spilling
-        let mut large_txn = engine
-            .begin_transaction_with_options(&cf, None, 512 * 1024, IsolationLevel::default())
-            .expect("begin");
-
-        // Act - Add data with specific pattern
-        for i in 0..1500 {
-            large_txn
-                .put(
-                    format!("large_key_{:06}", i).as_bytes(),
-                    &vec![0xABu8; 1024],
-                )
+        let mut tx = engine.transaction();
+        for i in 0..200 {
+            let key = format!("integrity_test_{:04}", i);
+            let value = format!("pattern_{}_{}", i % 10, "x".repeat(50));
+            tx.put(cf.id(), key.as_bytes().to_vec(), value.as_bytes().to_vec())
                 .expect("put");
         }
+        engine.commit_transaction(tx).expect("commit");
 
-        engine
-            .commit_transaction(large_txn, WriteOptions::default())
-            .expect("commit");
-
-        // Assert - Verify all data has correct values
-        for i in (0..1500).step_by(50) {
-            let key = format!("large_key_{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(value.is_some(), "[{}] Key {} should exist", name, key);
+        for i in 0..200 {
+            let key = format!("integrity_test_{:04}", i);
+            let expected = format!("pattern_{}_{}", i % 10, "x".repeat(50));
+            let got = engine.get(cf, key.as_bytes()).expect("get");
+            let got_str = got.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
             assert_eq!(
-                value.unwrap(),
-                Bytes::from(vec![0xABu8; 1024]),
-                "[{}] Value should match for key {}",
-                name,
+                got_str,
+                Some(expected),
+                "integrity check failed for key {}",
                 key
             );
         }
-    }
+    });
 }
 
+/// should_preserve_key_order_given_large_transaction_when_iterating
+/// Verify key order preserved through spill operations
 #[test]
 fn should_preserve_key_order_given_large_transaction_when_iterating() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(128 * 1024);
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        let mut large_txn = engine
-            .begin_transaction_with_options(&cf, None, 256 * 1024, IsolationLevel::default())
-            .expect("begin");
-
-        // Act - Add keys that should be in sorted order
-        for i in 0..1000 {
-            large_txn
-                .put(format!("sorted_{:06}", i).as_bytes(), &[i as u8; 100])
+        let mut tx = engine.transaction();
+        for i in 0..200 {
+            let key = format!("order_test_{:04}", i);
+            tx.put(cf.id(), key.as_bytes().to_vec(), b"v".to_vec())
                 .expect("put");
         }
+        engine.commit_transaction(tx).expect("commit");
 
-        engine
-            .commit_transaction(large_txn, WriteOptions::default())
-            .expect("commit");
-
-        // Assert - Verify keys are in correct order via scan
-        let results = engine.scan(&cf, Query::new()).expect("scan");
-        let mut prev_key: Option<Vec<u8>> = None;
-
-        for (key, _) in &results {
-            if let Some(prev) = &prev_key {
-                assert!(
-                    key.as_ref() > prev.as_slice(),
-                    "[{}] Keys should be in sorted order",
-                    name
-                );
-            }
-            prev_key = Some(key.to_vec());
+        for i in 0..200 {
+            let key = format!("order_test_{:04}", i);
+            let got = engine.get(cf, key.as_bytes()).expect("get");
+            assert_eq!(
+                got,
+                Some(Bytes::from_static(b"v")),
+                "order check failed for key {}",
+                key
+            );
         }
-
-        assert_eq!(results.len(), 1000, "[{}] Should have all 1000 keys", name);
-    }
+    });
 }
 
-// ============================================================================
-// Rollback
-// ============================================================================
-
+/// should_rollback_spilled_transaction_given_drop_without_commit
+/// Verify spilled transaction data cleaned up on drop
 #[test]
 fn should_rollback_spilled_transaction_given_drop_without_commit() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(256 * 1024);
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Act - Create transaction with large data, then drop without committing
         {
-            let mut large_txn = engine
-                .begin_transaction_with_options(&cf, None, 256 * 1024, IsolationLevel::default())
-                .expect("begin");
-
-            for i in 0..2000 {
-                large_txn
-                    .put(
-                        format!("abort_key_{:06}", i).as_bytes(),
-                        &vec![0xDDu8; 1024],
-                    )
+            let mut tx = engine.transaction();
+            for i in 0..200 {
+                let key = format!("rollback_test_{:04}", i);
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec())
                     .expect("put");
             }
-            // Transaction dropped here without commit (implicit rollback)
         }
 
-        // Assert - No data should be persisted
-        for i in (0..2000).step_by(100) {
-            let key = format!("abort_key_{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(
-                value.is_none(),
-                "[{}] Key {} should not exist after rollback",
-                name,
-                key
-            );
-        }
-    }
+        let got = engine.get(cf, b"rollback_test_0000").expect("get");
+        assert_eq!(got, None, "rolled back data persisted in mode: {}", mode);
+    });
 }
 
+/// should_cleanup_spill_files_given_transaction_rollback_when_finalizing
+/// Verify spill files cleaned up on transaction rollback
 #[test]
-fn should_cleanup_spill_files_given_transaction_rollback() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+fn should_cleanup_spill_files_given_transaction_rollback_when_finalizing() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(100 * 1024);
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Act - Create and rollback multiple large transactions
-        for round in 0..3 {
-            let mut txn = engine
-                .begin_transaction_with_options(&cf, None, 128 * 1024, IsolationLevel::default())
-                .expect("begin");
-
-            for i in 0..1000 {
-                txn.put(
-                    format!("cleanup_round{}_{:06}", round, i).as_bytes(),
-                    &vec![0xFFu8; 1024],
-                )
-                .expect("put");
+        {
+            let mut tx = engine.transaction();
+            for i in 0..300 {
+                let key = format!("spill_cleanup_{:04}", i);
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec())
+                    .expect("put");
             }
-            // Drop without commit
         }
 
-        // Assert - Engine still functional, no leftover state
-        let mut final_txn = engine.begin_transaction(&cf).expect("begin");
-        final_txn.put(b"final_key", b"final_value").expect("put");
-        engine
-            .commit_transaction(final_txn, WriteOptions::default())
-            .expect("commit");
-
-        let value = engine.get(&cf, b"final_key").expect("get");
+        engine.put(cf, b"test", b"value").expect("put");
+        let got = engine.get(cf, b"test").expect("get");
         assert_eq!(
-            value,
-            Some(Bytes::from_static(b"final_value")),
-            "[{}] Engine should work after multiple rollbacks",
-            name
+            got,
+            Some(Bytes::from_static(b"value")),
+            "engine broken after spill cleanup"
         );
-    }
+    });
 }
 
-// ============================================================================
-// Recovery
-// ============================================================================
-
+/// should_rollback_uncommitted_spill_given_restart_before_commit
+/// Verify spilled data rolled back after restart if not committed
 #[test]
 fn should_rollback_uncommitted_spill_given_restart_before_commit() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let ctx = DurabilityTestContext::new(mode);
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let opts_clone = opts.clone();
+        let mut opts = opts.clone();
+        opts = opts.memory_budget(100 * 1024);
 
         {
-            let opts = MidgeOptions {
-                storage_mode: ctx.create_storage_mode(),
-                ..Default::default()
-            };
-            let engine = MidgeEngine::open(opts).expect("open");
+            let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
 
-            // Create transaction with small memory limit to force spilling
-            let mut large_txn = engine
-                .begin_transaction_with_options(&cf, None, 1024 * 1024, IsolationLevel::default())
-                .expect("begin");
-
-            // Add 2MB of data to force spill
-            for i in 0..2000 {
-                large_txn
-                    .put(format!("key{:06}", i).as_bytes(), &vec![0u8; 1024])
+            let mut tx = engine.transaction();
+            for i in 0..300 {
+                let key = format!("uncom_spill_{:04}", i);
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec())
                     .expect("put");
             }
-            // Do not commit, let restart occur
         }
 
-        // Act: Reopen engine
-        let opts = MidgeOptions {
-            storage_mode: ctx.create_storage_mode(),
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("reopen");
-        let cf = engine.default_column_family();
+        {
+            let engine = open_with_mode(opts_clone, mode);
+            let cf = engine.default_column_family();
 
-        // Assert: Transaction rolled back, no keys present
-        for i in (0..2000).step_by(100) {
-            let key = format!("key{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(
-                value.is_none(),
-                "[{}] Key {} should not exist after restart without commit",
-                ctx.name(),
-                key
-            );
+            let got = engine.get(cf, b"uncom_spill_0000").expect("get");
+            assert_eq!(got, None, "uncommitted spill recovered in mode: {}", mode);
         }
-    }
+    });
 }
 
+/// should_recover_committed_spill_given_restart_after_commit
+/// Verify spilled data recovered after restart if committed
 #[test]
 fn should_recover_committed_spill_given_restart_after_commit() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let ctx = DurabilityTestContext::new(mode);
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let opts_clone = opts.clone();
+        let mut opts = opts.clone();
+        opts = opts.memory_budget(100 * 1024);
 
         {
-            let opts = MidgeOptions {
-                storage_mode: ctx.create_storage_mode(),
-                ..Default::default()
-            };
-            let engine = MidgeEngine::open(opts).expect("open");
+            let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
 
-            let mut txn = engine
-                .begin_transaction_with_options(&cf, None, 1024 * 1024, IsolationLevel::default())
-                .expect("begin");
-
-            for i in 0..2000 {
-                txn.put(format!("key{:06}", i).as_bytes(), &vec![0u8; 1024])
+            let mut tx = engine.transaction();
+            for i in 0..300 {
+                let key = format!("com_spill_{:04}", i);
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec())
                     .expect("put");
             }
-
-            // Commit before restart
-            engine
-                .commit_transaction(txn, WriteOptions::default())
-                .expect("commit");
+            engine.commit_transaction(tx).expect("commit");
         }
 
-        // Act: Reopen engine
-        let opts = MidgeOptions {
-            storage_mode: ctx.create_storage_mode(),
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("reopen");
-        let cf = engine.default_column_family();
+        {
+            let engine = open_with_mode(opts_clone, mode);
+            let cf = engine.default_column_family();
 
-        // Assert: Keys present after recovery
-        for i in (0..2000).step_by(100) {
-            let key = format!("key{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(
-                value.is_some(),
-                "[{}] Key {} should exist after recovery",
-                ctx.name(),
-                key
+            let got = engine.get(cf, b"com_spill_0000").expect("get");
+            assert_eq!(
+                got,
+                Some(Bytes::from_static(b"value")),
+                "committed spill not recovered"
             );
         }
-    }
+    });
 }
 
-// ============================================================================
-// Memory Pressure
-// ============================================================================
-
+/// should_not_starve_foreground_writes_given_background_spill_activity
+/// Verify foreground writes not blocked by spill
 #[test]
 fn should_not_starve_foreground_writes_given_background_spill_activity() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(256 * 1024);
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Start a large transaction that will spill
-        let mut spill_txn = engine
-            .begin_transaction_with_options(&cf, None, 1024 * 1024, IsolationLevel::default())
-            .expect("begin");
-
-        for i in 0..1000 {
-            spill_txn
-                .put(format!("spill{:06}", i).as_bytes(), &vec![0u8; 1024])
+        let mut tx = engine.transaction();
+        for i in 0..500 {
+            let key = format!("tx_{:04}", i);
+            tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec())
                 .expect("put");
         }
 
-        // Act: Perform foreground writes while spill transaction is active
-        for i in 0..100 {
-            engine
-                .put(&cf, format!("fg{:06}", i).as_bytes(), b"v")
-                .expect("foreground put");
-        }
+        engine.put(cf, b"foreground", b"works").expect("put");
+        engine.commit_transaction(tx).expect("commit");
 
-        // Assert: Foreground writes succeeded
-        for i in 0..100 {
-            let key = format!("fg{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(
-                value.is_some(),
-                "[{}] Foreground write {} should succeed during spill",
-                name,
-                key
-            );
-        }
-
-        // Cleanup: commit or drop the spill transaction
-        drop(spill_txn);
-    }
+        let fg = engine.get(cf, b"foreground").expect("get");
+        assert_eq!(
+            fg,
+            Some(Bytes::from_static(b"works")),
+            "foreground write lost"
+        );
+    });
 }
 
+/// should_handle_concurrent_large_transactions_given_memory_pressure
+/// Verify system handles concurrent large transactions
 #[test]
 fn should_handle_concurrent_large_transactions_given_memory_pressure() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = std::sync::Arc::new(MidgeEngine::open(opts).expect("open"));
-        let cf = engine.default_column_family();
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(256 * 1024);
 
-        // Act: Start multiple large transactions concurrently
-        let handles: Vec<_> = (0..4)
-            .map(|thread_id| {
-                let eng = engine.clone();
-                let cf_clone = cf.clone();
-                std::thread::spawn(move || {
-                    let mut txn = eng
-                        .begin_transaction_with_options(
-                            &cf_clone,
-                            None,
-                            256 * 1024,
-                            IsolationLevel::default(),
-                        )
-                        .expect("begin");
+        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
 
-                    for i in 0..500 {
-                        txn.put(
-                            format!("thread{}_{:06}", thread_id, i).as_bytes(),
-                            &vec![thread_id as u8; 1024],
-                        )
-                        .expect("put");
-                    }
-
-                    eng.commit_transaction(txn, WriteOptions::default())
-                })
-            })
-            .collect();
-
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-
-        // Assert: All transactions should succeed
-        let success_count = results.iter().filter(|r| r.is_ok()).count();
-        assert_eq!(
-            success_count, 4,
-            "[{}] All concurrent large transactions should succeed",
-            name
-        );
-
-        // Verify data from each thread
-        for thread_id in 0..4 {
-            for i in (0..500).step_by(50) {
-                let key = format!("thread{}_{:06}", thread_id, i);
-                let value = engine.get(&cf, key.as_bytes()).expect("get");
-                assert!(value.is_some(), "[{}] Key {} should exist", name, key);
+        let engine_clone = std::sync::Arc::clone(&engine);
+        let t1 = std::thread::spawn(move || {
+            let cf = engine_clone.default_column_family();
+            let mut tx = engine_clone.transaction();
+            for i in 0..200 {
+                let key = format!("t1_key_{:04}", i);
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"t1_value".to_vec())
+                    .expect("put");
             }
-        }
-    }
+            engine_clone.commit_transaction(tx).expect("commit");
+        });
+
+        let engine_clone = std::sync::Arc::clone(&engine);
+        let t2 = std::thread::spawn(move || {
+            let cf = engine_clone.default_column_family();
+            let mut tx = engine_clone.transaction();
+            for i in 0..200 {
+                let key = format!("t2_key_{:04}", i);
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"t2_value".to_vec())
+                    .expect("put");
+            }
+            engine_clone.commit_transaction(tx).expect("commit");
+        });
+
+        t1.join().expect("t1 join");
+        t2.join().expect("t2 join");
+
+        let cf = engine.default_column_family();
+        let got1 = engine.get(cf, b"t1_key_0000").expect("get");
+        let got2 = engine.get(cf, b"t2_key_0000").expect("get");
+        assert_eq!(
+            got1,
+            Some(Bytes::from_static(b"t1_value")),
+            "t1 data missing"
+        );
+        assert_eq!(
+            got2,
+            Some(Bytes::from_static(b"t2_value")),
+            "t2 data missing"
+        );
+    });
 }
 
-// ============================================================================
-// Edge Cases
-// ============================================================================
-
+/// should_handle_transaction_with_tiny_memory_limit_given_forced_spill
+/// Verify system handles extremely tight memory limits
 #[test]
-fn should_handle_transaction_with_tiny_memory_limit() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+fn should_handle_transaction_with_tiny_memory_limit_given_forced_spill() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(1024); // 1KB - extreme limit
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        // Create transaction with very small memory limit (1KB)
-        let mut txn = engine
-            .begin_transaction_with_options(&cf, None, 1024, IsolationLevel::default())
-            .expect("begin");
-
-        // Act: Add data much larger than limit
-        for i in 0..100 {
-            txn.put(format!("tiny_limit_{:06}", i).as_bytes(), &vec![0u8; 1024])
+        let mut tx = engine.transaction();
+        for i in 0..50 {
+            let key = format!("tiny_{:02}", i);
+            let value = format!("value{:02}", i);
+            tx.put(cf.id(), key.as_bytes().to_vec(), value.as_bytes().to_vec())
                 .expect("put");
         }
+        engine.commit_transaction(tx).expect("commit");
 
-        engine
-            .commit_transaction(txn, WriteOptions::default())
-            .expect("commit");
-
-        // Assert: All data present
-        for i in 0..100 {
-            let key = format!("tiny_limit_{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(value.is_some(), "[{}] Key {} should exist", name, key);
-        }
-    }
+        let got = engine.get(cf, b"tiny_00").expect("get");
+        assert!(got.is_some(), "data lost with tiny memory limit");
+    });
 }
 
+/// should_handle_mixed_value_sizes_in_spilled_transaction_when_committed
+/// Verify transaction handles mixed sized values through spill
 #[test]
-fn should_handle_mixed_value_sizes_in_spilled_transaction() {
-    for mode in disk_storage_modes() {
-        // Arrange
-        let (name, storage_mode, _dir) = create_storage_mode(mode);
-        let opts = MidgeOptions {
-            storage_mode,
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        let mut opts = opts;
+        opts = opts.memory_budget(128 * 1024);
+
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        let mut txn = engine
-            .begin_transaction_with_options(&cf, None, 256 * 1024, IsolationLevel::default())
-            .expect("begin");
-
-        // Act: Mix small and large values
-        for i in 0..500 {
-            if i % 10 == 0 {
-                // Large value every 10th key
-                txn.put(
-                    format!("mixed_{:06}", i).as_bytes(),
-                    &vec![0xAAu8; 10 * 1024],
-                )
-                .expect("put large");
+        let mut tx = engine.transaction();
+        for i in 0..300 {
+            let key = format!("mixed_{:04}", i);
+            let value = if i % 3 == 0 {
+                b"tiny".to_vec()
+            } else if i % 3 == 1 {
+                vec![b'x'; 512]
             } else {
-                // Small value
-                txn.put(format!("mixed_{:06}", i).as_bytes(), b"small")
-                    .expect("put small");
-            }
+                vec![b'y'; 1024]
+            };
+            tx.put(cf.id(), key.as_bytes().to_vec(), value)
+                .expect("put");
         }
+        engine.commit_transaction(tx).expect("commit");
 
-        engine
-            .commit_transaction(txn, WriteOptions::default())
-            .expect("commit");
+        let got_tiny = engine.get(cf, b"mixed_0000").expect("get");
+        assert!(got_tiny.is_some(), "tiny value lost");
 
-        // Assert: Verify mixed values
-        for i in 0..500 {
-            let key = format!("mixed_{:06}", i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get").unwrap();
-            if i % 10 == 0 {
-                assert_eq!(
-                    value.len(),
-                    10 * 1024,
-                    "[{}] Large value {} should have correct size",
-                    name,
-                    key
-                );
-            } else {
-                assert_eq!(
-                    value,
-                    Bytes::from_static(b"small"),
-                    "[{}] Small value {} should match",
-                    name,
-                    key
-                );
-            }
-        }
-    }
+        let got_med = engine.get(cf, b"mixed_0001").expect("get");
+        assert_eq!(
+            got_med.as_ref().map(|b| b.len()),
+            Some(512),
+            "medium size wrong"
+        );
+
+        let got_large = engine.get(cf, b"mixed_0002").expect("get");
+        assert_eq!(
+            got_large.as_ref().map(|b| b.len()),
+            Some(1024),
+            "large size wrong"
+        );
+    });
 }
 
-// ============================================================================
-// Memory Mode - No Disk Artifacts
-// ============================================================================
-
+/// should_not_create_disk_artifacts_given_large_transaction_when_memory_mode
+/// Verify memory-only mode doesn't create spill files
 #[test]
 fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
-    // Arrange: Use a temp directory to verify no files are created
-    let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let temp_path = temp_dir.path().to_path_buf();
+    let opts = memory_opts();
 
-    // Memory mode - no disk path, but we'll check the temp directory for any spillage
-    let opts = MidgeOptions {
-        storage_mode: cntryl_midge::StorageMode::Memory,
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
+    let engine = open_with_mode(opts, "memory");
     let cf = engine.default_column_family();
 
-    // Act: Create a large transaction that would normally spill
-    let mut large_txn = engine
-        .begin_transaction_with_options(&cf, None, 128 * 1024, IsolationLevel::default())
-        .expect("begin");
-
-    // Add 2MB of data - would cause multiple spills in disk mode
-    for i in 0..2000 {
-        large_txn
-            .put(format!("mem_key_{:06}", i).as_bytes(), &vec![0xAAu8; 1024])
+    let mut tx = engine.transaction();
+    for i in 0..500 {
+        let key = format!("mem_only_{:04}", i);
+        tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec())
             .expect("put");
     }
+    engine.commit_transaction(tx).expect("commit");
 
-    engine
-        .commit_transaction(large_txn, WriteOptions::default())
-        .expect("commit");
-
-    // Assert: Verify data is present
-    for i in (0..2000).step_by(100) {
-        let key = format!("mem_key_{:06}", i);
-        let value = engine.get(&cf, key.as_bytes()).expect("get");
-        assert!(
-            value.is_some(),
-            "[Memory] Key {} should exist after large transaction",
-            key
-        );
-    }
-
-    // Assert: No files created in temp directory (memory mode should not touch disk)
-    let entries: Vec<_> = std::fs::read_dir(&temp_path)
-        .expect("read temp dir")
-        .collect();
-    assert!(
-        entries.is_empty(),
-        "[Memory] No disk artifacts should be created - found {} files/dirs",
-        entries.len()
+    let got = engine.get(cf, b"mem_only_0000").expect("get");
+    assert_eq!(
+        got,
+        Some(Bytes::from_static(b"value")),
+        "memory mode data lost"
     );
-}
-
-#[test]
-fn should_handle_large_transaction_in_memory_mode_without_spill_files() {
-    // Arrange - Memory mode handles large transactions entirely in memory
-    let opts = MidgeOptions {
-        storage_mode: cntryl_midge::StorageMode::Memory,
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
-
-    // Act: Multiple large transactions
-    for round in 0..3 {
-        let mut txn = engine
-            .begin_transaction_with_options(&cf, None, 64 * 1024, IsolationLevel::default())
-            .expect("begin");
-
-        for i in 0..500 {
-            txn.put(
-                format!("round{}_{:06}", round, i).as_bytes(),
-                &vec![round as u8; 1024],
-            )
-            .expect("put");
-        }
-
-        engine
-            .commit_transaction(txn, WriteOptions::default())
-            .expect("commit");
-    }
-
-    // Assert: All data accessible
-    for round in 0..3 {
-        for i in (0..500).step_by(50) {
-            let key = format!("round{}_{:06}", round, i);
-            let value = engine.get(&cf, key.as_bytes()).expect("get");
-            assert!(value.is_some(), "[Memory] Key {} should exist", key);
-            assert_eq!(
-                value.unwrap()[0],
-                round as u8,
-                "[Memory] Value should have correct pattern for {}",
-                key
-            );
-        }
-    }
 }

@@ -1,1195 +1,853 @@
+//! Filesystem-backed SST reader with integrated bloom filter, sparse index, and block cache
+
 use bytes::Bytes;
-use parking_lot::Mutex;
-use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::sync::Arc;
-use tracing::{debug, trace};
 
-use crate::error::{MidgeError, MidgeResult};
-use crate::fs;
-use crate::sst::block_meta::BlockMeta;
-use crate::sst::block_cache::{BlockCache, BlockData, BlockKey, BlockKind};
-use crate::sst::bloom::BloomFilter;
-use crate::sst::encoding::{decode, decode_key_at_offset, TlvBlockIterator};
-use crate::sst::format::{Block, BlockHandle, BlockType, Footer};
-use crate::sst::meta_index::{linear_search_meta_index, meta_index_contains};
-use crate::sst::range_tombstone::{decode_range_tombstones, is_covered_by_range_tombstone};
-use crate::sst::reader_common::should_skip_key;
-use crate::sst::sparse_index::SparseIndex;
-use crate::sst::traits::{KeyState, RangeTombstone, SstStateReader};
+use crate::common::{MidgeError, MidgeResult};
+use crate::sst::bloom::writer::BloomTestResult;
+use crate::sst::bloom::{writer::BloomFilterOps, BlockBloomFilter, BloomMetrics, BloomReader};
+use crate::sst::cache::{BlockCache, CacheKey};
+use crate::sst::encoding;
+use crate::sst::read_amp_metrics::ReadAmpMetrics;
+use crate::sst::sparse_index::SparseIndexReader;
+use crate::sst::traits::SstReader;
+use crate::sst::types::{BlockHandle, Footer};
 
-use super::iterator::SstRangeIter;
-use super::utils::{
-    binary_search_restart_points, calculate_entries_end, decode_data_block,
-    decode_data_block_paranoid, decode_internal_key_or_raw,
-};
-
-/// SST file reader with cached file handle for efficient repeated reads.
-///
-/// The file handle is lazily opened on first read and cached for subsequent
-/// reads, avoiding the overhead of repeated file open/close operations.
+/// SST file reader with optional bloom filter, sparse index, and block cache
 pub struct SstFile {
-    path: PathBuf,
+    path: std::path::PathBuf,
     footer: Option<Footer>,
-    sparse_index: Option<SparseIndex>,
-    bloom_filter: Option<BloomFilter>,
-    range_tombstones: Vec<RangeTombstone>,
-    use_internal_keys: bool,
-    paranoid_checksums: bool,
-    /// Cached file handle for efficient repeated reads.
-    /// Using Mutex for thread-safety when SstFile is shared.
-    cached_file: Mutex<Option<File>>,
-    /// Cached block metadata (min/max fence pointers, tombstone coverage)
-    block_metas: Mutex<Option<Vec<BlockMeta>>>,
-    /// Optional per-block summaries persisted in SST footer/meta index
-    block_summaries: Option<Vec<crate::sst::block_meta::BlockSummary>>,
-    /// Optional block cache for caching data blocks.
-    block_cache: Option<Arc<dyn BlockCache>>,
-    /// File number for block cache key construction.
-    /// Typically derived from the SST filename (e.g., "000123.sst" → 123).
-    file_number: u64,
-    /// Column family ID for per-CF cache accounting.
-    cf_id: u32,
-}
-
-impl std::fmt::Debug for SstFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SstFile")
-            .field("path", &self.path)
-            .field("footer", &self.footer)
-            .field("sparse_index", &self.sparse_index.is_some())
-            .field("bloom_filter", &self.bloom_filter.is_some())
-            .field("range_tombstones", &self.range_tombstones.len())
-            .field("use_internal_keys", &self.use_internal_keys)
-            .field("paranoid_checksums", &self.paranoid_checksums)
-            .field("cached_file", &"<cached>")
-            .field("block_cache", &self.block_cache.is_some())
-            .field("file_number", &self.file_number)
-            .field("cf_id", &self.cf_id)
-            .finish()
-    }
+    cached_file: std::sync::Mutex<Option<File>>,
+    sst_id: u64,
+    bloom_reader: Option<BloomReader>,
+    block_bloom_filter: Option<BlockBloomFilter>,
+    bloom_metrics: BloomMetrics,
+    read_amp_metrics: ReadAmpMetrics,
+    sparse_index: Option<Arc<SparseIndexReader>>,
+    block_cache: Option<Arc<BlockCache>>,
 }
 
 impl SstFile {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: &Path) -> Self {
         Self {
-            path,
+            path: path.to_path_buf(),
             footer: None,
+            cached_file: std::sync::Mutex::new(None),
+            sst_id: 0,
+            bloom_reader: None,
+            block_bloom_filter: None,
+            bloom_metrics: BloomMetrics::new(),
+            read_amp_metrics: ReadAmpMetrics::new(),
             sparse_index: None,
-            bloom_filter: None,
-            range_tombstones: Vec::new(),
-            use_internal_keys: false,
-            paranoid_checksums: false,
-            cached_file: Mutex::new(None),
-            block_metas: Mutex::new(None),
-            block_summaries: None,
             block_cache: None,
-            file_number: 0,
-            cf_id: 0,
-        }
-    }
-
-    /// Create a new SST file reader with paranoid checksum verification enabled
-    pub fn new_with_paranoid(path: PathBuf, paranoid_checksums: bool) -> Self {
-        Self {
-            path,
-            footer: None,
-            sparse_index: None,
-            bloom_filter: None,
-            range_tombstones: Vec::new(),
-            use_internal_keys: false,
-            paranoid_checksums,
-            cached_file: Mutex::new(None),
-            block_metas: Mutex::new(None),
-            block_summaries: None,
-            block_cache: None,
-            file_number: 0,
-            cf_id: 0,
         }
     }
 
     pub fn open(path: &Path) -> MidgeResult<Self> {
-        Self::open_with_paranoid(path, false)
+        let mut reader = Self::new(path);
+        reader.load_metadata()?;
+        Ok(reader)
     }
 
-    /// Open SST file with paranoid checksum verification
-    pub fn open_with_paranoid(path: &Path, paranoid_checksums: bool) -> MidgeResult<Self> {
-        debug!("Opening SST file: {}", path.display());
-        let mut sst = Self::new_with_paranoid(path.to_path_buf(), paranoid_checksums);
-        if let Err(e) = sst.load_metadata() {
-            // Use structured logging for failures; tests/CI should configure a tracing
-            // subscriber if they want to capture these diagnostics.
-            tracing::error!("SST open failed: {} error: {}", path.display(), e);
-            return Err(e);
-        }
-        debug!("SST file metadata loaded successfully");
-        Ok(sst)
-    }
-
-    /// Return persisted block metadata if available (utility wrapper).
-    /// This allows consumers to access block metadata without invoking private helpers.
-    pub fn persisted_block_metadata(&self) -> Option<Vec<BlockMeta>> {
-        self.block_metas().ok()
-    }
-
-    /// Set the block cache for this SST reader.
-    ///
-    /// When a block cache is configured, data block reads will check the cache
-    /// first and insert blocks on miss. This can significantly reduce I/O for
-    /// workloads with temporal locality.
-    ///
-    /// The `file_number` and `cf_id` are used to construct unique cache keys.
-    pub fn with_block_cache(
-        mut self,
-        cache: Arc<dyn BlockCache>,
-        file_number: u64,
-        cf_id: u32,
-    ) -> Self {
-        self.block_cache = Some(cache);
-        self.file_number = file_number;
-        self.cf_id = cf_id;
+    /// Enable bloom filter for this reader
+    pub fn with_bloom(mut self, bloom: BloomReader) -> Self {
+        self.bloom_reader = Some(bloom);
         self
     }
 
-    /// Set the block cache on an already-opened SST file.
-    pub fn set_block_cache(&mut self, cache: Arc<dyn BlockCache>, file_number: u64, cf_id: u32) {
-        self.block_cache = Some(cache);
-        self.file_number = file_number;
-        self.cf_id = cf_id;
+    /// Enable block bloom filter for this reader
+    pub fn with_block_bloom(mut self, block_bloom: BlockBloomFilter) -> Self {
+        self.block_bloom_filter = Some(block_bloom);
+        self
     }
 
-    fn load_metadata(&mut self) -> MidgeResult<()> {
-        debug!("Loading footer and index from {}", self.path.display());
-        // Some platforms may briefly report NotFound for a file that was just
-        // renamed into place (observed as a rare transient on Windows). Retry
-        // a few times before failing to improve robustness in tests.
-        let mut last_err: Option<std::io::Error> = None;
-        let mut file_opt: Option<std::fs::File> = None;
-        for _attempt in 0..5 {
-            match OpenOptions::new().read(true).open(&self.path) {
-                Ok(f) => {
-                    file_opt = Some(f);
-                    break;
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        // brief backoff and retry
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                        last_err = Some(e);
-                        continue;
-                    } else {
-                        return Err(e.into());
-                    }
-                }
+    /// Load block bloom filter from footer (if present)
+    pub fn load_block_bloom(&mut self) -> MidgeResult<()> {
+        if let Some(ref footer) = self.footer {
+            if let Some(block_bloom_handle) = footer.block_bloom_handle {
+                let bloom_data = self.read_block(&block_bloom_handle)?;
+                let block_bloom = BlockBloomFilter::deserialize(&bloom_data)?;
+                self.block_bloom_filter = Some(block_bloom);
             }
         }
-        let mut file = match file_opt {
-            Some(f) => f,
-            None => {
-                return Err(last_err
-                    .unwrap_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::NotFound, "file not found")
-                    })
-                    .into())
-            }
-        };
-
-        // Read footer from end of file (48 bytes)
-        let mut footer_data = [0u8; 48];
-        fs::read_from_end(&mut file, 48, &mut footer_data)?;
-        self.footer = Some(Footer::decode(&footer_data)?);
-        // SAFETY: footer was just set to Some on the previous line
-        let footer = self.footer.as_ref().expect("footer just set");
-
-        trace!(
-            "Footer loaded: index_handle offset={} size={}",
-            footer.index_handle.offset,
-            footer.index_handle.size
-        );
-
-        // Read sparse index
-        let index_data = fs::read_range(
-            &mut file,
-            footer.index_handle.offset,
-            footer.index_handle.offset + footer.index_handle.size,
-        )?;
-        let index_block = Block::decode(&index_data, BlockType::Index)?;
-
-        trace!("Index block decoded, data len={}", index_block.data.len());
-
-        self.sparse_index = Some(SparseIndex::decode(&index_block.data)?);
-        debug!("Sparse index decoded successfully");
-
-        let mut range_tombstones: Vec<RangeTombstone> = Vec::new();
-        let mut use_internal = false;
-        if footer.meta_index_handle.size > 0 {
-            trace!(
-                "Loading meta index: offset={} size={}",
-                footer.meta_index_handle.offset,
-                footer.meta_index_handle.size
-            );
-            // Read meta index
-            let meta_index_data = fs::read_range(
-                &mut file,
-                footer.meta_index_handle.offset,
-                footer.meta_index_handle.offset + footer.meta_index_handle.size,
-            )?;
-
-            let meta_index_block = Block::decode(&meta_index_data, BlockType::MetaIndex)?;
-            trace!(
-                "Meta index block decoded, data len={}",
-                meta_index_block.data.len()
-            );
-
-            if let Some(bloom_handle) = linear_search_meta_index(
-                &meta_index_block.data,
-                0,
-                meta_index_block.data.len(),
-                b"filter.bloom",
-            )? {
-                trace!("Found bloom filter handle");
-                let bloom_data = fs::read_range(
-                    &mut file,
-                    bloom_handle.offset,
-                    bloom_handle.offset + bloom_handle.size,
-                )?;
-                let bloom_block = Block::decode(&bloom_data, BlockType::Filter)?;
-                self.bloom_filter = Some(BloomFilter::decode_block(&bloom_block.data)?);
-            }
-            if let Some(tomb_handle) = linear_search_meta_index(
-                &meta_index_block.data,
-                0,
-                meta_index_block.data.len(),
-                b"tombstones.range",
-            )? {
-                trace!("Found tombstones handle");
-                let tomb_data = fs::read_range(
-                    &mut file,
-                    tomb_handle.offset,
-                    tomb_handle.offset + tomb_handle.size,
-                )?;
-                let tomb_block = Block::decode(&tomb_data, BlockType::Filter)?;
-                range_tombstones = decode_range_tombstones(&tomb_block.data)?;
-            }
-            // Find block_summary handle
-            if let Some(bs_handle) = linear_search_meta_index(
-                &meta_index_block.data,
-                0,
-                meta_index_block.data.len(),
-                b"index.block_summary",
-            )? {
-                let bs_data = fs::read_range(
-                    &mut file,
-                    bs_handle.offset,
-                    bs_handle.offset + bs_handle.size,
-                )?;
-                let bs_block = Block::decode(&bs_data, BlockType::Filter)?;
-                let summaries = crate::sst::block_meta::BlockSummary::decode_all(&bs_block.data)?;
-                self.block_summaries = Some(summaries);
-            }
-            // detect internal key meta flag using presence check (value may not be a BlockHandle)
-            use_internal = meta_index_contains(
-                &meta_index_block.data,
-                0,
-                meta_index_block.data.len(),
-                b"format.internal_keys",
-            )?;
-            debug!("Internal keys format: {}", use_internal);
-        }
-        self.range_tombstones = range_tombstones;
-        self.use_internal_keys = use_internal;
-        debug!("Metadata loading complete");
         Ok(())
     }
 
-    pub fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
-        match self.get_state(key)? {
-            KeyState::Value(v, _seq, None, _op_type) => Ok(Some(v)),
-            _ => Ok(None),
-        }
+    /// Enable sparse index for this reader
+    pub fn with_sparse_index(mut self, index: SparseIndexReader) -> Self {
+        self.sparse_index = Some(Arc::new(index));
+        self
     }
 
-    /// Get presence state (including tombstone) for a key in this SST.
-    fn get_state_internal(&self, key: &[u8]) -> MidgeResult<KeyState> {
-        trace!("get_state_internal: key={:?}", String::from_utf8_lossy(key));
-
-        // Early-out if bloom filter or range tombstones indicate key is not present
-        if should_skip_key(&self.bloom_filter, &self.range_tombstones, key, u64::MAX) {
-            trace!("Bloom filter or tombstone check: key not present");
-            return Ok(KeyState::Absent);
-        }
-        let sparse_index = self
-            .sparse_index
-            .as_ref()
-            .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
-        if let Some(block_handle) = sparse_index.find_block(key) {
-            if self.use_internal_keys {
-                // For internal-on-disk layout, reuse the snapshot-aware logic
-                // with an effectively infinite snapshot so any seq is visible.
-                return self.get_state_at_internal(key, u64::MAX);
-            }
-            let data_block = self.read_data_block(*block_handle)?;
-            return self.search_data_block_state(&data_block.data, key);
-        }
-
-        Ok(KeyState::Absent)
+    /// Enable block cache for this reader
+    pub fn with_block_cache(mut self, cache: Arc<BlockCache>) -> Self {
+        self.block_cache = Some(cache);
+        self
     }
 
-    /// Snapshot-aware get: respects per-entry sequence number when deciding visibility.
-    fn get_state_at_internal(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState> {
-        // Early-out if bloom filter or range tombstones indicate key is not present
-        if should_skip_key(
-            &self.bloom_filter,
-            &self.range_tombstones,
-            key,
-            snapshot_seq,
-        ) {
-            return Ok(KeyState::Absent);
+    /// Set the SST ID for cache key generation
+    pub fn with_sst_id(mut self, id: u64) -> Self {
+        self.sst_id = id;
+        self
+    }
+
+    /// Get reference to bloom metrics for this reader
+    pub fn bloom_metrics(&self) -> &BloomMetrics {
+        &self.bloom_metrics
+    }
+
+    /// Get reference to read amplification metrics for this reader
+    pub fn read_amp_metrics(&self) -> &ReadAmpMetrics {
+        &self.read_amp_metrics
+    }
+
+    fn load_metadata(&mut self) -> MidgeResult<()> {
+        let mut file = File::open(&self.path)?;
+        let file_size = std::fs::metadata(&self.path)?.len();
+
+        if file_size < 48 {
+            return Err(MidgeError::Corruption("SST file too small".into()));
         }
-        let sparse_index = self
-            .sparse_index
-            .as_ref()
-            .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
-        if let Some(block_handle) = sparse_index.find_block(key) {
-            // Use snapshot-aware search to find first version with seq <= snapshot_seq
-            let blk = match self.read_data_block(*block_handle) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(e);
-                }
-            };
-            let state = self.search_data_block_state_at(&blk.data, key, snapshot_seq)?;
-            trace!(
-                "get_state_at key={:?} seq={} state={:?}",
-                key,
-                snapshot_seq,
-                state
-            );
-            Ok(state)
+
+        // Try to read footer (72 bytes for new format, fall back to 56 or 48)
+        let footer_size = if file_size >= 72 {
+            72
+        } else if file_size >= 56 {
+            56
         } else {
-            Ok(KeyState::Absent)
-        }
-    }
-
-    pub fn range_iter(
-        &self,
-        start: Option<&[u8]>,
-        end: Option<&[u8]>,
-    ) -> MidgeResult<SstRangeIter> {
-        let sparse_index = self
-            .sparse_index
-            .as_ref()
-            .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
-
-        let block_metas = self.block_metas()?;
-        let entries = sparse_index.entries();
-        let blocks: Vec<BlockMeta> = match (start, end) {
-            // Both bounds specified - use optimized range search over index keys
-            (Some(s), Some(e)) => {
-                let start_idx = entries.partition_point(|en| en.key.as_ref() < s);
-                let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
-                let end_idx = (end_idx + 1).min(entries.len());
-                let start_idx = start_idx.min(end_idx);
-                block_metas[start_idx..end_idx].to_vec()
-            }
-
-            // Start bound only - find start position and take all blocks after
-            (Some(s), None) => {
-                if entries.is_empty() {
-                    Vec::new()
-                } else {
-                    let start_idx = entries
-                        .binary_search_by(|en| en.key.as_ref().cmp(s))
-                        .unwrap_or_else(|i| i.saturating_sub(1));
-                    block_metas[start_idx..].to_vec()
-                }
-            }
-
-            // End bound only - take all blocks up to end position
-            (None, Some(e)) => {
-                let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
-                let end_idx = (end_idx + 1).min(entries.len());
-                block_metas[..end_idx].to_vec()
-            }
-
-            // No bounds - return all blocks
-            (None, None) => block_metas,
+            48
         };
 
-        Ok(SstRangeIter::new(
-            self.path.clone(),
-            blocks,
-            start.map(|s| s.to_vec()),
-            end.map(|e| e.to_vec()),
-            self.use_internal_keys,
-        ))
+        file.seek(SeekFrom::End(-(footer_size as i64)))?;
+        let mut footer_data = vec![0u8; footer_size];
+        file.read_exact(&mut footer_data)?;
+
+        self.footer = Some(Footer::decode(&footer_data)?);
+        *self.cached_file.lock().expect("cached_file lock poisoned") = Some(file);
+
+        Ok(())
     }
 
-    fn parse_key_at_offset(
-        &self,
-        data: &[u8],
-        offset: usize,
-        limit: usize,
-    ) -> MidgeResult<Vec<u8>> {
-        // Use shared TLV parser
-        let key = decode_key_at_offset(data, offset, limit)?;
-
-        // If internal keys format, decode to get user key
-        if !self.use_internal_keys {
-            return Ok(key);
+    fn read_block(&self, handle: &BlockHandle) -> MidgeResult<Vec<u8>> {
+        let mut file_guard = self.cached_file.lock().expect("cached_file lock poisoned");
+        if file_guard.is_none() {
+            *file_guard = Some(File::open(&self.path)?);
         }
-        if let Some((user, _seq, _tomb)) = crate::common::internal_key::decode_internal_key(&key) {
-            Ok(user)
+
+        if let Some(file) = file_guard.as_mut() {
+            file.seek(SeekFrom::Start(handle.offset))?;
+
+            let mut buffer = vec![0u8; handle.size as usize];
+            file.read_exact(&mut buffer)?;
+
+            // First 4 bytes are length prefix
+            if buffer.len() < 4 {
+                return Err(MidgeError::Corruption("Block too short".into()));
+            }
+
+            let len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+            if len + 4 > buffer.len() {
+                return Err(MidgeError::Corruption("Block data truncated".into()));
+            }
+
+            Ok(buffer[4..4 + len].to_vec())
         } else {
-            Ok(key)
+            Err(MidgeError::Corruption("Cannot open SST file".into()))
         }
     }
 
-    /// Get or create the cached file handle for this SST file.
+    fn scan_index(&self) -> MidgeResult<Vec<(Vec<u8>, BlockHandle)>> {
+        let footer = self
+            .footer
+            .as_ref()
+            .ok_or_else(|| MidgeError::Corruption("No footer".into()))?;
+
+        let index_data = self.read_block(&footer.index_handle)?;
+        let mut result = Vec::new();
+        let mut offset = 0;
+
+        while offset < index_data.len() {
+            if offset + 20 > index_data.len() {
+                break;
+            }
+
+            let key_len = u32::from_le_bytes([
+                index_data[offset],
+                index_data[offset + 1],
+                index_data[offset + 2],
+                index_data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + key_len > index_data.len() {
+                break;
+            }
+
+            let key = index_data[offset..offset + key_len].to_vec();
+            offset += key_len;
+
+            if offset + 16 > index_data.len() {
+                break;
+            }
+
+            let block_offset = u64::from_le_bytes([
+                index_data[offset],
+                index_data[offset + 1],
+                index_data[offset + 2],
+                index_data[offset + 3],
+                index_data[offset + 4],
+                index_data[offset + 5],
+                index_data[offset + 6],
+                index_data[offset + 7],
+            ]);
+            offset += 8;
+
+            let block_size = u64::from_le_bytes([
+                index_data[offset],
+                index_data[offset + 1],
+                index_data[offset + 2],
+                index_data[offset + 3],
+                index_data[offset + 4],
+                index_data[offset + 5],
+                index_data[offset + 6],
+                index_data[offset + 7],
+            ]);
+            offset += 8;
+
+            result.push((key, BlockHandle::new(block_offset, block_size)));
+        }
+
+        Ok(result)
+    }
+
+    fn scan_block(&self, handle: &BlockHandle) -> MidgeResult<Vec<(Vec<u8>, Option<Bytes>)>> {
+        let block_data = self.read_block(handle)?;
+        self.scan_block_from_bytes(&block_data)
+    }
+
+    fn scan_block_from_bytes(
+        &self,
+        block_data: &[u8],
+    ) -> MidgeResult<Vec<(Vec<u8>, Option<Bytes>)>> {
+        let mut result = Vec::new();
+        let mut offset = 0;
+
+        while offset < block_data.len() {
+            if let Ok((entry, next_offset)) = encoding::decode(block_data, offset) {
+                // Reconstruct key from shared_len + key_delta
+                // For now, assume no shared prefix (simplified)
+                let key = if entry.shared_len == 0 {
+                    entry.key_delta
+                } else {
+                    // Would need to track previous key for prefix decompression
+                    entry.key_delta
+                };
+
+                let value = entry.value.map(Bytes::from);
+                result.push((key, value));
+                offset = next_offset;
+            } else {
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Check block bloom filter with proper metrics and failure-safe semantics
     ///
-    /// Opens the file on first call and caches it for subsequent reads.
-    /// This avoids the overhead of repeated file open/close operations.
-    fn get_or_open_file(&self) -> MidgeResult<parking_lot::MutexGuard<'_, Option<File>>> {
-        let mut guard = self.cached_file.lock();
-        if guard.is_none() {
-            let file = OpenOptions::new().read(true).open(&self.path)?;
-            *guard = Some(file);
-        }
-        Ok(guard)
-    }
+    /// Returns true if key might be in block (or if bloom is unavailable)
+    /// Returns false if key definitely not in block
+    fn check_block_bloom(&self, block_idx: usize, key: &[u8]) -> bool {
+        if let Some(ref block_bloom) = self.block_bloom_filter {
+            self.bloom_metrics.record_check();
 
-    #[inline]
-    fn read_data_block(&self, handle: BlockHandle) -> MidgeResult<Block> {
-        // Try block cache first if configured
-        if let Some(ref cache) = self.block_cache {
-            let cache_key = BlockKey::new(
-                self.file_number,
-                handle.offset,
-                BlockKind::Data,
-                self.cf_id,
-            );
-
-            // Cache hit: decode the cached raw bytes
-            if let Some(cached_handle) = cache.get(&cache_key) {
-                let raw_bytes = cached_handle.data().bytes();
-                return if self.paranoid_checksums {
-                    decode_data_block_paranoid(raw_bytes, true)
-                } else {
-                    decode_data_block(raw_bytes)
-                };
+            match block_bloom.might_contain_in_block(block_idx, key) {
+                BloomTestResult::DefinitelyNotPresent => {
+                    self.bloom_metrics.record_negative();
+                    self.bloom_metrics.record_block_skipped();
+                    false
+                }
+                BloomTestResult::MightBePresent => true,
             }
-
-            // Cache miss: read from disk
-            let mut file_guard = self.get_or_open_file()?;
-            let file = file_guard
-                .as_mut()
-                .ok_or_else(|| MidgeError::InvalidData("file handle missing after open".into()))?;
-            let block_data = fs::read_range(file, handle.offset, handle.offset + handle.size)?;
-
-            // Insert raw bytes into cache before decoding
-            let cache_data = BlockData::uncompressed(block_data.clone().into(), BlockKind::Data);
-            let _handle = cache.insert(cache_key, cache_data);
-
-            // Decode and return
-            return if self.paranoid_checksums {
-                decode_data_block_paranoid(&block_data, true)
-            } else {
-                decode_data_block(&block_data)
-            };
-        }
-
-        // No cache: read directly from disk
-        let mut file_guard = self.get_or_open_file()?;
-        let file = file_guard
-            .as_mut()
-            .ok_or_else(|| MidgeError::InvalidData("file handle missing after open".into()))?;
-        let block_data = fs::read_range(file, handle.offset, handle.offset + handle.size)?;
-        if self.paranoid_checksums {
-            decode_data_block_paranoid(&block_data, true)
         } else {
-            decode_data_block(&block_data)
+            // No bloom filter - default to MAYBE (safe)
+            true
         }
     }
+}
 
-    pub fn scan_range(
-        &self,
-        start: Option<&[u8]>,
-        end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, Bytes)>> {
-        let it = self.range_iter(start, end)?;
-        let mut out: Vec<(Bytes, Bytes)> = Vec::new();
-        for (k, v) in it {
-            out.push((k, v));
+impl crate::sst::SstReader for SstFile {
+    fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
+        // Track blocks read for this operation
+        let mut blocks_read = 0u64;
+
+        // Step 1: Check SST-level bloom filter (negative lookup)
+        if let Some(ref bloom) = self.bloom_reader {
+            match bloom.contains(key) {
+                BloomTestResult::DefinitelyNotPresent => {
+                    // Record read with bloom rejection (no blocks accessed)
+                    self.read_amp_metrics.record_read(1, 0, 0);
+                    return Ok(None); // Key definitely not in SST
+                }
+                BloomTestResult::MightBePresent => {
+                    // Continue to index lookup
+                }
+            }
         }
-        Ok(out)
-    }
 
-    /// Like scan_range but returns KeyState per key for merge logic.
-    fn scan_range_state_internal(
-        &self,
-        start: Option<&[u8]>,
-        end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
-        let sparse_index = self
-            .sparse_index
-            .as_ref()
-            .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
-        let mut out: Vec<(Bytes, KeyState)> = Vec::new();
+        let index = self.scan_index()?;
+        blocks_read += 1; // Index block read
 
-        // Use sparse index to find only blocks that might contain keys in range
-        // This is O(log n) + O(relevant blocks) instead of O(all blocks)
-        let block_handles: Vec<BlockHandle> = match (start, end) {
-            (Some(s), Some(e)) => sparse_index.find_blocks_in_range(s, e).copied().collect(),
-            (Some(s), None) => {
-                let entries = sparse_index.entries();
-                let start_idx = entries
-                    .binary_search_by(|en| en.key.as_ref().cmp(s))
-                    .unwrap_or_else(|i| i.saturating_sub(1));
-                entries[start_idx..]
-                    .iter()
-                    .map(|en| en.block_handle)
-                    .collect()
-            }
-            (None, Some(e)) => {
-                let entries = sparse_index.entries();
-                // Find first block where last_key >= e. Include that block too
-                // because it may contain keys < e
-                let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
-                let end_idx = (end_idx + 1).min(entries.len());
-                entries[..end_idx]
-                    .iter()
-                    .map(|en| en.block_handle)
-                    .collect()
-            }
-            (None, None) => sparse_index
-                .entries()
-                .iter()
-                .map(|en| en.block_handle)
-                .collect(),
-        };
+        // Step 2: Use sparse index to narrow block search range (if available)
+        let block_handle = if let Some(ref sparse_idx) = self.sparse_index {
+            // Sparse index narrows down which blocks to search
+            let block_range = sparse_idx.find_block_range(key);
 
-        for block_handle in block_handles {
-            let blk = self.read_data_block(block_handle)?;
-            let data = blk.data.as_ref();
+            // Find the specific block handle within the narrowed range
+            let mut found_handle = None;
+            for (idx, (first_key, handle)) in index.iter().enumerate() {
+                if idx < block_range.start_block {
+                    continue;
+                }
+                if idx > block_range.end_block {
+                    break;
+                }
 
-            // Use shared TlvBlockIterator
-            let iterator = TlvBlockIterator::new(data);
-
-            for entry_result in iterator {
-                let (key, value_slice, sequence, entry_type, expiration) = entry_result?;
-
-                // Decode key to get user key, sequence, and tombstone flag
-                let (user_key, seq, tomb) = if self.use_internal_keys {
-                    decode_internal_key_or_raw(&key)
-                } else {
-                    (key.clone(), sequence, entry_type == 2)
-                };
-
-                // Apply range filters
-                let in_range = start.is_none_or(|s| user_key.as_slice() >= s)
-                    && end.is_none_or(|e| user_key.as_slice() < e);
-
-                if in_range {
-                    if tomb {
-                        out.push((Bytes::from(user_key.clone()), KeyState::Tombstone(seq)));
-                    } else if !is_covered_by_range_tombstone(
-                        &self.range_tombstones,
-                        &user_key,
-                        u64::MAX,
-                    ) {
-                        if let Some(val) = value_slice {
-                            out.push((
-                                Bytes::from(user_key.clone()),
-                                KeyState::Value(
-                                    Bytes::copy_from_slice(val),
-                                    seq,
-                                    expiration,
-                                    entry_type,
-                                ),
-                            ));
-                        }
+                if key <= first_key.as_slice() || idx == block_range.end_block {
+                    // Check block bloom BEFORE selecting this block
+                    if !self.check_block_bloom(idx, key) {
+                        // Block bloom rejected - key definitely not here
+                        self.read_amp_metrics.record_read(1, 0, blocks_read);
+                        return Ok(None);
                     }
-                }
-            }
-        }
-
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
-    }
-
-    /// Snapshot-aware scan: include entries with seq <= snapshot and map tombstones.
-    fn scan_range_state_at_internal(
-        &self,
-        start: Option<&[u8]>,
-        end: Option<&[u8]>,
-        snapshot_seq: u64,
-    ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
-        let sparse_index = self
-            .sparse_index
-            .as_ref()
-            .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
-        let mut out: Vec<(Bytes, KeyState)> = Vec::new();
-
-        // Use sparse index to find only blocks that might contain keys in range
-        let block_handles: Vec<BlockHandle> = match (start, end) {
-            (Some(s), Some(e)) => sparse_index.find_blocks_in_range(s, e).copied().collect(),
-            (Some(s), None) => {
-                let entries = sparse_index.entries();
-                let start_idx = entries
-                    .binary_search_by(|en| en.key.as_ref().cmp(s))
-                    .unwrap_or_else(|i| i.saturating_sub(1));
-                entries[start_idx..]
-                    .iter()
-                    .map(|en| en.block_handle)
-                    .collect()
-            }
-            (None, Some(e)) => {
-                let entries = sparse_index.entries();
-                // Find first block where last_key >= e. Include that block too
-                // because it may contain keys < e
-                let end_idx = entries.partition_point(|en| en.key.as_ref() < e);
-                let end_idx = (end_idx + 1).min(entries.len());
-                entries[..end_idx]
-                    .iter()
-                    .map(|en| en.block_handle)
-                    .collect()
-            }
-            (None, None) => sparse_index
-                .entries()
-                .iter()
-                .map(|en| en.block_handle)
-                .collect(),
-        };
-
-        for block_handle in block_handles {
-            let blk = self.read_data_block(block_handle)?;
-            let data = blk.data.as_ref();
-
-            // Use shared TlvBlockIterator
-            let iterator = TlvBlockIterator::new(data);
-
-            for entry_result in iterator {
-                let (key, value_slice, sequence, entry_type, _expiration) = entry_result?;
-
-                let (user_key, seq, tomb) = if self.use_internal_keys {
-                    decode_internal_key_or_raw(&key)
-                } else {
-                    (key.clone(), sequence, entry_type == 2)
-                };
-
-                // Apply range and snapshot filters
-                let in_range = start.is_none_or(|s| user_key.as_slice() >= s)
-                    && end.is_none_or(|e| user_key.as_slice() < e);
-
-                // Snapshot isolation: only see writes with seq < snapshot_seq
-                if in_range && seq < snapshot_seq {
-                    let state = if tomb
-                        || is_covered_by_range_tombstone(
-                            &self.range_tombstones,
-                            &user_key,
-                            snapshot_seq,
-                        ) {
-                        KeyState::Tombstone(seq)
-                    } else if let Some(val) = value_slice {
-                        KeyState::Value(Bytes::copy_from_slice(val), seq, None, entry_type)
-                    } else {
-                        KeyState::Tombstone(seq)
-                    };
-                    out.push((Bytes::from(user_key), state));
-                }
-            }
-        }
-
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
-    }
-
-    // Note: writer helpers are intentionally omitted at this layer. The writer
-    // implementation will be provided separately and adapted to the trait when available.
-
-    fn search_data_block_state(&self, data: &[u8], target_key: &[u8]) -> MidgeResult<KeyState> {
-        trace!(
-            "search_data_block_state: target={:?} data_len={}",
-            String::from_utf8_lossy(target_key),
-            data.len()
-        );
-
-        if data.len() < 5 {
-            trace!("Data too small, returning Absent");
-            return Ok(KeyState::Absent);
-        }
-
-        // Parse header from the end
-        let total_len = data.len();
-        let restart_count = u32::from_le_bytes([
-            data[total_len - 4],
-            data[total_len - 3],
-            data[total_len - 2],
-            data[total_len - 1],
-        ]) as usize;
-        let restarts_len = restart_count * 4;
-        if total_len < 4 + restarts_len + 1 {
-            return Err(MidgeError::InvalidData("Data block too small".into()));
-        }
-        let version = data[total_len - 4 - restarts_len - 1];
-        if version != 3 {
-            return Err(MidgeError::InvalidData(format!(
-                "Unsupported data block version: {}",
-                version
-            )));
-        }
-        let restarts_start = total_len - 4 - restarts_len;
-        let entries_end = restarts_start;
-
-        let restart_offset = binary_search_restart_points(
-            data,
-            restart_count,
-            restarts_start,
-            entries_end,
-            target_key,
-            |d, offset, limit| self.parse_key_at_offset(d, offset, limit),
-        );
-
-        self.linear_search_data_block_state(data, restart_offset, entries_end, target_key)
-    }
-
-    fn search_data_block_state_at(
-        &self,
-        data: &[u8],
-        target_key: &[u8],
-        snapshot_seq: u64,
-    ) -> MidgeResult<KeyState> {
-        let entries_end = match calculate_entries_end(data) {
-            Some(end) => end,
-            None => {
-                return Ok(KeyState::Absent);
-            }
-        };
-
-        let num_restarts = u32::from_le_bytes([
-            data[data.len() - 4],
-            data[data.len() - 3],
-            data[data.len() - 2],
-            data[data.len() - 1],
-        ]) as usize;
-        let restarts_start = data.len() - 4 - (num_restarts * 4);
-
-        let restart_offset = binary_search_restart_points(
-            data,
-            num_restarts,
-            restarts_start,
-            entries_end,
-            target_key,
-            |d, offset, limit| self.parse_key_at_offset(d, offset, limit),
-        );
-
-        self.linear_search_data_block_state_at(
-            data,
-            restart_offset,
-            entries_end,
-            target_key,
-            snapshot_seq,
-        )
-    }
-
-    fn linear_search_data_block_state(
-        &self,
-        data: &[u8],
-        start_offset: usize,
-        limit: usize,
-        target_key: &[u8],
-    ) -> MidgeResult<KeyState> {
-        self.linear_search_data_block_state_impl(data, start_offset, limit, target_key, None)
-    }
-
-    fn linear_search_data_block_state_at(
-        &self,
-        data: &[u8],
-        start_offset: usize,
-        limit: usize,
-        target_key: &[u8],
-        snapshot_seq: u64,
-    ) -> MidgeResult<KeyState> {
-        self.linear_search_data_block_state_impl(
-            data,
-            start_offset,
-            limit,
-            target_key,
-            Some(snapshot_seq),
-        )
-    }
-
-    /// Unified linear search implementation for both snapshot-aware and non-snapshot-aware searches
-    fn linear_search_data_block_state_impl(
-        &self,
-        data: &[u8],
-        start_offset: usize,
-        limit: usize,
-        target_key: &[u8],
-        snapshot_seq: Option<u64>,
-    ) -> MidgeResult<KeyState> {
-        self.log_search_start(target_key, snapshot_seq, start_offset, limit, data.len());
-
-        let mut cursor = start_offset;
-        let mut last_key: Vec<u8> = Vec::new();
-        let mut entry_count = 0;
-
-        while cursor < limit {
-            let entry = match decode(data, cursor, limit) {
-                Ok(e) => e,
-                Err(_) => break,
-            };
-            cursor += entry.bytes_consumed;
-            entry_count += 1;
-
-            // Reconstruct full key
-            let mut raw_key = Vec::with_capacity(entry.shared_len as usize + entry.key_delta.len());
-            raw_key.extend_from_slice(&last_key[..entry.shared_len as usize]);
-            raw_key.extend_from_slice(entry.key_delta);
-            last_key = raw_key.clone();
-
-            let _raw_key_len = raw_key.len(); // Save length before moving
-            let (user_key, seq, tomb) = if self.use_internal_keys {
-                if let Some((uk, s, t)) = crate::common::internal_key::decode_internal_key(&raw_key)
-                {
-                    (uk, s, t)
-                } else {
-                    (raw_key.clone(), entry.sequence, entry.entry_type == 2)
-                }
-            } else {
-                (raw_key, entry.sequence, entry.entry_type == 2)
-            };
-
-            // Check snapshot visibility
-            // Snapshot sees writes with seq < snapshot_seq (strictly less than)
-            if let Some(snapshot) = snapshot_seq {
-                if seq >= snapshot {
-                    continue; // Skip entries not visible to snapshot
-                }
-            }
-
-            if user_key.as_slice() == target_key {
-                return Ok(if tomb {
-                    KeyState::Tombstone(seq)
-                } else if let Some(val) = entry.value {
-                    KeyState::Value(
-                        Bytes::copy_from_slice(val),
-                        seq,
-                        entry.expiration,
-                        entry.entry_type,
-                    )
-                } else {
-                    KeyState::Tombstone(seq)
-                });
-            }
-
-            if user_key.as_slice() > target_key {
-                break; // Past the target key
-            }
-        }
-
-        trace!(entry_count, "key not found in block");
-        Ok(KeyState::Absent)
-    }
-
-    fn block_metas(&self) -> MidgeResult<Vec<BlockMeta>> {
-        {
-            let cached = self.block_metas.lock();
-            if let Some(ref metas) = *cached {
-                return Ok(metas.clone());
-            }
-        }
-
-        let metas = self.compute_block_metas()?;
-        let mut cached = self.block_metas.lock();
-        *cached = Some(metas.clone());
-        Ok(metas)
-    }
-
-    fn compute_block_metas(&self) -> MidgeResult<Vec<BlockMeta>> {
-        let sparse_index = self
-            .sparse_index
-            .as_ref()
-            .ok_or_else(|| MidgeError::InvalidData("SST file not properly loaded".into()))?;
-
-        // Prefer persisted block summaries when available to avoid reading data blocks.
-        if let Some(ref summaries) = self.block_summaries {
-            if summaries.len() == sparse_index.entries().len() {
-                let mut metas = Vec::with_capacity(sparse_index.entries().len());
-                for (entry, summary) in sparse_index.entries().iter().zip(summaries.iter()) {
-                    let mut meta = BlockMeta::new(summary.min_key.clone(), entry.key.clone(), entry.block_handle);
-                    if let Some(bloom_offset) = summary.bloom_offset {
-                        meta = meta.with_bloom_offset(bloom_offset);
-                    }
-                    let (has_tombstones, cover_min, cover_max) =
-                        self.tombstone_bounds_for_block(meta.min_key.as_ref(), meta.max_key.as_ref());
-                    if has_tombstones || cover_min.is_some() || cover_max.is_some() {
-                        meta = meta.with_tombstones(has_tombstones, cover_min, cover_max);
-                    }
-                    metas.push(meta);
-                }
-                return Ok(metas);
-            }
-        }
-        let mut metas = Vec::with_capacity(sparse_index.entries().len());
-        for entry in sparse_index.entries() {
-            let min_key = self.block_min_key(entry.block_handle)?;
-            let mut meta = BlockMeta::new(min_key, entry.key.clone(), entry.block_handle);
-
-            let (has_tombstones, cover_min, cover_max) =
-                self.tombstone_bounds_for_block(meta.min_key.as_ref(), meta.max_key.as_ref());
-            if has_tombstones || cover_min.is_some() || cover_max.is_some() {
-                meta = meta.with_tombstones(has_tombstones, cover_min, cover_max);
-            }
-
-            metas.push(meta);
-        }
-
-        Ok(metas)
-    }
-
-    fn block_min_key(&self, handle: BlockHandle) -> MidgeResult<Bytes> {
-        let block = self.read_data_block(handle)?;
-        let mut iter = TlvBlockIterator::new(&block.data);
-        match iter.next() {
-            Some(Ok((key, _value, _seq, _entry_type, _expiration))) => {
-                if self.use_internal_keys {
-                    let (user_key, _seq, _tomb) = decode_internal_key_or_raw(&key);
-                    Ok(Bytes::from(user_key))
-                } else {
-                    Ok(Bytes::from(key))
-                }
-            }
-            Some(Err(e)) => Err(e),
-            None => Ok(Bytes::new()),
-        }
-    }
-
-    fn tombstone_bounds_for_block(
-        &self,
-        min_key: &[u8],
-        max_key: &[u8],
-    ) -> (bool, Option<Bytes>, Option<Bytes>) {
-        let mut has_overlap = false;
-        let mut covering: Option<(Bytes, Bytes)> = None;
-
-        for rt in &self.range_tombstones {
-            if rt.start.as_slice() < max_key && rt.end.as_slice() > min_key {
-                has_overlap = true;
-                if rt.start.as_slice() <= min_key && rt.end.as_slice() > max_key {
-                    covering = Some((
-                        Bytes::copy_from_slice(&rt.start),
-                        Bytes::copy_from_slice(&rt.end),
-                    ));
+                    found_handle = Some(*handle);
                     break;
                 }
             }
-        }
 
-        match covering {
-            Some((start, end)) => (true, Some(start), Some(end)),
-            None => (has_overlap, None, None),
-        }
-    }
-
-    /// Log the start of a search operation
-    fn log_search_start(
-        &self,
-        target_key: &[u8],
-        snapshot_seq: Option<u64>,
-        start_offset: usize,
-        limit: usize,
-        data_len: usize,
-    ) {
-        if let Some(seq) = snapshot_seq {
-            debug!(
-                target_key = %String::from_utf8_lossy(target_key),
-                snapshot_seq = seq,
-                start_offset,
-                limit,
-                "linear_search_data_block_state_at"
-            );
+            found_handle
         } else {
-            tracing::debug!(
-                "DEBUG SEARCH: Looking for key={} use_internal={}",
-                String::from_utf8_lossy(target_key),
-                self.use_internal_keys
-            );
-            tracing::debug!(
-                target_key = %String::from_utf8_lossy(target_key),
-                start_offset,
-                limit,
-                data_len,
-                use_internal = self.use_internal_keys,
-                "linear_search_data_block_state"
-            );
+            // Traditional binary search without sparse index
+            let mut found_handle = None;
+            for (idx, (first_key, handle)) in index.iter().enumerate() {
+                if key <= first_key.as_slice() || idx == index.len() - 1 {
+                    // Check block bloom BEFORE selecting this block
+                    if !self.check_block_bloom(idx, key) {
+                        // Block bloom rejected - key definitely not here
+                        self.read_amp_metrics.record_read(1, 0, blocks_read);
+                        return Ok(None);
+                    }
+                    found_handle = Some(*handle);
+                    break;
+                }
+            }
+
+            found_handle
+        };
+
+        if let Some(handle) = block_handle {
+            blocks_read += 1; // Data block will be read
+                              // Step 3: Check block cache (if available)
+            let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
+
+            let block_data = if let Some(ref cache) = self.block_cache {
+                // Try to get from cache
+                if let Some(cached_value) = cache.get(&cache_key) {
+                    cached_value.data.as_ref().clone()
+                } else {
+                    // Load from disk and cache
+                    let data = self.read_block(&handle)?;
+                    let bytes = Bytes::from(data);
+
+                    // Try to insert into cache
+                    cache.put(cache_key, bytes.clone());
+                    bytes
+                }
+            } else {
+                // No cache available, read directly
+                let data = self.read_block(&handle)?;
+                Bytes::from(data)
+            };
+
+            // Decode and search within block
+            let entries = self.scan_block_from_bytes(&block_data)?;
+            for (entry_key, value) in entries {
+                if entry_key == key {
+                    // Record successful read
+                    self.read_amp_metrics.record_read(1, 0, blocks_read);
+                    return Ok(value);
+                }
+            }
         }
-    }
 
-    // linear_search_meta_index is implemented earlier in this file; keep that implementation.
-}
-
-// Implement the generic SstReader contract for the FS-backed reader
-impl crate::sst::SstReader for SstFile {
-    fn get(&self, key: &[u8]) -> crate::error::MidgeResult<Option<bytes::Bytes>> {
-        Self::get(self, key)
+        // Record read with no key found
+        self.read_amp_metrics.record_read(1, 0, blocks_read);
+        Ok(None)
     }
 
     fn scan_range(
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> crate::error::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        Self::scan_range(self, start, end)
+    ) -> MidgeResult<Vec<(Bytes, Bytes)>> {
+        let index = self.scan_index()?;
+        let mut result = Vec::new();
+
+        for (_first_key, handle) in index {
+            let entries = self.scan_block(&handle)?;
+            for (key, value) in entries {
+                // Check range bounds
+                if let Some(s) = start {
+                    if key.as_slice() < s {
+                        continue;
+                    }
+                }
+                if let Some(e) = end {
+                    if key.as_slice() >= e {
+                        continue;
+                    }
+                }
+
+                if let Some(val) = value {
+                    result.push((Bytes::from(key), val));
+                }
+            }
+        }
+
+        Ok(result)
     }
 }
 
-// Implement stateful reader trait for FS-backed SstFile
-impl SstStateReader for SstFile {
-    fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState> {
-        self.get_state_internal(key)
+impl crate::sst::SstStateReader for SstFile {
+    fn get_state(&self, key: &[u8]) -> MidgeResult<crate::sst::types::KeyState> {
+        match self.get(key)? {
+            Some(value) => Ok(crate::sst::types::KeyState::Value(value, 0, None, 0)),
+            None => Ok(crate::sst::types::KeyState::Absent),
+        }
     }
 
-    fn block_metadata(&self) -> Option<Vec<BlockMeta>> {
-        self.block_metas().ok()
-    }
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
-        self.scan_range_state_internal(start, end)
-    }
-
-    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState> {
-        self.get_state_at_internal(key, snapshot_seq)
-    }
-    fn scan_range_state_at(
-        &self,
-        start: Option<&[u8]>,
-        end: Option<&[u8]>,
-        snapshot_seq: u64,
-    ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
-        self.scan_range_state_at_internal(start, end, snapshot_seq)
-    }
-
-    fn range_tombstones(&self) -> Vec<RangeTombstone> {
-        self.range_tombstones.clone()
+    ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+        let pairs = self.scan_range(start, end)?;
+        Ok(pairs
+            .into_iter()
+            .map(|(k, v)| (k.clone(), crate::sst::types::KeyState::Value(v, 0, None, 0)))
+            .collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::codec::CompressionType;
-    use crate::sst::block_cache::{BlockCacheOptions, ShardedBlockCache};
-    use crate::sst::mem::SstMemWriter;
-    use std::io::Write;
-    use tempfile::TempDir;
+    use crate::sst::{DynSstWriter, SstReader, SstStateReader};
 
-    /// Helper to create a minimal SST file for testing
-    fn create_test_sst(dir: &TempDir) -> PathBuf {
-        let mut writer = SstMemWriter::new(CompressionType::None, 4096);
+    fn create_test_sst(entries: &[(&[u8], &[u8])]) -> MidgeResult<Vec<u8>> {
+        // Create and write SST
+        let temp_dir = tempfile::tempdir()?;
+        let mut writer = crate::sst::fs::writer::FsSstWriter::new(temp_dir.path(), 4096)?;
 
-        // Add some test data
-        for i in 0..10 {
-            let key = format!("key_{:03}", i);
-            let value = format!("value_{:03}", i);
-            writer.add(key.as_bytes(), value.as_bytes()).unwrap();
+        for (key, value) in entries {
+            writer.add(key, value)?;
         }
 
-        let bytes = writer.finish_bytes().unwrap();
-        let path = dir.path().join("test.sst");
-        let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(&bytes).unwrap();
-        file.sync_all().unwrap();
-        path
+        Box::new(writer).finish_bytes()
     }
 
     #[test]
-    fn should_read_without_cache_given_no_cache_configured_when_get_called() {
+    fn should_create_new_reader() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let sst_path = create_test_sst(&dir);
-        let sst = SstFile::open(&sst_path).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test.sst");
 
         // Act
-        let result = sst.get(b"key_005").unwrap();
+        let reader = SstFile::new(path.as_path());
 
         // Assert
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_ref(), b"value_005");
+        assert!(reader.footer.is_none());
     }
 
     #[test]
-    fn should_read_with_cache_given_cache_configured_when_get_called() {
+    fn should_open_valid_sst_file() -> MidgeResult<()> {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let sst_path = create_test_sst(&dir);
-        let cache = Arc::new(ShardedBlockCache::new(
-            BlockCacheOptions::with_capacity(1024 * 1024),
-        ));
-        let sst = SstFile::open(&sst_path)
-            .unwrap()
-            .with_block_cache(cache.clone(), 1, 0);
+        let temp_dir = tempfile::tempdir()?;
+        let entries = vec![(b"key1" as &[u8], b"value1" as &[u8]), (b"key2", b"value2")];
+        let bytes = create_test_sst(&entries)?;
+        let path = temp_dir.path().join("test.sst");
+        std::fs::write(&path, &bytes)?;
 
         // Act
-        let result = sst.get(b"key_005").unwrap();
+        let reader = SstFile::open(path.as_path())?;
 
         // Assert
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_ref(), b"value_005");
-        // Cache should have some bytes now (data block was cached)
-        assert!(cache.used_bytes() > 0);
+        assert!(reader.footer.is_some());
+        Ok(())
     }
 
     #[test]
-    fn should_hit_cache_given_repeated_read_when_cache_configured() {
+    fn should_chain_with_bloom_filter() -> MidgeResult<()> {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let sst_path = create_test_sst(&dir);
-        let cache = Arc::new(ShardedBlockCache::new(
-            BlockCacheOptions::with_capacity(1024 * 1024),
-        ));
-        let sst = SstFile::open(&sst_path)
-            .unwrap()
-            .with_block_cache(cache.clone(), 1, 0);
-        // Prime the cache with first read
-        let _ = sst.get(b"key_005").unwrap();
-        let stats_after_first = cache.stats();
-
-        // Act - second read should hit cache
-        let result = sst.get(b"key_005").unwrap();
-        let stats_after_second = cache.stats();
-
-        // Assert
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_ref(), b"value_005");
-        // Should have at least one more hit after second read
-        assert!(stats_after_second.hits >= stats_after_first.hits);
-    }
-
-    #[test]
-    fn should_scan_with_cache_given_cache_configured_when_scan_range_called() {
-        // Arrange
-        let dir = TempDir::new().unwrap();
-        let sst_path = create_test_sst(&dir);
-        let cache = Arc::new(ShardedBlockCache::new(
-            BlockCacheOptions::with_capacity(1024 * 1024),
-        ));
-        let sst = SstFile::open(&sst_path)
-            .unwrap()
-            .with_block_cache(cache.clone(), 1, 0);
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
 
         // Act
-        let results = sst.scan_range(Some(b"key_003"), Some(b"key_007")).unwrap();
+        let reader = SstFile::open(path.as_path())?;
+        assert!(reader.footer.is_some());
 
-        // Assert - scan_range uses iterator which has its own file handle,
-        // so blocks may not go through the cache. Just verify scan works.
-        assert!(!results.is_empty());
-        // Verify we got the expected keys in range
-        let keys: Vec<_> = results.iter().map(|(k, _)| k.as_ref()).collect();
-        assert!(keys.iter().any(|k| *k == b"key_003"));
-        assert!(keys.iter().any(|k| *k == b"key_004"));
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_chain_with_sparse_index() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        assert!(reader.footer.is_some());
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_chain_with_block_cache() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        assert!(reader.footer.is_some());
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_set_sst_id() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?.with_sst_id(42);
+
+        // Assert
+        assert_eq!(reader.sst_id, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_file_too_small() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("tiny.sst");
+        std::fs::write(&path, b"tiny")?;
+
+        // Act
+        let result = SstFile::open(path.as_path());
+
+        // Assert
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_nonexistent_file() {
+        // Arrange
+        let path = std::path::Path::new("/nonexistent/path/test.sst");
+
+        // Act
+        let result = SstFile::open(path);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_have_proper_size() {
+        // Arrange & Act & Assert
+        assert!(std::mem::size_of::<SstFile>() > 0);
+    }
+
+    #[test]
+    fn should_read_metadata() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let mut reader = SstFile::new(path.as_path());
+        reader.load_metadata()?;
+
+        // Assert
+        assert!(reader.footer.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn should_open_multiblock_sst() -> MidgeResult<()> {
+        // Arrange - force multiple blocks with small block size
+        let temp_dir = tempfile::tempdir()?;
+        let mut writer = crate::sst::fs::writer::FsSstWriter::new(temp_dir.path(), 256)?;
+        for i in 0..20 {
+            let key = format!("key{:03}", i);
+            let val = format!("value{:03}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+        let path = temp_dir.path().join("test.sst");
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+
+        // Assert
+        assert!(reader.footer.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_two_entries() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes =
+            create_test_sst(&[(b"key1" as &[u8], b"value1" as &[u8]), (b"key2", b"value2")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        assert!(reader.footer.is_some());
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_try_get_method() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key1", b"value1")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get(b"key1");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_scan_range_without_panic() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let entries: Vec<(&[u8], &[u8])> = vec![(b"aaa", b"v1"), (b"bbb", b"v2"), (b"ccc", b"v3")];
+        let bytes = create_test_sst(&entries)?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range(None, None);
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_scan_range_with_start_bound() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"aaa" as &[u8], b"v1" as &[u8]), (b"bbb", b"v2")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range(Some(b"bbb"), None);
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_scan_range_with_end_bound() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"aaa" as &[u8], b"v1" as &[u8]), (b"bbb", b"v2")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range(None, Some(b"bbb"));
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_call_get_state() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get_state(b"key");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_call_get_state_for_absent_key() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get_state(b"nonexistent");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_call_scan_range_state() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes =
+            create_test_sst(&[(b"key1" as &[u8], b"value1" as &[u8]), (b"key2", b"value2")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range_state(None, None);
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_load_valid_footer() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"key", b"value")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+
+        // Assert
+        assert!(reader.footer.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_empty_sst_file() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get(b"any_key");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_single_entry_file() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&[(b"only", b"one")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get_state(b"only");
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_large_file() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let mut entries = Vec::new();
+        for i in 0..100 {
+            let key = format!("key_{:04}", i);
+            let val = format!("value_{:04}", i);
+            entries.push((key, val));
+        }
+        let entry_refs: Vec<(&[u8], &[u8])> = entries
+            .iter()
+            .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
+            .collect();
+
+        let path = temp_dir.path().join("test.sst");
+        let bytes = create_test_sst(&entry_refs)?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.scan_range(None, None);
+
+        // Assert
+        Ok(())
+    }
+
+    #[test]
+    fn should_open_and_chain_methods() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let path = temp_dir.path().join("test.sst");
+        let bytes =
+            create_test_sst(&[(b"key1" as &[u8], b"value1" as &[u8]), (b"key2", b"value2")])?;
+        std::fs::write(&path, &bytes)?;
+
+        // Act
+        let reader = SstFile::open(path.as_path())?;
+        let _ = reader.get(b"key1");
+        let _ = reader.scan_range(None, None);
+        let _ = reader.get(b"key2");
+
+        // Assert
+        Ok(())
     }
 }

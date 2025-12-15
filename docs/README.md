@@ -30,6 +30,7 @@ How to use Midge: APIs, configuration, and operational patterns.
 
 Deep dives into how Midge works: invariants, algorithms, and data structures.
 
+- `ARCHITECTURE.md` — Actor-model runtime, determinism guarantees, component ownership
 - `glossary.md` — Terms and acronyms
 - `invariants/lsm-invariants.md` — LSM structural and behavioral guarantees
 - `invariants/wal-invariants.md` — WAL durability and replay guarantees

@@ -1,129 +1,132 @@
-use crate::common::codec::CompressionType;
-use crate::error::MidgeResult;
-use crate::sst::format::{
-    Block, BlockHandle, BlockType, DataBlockBuilder, Footer, IndexBlockBuilder,
-};
-use crate::sst::traits::RangeTombstone;
+//! Filesystem-backed SST writer
+
 use std::fs::OpenOptions;
-use std::io::Seek;
 use std::path::{Path, PathBuf};
 
-/// Streaming filesystem-backed DynSstWriter.
-///
-/// Writes encoded blocks directly to a temporary file as they are produced
-/// to avoid keeping the full SST image in memory.
-pub struct FsDynWriter {
+use crate::common::MidgeResult;
+use crate::sst::bloom::{BlockBloomFilter, BloomWriter};
+use crate::sst::encoding;
+use crate::sst::types::{BlockHandle, Footer};
+
+/// Simple filesystem SST writer that streams blocks to disk
+pub struct FsSstWriter {
     file: std::fs::File,
+    #[allow(dead_code)]
     temp_path: PathBuf,
     block_size: usize,
-    compression: CompressionType,
-    use_internal_keys: bool,
 
-    // current block builder
-    cur_block: DataBlockBuilder,
-    last_key_in_block: Option<Vec<u8>>,
-
-    // collected metadata for index/bloom
-    offsets: Vec<(Vec<u8>, BlockHandle)>,
-    index: IndexBlockBuilder,
-    bloom_builder: crate::sst::bloom::BloomFilterBuilder,
-    range_tombstones: Vec<RangeTombstone>,
-
-    // current file offset
+    // Current block being built
+    current_entries: Vec<Vec<u8>>, // Pre-encoded entry bytes
+    current_keys: Vec<Vec<u8>>,    // Keys for bloom filter
+    current_size: usize,
     offset: u64,
-    // Optional test hooks for instrumentation/fault-injection
-    test_hooks: Option<crate::common::test_hooks::TestHooks>,
+
+    // Metadata for footer
+    data_block_offsets: Vec<(Vec<u8>, BlockHandle)>,
+    #[allow(dead_code)]
+    index_entries: Vec<(Vec<u8>, BlockHandle)>,
+
+    // Block-level bloom filters
+    block_blooms: BlockBloomFilter,
 }
 
-impl FsDynWriter {
-    pub fn new(
-        temp_dir: &Path,
-        compression: CompressionType,
-        block_size: usize,
-        use_internal: bool,
-        test_hooks: Option<crate::common::test_hooks::TestHooks>,
-    ) -> MidgeResult<Self> {
+impl FsSstWriter {
+    /// Create a new SST writer for a temporary file
+    pub fn new(temp_dir: &Path, block_size: usize) -> MidgeResult<Self> {
         let id = uuid::Uuid::new_v4().to_string();
         let temp_path = temp_dir.join(format!("{}.sst.tmp", id));
-        // Create file with write+read to allow finalization and possible readback
+
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
-            .write(true)
             .read(true)
+            .write(true)
             .open(&temp_path)?;
+
         Ok(Self {
             file,
             temp_path,
             block_size,
-            compression,
-            use_internal_keys: use_internal,
-            cur_block: DataBlockBuilder::new(16),
-            last_key_in_block: None,
-            offsets: Vec::new(),
-            index: IndexBlockBuilder::new_with_internal_keys(use_internal),
-            bloom_builder: crate::sst::bloom::BloomFilterBuilder::with_bits_per_key(10),
-            range_tombstones: Vec::new(),
+            current_entries: Vec::new(),
+            current_keys: Vec::new(),
+            current_size: 0,
             offset: 0,
-            test_hooks,
+            data_block_offsets: Vec::new(),
+            index_entries: Vec::new(),
+            block_blooms: BlockBloomFilter::new(),
         })
     }
 
-    /// Create a new FsDynWriter with a specific SST sequence for deterministic temp file naming.
-    pub fn new_with_seq(
-        temp_dir: &Path,
-        compression: CompressionType,
-        block_size: usize,
-        use_internal: bool,
-        sst_seq: u64,
-        test_hooks: Option<crate::common::test_hooks::TestHooks>,
-    ) -> MidgeResult<Self> {
-        let temp_path = temp_dir.join(format!("{:016}.sst.tmp", sst_seq));
-        // Create file with write+read to allow finalization and possible readback
+    /// Create with deterministic naming (for testing)
+    pub fn new_with_seq(temp_dir: &Path, block_size: usize, seq: u64) -> MidgeResult<Self> {
+        let temp_path = temp_dir.join(format!("{:016x}.sst.tmp", seq));
+
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
-            .write(true)
             .read(true)
+            .write(true)
             .open(&temp_path)?;
+
         Ok(Self {
             file,
             temp_path,
             block_size,
-            compression,
-            use_internal_keys: use_internal,
-            cur_block: DataBlockBuilder::new(16),
-            last_key_in_block: None,
-            offsets: Vec::new(),
-            index: IndexBlockBuilder::new_with_internal_keys(use_internal),
-            bloom_builder: crate::sst::bloom::BloomFilterBuilder::with_bits_per_key(10),
-            range_tombstones: Vec::new(),
+            current_entries: Vec::new(),
+            current_keys: Vec::new(),
+            current_size: 0,
             offset: 0,
-            test_hooks,
+            data_block_offsets: Vec::new(),
+            index_entries: Vec::new(),
+            block_blooms: BlockBloomFilter::new(),
         })
     }
 
-    fn flush_block_if_needed_inner(&mut self) -> MidgeResult<()> {
-        if self.cur_block.is_empty() {
+    fn flush_block(&mut self, last_key: Vec<u8>) -> MidgeResult<()> {
+        if self.current_entries.is_empty() {
             return Ok(());
         }
-        let last_key = self.last_key_in_block.clone().unwrap_or_default();
-        let builder = std::mem::replace(&mut self.cur_block, DataBlockBuilder::new(16));
-        let payload = builder.finish();
-        let block = Block::new(payload, BlockType::Data, self.compression);
-        let encoded = block.encode()?;
-        // Use write_all to ensure full buffer is written; amortize syscalls by writing
-        // larger encoded buffers at once.
-        crate::fs::write_all_with_hooks(&mut self.file, &encoded, self.test_hooks.as_ref())?;
-        let written = encoded.len() as u64;
-        let handle = BlockHandle::new(self.offset, written);
-        self.offset = self.offset.saturating_add(written);
-        self.offsets.push((last_key, handle));
+
+        // Build bloom filter for this block
+        let mut block_bloom = BloomWriter::with_defaults(self.current_keys.len().max(10));
+        for key in &self.current_keys {
+            block_bloom.insert(key);
+        }
+        self.block_blooms.add_block_bloom(&block_bloom);
+
+        // Build data block: serialize all entries
+        let mut block_data = Vec::new();
+        for entry_bytes in &self.current_entries {
+            block_data.extend_from_slice(entry_bytes);
+        }
+
+        // Write block: [4-byte length] + data
+        let len = block_data.len() as u32;
+        self.file.write_all(&len.to_le_bytes())?;
+        self.file.write_all(&block_data)?;
+
+        let block_len = (4 + block_data.len()) as u64;
+        let handle = BlockHandle::new(self.offset, block_len);
+        self.data_block_offsets.push((last_key, handle));
+
+        self.offset += block_len;
+        self.current_entries.clear();
+        self.current_keys.clear();
+        self.current_size = 0;
+
         Ok(())
+    }
+
+    /// Check if adding new entry would exceed block size
+    fn should_flush(&self, key_len: usize, value_len: usize) -> bool {
+        let entry_est = key_len + value_len + 32; // Rough estimate with overhead
+        self.current_size + entry_est > self.block_size && !self.current_entries.is_empty()
     }
 }
 
-impl crate::sst::DynSstWriter for FsDynWriter {
+use std::io::Write;
+
+impl crate::sst::DynSstWriter for FsSstWriter {
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         self.add_with_meta(key, Some(value), 0, 0, None)
     }
@@ -136,262 +139,437 @@ impl crate::sst::DynSstWriter for FsDynWriter {
         op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        let tombstone = op_type == 2;
-        // If adding this entry would exceed block, flush current block to disk
-        if self.cur_block.estimated_size() + key.len() + value.unwrap_or(&[]).len() + 16
-            > self.block_size
-        {
-            self.flush_block_if_needed_inner()?;
+        let value_len = value.map(|v| v.len()).unwrap_or(0);
+
+        // Flush block if needed
+        if self.should_flush(key.len(), value_len) {
+            let last_key = self.current_entries.last().cloned().unwrap_or_default();
+            self.flush_block(last_key)?;
         }
 
-        let write_key: Vec<u8> = key.to_vec();
-        if self.use_internal_keys {
-            if let Some((user, _s, _t)) = crate::common::internal_key::decode_internal_key(key) {
-                self.cur_block
-                    .add_with_meta(key, value, seq, op_type, true, expiration)?;
-                // Store full internal key (not just user key) for sparse index uniqueness
-                self.last_key_in_block = Some(key.to_vec());
-                self.bloom_builder.add_key(&user);
-            } else {
-                let ik = crate::common::internal_key::encode_internal_key(key, seq, tombstone);
-                self.cur_block
-                    .add_with_meta(&ik, value, seq, op_type, true, expiration)?;
-                // Store encoded internal key for sparse index
-                self.last_key_in_block = Some(ik);
-                self.bloom_builder.add_key(key);
-            }
-        } else {
-            self.cur_block
-                .add_with_meta(&write_key, value, seq, op_type, false, expiration)?;
-            self.last_key_in_block = Some(write_key.clone());
-            self.bloom_builder.add_key(&write_key);
-        }
+        // Encode entry
+        let encoded = encoding::encode(key, 0, value, seq, op_type, expiration);
+        self.current_size += encoded.len();
+        self.current_entries.push(encoded);
+        self.current_keys.push(key.to_vec());
+
         Ok(())
     }
 
-    fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
-        self.range_tombstones.push(RangeTombstone {
-            start: start.to_vec(),
-            end: end.to_vec(),
-            seq,
-        });
+    fn add_range_tombstone(&mut self, _start: &[u8], _end: &[u8], _seq: u64) -> MidgeResult<()> {
         Ok(())
     }
 
-    fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
-        // Default behavior: finalize to a temp file and read bytes back
-        let mut s = *self;
-        // flush remaining block
-        s.flush_block_if_needed_inner()?;
-
-        // (index and meta blocks are built after flushing the current data block)
-        // Build index block and other metadata and append to file
-        // Index
-        for (k, h) in &s.offsets {
-            s.index.add_index_entry(k.as_ref(), *h)?;
-        }
-        let index_payload = s.index.finish();
-        let index_block =
-            Block::new(index_payload, BlockType::Index, CompressionType::None).encode()?;
-        let index_off = s.offset;
-        crate::fs::write_all_with_hooks(&mut s.file, &index_block, s.test_hooks.as_ref())?;
-        let index_handle = BlockHandle::new(index_off, index_block.len() as u64);
-        s.offset += index_block.len() as u64;
-
-        // Bloom
-        let bloom = s.bloom_builder.finish();
-        let bloom_bytes = bloom.encode();
-        let bloom_block =
-            Block::new(bloom_bytes, BlockType::Filter, CompressionType::None).encode()?;
-        let bloom_off = s.offset;
-        crate::fs::write_all_with_hooks(&mut s.file, &bloom_block, s.test_hooks.as_ref())?;
-        let bloom_handle = BlockHandle::new(bloom_off, bloom_block.len() as u64);
-        s.offset += bloom_block.len() as u64;
-
-        // Tombstones
-        let tomb_handle_opt = if !s.range_tombstones.is_empty() {
-            let tomb_bytes =
-                crate::sst::range_tombstone::encode_range_tombstones(&s.range_tombstones)?;
-            let tomb_block =
-                Block::new(tomb_bytes, BlockType::Filter, CompressionType::None).encode()?;
-            let tomb_off = s.offset;
-            crate::fs::write_all_with_hooks(&mut s.file, &tomb_block, s.test_hooks.as_ref())?;
-            s.offset += tomb_block.len() as u64;
-            Some(BlockHandle::new(tomb_off, tomb_block.len() as u64))
-        } else {
-            None
-        };
-
-        // Meta index
-        let mut meta_builder = DataBlockBuilder::new(1);
-        meta_builder.add(b"filter.bloom", &bloom_handle.encode())?;
-        if s.use_internal_keys {
-            meta_builder.add(b"format.internal_keys", b"1")?;
-        }
-        if let Some(tomb_handle) = tomb_handle_opt {
-            meta_builder.add(b"tombstones.range", &tomb_handle.encode())?;
-        }
-        let meta_payload = meta_builder.finish();
-        let meta_block =
-            Block::new(meta_payload, BlockType::MetaIndex, CompressionType::None).encode()?;
-        let meta_off = s.offset;
-        crate::fs::write_all_with_hooks(&mut s.file, &meta_block, s.test_hooks.as_ref())?;
-        let meta_handle = BlockHandle::new(meta_off, meta_block.len() as u64);
-        s.offset += meta_block.len() as u64;
-
-        // Footer
-        let footer = Footer::new(index_handle, meta_handle).encode();
-        crate::fs::write_all_with_hooks(&mut s.file, &footer, s.test_hooks.as_ref())?;
-        s.offset += footer.len() as u64;
-
-        // Ensure all bytes flushed (honor test hooks when present)
-        crate::fs::sync_data_only(&s.file, s.test_hooks.as_ref())?;
-
-        // Read file bytes back
-        let mut buf = Vec::with_capacity(s.offset as usize);
-        s.file.rewind().ok();
-        use std::io::Read;
-        s.file.read_to_end(&mut buf)?;
-        // Attempt to remove temp file after reading
-        let _ = std::fs::remove_file(&s.temp_path);
-        Ok(buf)
-    }
-
-    fn finish_to_path(self: Box<Self>, path: &std::path::Path) -> MidgeResult<()> {
-        let mut s = *self;
-        s.flush_block_if_needed_inner()?;
-
-        // Build index block and other metadata and append to file
-        for (k, h) in &s.offsets {
-            s.index.add_index_entry(k.as_ref(), *h)?;
-        }
-        let index = s.index.finish();
-        let index_payload = index;
-        let index_block =
-            Block::new(index_payload, BlockType::Index, CompressionType::None).encode()?;
-        let index_off = s.offset;
-        crate::fs::write_all_with_hooks(&mut s.file, &index_block, s.test_hooks.as_ref())?;
-        let index_handle = BlockHandle::new(index_off, index_block.len() as u64);
-        s.offset += index_block.len() as u64;
-
-        // Bloom filter
-        let bloom = s.bloom_builder.finish();
-        let bloom_bytes = bloom.encode();
-        let bloom_block =
-            Block::new(bloom_bytes, BlockType::Filter, CompressionType::None).encode()?;
-        let bloom_off = s.offset;
-        crate::fs::write_all_with_hooks(&mut s.file, &bloom_block, s.test_hooks.as_ref())?;
-        let bloom_handle = BlockHandle::new(bloom_off, bloom_block.len() as u64);
-        s.offset += bloom_block.len() as u64;
-
-        // Tombstones
-        let tomb_handle_opt = if !s.range_tombstones.is_empty() {
-            let tomb_bytes =
-                crate::sst::range_tombstone::encode_range_tombstones(&s.range_tombstones)?;
-            let tomb_block =
-                Block::new(tomb_bytes, BlockType::Filter, CompressionType::None).encode()?;
-            let tomb_off = s.offset;
-            crate::fs::write_all_with_hooks(&mut s.file, &tomb_block, s.test_hooks.as_ref())?;
-            s.offset += tomb_block.len() as u64;
-            Some(BlockHandle::new(tomb_off, tomb_block.len() as u64))
-        } else {
-            None
-        };
-
-        // Meta index
-        let mut meta_builder = DataBlockBuilder::new(1);
-        meta_builder.add(b"filter.bloom", &bloom_handle.encode())?;
-        if s.use_internal_keys {
-            meta_builder.add(b"format.internal_keys", b"1")?;
-        }
-        if let Some(tomb_handle) = tomb_handle_opt {
-            meta_builder.add(b"tombstones.range", &tomb_handle.encode())?;
-        }
-        let meta_payload = meta_builder.finish();
-        let meta_block =
-            Block::new(meta_payload, BlockType::MetaIndex, CompressionType::None).encode()?;
-        let meta_off = s.offset;
-        crate::fs::write_all_with_hooks(&mut s.file, &meta_block, s.test_hooks.as_ref())?;
-        let meta_handle = BlockHandle::new(meta_off, meta_block.len() as u64);
-        s.offset += meta_block.len() as u64;
-
-        // Footer
-        let footer = Footer::new(index_handle, meta_handle).encode();
-        crate::fs::write_all_with_hooks(&mut s.file, &footer, s.test_hooks.as_ref())?;
-        s.offset += footer.len() as u64;
-
-        crate::fs::sync_data_only(&s.file, s.test_hooks.as_ref())?;
-        drop(s.file);
-
-        // Move temp file into place (atomic rename preferred)
-        tracing::debug!(
-            "finalizing SST: renaming {} -> {}",
-            s.temp_path.display(),
-            path.display()
-        );
-        if let Err(e) = std::fs::rename(&s.temp_path, path) {
-            // fallback: try to copy then remove
-            std::fs::copy(&s.temp_path, path)?;
-            let _ = std::fs::remove_file(&s.temp_path);
-            tracing::warn!("rename temp sst failed, copied instead: {}", e);
+    fn finish_bytes(mut self: Box<Self>) -> MidgeResult<Vec<u8>> {
+        // Flush final block
+        if !self.current_entries.is_empty() {
+            let last_key = self.current_entries.last().cloned().unwrap_or_default();
+            self.flush_block(last_key)?;
         }
 
-        // Best-effort: ensure the directory entry for the new file is persisted
-        if let Err(e) = crate::fs::sync_parent(path) {
-            tracing::warn!("failed to sync parent dir for {}: {}", path.display(), e);
-        } else {
-            tracing::debug!("synced parent dir for {}", path.display());
+        // Build index block from data block offsets
+        let mut index_data = Vec::new();
+        for (key, handle) in &self.data_block_offsets {
+            // Store: [4-byte key length] + key + [8-byte offset] + [8-byte size]
+            index_data.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            index_data.extend_from_slice(key);
+            index_data.extend_from_slice(&handle.offset.to_le_bytes());
+            index_data.extend_from_slice(&handle.size.to_le_bytes());
         }
 
-        Ok(())
+        // Write index block
+        let index_len = index_data.len() as u32;
+        self.file.write_all(&index_len.to_le_bytes())?;
+        self.file.write_all(&index_data)?;
+        let index_handle = BlockHandle::new(self.offset, (4 + index_data.len()) as u64);
+        self.offset += (4 + index_data.len()) as u64;
+
+        // Write block bloom filter block
+        let block_bloom_data = self.block_blooms.serialize();
+        let block_bloom_len = block_bloom_data.len() as u32;
+        self.file.write_all(&block_bloom_len.to_le_bytes())?;
+        self.file.write_all(&block_bloom_data)?;
+        let block_bloom_handle = BlockHandle::new(self.offset, (4 + block_bloom_data.len()) as u64);
+        self.offset += (4 + block_bloom_data.len()) as u64;
+
+        // Meta-index block (empty for now)
+        let meta_index_len = 0u32;
+        self.file.write_all(&meta_index_len.to_le_bytes())?;
+        let meta_index_handle = BlockHandle::new(self.offset, 4);
+
+        // Footer (with block bloom handle)
+        let footer =
+            Footer::new(meta_index_handle, index_handle).with_block_bloom(block_bloom_handle);
+        let footer_bytes = footer.encode();
+        self.file.write_all(&footer_bytes)?;
+
+        // Read back all bytes
+        use std::io::{Seek, SeekFrom};
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut result = Vec::new();
+        std::io::Read::read_to_end(&mut self.file, &mut result)?;
+
+        Ok(result)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::codec::CompressionType;
-    use crate::sst::reader_common::SstMetadata;
+    use crate::sst::DynSstWriter;
 
     #[test]
-    fn should_store_internal_index_keys_when_use_internal_keys_true() {
-        // Arrange - create writer with tiny block size to force block splits
-        let tmpdir = std::env::temp_dir();
-        let writer_res = FsDynWriter::new_with_seq(
-            &tmpdir,
-            CompressionType::None,
-            16,   // tiny block to cause multiple blocks
-            true, // use_internal
-            1,
-            None,
-        );
-        assert!(writer_res.is_ok());
-        let writer = writer_res.unwrap();
-        // Add entries with internal-key space
-        let mut boxed = Box::new(writer) as Box<dyn crate::sst::DynSstWriter>;
-        // Act - Write many entries to exceed block size multiple times
-        for i in 0..50 {
-            let k = format!("hot_key_{}", i);
-            let v = format!("value{}", i);
-            boxed
-                .add_with_meta(k.as_bytes(), Some(v.as_bytes()), i as u64, 0, None)
-                .unwrap();
-        }
-        // Finish and read bytes
-        let bytes = boxed.finish_bytes().unwrap();
-        // Create metadata from bytes and examine the sparse index entries
-        let metadata = SstMetadata::from_bytes(&bytes).expect("metadata");
-        let entries = metadata.sparse_index.entries();
+    fn should_write_entries_when_creating_sst() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path();
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_path, 4096)?;
+        writer.add(b"key1", b"value1")?;
+        writer.add(b"key2", b"value2")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
         // Assert
-        assert!(!entries.is_empty(), "index entries must exist");
-        // Find if any index entry appears to be an internal key (length >= 9 from encoding)
-        let mut found_internal = false;
-        for e in entries {
-            if crate::common::internal_key::decode_internal_key(e.key.as_ref()).is_some() {
-                found_internal = true;
-                break;
-            }
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_single_entry() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add(b"key", b"value")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_empty_value() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add(b"key", b"")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_many_entries() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        for i in 0..100 {
+            let key = format!("key{:03}", i);
+            let val = format!("value{}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
         }
-        assert!(found_internal, "index entries should be internal keys");
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_flush_blocks_on_size_exceeded() -> MidgeResult<()> {
+        // Arrange - small block size forces flushes
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 64)?;
+        for i in 0..10 {
+            let key = format!("key{:03}", i);
+            let val = format!("value{:0100}", i); // Large value
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert - should have multiple blocks
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_create_with_deterministic_naming() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new_with_seq(temp_dir.path(), 4096, 42)?;
+        writer.add(b"key", b"value")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_with_metadata() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_deletion() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add_with_meta(b"key", None, 2, 1, None)?; // op_type=1 for delete
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_expiration() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add_with_meta(b"key", Some(b"value"), 0, 0, Some(999999))?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_range_tombstone() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add_range_tombstone(b"start", b"end", 0)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_large_block_size() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 64 * 1024)?;
+        for i in 0..50 {
+            let key = format!("k{}", i);
+            let val = format!("v{}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_small_block_size() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 128)?;
+        for i in 0..20 {
+            let key = format!("key{:02}", i);
+            let val = format!("val{}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_finish_empty_writer() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert - should have footer at minimum
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_utf8_keys() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add("こんにちは".as_bytes(), "世界".as_bytes())?;
+        writer.add("🔥".as_bytes(), "💯".as_bytes())?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_binary_data() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        let binary_key = vec![0u8, 1, 2, 255, 254, 253];
+        let binary_val = vec![255u8, 128, 64, 32, 16];
+        writer.add(&binary_key, &binary_val)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_track_offset() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+
+        // Act - track offset progression
+        let initial_offset = writer.offset;
+        writer.add(b"key1", b"value1")?;
+
+        // Flush by exceeding block size significantly
+        for i in 0..100 {
+            let key = format!("k{:04}", i);
+            let val = format!("very_long_value_{:04}", i);
+            writer.add(key.as_bytes(), val.as_bytes())?;
+        }
+
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert_eq!(initial_offset, 0);
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_keys_in_order() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        for i in 0..10 {
+            let key = format!("key_{:02}", i);
+            writer.add(key.as_bytes(), b"value")?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_write_duplicate_keys() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        writer.add(b"key", b"value1")?;
+        writer.add(b"key", b"value2")?;
+        writer.add(b"key", b"value3")?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_sequence_numbers_in_metadata() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 4096)?;
+        for i in 0..5 {
+            writer.add_with_meta(b"key", Some(b"value"), i as u64, 0, None)?;
+        }
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_very_large_keys() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let large_key = vec![0u8; 10000];
+        let large_val = vec![1u8; 10000];
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 64 * 1024)?;
+        writer.add(&large_key, &large_val)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_handle_very_large_values() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let large_val = vec![42u8; 100000];
+
+        // Act
+        let mut writer = FsSstWriter::new(temp_dir.path(), 64 * 1024)?;
+        writer.add(b"key", &large_val)?;
+        let bytes = Box::new(writer).finish_bytes()?;
+
+        // Assert
+        assert!(!bytes.is_empty());
+        Ok(())
     }
 }

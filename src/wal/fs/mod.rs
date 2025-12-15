@@ -1,16 +1,12 @@
-//! Filesystem-backed WAL implementation.
+//! Filesystem-backed Write-Ahead Log (WAL).
 //!
-//! Provides durable write-ahead logging using filesystem storage with:
-//! - TLV encoding format for efficient parsing
-//! - Optional compression (LZ4) for large values
-//! - Group commit coordination for batching fsyncs
+//! Provides FsWalReader, FsWalWriter, and FsWalFactory.
+//! Higher-level behavior (rotation, sync, recovery, sequencing) is handled by runtime actors.
 
-mod batched_sync;
 mod factory;
 mod reader;
 mod writer;
 
-pub use batched_sync::{BatchedSyncConfig, BatchedSyncCoordinator};
 pub use factory::FsWalFactory;
-pub use reader::replay_wal_file;
-pub use writer::{replay_wal_file_with_mode, replay_wal_file_with_stats, Wal};
+pub use reader::FsWalReader;
+pub use writer::FsWalWriter;

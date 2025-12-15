@@ -1,21 +1,27 @@
-//! Filesystem utilities
+//! Filesystem abstraction for the engine (small, start-only-with-traits)
 //!
-//! Common filesystem operations shared across WAL and SST modules:
-//! - File I/O operations (read_exact_at, read_range, vectorized writes)
-//! - Numbered file management (find latest, generate paths)
-//! - Platform-specific sync operations (fdatasync)
-//! - Sequential reading with position tracking
+//! This module implements the minimal trait surface from the FS design
+//! specification: typed path IDs, durability enum, error types, and the
+//! `EngineFs` and WAL/SST writer/reader traits. Implementations (RealFs,
+//! FastFs, ChaosFs) will be added later.
 
-pub mod io;
-pub mod numbered_files;
-pub mod sync;
+pub mod traits;
 
-// Re-export commonly used functions
-pub use io::{
-    current_position, file_size, read_exact, read_exact_at, read_file, read_from_end, read_range,
-    seek, write_all, write_all_with_hooks, write_vectored, write_vectored_with_hooks,
-    SequentialReader,
-};
-pub use numbered_files::{find_latest_numbered_file, list_numbered_files, numbered_file_path};
-pub use sync::sync_data_only;
-pub use sync::sync_parent;
+pub use traits::*;
+
+// Submodules (stubs / implementations)
+pub mod chaos;
+pub mod real;
+pub mod mock;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn traits_are_send_sync() {
+        // Ensure the trait objects are Send + Sync where expected.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<&dyn EngineFs>();
+    }
+}

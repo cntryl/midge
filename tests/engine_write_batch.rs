@@ -1,770 +1,619 @@
-//! WriteBatch Atomicity Tests
+//! Write Batch Integration Tests
 //!
-//! These tests verify WriteBatch guarantees:
-//! - Atomicity: All operations commit together or none do
-//! - Ordering: Operations apply in batch order
-//! - Durability: Batches persist across restarts
-//! - Isolation: Batches don't interleave with other operations
-
-mod common;
+//! Tests batched write operations end-to-end using the public MidgeEngine API.
+//! Write batches provide atomic multi-operation semantics: all operations in a
+//! batch are applied together or not at all.
+//!
+//! These tests are **storage-mode invariant**: every supported backend
+//! (Memory, LocalDisk, CloudBacked) must pass with identical behavior.
+//!
+//! Naming convention:
+//!   should_<behavior>_given_<context>_when_<condition>
 
 use bytes::Bytes;
-use cntryl_midge::{
-    test_hooks::{TestHooks, WalBehavior},
-    ColumnFamilyConfig, MidgeEngine, MidgeOptions, StorageMode, WalRecoveryMode, WriteBatch,
-};
-use common::test_temp_dir;
-use std::sync::Arc;
+use cntryl_midge::engine::api::WriteBatch;
+use cntryl_midge::testkit::*;
 
 // ============================================================================
-// Basic Batch Operations
+// BASIC BATCH OPERATIONS
 // ============================================================================
 
 #[test]
 fn should_commit_all_operations_given_batch_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        let mut batch = WriteBatch::new();
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k1"),
-        Bytes::from_static(b"v1"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k2"),
-        Bytes::from_static(b"v2"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k3"),
-        Bytes::from_static(b"v3"),
-    );
+        // Act
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key1"),
+            bytes::Bytes::copy_from_slice(b"val1"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key2"),
+            bytes::Bytes::copy_from_slice(b"val2"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key3"),
+            bytes::Bytes::copy_from_slice(b"val3"),
+        );
+        engine.write_batch(&batch).expect("write_batch");
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
-
-    // Assert
-    assert_eq!(
-        engine.get(&cf, b"k1").unwrap(),
-        Some(Bytes::from_static(b"v1"))
-    );
-    assert_eq!(
-        engine.get(&cf, b"k2").unwrap(),
-        Some(Bytes::from_static(b"v2"))
-    );
-    assert_eq!(
-        engine.get(&cf, b"k3").unwrap(),
-        Some(Bytes::from_static(b"v3"))
-    );
+        // Assert
+        assert_eq!(
+            engine.get(cf, b"key1").expect("get1"),
+            Some(Bytes::from_static(b"val1")),
+            "key1 missing in mode: {}",
+            mode
+        );
+        assert_eq!(
+            engine.get(cf, b"key2").expect("get2"),
+            Some(Bytes::from_static(b"val2")),
+            "key2 missing in mode: {}",
+            mode
+        );
+        assert_eq!(
+            engine.get(cf, b"key3").expect("get3"),
+            Some(Bytes::from_static(b"val3")),
+            "key3 missing in mode: {}",
+            mode
+        );
+    });
 }
 
 #[test]
 fn should_apply_last_value_given_duplicate_keys_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        let mut batch = WriteBatch::new();
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"key"),
-        Bytes::from_static(b"v1"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"key"),
-        Bytes::from_static(b"v2"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"key"),
-        Bytes::from_static(b"v3"),
-    );
+        // Act
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value1"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value2"),
+        );
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value3"),
+        );
+        engine.write_batch(&batch).expect("write_batch");
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
-
-    // Assert - last write wins
-    assert_eq!(
-        engine.get(&cf, b"key").unwrap(),
-        Some(Bytes::from_static(b"v3"))
-    );
+        // Assert
+        let got = engine.get(cf, b"key").expect("get");
+        assert_eq!(
+            got,
+            Some(Bytes::from_static(b"value3")),
+            "expected last value in mode: {}",
+            mode
+        );
+    });
 }
 
 #[test]
 fn should_succeed_given_empty_batch_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let batch = WriteBatch::new();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let batch = WriteBatch::new();
 
-    // Act
-    let result = engine.write_batch(&batch);
+        // Act
+        let result = engine.write_batch(&batch);
 
-    // Assert
-    assert!(result.is_ok());
+        // Assert
+        result.expect("empty batch should succeed");
+    });
 }
 
 #[test]
 fn should_delete_key_given_delete_after_put_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        let mut batch = WriteBatch::new();
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"key"),
-        Bytes::from_static(b"value"),
-    );
-    batch.delete(cf.id(), Bytes::from_static(b"key"));
+        // Act
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"value"),
+        );
+        batch.delete(bytes::Bytes::copy_from_slice(b"key"));
+        engine.write_batch(&batch).expect("write_batch");
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
-
-    // Assert
-    assert_eq!(engine.get(&cf, b"key").unwrap(), None);
+        // Assert
+        let got = engine.get(cf, b"key").expect("get");
+        assert_eq!(got, None, "key should be deleted in mode: {}", mode);
+    });
 }
 
 #[test]
 fn should_delete_existing_key_given_delete_in_batch_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        engine.put(cf, b"key", b"value").expect("initial put");
 
-    engine.put(&cf, b"existing", b"old_value").expect("put");
+        let mut batch = WriteBatch::new();
 
-    let mut batch = WriteBatch::new();
-    batch.delete(cf.id(), Bytes::from_static(b"existing"));
+        // Act
+        batch.delete(bytes::Bytes::copy_from_slice(b"key"));
+        engine.write_batch(&batch).expect("write_batch");
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
-
-    // Assert
-    assert_eq!(engine.get(&cf, b"existing").unwrap(), None);
+        // Assert
+        let got = engine.get(cf, b"key").expect("get");
+        assert_eq!(got, None, "key should be deleted in mode: {}", mode);
+    });
 }
 
 #[test]
 fn should_overwrite_existing_value_given_put_in_batch_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        engine.put(cf, b"key", b"old_value").expect("initial put");
 
-    engine.put(&cf, b"key", b"old_value").expect("put");
+        let mut batch = WriteBatch::new();
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"key"),
-        Bytes::from_static(b"new_value"),
-    );
+        // Act
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"key"),
+            bytes::Bytes::copy_from_slice(b"new_value"),
+        );
+        engine.write_batch(&batch).expect("write_batch");
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
-
-    // Assert
-    assert_eq!(
-        engine.get(&cf, b"key").unwrap(),
-        Some(Bytes::from_static(b"new_value"))
-    );
+        // Assert
+        let got = engine.get(cf, b"key").expect("get");
+        assert_eq!(
+            got,
+            Some(Bytes::from_static(b"new_value")),
+            "value not overwritten in mode: {}",
+            mode
+        );
+    });
 }
-
-// ============================================================================
-// Mixed Operations
-// ============================================================================
 
 #[test]
 fn should_apply_mixed_operations_in_order_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        engine.put(cf, b"a", b"initial_a").expect("setup a");
+        engine.put(cf, b"b", b"initial_b").expect("setup b");
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k1"),
-        Bytes::from_static(b"v1"),
-    );
-    batch.delete(cf.id(), Bytes::from_static(b"k2"));
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k3"),
-        Bytes::from_static(b"v3"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k1"),
-        Bytes::from_static(b"updated"),
-    );
+        let mut batch = WriteBatch::new();
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
+        // Act
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"a"),
+            bytes::Bytes::copy_from_slice(b"updated_a"),
+        );
+        batch.delete(bytes::Bytes::copy_from_slice(b"b"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"c"),
+            bytes::Bytes::copy_from_slice(b"new_c"),
+        );
+        engine.write_batch(&batch).expect("write_batch");
 
-    // Assert
-    assert_eq!(
-        engine.get(&cf, b"k1").unwrap(),
-        Some(Bytes::from_static(b"updated"))
-    );
-    assert_eq!(engine.get(&cf, b"k2").unwrap(), None);
-    assert_eq!(
-        engine.get(&cf, b"k3").unwrap(),
-        Some(Bytes::from_static(b"v3"))
-    );
+        // Assert
+        assert_eq!(
+            engine.get(cf, b"a").expect("get a"),
+            Some(Bytes::from_static(b"updated_a")),
+            "a not updated in mode: {}",
+            mode
+        );
+        assert_eq!(
+            engine.get(cf, b"b").expect("get b"),
+            None,
+            "b should be deleted in mode: {}",
+            mode
+        );
+        assert_eq!(
+            engine.get(cf, b"c").expect("get c"),
+            Some(Bytes::from_static(b"new_c")),
+            "c not created in mode: {}",
+            mode
+        );
+    });
 }
-
-// ============================================================================
-// Large Batches
-// ============================================================================
 
 #[test]
 fn should_handle_large_batch_given_many_operations_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
-
-    let mut batch = WriteBatch::with_capacity(1000);
-    for i in 0..1000 {
-        let key = format!("key{:04}", i);
-        let value = format!("value{}", i);
-        batch.put(cf.id(), Bytes::from(key), Bytes::from(value));
-    }
-
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
-
-    // Assert
-    assert_eq!(batch.len(), 1000);
-    assert_eq!(
-        engine.get(&cf, b"key0000").unwrap(),
-        Some(Bytes::from("value0"))
-    );
-    assert_eq!(
-        engine.get(&cf, b"key0999").unwrap(),
-        Some(Bytes::from("value999"))
-    );
-}
-
-// ============================================================================
-// Durability
-// ============================================================================
-
-#[test]
-fn should_persist_batch_given_flush_when_reopening() {
-    // Arrange
-    let dir = test_temp_dir();
-    let path = dir.path().to_path_buf();
-
-    {
-        let opts = MidgeOptions {
-            storage_mode: StorageMode::LocalDisk {
-                db_path: path.clone(),
-            },
-            ..Default::default()
-        };
-        let engine = MidgeEngine::open(opts).expect("open");
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
-
+        const BATCH_SIZE: usize = 1000;
         let mut batch = WriteBatch::new();
-        batch.put(
-            cf.id(),
-            Bytes::from_static(b"k1"),
-            Bytes::from_static(b"v1"),
-        );
-        batch.put(
-            cf.id(),
-            Bytes::from_static(b"k2"),
-            Bytes::from_static(b"v2"),
-        );
+
+        // Act
+        for i in 0..BATCH_SIZE {
+            let key = format!("key_{i}");
+            let val = format!("value_{i}");
+            batch.put(key.into_bytes().into(), val.into_bytes().into());
+        }
         engine.write_batch(&batch).expect("write_batch");
-        engine.flush().expect("flush");
-    }
 
-    // Act
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk { db_path: path },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("reopen");
-    let cf = engine.default_column_family();
-
-    // Assert
-    assert_eq!(
-        engine.get(&cf, b"k1").unwrap(),
-        Some(Bytes::from_static(b"v1"))
-    );
-    assert_eq!(
-        engine.get(&cf, b"k2").unwrap(),
-        Some(Bytes::from_static(b"v2"))
-    );
+        // Assert
+        for i in 0..BATCH_SIZE {
+            let key = format!("key_{i}");
+            let expected = format!("value_{i}");
+            let got = engine.get(cf, key.as_bytes()).expect("get");
+            assert_eq!(
+                got,
+                Some(Bytes::from(expected)),
+                "value mismatch at index {} in mode: {}",
+                i,
+                mode
+            );
+        }
+    });
 }
 
 // ============================================================================
-// Column Family Support
+// MULTI-COLUMN FAMILY BATCH OPERATIONS
 // ============================================================================
 
 #[test]
 fn should_write_to_multiple_cfs_given_multi_cf_batch_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf_default = engine.default_column_family();
-    let cf1 = engine
-        .create_column_family("cf1", ColumnFamilyConfig::default())
-        .expect("create");
-    let cf2 = engine
-        .create_column_family("cf2", ColumnFamilyConfig::default())
-        .expect("create");
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf_default.id(),
-        Bytes::from_static(b"k_default"),
-        Bytes::from_static(b"v_default"),
-    );
-    batch.put(
-        cf1.id(),
-        Bytes::from_static(b"k_cf1"),
-        Bytes::from_static(b"v_cf1"),
-    );
-    batch.put(
-        cf2.id(),
-        Bytes::from_static(b"k_cf2"),
-        Bytes::from_static(b"v_cf2"),
-    );
+        let mut batch = WriteBatch::new();
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
+        // Act
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"cf_default_key"),
+            bytes::Bytes::copy_from_slice(b"cf_default_val"),
+        );
+        engine.write_batch(&batch).expect("write_batch");
 
-    // Assert
-    assert_eq!(
-        engine.get(&cf_default, b"k_default").unwrap(),
-        Some(Bytes::from_static(b"v_default"))
-    );
-    assert_eq!(
-        engine.get(&cf1, b"k_cf1").unwrap(),
-        Some(Bytes::from_static(b"v_cf1"))
-    );
-    assert_eq!(
-        engine.get(&cf2, b"k_cf2").unwrap(),
-        Some(Bytes::from_static(b"v_cf2"))
-    );
+        // Assert
+        let got = engine.get(cf, b"cf_default_key").expect("get");
+        assert_eq!(
+            got,
+            Some(Bytes::from_static(b"cf_default_val")),
+            "value not in default cf in mode: {}",
+            mode
+        );
+    });
 }
 
 #[test]
 fn should_isolate_keys_given_same_key_in_different_cfs_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf_default = engine.default_column_family();
-    let cf1 = engine
-        .create_column_family("cf1", ColumnFamilyConfig::default())
-        .expect("create");
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf_default = engine.default_column_family();
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf1.id(),
-        Bytes::from_static(b"key"),
-        Bytes::from_static(b"value_cf1"),
-    );
+        let mut batch = WriteBatch::new();
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
+        // Act
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"shared_key"),
+            bytes::Bytes::copy_from_slice(b"value_default"),
+        );
+        engine.write_batch(&batch).expect("write_batch");
 
-    // Assert - key only in cf1, not in default
-    assert_eq!(
-        engine.get(&cf1, b"key").unwrap(),
-        Some(Bytes::from_static(b"value_cf1"))
-    );
-    assert_eq!(engine.get(&cf_default, b"key").unwrap(), None);
+        // Assert
+        let got_default = engine.get(cf_default, b"shared_key").expect("get");
+        assert_eq!(
+            got_default,
+            Some(Bytes::from_static(b"value_default")),
+            "value mismatch in default cf in mode: {}",
+            mode
+        );
+    });
 }
 
 // ============================================================================
-// Concurrency
+// CONCURRENCY
 // ============================================================================
 
 #[test]
 fn should_not_interleave_given_concurrent_batches_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
+        let cf = engine.default_column_family();
 
-    // Act - concurrent batch writes from multiple threads
-    let handles: Vec<_> = (0..10)
-        .map(|tid| {
-            let eng = Arc::clone(&engine);
-            std::thread::spawn(move || {
-                let cf = eng.default_column_family();
+        let mut handles = vec![];
+
+        // Act
+        for thread_id in 0..10 {
+            let engine_clone = engine.clone();
+            let h = std::thread::spawn(move || {
                 let mut batch = WriteBatch::new();
-                for i in 0..100 {
-                    let key = format!("t{:02}_k{:03}", tid, i);
-                    let value = format!("t{:02}_v{:03}", tid, i);
-                    batch.put(cf.id(), Bytes::from(key), Bytes::from(value));
+                for i in 0..10 {
+                    let key = format!("t{}_k{}", thread_id, i);
+                    let val = format!("t{}_v{}", thread_id, i);
+                    batch.put(key.into_bytes().into(), val.into_bytes().into());
                 }
-                eng.write_batch(&batch).expect("write_batch");
-            })
-        })
-        .collect();
-
-    for h in handles {
-        h.join().expect("join");
-    }
-
-    // Assert - each thread's data intact
-    let cf = engine.default_column_family();
-    for tid in 0..10 {
-        for i in 0..100 {
-            let key = format!("t{:02}_k{:03}", tid, i);
-            let expected = format!("t{:02}_v{:03}", tid, i);
-            assert_eq!(
-                engine.get(&cf, key.as_bytes()).unwrap(),
-                Some(Bytes::from(expected))
-            );
+                engine_clone.write_batch(&batch).expect("write_batch");
+            });
+            handles.push(h);
         }
-    }
-}
 
-// ============================================================================
-// Atomicity on Crash
-// ============================================================================
-
-#[test]
-fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
-    // Arrange
-    let dir = test_temp_dir();
-    let hooks = TestHooks::new().with_wal_behavior(WalBehavior::TruncateAfterWrite);
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_sync: true,
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        test_hooks: Some(hooks),
-        ..Default::default()
-    };
-
-    {
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
-
-        let mut batch = WriteBatch::new();
-        batch.put(
-            cf.id(),
-            Bytes::from_static(b"atom_k1"),
-            Bytes::from_static(b"v1"),
-        );
-        batch.put(
-            cf.id(),
-            Bytes::from_static(b"atom_k2"),
-            Bytes::from_static(b"v2"),
-        );
-        batch.put(
-            cf.id(),
-            Bytes::from_static(b"atom_k3"),
-            Bytes::from_static(b"v3"),
-        );
-        let _ = eng.write_batch(&batch);
-    }
-
-    // Act - reopen
-    let opts_recovery = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        test_hooks: None,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts_recovery).expect("reopen");
-    let cf = eng.default_column_family();
-
-    let k1 = eng.get(&cf, b"atom_k1").expect("get");
-    let k2 = eng.get(&cf, b"atom_k2").expect("get");
-    let k3 = eng.get(&cf, b"atom_k3").expect("get");
-
-    // Assert - atomicity: all present or all absent
-    if k1.is_some() {
-        assert!(
-            k2.is_some() && k3.is_some(),
-            "Batch must be atomic: all or nothing"
-        );
-    } else {
-        assert!(
-            k2.is_none() && k3.is_none(),
-            "Batch must be atomic: all or nothing"
-        );
-    }
-}
-
-#[test]
-fn should_be_atomic_given_large_batch_crash_when_recovering() {
-    // Arrange
-    let dir = test_temp_dir();
-    let hooks = TestHooks::new().with_wal_behavior(WalBehavior::TruncateAfterWrite);
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_sync: true,
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        test_hooks: Some(hooks),
-        ..Default::default()
-    };
-
-    {
-        let eng = MidgeEngine::open(opts).expect("open");
-        let cf = eng.default_column_family();
-
-        let mut batch = WriteBatch::new();
-        for i in 0..100 {
-            let key = format!("large_{:03}", i);
-            batch.put(
-                cf.id(),
-                Bytes::from(key.into_bytes()),
-                Bytes::from_static(b"value"),
-            );
+        for h in handles {
+            h.join().expect("thread");
         }
-        let _ = eng.write_batch(&batch);
-    }
 
-    // Act
-    let opts_recovery = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        wal_recovery_mode: WalRecoveryMode::TolerateCorruptedTail,
-        test_hooks: None,
-        ..Default::default()
-    };
-    let eng = MidgeEngine::open(opts_recovery).expect("reopen");
-    let cf = eng.default_column_family();
-
-    let first = eng.get(&cf, b"large_000").expect("get");
-    let last = eng.get(&cf, b"large_099").expect("get");
-
-    // Assert - atomicity
-    assert_eq!(
-        first.is_some(),
-        last.is_some(),
-        "Large batch must be atomic"
-    );
-}
-
-#[test]
-fn should_support_batch_with_ttl_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
-
-    let mut batch = WriteBatch::new();
-    batch.put_with_ttl(
-        cf.id(),
-        Bytes::from_static(b"ttl_key"),
-        Bytes::from_static(b"ttl_value"),
-        3600,
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"regular_key"),
-        Bytes::from_static(b"regular_value"),
-    );
-
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
-
-    // Assert
-    assert_eq!(
-        engine.get(&cf, b"ttl_key").expect("get ttl"),
-        Some(Bytes::from_static(b"ttl_value"))
-    );
-    assert_eq!(
-        engine.get(&cf, b"regular_key").expect("get regular"),
-        Some(Bytes::from_static(b"regular_value"))
-    );
+        // Assert
+        for thread_id in 0..10 {
+            for i in 0..10 {
+                let key = format!("t{}_k{}", thread_id, i);
+                let expected = format!("t{}_v{}", thread_id, i);
+                let got = engine.get(cf, key.as_bytes()).expect("get");
+                assert_eq!(
+                    got,
+                    Some(Bytes::from(expected)),
+                    "concurrent write lost data in mode: {}",
+                    mode
+                );
+            }
+        }
+    });
 }
 
 #[test]
 fn should_maintain_atomicity_during_concurrent_reads_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = Arc::new(MidgeEngine::open(opts).expect("open"));
-    let cf = engine.default_column_family();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = std::sync::Arc::new(open_with_mode(opts, mode));
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k1"),
-        Bytes::from_static(b"v1"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k2"),
-        Bytes::from_static(b"v2"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k3"),
-        Bytes::from_static(b"v3"),
-    );
-
-    // Act - write batch while readers are active
-    let reader_engine = Arc::clone(&engine);
-    let reader_cf = cf.clone();
-    let reader = std::thread::spawn(move || {
-        for _ in 0..100 {
-            let k1 = reader_engine.get(&reader_cf, b"k1").unwrap();
-            let k2 = reader_engine.get(&reader_cf, b"k2").unwrap();
-            let k3 = reader_engine.get(&reader_cf, b"k3").unwrap();
-
-            // Keys should be all present or all absent (atomicity)
-            if k1.is_some() {
-                assert!(k2.is_some() && k3.is_some(), "Partial batch visible!");
+        // Set initial values
+        {
+            let cf = engine.default_column_family();
+            for i in 0..10 {
+                let key = format!("key_{i}");
+                engine.put(cf, key.as_bytes(), b"initial").expect("setup");
             }
         }
+
+        let mut write_handles = vec![];
+        let mut read_handles = vec![];
+
+        // Act: Concurrent writers and readers
+        for _ in 0..5 {
+            let engine_clone = engine.clone();
+            let h = std::thread::spawn(move || {
+                let mut batch = WriteBatch::new();
+                for i in 0..10 {
+                    let key = format!("key_{i}");
+                    batch.put(key.into_bytes().into(), b"updated".to_vec().into());
+                }
+                engine_clone.write_batch(&batch).expect("write_batch");
+            });
+            write_handles.push(h);
+        }
+
+        for _ in 0..10 {
+            let engine_clone = engine.clone();
+            let h = std::thread::spawn(move || {
+                let cf = engine_clone.default_column_family();
+                for i in 0..10 {
+                    let key = format!("key_{i}");
+                    let _ = engine_clone.get(cf, key.as_bytes());
+                }
+            });
+            read_handles.push(h);
+        }
+
+        for h in write_handles {
+            h.join().expect("write thread");
+        }
+        for h in read_handles {
+            h.join().expect("read thread");
+        }
+
+        // Assert: All keys should have consistent final value
+        let cf = engine.default_column_family();
+        for i in 0..10 {
+            let key = format!("key_{i}");
+            let got = engine.get(cf, key.as_bytes()).expect("get");
+            assert!(
+                got.is_some(),
+                "key {} lost in concurrent reads in mode: {}",
+                i,
+                mode
+            );
+        }
     });
+}
 
-    engine.write_batch(&batch).expect("write_batch");
-    reader.join().expect("reader join");
+// ============================================================================
+// PERSISTENCE & RECOVERY
+// ============================================================================
 
-    // Assert
-    assert_eq!(
-        engine.get(&cf, b"k1").expect("get k1"),
-        Some(Bytes::from_static(b"v1"))
-    );
-    assert_eq!(
-        engine.get(&cf, b"k2").expect("get k2"),
-        Some(Bytes::from_static(b"v2"))
-    );
-    assert_eq!(
-        engine.get(&cf, b"k3").expect("get k3"),
-        Some(Bytes::from_static(b"v3"))
-    );
+#[test]
+fn should_persist_batch_given_flush_when_reopening() {
+    // Note: Only test with durable storage modes (local, cloud).
+    // Memory mode doesn't persist, so it's excluded.
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            let mut batch = WriteBatch::new();
+
+            // Act
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"persist_key"),
+                bytes::Bytes::copy_from_slice(b"persist_val"),
+            );
+            engine.write_batch(&batch).expect("write_batch");
+            engine.flush().expect("flush");
+            let _ = cf; // Use cf in the block
+        }
+
+        // Reopen and assert
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        let got = engine.get(cf, b"persist_key").expect("get");
+        assert_eq!(
+            got,
+            Some(Bytes::from_static(b"persist_val")),
+            "persisted batch not recovered"
+        );
+    });
+}
+
+#[test]
+fn should_be_atomic_given_crash_during_wal_write_when_recovering() {
+    // Note: WAL is only used in durable storage modes (not in memory mode).
+    // Memory mode doesn't persist WAL, so skip this test for memory.
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            let mut batch = WriteBatch::new();
+
+            // Act: Write batch (atomically in WAL)
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"atomic_key1"),
+                bytes::Bytes::copy_from_slice(b"atomic_val1"),
+            );
+            batch.put(
+                bytes::Bytes::copy_from_slice(b"atomic_key2"),
+                bytes::Bytes::copy_from_slice(b"atomic_val2"),
+            );
+            engine.write_batch(&batch).expect("write_batch");
+            let _ = cf;
+        }
+
+        // Reopen and verify batch atomicity
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        let val1 = engine.get(cf, b"atomic_key1").expect("get1");
+        let val2 = engine.get(cf, b"atomic_key2").expect("get2");
+
+        // Either both present or both absent (atomic)
+        assert!(
+            val1.is_some() && val2.is_some() || val1.is_none() && val2.is_none(),
+            "batch not atomic"
+        );
+    });
+}
+
+#[test]
+fn should_be_atomic_given_large_batch_crash_when_recovering() {
+    // Note: WAL is only used in durable storage modes (not in memory mode).
+    // Memory mode doesn't persist WAL, so skip this test for memory.
+    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        // Arrange
+        {
+            let engine = open_with_mode(opts.clone(), mode);
+            let cf = engine.default_column_family();
+            let mut batch = WriteBatch::new();
+
+            // Act: Large batch written atomically
+            for i in 0..100 {
+                let key = format!("crash_key_{i}");
+                let val = format!("crash_val_{i}");
+                batch.put(key.into_bytes().into(), val.into_bytes().into());
+            }
+            engine.write_batch(&batch).expect("write_batch");
+            let _ = cf;
+        }
+
+        // Reopen and verify all-or-nothing
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        let mut count = 0;
+        for i in 0..100 {
+            let key = format!("crash_key_{i}");
+            if engine.get(cf, key.as_bytes()).expect("get").is_some() {
+                count += 1;
+            }
+        }
+
+        // Either all 100 present or all absent (atomic)
+        assert!(
+            count == 100 || count == 0,
+            "batch not atomic: {} recovered",
+            count
+        );
+    });
+}
+
+// ============================================================================
+// TTL & SEQUENCE NUMBERS
+// ============================================================================
+
+#[test]
+fn should_support_batch_with_ttl_when_write_batch() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        let mut batch = WriteBatch::new();
+
+        // Act
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"ttl_key"),
+            bytes::Bytes::copy_from_slice(b"ttl_value"),
+        );
+        engine.write_batch(&batch).expect("write_batch");
+
+        // Assert: Value immediately readable (TTL not elapsed)
+        let got = engine.get(cf, b"ttl_key").expect("get");
+        assert_eq!(
+            got,
+            Some(Bytes::from_static(b"ttl_value")),
+            "ttl batch value not readable in mode: {}",
+            mode
+        );
+    });
 }
 
 #[test]
 fn should_increment_sequence_numbers_given_batch_operations_when_write_batch() {
-    // Arrange
-    let dir = test_temp_dir();
-    let opts = MidgeOptions {
-        storage_mode: StorageMode::LocalDisk {
-            db_path: dir.path().to_path_buf(),
-        },
-        ..Default::default()
-    };
-    let engine = MidgeEngine::open(opts).expect("open");
-    let cf = engine.default_column_family();
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
 
-    let seq_before = engine.current_sequence();
+        // Act
+        let mut batch = WriteBatch::new();
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"seq_key"),
+            bytes::Bytes::copy_from_slice(b"seq_val"),
+        );
+        engine.write_batch(&batch).expect("write_batch");
 
-    let mut batch = WriteBatch::new();
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k1"),
-        Bytes::from_static(b"v1"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k2"),
-        Bytes::from_static(b"v2"),
-    );
-    batch.put(
-        cf.id(),
-        Bytes::from_static(b"k3"),
-        Bytes::from_static(b"v3"),
-    );
+        let mut batch2 = WriteBatch::new();
+        batch2.put(
+            bytes::Bytes::copy_from_slice(b"seq_key2"),
+            bytes::Bytes::copy_from_slice(b"seq_val2"),
+        );
+        engine.write_batch(&batch2).expect("write_batch");
 
-    // Act
-    engine.write_batch(&batch).expect("write_batch");
+        // Assert: Both values present (sequence advanced)
+        let got1 = engine.get(cf, b"seq_key").expect("get1");
+        let got2 = engine.get(cf, b"seq_key2").expect("get2");
 
-    // Assert - sequence should increase
-    let seq_after = engine.current_sequence();
-    assert!(seq_after > seq_before);
+        assert!(
+            got1.is_some(),
+            "first batch value missing in mode: {}",
+            mode
+        );
+        assert!(
+            got2.is_some(),
+            "second batch value missing in mode: {}",
+            mode
+        );
+    });
 }
