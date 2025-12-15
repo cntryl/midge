@@ -35,11 +35,27 @@ use crate::common::MidgeError;
 use crate::common::MidgeResult;
 use crate::runtime::IntentLogEntry;
 use crate::sst::Memtable;
+use crate::storage::abstraction::{Storage, StorageErrorKind, StoragePath};
+use crate::storage::LocalFsStorage;
 use crate::wal::{DurabilityPolicy, FsWalFactory, WalFactory, WalOpKind, WalRecord, WalWriter};
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+fn map_storage_error(err: crate::storage::abstraction::StorageError) -> MidgeError {
+    match err.kind {
+        StorageErrorKind::NotFound => MidgeError::NotFound,
+        StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
+        StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
+        StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
+        _ => MidgeError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            err.to_string(),
+        )),
+    }
+}
 
 #[derive(Debug)]
 enum PendingCloudWrite {
@@ -80,8 +96,12 @@ enum BatchApplyOp {
 pub struct WalActor {
     /// WAL writer (owned by this actor)
     writer: Option<Box<dyn WalWriter>>,
-    /// WAL directory
-    wal_dir: PathBuf,
+    /// Storage backend for WAL files.
+    ///
+    /// WAL-related modules must not touch `std::fs` directly.
+    wal_storage: Option<Arc<dyn Storage>>,
+    /// Directory within the WAL storage root (usually empty).
+    wal_storage_dir: StoragePath,
     /// Buffered writes pending sync
     pending_sync_count: usize,
     /// Durability policy (determines sync behavior)
@@ -103,16 +123,21 @@ impl WalActor {
         durability_policy: DurabilityPolicy,
         memory_mode: bool,
     ) -> MidgeResult<Self> {
-        let writer = if memory_mode {
-            None
+        let (wal_storage, wal_storage_dir, writer) = if memory_mode {
+            (None, StoragePath::new(""), None)
         } else {
+            let storage: Arc<dyn Storage> =
+                Arc::new(LocalFsStorage::new(&wal_dir).map_err(map_storage_error)?);
+            let dir = StoragePath::new("");
             let factory = FsWalFactory;
-            Some(factory.create_writer(&wal_dir)?)
+            let writer = Some(factory.create_writer(storage.as_ref(), &dir)?);
+            (Some(storage), dir, writer)
         };
 
         Ok(Self {
             writer,
-            wal_dir,
+            wal_storage,
+            wal_storage_dir,
             pending_sync_count: 0,
             durability_policy,
             pending_cloud_writes: VecDeque::new(),
@@ -718,7 +743,12 @@ impl WalActor {
 
         // Rotate via factory
         let factory = FsWalFactory;
-        self.writer = Some(factory.rotate_writer(&self.wal_dir, old_segment)?);
+        let storage = self
+            .wal_storage
+            .as_ref()
+            .expect("wal_storage must exist when not in memory_mode");
+        self.writer =
+            Some(factory.rotate_writer(storage.as_ref(), &self.wal_storage_dir, old_segment)?);
 
         state.wal.current_segment_id += 1;
 

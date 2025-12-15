@@ -133,6 +133,7 @@
 pub(crate) mod cloud;
 pub(crate) mod filesystem;
 pub(crate) mod hybrid;
+pub(crate) mod local_fs_storage;
 pub(crate) mod providers;
 pub(crate) mod test_support;
 
@@ -141,6 +142,8 @@ pub(crate) mod test_support;
 /// This is the long-lived API contract intended for multiple backends (local,
 /// cloud object storage, and hybrids) without exposing engine concepts.
 pub mod abstraction;
+
+pub(crate) use local_fs_storage::LocalFsStorage;
 
 pub use hybrid::HybridStorage;
 

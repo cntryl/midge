@@ -117,7 +117,7 @@ impl StorageError {
     pub fn with_source(
         kind: StorageErrorKind,
         message: impl Into<String>,
-        source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>, 
+        source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
     ) -> Self {
         Self {
             kind,
@@ -377,7 +377,11 @@ pub trait Storage: Send + Sync {
     }
 
     /// Open a file.
-    fn open_file(&self, path: &StoragePath, options: OpenOptions) -> StorageResult<Box<dyn StorageFile>>;
+    fn open_file(
+        &self,
+        path: &StoragePath,
+        options: OpenOptions,
+    ) -> StorageResult<Box<dyn StorageFile>>;
 
     /// List a directory/prefix.
     fn list_dir(&self, path: &StoragePath) -> StorageResult<Vec<DirEntry>>;
@@ -399,6 +403,10 @@ pub trait Storage: Send + Sync {
     ///   non-atomic emulation (copy+delete, multipart rewrite, etc.).
     /// - If `options.durability == Durable`, implementations must *attempt* to make
     ///   the rename durable, and report whether it was achieved.
-    fn rename(&self, from: &StoragePath, to: &StoragePath, options: RenameOptions)
-        -> StorageResult<RenameReport>;
+    fn rename(
+        &self,
+        from: &StoragePath,
+        to: &StoragePath,
+        options: RenameOptions,
+    ) -> StorageResult<RenameReport>;
 }

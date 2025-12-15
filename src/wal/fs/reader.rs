@@ -15,27 +15,50 @@
 //! higher-level async abstractions belong in the runtime.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::storage::abstraction::{
+    OpenMode, OpenOptions, Storage, StorageError, StorageErrorKind, StorageFile, StoragePath,
+};
 use crate::wal::encoding;
 use crate::wal::traits::{WalReader, WalReaderDyn};
 use crate::wal::types::{WalPos, WalRecord};
 
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+fn map_storage_error(err: StorageError) -> MidgeError {
+    match err.kind {
+        StorageErrorKind::NotFound => MidgeError::NotFound,
+        StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
+        StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
+        StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
+        _ => MidgeError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            err.to_string(),
+        )),
+    }
+}
 
 /// Filesystem-backed WAL reader.
 ///
 /// This struct provides low-level, corruption-aware reading semantics.
 pub struct FsWalReader {
-    file: File,
+    file: Box<dyn StorageFile>,
     current_pos: WalPos,
 }
 
 impl FsWalReader {
     /// Open `wal.log` in read-only mode.
-    pub fn new(dir: &Path) -> MidgeResult<Self> {
-        let path = dir.join("wal.log");
-        let file = File::open(&path).map_err(MidgeError::Io)?;
+    pub fn new(storage: &dyn Storage, dir: &StoragePath) -> MidgeResult<Self> {
+        let path = super::join(dir, "wal.log");
+        let file = storage
+            .open_file(
+                &path,
+                OpenOptions {
+                    mode: OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                    append: false,
+                },
+            )
+            .map_err(map_storage_error)?;
 
         Ok(Self {
             file,
@@ -52,35 +75,36 @@ impl WalReader for FsWalReader {
     /// - Ok(None) if clean EOF at `pos`
     /// - Err(Corruption) if EOF occurs mid-record
     fn read_at(&mut self, pos: WalPos) -> MidgeResult<Option<WalRecord>> {
-        self.file
-            .seek(SeekFrom::Start(pos))
-            .map_err(MidgeError::Io)?;
-
         // Read 4-byte length prefix
-        let mut len_buf = [0u8; 4];
-        match self.file.read_exact(&mut len_buf) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // Clean EOF — no more records
-                return Ok(None);
-            }
-            Err(e) => return Err(MidgeError::Io(e)),
+        let len_bytes = self.file.read_at(pos, 4).map_err(map_storage_error)?;
+        if len_bytes.is_empty() {
+            return Ok(None);
         }
+        if len_bytes.len() < 4 {
+            return Err(MidgeError::Corruption(format!(
+                "Incomplete WAL length prefix at pos {} (got {} bytes)",
+                pos,
+                len_bytes.len()
+            )));
+        }
+
+        let mut len_buf = [0u8; 4];
+        len_buf.copy_from_slice(&len_bytes[..4]);
 
         let len = u32::from_le_bytes(len_buf) as usize;
 
         // Read the encoded record bytes
-        let mut buf = vec![0u8; len];
-        match self.file.read_exact(&mut buf) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // EOF *inside* record → corruption
-                return Err(MidgeError::Corruption(format!(
-                    "Incomplete WAL record at pos {} (len={})",
-                    pos, len
-                )));
-            }
-            Err(e) => return Err(MidgeError::Io(e)),
+        let buf = self
+            .file
+            .read_at(pos + 4, len as u64)
+            .map_err(map_storage_error)?;
+        if buf.len() < len {
+            return Err(MidgeError::Corruption(format!(
+                "Incomplete WAL record at pos {} (len={}, got={})",
+                pos,
+                len,
+                buf.len()
+            )));
         }
 
         let record = encoding::decode(&buf[..])?;
@@ -99,34 +123,39 @@ impl WalReader for FsWalReader {
     where
         F: FnMut(&WalRecord) -> MidgeResult<()>,
     {
-        self.file
-            .seek(SeekFrom::Start(start))
-            .map_err(MidgeError::Io)?;
-
         let mut pos = start;
 
         loop {
             // Read the length prefix
-            let mut len_buf = [0u8; 4];
-            match self.file.read_exact(&mut len_buf) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // Clean EOF
-                Err(e) => return Err(MidgeError::Io(e)),
+            let len_bytes = self.file.read_at(pos, 4).map_err(map_storage_error)?;
+            if len_bytes.is_empty() {
+                break; // Clean EOF
             }
+            if len_bytes.len() < 4 {
+                return Err(MidgeError::Corruption(format!(
+                    "Incomplete WAL length prefix at pos {} (got {} bytes)",
+                    pos,
+                    len_bytes.len()
+                )));
+            }
+
+            let mut len_buf = [0u8; 4];
+            len_buf.copy_from_slice(&len_bytes[..4]);
 
             let len = u32::from_le_bytes(len_buf) as usize;
 
             // Read record payload
-            let mut buf = vec![0u8; len];
-            match self.file.read_exact(&mut buf) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Err(MidgeError::Corruption(format!(
-                        "Incomplete WAL record at pos {} (len={})",
-                        pos, len
-                    )));
-                }
-                Err(e) => return Err(MidgeError::Io(e)),
+            let buf = self
+                .file
+                .read_at(pos + 4, len as u64)
+                .map_err(map_storage_error)?;
+            if buf.len() < len {
+                return Err(MidgeError::Corruption(format!(
+                    "Incomplete WAL record at pos {} (len={}, got={})",
+                    pos,
+                    len,
+                    buf.len()
+                )));
             }
 
             // Decode
@@ -170,22 +199,29 @@ impl WalReaderDyn for FsWalReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::test_support::{build_temp_local_storage, TempLocalStorage};
     use crate::wal::fs::FsWalWriter;
     use crate::wal::traits::{WalReader, WalWriter};
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
-    use std::fs;
-    use tempfile::TempDir;
+
+    fn new_writer(temp: &TempLocalStorage) -> FsWalWriter {
+        FsWalWriter::new(temp.storage.as_ref(), &temp.root).unwrap()
+    }
+
+    fn new_reader(temp: &TempLocalStorage) -> MidgeResult<FsWalReader> {
+        FsWalReader::new(temp.storage.as_ref(), &temp.root)
+    }
 
     // =========== Reader Creation and Initialization Tests ===========
 
     #[test]
     fn should_create_reader_for_existing_wal_log() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let temp = build_temp_local_storage().unwrap();
 
         // Create a writer to write some data
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key"),
@@ -202,7 +238,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let reader = FsWalReader::new(dir.path());
+    let reader = new_reader(&temp);
 
         // Assert
         assert!(reader.is_ok());
@@ -211,10 +247,10 @@ mod tests {
     #[test]
     fn should_fail_to_create_reader_for_missing_wal_log() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let temp = build_temp_local_storage().unwrap();
 
         // Act
-        let reader = FsWalReader::new(dir.path());
+        let reader = new_reader(&temp);
 
         // Assert
         assert!(reader.is_err());
@@ -225,8 +261,8 @@ mod tests {
     #[test]
     fn should_read_record_at_position_zero() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("test_key"),
@@ -243,7 +279,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&temp).unwrap();
         let read_record = WalReader::read_at(&mut reader, 0).unwrap();
 
         // Assert
@@ -256,8 +292,8 @@ mod tests {
     #[test]
     fn should_return_none_on_clean_eof() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key"),
@@ -276,7 +312,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&temp).unwrap();
         let result = WalReader::read_at(&mut reader, end_pos).unwrap();
 
         // Assert
@@ -286,10 +322,10 @@ mod tests {
     #[test]
     fn should_detect_corruption_on_partial_record() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let temp = build_temp_local_storage().unwrap();
 
         // Write a complete record
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key"),
@@ -305,16 +341,43 @@ mod tests {
         writer.sync().unwrap();
         drop(writer);
 
-        // Truncate the file to simulate corruption
-        let path = dir.path().join("wal.log");
-        let metadata = fs::metadata(&path).unwrap();
-        fs::File::create(&path)
-            .unwrap()
-            .set_len(metadata.len() / 2)
+        // Truncate the file to simulate corruption (via storage abstraction):
+        // rewrite only the first half of the file into a newly truncated file.
+        let wal_log = super::join(&temp.root, "wal.log");
+        let file_ro = temp
+            .storage
+            .open_file(
+                &wal_log,
+                crate::storage::abstraction::OpenOptions {
+                    mode: crate::storage::abstraction::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                    append: false,
+                },
+            )
             .unwrap();
+        let len = file_ro.len().unwrap();
+        let half = (len / 2).max(1);
+        let half_bytes = file_ro.read_at(0, half).unwrap();
+
+        let mut file_trunc = temp
+            .storage
+            .open_file(
+                &wal_log,
+                crate::storage::abstraction::OpenOptions {
+                    mode: crate::storage::abstraction::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: true,
+                    append: false,
+                },
+            )
+            .unwrap();
+        let _ = file_trunc.write_at(0, &half_bytes).unwrap();
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&temp).unwrap();
         let result = WalReader::read_at(&mut reader, 0);
 
         // Assert
@@ -325,8 +388,8 @@ mod tests {
     #[test]
     fn should_update_current_position_after_read() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key"),
@@ -343,7 +406,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&temp).unwrap();
         let _ = WalReader::read_at(&mut reader, 0).unwrap();
         let pos_after = reader.current_pos;
 
@@ -356,8 +419,8 @@ mod tests {
     #[test]
     fn should_replay_all_records_from_start() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record1 = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key1"),
@@ -386,7 +449,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let mut count = 0;
         let mut keys = Vec::new();
         let result = WalReader::replay(&mut reader, 0, |record| {
@@ -406,7 +469,7 @@ mod tests {
     fn should_replay_from_middle_position() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&dir);
         let record1 = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("first"),
@@ -435,7 +498,7 @@ mod tests {
         drop(writer);
 
         // Act - replay from second record
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let mut count = 0;
         let result = WalReader::replay(&mut reader, pos2, |_| {
             count += 1;
@@ -451,7 +514,7 @@ mod tests {
     fn should_stop_replay_on_callback_error() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&dir);
         for i in 0..5 {
             let record = WalRecord {
                 op: WalOpKind::Put,
@@ -470,7 +533,7 @@ mod tests {
         drop(writer);
 
         // Act - replay with callback that fails on 3rd record
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let mut count = 0;
         let result = WalReader::replay(&mut reader, 0, |_| {
             count += 1;
@@ -490,12 +553,12 @@ mod tests {
     fn should_handle_empty_file_replay() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&dir);
         writer.sync().unwrap();
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let mut count = 0;
         let result = WalReader::replay(&mut reader, 0, |_| {
             count += 1;
@@ -513,7 +576,7 @@ mod tests {
     fn should_close_without_error() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&dir);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key"),
@@ -530,7 +593,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let result = WalReader::close(&mut reader);
 
         // Assert
@@ -543,7 +606,7 @@ mod tests {
     fn should_preserve_binary_key_and_value() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&dir);
         let binary_key = vec![0u8, 1u8, 255u8, 254u8];
         let binary_value = vec![127u8, 128u8, 64u8, 32u8];
         let record = WalRecord {
@@ -562,7 +625,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let read_record = WalReader::read_at(&mut reader, 0).unwrap().unwrap();
 
         // Assert
@@ -574,7 +637,7 @@ mod tests {
     fn should_handle_large_records() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&dir);
         let large_value = vec![42u8; 100_000]; // 100 KB
         let record = WalRecord {
             op: WalOpKind::Put,
@@ -592,7 +655,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let read_record = WalReader::read_at(&mut reader, 0).unwrap().unwrap();
 
         // Assert
@@ -603,7 +666,7 @@ mod tests {
     fn should_handle_multiple_sequential_reads() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&dir);
         let records = vec![
             WalRecord {
                 op: WalOpKind::Put,
@@ -637,7 +700,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let r1 = WalReader::read_at(&mut reader, positions[0])
             .unwrap()
             .unwrap();
@@ -654,7 +717,7 @@ mod tests {
     fn should_handle_delete_records_without_value() {
         // Arrange
         let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&dir);
         let record = WalRecord {
             op: WalOpKind::Delete,
             key: Bytes::from("key_to_delete"),
@@ -671,7 +734,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = FsWalReader::new(dir.path()).unwrap();
+        let mut reader = new_reader(&dir).unwrap();
         let read_record = WalReader::read_at(&mut reader, 0).unwrap().unwrap();
 
         // Assert

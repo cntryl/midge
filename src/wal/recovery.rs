@@ -10,11 +10,34 @@
 use super::types::{ColumnFamilyId, WalOpKind, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::{Memtable, SkipListMemtable};
+use crate::storage::abstraction::{
+    OpenMode, OpenOptions, Storage, StorageError, StorageErrorKind, StoragePath,
+};
 use std::collections::HashMap;
-use std::io::Read;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::instrument;
+
+fn map_storage_error(err: StorageError) -> MidgeError {
+    match err.kind {
+        StorageErrorKind::NotFound => MidgeError::NotFound,
+        StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
+        StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
+        StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
+        _ => MidgeError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            err.to_string(),
+        )),
+    }
+}
+
+fn join(dir: &StoragePath, leaf: &str) -> StoragePath {
+    let base = dir.as_str().trim_end_matches('/');
+    if base.is_empty() {
+        StoragePath::new(leaf)
+    } else {
+        StoragePath::new(format!("{base}/{leaf}"))
+    }
+}
 
 /// Statistics from WAL recovery
 #[derive(Debug, Clone)]
@@ -68,9 +91,10 @@ impl RecoveryStats {
 ///
 /// Returns aggregated recovery statistics. Caller is responsible for attaching
 /// the recovered memtables to the runtime state.
-#[instrument(level = "info", skip(memtables), fields(wal_dir = ?wal_dir))]
+#[instrument(level = "info", skip(storage, memtables), fields(wal_dir = ?wal_dir))]
 pub fn replay_wal(
-    wal_dir: &Path,
+    storage: &dyn Storage,
+    wal_dir: &StoragePath,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
 ) -> MidgeResult<RecoveryStats> {
     let mut stats = RecoveryStats::new();
@@ -84,40 +108,39 @@ pub fn replay_wal(
         std::collections::HashMap::new();
     let mut begun_txns: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
-    if !wal_dir.exists() {
-        return Ok(stats);
-    }
-
-    tracing::info!(dir = ?wal_dir, "starting wal replay");
+    tracing::info!(dir = %wal_dir, "starting wal replay");
 
     // Collect replay files: rotated segments first, then wal.log.
-    let mut segment_files: Vec<(u64, std::path::PathBuf)> = Vec::new();
-    let mut wal_log_path: Option<std::path::PathBuf> = None;
+    let mut segment_files: Vec<(u64, StoragePath)> = Vec::new();
+    let mut wal_log_path: Option<StoragePath> = None;
 
-    for entry in std::fs::read_dir(wal_dir).map_err(MidgeError::Io)? {
-        let entry = entry.map_err(MidgeError::Io)?;
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+    let entries = match storage.list_dir(wal_dir) {
+        Ok(v) => v,
+        Err(e) if e.kind == StorageErrorKind::NotFound => return Ok(stats),
+        Err(e) => return Err(map_storage_error(e)),
+    };
+
+    for entry in entries {
+        if entry.is_dir {
             continue;
-        };
-
+        }
+        let file_name = entry.name;
         if file_name == "wal.log" {
-            wal_log_path = Some(path);
+            wal_log_path = Some(join(wal_dir, "wal.log"));
             continue;
         }
 
         // Match `{segment_id}.wal`
         if let Some(segment_str) = file_name.strip_suffix(".wal") {
             if let Ok(segment_id) = segment_str.parse::<u64>() {
-                segment_files.push((segment_id, path));
+                segment_files.push((segment_id, join(wal_dir, &file_name)));
             }
         }
     }
 
     segment_files.sort_by_key(|(id, _)| *id);
 
-    let mut replay_paths: Vec<std::path::PathBuf> =
-        segment_files.into_iter().map(|(_, p)| p).collect();
+    let mut replay_paths: Vec<StoragePath> = segment_files.into_iter().map(|(_, p)| p).collect();
     if let Some(wal_log) = wal_log_path {
         replay_paths.push(wal_log);
     }
@@ -126,6 +149,7 @@ pub fn replay_wal(
     let mut result: MidgeResult<()> = Ok(());
     for file_path in replay_paths {
         result = replay_wal_file(
+            storage,
             &file_path,
             &mut stats,
             memtables,
@@ -140,7 +164,7 @@ pub fn replay_wal(
     match result {
         Ok(()) => {
             tracing::info!(
-                dir = ?wal_dir,
+                dir = %wal_dir,
                 records = stats.record_count,
                 bytes = stats.bytes,
                 max_sequence = ?stats.max_sequence,
@@ -151,52 +175,84 @@ pub fn replay_wal(
         }
         Err(MidgeError::Corruption(e)) => {
             stats.mark_corruption();
-            tracing::warn!(dir = ?wal_dir, error = %e, "wal replay encountered corruption");
+            tracing::warn!(dir = %wal_dir, error = %e, "wal replay encountered corruption");
             Err(MidgeError::Corruption(e))
         }
         Err(e) => {
-            tracing::error!(dir = ?wal_dir, error = %e, "wal replay failed");
+            tracing::error!(dir = %wal_dir, error = %e, "wal replay failed");
             Err(e)
         }
     }
 }
 
 fn replay_wal_file(
-    file_path: &Path,
+    storage: &dyn Storage,
+    file_path: &StoragePath,
     stats: &mut RecoveryStats,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
     begun_txns: &mut std::collections::HashSet<u64>,
 ) -> MidgeResult<()> {
-    let mut file = match std::fs::File::open(file_path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(MidgeError::Io(e)),
-    };
-
     let mut pos: u64 = 0;
     loop {
         // Read 4-byte length prefix
-        let mut len_buf = [0u8; 4];
-        match file.read_exact(&mut len_buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // clean EOF
-            Err(e) => return Err(MidgeError::Io(e)),
+        let len_bytes = match storage.open_file(
+            file_path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+                append: false,
+            },
+        ) {
+            Ok(file) => file.read_at(pos, 4).map_err(map_storage_error)?,
+            Err(e) if e.kind == StorageErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(map_storage_error(e)),
+        };
+
+        if len_bytes.is_empty() {
+            break; // clean EOF
         }
+        if len_bytes.len() < 4 {
+            return Err(MidgeError::Corruption(format!(
+                "Incomplete WAL length prefix at pos {} in {} (got {} bytes)",
+                pos,
+                file_path,
+                len_bytes.len()
+            )));
+        }
+
+        let mut len_buf = [0u8; 4];
+        len_buf.copy_from_slice(&len_bytes[..4]);
 
         let len = u32::from_le_bytes(len_buf) as usize;
 
         // Read record payload
-        let mut buf = vec![0u8; len];
-        match file.read_exact(&mut buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(MidgeError::Corruption(format!(
-                    "Incomplete WAL record at pos {} in {:?} (len={})",
-                    pos, file_path, len
-                )))
-            }
-            Err(e) => return Err(MidgeError::Io(e)),
+        let buf = {
+            let file = storage
+                .open_file(
+                    file_path,
+                    OpenOptions {
+                        mode: OpenMode::ReadOnly,
+                        create: false,
+                        create_new: false,
+                        truncate: false,
+                        append: false,
+                    },
+                )
+                .map_err(map_storage_error)?;
+            file.read_at(pos + 4, len as u64)
+                .map_err(map_storage_error)?
+        };
+        if buf.len() < len {
+            return Err(MidgeError::Corruption(format!(
+                "Incomplete WAL record at pos {} in {} (len={}, got={})",
+                pos,
+                file_path,
+                len,
+                buf.len()
+            )));
         }
 
         let record = super::encoding::decode(&buf[..])?;

@@ -216,7 +216,12 @@ impl RuntimeState {
         let replay_dir = recovery_wal_dir.as_deref().unwrap_or(&wal_dir);
         let recovered_sequence = if !memory_mode && replay_dir.exists() {
             let mut recovery_memtables = HashMap::new();
-            match crate::wal::recovery::replay_wal(replay_dir, &mut recovery_memtables) {
+            match crate::storage::LocalFsStorage::new(replay_dir) {
+                Ok(storage) => match crate::wal::recovery::replay_wal(
+                    &storage,
+                    &crate::storage::abstraction::StoragePath::new(""),
+                    &mut recovery_memtables,
+                ) {
                 Ok(stats) => {
                     tracing::info!(
                         records_recovered = stats.record_count,
@@ -240,6 +245,11 @@ impl RuntimeState {
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "WAL recovery failed, continuing without recovered state");
+                    0
+                }
+                },
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to initialize WAL recovery storage");
                     0
                 }
             }

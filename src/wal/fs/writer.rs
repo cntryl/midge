@@ -12,14 +12,29 @@
 //! • All concurrency protection is via `Mutex` — do NOT add async constructs.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::storage::abstraction::{
+    OpenMode, OpenOptions, Storage, StorageError, StorageErrorKind, StorageFile, StoragePath,
+    SyncMode,
+};
 use crate::wal::encoding;
 use crate::wal::traits::WalWriter;
 use crate::wal::types::{WalOpKind, WalPos, WalRecord};
 
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::Path;
+use std::io::IoSlice;
 use std::sync::Mutex;
+
+fn map_storage_error(err: StorageError) -> MidgeError {
+    match err.kind {
+        StorageErrorKind::NotFound => MidgeError::NotFound,
+        StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
+        StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
+        StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
+        _ => MidgeError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            err.to_string(),
+        )),
+    }
+}
 
 /// Filesystem-backed WAL writer.
 ///
@@ -28,30 +43,34 @@ use std::sync::Mutex;
 /// or any other higher-level concerns. Those belong to the WAL actor.
 pub struct FsWalWriter {
     _file_path: String,
-    file: Mutex<File>,
+    file: Mutex<Box<dyn StorageFile>>,
     current_pos: Mutex<WalPos>,
 }
 
 impl FsWalWriter {
     /// Create a new filesystem-backed WAL writer targeting `wal.log`.
-    pub fn new(dir: &Path) -> MidgeResult<Self> {
-        // Ensure directory exists.
-        std::fs::create_dir_all(dir).map_err(MidgeError::Io)?;
+    pub fn new(storage: &dyn Storage, dir: &StoragePath) -> MidgeResult<Self> {
+        storage.create_dir_all(dir).map_err(map_storage_error)?;
 
-        let file_path = dir.join("wal.log");
+        let file_path = super::join(dir, "wal.log");
 
-        // Open or create active WAL file in append mode.
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)
-            .map_err(MidgeError::Io)?;
+        let file = storage
+            .open_file(
+                &file_path,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: false,
+                    append: true,
+                },
+            )
+            .map_err(map_storage_error)?;
 
-        // Determine current write position (file size).
-        let current_pos = file.metadata().map_err(MidgeError::Io)?.len();
+        let current_pos = file.len().map_err(map_storage_error)?;
 
         Ok(Self {
-            _file_path: file_path.to_string_lossy().into_owned(),
+            _file_path: file_path.to_string(),
             file: Mutex::new(file),
             current_pos: Mutex::new(current_pos),
         })
@@ -71,16 +90,22 @@ impl WalWriter for FsWalWriter {
 
         // Write atomically under file lock.
         let mut file = self.file.lock().expect("file mutex poisoned");
+        let (start, appended) = file
+            .appendv(&[IoSlice::new(&len_prefix), IoSlice::new(encoded.as_ref())])
+            .map_err(map_storage_error)?;
 
-        file.write_all(&len_prefix).map_err(MidgeError::Io)?;
-        file.write_all(&encoded).map_err(MidgeError::Io)?;
+        let expected = 4u64 + encoded.len() as u64;
+        if appended != expected {
+            return Err(MidgeError::Io(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                format!("partial WAL append: expected {expected} bytes, wrote {appended}"),
+            )));
+        }
 
         // Update write position.
         let mut pos = self.current_pos.lock().expect("position mutex poisoned");
-        let prev = *pos;
-        *pos += 4 + encoded.len() as u64;
-
-        Ok(prev)
+        *pos = start + appended;
+        Ok(start)
     }
 
     /// This method is intentionally unsupported because it hides sequence semantics.
@@ -103,14 +128,16 @@ impl WalWriter for FsWalWriter {
 
     /// Flush buffered writes to OS buffers.
     fn flush(&self) -> MidgeResult<()> {
-        let mut file = self.file.lock().expect("file mutex poisoned");
-        file.flush().map_err(MidgeError::Io)
+        // Unbuffered implementations have no meaningful flush.
+        // Durability is always controlled by `sync()`.
+        Ok(())
     }
 
     /// Flush + fsync() — ensures durability.
     fn sync(&self) -> MidgeResult<()> {
-        let file = self.file.lock().expect("file mutex poisoned");
-        file.sync_all().map_err(MidgeError::Io)
+        let mut file = self.file.lock().expect("file mutex poisoned");
+        file.sync(SyncMode::DataAndMetadata)
+            .map_err(map_storage_error)
     }
 
     fn sync_local(&self) -> MidgeResult<()> {
@@ -130,32 +157,52 @@ impl WalWriter for FsWalWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::abstraction::{OpenMode, OpenOptions};
+    use crate::storage::test_support::{build_temp_local_storage, TempLocalStorage};
     use bytes::Bytes;
-    use std::fs;
-    use std::io::Read;
     use std::sync::Mutex;
-    use tempfile::TempDir;
+
+    fn new_writer(temp: &TempLocalStorage) -> FsWalWriter {
+        FsWalWriter::new(temp.storage.as_ref(), &temp.root).unwrap()
+    }
+
+    fn open_wal_log_readonly(temp: &TempLocalStorage) -> Box<dyn StorageFile> {
+        let wal_log = super::join(&temp.root, "wal.log");
+        temp.storage
+            .open_file(
+                &wal_log,
+                OpenOptions {
+                    mode: OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                    append: false,
+                },
+            )
+            .unwrap()
+    }
 
     // =========== Creation and Position Tests ===========
 
     #[test]
     fn should_create_wal_writer_and_wal_log_file() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let temp = build_temp_local_storage().unwrap();
 
         // Act
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let writer = new_writer(&temp);
 
         // Assert
-        assert!(dir.path().join("wal.log").exists());
+        let entries = temp.storage.list_dir(&temp.root).unwrap();
+        assert!(entries.iter().any(|e| e.name == "wal.log" && !e.is_dir));
         assert_eq!(writer.current_pos(), 0);
     }
 
     #[test]
     fn should_track_write_position_after_records() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key1"),
@@ -182,8 +229,8 @@ mod tests {
     #[test]
     fn should_return_previous_position_on_append() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("test_key"),
@@ -208,8 +255,8 @@ mod tests {
     #[test]
     fn should_monotonically_increase_write_position() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record1 = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key1"),
@@ -251,8 +298,8 @@ mod tests {
     #[test]
     fn should_flush_without_error() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key"),
@@ -273,8 +320,8 @@ mod tests {
     #[test]
     fn should_sync_without_error() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key"),
@@ -295,8 +342,8 @@ mod tests {
     #[test]
     fn should_sync_local_without_error() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
 
         // Act & Assert
         assert!(writer.sync_local().is_ok());
@@ -307,8 +354,8 @@ mod tests {
     #[test]
     fn should_write_with_length_prefix_format() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("abc"),
@@ -326,10 +373,9 @@ mod tests {
         writer.sync().unwrap();
 
         // Assert - read back and verify format
-        let mut file = fs::File::open(dir.path().join("wal.log")).unwrap();
-        let mut buf = vec![0u8; 4];
-        file.read_exact(&mut buf).unwrap();
-        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        let file = open_wal_log_readonly(&temp);
+        let buf = file.read_at(0, 4).unwrap();
+        let len = u32::from_le_bytes(buf.as_slice().try_into().unwrap()) as usize;
         assert!(len > 0); // Length prefix should be non-zero for non-empty record
     }
 
@@ -338,8 +384,8 @@ mod tests {
     #[test]
     fn should_close_successfully() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
 
         // Act & Assert
         assert!(writer.close().is_ok());
@@ -350,8 +396,8 @@ mod tests {
     #[test]
     fn should_reject_append_op_without_sequence() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
 
         // Act & Assert
         let result = writer.append_op(WalOpKind::Put, b"key", Some(b"value"));
@@ -365,8 +411,8 @@ mod tests {
     #[test]
     fn should_reject_append_op_kind_delete() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
 
         // Act & Assert
         let result = writer.append_op(WalOpKind::Delete, b"key", None);
@@ -378,7 +424,7 @@ mod tests {
     #[test]
     fn should_append_to_existing_wal_log() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let temp = build_temp_local_storage().unwrap();
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key1"),
@@ -392,7 +438,7 @@ mod tests {
         };
 
         // Write first record
-        let writer1 = FsWalWriter::new(dir.path()).unwrap();
+    let writer1 = new_writer(&temp);
         let pos1 = writer1.append_record(&record).unwrap();
         writer1.sync().unwrap();
 
@@ -400,7 +446,7 @@ mod tests {
         drop(writer1);
 
         // Act - open new writer on same directory
-        let writer2 = FsWalWriter::new(dir.path()).unwrap();
+    let writer2 = new_writer(&temp);
         let expected_next_pos = pos1 + 4 + encoding::encode(&record).unwrap().len() as u64;
 
         // Assert - new writer continues from end
@@ -410,8 +456,8 @@ mod tests {
     #[test]
     fn should_handle_large_record() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let large_value = vec![42u8; 100_000]; // 100 KB value
         let record = WalRecord {
             op: WalOpKind::Put,
@@ -436,8 +482,8 @@ mod tests {
     #[test]
     fn should_handle_empty_value_in_delete_record() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Delete,
             key: Bytes::from("key_to_delete"),
@@ -461,8 +507,8 @@ mod tests {
     #[test]
     fn should_handle_different_column_families() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let cf_ids = vec![0, 1, 5, 100];
 
         // Act
@@ -488,8 +534,8 @@ mod tests {
     #[test]
     fn should_handle_high_sequence_numbers() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let high_seq = u64::MAX - 1;
         let record = WalRecord {
             op: WalOpKind::Put,
@@ -518,8 +564,8 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let dir = TempDir::new().unwrap();
-        let writer = Arc::new(FsWalWriter::new(dir.path()).unwrap());
+        let temp = build_temp_local_storage().unwrap();
+        let writer = Arc::new(new_writer(&temp));
         let mut handles = vec![];
 
         // Act - spawn multiple threads writing records
@@ -562,8 +608,8 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let dir = TempDir::new().unwrap();
-        let writer = Arc::new(FsWalWriter::new(dir.path()).unwrap());
+        let temp = build_temp_local_storage().unwrap();
+        let writer = Arc::new(new_writer(&temp));
         let positions = Arc::new(Mutex::new(Vec::new()));
 
         // Act - spawn threads and collect returned positions
@@ -607,8 +653,8 @@ mod tests {
     #[test]
     fn should_encode_and_decode_record_with_expiration() {
         // Arrange
-        let dir = TempDir::new().unwrap();
-        let writer = FsWalWriter::new(dir.path()).unwrap();
+        let temp = build_temp_local_storage().unwrap();
+        let writer = new_writer(&temp);
         let record = WalRecord {
             op: WalOpKind::Put,
             key: Bytes::from("key"),
@@ -627,12 +673,10 @@ mod tests {
         drop(writer);
 
         // Read back
-        let mut reader = fs::File::open(dir.path().join("wal.log")).unwrap();
-        let mut buf = vec![0u8; 4];
-        reader.read_exact(&mut buf).unwrap();
-        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        let mut rec_buf = vec![0u8; len];
-        reader.read_exact(&mut rec_buf).unwrap();
+        let file = open_wal_log_readonly(&temp);
+        let header = file.read_at(0, 4).unwrap();
+        let len = u32::from_le_bytes(header.as_slice().try_into().unwrap()) as usize;
+        let rec_buf = file.read_at(4, len as u64).unwrap();
 
         // Assert
         let decoded = encoding::decode(&rec_buf[..]).unwrap();
