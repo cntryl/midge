@@ -25,7 +25,7 @@ use crate::sst::traits::SstReader;
 use crate::sst::Memtable;
 
 #[derive(Debug, Clone)]
-enum CloudFirstWaiter {
+enum DurabilityWaiter {
     WalAppend {
         request_id: u64,
         sequence: u64,
@@ -67,11 +67,18 @@ pub struct EventLoop {
     // CloudFirst: track enqueue->ack per WAL segment.
     cloudfirst_inflight: HashMap<u64, CloudFirstInflightSegment>,
 
-    // CloudFirst: waiters grouped by WAL segment id.
-    cloudfirst_waiters: Option<KeyedGroupCommit<u64, CloudFirstWaiter>>,
+    // Durability group commit: waiters grouped by WAL segment/generation id.
+    // Used in both CloudFirst (keyed by segment id) and Batched (keyed by flush generation).
+    durability_waiters: Option<KeyedGroupCommit<u64, DurabilityWaiter>>,
 
     /// Per-request router (oneshot channels)
     router: Arc<ResponseRouter>,
+
+    /// One buffered message we pulled from the channel while draining writes.
+    ///
+    /// This preserves FIFO semantics when we opportunistically `try_recv()` to batch writes:
+    /// if we encounter a non-write message, we stash it here and handle it next.
+    pending_msg: Option<RuntimeMsg>,
 }
 
 impl EventLoop {
@@ -113,13 +120,10 @@ impl EventLoop {
             trace_enabled,
             last_cloud_flush: Instant::now(),
             cloudfirst_inflight: HashMap::new(),
-            cloudfirst_waiters: None,
+            durability_waiters: Some(KeyedGroupCommit::new(initial_segment_id)),
             router,
+            pending_msg: None,
         };
-
-        if event_loop.wal_actor.is_cloud_first() {
-            event_loop.cloudfirst_waiters = Some(KeyedGroupCommit::new(initial_segment_id));
-        }
 
         if let Some(storage) = config.hybrid_storage {
             event_loop.set_hybrid_storage(storage);
@@ -195,14 +199,14 @@ impl EventLoop {
                         }
 
                         let waiters = self
-                            .cloudfirst_waiters
+                            .durability_waiters
                             .as_ref()
                             .map(|w| w.complete(&seg_id))
                             .unwrap_or_default();
 
                         for w in waiters {
                             match w {
-                                CloudFirstWaiter::WalAppend {
+                                DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence,
                                 } => {
@@ -214,7 +218,7 @@ impl EventLoop {
                                         },
                                     );
                                 }
-                                CloudFirstWaiter::WriteBatch {
+                                DurabilityWaiter::WriteBatch {
                                     request_id,
                                     last_sequence,
                                     op_count,
@@ -242,11 +246,11 @@ impl EventLoop {
                 self.wal_actor
                     .handle_cloud_upload_failed(segment_id, &error);
 
-                if let Some(waiters) = self.cloudfirst_waiters.as_ref().map(|w| w.drain_all()) {
+                if let Some(waiters) = self.durability_waiters.as_ref().map(|w| w.drain_all()) {
                     for w in waiters {
                         let request_id = match w {
-                            CloudFirstWaiter::WalAppend { request_id, .. }
-                            | CloudFirstWaiter::WriteBatch { request_id, .. } => request_id,
+                            DurabilityWaiter::WalAppend { request_id, .. }
+                            | DurabilityWaiter::WriteBatch { request_id, .. } => request_id,
                         };
                         self.respond(
                             request_id,
@@ -331,7 +335,7 @@ impl EventLoop {
         }
 
         // Move waiters for the sealed segment into an inflight bucket keyed by `segment_id`.
-        if let Some(waiters) = &self.cloudfirst_waiters {
+        if let Some(waiters) = &self.durability_waiters {
             let _ = waiters.rotate_to(self.state.wal.current_segment_id);
         }
 
@@ -365,6 +369,286 @@ impl EventLoop {
         self.last_cloud_flush = Instant::now();
     }
 
+    /// Opportunistically drain pending *write* messages from the channel.
+    ///
+    /// This improves group commit by coalescing bursts of concurrent writers into a single WAL sync.
+    /// If a non-write message is encountered, it is stashed in `self.pending_msg` to preserve FIFO
+    /// semantics (since we cannot "un-recv" with crossbeam channels).
+    fn drain_pending_writes(&mut self, msg_rx: &Receiver<RuntimeMsg>, max: usize) -> usize {
+        if self.wal_actor.is_cloud_first() {
+            return 0;
+        }
+
+        let mut drained = 0usize;
+
+        while drained < max {
+            match msg_rx.try_recv() {
+                Ok(RuntimeMsg::WalAppend {
+                    request_id,
+                    cf_id,
+                    key,
+                    value,
+                    ttl_seconds,
+                    insert_only,
+                }) => {
+                    let result = self.wal_actor.append(
+                        &mut self.state,
+                        request_id,
+                        cf_id,
+                        bytes::Bytes::from(key),
+                        value.map(bytes::Bytes::from),
+                        insert_only,
+                        ttl_seconds,
+                    );
+
+                    match result {
+                        Ok((seq, deferred)) => {
+                            if !deferred {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WalAppended {
+                                        request_id,
+                                        sequence: seq,
+                                    },
+                                );
+                            } else if let Some(waiters) = &self.durability_waiters {
+                                waiters.join(DurabilityWaiter::WalAppend {
+                                    request_id,
+                                    sequence: seq,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            );
+                        }
+                    }
+
+                    drained += 1;
+                }
+
+                Ok(RuntimeMsg::WalMerge {
+                    request_id,
+                    cf_id,
+                    key,
+                    operand,
+                }) => {
+                    let result = self.wal_actor.append_merge(
+                        &mut self.state,
+                        cf_id,
+                        bytes::Bytes::from(key),
+                        bytes::Bytes::from(operand),
+                    );
+
+                    match result {
+                        Ok((seq, deferred)) => {
+                            if !deferred {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WalAppended {
+                                        request_id,
+                                        sequence: seq,
+                                    },
+                                );
+                            } else if let Some(waiters) = &self.durability_waiters {
+                                waiters.join(DurabilityWaiter::WalAppend {
+                                    request_id,
+                                    sequence: seq,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            );
+                        }
+                    }
+
+                    drained += 1;
+                }
+
+                Ok(RuntimeMsg::WriteBatch { request_id, ops }) => {
+                    match self
+                        .wal_actor
+                        .append_batch(&mut self.state, request_id, ops)
+                    {
+                        Ok((last_sequence, op_count, deferred)) => {
+                            if !deferred {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WriteBatchAppended {
+                                        request_id,
+                                        last_sequence,
+                                        op_count,
+                                    },
+                                );
+                            } else if let Some(waiters) = &self.durability_waiters {
+                                waiters.join(DurabilityWaiter::WriteBatch {
+                                    request_id,
+                                    last_sequence,
+                                    op_count,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            );
+                        }
+                    }
+
+                    drained += 1;
+                }
+
+                Ok(other) => {
+                    // Preserve FIFO ordering: stash the first non-write and stop draining.
+                    if self.pending_msg.is_none() {
+                        self.pending_msg = Some(other);
+                    }
+                    break;
+                }
+
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+
+        if drained > 0 && self.trace_enabled {
+            tracing::trace!(drained, "drained pending writes");
+        }
+
+        drained
+    }
+
+    /// Sync batched WAL if threshold exceeded or if there are pending writes.
+    /// In group commit mode, this completes all waiters for the sealed generation.
+    fn sync_batched_wal_if_needed(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+        if self.wal_actor.is_cloud_first() {
+            return; // CloudFirst has separate logic
+        }
+
+        // Sync if either byte threshold or pending write count warrants it
+        let should_sync =
+            self.wal_actor.should_sync_batch() || self.wal_actor.pending_sync_count() > 0;
+
+        if !should_sync {
+            return;
+        }
+
+        // Maximize group commit: pull any immediately-available writes into this same sync.
+        // Note: if we encounter a non-write message, it will be buffered in `self.pending_msg`.
+        const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
+        let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_BEFORE_SYNC);
+
+        match self.wal_actor.sync(&mut self.state) {
+            Ok(sealed_gen) => {
+                // Rotate group commit to new generation and complete old one
+                if let Some(waiters) = &self.durability_waiters {
+                    let _ = waiters.rotate_to(sealed_gen + 1);
+                    let completed = waiters.complete(&sealed_gen);
+                    for w in completed {
+                        match w {
+                            DurabilityWaiter::WalAppend {
+                                request_id,
+                                sequence,
+                            } => {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WalAppended {
+                                        request_id,
+                                        sequence,
+                                    },
+                                );
+                            }
+                            DurabilityWaiter::WriteBatch {
+                                request_id,
+                                last_sequence,
+                                op_count,
+                            } => {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WriteBatchAppended {
+                                        request_id,
+                                        last_sequence,
+                                        op_count,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to sync batched WAL");
+            }
+        }
+    }
+
+    /// Force WAL sync even if no pending writes (for DDL durability barriers).
+    /// Required before CF metadata mutations to guarantee durability fences.
+    fn force_wal_sync(&mut self) {
+        if self.wal_actor.is_cloud_first() {
+            return; // CloudFirst has separate logic
+        }
+
+        // Always sync to establish durability barrier, even if no pending writes
+        match self.wal_actor.sync(&mut self.state) {
+            Ok(sealed_gen) => {
+                // Rotate and complete any pending waiters
+                if let Some(waiters) = &self.durability_waiters {
+                    let _ = waiters.rotate_to(sealed_gen + 1);
+                    let completed = waiters.complete(&sealed_gen);
+                    for w in completed {
+                        match w {
+                            DurabilityWaiter::WalAppend {
+                                request_id,
+                                sequence,
+                            } => {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WalAppended {
+                                        request_id,
+                                        sequence,
+                                    },
+                                );
+                            }
+                            DurabilityWaiter::WriteBatch {
+                                request_id,
+                                last_sequence,
+                                op_count,
+                            } => {
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::WriteBatchAppended {
+                                        request_id,
+                                        last_sequence,
+                                        op_count,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to force WAL sync for durability barrier");
+            }
+        }
+    }
+
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
         self.eviction_actor = Some(EvictionActor::new(storage.clone()));
         self.hybrid_storage = Some(storage);
@@ -396,34 +680,41 @@ impl EventLoop {
             };
 
             // Prefer reacting to storage events immediately (no polling floor).
-            let storage_rx_opt = self.hybrid_storage_events.clone();
-            let msg = if let Some(storage_rx) = storage_rx_opt {
-                crossbeam::channel::select! {
-                    recv(msg_rx) -> msg => msg.ok(),
-                    recv(storage_rx) -> ev => {
-                        if let Ok(ev) = ev {
-                            self.handle_storage_event(ev);
-                        }
-                        // Continue the loop; we didn't consume a RuntimeMsg.
-                        continue;
-                    },
-                    default(timeout) => {
-                        self.maybe_flush_cloudfirst_wal();
-                        self.tick_hybrid_storage();
-                        // Drain any push-channel events that arrived between ticks.
-                        self.drain_hybrid_storage_events();
-                        continue;
-                    }
-                }
+            //
+            // If we previously pulled a non-write message while draining writes, handle it first to
+            // preserve FIFO semantics.
+            let msg = if let Some(pending) = self.pending_msg.take() {
+                Some(pending)
             } else {
-                match msg_rx.recv_timeout(timeout) {
-                    Ok(msg) => Some(msg),
-                    Err(RecvTimeoutError::Timeout) => {
-                        self.maybe_flush_cloudfirst_wal();
-                        self.tick_hybrid_storage();
-                        continue;
+                let storage_rx_opt = self.hybrid_storage_events.clone();
+                if let Some(storage_rx) = storage_rx_opt {
+                    crossbeam::channel::select! {
+                        recv(msg_rx) -> msg => msg.ok(),
+                        recv(storage_rx) -> ev => {
+                            if let Ok(ev) = ev {
+                                self.handle_storage_event(ev);
+                            }
+                            // Continue the loop; we didn't consume a RuntimeMsg.
+                            continue;
+                        },
+                        default(timeout) => {
+                            self.maybe_flush_cloudfirst_wal();
+                            self.tick_hybrid_storage();
+                            // Drain any push-channel events that arrived between ticks.
+                            self.drain_hybrid_storage_events();
+                            continue;
+                        }
                     }
-                    Err(RecvTimeoutError::Disconnected) => None,
+                } else {
+                    match msg_rx.recv_timeout(timeout) {
+                        Ok(msg) => Some(msg),
+                        Err(RecvTimeoutError::Timeout) => {
+                            self.maybe_flush_cloudfirst_wal();
+                            self.tick_hybrid_storage();
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => None,
+                    }
                 }
             };
 
@@ -507,8 +798,8 @@ impl EventLoop {
                                             op_count,
                                         },
                                     );
-                                } else if let Some(waiters) = &self.cloudfirst_waiters {
-                                    waiters.join(CloudFirstWaiter::WriteBatch {
+                                } else if let Some(waiters) = &self.durability_waiters {
+                                    waiters.join(DurabilityWaiter::WriteBatch {
                                         request_id,
                                         last_sequence,
                                         op_count,
@@ -525,6 +816,13 @@ impl EventLoop {
                                 );
                             }
                         }
+                    }
+                    // Auto-sync batched writes if needed (group commit completes all waiters).
+                    // Do this for local durability mode; CloudFirst uses rotate/upload logic.
+                    if !self.wal_actor.is_cloud_first() {
+                        const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
+                        let _ = self.drain_pending_writes(&msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
+                        self.sync_batched_wal_if_needed(&msg_rx);
                     }
 
                     self.maybe_flush_cloudfirst_wal();
@@ -661,8 +959,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.cloudfirst_waiters {
-                                waiters.join(CloudFirstWaiter::WalAppend {
+                            } else if let Some(waiters) = &self.durability_waiters {
+                                waiters.join(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -679,12 +977,8 @@ impl EventLoop {
                         }
                     }
 
-                    // Auto-sync if batched threshold exceeded
-                    if !self.wal_actor.is_cloud_first() && self.wal_actor.should_sync_batch() {
-                        if let Err(e) = self.wal_actor.sync(&mut self.state) {
-                            tracing::warn!(error = %e, "failed to auto-sync WAL batch");
-                        }
-                    }
+                    // Auto-sync batched writes if needed (group commit completes all waiters)
+                    self.sync_batched_wal_if_needed(&msg_rx);
 
                     self.maybe_flush_cloudfirst_wal();
                 }
@@ -712,8 +1006,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.cloudfirst_waiters {
-                                waiters.join(CloudFirstWaiter::WalAppend {
+                            } else if let Some(waiters) = &self.durability_waiters {
+                                waiters.join(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -730,12 +1024,8 @@ impl EventLoop {
                         }
                     }
 
-                    // Auto-sync if batched threshold exceeded
-                    if !self.wal_actor.is_cloud_first() && self.wal_actor.should_sync_batch() {
-                        if let Err(e) = self.wal_actor.sync(&mut self.state) {
-                            tracing::warn!(error = %e, "failed to auto-sync WAL batch");
-                        }
-                    }
+                    // Auto-sync batched writes if needed (group commit completes all waiters)
+                    self.sync_batched_wal_if_needed(&msg_rx);
 
                     self.maybe_flush_cloudfirst_wal();
                 }
@@ -892,6 +1182,9 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
+                    // DDL durability barrier: ensure WAL is durable before CF creation
+                    self.force_wal_sync();
+
                     let result = self
                         .manifest_actor
                         .create_column_family(&mut self.state, name.clone());
@@ -905,6 +1198,9 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
+                    // DDL durability barrier: ensure WAL is durable before CF drop
+                    self.force_wal_sync();
+
                     let result = self
                         .manifest_actor
                         .drop_column_family(&mut self.state, cf_id);

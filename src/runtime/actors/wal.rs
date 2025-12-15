@@ -93,6 +93,8 @@ pub struct WalActor {
     pending_cloud_writes: VecDeque<PendingCloudWrite>,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
+    /// Flush generation for batched/local durability group commit
+    flush_generation: u64,
 
     // === Optional instrumentation ===
     sync_calls: u64,
@@ -121,6 +123,7 @@ impl WalActor {
             durability_policy,
             pending_cloud_writes: VecDeque::new(),
             bytes_since_sync: 0,
+            flush_generation: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
         })
@@ -144,6 +147,14 @@ impl WalActor {
 
     pub fn bytes_since_sync(&self) -> usize {
         self.bytes_since_sync
+    }
+
+    pub fn pending_sync_count(&self) -> usize {
+        self.pending_sync_count
+    }
+
+    pub fn current_flush_generation(&self) -> u64 {
+        self.flush_generation
     }
 
     /// Append a record to the WAL
@@ -214,9 +225,10 @@ impl WalActor {
                 self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
             }
             DurabilityPolicy::Batched => {
-                // Apply to memtable immediately (no cloud wait)
+                // Apply to memtable immediately, but defer response until fsync completes.
+                // Caller joins the group commit waiter queue; sync completion notifies all.
                 self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
-                // Sync if batch thresholds exceeded (handled by caller/timer)
+                // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
                 // Fsync locally, apply to memtable, schedule cloud upload in background
@@ -244,7 +256,12 @@ impl WalActor {
 
         tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL append");
 
-        Ok((sequence, self.is_cloud_first()))
+        // Return deferred=true if using group commit (Batched or CloudFirst modes)
+        let deferred = matches!(
+            self.durability_policy,
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
+        );
+        Ok((sequence, deferred))
     }
 
     /// Append a batch of operations to the WAL as a single atomic unit.
@@ -448,7 +465,12 @@ impl WalActor {
 
         tracing::trace!(txn_id, last_sequence, op_count, "WAL batch append");
 
-        Ok((last_sequence, op_count, self.is_cloud_first()))
+        // Return deferred=true if using group commit (Batched or CloudFirst modes)
+        let deferred = matches!(
+            self.durability_policy,
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
+        );
+        Ok((last_sequence, op_count, deferred))
     }
 
     /// Append a merge operand to the WAL
@@ -495,9 +517,10 @@ impl WalActor {
                 self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
             }
             DurabilityPolicy::Batched => {
-                // Apply to memtable immediately (no cloud wait)
+                // Apply to memtable immediately, but defer response until fsync completes.
+                // Caller joins the group commit waiter queue; sync completion notifies all.
                 self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
-                // Sync if batch thresholds exceeded (handled by caller/timer)
+                // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
                 // Fsync locally, apply to memtable, schedule cloud upload in background
@@ -519,7 +542,12 @@ impl WalActor {
 
         tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL merge append");
 
-        Ok((sequence, self.is_cloud_first()))
+        // Return deferred=true if using group commit (Batched or CloudFirst modes)
+        let deferred = matches!(
+            self.durability_policy,
+            DurabilityPolicy::Batched | DurabilityPolicy::CloudFirst
+        );
+        Ok((sequence, deferred))
     }
 
     /// Checks current in-memory view (active + immutable memtables) for existence
@@ -660,20 +688,28 @@ impl WalActor {
         Ok(())
     }
 
-    /// Sync WAL to disk (public interface)
-    pub fn sync(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+    /// Sync WAL to disk (public interface).
+    /// 
+    /// Returns the sealed flush generation. In group commit modes (Batched/CloudFirst),
+    /// all pending writes at sync time are grouped under this generation.
+    pub fn sync(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {
         let pending = state.wal.pending_writes;
+        let sealed_generation = self.flush_generation;
 
         self.sync_internal(state)?;
+
+        // Advance to next generation for next batch
+        self.flush_generation += 1;
 
         tracing::debug!(
             pending_writes = pending,
             synced_seq = state.wal.last_synced_seq,
             local_durable = state.wal.local_durable_seq,
+            sealed_generation,
             "WAL sync"
         );
 
-        Ok(())
+        Ok(sealed_generation)
     }
 
     /// Flush WAL buffers without fsync.
