@@ -54,12 +54,14 @@ mod test_support_impl {
     ///
     /// This lives under `storage/` so other layers (e.g. WAL) can test against
     /// a real backend without directly touching filesystem paths.
+    #[allow(dead_code)]
     pub(crate) struct TempLocalStorage {
         _tempdir: tempfile::TempDir,
         pub storage: Arc<dyn Storage>,
         pub root: StoragePath,
     }
 
+    #[allow(dead_code)]
     pub(crate) fn build_temp_local_storage(
     ) -> crate::storage::abstraction::StorageResult<TempLocalStorage> {
         let tempdir = tempfile::TempDir::new().map_err(|e| {
