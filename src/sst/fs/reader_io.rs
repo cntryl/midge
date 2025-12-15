@@ -63,7 +63,7 @@ impl SstFileIo {
         let fs = Arc::new(crate::io::RealFs::new(parent)?);
         let path_str = path
             .to_str()
-            .unwrap_or_else(|| "")
+            .unwrap_or("")
             .to_string();
         Self::open(&path_str, fs)
     }

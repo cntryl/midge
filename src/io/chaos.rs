@@ -46,32 +46,32 @@ impl ChaosFs {
 
     fn should_fail_open(&self) -> bool {
         self.fail_every != 0
-            && self.counters.open.fetch_add(1, Ordering::Relaxed) % self.fail_every == 0
+            && self.counters.open.fetch_add(1, Ordering::Relaxed).is_multiple_of(self.fail_every)
     }
 
     fn should_fail_read(&self) -> bool {
         self.fail_every != 0
-            && self.counters.read.fetch_add(1, Ordering::Relaxed) % self.fail_every == 0
+            && self.counters.read.fetch_add(1, Ordering::Relaxed).is_multiple_of(self.fail_every)
     }
 
     fn should_fail_write(&self) -> bool {
         self.fail_every != 0
-            && self.counters.write.fetch_add(1, Ordering::Relaxed) % self.fail_every == 0
+            && self.counters.write.fetch_add(1, Ordering::Relaxed).is_multiple_of(self.fail_every)
     }
 
     fn should_fail_delete(&self) -> bool {
         self.fail_every != 0
-            && self.counters.delete.fetch_add(1, Ordering::Relaxed) % self.fail_every == 0
+            && self.counters.delete.fetch_add(1, Ordering::Relaxed).is_multiple_of(self.fail_every)
     }
 
     fn should_fail_list(&self) -> bool {
         self.fail_every != 0
-            && self.counters.list.fetch_add(1, Ordering::Relaxed) % self.fail_every == 0
+            && self.counters.list.fetch_add(1, Ordering::Relaxed).is_multiple_of(self.fail_every)
     }
 
     fn should_fail_rename(&self) -> bool {
         self.fail_every != 0
-            && self.counters.rename.fetch_add(1, Ordering::Relaxed) % self.fail_every == 0
+            && self.counters.rename.fetch_add(1, Ordering::Relaxed).is_multiple_of(self.fail_every)
     }
 
     /// Reset all failure counters

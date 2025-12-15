@@ -229,6 +229,21 @@ pub trait Fs: Send + Sync + 'static {
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()>;
 }
 
+impl From<FsError> for crate::common::MidgeError {
+    fn from(err: FsError) -> Self {
+        match err {
+            FsError::NotFound(_msg) => crate::common::MidgeError::NotFound,
+            FsError::AlreadyExists(msg) => crate::common::MidgeError::InvalidArgument(msg),
+            FsError::Corruption(msg) => crate::common::MidgeError::Corruption(msg),
+            FsError::Io(msg) => crate::common::MidgeError::Io(
+                std::io::Error::other(msg)
+            ),
+            FsError::Unavailable(msg) => crate::common::MidgeError::Internal(msg),
+            FsError::Unsupported(msg) => crate::common::MidgeError::NotSupported(msg),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,22 +289,5 @@ mod tests {
         let combined = FileCaps(caps.0 | FileCaps::WRITEV_AT.0);
         assert!(combined.contains(FileCaps::READV_AT));
         assert!(combined.contains(FileCaps::WRITEV_AT));
-    }
-}
-
-/// Conversion from io::FsError to MidgeError
-/// Allows using ? operator with FsResult in functions that return MidgeResult
-impl From<FsError> for crate::common::MidgeError {
-    fn from(err: FsError) -> Self {
-        match err {
-            FsError::NotFound(_msg) => crate::common::MidgeError::NotFound,
-            FsError::AlreadyExists(msg) => crate::common::MidgeError::InvalidArgument(msg),
-            FsError::Corruption(msg) => crate::common::MidgeError::Corruption(msg),
-            FsError::Io(msg) => crate::common::MidgeError::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, msg)
-            ),
-            FsError::Unavailable(msg) => crate::common::MidgeError::Internal(msg),
-            FsError::Unsupported(msg) => crate::common::MidgeError::NotSupported(msg),
-        }
     }
 }

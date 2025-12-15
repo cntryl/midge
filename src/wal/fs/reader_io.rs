@@ -105,14 +105,9 @@ impl WalReader for FsWalReaderIo {
         F: FnMut(&WalRecord) -> MidgeResult<()>,
     {
         let mut pos = start;
-        loop {
-            match <Self as WalReader>::read_at(self, pos)? {
-                Some(record) => {
-                    cb(&record)?;
-                    pos = self.current_pos;
-                }
-                None => break,
-            }
+        while let Some(record) = <Self as WalReader>::read_at(self, pos)? {
+            cb(&record)?;
+            pos = self.current_pos;
         }
         Ok(())
     }
@@ -135,14 +130,9 @@ impl WalReaderDyn for FsWalReaderIo {
         cb: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
     ) -> MidgeResult<()> {
         let mut pos = start;
-        loop {
-            match WalReader::read_at(self, pos)? {
-                Some(record) => {
-                    cb(&record)?;
-                    pos = self.current_pos;
-                }
-                None => break,
-            }
+        while let Some(record) = WalReader::read_at(self, pos)? {
+            cb(&record)?;
+            pos = self.current_pos;
         }
         Ok(())
     }

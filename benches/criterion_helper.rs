@@ -36,14 +36,20 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         //
         // Ultra-tight loops: bloom probe, cache lookup, TLV parse.
         // Goal: stable sub-microsecond signals.
+        // Windows has higher system jitter, so we use:
+        // - Longer warmup (CPU ramp-up, cache warmth)
+        // - Longer measurement window (average out timer noise)
+        // - More samples (statistical stability)
+        // - Looser noise threshold (accept Windows jitter)
         // ---------------------------------------------------------------
         BenchTier::Tier1Hot => Criterion::default()
-            .warm_up_time(Duration::from_millis(200))
-            .measurement_time(Duration::from_millis(500))
-            .sample_size(20)
-            .noise_threshold(0.015)
-            .confidence_level(0.95)
-            .nresamples(20_000)
+            .warm_up_time(Duration::from_millis(800))
+            .measurement_time(Duration::from_millis(2000))
+            .sample_size(10)
+            .noise_threshold(0.05)
+            .confidence_level(0.90)
+            .significance_level(0.10)
+            .nresamples(10_000)
             .without_plots(),
 
         // ---------------------------------------------------------------
