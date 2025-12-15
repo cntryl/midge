@@ -540,9 +540,19 @@ impl EventLoop {
             return; // CloudFirst has separate logic
         }
 
-        // Sync if either byte threshold or pending write count warrants it
-        let should_sync =
-            self.wal_actor.should_sync_batch() || self.wal_actor.pending_sync_count() > 0;
+        // Sync if any of these conditions are true:
+        // 1. Byte threshold exceeded
+        // 2. Pending write count threshold exceeded
+        // 3. Any durable waiters are pending (important for small workloads!)
+        let has_pending_waiters = self
+            .durability_waiters
+            .as_ref()
+            .map(|w| w.pending_len() > 0)
+            .unwrap_or(false);
+
+        let should_sync = self.wal_actor.should_sync_batch()
+            || self.wal_actor.pending_sync_count() > 0
+            || has_pending_waiters;
 
         if !should_sync {
             return;
@@ -597,11 +607,46 @@ impl EventLoop {
         }
     }
 
-    /// Force WAL sync even if no pending writes (for DDL durability barriers).
-    /// Required before CF metadata mutations to guarantee durability fences.
-    fn force_wal_sync(&mut self) {
+    /// Sync WAL if any durable waiters exist (safety valve for forward-progress).
+    /// This ensures that operations observing durability (reads, ranges, deletes)
+    /// always see a stable state with durability guarantees.
+    /// Without this, tests with patterns like "write → read/range/delete" hang forever.
+    fn sync_if_waiters_exist(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         if self.wal_actor.is_cloud_first() {
             return; // CloudFirst has separate logic
+        }
+
+        let has_waiters = self
+            .durability_waiters
+            .as_ref()
+            .map(|w| w.pending_len() > 0)
+            .unwrap_or(false);
+
+        if has_waiters {
+            self.force_wal_sync(msg_rx);
+        }
+    }
+
+    /// Force WAL sync even if no pending writes (for DDL durability barriers).
+    /// Required before CF metadata mutations to guarantee durability fences.
+    /// CRITICAL: Must drain pending writes first so they are included in the sync.
+    fn force_wal_sync(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+        if self.wal_actor.is_cloud_first() {
+            return; // CloudFirst has separate logic
+        }
+
+        // 🔑 Drain any pending writes so they are included in this sync
+        const MAX_DRAIN: usize = 4096;
+        let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
+
+        // Early return if no durable waiters are pending
+        if self
+            .durability_waiters
+            .as_ref()
+            .map(|w| w.pending_len() == 0)
+            .unwrap_or(true)
+        {
+            return;
         }
 
         // Always sync to establish durability barrier, even if no pending writes
@@ -1183,7 +1228,7 @@ impl EventLoop {
 
                 RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
                     // DDL durability barrier: ensure WAL is durable before CF creation
-                    self.force_wal_sync();
+                    self.force_wal_sync(&msg_rx);
 
                     let result = self
                         .manifest_actor
@@ -1199,7 +1244,7 @@ impl EventLoop {
 
                 RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
                     // DDL durability barrier: ensure WAL is durable before CF drop
-                    self.force_wal_sync();
+                    self.force_wal_sync(&msg_rx);
 
                     let result = self
                         .manifest_actor
@@ -1220,6 +1265,10 @@ impl EventLoop {
                     key,
                     sequence,
                 } => {
+                    // 🔑 Establish durability fence: if durability waiters exist, sync before reading
+                    // This ensures "write → await durable → read" patterns work correctly
+                    self.sync_if_waiters_exist(&msg_rx);
+
                     let value = self.handle_read(cf_id, &key, sequence);
                     self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
                 }
@@ -1231,6 +1280,10 @@ impl EventLoop {
                     end,
                     sequence,
                 } => {
+                    // 🔑 Establish durability fence: if durability waiters exist, sync before scanning
+                    // This ensures "write → await durable → range_scan" patterns work correctly
+                    self.sync_if_waiters_exist(&msg_rx);
+
                     let results = self.handle_range_scan(cf_id, &start, &end, sequence);
                     self.respond(
                         request_id,
