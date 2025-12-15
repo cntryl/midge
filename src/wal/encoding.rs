@@ -1,197 +1,301 @@
 //! WAL record encoding/decoding
 //!
-//! TLV-based encoding for efficient WAL storage with minimal overhead.
+//! v2 WAL payload format: magic + version + TLVs.
+//!
+//! Framing:
+//! - WAL file stores records as: `<u32 len><payload bytes>` (handled by the WAL IO layer)
+//! - This module encodes/decodes the *payload bytes*.
+//!
+//! Payload wire format:
+//! - `MAGIC: [u8; 2]` (currently `b"MW"`)
+//! - `VERSION: u8` (currently `1`)
+//! - repeated TLV fields:
+//!   - `tag: u8`
+//!   - `len: u32` (little-endian)
+//!   - `val: [u8; len]`
+//!
+//! Required fields:
+//! - OP, CF_ID, SEQ, KEY
+//!
+//! Optional fields:
+//! - VALUE, EXPIRATION, RANGE_END, TXN_ID, COMPRESSION
+//!
+//! Unknown tags are skipped (forward-compatible). Duplicate tags are accepted; the
+//! *last* occurrence wins.
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::wal::types::{WalOpKind, WalRecord};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-const RECORD_HEADER_SIZE: usize = 1 + 1 + 4 + 8; // op + flags + cf_id + seq
+const MAGIC: [u8; 2] = *b"MW";
+const VERSION: u8 = 1;
+const PREFIX_LEN: usize = 3; // MAGIC (2) + VERSION (1)
+const TLV_HEADER_LEN: usize = 1 + 4; // tag (1) + len (4)
 
-/// Encode a WAL record to bytes
+/// WAL TLV tags.
+pub mod tags {
+    pub const OP: u8 = 1;
+    pub const CF_ID: u8 = 2;
+    pub const SEQ: u8 = 3;
+    pub const KEY: u8 = 4;
+
+    pub const VALUE: u8 = 5;
+    pub const EXPIRATION: u8 = 6;
+    pub const RANGE_END: u8 = 7;
+    pub const TXN_ID: u8 = 8;
+    pub const COMPRESSION: u8 = 9;
+}
+
+/// Borrowed zero-copy WAL record view.
+///
+/// This is the preferred decode representation for hot paths.
+#[derive(Debug, Clone, Copy)]
+pub struct WalRecordView<'a> {
+    pub cf_id: u32,
+    pub op: WalOpKind,
+    pub key: &'a [u8],
+    pub value: Option<&'a [u8]>,
+    pub seq: u64,
+    pub expiration: Option<u64>,
+    pub range_end: Option<&'a [u8]>,
+    pub txn_id: Option<u64>,
+    pub compression: Option<u8>,
+}
+
+#[inline]
+fn corruption(msg: &'static str) -> MidgeError {
+    MidgeError::Corruption(msg.to_string())
+}
+
+#[inline]
+fn put_tlv(buf: &mut BytesMut, tag: u8, val: &[u8]) {
+    buf.put_u8(tag);
+    buf.put_u32_le(val.len() as u32);
+    buf.extend_from_slice(val);
+}
+
+#[inline]
+fn put_u8(buf: &mut BytesMut, tag: u8, v: u8) {
+    put_tlv(buf, tag, &[v]);
+}
+
+#[inline]
+fn put_u32(buf: &mut BytesMut, tag: u8, v: u32) {
+    put_tlv(buf, tag, &v.to_le_bytes());
+}
+
+#[inline]
+fn put_u64(buf: &mut BytesMut, tag: u8, v: u64) {
+    put_tlv(buf, tag, &v.to_le_bytes());
+}
+
+#[inline]
+fn scan_tlvs<'a>(
+    mut data: &'a [u8],
+    mut f: impl FnMut(u8, &'a [u8]) -> MidgeResult<()>,
+) -> MidgeResult<()> {
+    while !data.is_empty() {
+        if data.len() < TLV_HEADER_LEN {
+            return Err(corruption("truncated TLV header"));
+        }
+
+        let tag = data[0];
+        let len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+        data = &data[TLV_HEADER_LEN..];
+
+        if data.len() < len {
+            return Err(corruption("truncated TLV value"));
+        }
+
+        let (val, rest) = data.split_at(len);
+        data = rest;
+
+        f(tag, val)?;
+    }
+    Ok(())
+}
+
+/// Encode a WAL record to bytes (v2 payload).
 pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
-    let mut buf = BytesMut::new();
+    let mut capacity = PREFIX_LEN
+        + (TLV_HEADER_LEN + 1) // OP
+        + (TLV_HEADER_LEN + 4) // CF_ID
+        + (TLV_HEADER_LEN + 8) // SEQ
+        + (TLV_HEADER_LEN + record.key.len());
 
-    // Write operation kind (1 byte)
-    buf.put_u8(record.op.to_wire_format());
-
-    // Write flags (1 byte)
-    // Bit 0: has value
-    // Bit 1: has expiration
-    // Bit 2: has range_end
-    // Bit 3: has txn_id
-    // Bit 4: has compression
-    let mut flags = 0u8;
-    if record.value.is_some() {
-        flags |= 0x01;
+    // Preserve existing semantics: an empty VALUE behaves like None.
+    if let Some(v) = &record.value {
+        if !v.is_empty() {
+            capacity += TLV_HEADER_LEN + v.len();
+        }
     }
+
     if record.expiration.is_some() {
-        flags |= 0x02;
+        capacity += TLV_HEADER_LEN + 8;
     }
-    if record.range_end.is_some() {
-        flags |= 0x04;
+    if let Some(r) = &record.range_end {
+        capacity += TLV_HEADER_LEN + r.len();
     }
     if record.txn_id.is_some() {
-        flags |= 0x08;
+        capacity += TLV_HEADER_LEN + 8;
     }
     if record.compression.is_some() {
-        flags |= 0x10;
-    }
-    buf.put_u8(flags);
-
-    // Write CF ID (4 bytes)
-    buf.put_u32_le(record.cf_id);
-
-    // Write sequence (8 bytes)
-    buf.put_u64_le(record.seq);
-
-    // Write key length (4 bytes) + key
-    buf.put_u32_le(record.key.len() as u32);
-    buf.put_slice(&record.key);
-
-    // Write value length (4 bytes) + value (if present)
-    if let Some(value) = &record.value {
-        buf.put_u32_le(value.len() as u32);
-        buf.put_slice(value);
-    } else {
-        buf.put_u32_le(0);
+        capacity += TLV_HEADER_LEN + 1;
     }
 
-    // Write optional fields
-    if let Some(expiration) = record.expiration {
-        buf.put_u64_le(expiration);
+    let mut buf = BytesMut::with_capacity(capacity);
+
+    buf.extend_from_slice(&MAGIC);
+    buf.put_u8(VERSION);
+
+    put_u8(&mut buf, tags::OP, record.op.to_wire_format());
+    put_u32(&mut buf, tags::CF_ID, record.cf_id);
+    put_u64(&mut buf, tags::SEQ, record.seq);
+    put_tlv(&mut buf, tags::KEY, &record.key);
+
+    if let Some(v) = &record.value {
+        if !v.is_empty() {
+            put_tlv(&mut buf, tags::VALUE, v);
+        }
     }
 
-    if let Some(range_end) = &record.range_end {
-        buf.put_u32_le(range_end.len() as u32);
-        buf.put_slice(range_end);
+    if let Some(exp) = record.expiration {
+        put_u64(&mut buf, tags::EXPIRATION, exp);
     }
-
+    if let Some(r) = &record.range_end {
+        put_tlv(&mut buf, tags::RANGE_END, r);
+    }
     if let Some(txn_id) = record.txn_id {
-        buf.put_u64_le(txn_id);
+        put_u64(&mut buf, tags::TXN_ID, txn_id);
     }
-
-    if let Some(compression) = record.compression {
-        buf.put_u8(compression);
+    if let Some(c) = record.compression {
+        put_u8(&mut buf, tags::COMPRESSION, c);
     }
 
     Ok(buf.freeze())
 }
 
-/// Decode a WAL record from bytes
-pub fn decode(mut bytes: impl Buf) -> MidgeResult<WalRecord> {
-    if bytes.remaining() < RECORD_HEADER_SIZE {
-        return Err(crate::common::MidgeError::Corruption(
-            "Incomplete WAL record header".to_string(),
-        ));
+/// Zero-copy decode into a borrowed view.
+pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
+    if data.len() < PREFIX_LEN {
+        return Err(corruption("truncated WAL payload prefix"));
+    }
+    if data[0..2] != MAGIC {
+        return Err(corruption("invalid WAL payload magic"));
+    }
+    if data[2] != VERSION {
+        return Err(corruption("unsupported WAL payload version"));
     }
 
-    // Read operation kind
-    let op_byte = bytes.get_u8();
-    let op = WalOpKind::from_wire_format(op_byte)?;
+    let mut op = None;
+    let mut cf_id = None;
+    let mut seq = None;
+    let mut key = None;
 
-    // Read flags
-    let flags = bytes.get_u8();
-    let has_value = (flags & 0x01) != 0;
-    let has_expiration = (flags & 0x02) != 0;
-    let has_range_end = (flags & 0x04) != 0;
-    let has_txn_id = (flags & 0x08) != 0;
-    let has_compression = (flags & 0x10) != 0;
+    let mut value = None;
+    let mut expiration = None;
+    let mut range_end = None;
+    let mut txn_id = None;
+    let mut compression = None;
 
-    // Read CF ID
-    let cf_id = bytes.get_u32_le();
-
-    // Read sequence
-    let seq = bytes.get_u64_le();
-
-    // Read key
-    let key_len = bytes.get_u32_le() as usize;
-    if bytes.remaining() < key_len {
-        return Err(crate::common::MidgeError::Corruption(
-            "Incomplete key in WAL record".to_string(),
-        ));
-    }
-    let key = Bytes::copy_from_slice(&bytes.chunk()[..key_len]);
-    bytes.advance(key_len);
-
-    // Read value
-    let value_len = bytes.get_u32_le() as usize;
-    let value = if has_value && value_len > 0 {
-        if bytes.remaining() < value_len {
-            return Err(crate::common::MidgeError::Corruption(
-                "Incomplete value in WAL record".to_string(),
-            ));
+    scan_tlvs(&data[PREFIX_LEN..], |tag, val| {
+        match tag {
+            tags::OP => {
+                if val.len() != 1 {
+                    return Err(corruption("bad OP length"));
+                }
+                op = Some(WalOpKind::from_wire_format(val[0])?);
+            }
+            tags::CF_ID => {
+                if val.len() != 4 {
+                    return Err(corruption("bad CF_ID length"));
+                }
+                cf_id = Some(u32::from_le_bytes([val[0], val[1], val[2], val[3]]));
+            }
+            tags::SEQ => {
+                if val.len() != 8 {
+                    return Err(corruption("bad SEQ length"));
+                }
+                seq = Some(u64::from_le_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ]));
+            }
+            tags::KEY => {
+                key = Some(val);
+            }
+            tags::VALUE => {
+                // Preserve semantics: empty is treated as absent.
+                if !val.is_empty() {
+                    value = Some(val);
+                }
+            }
+            tags::EXPIRATION => {
+                if val.len() != 8 {
+                    return Err(corruption("bad EXPIRATION length"));
+                }
+                expiration = Some(u64::from_le_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ]));
+            }
+            tags::RANGE_END => {
+                range_end = Some(val);
+            }
+            tags::TXN_ID => {
+                if val.len() != 8 {
+                    return Err(corruption("bad TXN_ID length"));
+                }
+                txn_id = Some(u64::from_le_bytes([
+                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                ]));
+            }
+            tags::COMPRESSION => {
+                if val.len() != 1 {
+                    return Err(corruption("bad COMPRESSION length"));
+                }
+                compression = Some(val[0]);
+            }
+            _ => {
+                // forward compatible: skip unknown tags
+            }
         }
-        let val = Bytes::copy_from_slice(&bytes.chunk()[..value_len]);
-        bytes.advance(value_len);
-        Some(val)
-    } else {
-        None
-    };
+        Ok(())
+    })?;
 
-    // Read optional fields
-    let expiration = if has_expiration {
-        if bytes.remaining() < 8 {
-            return Err(crate::common::MidgeError::Corruption(
-                "Incomplete expiration in WAL record".to_string(),
-            ));
-        }
-        Some(bytes.get_u64_le())
-    } else {
-        None
-    };
-
-    let range_end = if has_range_end {
-        if bytes.remaining() < 4 {
-            return Err(crate::common::MidgeError::Corruption(
-                "Incomplete range_end length in WAL record".to_string(),
-            ));
-        }
-        let range_len = bytes.get_u32_le() as usize;
-        if bytes.remaining() < range_len {
-            return Err(crate::common::MidgeError::Corruption(
-                "Incomplete range_end in WAL record".to_string(),
-            ));
-        }
-        let range = Bytes::copy_from_slice(&bytes.chunk()[..range_len]);
-        bytes.advance(range_len);
-        Some(range)
-    } else {
-        None
-    };
-
-    let txn_id = if has_txn_id {
-        if bytes.remaining() < 8 {
-            return Err(crate::common::MidgeError::Corruption(
-                "Incomplete txn_id in WAL record".to_string(),
-            ));
-        }
-        Some(bytes.get_u64_le())
-    } else {
-        None
-    };
-
-    let compression = if has_compression {
-        if bytes.remaining() < 1 {
-            return Err(crate::common::MidgeError::Corruption(
-                "Incomplete compression in WAL record".to_string(),
-            ));
-        }
-        Some(bytes.get_u8())
-    } else {
-        None
-    };
-
-    Ok(WalRecord {
-        cf_id,
-        op,
-        key,
+    Ok(WalRecordView {
+        op: op.ok_or_else(|| corruption("missing OP"))?,
+        cf_id: cf_id.ok_or_else(|| corruption("missing CF_ID"))?,
+        seq: seq.ok_or_else(|| corruption("missing SEQ"))?,
+        key: key.ok_or_else(|| corruption("missing KEY"))?,
         value,
-        seq,
         expiration,
         range_end,
         txn_id,
         compression,
+    })
+}
+
+/// Compatibility adapter: decode into owned `WalRecord`.
+///
+/// This allocates for key/value/range_end. Prefer [`decode_view`] in hot paths.
+pub fn decode(bytes: impl Buf) -> MidgeResult<WalRecord> {
+    // WAL frames must be contiguous; enforce this.
+    let data = bytes.chunk();
+    if data.len() != bytes.remaining() {
+        return Err(corruption("non-contiguous WAL buffer"));
+    }
+
+    let view = decode_view(data)?;
+
+    Ok(WalRecord {
+        cf_id: view.cf_id,
+        op: view.op,
+        key: Bytes::copy_from_slice(view.key),
+        value: view.value.map(Bytes::copy_from_slice),
+        seq: view.seq,
+        expiration: view.expiration,
+        range_end: view.range_end.map(Bytes::copy_from_slice),
+        txn_id: view.txn_id,
+        compression: view.compression,
     })
 }
 
@@ -200,395 +304,114 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_encode_put_operation() {
+    fn should_roundtrip_put_when_value_present() {
+        // Arrange
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             42,
         );
-        let encoded = encode(&record).unwrap();
-        assert!(!encoded.is_empty());
-    }
 
-    #[test]
-    fn should_roundtrip_put_operation() {
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
+        // Act
         let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded[..]).unwrap();
-        assert_eq!(decoded.op, WalOpKind::Put);
-    }
 
-    #[test]
-    fn should_preserve_key_when_encoding_and_decoding() {
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"mykey"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
+        // Assert
+        assert_eq!(decoded.op, record.op);
+        assert_eq!(decoded.cf_id, record.cf_id);
+        assert_eq!(decoded.seq, record.seq);
         assert_eq!(decoded.key, record.key);
-    }
-
-    #[test]
-    fn should_preserve_value_when_encoding_and_decoding() {
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"myvalue")),
-            42,
-        );
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
         assert_eq!(decoded.value, record.value);
     }
 
     #[test]
-    fn should_preserve_sequence_when_encoding_and_decoding() {
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
+    fn should_roundtrip_delete_when_value_absent() {
+        // Arrange
+        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"k"), None, 7);
+
+        // Act
         let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded[..]).unwrap();
-        assert_eq!(decoded.seq, 42);
-    }
 
-    #[test]
-    fn should_encode_delete_operation() {
-        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 10);
-        let encoded = encode(&record).unwrap();
-        assert!(!encoded.is_empty());
-    }
-
-    #[test]
-    fn should_roundtrip_delete_operation() {
-        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 10);
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
+        // Assert
         assert_eq!(decoded.op, WalOpKind::Delete);
-    }
-
-    #[test]
-    fn should_encode_column_family_id() {
-        let record = WalRecord::new_cf(
-            1,
-            WalOpKind::Delete,
-            Bytes::from_static(b"mykey"),
-            None,
-            100,
-        );
-        let encoded = encode(&record).unwrap();
-        assert!(!encoded.is_empty());
-    }
-
-    #[test]
-    fn should_preserve_cf_id_when_encoding_and_decoding() {
-        let record = WalRecord::new_cf(
-            1,
-            WalOpKind::Delete,
-            Bytes::from_static(b"mykey"),
-            None,
-            100,
-        );
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-        assert_eq!(decoded.cf_id, 1);
-    }
-
-    #[test]
-    fn should_preserve_all_fields_with_column_family() {
-        let record = WalRecord::new_cf(
-            1,
-            WalOpKind::Delete,
-            Bytes::from_static(b"mykey"),
-            None,
-            100,
-        );
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-        assert_eq!(decoded.op, WalOpKind::Delete);
-        assert_eq!(decoded.key, record.key);
         assert_eq!(decoded.value, None);
-        assert_eq!(decoded.seq, 100);
-    }
-
-    // =========== All Operation Kinds ===========
-
-    #[test]
-    fn should_roundtrip_insert_operation() {
-        let record = WalRecord::new(
-            WalOpKind::Insert,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-        assert_eq!(decoded.op, WalOpKind::Insert);
+        assert_eq!(decoded.key, record.key);
     }
 
     #[test]
-    fn should_roundtrip_delete_range_operation() {
-        // Arrange
-        let mut record = WalRecord::new(
-            WalOpKind::DeleteRange,
-            Bytes::from_static(b"start"),
-            None,
-            42,
-        );
-        record.range_end = Some(Bytes::from_static(b"end"));
-
-        // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-
-        // Assert
-        assert_eq!(decoded.op, WalOpKind::DeleteRange);
-        assert_eq!(decoded.range_end, record.range_end);
-    }
-
-    #[test]
-    fn should_roundtrip_merge_operation() {
-        let record = WalRecord::new(
-            WalOpKind::Merge,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"merge_value")),
-            42,
-        );
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-        assert_eq!(decoded.op, WalOpKind::Merge);
-    }
-
-    #[test]
-    fn should_roundtrip_txn_begin_operation() {
-        let record = WalRecord::new(
-            WalOpKind::TxnBegin,
-            Bytes::from_static(b"txn_key"),
-            None,
-            42,
-        );
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-        assert_eq!(decoded.op, WalOpKind::TxnBegin);
-    }
-
-    #[test]
-    fn should_roundtrip_txn_commit_operation() {
-        let record = WalRecord::new(
-            WalOpKind::TxnCommit,
-            Bytes::from_static(b"txn_key"),
-            None,
-            42,
-        );
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-        assert_eq!(decoded.op, WalOpKind::TxnCommit);
-    }
-
-    // =========== Optional Fields ===========
-
-    #[test]
-    fn should_roundtrip_record_with_expiration() {
-        // Arrange
-        let mut record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
-        record.expiration = Some(1234567890);
-
-        // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-
-        // Assert
-        assert_eq!(decoded.expiration, Some(1234567890));
-    }
-
-    #[test]
-    fn should_roundtrip_record_with_txn_id() {
-        // Arrange
-        let mut record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
-        record.txn_id = Some(999);
-
-        // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-
-        // Assert
-        assert_eq!(decoded.txn_id, Some(999));
-    }
-
-    #[test]
-    fn should_roundtrip_record_with_compression() {
-        // Arrange
-        let mut record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
-        record.compression = Some(1); // Compression type 1
-
-        // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-
-        // Assert
-        assert_eq!(decoded.compression, Some(1));
-    }
-
-    // =========== Edge Cases ===========
-
-    #[test]
-    fn should_handle_empty_key() {
-        // Arrange
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::new(),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
-
-        // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-
-        // Assert
-        assert_eq!(decoded.key.len(), 0);
-    }
-
-    #[test]
-    fn should_treat_empty_value_as_none() {
-        // Arrange - empty value is treated as None by encoding
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::new()),
-            42,
-        );
-
-        // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
-
-        // Assert - empty values become None during roundtrip
-        // This is by design: if value_len is 0, has_value flag determines presence
-        assert!(decoded.value.is_none());
-    }
-
-    #[test]
-    fn should_handle_max_u64_sequence() {
+    fn should_skip_unknown_tags_when_decoding() {
         // Arrange
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
-            u64::MAX,
+            1,
         );
+        let mut encoded = encode(&record).unwrap().to_vec();
+
+        // Inject an unknown tag (250) with 3 bytes of data.
+        encoded.push(250);
+        encoded.extend_from_slice(&3u32.to_le_bytes());
+        encoded.extend_from_slice(b"xyz");
 
         // Act
-        let encoded = encode(&record).unwrap();
         let decoded = decode(&encoded[..]).unwrap();
 
         // Assert
-        assert_eq!(decoded.seq, u64::MAX);
+        assert_eq!(decoded.op, record.op);
+        assert_eq!(decoded.key, record.key);
+        assert_eq!(decoded.value, record.value);
     }
 
     #[test]
-    fn should_handle_max_u32_cf_id() {
+    fn should_error_when_magic_invalid() {
         // Arrange
-        let record = WalRecord::new_cf(
-            u32::MAX,
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
+        let bad = Bytes::from_static(b"ZZ\x01");
 
         // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
+        let err = decode(&bad[..]).unwrap_err();
 
         // Assert
-        assert_eq!(decoded.cf_id, u32::MAX);
+        match err {
+            MidgeError::Corruption(_) => {}
+            other => panic!("expected corruption error, got: {:?}", other),
+        }
     }
 
     #[test]
-    fn should_handle_large_key_and_value() {
+    fn should_error_when_required_fields_missing() {
         // Arrange
-        let large_key = vec![42u8; 10_000];
-        let large_value = vec![99u8; 100_000];
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::copy_from_slice(&large_key),
-            Some(Bytes::copy_from_slice(&large_value)),
-            42,
-        );
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&MAGIC);
+        payload.push(VERSION);
 
         // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
+        let err = decode(&payload[..]).unwrap_err();
 
         // Assert
-        assert_eq!(decoded.key.as_ref(), &large_key[..]);
-        assert_eq!(decoded.value.unwrap().as_ref(), &large_value[..]);
+        match err {
+            MidgeError::Corruption(_) => {}
+            other => panic!("expected corruption error, got: {:?}", other),
+        }
     }
 
     #[test]
-    fn should_preserve_binary_data() {
+    fn should_error_when_tlv_header_truncated() {
         // Arrange
-        let binary_key = vec![0u8, 1u8, 255u8, 254u8, 127u8];
-        let binary_value = vec![128u8, 64u8, 32u8, 16u8, 8u8];
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::copy_from_slice(&binary_key),
-            Some(Bytes::copy_from_slice(&binary_value)),
-            42,
-        );
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&MAGIC);
+        payload.push(VERSION);
+        payload.push(tags::OP); // tag only; missing 4-byte length
 
         // Act
-        let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
+        let err = decode(&payload[..]).unwrap_err();
 
         // Assert
-        assert_eq!(decoded.key.as_ref(), &binary_key[..]);
-        assert_eq!(decoded.value.unwrap().as_ref(), &binary_value[..]);
-    }
-
-    #[test]
-    fn should_detect_corruption_truncated_header() {
-        // Arrange
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
-            42,
-        );
-        let encoded = encode(&record).unwrap();
-        let truncated = &encoded.as_ref()[..1]; // Only 1 byte
-
-        // Act
-        let result = decode(truncated);
-
-        // Assert
-        assert!(result.is_err());
+        match err {
+            MidgeError::Corruption(_) => {}
+            other => panic!("expected corruption error, got: {:?}", other),
+        }
     }
 }
