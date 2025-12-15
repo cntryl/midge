@@ -174,10 +174,7 @@ impl File for RealFile {
     fn sync(&mut self, dur: Durability) -> FsResult<()> {
         match dur {
             Durability::Unsafe => Ok(()),
-            Durability::Durable => self
-                .file
-                .sync_all()
-                .map_err(|e| FsError::Io(e.to_string())),
+            Durability::Durable => self.file.sync_all().map_err(|e| FsError::Io(e.to_string())),
         }
     }
 
@@ -208,22 +205,28 @@ mod tests {
         let fs = RealFs::new(temp.path())?;
 
         let path = FsPath::new("test.txt");
-        let mut file = fs.open(&path, OpenOptions {
-            mode: OpenMode::ReadWrite,
-            create: true,
-            create_new: false,
-            truncate: false,
-        })?;
+        let mut file = fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
 
         file.append(bytes::Bytes::from("hello"))?;
         drop(file);
 
-        let file = fs.open(&path, OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        })?;
+        let file = fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
 
         let data = file.read_at(0, 5)?;
         assert_eq!(data, bytes::Bytes::from("hello"));
@@ -236,12 +239,15 @@ mod tests {
         let fs = RealFs::new(temp.path())?;
 
         let path = FsPath::new("../escape.txt");
-        let mut file = fs.open(&path, OpenOptions {
-            mode: OpenMode::ReadWrite,
-            create: true,
-            create_new: false,
-            truncate: false,
-        })?;
+        let mut file = fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
 
         file.append(bytes::Bytes::from("data"))?;
         drop(file);

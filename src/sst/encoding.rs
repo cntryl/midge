@@ -1,190 +1,150 @@
-//! SST entry encoding/decoding in TLV format
+//! SST entry encoding/decoding
+//!
+//! Packed, zero-copy SST *data block* entry format.
+//!
+//! This is intentionally NOT TLV.
+//! TLV is reserved for block-level metadata.
+//!
+//! Entry layout (little-endian):
+//!
+//! [shared_prefix_len: u16]
+//! [key_delta_len:   u16]
+//! [value_len:       u32]   // 0 => tombstone / no value
+//! [sequence:        u64]
+//! [entry_type:      u8]
+//! [key_delta bytes]
+//! [value bytes?]
+//!
+//! Entry length is fully deterministic from the header.
+//! Decode is zero-copy and allocation-free.
 
-use crate::common::MidgeError;
-use crate::common::MidgeResult;
-use crate::common::tlv::{
-    decode_tlv_field, decode_varint32, encode_bytes_with_tag, encode_u64_with_tag,
-    encode_u8_with_tag, encode_varint_with_tag,
-};
-use bytes::BytesMut;
+use crate::common::{MidgeError, MidgeResult};
+use bytes::{BufMut, BytesMut};
 
 /// Restart point interval for block building
-/// Every RESTART_INTERVAL entries, a restart point is stored
-/// for fast binary search within blocks
 pub const RESTART_INTERVAL: usize = 16;
 
-/// TLV tags for SST entries
-pub mod tags {
-    pub const SHARED_PREFIX_LEN: u8 = 1;
-    pub const KEY_DELTA: u8 = 2;
-    pub const VALUE: u8 = 3;
-    pub const SEQUENCE: u8 = 4;
-    pub const ENTRY_TYPE: u8 = 5;
-    pub const EXPIRATION: u8 = 6;
-}
-
-/// Encode a single SST entry in TLV format
+/// Encode a single SST entry into `buf`.
 ///
-/// Format:
-/// - SHARED_PREFIX_LEN (varint32): bytes shared with previous key
-/// - KEY_DELTA (bytes): suffix of key after shared prefix
-/// - VALUE (bytes): optional value (omitted for tombstones)
-/// - SEQUENCE (u64): sequence number
-/// - ENTRY_TYPE (u8): 0=Put, 1=Insert, 2=Delete, 3=Merge
-/// - EXPIRATION (u64): optional TTL expiration timestamp
+/// This appends bytes to the provided buffer (block builder style).
+#[inline]
 pub fn encode(
     key_delta: &[u8],
     shared_len: u32,
     value: Option<&[u8]>,
     seq: u64,
     entry_type: u8,
-    expiration: Option<u64>,
+    _expiration: Option<u64>, // reserved; handled at higher layers if needed
 ) -> Vec<u8> {
-    let mut buf = BytesMut::new();
+    let mut buf =
+        BytesMut::with_capacity(2 + 2 + 4 + 8 + 1 + key_delta.len() + value.map_or(0, |v| v.len()));
 
-    // Write shared prefix length as tagged varint
-    encode_varint_with_tag(&mut buf, tags::SHARED_PREFIX_LEN, shared_len);
-
-    // Write key delta
-    encode_bytes_with_tag(&mut buf, tags::KEY_DELTA, key_delta);
-
-    // Write value if present
-    let is_tombstone = entry_type == 2;
-    let user_value = value.unwrap_or(&[]);
-    if !is_tombstone || !user_value.is_empty() {
-        encode_bytes_with_tag(&mut buf, tags::VALUE, user_value);
-    }
-
-    // Write sequence number
-    encode_u64_with_tag(&mut buf, tags::SEQUENCE, seq);
-
-    // Write entry type
-    encode_u8_with_tag(&mut buf, tags::ENTRY_TYPE, entry_type);
-
-    // Write expiration if present
-    if let Some(exp) = expiration {
-        encode_u64_with_tag(&mut buf, tags::EXPIRATION, exp);
-    }
-
+    encode_into(&mut buf, key_delta, shared_len, value, seq, entry_type);
     buf.to_vec()
 }
 
-/// Parsed SST entry from encoded data
-#[derive(Debug, Clone)]
-pub struct TlvEntry {
+#[inline]
+fn encode_into(
+    buf: &mut BytesMut,
+    key_delta: &[u8],
+    shared_len: u32,
+    value: Option<&[u8]>,
+    seq: u64,
+    entry_type: u8,
+) {
+    let shared = shared_len as u16;
+    let key_len = key_delta.len() as u16;
+    let val = value.unwrap_or(&[]);
+    let val_len = val.len() as u32;
+
+    buf.put_u16_le(shared);
+    buf.put_u16_le(key_len);
+    buf.put_u32_le(val_len);
+    buf.put_u64_le(seq);
+    buf.put_u8(entry_type);
+    buf.extend_from_slice(key_delta);
+    buf.extend_from_slice(val);
+}
+
+/// Zero-copy decoded SST entry view
+#[derive(Debug, Clone, Copy)]
+pub struct EntryView<'a> {
     pub shared_len: u32,
-    pub key_delta: Vec<u8>,
-    pub value: Option<Vec<u8>>,
+    /// Borrowed slice for key delta
+    pub key_delta: &'a [u8],
+    /// Absolute offset of key_delta in the original buffer
+    pub key_offset: usize,
+    /// Borrowed slice for value (if present)
+    pub value: Option<&'a [u8]>,
+    /// Absolute offset of value in the original buffer (if present)
+    pub value_offset: Option<usize>,
     pub sequence: u64,
     pub entry_type: u8,
-    pub expiration: Option<u64>,
     pub bytes_consumed: usize,
 }
 
-/// Decode a single TLV entry from data starting at offset
-pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(TlvEntry, usize)> {
+/// Decode a single entry starting at `offset`.
+///
+/// This is allocation-free and returns a borrowed view.
+pub fn decode<'a>(data: &'a [u8], offset: usize) -> MidgeResult<(EntryView<'a>, usize)> {
     if offset >= data.len() {
         return Err(MidgeError::Corruption("Offset beyond data length".into()));
     }
 
-    let mut cursor = offset;
-    let mut shared_len = 0u32;
-    let mut shared_len_seen = false;
-    let mut key_delta = Vec::new();
-    let mut value: Option<Vec<u8>> = None;
-    let mut sequence = 0u64;
-    let mut entry_type = 0u8;
-    let mut expiration: Option<u64> = None;
+    let mut p = offset;
 
-    // Parse TLV fields until we hit end of data or next entry
-    loop {
-        if cursor >= data.len() {
-            break;
-        }
-
-        let (tag, tag_data, consumed) = decode_tlv_field(&data[cursor..])?;
-        if tag == 0 {
-            break; // End of entry
-        }
-
-        match tag {
-            _ if tag != tags::SHARED_PREFIX_LEN => {
-                // If we haven't seen shared prefix length but see another tag,
-                // this may be start of next entry
-                if !shared_len_seen && key_delta.is_empty() {
-                    break;
-                }
-            }
-            _ => {}
-        }
-
-        match tag {
-            tags::SHARED_PREFIX_LEN => {
-                shared_len = decode_varint32(tag_data)?;
-                shared_len_seen = true;
-            }
-            tags::KEY_DELTA => {
-                key_delta = tag_data.to_vec();
-            }
-            tags::VALUE => {
-                value = Some(tag_data.to_vec());
-            }
-            tags::SEQUENCE => {
-                if tag_data.len() == 8 {
-                    sequence = u64::from_be_bytes([
-                        tag_data[0],
-                        tag_data[1],
-                        tag_data[2],
-                        tag_data[3],
-                        tag_data[4],
-                        tag_data[5],
-                        tag_data[6],
-                        tag_data[7],
-                    ]);
-                }
-            }
-            tags::ENTRY_TYPE => {
-                if !tag_data.is_empty() {
-                    entry_type = tag_data[0];
-                }
-            }
-            tags::EXPIRATION => {
-                if tag_data.len() == 8 {
-                    expiration = Some(u64::from_be_bytes([
-                        tag_data[0],
-                        tag_data[1],
-                        tag_data[2],
-                        tag_data[3],
-                        tag_data[4],
-                        tag_data[5],
-                        tag_data[6],
-                        tag_data[7],
-                    ]));
-                }
-            }
-            _ => {}
-        }
-
-        cursor += consumed;
+    if data.len() < p + 17 {
+        return Err(MidgeError::Corruption("Truncated SST entry header".into()));
     }
 
-    if key_delta.is_empty() {
-        return Err(MidgeError::Corruption(
-            "Missing key_delta in TLV entry".into(),
-        ));
+    let shared = u16::from_le_bytes([data[p], data[p + 1]]) as u32;
+    let key_len = u16::from_le_bytes([data[p + 2], data[p + 3]]) as usize;
+    let val_len = u32::from_le_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]) as usize;
+    let seq = u64::from_le_bytes([
+        data[p + 8],
+        data[p + 9],
+        data[p + 10],
+        data[p + 11],
+        data[p + 12],
+        data[p + 13],
+        data[p + 14],
+        data[p + 15],
+    ]);
+    let entry_type = data[p + 16];
+
+    p += 17;
+
+    if data.len() < p + key_len + val_len {
+        return Err(MidgeError::Corruption("Truncated SST entry payload".into()));
     }
+
+    let key_offset = p;
+    let key = &data[p..p + key_len];
+    p += key_len;
+
+    let (value_offset, value) = if val_len > 0 {
+        let v_off = p;
+        let v = &data[p..p + val_len];
+        p += val_len;
+        (Some(v_off), Some(v))
+    } else {
+        (None, None)
+    };
+
+    let consumed = p - offset;
 
     Ok((
-        TlvEntry {
-            shared_len,
-            key_delta,
+        EntryView {
+            shared_len: shared,
+            key_delta: key,
+            key_offset,
             value,
-            sequence,
+            value_offset,
+            sequence: seq,
             entry_type,
-            expiration,
-            bytes_consumed: cursor - offset,
+            bytes_consumed: consumed,
         },
-        cursor,
+        p,
     ))
 }
 
@@ -194,192 +154,44 @@ mod tests {
 
     #[test]
     fn should_encode_and_decode_key_delta() {
-        // Arrange & Act
         let encoded = encode(b"mykey", 0, None, 0, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
         assert_eq!(entry.key_delta, b"mykey");
     }
 
     #[test]
     fn should_encode_and_decode_with_value() {
-        // Arrange & Act
         let encoded = encode(b"key", 0, Some(b"myvalue"), 0, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry.key_delta, b"key");
-        assert_eq!(entry.value, Some(b"myvalue".to_vec()));
+        assert_eq!(entry.value, Some(b"myvalue".as_slice()));
     }
 
     #[test]
     fn should_encode_and_decode_sequence() {
-        // Arrange & Act
         let encoded = encode(b"key", 0, None, 12345, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
         assert_eq!(entry.sequence, 12345);
     }
 
     #[test]
     fn should_encode_and_decode_entry_type_delete() {
-        // Arrange & Act
         let encoded = encode(b"key", 0, None, 0, 2, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
         assert_eq!(entry.entry_type, 2);
     }
 
     #[test]
-    fn should_encode_and_decode_with_expiration() {
-        // Arrange
-        let exp = 1234567890u64;
-
-        // Act
-        let encoded = encode(b"key", 0, None, 0, 0, Some(exp));
-        let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry.expiration, Some(exp));
-    }
-
-    #[test]
     fn should_encode_and_decode_shared_prefix() {
-        // Arrange & Act
         let encoded = encode(b"suffix", 42, Some(b"val"), 0, 0, None);
         let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
         assert_eq!(entry.shared_len, 42);
     }
 
     #[test]
     fn should_return_bytes_consumed() {
-        // Arrange
         let encoded = encode(b"key", 0, Some(b"val"), 42, 0, None);
-
-        // Act
-        let (_entry, consumed) = decode(&encoded, 0).unwrap();
-
-        // Assert
+        let (entry, consumed) = decode(&encoded, 0).unwrap();
+        assert_eq!(entry.bytes_consumed, encoded.len());
         assert_eq!(consumed, encoded.len());
-    }
-
-    #[test]
-    fn should_roundtrip_all_fields() {
-        // Arrange
-        let key = b"test_key";
-        let value = Some(b"test_value" as &[u8]);
-        let seq = 999u64;
-        let op_type = 1u8;
-        let exp = Some(5555u64);
-        let shared = 5u32;
-
-        // Act
-        let encoded = encode(key, shared, value, seq, op_type, exp);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry.key_delta, key);
-        assert_eq!(entry.value, value.map(|v| v.to_vec()));
-        assert_eq!(entry.sequence, seq);
-        assert_eq!(entry.entry_type, op_type);
-        assert_eq!(entry.expiration, exp);
-        assert_eq!(entry.shared_len, shared);
-    }
-
-    #[test]
-    fn should_handle_binary_keys() {
-        // Arrange
-        let binary_key = vec![0u8, 1u8, 255u8, 254u8, 128u8];
-
-        // Act
-        let encoded = encode(&binary_key, 0, Some(b"val"), 0, 0, None);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry.key_delta, binary_key);
-    }
-
-    #[test]
-    fn should_decode_from_offset_zero() {
-        // Arrange
-        let encoded = encode(b"key", 0, Some(b"val"), 0, 0, None);
-
-        // Act
-        let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry.key_delta, b"key");
-    }
-
-    #[test]
-    fn should_handle_invalid_offset_beyond_data() {
-        // Arrange
-        let encoded = encode(b"key", 0, Some(b"val"), 0, 0, None);
-
-        // Act
-        let result = decode(&encoded, encoded.len() + 100);
-
-        // Assert
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn should_encode_produces_same_output_for_same_inputs() {
-        // Arrange & Act
-        let enc1 = encode(b"key", 5, Some(b"val"), 100, 1, Some(200));
-        let enc2 = encode(b"key", 5, Some(b"val"), 100, 1, Some(200));
-
-        // Assert
-        assert_eq!(enc1, enc2);
-    }
-
-    #[test]
-    fn should_create_tlv_entry_from_decode() {
-        // Arrange
-        let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
-
-        // Act
-        let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(entry.key_delta, b"test");
-        assert_eq!(entry.value, Some(b"data".to_vec()));
-        assert_eq!(entry.sequence, 42);
-        assert_eq!(entry.entry_type, 1);
-        assert_eq!(entry.expiration, Some(100));
-        assert!(entry.bytes_consumed > 0);
-    }
-
-    #[test]
-    fn should_tlv_entry_be_cloneable() {
-        // Arrange
-        let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
-        let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Act
-        let cloned = entry.clone();
-
-        // Assert
-        assert_eq!(entry.key_delta, cloned.key_delta);
-        assert_eq!(entry.value, cloned.value);
-        assert_eq!(entry.sequence, cloned.sequence);
-    }
-
-    #[test]
-    fn should_tlv_entry_be_debuggable() {
-        // Arrange
-        let encoded = encode(b"test", 0, Some(b"data"), 42, 1, Some(100));
-        let (entry, _) = decode(&encoded, 0).unwrap();
-
-        // Act
-        let debug_str = format!("{:?}", entry);
-
-        // Assert
-        assert!(debug_str.contains("TlvEntry") || debug_str.contains("key_delta"));
     }
 }

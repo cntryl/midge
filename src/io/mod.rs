@@ -35,12 +35,15 @@
 //! ));
 //! ```
 
-pub mod traits;
-pub mod real;
-pub mod mock;
 pub mod chaos;
+pub mod mock;
+pub mod real;
+pub mod traits;
 
-pub use traits::{Fs, File, FsError, FsResult, FsPath, Durability, OpenMode, OpenOptions, Metadata, DirEntry, FileCaps};
-pub use real::RealFs;
-pub use mock::MockFs;
 pub use chaos::ChaosFs;
+pub use mock::MockFs;
+pub use real::RealFs;
+pub use traits::{
+    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenMode,
+    OpenOptions,
+};

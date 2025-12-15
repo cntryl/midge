@@ -77,7 +77,7 @@ fn bench_varint32_decode(c: &mut Criterion) {
         let mut buf = BytesMut::with_capacity(5);
         encode_varint32(&mut buf, *value);
         let data = buf.freeze();
-        
+
         group.bench_function(*name, |b| {
             b.iter(|| decode_varint32(black_box(data.as_ref())).unwrap());
         });

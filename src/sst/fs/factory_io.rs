@@ -28,10 +28,7 @@ impl FsSstFactoryIo {
 
     /// Open an SST file using the io::Fs backend
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::SstReader>> {
-        let path_str = path
-            .to_str()
-            .unwrap_or("")
-            .to_string();
+        let path_str = path.to_str().unwrap_or("").to_string();
         let reader = super::SstFileIo::open(&path_str, Arc::clone(&self.fs))?;
         Ok(Box::new(reader))
     }

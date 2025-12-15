@@ -674,7 +674,9 @@ impl WalActor {
             self.sync_calls += 1;
             self.sync_total += elapsed;
 
-            if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some() && self.sync_calls.is_multiple_of(1000) {
+            if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some()
+                && self.sync_calls.is_multiple_of(1000)
+            {
                 let avg_ms = (self.sync_total.as_secs_f64() * 1000.0) / (self.sync_calls as f64);
                 eprintln!(
                     "[midge] wal.sync: calls={} total_ms={:.2} avg_ms={:.3}",
@@ -695,7 +697,7 @@ impl WalActor {
     }
 
     /// Sync WAL to disk (public interface).
-    /// 
+    ///
     /// Returns the sealed flush generation. In group commit modes (Batched/CloudFirst),
     /// all pending writes at sync time are grouped under this generation.
     pub fn sync(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {

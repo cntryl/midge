@@ -225,31 +225,31 @@ impl RuntimeState {
                     &crate::storage::abstraction::StoragePath::new(""),
                     &mut recovery_memtables,
                 ) {
-                Ok(stats) => {
-                    tracing::info!(
-                        records_recovered = stats.record_count,
-                        bytes_recovered = stats.bytes,
-                        max_sequence = ?stats.max_sequence,
-                        replay_dir = ?replay_dir,
-                        "WAL recovery completed successfully"
-                    );
-                    for (cf_id, recovered_memtable) in recovery_memtables {
-                        if let Some(cf_state) = column_families.get_mut(&cf_id) {
-                            cf_state.memtable = recovered_memtable;
-                        } else {
-                            let name = format!("cf_{}", cf_id);
-                            let mut cf_state = ColumnFamilyState::new(cf_id, name);
-                            cf_state.memtable = recovered_memtable;
-                            column_families.insert(cf_id, cf_state);
+                    Ok(stats) => {
+                        tracing::info!(
+                            records_recovered = stats.record_count,
+                            bytes_recovered = stats.bytes,
+                            max_sequence = ?stats.max_sequence,
+                            replay_dir = ?replay_dir,
+                            "WAL recovery completed successfully"
+                        );
+                        for (cf_id, recovered_memtable) in recovery_memtables {
+                            if let Some(cf_state) = column_families.get_mut(&cf_id) {
+                                cf_state.memtable = recovered_memtable;
+                            } else {
+                                let name = format!("cf_{}", cf_id);
+                                let mut cf_state = ColumnFamilyState::new(cf_id, name);
+                                cf_state.memtable = recovered_memtable;
+                                column_families.insert(cf_id, cf_state);
+                            }
                         }
+                        // Restore sequence counter from recovery
+                        stats.max_sequence.unwrap_or(0)
                     }
-                    // Restore sequence counter from recovery
-                    stats.max_sequence.unwrap_or(0)
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "WAL recovery failed, continuing without recovered state");
-                    0
-                }
+                    Err(e) => {
+                        tracing::error!(error = %e, "WAL recovery failed, continuing without recovered state");
+                        0
+                    }
                 },
                 Err(e) => {
                     tracing::error!(error = %e, "failed to initialize WAL recovery storage");

@@ -4,9 +4,9 @@
 
 use super::traits::*;
 use bytes::Bytes;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 #[derive(Debug, Clone)]
 struct MockFileData {
@@ -110,7 +110,7 @@ impl Fs for MockFs {
         let mut files = self.files.lock();
         let before = files.len();
         files.retain(|k, _| !k.starts_with(&path.0));
-        
+
         if files.len() == before {
             return Err(FsError::NotFound(path.0.clone()));
         }

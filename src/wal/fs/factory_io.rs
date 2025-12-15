@@ -42,7 +42,10 @@ mod tests {
         let factory = FsWalFactoryIo::new(fs);
 
         // Assert
-        assert!(factory.fs.metadata(&crate::io::FsPath::new("test")).is_err());
+        assert!(factory
+            .fs
+            .metadata(&crate::io::FsPath::new("test"))
+            .is_err());
     }
 
     #[test]

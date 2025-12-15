@@ -1,5 +1,5 @@
 //! Filesystem-backed SST reader using io::Fs abstraction (new approach)
-//! 
+//!
 //! This reader uses the base io::Fs trait instead of std::fs directly,
 //! allowing for swappable implementations (Real, Mock, Chaos) for testing.
 
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
-use crate::sst::bloom::writer::{BloomTestResult, BloomFilterOps};
+use crate::sst::bloom::writer::{BloomFilterOps, BloomTestResult};
 use crate::sst::bloom::{BlockBloomFilter, BloomMetrics, BloomReader};
 use crate::sst::cache::{BlockCache, CacheKey};
 use crate::sst::encoding;
@@ -61,10 +61,7 @@ impl SstFileIo {
     pub fn open_with_real_fs(path: &std::path::Path) -> MidgeResult<Self> {
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         let fs = Arc::new(crate::io::RealFs::new(parent)?);
-        let path_str = path
-            .to_str()
-            .unwrap_or("")
-            .to_string();
+        let path_str = path.to_str().unwrap_or("").to_string();
         Self::open(&path_str, fs)
     }
 
@@ -122,12 +119,15 @@ impl SstFileIo {
 
     fn load_metadata(&mut self) -> MidgeResult<()> {
         // Open file in read-only mode
-        let file = self.fs.open(&self.path, crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        })?;
+        let file = self.fs.open(
+            &self.path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
 
         // Get file size
         let metadata = self.fs.metadata(&self.path)?;
@@ -155,13 +155,16 @@ impl SstFileIo {
         Ok(())
     }
 
-    fn read_block(&self, handle: &BlockHandle) -> MidgeResult<Vec<u8>> {
-        let file = self.fs.open(&self.path, crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        })?;
+    fn read_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
+        let file = self.fs.open(
+            &self.path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
 
         // Read block with size prefix
         let buffer = file.read_at(handle.offset, handle.size)?;
@@ -176,7 +179,7 @@ impl SstFileIo {
             return Err(MidgeError::Corruption("Block data truncated".into()));
         }
 
-        Ok(buffer[4..4 + len].to_vec())
+        Ok(bytes::Bytes::copy_from_slice(&buffer[4..4 + len]))
     }
 
     fn scan_index(&self) -> MidgeResult<Vec<(Vec<u8>, BlockHandle)>> {
@@ -243,24 +246,36 @@ impl SstFileIo {
         Ok(result)
     }
 
-    fn scan_block(&self, handle: &BlockHandle) -> MidgeResult<Vec<(Vec<u8>, Option<Bytes>)>> {
+    fn scan_block(
+        &self,
+        handle: &BlockHandle,
+    ) -> MidgeResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>> {
         let block_data = self.read_block(handle)?;
         self.scan_block_from_bytes(&block_data)
     }
 
     fn scan_block_from_bytes(
         &self,
-        block_data: &[u8],
-    ) -> MidgeResult<Vec<(Vec<u8>, Option<Bytes>)>> {
+        block_data: &bytes::Bytes,
+    ) -> MidgeResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>> {
         let mut result = Vec::new();
         let mut offset = 0;
 
         while offset < block_data.len() {
-            if let Ok((entry, next_offset)) = encoding::decode(block_data, offset) {
-                // For now, assume no shared prefix (simplified)
-                let key = entry.key_delta;
-                let value = entry.value.map(Bytes::from);
-                result.push((key, value));
+            if let Ok((entry, next_offset)) = encoding::decode(block_data.as_ref(), offset) {
+                // Zero-copy: create Bytes slices that reference the original block buffer
+                let key_start = entry.key_offset;
+                let key_len = entry.key_delta.len();
+                let key_bytes = block_data.slice(key_start..key_start + key_len);
+
+                let value_bytes = if let Some(val_off) = entry.value_offset {
+                    let val_len = entry.value.unwrap().len();
+                    Some(block_data.slice(val_off..val_off + val_len))
+                } else {
+                    None
+                };
+
+                result.push((key_bytes, value_bytes));
                 offset = next_offset;
             } else {
                 break;
@@ -358,19 +373,17 @@ impl crate::sst::SstReader for SstFileIo {
                 if let Some(cached_value) = cache.get(&cache_key) {
                     cached_value.data.as_ref().clone()
                 } else {
-                    let data = self.read_block(&handle)?;
-                    let bytes = Bytes::from(data);
+                    let bytes = self.read_block(&handle)?;
                     cache.put(cache_key, bytes.clone());
                     bytes
                 }
             } else {
-                let data = self.read_block(&handle)?;
-                Bytes::from(data)
+                self.read_block(&handle)?
             };
 
             let entries = self.scan_block_from_bytes(&block_data)?;
             for (entry_key, value) in entries {
-                if entry_key == key {
+                if entry_key.as_ref() == key {
                     self.read_amp_metrics.record_read(1, 0, blocks_read);
                     return Ok(value);
                 }
@@ -393,18 +406,18 @@ impl crate::sst::SstReader for SstFileIo {
             let entries = self.scan_block(&handle)?;
             for (key, value) in entries {
                 if let Some(s) = start {
-                    if key.as_slice() < s {
+                    if key.as_ref() < s {
                         continue;
                     }
                 }
                 if let Some(e) = end {
-                    if key.as_slice() >= e {
+                    if key.as_ref() >= e {
                         continue;
                     }
                 }
 
                 if let Some(val) = value {
-                    result.push((Bytes::from(key), val));
+                    result.push((key.clone(), val));
                 }
             }
         }

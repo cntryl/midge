@@ -58,12 +58,15 @@ impl WalReader for FsWalReaderIo {
     /// - Err(Corruption) if EOF occurs mid-record
     fn read_at(&mut self, pos: WalPos) -> MidgeResult<Option<WalRecord>> {
         // Open file in read-only mode
-        let file = self.fs.open(&self.path, crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        })?;
+        let file = self.fs.open(
+            &self.path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
 
         // Read 4-byte length prefix
         let len_bytes = file.read_at(pos, 4)?;

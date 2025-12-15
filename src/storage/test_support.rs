@@ -64,9 +64,8 @@ mod test_support_impl {
     #[allow(dead_code)]
     pub(crate) fn build_temp_local_storage(
     ) -> crate::storage::abstraction::StorageResult<TempLocalStorage> {
-        let tempdir = tempfile::TempDir::new().map_err(|e| {
-            StorageError::with_source(StorageErrorKind::Io, "TempDir::new", e)
-        })?;
+        let tempdir = tempfile::TempDir::new()
+            .map_err(|e| StorageError::with_source(StorageErrorKind::Io, "TempDir::new", e))?;
 
         let storage: Arc<dyn Storage> = Arc::new(LocalFsStorage::new(tempdir.path())?);
         let root = StoragePath::new("");
@@ -78,4 +77,3 @@ mod test_support_impl {
         })
     }
 }
-

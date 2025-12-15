@@ -63,9 +63,9 @@ pub enum OpenMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenOptions {
     pub mode: OpenMode,
-    pub create: bool,        // Create if not exists
-    pub create_new: bool,    // Fail if exists
-    pub truncate: bool,      // Truncate if exists
+    pub create: bool,     // Create if not exists
+    pub create_new: bool, // Fail if exists
+    pub truncate: bool,   // Truncate if exists
 }
 
 /// Range specification for read operations
@@ -80,10 +80,10 @@ pub struct ReadRange {
 pub struct FileCaps(u32);
 
 impl FileCaps {
-    pub const READV_AT: FileCaps = FileCaps(1 << 0);      // Vectored read
-    pub const WRITEV_AT: FileCaps = FileCaps(1 << 1);     // Vectored write
-    pub const APPENDV: FileCaps = FileCaps(1 << 2);       // Vectored append
-    pub const READ_RANGES: FileCaps = FileCaps(1 << 3);   // Multi-range read
+    pub const READV_AT: FileCaps = FileCaps(1 << 0); // Vectored read
+    pub const WRITEV_AT: FileCaps = FileCaps(1 << 1); // Vectored write
+    pub const APPENDV: FileCaps = FileCaps(1 << 2); // Vectored append
+    pub const READ_RANGES: FileCaps = FileCaps(1 << 3); // Multi-range read
 
     pub const fn empty() -> Self {
         FileCaps(0)
@@ -235,9 +235,7 @@ impl From<FsError> for crate::common::MidgeError {
             FsError::NotFound(_msg) => crate::common::MidgeError::NotFound,
             FsError::AlreadyExists(msg) => crate::common::MidgeError::InvalidArgument(msg),
             FsError::Corruption(msg) => crate::common::MidgeError::Corruption(msg),
-            FsError::Io(msg) => crate::common::MidgeError::Io(
-                std::io::Error::other(msg)
-            ),
+            FsError::Io(msg) => crate::common::MidgeError::Io(std::io::Error::other(msg)),
             FsError::Unavailable(msg) => crate::common::MidgeError::Internal(msg),
             FsError::Unsupported(msg) => crate::common::MidgeError::NotSupported(msg),
         }

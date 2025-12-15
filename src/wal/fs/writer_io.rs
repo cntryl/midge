@@ -40,12 +40,15 @@ impl FsWalWriterIo {
 
         // Verify file exists or can be created by checking metadata
         {
-            let _ = fs.open(&path, crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadWrite,
-                create: true,
-                create_new: false,
-                truncate: false,
-            })?;
+            let _ = fs.open(
+                &path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: false,
+                },
+            )?;
         }
 
         // Get current file size
@@ -73,12 +76,15 @@ impl WalWriter for FsWalWriterIo {
         let start_pos = *pos_guard;
 
         // Open file for this write (fs handles pooling)
-        let mut file = self.fs.open(&self.path, crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadWrite,
-            create: false,
-            create_new: false,
-            truncate: false,
-        })?;
+        let mut file = self.fs.open(
+            &self.path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
 
         // Append prefix + data
         file.append(Bytes::from(len_prefix.to_vec()))?;
@@ -90,7 +96,12 @@ impl WalWriter for FsWalWriterIo {
         Ok(start_pos)
     }
 
-    fn append_op(&self, _kind: WalOpKind, _key: &[u8], _value: Option<&[u8]>) -> MidgeResult<WalPos> {
+    fn append_op(
+        &self,
+        _kind: WalOpKind,
+        _key: &[u8],
+        _value: Option<&[u8]>,
+    ) -> MidgeResult<WalPos> {
         // Default implementation: error, as we need a sequence number
         Err(crate::common::MidgeError::NotSupported(
             "append_op without sequence number not supported".into(),
@@ -103,12 +114,15 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn sync(&self) -> MidgeResult<()> {
-        let mut file = self.fs.open(&self.path, crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadWrite,
-            create: false,
-            create_new: false,
-            truncate: false,
-        })?;
+        let mut file = self.fs.open(
+            &self.path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
         file.sync(Durability::Durable)?;
         Ok(())
     }

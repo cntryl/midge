@@ -759,7 +759,7 @@ impl EventLoop {
                             // 🔑 CRITICAL: Drive durability progress on idle ticks
                             // If waiters exist but no new messages, sync them now
                             self.sync_batched_wal_if_needed(&msg_rx);
-                            
+
                             self.maybe_flush_cloudfirst_wal();
                             self.tick_hybrid_storage();
                             // Drain any push-channel events that arrived between ticks.
@@ -774,7 +774,7 @@ impl EventLoop {
                             // 🔑 CRITICAL: Drive durability progress on idle ticks
                             // If waiters exist but no new messages, sync them now
                             self.sync_batched_wal_if_needed(&msg_rx);
-                            
+
                             self.maybe_flush_cloudfirst_wal();
                             self.tick_hybrid_storage();
                             continue;

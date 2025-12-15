@@ -7,9 +7,9 @@
 //!
 //! The io::Fs abstraction enables better testability with Mock and Chaos implementations.
 
+mod factory_io;
 mod reader_io;
 mod writer_io;
-mod factory_io;
 
 // Re-export the io::Fs-based implementations
 pub use factory_io::FsWalFactoryIo;

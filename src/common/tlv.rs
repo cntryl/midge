@@ -3,9 +3,9 @@
 //! Provides primitives for encoding and decoding tagged fields,
 //! used by both WAL and SST formats.
 
-use bytes::{BufMut, BytesMut};
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
+use bytes::{BufMut, BytesMut};
 
 /// Encode a varint32 value into the buffer
 #[inline(always)]
