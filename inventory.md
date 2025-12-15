@@ -388,7 +388,156 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_skip_cold_ssts_using_key_ranges`
     - `should_accumulate_reads_over_time`
 
+- `tests/column_families.rs`
+  - tests:
+    - `should_create_column_family_given_valid_name_when_engine_open`
+    - `should_create_multiple_column_families_given_unique_names_when_engine_open`
+    - `should_fail_create_column_family_given_duplicate_name_when_cf_exists`
+    - `should_create_column_family_with_custom_config_given_config_when_creating`
+    - `should_drop_column_family_given_empty_cf_when_requested`
+    - `should_drop_column_family_given_flushed_data_when_requested`
+    - `should_fail_drop_column_family_given_unflushed_data_when_memtable_not_empty`
+    - `should_fail_drop_default_column_family_given_drop_request_when_default_cf`
+    - `should_invalidate_handle_given_cf_dropped_when_accessing`
+    - `should_delete_cf_data_given_cf_dropped_when_persisted`
+    - `should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating`
+    - `should_list_default_cf_only_given_no_custom_cfs_when_listing`
+    - `should_list_all_column_families_given_multiple_cfs_when_listing`
+    - `should_not_list_dropped_cf_given_cf_dropped_when_listing`
+    - `should_isolate_keys_given_same_key_in_different_cfs_when_reading`
+    - `should_isolate_deletes_given_delete_in_one_cf_when_other_cf_has_same_key`
+    - `should_isolate_data_given_different_data_volumes_when_reading`
+    - `should_isolate_compaction_given_per_cf_data_when_compacting`
+    - `should_persist_cf_metadata_given_restart_when_cf_created`
+    - `should_persist_cf_data_given_restart_when_data_flushed`
+    - `should_persist_multiple_cfs_given_restart_when_all_flushed`
+    - `should_persist_cf_drop_given_restart_when_cf_was_dropped`
+    - `should_get_column_family_by_name_given_existing_cf_when_querying`
+    - `should_fail_get_column_family_given_nonexistent_name_when_querying`
+    - `should_get_default_column_family_given_fresh_engine_when_querying`
+    - `should_isolate_cf_after_flush_given_same_key_when_reading`
+    - `should_handle_operations_on_default_cf_given_custom_cfs_exist_when_operating`
+    - `should_maintain_cf_isolation_given_many_cfs_when_operating`
+
+- `tests/config_api.rs`
+  - tests:
+    - `should_build_config_given_minimal_defaults_when_only_path_provided`
+    - `should_set_goal_given_latency_when_optimizing_for_p99`
+    - `should_set_goal_given_throughput_when_optimizing_for_bulk_writes`
+    - `should_set_goal_given_cost_when_minimizing_resources`
+    - `should_set_durability_given_strict_when_fsync_per_write_required`
+    - `should_set_durability_given_steady_when_balanced_sync_needed`
+    - `should_respect_memory_budget_given_explicit_bytes_when_configured`
+    - `should_use_auto_memory_given_no_explicit_budget_when_default`
+    - `should_optimize_params_given_write_heavy_profile_when_configured`
+    - `should_optimize_params_given_read_mostly_profile_when_configured`
+    - `should_optimize_params_given_range_scan_profile_when_configured`
+    - `should_derive_consistent_params_given_all_knobs_set_when_building`
+    - `should_derive_different_params_given_latency_vs_throughput_when_comparing`
+    - `should_provide_getter_access_given_derived_params_when_querying`
+    - `should_store_path_given_relative_path_when_building`
+    - `should_store_path_given_absolute_path_when_building`
+    - `should_clone_options_preserving_all_settings_given_configured_opts_when_cloning`
+    - `should_use_sensible_defaults_given_no_configuration_when_using_default`
+
+- `tests/durability_atomicity.rs`
+  - tests:
+    - `should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recovering`
+    - `should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recovering`
+    - `should_preserve_manifest_authority_given_wal_newer_when_sst_missing`
+    - `should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind`
+    - `should_not_publish_sst_given_manifest_not_persisted_when_adding_sst`
+    - `should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating`
+    - `should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_manifest`
+    - `should_commit_ssts_manifest_together_given_compaction_success_when_completing`
+    - `should_cleanup_partial_output_given_compaction_failure_when_recovering`
+    - `should_delete_old_ssts_only_after_manifest_persisted_when_compacting`
+    - `should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopening`
+
+- `tests/durability_recovery.rs`
+  - tests:
+    - `should_recover_from_clean_shutdown_when_reopening`
+    - `should_recover_from_crash_after_flush_when_reopening`
+    - `should_recover_unflushed_data_given_crash_during_flush_when_reopening`
+    - `should_prefer_wal_given_wal_newer_than_sst_when_recovering`
+    - `should_skip_wal_entries_given_already_in_sst_when_recovering`
+    - `should_replay_wal_in_order_given_multiple_writes_when_recovering`
+    - `should_recover_deletes_given_crash_after_delete_when_reopening`
+    - `should_recover_write_batch_atomically_given_crash_when_reopening`
+    - `should_recover_from_wal_given_manifest_save_failure_when_reopening`
+    - `should_preserve_consistency_given_crash_before_manifest_update_when_reopening`
+    - `should_be_idempotent_given_multiple_recovery_cycles_when_reopening`
+    - `should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening`
+    - `should_continue_sequence_numbers_given_recovery_when_new_writes`
+    - `should_skip_corrupted_tail_given_partial_record_when_tolerant_mode`
+
+- `tests/durability_wal.rs`
+  - tests:
+    - `should_recover_writes_given_unflushed_memtable_when_reopening`
+    - `should_persist_write_given_fsync_enabled_when_crash_occurs`
+    - `should_call_fsync_given_wal_sync_enabled_when_put`
+    - `should_rotate_wal_given_small_buffer_when_writes_exceed_buffer`
+    - `should_replay_all_records_given_multiple_wal_segments_when_recovering`
+    - `should_recover_all_writes_given_concurrent_puts_when_crash_occurs`
+    - `should_handle_gracefully_given_truncated_wal_tail_when_recovering`
+    - `should_not_recover_data_given_truncated_wal_append_when_reopening`
+    - `should_allow_data_loss_given_skipped_fsync_when_crash_occurs`
+    - `should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening`
+
+- `tests/edge_cases.rs`
+  - tests:
+    - `should_store_and_retrieve_very_large_keys_when_megabyte_sized`
+    - `should_store_and_retrieve_very_large_values_when_hundred_megabytes`
+    - `should_handle_mixed_size_values_when_ranging_from_bytes_to_megabytes`
+    - `should_handle_special_characters_in_keys_when_utf8_and_binary_mixed`
+    - `should_handle_empty_database_when_no_keys_written`
+    - `should_handle_single_record_database_when_one_key_value_pair`
+    - `should_handle_range_query_at_boundaries_when_first_last_and_missing`
+    - `should_handle_rapid_operations_when_one_thousand_puts_per_second`
+    - `should_handle_delete_all_pattern_when_writing_then_deleting_all_keys`
+    - `should_handle_tombstone_accumulation_when_many_deletes_create_tombstones`
+    - `should_handle_ten_thousand_keys_when_large_keyspace`
+    - `should_batch_concurrent_puts_when_cloudfirst_mode`
+
+- `tests/engine_basic.rs`
+  - tests:
+    - `should_get_value_given_existing_key_when_put`
+    - `should_return_none_given_nonexistent_key_when_get`
+    - `should_overwrite_value_given_existing_key_when_put`
+    - `should_handle_empty_value_when_put`
+    - `should_handle_binary_data_when_put`
+    - `should_return_none_given_deleted_key_when_get`
+    - `should_succeed_given_nonexistent_key_when_delete`
+    - `should_handle_many_operations_when_sequential`
+    - `should_not_create_filesystem_artifacts_when_memory_mode`
+
+- `tests/engine_delete_range.rs`
+  - tests:
+    - `should_delete_keys_in_range_given_delete_range_when_querying`
+    - `should_handle_empty_range_given_start_equals_end_when_delete_range`
+    - `should_accept_delete_range_call_with_valid_bounds_when_called`
+    - `should_delete_key_given_delete_range_with_single_key_when_matching`
+    - `should_handle_delete_range_after_put_when_interleaved`
+    - `should_allow_multiple_delete_ranges_when_called_sequentially`
+    - `should_persist_keys_across_delete_range_with_restart_when_durable`
+    - `should_handle_concurrent_delete_ranges_when_multiple_threads`
+    - `should_handle_concurrent_mixed_operations_when_put_delete_interleaved`
+    - `should_document_current_limitation_of_range_METHOD_when_called`
+
+- `tests/engine_init.rs`
+  - tests:
+    - `should_create_engine_in_all_modes`
+    - `should_create_engine_in_memory`
+    - `should_create_engine_in_local_mode`
+    - `should_create_engine_in_cloud_mode`
+
+- `tests/wal_encoding_tests.rs`
+  - tests:
+    - `should_use_last_occurrence_when_duplicate_tags`
+
 **Benches (benches/)**
+
+- `benches/criterion_helper.rs` (benchmark helper utilities — no direct `bench_*` targets)
 
 - `benches/tier1_hotpath_api.rs`
   - benches:
@@ -447,6 +596,16 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_trie_find_block`
     - `bench_trie_prefix_range`
     - `bench_trie_key_patterns`
+
+- `benches/tier1_hotpath_tlv_encoding.rs`
+  - benches:
+    - `bench_varint32_encode`
+    - `bench_varint32_decode`
+    - `bench_encode_bytes_with_tag`
+    - `bench_encode_u64_with_tag`
+    - `bench_encode_u8_with_tag`
+    - `bench_decode_tlv_field`
+    - `bench_batch_field_encoding`
 
 - `benches/tier1_hotpath_wal.rs`
   - benches:

@@ -14,7 +14,7 @@ mod criterion_helper;
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 
-use cntryl_midge::sst::encoding::{decode, encode};
+use cntryl_midge::sst::encoding::{decode, encode, EntryType};
 use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ fn bench_encode(c: &mut Criterion) {
 
     g.bench_function("encode_small", |b| {
         b.iter(|| {
-            black_box(encode(delta, shared as u32, Some(value), 1, 0, None));
+            black_box(encode(delta, shared as u16, Some(value), 1, EntryType::Put));
         });
     });
 
@@ -61,7 +61,7 @@ fn bench_decode(c: &mut Criterion) {
     let shared = shared_prefix_len(prev, key);
     let delta = &key[shared..];
 
-    let encoded = encode(delta, shared as u32, Some(b"value"), 1, 0, None);
+    let encoded = encode(delta, shared as u16, Some(b"value"), 1, EntryType::Put);
 
     g.bench_function("decode_small", |b| {
         b.iter(|| {
@@ -89,7 +89,7 @@ fn bench_roundtrip(c: &mut Criterion) {
 
     g.bench_function("roundtrip_small", |b| {
         b.iter(|| {
-            let encoded = encode(delta, shared as u32, Some(value), 1, 0, None);
+            let encoded = encode(delta, shared as u16, Some(value), 1, EntryType::Put);
             let _ = decode(&encoded, 0).unwrap();
             black_box(encoded);
         });

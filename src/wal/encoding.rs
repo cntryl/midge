@@ -62,9 +62,8 @@ pub struct WalRecordView<'a> {
     pub compression: Option<u8>,
 }
 
-#[inline]
-fn corruption(msg: &'static str) -> MidgeError {
-    MidgeError::Corruption(msg.to_string())
+fn corruption(msg: impl Into<String>) -> MidgeError {
+    MidgeError::Corruption(msg.into())
 }
 
 #[inline]
@@ -96,7 +95,11 @@ fn scan_tlvs<'a>(
 ) -> MidgeResult<()> {
     while !data.is_empty() {
         if data.len() < TLV_HEADER_LEN {
-            return Err(corruption("truncated TLV header"));
+            return Err(corruption(format!(
+                "truncated TLV header: need {}, have {}",
+                TLV_HEADER_LEN,
+                data.len()
+            )));
         }
 
         let tag = data[0];
@@ -104,7 +107,12 @@ fn scan_tlvs<'a>(
         data = &data[TLV_HEADER_LEN..];
 
         if data.len() < len {
-            return Err(corruption("truncated TLV value"));
+            return Err(corruption(format!(
+                "truncated TLV value for tag {}: need {}, have {}",
+                tag,
+                len,
+                data.len()
+            )));
         }
 
         let (val, rest) = data.split_at(len);
@@ -117,30 +125,31 @@ fn scan_tlvs<'a>(
 
 /// Encode a WAL record to bytes (v2 payload).
 pub fn encode(record: &WalRecord) -> MidgeResult<Bytes> {
-    let mut capacity = PREFIX_LEN
-        + (TLV_HEADER_LEN + 1) // OP
-        + (TLV_HEADER_LEN + 4) // CF_ID
-        + (TLV_HEADER_LEN + 8) // SEQ
-        + (TLV_HEADER_LEN + record.key.len());
+    // Use checked adds to avoid overflow on 32-bit systems or huge values.
+    let mut capacity = PREFIX_LEN;
+    capacity = capacity.checked_add(TLV_HEADER_LEN + 1).unwrap_or(capacity); // OP
+    capacity = capacity.checked_add(TLV_HEADER_LEN + 4).unwrap_or(capacity); // CF_ID
+    capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity); // SEQ
+    capacity = capacity.checked_add(TLV_HEADER_LEN + record.key.len()).unwrap_or(capacity);
 
     // Preserve existing semantics: an empty VALUE behaves like None.
     if let Some(v) = &record.value {
         if !v.is_empty() {
-            capacity += TLV_HEADER_LEN + v.len();
+            capacity = capacity.checked_add(TLV_HEADER_LEN + v.len()).unwrap_or(capacity);
         }
     }
 
     if record.expiration.is_some() {
-        capacity += TLV_HEADER_LEN + 8;
+        capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity);
     }
     if let Some(r) = &record.range_end {
-        capacity += TLV_HEADER_LEN + r.len();
+        capacity = capacity.checked_add(TLV_HEADER_LEN + r.len()).unwrap_or(capacity);
     }
     if record.txn_id.is_some() {
-        capacity += TLV_HEADER_LEN + 8;
+        capacity = capacity.checked_add(TLV_HEADER_LEN + 8).unwrap_or(capacity);
     }
     if record.compression.is_some() {
-        capacity += TLV_HEADER_LEN + 1;
+        capacity = capacity.checked_add(TLV_HEADER_LEN + 1).unwrap_or(capacity);
     }
 
     let mut buf = BytesMut::with_capacity(capacity);
@@ -208,23 +217,22 @@ pub fn decode_view<'a>(data: &'a [u8]) -> MidgeResult<WalRecordView<'a>> {
             }
             tags::CF_ID => {
                 if val.len() != 4 {
-                    return Err(corruption("bad CF_ID length"));
+                    return Err(corruption(format!("bad CF_ID length: {}", val.len())));
                 }
-                cf_id = Some(u32::from_le_bytes([val[0], val[1], val[2], val[3]]));
+                cf_id = Some(u32::from_le_bytes(val[..4].try_into().unwrap()));
             }
             tags::SEQ => {
                 if val.len() != 8 {
-                    return Err(corruption("bad SEQ length"));
+                    return Err(corruption(format!("bad SEQ length: {}", val.len())));
                 }
-                seq = Some(u64::from_le_bytes([
-                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
-                ]));
+                seq = Some(u64::from_le_bytes(val[..8].try_into().unwrap()));
             }
             tags::KEY => {
                 key = Some(val);
             }
             tags::VALUE => {
                 // Preserve semantics: empty is treated as absent.
+                // Documented: encoding treats Some(empty) as absent to save space.
                 if !val.is_empty() {
                     value = Some(val);
                 }
