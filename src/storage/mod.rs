@@ -76,22 +76,39 @@
 //! Provides durability abstractions for SSTs (synchronous local/cloud) and WAL segments
 //! (cloud-first with local fallback).
 //!
+//! ## Architecture: Two Abstraction Layers
+//!
+//! **Layer 1: `StorageBackend` Trait (Callback-based)**
+//! - Used by `HybridStorage` and cloud orchestration
+//! - Callback-driven, non-blocking I/O via `StorageCallback` channels
+//! - Implementations: `FileSystem` (local), `CloudStorage` (cloud)
+//! - Modules: [`filesystem`], [`cloud`], [`hybrid`]
+//!
+//! **Layer 2: `Storage` Trait (File handle-based, in `abstraction`)**
+//! - Used by WAL recovery and legacy internal APIs
+//! - Full POSIX-like file interface with handles and explicit sync
+//! - Implementation: `LocalFsStorage` (local filesystem only)
+//! - Module: [`local_fs_storage`]
+//!
 //! ## Module Overview
 //!
-//! - **[`cloud`]**: Cloud storage abstractions (callbacks, backends, executor)
+//! - **[`abstraction`]**: High-level `Storage` trait and error types
+//!   - Portable filesystem abstraction (POSIX-like semantics)
+//!   - Not used by hot path; kept for WAL recovery contracts
+//!
+//! - **[`filesystem`]** (`StorageBackend`): Local filesystem via callbacks
+//!   - Synchronous, callback-based operations
+//!   - Parent directory creation, path sanitization
+//!   - Used for local SST cache, WAL fallback, and test backends
+//!
+//! - **[`cloud`]**: Cloud storage abstractions
 //!   - `CloudBackend` trait for non-blocking I/O
 //!   - `CloudStorage` namespace-aware dispatcher
 //!   - `CloudExecutor` embedded tokio runtime for async HTTP
 //!   - `MockCloudBackend` for deterministic testing
 //!
-//! - **[`filesystem`]**: Local filesystem storage
-//!   - Synchronous file read/write via callbacks
-//!   - Parent directory creation, path sanitization
-//!   - Used for local SST cache and WAL segments
-//!
-//! - **[`hybrid`]**: Orchestration layer
-//!   - Combines local filesystem + cloud backends
-//!   - WAL durability: local → cloud upload pipeline
+//! - **[`hybrid`]**: Orchestration layer combining filesystem + cloud
+//!   - `HybridStorage`: WAL durability (local → cloud upload pipeline)
 //!   - SST management: local cache + cloud replication
 //!   - Retry logic, backpressure, state tracking
 //!
@@ -100,13 +117,17 @@
 //!   - AWS S3, Wasabi, MinIO (S3-compatible wrappers)
 //!   - Azure Blob Storage, Google Cloud Storage, OCI stubs
 //!
-//! - **[`paths`]**: Path utilities
-//!   - SST key formatting
-//!   - WAL segment naming conventions
+//! - **[`local_fs_storage`]**: Legacy `Storage` trait implementation
+//!   - Full file handle API with per-handle mutexes
+//!   - Used exclusively by WAL recovery tests
+//!   - Not on hot path; keep for contract compatibility
+//!
+//! - **[`test_support`]**: Test harnesses
+//!   - Pre-configured `HybridStorage` with mocks
 //!
 //! ## Data Flow
 //!
-//! ### SST Write Path
+//! ### SST Write Path (Hot Path)
 //! ```text
 //! Engine → HybridStorage::submit_write()
 //!   → FileSystem (local cache) → CloudStorage (background)
@@ -126,7 +147,7 @@
 //! ## Key Guarantees
 //!
 //! 1. **No futures in engine thread**: All async work happens in `CloudExecutor`'s embedded tokio runtime
-//! 2. **Callback-driven**: No blocking or waiting; results sent via mpsc channels
+//! 2. **Callback-driven hot path**: No blocking or waiting; results sent via mpsc channels
 //! 3. **WAL ordering**: Local write → cloud upload → CloudAck → memtable update
 //! 4. **Deterministic testing**: `MockCloudBackend` for synchronous test execution
 
@@ -137,8 +158,8 @@ pub(crate) mod test_support;
 
 /// Stable, filesystem-oriented storage abstraction.
 ///
-/// This is the long-lived API contract intended for multiple backends (local,
-/// cloud object storage, and hybrids) without exposing engine concepts.
+/// This is the long-lived API contract intended for WAL recovery compatibility.
+/// Not on the hot path; use `StorageBackend` trait for actual I/O.
 pub mod abstraction;
 
 pub(crate) use local_fs_storage::LocalFsStorage;

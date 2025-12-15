@@ -24,8 +24,9 @@ impl FlushActor {
         let sst_factory: Option<std::sync::Arc<dyn crate::sst::SstFactory>> = if memory_mode {
             None // Don't create factory in memory mode
         } else {
+            let fs = std::sync::Arc::new(crate::io::RealFs::new(sst_dir)?);
             Some(std::sync::Arc::new(
-                crate::sst::FsSstFactory::new(sst_dir, 64 * 1024), // 64KB block size
+                crate::sst::FsSstFactoryIo::new(fs, 64 * 1024), // 64KB block size
             ))
         };
         Ok(Self {

@@ -88,9 +88,11 @@ impl EventLoop {
 
         let sst_factory = if memory_mode {
             // Don't create SST factory in memory mode
-            Arc::new(crate::sst::FsSstFactory::new(&sst_dir, 64 * 1024)) // Dummy, won't be used
+            let fs = Arc::new(crate::io::RealFs::new(&sst_dir)?);
+            Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)) // Dummy, won't be used
         } else {
-            Arc::new(super::super::sst::FsSstFactory::new(&sst_dir, 64 * 1024)) // 64KB block size
+            let fs = Arc::new(crate::io::RealFs::new(&sst_dir)?);
+            Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)) // 64KB block size
         };
 
         // Create actors - they handle memory_mode internally
@@ -1070,7 +1072,7 @@ impl EventLoop {
 
                 // Try to open and read from this SST
                 let sst_path = self.state.sst_dir.join(&file_meta.name);
-                if let Ok(reader) = crate::sst::fs::SstFile::open(&sst_path) {
+                if let Ok(reader) = crate::sst::fs::SstFileIo::open_with_real_fs(&sst_path) {
                     blocks_read += 1; // At minimum, we read index block
                     if let Ok(Some(value)) = reader.get(key) {
                         // Found! Record metrics and return
@@ -1108,7 +1110,7 @@ impl EventLoop {
 
                 // Try to open and read from this SST
                 let sst_path = self.state.sst_dir.join(&file_meta.name);
-                if let Ok(reader) = crate::sst::fs::SstFile::open(&sst_path) {
+                if let Ok(reader) = crate::sst::fs::SstFileIo::open_with_real_fs(&sst_path) {
                     blocks_read += 1; // At minimum, we read index block
                     if let Ok(Some(value)) = reader.get(key) {
                         // Found! Record metrics and return

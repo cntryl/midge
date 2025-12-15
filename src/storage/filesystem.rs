@@ -1,7 +1,15 @@
-//! Filesystem storage backend implementation
+//! Filesystem storage backend implementing `StorageBackend` trait (hot path).
 //!
-//! Provides local filesystem storage with callback-based operations.
-//! Executes immediately (synchronously) but conforms to the async-compatible trait.
+//! Provides synchronous local filesystem storage via callback-based operations.
+//! Executes immediately but conforms to the async-compatible `StorageBackend` trait.
+//!
+//! **On the hot path** for:
+//! - Local SST cache reads/writes
+//! - WAL segment fallback (before cloud upload)
+//! - Test backends via `HybridStorage`
+//!
+//! Design is callback-driven to integrate with `CloudExecutor` and avoid blocking
+//! the main engine thread.
 
 use crate::common::MidgeResult;
 use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};

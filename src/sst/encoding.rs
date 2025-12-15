@@ -2,7 +2,11 @@
 
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
-use bytes::{BufMut, BytesMut};
+use crate::common::tlv::{
+    decode_tlv_field, decode_varint32, encode_bytes_with_tag, encode_u64_with_tag,
+    encode_u8_with_tag, encode_varint_with_tag,
+};
+use bytes::BytesMut;
 
 /// Restart point interval for block building
 /// Every RESTART_INTERVAL entries, a restart point is stored
@@ -182,88 +186,6 @@ pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(TlvEntry, usize)> {
         },
         cursor,
     ))
-}
-
-// ─── Helper functions ────────────────────────────────────────────────────
-
-fn encode_varint32(buf: &mut BytesMut, mut value: u32) {
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        buf.put_u8(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-fn encode_varint_with_tag(buf: &mut BytesMut, tag: u8, value: u32) {
-    buf.put_u8(tag);
-    // Encode the varint, then put its length as length byte
-    let mut temp = BytesMut::new();
-    encode_varint32(&mut temp, value);
-    buf.put_u8(temp.len() as u8);
-    buf.put_slice(&temp);
-}
-
-fn encode_bytes_with_tag(buf: &mut BytesMut, tag: u8, data: &[u8]) {
-    buf.put_u8(tag);
-    encode_varint32(buf, data.len() as u32);
-    buf.put_slice(data);
-}
-
-fn encode_u64_with_tag(buf: &mut BytesMut, tag: u8, value: u64) {
-    buf.put_u8(tag);
-    buf.put_u8(8); // 8 bytes for u64
-    buf.put_u64(value);
-}
-
-fn encode_u8_with_tag(buf: &mut BytesMut, tag: u8, value: u8) {
-    buf.put_u8(tag);
-    buf.put_u8(1); // 1 byte
-    buf.put_u8(value);
-}
-
-fn decode_varint32(data: &[u8]) -> MidgeResult<u32> {
-    let mut result = 0u32;
-    let mut shift = 0;
-    for (i, &byte) in data.iter().enumerate() {
-        if i >= 5 {
-            return Err(MidgeError::Corruption("varint32 overflow".into()));
-        }
-        result |= ((byte & 0x7f) as u32) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(result);
-        }
-        shift += 7;
-    }
-    Err(MidgeError::Corruption("varint32 incomplete".into()))
-}
-
-fn decode_tlv_field(data: &[u8]) -> MidgeResult<(u8, &[u8], usize)> {
-    if data.is_empty() {
-        return Ok((0, &[], 0));
-    }
-
-    let tag = data[0];
-    if tag == 0 {
-        return Ok((0, &[], 1));
-    }
-
-    if data.len() < 2 {
-        return Err(MidgeError::Corruption("TLV field too short".into()));
-    }
-
-    let len = data[1] as usize;
-    if data.len() < 2 + len {
-        return Err(MidgeError::Corruption("TLV field data truncated".into()));
-    }
-
-    let value = &data[2..2 + len];
-    Ok((tag, value, 2 + len))
 }
 
 #[cfg(test)]

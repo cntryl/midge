@@ -221,6 +221,11 @@ path = "benches/tier1_hotpath_wal.rs"
 harness = false
 
 [[bench]]
+name = "tier1_hotpath_tlv_encoding"
+path = "benches/tier1_hotpath_tlv_encoding.rs"
+harness = false
+
+[[bench]]
 name = "tier1_hotpath_singleflight"
 path = "benches/tier1_hotpath_singleflight.rs"
 harness = false

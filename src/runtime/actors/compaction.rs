@@ -169,11 +169,9 @@ mod tests {
     use super::*;
 
     fn create_test_compaction_actor() -> CompactionActor {
-        // Use the crate's SST factory from testkit or use a concrete implementation
-        let sst_factory = Arc::new(crate::sst::FsSstFactory::new(
-            &std::path::PathBuf::from("/tmp"),
-            64 * 1024,
-        ));
+        // Use the modern io::Fs-backed factory
+        let fs = Arc::new(crate::io::MockFs::new());
+        let sst_factory = Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         CompactionActor::new(sst_factory)
     }
 

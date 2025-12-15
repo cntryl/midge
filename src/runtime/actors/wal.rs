@@ -33,26 +33,15 @@
 use super::super::state::RuntimeState;
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
+use crate::io::{Fs, FsPath, RealFs};
 use crate::runtime::IntentLogEntry;
 use crate::sst::Memtable;
-use crate::storage::abstraction::{Storage, StorageErrorKind, StoragePath};
-use crate::storage::LocalFsStorage;
-use crate::wal::{DurabilityPolicy, FsWalFactory, WalFactory, WalOpKind, WalRecord, WalWriter};
+use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWriter};
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-fn map_storage_error(err: crate::storage::abstraction::StorageError) -> MidgeError {
-    match err.kind {
-        StorageErrorKind::NotFound => MidgeError::NotFound,
-        StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
-        StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
-        StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
-        _ => MidgeError::Io(std::io::Error::other(err.to_string())),
-    }
-}
 
 #[derive(Debug)]
 enum PendingCloudWrite {
@@ -93,12 +82,8 @@ enum BatchApplyOp {
 pub struct WalActor {
     /// WAL writer (owned by this actor)
     writer: Option<Box<dyn WalWriter>>,
-    /// Storage backend for WAL files.
-    ///
-    /// WAL-related modules must not touch `std::fs` directly.
-    wal_storage: Option<Arc<dyn Storage>>,
-    /// Directory within the WAL storage root (usually empty).
-    wal_storage_dir: StoragePath,
+    /// Filesystem backend for WAL files (io::Fs abstraction)
+    wal_fs: Option<Arc<dyn Fs>>,
     /// Buffered writes pending sync
     pending_sync_count: usize,
     /// Durability policy (determines sync behavior)
@@ -120,21 +105,18 @@ impl WalActor {
         durability_policy: DurabilityPolicy,
         memory_mode: bool,
     ) -> MidgeResult<Self> {
-        let (wal_storage, wal_storage_dir, writer) = if memory_mode {
-            (None, StoragePath::new(""), None)
+        let (wal_fs, writer) = if memory_mode {
+            (None, None)
         } else {
-            let storage: Arc<dyn Storage> =
-                Arc::new(LocalFsStorage::new(&wal_dir).map_err(map_storage_error)?);
-            let dir = StoragePath::new("");
-            let factory = FsWalFactory;
-            let writer = Some(factory.create_writer(storage.as_ref(), &dir)?);
-            (Some(storage), dir, writer)
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new(&wal_dir)?);
+            let factory = FsWalFactoryIo::new(Arc::clone(&fs));
+            let writer = Some(factory.create_writer("wal.log")?);
+            (Some(fs), writer)
         };
 
         Ok(Self {
             writer,
-            wal_storage,
-            wal_storage_dir,
+            wal_fs,
             pending_sync_count: 0,
             durability_policy,
             pending_cloud_writes: VecDeque::new(),
@@ -733,19 +715,21 @@ impl WalActor {
     pub fn rotate(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         let old_segment = state.wal.current_segment_id;
 
-        // IMPORTANT (Windows): the active `wal.log` must be closed before `fs::rename`.
-        // `FsWalFactory::rotate_writer` renames `wal.log` to `{segment_id}.wal`.
-        // Renaming an open file is denied on Windows, so drop the writer first.
+        // Close the current writer before renaming
         let _ = self.writer.take();
 
-        // Rotate via factory
-        let factory = FsWalFactory;
-        let storage = self
-            .wal_storage
-            .as_ref()
-            .expect("wal_storage must exist when not in memory_mode");
-        self.writer =
-            Some(factory.rotate_writer(storage.as_ref(), &self.wal_storage_dir, old_segment)?);
+        if let Some(fs) = &self.wal_fs {
+            // Rename wal.log to {old_segment}.wal
+            let old_path = FsPath::new("wal.log");
+            let new_path = FsPath::new(format!("{old_segment}.wal"));
+
+            // Rename may fail if file doesn't exist (e.g., in memory mode)
+            let _ = fs.rename_atomic(&old_path, &new_path);
+
+            // Create new writer for the next segment
+            let factory = FsWalFactoryIo::new(Arc::clone(fs));
+            self.writer = Some(factory.create_writer("wal.log")?);
+        }
 
         state.wal.current_segment_id += 1;
 

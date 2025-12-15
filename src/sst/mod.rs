@@ -196,11 +196,34 @@
 //!
 //! Provides both in-memory memtables and on-disk SST file implementations.
 //!
+//! ## Key Design: SST uses `std::fs` directly, NOT `storage/` layer
+//!
+//! SSTs intentionally use synchronous, direct filesystem I/O via `std::fs` rather than
+//! the callback-driven `StorageBackend` trait. This is correct because:
+//!
+//! - **Immutable after finalize()**: SST files never change once written, only read or deleted
+//! - **Blocking I/O required**: SST access patterns (seek + read at offset) need synchronous I/O
+//! - **Local files first**: SSTs are written locally, then replicated to cloud via HybridStorage
+//! - **Hot path on read side**: Reader needs fast, direct access without callback overhead
+//!
+//! ### Integration with Storage Layer
+//!
+//! - **Write path**: Compaction creates SSTs via `FsSstFactoryIo` (using io::Fs abstraction)
+//!   → Files stored in local directory
+//!   → HybridStorage replicates to cloud (via `StorageBackend` callbacks)
+//!
+//! - **Read path**: Queries use `SstFileIo` to read local SSTs
+//!   → Uses io::Fs for flexible filesystem backends (Real, Mock, Chaos)
+//!   → Block cache + bloom filters for optimization
+//!   → No cloud access on read (reads hit local cache or cloud-synced local file)
+//!
+//! ## Module Overview
+//!
 //! - **memtable**: In-memory skiplist-based key-value store
 //! - **encoding**: TLV-based entry encoding for SST files
 //! - **types**: SST file format types (blocks, footers, handles)
 //! - **traits**: Reader/Writer/Factory contracts for SST implementations
-//! - **fs**: Filesystem-backed SST implementation
+//! - **fs**: Filesystem-backed SST implementation (uses io::Fs abstraction)
 
 use crate::common::MidgeResult;
 use crate::iterators::skiplist::OpType;
@@ -226,7 +249,7 @@ pub use compression::{
     compress_block, decompress_block, CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE,
     MAX_BLOCK_SIZE, MIN_COMPRESS_SIZE,
 };
-pub use fs::FsSstFactory;
+pub use fs::FsSstFactoryIo;
 pub use index::{IndexKind, IndexTuner, KeyStructureProfile, KeyStructureProfiler};
 pub use read_amp_metrics::ReadAmpMetrics;
 pub use sparse_index::{BlockRange, IndexEntry, SparseIndexReader, SparseIndexWriter};

@@ -2,12 +2,13 @@
 //!
 //! Clean architectural layers:
 //!   - `common`      - foundational types with zero dependencies
+//!   - `io`          - base filesystem abstraction (Fs, File, RealFs, MockFs, ChaosFs)
 //!   - `engine`      - main KV store and public API surface
 //!   - `runtime`     - background actors (compaction, flush, metrics)
 //!   - `metadata`    - manifest + version mgmt
-//!   - `wal`         - write-ahead log abstraction
-//!   - `sst`         - sorted-string table formats + readers/writers
-//!   - `storage`     - storage backend abstraction (fs, cloud, hybrid)
+//!   - `wal`         - write-ahead log (uses io:: abstraction)
+//!   - `sst`         - sorted-string table (uses io:: abstraction)
+//!   - `storage`     - storage orchestration layer (fs, cloud, hybrid)
 //!   - `compaction`  - compaction planning + execution
 //!   - `iterators`   - iterator implementations
 //!   - `metrics`     - performance instrumentation
@@ -23,6 +24,9 @@
 
 // Foundation - no dependencies
 pub mod common;
+
+// Base I/O abstraction - domain-agnostic filesystem
+pub mod io;
 
 // Telemetry (observability)
 pub mod telemetry;

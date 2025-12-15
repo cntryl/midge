@@ -1,41 +1,59 @@
-use std::collections::HashMap;
+//! In-memory mock filesystem implementation
+//!
+//! Deterministic, no I/O, suitable for testing.
 
+use super::traits::*;
 use bytes::Bytes;
+use std::collections::HashMap;
+use std::sync::Arc;
 use parking_lot::Mutex;
-
-use super::{DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, FileCaps, IoSlice, IoSliceMut, Metadata, OpenOptions, ReadRange};
-
-#[derive(Debug, Default)]
-pub struct MockFs {
-    files: Mutex<HashMap<String, MockFileData>>,
-    dirs: Mutex<HashMap<String, Vec<String>>>,
-}
 
 #[derive(Debug, Clone)]
 struct MockFileData {
     data: Vec<u8>,
-    synced: bool,
+}
+
+/// In-memory mock filesystem
+#[derive(Debug, Clone, Default)]
+pub struct MockFs {
+    files: Arc<Mutex<HashMap<String, MockFileData>>>,
 }
 
 impl MockFs {
+    /// Create a new empty mock filesystem
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Get file contents for testing
+    #[allow(dead_code)]
+    pub fn get_file(&self, path: &str) -> Option<Vec<u8>> {
+        self.files.lock().get(path).map(|f| f.data.clone())
+    }
+
+    /// Clear all files
+    #[allow(dead_code)]
+    pub fn clear(&self) {
+        self.files.lock().clear();
     }
 }
 
 impl Fs for MockFs {
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let mut files = self.files.lock();
-        let data = files.entry(path.0.clone()).or_insert_with(|| MockFileData {
-            data: Vec::new(),
-            synced: false,
-        });
-        if opts.truncate {
-            data.data.clear();
-        }
-        if opts.create_new && !data.data.is_empty() {
+
+        if opts.create_new && files.contains_key(&path.0) {
             return Err(FsError::AlreadyExists(path.0.clone()));
         }
+
+        let file_data = files
+            .entry(path.0.clone())
+            .or_insert_with(|| MockFileData { data: Vec::new() });
+
+        if opts.truncate {
+            file_data.data.clear();
+        }
+
         Ok(Box::new(MockFile {
             path: path.0.clone(),
             fs: self,
@@ -51,40 +69,49 @@ impl Fs for MockFs {
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        let files = self.files.lock();
-        Ok(files.contains_key(&path.0))
+        Ok(self.files.lock().contains_key(&path.0))
     }
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
         let files = self.files.lock();
         if let Some(data) = files.get(&path.0) {
-            Ok(Metadata { len: data.data.len() as u64 })
+            Ok(Metadata {
+                len: data.data.len() as u64,
+            })
         } else {
             Err(FsError::NotFound(path.0.clone()))
         }
     }
 
-    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
-        let mut dirs = self.dirs.lock();
-        dirs.entry(path.0.clone()).or_default();
+    fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
+        // Mock filesystem doesn't track directories
         Ok(())
     }
 
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        let dirs = self.dirs.lock();
-        if let Some(entries) = dirs.get(&path.0) {
-            Ok(entries.iter().map(|name| DirEntry {
+        let files = self.files.lock();
+        let entries: Vec<_> = files
+            .keys()
+            .filter(|k| k.starts_with(&path.0))
+            .map(|name| DirEntry {
                 name: name.clone(),
-                is_dir: false, // For simplicity, assume all are files
-            }).collect())
-        } else {
-            Err(FsError::NotFound(path.0.clone()))
+                is_dir: false,
+            })
+            .collect();
+
+        if entries.is_empty() && !path.0.is_empty() {
+            return Err(FsError::NotFound(path.0.clone()));
         }
+
+        Ok(entries)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
-        let mut dirs = self.dirs.lock();
-        if dirs.remove(&path.0).is_none() {
+        let mut files = self.files.lock();
+        let before = files.len();
+        files.retain(|k, _| !k.starts_with(&path.0));
+        
+        if files.len() == before {
             return Err(FsError::NotFound(path.0.clone()));
         }
         Ok(())
@@ -116,9 +143,11 @@ impl<'a> File for MockFile<'a> {
         if let Some(data) = files.get(&self.path) {
             let start = offset as usize;
             let end = (offset + len) as usize;
+
             if start > data.data.len() {
                 return Err(FsError::Io("offset beyond file".to_string()));
             }
+
             let slice = &data.data[start..end.min(data.data.len())];
             Ok(Bytes::from(slice.to_vec()))
         } else {
@@ -131,11 +160,12 @@ impl<'a> File for MockFile<'a> {
         if let Some(file_data) = files.get_mut(&self.path) {
             let start = offset as usize;
             let end = start + data.len();
+
             if end > file_data.data.len() {
                 file_data.data.resize(end, 0);
             }
+
             file_data.data[start..end].copy_from_slice(&data);
-            file_data.synced = false;
             Ok(())
         } else {
             Err(FsError::NotFound(self.path.clone()))
@@ -147,7 +177,6 @@ impl<'a> File for MockFile<'a> {
         if let Some(file_data) = files.get_mut(&self.path) {
             let pos = file_data.data.len() as u64;
             file_data.data.extend_from_slice(&data);
-            file_data.synced = false;
             Ok(pos)
         } else {
             Err(FsError::NotFound(self.path.clone()))
@@ -163,13 +192,7 @@ impl<'a> File for MockFile<'a> {
         }
     }
 
-    fn sync(&mut self, dur: Durability) -> FsResult<()> {
-        if dur == Durability::Durable {
-            let mut files = self.fs.files.lock();
-            if let Some(data) = files.get_mut(&self.path) {
-                data.synced = true;
-            }
-        }
+    fn sync(&mut self, _dur: Durability) -> FsResult<()> {
         Ok(())
     }
 
@@ -177,44 +200,67 @@ impl<'a> File for MockFile<'a> {
         Ok(())
     }
 
-    fn writev_at(&mut self, offset: u64, bufs: &[IoSlice<'_>]) -> FsResult<u64> {
-        let mut total = 0usize;
-        for b in bufs { total += b.len(); }
-        let mut tmp = Vec::with_capacity(total);
-        for b in bufs { tmp.extend_from_slice(b); }
-        self.write_at(offset, bytes::Bytes::from(tmp))?;
-        Ok(total as u64)
+    fn caps(&self) -> FileCaps {
+        FileCaps::empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_write_and_read() -> FsResult<()> {
+        let fs = MockFs::new();
+        let path = FsPath::new("test.txt");
+
+        let mut file = fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+
+        file.append(Bytes::from("hello"))?;
+        drop(file);
+
+        let file = fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+
+        let data = file.read_at(0, 5)?;
+        assert_eq!(data, Bytes::from("hello"));
+        Ok(())
     }
 
-    fn appendv(&mut self, bufs: &[IoSlice<'_>]) -> FsResult<u64> {
-        let mut total = 0usize;
-        for b in bufs { total += b.len(); }
-        let mut tmp = Vec::with_capacity(total);
-        for b in bufs { tmp.extend_from_slice(b); }
-        self.append(bytes::Bytes::from(tmp))
-    }
+    #[test]
+    fn should_delete_file() -> FsResult<()> {
+        let fs = MockFs::new();
+        let path = FsPath::new("test.txt");
 
-    fn readv_at(&self, offset: u64, bufs: &mut [IoSliceMut<'_>]) -> FsResult<u64> {
-        let need: usize = bufs.iter().map(|b| b.len()).sum();
-        let data = self.read_at(offset, need as u64)?;
-        let mut written = 0usize;
-        let mut cursor = &data[..];
-        for b in bufs {
-            let n = b.len().min(cursor.len());
-            b[..n].copy_from_slice(&cursor[..n]);
-            cursor = &cursor[n..];
-            written += n;
-        }
-        Ok(written as u64)
-    }
+        let mut file = fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        file.append(Bytes::from("data"))?;
+        drop(file);
 
-    fn read_ranges(&self, ranges: &[ReadRange]) -> FsResult<Vec<bytes::Bytes>> {
-        let mut out = Vec::with_capacity(ranges.len());
-        for r in ranges {
-            out.push(self.read_at(r.offset, r.len as u64)?);
-        }
-        Ok(out)
+        fs.remove_file(&path)?;
+        assert!(!fs.exists(&path)?);
+        Ok(())
     }
-
-    fn caps(&self) -> FileCaps { FileCaps::empty() }
 }

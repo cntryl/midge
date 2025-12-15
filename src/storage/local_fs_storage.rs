@@ -1,9 +1,14 @@
-//! Local filesystem implementation of the stable storage abstraction.
+//! Local filesystem implementation of the `Storage` trait (abstraction layer).
 //!
-//! This is intentionally conservative and portable:
+//! **NOT on the hot path.** This implementation is used only by WAL recovery tests
+//! and kept for contract compatibility with the `Storage` trait.
+//!
+//! Design is intentionally conservative and portable:
 //! - Uses a per-handle mutex for correctness (slow).
 //! - Does not assume POSIX directory fsync semantics.
 //! - Provides explicit durability via `sync()`.
+//!
+//! For actual hot-path I/O, use `FileSystem` which implements `StorageBackend`.
 
 use crate::storage::abstraction::{
     Atomicity, DirEntry, Durability, FileCapabilities, OpenMode, OpenOptions, ReadRange,

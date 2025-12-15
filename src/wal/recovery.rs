@@ -344,12 +344,14 @@ fn apply_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::RealFs;
     use crate::storage::abstraction::StoragePath;
     use crate::storage::LocalFsStorage;
-    use crate::wal::fs::FsWalWriter;
+    use crate::wal::fs::FsWalWriterIo;
     use crate::wal::types::WalOpKind;
     use crate::wal::WalWriter;
     use bytes::Bytes;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -387,11 +389,14 @@ mod tests {
     #[test]
     fn should_recover_put_record_key_value_when_replaying_wal() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
             let record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"test_key"),
@@ -413,11 +418,14 @@ mod tests {
     #[test]
     fn should_increment_record_count_when_replaying_put() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
             let record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"test_key"),
@@ -437,11 +445,14 @@ mod tests {
     #[test]
     fn should_track_max_sequence_from_put_record() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
             let record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"test_key"),
@@ -461,11 +472,14 @@ mod tests {
     #[test]
     fn should_recover_delete_operation_when_replaying_wal() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
             let put_record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"test_key"),
@@ -492,11 +506,14 @@ mod tests {
     fn should_count_put_records() {
         // Arrange
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
             let put_record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"test_key"),
@@ -522,11 +539,14 @@ mod tests {
     #[test]
     fn should_separate_records_by_column_family_when_recovering() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
             let record_cf0 = WalRecord::new_cf(
                 0,
@@ -557,11 +577,14 @@ mod tests {
     #[test]
     fn should_recover_both_column_families_with_correct_data() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
             let record_cf0 = WalRecord::new_cf(
                 0,
@@ -593,11 +616,14 @@ mod tests {
     #[test]
     fn should_count_records_across_multiple_column_families() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
             let record_cf0 = WalRecord::new_cf(
                 0,
@@ -628,11 +654,14 @@ mod tests {
     #[test]
     fn should_track_max_sequence_across_multiple_records() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
             let record1 = WalRecord::new(
                 WalOpKind::Put,
@@ -669,11 +698,14 @@ mod tests {
     #[test]
     fn should_count_multiple_records_correctly() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
             let record1 = WalRecord::new(
                 WalOpKind::Put,
@@ -710,11 +742,14 @@ mod tests {
     #[test]
     fn should_return_none_max_sequence_when_no_records() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let _writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let _writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
         }
 
         let mut memtables = HashMap::new();
@@ -726,11 +761,14 @@ mod tests {
     #[test]
     fn should_return_zero_record_count_when_no_records() {
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let _writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let _writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
         }
 
         let mut memtables = HashMap::new();
@@ -745,11 +783,14 @@ mod tests {
     fn should_skip_expired_records_during_recovery() {
         // Arrange
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
             let mut expired_record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"expired_key"),
@@ -791,11 +832,14 @@ mod tests {
     fn should_track_bytes_accounting_correctly() {
         // Arrange
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
             let record = WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"key123"),         // 6 bytes
@@ -820,11 +864,14 @@ mod tests {
     fn should_handle_delete_range_operations() {
         // Arrange
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
             // Add a put record first
             let put_record = WalRecord::new(
@@ -860,11 +907,14 @@ mod tests {
     fn should_handle_merge_operations() {
         // Arrange
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
             // Merge operations are currently not applied, but should not cause errors
             let merge_record = WalRecord::new(
@@ -889,11 +939,14 @@ mod tests {
     fn should_handle_transaction_markers() {
         // Arrange
         let dir = TempDir::new().unwrap();
+        let wal_subdir = dir.path().join("wal");
+        std::fs::create_dir(&wal_subdir).unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let wal_dir = StoragePath::new("wal");
 
         {
-            let writer = FsWalWriter::new(&storage, &wal_dir).unwrap();
+            let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+            let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
 
             let begin_record =
                 WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn_key"), None, 1);
