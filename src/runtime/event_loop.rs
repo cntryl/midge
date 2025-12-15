@@ -388,6 +388,13 @@ impl EventLoop {
             return 0;
         }
 
+        // IMPORTANT: If we already have a buffered non-write message, do not `try_recv()`.
+        // Otherwise we could consume another non-write message and have nowhere to stash it,
+        // effectively dropping it and causing the corresponding `send_and_wait()` to hang.
+        if self.pending_msg.is_some() {
+            return 0;
+        }
+
         let mut drained = 0usize;
 
         while drained < max {
@@ -848,7 +855,26 @@ impl EventLoop {
                             .append_batch(&mut self.state, request_id, ops)
                         {
                             Ok((last_sequence, op_count, deferred)) => {
-                                if !deferred {
+                                if deferred {
+                                    if let Some(waiters) = &self.durability_waiters {
+                                        waiters.join(DurabilityWaiter::WriteBatch {
+                                            request_id,
+                                            last_sequence,
+                                            op_count,
+                                        });
+                                    } else {
+                                        // Should never happen, but avoid hanging the caller.
+                                        self.respond(
+                                            request_id,
+                                            RuntimeResponse::WriteBatchAppended {
+                                                request_id,
+                                                last_sequence,
+                                                op_count,
+                                            },
+                                        );
+                                    }
+                                } else {
+                                    // Strict/CloudMirrored: completes immediately inside append_batch.
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WriteBatchAppended {
@@ -857,12 +883,6 @@ impl EventLoop {
                                             op_count,
                                         },
                                     );
-                                } else if let Some(waiters) = &self.durability_waiters {
-                                    waiters.join(DurabilityWaiter::WriteBatch {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                    });
                                 }
                             }
                             Err(e) => {
