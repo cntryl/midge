@@ -308,7 +308,7 @@ impl RuntimeState {
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             read_only: false,
             memory_mode,
-            intent_log: intent_log,
+            intent_log,
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             write_stalled: false,
             total_memtable_bytes: 0,

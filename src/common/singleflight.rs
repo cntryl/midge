@@ -117,7 +117,7 @@ where
             .expect("keyed group commit mutex poisoned");
         let mut out = Vec::new();
 
-        out.extend(state.pending.drain(..));
+        out.append(&mut state.pending);
         for (_, mut ws) in state.inflight.drain() {
             out.append(&mut ws);
         }

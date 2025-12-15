@@ -50,10 +50,7 @@ fn map_storage_error(err: crate::storage::abstraction::StorageError) -> MidgeErr
         StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
         StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
         StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
-        _ => MidgeError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            err.to_string(),
-        )),
+        _ => MidgeError::Io(std::io::Error::other(err.to_string())),
     }
 }
 
@@ -661,7 +658,7 @@ impl WalActor {
             self.sync_calls += 1;
             self.sync_total += elapsed;
 
-            if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some() && self.sync_calls % 1000 == 0 {
+            if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some() && self.sync_calls.is_multiple_of(1000) {
                 let avg_ms = (self.sync_total.as_secs_f64() * 1000.0) / (self.sync_calls as f64);
                 eprintln!(
                     "[midge] wal.sync: calls={} total_ms={:.2} avg_ms={:.3}",

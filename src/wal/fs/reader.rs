@@ -28,10 +28,7 @@ fn map_storage_error(err: StorageError) -> MidgeError {
         StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
         StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
         StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
-        _ => MidgeError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            err.to_string(),
-        )),
+        _ => MidgeError::Io(std::io::Error::other(err.to_string())),
     }
 }
 
@@ -199,6 +196,7 @@ impl WalReaderDyn for FsWalReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::fs::join;
     use crate::storage::test_support::{build_temp_local_storage, TempLocalStorage};
     use crate::wal::fs::FsWalWriter;
     use crate::wal::traits::{WalReader, WalWriter};
@@ -211,6 +209,10 @@ mod tests {
 
     fn new_reader(temp: &TempLocalStorage) -> MidgeResult<FsWalReader> {
         FsWalReader::new(temp.storage.as_ref(), &temp.root)
+    }
+
+    fn setup_test() -> TempLocalStorage {
+        build_temp_local_storage().unwrap()
     }
 
     // =========== Reader Creation and Initialization Tests ===========
@@ -343,7 +345,7 @@ mod tests {
 
         // Truncate the file to simulate corruption (via storage abstraction):
         // rewrite only the first half of the file into a newly truncated file.
-        let wal_log = super::join(&temp.root, "wal.log");
+        let wal_log = join(&temp.root, "wal.log");
         let file_ro = temp
             .storage
             .open_file(
@@ -449,7 +451,7 @@ mod tests {
         drop(writer);
 
         // Act
-        let mut reader = new_reader(&dir).unwrap();
+        let mut reader = new_reader(&temp).unwrap();
         let mut count = 0;
         let mut keys = Vec::new();
         let result = WalReader::replay(&mut reader, 0, |record| {
@@ -468,7 +470,7 @@ mod tests {
     #[test]
     fn should_replay_from_middle_position() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let dir = setup_test();
         let writer = new_writer(&dir);
         let record1 = WalRecord {
             op: WalOpKind::Put,
@@ -513,7 +515,7 @@ mod tests {
     #[test]
     fn should_stop_replay_on_callback_error() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let dir = setup_test();
         let writer = new_writer(&dir);
         for i in 0..5 {
             let record = WalRecord {
@@ -552,7 +554,7 @@ mod tests {
     #[test]
     fn should_handle_empty_file_replay() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let dir = setup_test();
         let writer = new_writer(&dir);
         writer.sync().unwrap();
         drop(writer);
@@ -575,7 +577,7 @@ mod tests {
     #[test]
     fn should_close_without_error() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let dir = setup_test();
         let writer = new_writer(&dir);
         let record = WalRecord {
             op: WalOpKind::Put,
@@ -605,7 +607,7 @@ mod tests {
     #[test]
     fn should_preserve_binary_key_and_value() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let dir = setup_test();
         let writer = new_writer(&dir);
         let binary_key = vec![0u8, 1u8, 255u8, 254u8];
         let binary_value = vec![127u8, 128u8, 64u8, 32u8];
@@ -636,7 +638,7 @@ mod tests {
     #[test]
     fn should_handle_large_records() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let dir = setup_test();
         let writer = new_writer(&dir);
         let large_value = vec![42u8; 100_000]; // 100 KB
         let record = WalRecord {
@@ -665,7 +667,7 @@ mod tests {
     #[test]
     fn should_handle_multiple_sequential_reads() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let dir = setup_test();
         let writer = new_writer(&dir);
         let records = vec![
             WalRecord {
@@ -716,7 +718,7 @@ mod tests {
     #[test]
     fn should_handle_delete_records_without_value() {
         // Arrange
-        let dir = TempDir::new().unwrap();
+        let dir = setup_test();
         let writer = new_writer(&dir);
         let record = WalRecord {
             op: WalOpKind::Delete,

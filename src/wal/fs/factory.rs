@@ -22,10 +22,7 @@ fn map_storage_error(err: crate::storage::abstraction::StorageError) -> MidgeErr
         StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
         StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
         StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
-        _ => MidgeError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            err.to_string(),
-        )),
+        _ => MidgeError::Io(std::io::Error::other(err.to_string())),
     }
 }
 

@@ -36,11 +36,13 @@ pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 
 /// Cloud operation outcome – cloneable wrapper around Result
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum CloudOutcome<T: Clone> {
     Ok(T),
     Err(String),
 }
 
+#[allow(dead_code)]
 impl<T: Clone> CloudOutcome<T> {
     pub fn is_ok(&self) -> bool {
         matches!(self, CloudOutcome::Ok(_))
@@ -60,6 +62,7 @@ impl<T: Clone> CloudOutcome<T> {
 
 /// Cloud operation completion events sent back via callback.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum CloudEvent {
     PutComplete {
         key: String,
@@ -94,12 +97,14 @@ pub type CloudCallback = std::sync::mpsc::Sender<CloudEvent>;
 
 /// Basic metadata emitted by HEAD operations.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ObjectMetadata {
     pub size: u64,
     pub etag: String,
     pub last_modified: u64,
 }
 
+#[allow(dead_code)]
 impl ObjectMetadata {
     pub fn new(size: u64, etag: String, last_modified: u64) -> Self {
         Self {
@@ -111,6 +116,7 @@ impl ObjectMetadata {
 }
 
 /// Non-blocking cloud backend interface used by the engine.
+#[allow(dead_code)]
 pub trait CloudBackend: Send + Sync + 'static {
     fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback);
     fn submit_get(&self, key: String, callback: CloudCallback);
@@ -121,12 +127,14 @@ pub trait CloudBackend: Send + Sync + 'static {
 }
 
 /// Deterministic mock backend for testing (synchronous).
+#[allow(dead_code)]
 pub struct MockCloudBackend {
     storage: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     uploads: Arc<Mutex<Vec<(String, u64)>>>,
     downloads: Arc<Mutex<Vec<String>>>,
 }
 
+#[allow(dead_code)]
 impl MockCloudBackend {
     pub fn new() -> Self {
         Self {

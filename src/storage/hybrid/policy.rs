@@ -67,9 +67,9 @@ impl Default for StorageBudgetPolicy {
 pub enum EvictionStrategy {
     /// Least Recently Used
     #[default]
-    LRU,
+    Lru,
     /// FIFO (oldest first)
-    FIFO,
+    Fifo,
     /// Random eviction
     Random,
 }
@@ -161,8 +161,8 @@ mod tests {
     #[test]
     fn should_have_eviction_strategies_with_default() {
         // Arrange & Act & Assert
-        assert_eq!(EvictionStrategy::default(), EvictionStrategy::LRU);
-        assert_ne!(EvictionStrategy::LRU, EvictionStrategy::FIFO);
-        assert_ne!(EvictionStrategy::FIFO, EvictionStrategy::Random);
+        assert_eq!(EvictionStrategy::default(), EvictionStrategy::Lru);
+        assert_ne!(EvictionStrategy::Lru, EvictionStrategy::Fifo);
+        assert_ne!(EvictionStrategy::Fifo, EvictionStrategy::Random);
     }
 }

@@ -64,14 +64,14 @@ impl LocalFsStorage {
 }
 
 struct LocalFsFile {
-    path: PathBuf,
+    _path: PathBuf,
     file: Mutex<fs::File>,
 }
 
 impl LocalFsFile {
     fn new(path: PathBuf, file: fs::File) -> Self {
         Self {
-            path,
+            _path: path,
             file: Mutex::new(file),
         }
     }
@@ -274,7 +274,7 @@ impl Storage for LocalFsStorage {
         to: &StoragePath,
         options: RenameOptions,
     ) -> StorageResult<RenameReport> {
-        if options.require_atomic == true {
+        if options.require_atomic {
             // We assume within-root renames are atomic on local filesystems.
             // If a caller needs stronger guarantees (dir fsync), it must use storage-specific policy.
         }

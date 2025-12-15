@@ -60,10 +60,12 @@ impl Default for DiskState {
 }
 
 /// Atomic disk state for lock-free reads
+#[allow(dead_code)]
 pub struct AtomicDiskState {
     total_committed: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl AtomicDiskState {
     pub fn new() -> Self {
         Self {

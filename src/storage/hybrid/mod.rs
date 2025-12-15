@@ -45,9 +45,3 @@ pub mod actor;
 pub mod backend;
 pub mod policy;
 pub mod state;
-
-// Re-exports for convenience
-pub use actor::{ReservationResult, StorageBudgetActor, StorageBudgetEvent};
-pub use backend::{HybridStorage, UploadState, UploadStatus};
-pub use policy::{EvictionStrategy, StorageBudgetPolicy};
-pub use state::{AtomicDiskState, DiskState};

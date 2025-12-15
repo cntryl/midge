@@ -357,6 +357,12 @@ pub trait StorageFile: Send {
     /// Returns the current file length.
     fn len(&self) -> StorageResult<u64>;
 
+    /// Returns true if the file is empty (length is 0).
+    #[inline]
+    fn is_empty(&self) -> StorageResult<bool> {
+        Ok(self.len()? == 0)
+    }
+
     /// Explicit durability boundary for this file.
     fn sync(&mut self, mode: SyncMode) -> StorageResult<()>;
 

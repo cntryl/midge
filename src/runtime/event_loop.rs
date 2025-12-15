@@ -397,10 +397,7 @@ impl EventLoop {
             let storage_rx_opt = self.hybrid_storage_events.clone();
             let msg = if let Some(storage_rx) = storage_rx_opt {
                 crossbeam::channel::select! {
-                    recv(msg_rx) -> msg => match msg {
-                        Ok(msg) => Some(msg),
-                        Err(_) => None,
-                    },
+                    recv(msg_rx) -> msg => msg.ok(),
                     recv(storage_rx) -> ev => {
                         if let Ok(ev) = ev {
                             self.handle_storage_event(ev);

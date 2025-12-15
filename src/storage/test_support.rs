@@ -1,12 +1,12 @@
+#![allow(clippy::items_after_test_module)]
+
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::common::MidgeResult;
 
-use crate::storage::abstraction::{Storage, StoragePath};
-
 use super::filesystem::FileSystem;
-use super::LocalFsStorage;
 use super::{HybridStorage, StorageEvent};
 
 pub(crate) struct CloudBackedTestSetup {
@@ -20,7 +20,7 @@ pub(crate) struct CloudBackedTestSetup {
 /// The engine/testkit should not know about folders/blobs; it only needs the
 /// resulting HybridStorage, event stream, and a recovery directory.
 pub(crate) fn build_cloud_backed_filesystem_simulation(
-    db_path: &PathBuf,
+    db_path: &Path,
 ) -> MidgeResult<CloudBackedTestSetup> {
     // Simulate cloud with a separate filesystem-backed store under db_path.
     let cloud_root = db_path.join("cloud_store");
@@ -44,31 +44,38 @@ pub(crate) fn build_cloud_backed_filesystem_simulation(
     })
 }
 
-/// Opaque temp local storage for unit tests.
-///
-/// This lives under `storage/` so other layers (e.g. WAL) can test against
-/// a real backend without directly touching filesystem paths.
-pub(crate) struct TempLocalStorage {
-    _tempdir: tempfile::TempDir,
-    pub storage: Arc<dyn Storage>,
-    pub root: StoragePath,
+#[cfg(test)]
+mod test_support_impl {
+    use super::*;
+    use crate::storage::abstraction::{Storage, StorageError, StorageErrorKind, StoragePath};
+    use crate::storage::LocalFsStorage;
+
+    /// Opaque temp local storage for unit tests.
+    ///
+    /// This lives under `storage/` so other layers (e.g. WAL) can test against
+    /// a real backend without directly touching filesystem paths.
+    pub(crate) struct TempLocalStorage {
+        _tempdir: tempfile::TempDir,
+        pub storage: Arc<dyn Storage>,
+        pub root: StoragePath,
+    }
+
+    pub(crate) fn build_temp_local_storage(
+    ) -> crate::storage::abstraction::StorageResult<TempLocalStorage> {
+        let tempdir = tempfile::TempDir::new().map_err(|e| {
+            StorageError::with_source(StorageErrorKind::Io, "TempDir::new", e)
+        })?;
+
+        let storage: Arc<dyn Storage> = Arc::new(LocalFsStorage::new(tempdir.path())?);
+        let root = StoragePath::new("");
+
+        Ok(TempLocalStorage {
+            _tempdir: tempdir,
+            storage,
+            root,
+        })
+    }
 }
 
-pub(crate) fn build_temp_local_storage() -> crate::storage::abstraction::StorageResult<TempLocalStorage> {
-    let tempdir = tempfile::TempDir::new().map_err(|e| {
-        crate::storage::abstraction::StorageError::with_source(
-            crate::storage::abstraction::StorageErrorKind::Io,
-            "TempDir::new",
-            e,
-        )
-    })?;
-
-    let storage: Arc<dyn Storage> = Arc::new(LocalFsStorage::new(tempdir.path())?);
-    let root = StoragePath::new("");
-
-    Ok(TempLocalStorage {
-        _tempdir: tempdir,
-        storage,
-        root,
-    })
-}
+#[cfg(test)]
+pub(crate) use test_support_impl::{build_temp_local_storage, TempLocalStorage};

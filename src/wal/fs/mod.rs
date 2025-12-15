@@ -13,7 +13,7 @@ pub use writer::FsWalWriter;
 
 use crate::storage::abstraction::StoragePath;
 
-fn join(dir: &StoragePath, leaf: &str) -> StoragePath {
+pub fn join(dir: &StoragePath, leaf: &str) -> StoragePath {
     let base = dir.as_str().trim_end_matches('/');
     if base.is_empty() {
         StoragePath::new(leaf)

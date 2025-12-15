@@ -29,10 +29,7 @@ fn map_storage_error(err: StorageError) -> MidgeError {
         StorageErrorKind::Unsupported => MidgeError::NotSupported(err.message),
         StorageErrorKind::Corruption => MidgeError::Corruption(err.message),
         StorageErrorKind::InvalidInput => MidgeError::InvalidArgument(err.message),
-        _ => MidgeError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            err.to_string(),
-        )),
+        _ => MidgeError::Io(std::io::Error::other(err.to_string())),
     }
 }
 
@@ -157,6 +154,7 @@ impl WalWriter for FsWalWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::fs::join;
     use crate::storage::abstraction::{OpenMode, OpenOptions};
     use crate::storage::test_support::{build_temp_local_storage, TempLocalStorage};
     use bytes::Bytes;
@@ -167,7 +165,7 @@ mod tests {
     }
 
     fn open_wal_log_readonly(temp: &TempLocalStorage) -> Box<dyn StorageFile> {
-        let wal_log = super::join(&temp.root, "wal.log");
+        let wal_log = join(&temp.root, "wal.log");
         temp.storage
             .open_file(
                 &wal_log,

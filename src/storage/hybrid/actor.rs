@@ -69,7 +69,7 @@ impl StorageBudgetActor {
         Self {
             policy,
             disk_state: DiskState::new(),
-            eviction_strategy: EvictionStrategy::LRU,
+            eviction_strategy: EvictionStrategy::Lru,
             pending_evictions: VecDeque::new(),
             last_watermark_state: WatermarkState::Normal,
         }

@@ -370,10 +370,7 @@ fn should_batch_concurrent_puts_when_cloudfirst_mode() {
         let uploads: usize = std::fs::read_dir(&cloud_wal_dir)
             .unwrap_or_else(|e| panic!("read_dir({cloud_wal_dir:?}) failed: {e}"))
             .filter_map(|e| e.ok())
-            .filter(|e| match e.path().extension().and_then(|s| s.to_str()) {
-                Some("wal") => true,
-                _ => false,
-            })
+            .filter(|e| matches!(e.path().extension().and_then(|s| s.to_str()), Some("wal")))
             .count();
 
         assert!(
