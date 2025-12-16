@@ -178,9 +178,8 @@ fn should_handle_many_operations_when_sequential() {
 }
 
 #[test]
-fn should_not_create_filesystem_artifacts_when_memory_mode() {
-    // This test validates that memory mode operates entirely in RAM.
-    // All storage modes should support this pattern with identical semantics.
+fn should_retrieve_written_data_across_storage_modes() {
+    // Validate that data written is retrievable across all storage modes.
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange: Open engine and write data
         let engine = open_with_mode(opts, mode);
