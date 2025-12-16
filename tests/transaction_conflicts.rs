@@ -729,27 +729,37 @@ fn should_persist_lost_update_prevention_after_restart() {
 // ============================================================================
 
 #[test]
-fn should_NOT_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
+fn should_not_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Verify that non-conflicting writes are never rejected
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act: Two transactions writing to different keys (no conflict)
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec()).unwrap();
-        
+
+        txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+            .unwrap();
+        txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
+            .unwrap();
+
         let r1 = engine.commit_transaction(txn1);
         let r2 = engine.commit_transaction(txn2);
-        
+
         // Assert: Both must succeed (no false positive conflict detection)
-        assert!(r1.is_ok(), "Non-conflicting write 1 was rejected in {}", mode);
-        assert!(r2.is_ok(), "Non-conflicting write 2 was rejected in {}", mode);
-        
+        assert!(
+            r1.is_ok(),
+            "Non-conflicting write 1 was rejected in {}",
+            mode
+        );
+        assert!(
+            r2.is_ok(),
+            "Non-conflicting write 2 was rejected in {}",
+            mode
+        );
+
         let v1 = engine.get(cf, b"key1").unwrap();
         let v2 = engine.get(cf, b"key2").unwrap();
         assert_eq!(v1, Some(Bytes::from_static(b"value1")));
@@ -758,34 +768,44 @@ fn should_NOT_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
 }
 
 #[test]
-fn should_preserve_BOTH_writes_when_non_overlapping_keys_given_concurrent_commits() {
+fn should_preserve_both_writes_when_non_overlapping_keys_given_concurrent_commits() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Verify that non-conflicting concurrent writes are both visible
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Pre-populate
         engine.put(cf, b"key1", b"old1").unwrap();
         engine.put(cf, b"key2", b"old2").unwrap();
-        
+
         // Act: Two concurrent updates to different keys
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.put(cf.id(), b"key1".to_vec(), b"new1".to_vec()).unwrap();
-        txn2.put(cf.id(), b"key2".to_vec(), b"new2".to_vec()).unwrap();
-        
+
+        txn1.put(cf.id(), b"key1".to_vec(), b"new1".to_vec())
+            .unwrap();
+        txn2.put(cf.id(), b"key2".to_vec(), b"new2".to_vec())
+            .unwrap();
+
         engine.commit_transaction(txn1).ok();
         engine.commit_transaction(txn2).ok();
-        
+
         // Assert: Both updates must be visible
         let v1 = engine.get(cf, b"key1").unwrap();
         let v2 = engine.get(cf, b"key2").unwrap();
-        
-        assert_eq!(v1, Some(Bytes::from_static(b"new1")), 
-                   "key1 update lost in {}", mode);
-        assert_eq!(v2, Some(Bytes::from_static(b"new2")), 
-                   "key2 update lost in {}", mode);
+
+        assert_eq!(
+            v1,
+            Some(Bytes::from_static(b"new1")),
+            "key1 update lost in {}",
+            mode
+        );
+        assert_eq!(
+            v2,
+            Some(Bytes::from_static(b"new2")),
+            "key2 update lost in {}",
+            mode
+        );
     });
 }

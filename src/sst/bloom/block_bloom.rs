@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn should_serialize_and_deserialize() -> MidgeResult<()> {
+    fn should_roundtrip_serialize_deserialize() -> MidgeResult<()> {
         // Arrange
         let mut filter = BlockBloomFilter::new();
         for i in 0..3 {

@@ -24,7 +24,7 @@ use std::sync::Arc;
 // If Midge allows dirty reads, it's Read Uncommitted.
 
 #[test]
-fn audit_dirty_read_prevention_uncommitted_writes() {
+fn should_prevent_dirty_reads_when_reading_uncommitted_writes() {
     eprintln!("\n=== AUDIT: DIRTY READ PREVENTION ===");
     eprintln!("Question: Can a transaction see uncommitted writes from another transaction?");
 
@@ -62,7 +62,7 @@ fn audit_dirty_read_prevention_uncommitted_writes() {
 // - Repeatable Read: Lost update possible
 
 #[test]
-fn audit_concurrent_write_conflict_resolution() {
+fn should_resolve_concurrent_write_conflicts_when_concurrent() {
     eprintln!("\n=== AUDIT: CONCURRENT WRITE CONFLICT ===");
     eprintln!("Question: What happens when two transactions write to the same key?");
 
@@ -136,7 +136,7 @@ fn audit_concurrent_write_conflict_resolution() {
 // LWW/Repeatable Read: Final count = 1 (lost update possible)
 
 #[test]
-fn audit_read_modify_write_conflict() {
+fn should_detect_read_modify_write_conflicts_when_concurrent() {
     eprintln!("\n=== AUDIT: READ-MODIFY-WRITE LOST UPDATE ===");
     eprintln!("Question: Does lost update prevention work?");
 
@@ -214,7 +214,7 @@ fn audit_read_modify_write_conflict() {
 // after snapshot creation.
 
 #[test]
-fn audit_phantom_read_prevention() {
+fn should_prevent_phantom_reads_when_isolation_enforced() {
     eprintln!("\n=== AUDIT: PHANTOM READ PREVENTION (Snapshot Isolation) ===");
     eprintln!("Question: Can rows inserted after transaction starts become visible?");
 
@@ -255,7 +255,7 @@ fn audit_phantom_read_prevention() {
 // LWW would allow it and last write wins.
 
 #[test]
-fn audit_write_skew_detection() {
+fn should_detect_write_skew_when_isolation_enabled() {
     eprintln!("\n=== AUDIT: WRITE SKEW (Serializable) ===");
     eprintln!("Question: Is write skew (concurrent reads of same base, disjoint writes) detected?");
 

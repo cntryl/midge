@@ -55,7 +55,7 @@ fn document_transaction_isolation_level_lww() {
 
 /// Verify: Dirty writes ARE prevented (not LWW quirk, but actual guarantee)
 #[test]
-fn verify_dirty_writes_prevented() {
+fn should_prevent_dirty_writes_when_uncommitted() {
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
@@ -75,7 +75,7 @@ fn verify_dirty_writes_prevented() {
 
 /// Verify: Concurrent writes both succeed, last one visible
 #[test]
-fn verify_concurrent_writes_lww() {
+fn should_resolve_concurrent_writes_with_lww_when_enabled() {
     let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
     let cf = engine.default_column_family();
 
@@ -106,7 +106,7 @@ fn verify_concurrent_writes_lww() {
 
 /// Verify: Lost updates ARE POSSIBLE in LWW (this is expected behavior)
 #[test]
-fn verify_lost_update_possible() {
+fn should_permit_lost_updates_when_not_prevented() {
     let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
     let cf = engine.default_column_family();
 
@@ -159,7 +159,7 @@ fn verify_lost_update_possible() {
 
 /// Verify: Snapshots see uncommitted changes (NOT true Snapshot Isolation)
 #[test]
-fn verify_snapshots_not_isolated() {
+fn should_not_isolate_snapshots_when_isolation_disabled() {
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 

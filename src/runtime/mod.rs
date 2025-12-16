@@ -952,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn should_register_and_complete_response() {
+    fn should_register_then_complete_response() {
         // Arrange
         let router = ResponseRouter::new();
 

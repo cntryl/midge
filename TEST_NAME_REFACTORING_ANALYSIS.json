@@ -1,0 +1,322 @@
+[
+  {
+    "current_name": "should_encode_and_decode_key_delta",
+    "file": "src/sst/encoding.rs",
+    "should_refactor": true,
+    "new_name": "should_roundtrip_encode_decode_for_key_delta",
+    "reasoning": "Clear roundtrip flow: data is encoded then decoded; sequence dependent"
+  },
+  {
+    "current_name": "should_encode_and_decode_with_value",
+    "file": "src/sst/encoding.rs",
+    "should_refactor": true,
+    "new_name": "should_roundtrip_encode_decode_with_value",
+    "reasoning": "Encode-then-decode is sequential; roundtrip pattern"
+  },
+  {
+    "current_name": "should_encode_and_decode_sequence",
+    "file": "src/sst/encoding.rs",
+    "should_refactor": true,
+    "new_name": "should_roundtrip_encode_decode_for_sequence",
+    "reasoning": "Roundtrip pattern: encode is prerequisite for decode"
+  },
+  {
+    "current_name": "should_encode_and_decode_entry_type_delete",
+    "file": "src/sst/encoding.rs",
+    "should_refactor": true,
+    "new_name": "should_roundtrip_encode_decode_for_entry_type_delete",
+    "reasoning": "Sequential flow: encode then decode validates round-trip fidelity"
+  },
+  {
+    "current_name": "should_encode_and_decode_shared_prefix",
+    "file": "src/sst/encoding.rs",
+    "should_refactor": true,
+    "new_name": "should_roundtrip_encode_decode_shared_prefix",
+    "reasoning": "Encode-then-decode sequential dependency; roundtrip validation"
+  },
+  {
+    "current_name": "should_write_and_read_file",
+    "file": "src/io/real.rs",
+    "should_refactor": true,
+    "new_name": "should_write_then_read_file",
+    "reasoning": "Clear I/O sequence: write is prerequisite for read operation"
+  },
+  {
+    "current_name": "should_write_and_read",
+    "file": "src/io/mock.rs",
+    "should_refactor": true,
+    "new_name": "should_write_then_read",
+    "reasoning": "Sequential flow: write data, then read back; cause-and-effect"
+  },
+  {
+    "current_name": "should_serialize_and_deserialize",
+    "file": "src/sst/bloom/block_bloom.rs",
+    "should_refactor": true,
+    "new_name": "should_roundtrip_serialize_deserialize",
+    "reasoning": "Serialize-then-deserialize roundtrip; sequencing prerequisite"
+  },
+  {
+    "current_name": "should_track_hit_and_miss_metrics",
+    "file": "src/sst/cache/shard.rs",
+    "should_refactor": false,
+    "reasoning": "Independent metrics being tracked simultaneously (hit OR miss, not sequential)"
+  },
+  {
+    "current_name": "should_handle_mixed_accesses_and_removals",
+    "file": "src/sst/cache/policy/lru.rs",
+    "should_refactor": true,
+    "new_name": "should_access_then_remove_then_track_order",
+    "reasoning": "Sequential flow: accesses and removals are ordered operations affecting victim selection"
+  },
+  {
+    "current_name": "should_handle_mixed_accesses_and_removals",
+    "file": "src/sst/cache/policy/clockpro.rs",
+    "should_refactor": true,
+    "new_name": "should_access_then_remove_then_track_order",
+    "reasoning": "Sequential flow: accesses and removals affect victim selection order"
+  },
+  {
+    "current_name": "should_be_cloneable_and_share_state",
+    "file": "src/sst/cache/metrics.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent properties being tested (cloneable AND shared state); not sequential"
+  },
+  {
+    "current_name": "should_track_write_latency_and_bytes_when_recording_writes",
+    "file": "src/metrics/mod.rs",
+    "should_refactor": true,
+    "new_name": "should_track_all_write_metrics_when_recording_writes",
+    "reasoning": "All metrics tracked together from single operation; better as unified tracking"
+  },
+  {
+    "current_name": "should_track_wal_writes_and_syncs",
+    "file": "src/metrics/mod.rs",
+    "should_refactor": true,
+    "new_name": "should_track_wal_writes_then_syncs",
+    "reasoning": "Writes typically precede syncs; sequential durability pattern"
+  },
+  {
+    "current_name": "should_have_forward_and_reverse_variants_when_comparing_direction",
+    "file": "src/engine/api/iterator.rs",
+    "should_refactor": false,
+    "reasoning": "Independent variant comparison (Forward vs Reverse are distinct modes, not sequential)"
+  },
+  {
+    "current_name": "should_combine_start_and_end_bounds_when_both_set",
+    "file": "src/engine/api/iterator.rs",
+    "should_refactor": false,
+    "reasoning": "Independent bounds being combined (both are parallel concerns, not cause-effect)"
+  },
+  {
+    "current_name": "should_apply_bounds_before_reversing_when_range_and_reverse_combined",
+    "file": "src/engine/api/iterator.rs",
+    "should_refactor": false,
+    "reasoning": "Name already indicates sequence; keep as-is (bounds BEFORE reversing)"
+  },
+  {
+    "current_name": "should_sort_by_key_primary_and_sequence_secondary",
+    "file": "src/compaction/merge.rs",
+    "should_refactor": false,
+    "reasoning": "Independent sort keys (primary AND secondary sort criteria; not sequential)"
+  },
+  {
+    "current_name": "should_advance_iterator_and_reinserve_into_heap",
+    "file": "src/compaction/merge.rs",
+    "should_refactor": true,
+    "new_name": "should_advance_iterator_then_reinserve_into_heap",
+    "reasoning": "Sequential operations: iterator advanced, THEN result reinserted into heap"
+  },
+  {
+    "current_name": "should_distinguish_ok_and_err_outcomes",
+    "file": "src/storage/cloud/mod.rs",
+    "should_refactor": false,
+    "reasoning": "Independent outcomes being distinguished (Ok OR Err, not sequential)"
+  },
+  {
+    "current_name": "should_create_and_clone_object_metadata",
+    "file": "src/storage/cloud/mod.rs",
+    "should_refactor": true,
+    "new_name": "should_create_then_clone_object_metadata",
+    "reasoning": "Clone requires creation first; sequential prerequisite"
+  },
+  {
+    "current_name": "should_route_and_namespace_put_operation",
+    "file": "src/storage/cloud/mod.rs",
+    "should_refactor": false,
+    "reasoning": "Routing AND namespacing are parallel transformations of same operation"
+  },
+  {
+    "current_name": "should_route_and_namespace_get_operation",
+    "file": "src/storage/cloud/mod.rs",
+    "should_refactor": false,
+    "reasoning": "Routing AND namespacing are parallel transformations applied together"
+  },
+  {
+    "current_name": "should_route_delete_and_apply_namespace",
+    "file": "src/storage/cloud/mod.rs",
+    "should_refactor": false,
+    "reasoning": "Parallel transformations (routing + namespace) applied to delete operation"
+  },
+  {
+    "current_name": "should_route_list_and_apply_namespace",
+    "file": "src/storage/cloud/mod.rs",
+    "should_refactor": false,
+    "reasoning": "Parallel transformations (routing + namespace) applied to list operation"
+  },
+  {
+    "current_name": "should_route_head_and_return_metadata",
+    "file": "src/storage/cloud/mod.rs",
+    "should_refactor": false,
+    "reasoning": "Routing enables metadata return; but mostly parallel concerns"
+  },
+  {
+    "current_name": "should_find_first_and_last_children",
+    "file": "src/sst/trie/node.rs",
+    "should_refactor": false,
+    "reasoning": "Finding first AND last are independent boundary operations"
+  },
+  {
+    "current_name": "should_be_cloneable_and_copyable",
+    "file": "src/sst/index/tuner.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent type properties (Clone trait AND Copy trait)"
+  },
+  {
+    "current_name": "should_choose_trie_for_high_prefix_correlation_and_low_entropy",
+    "file": "src/sst/index/tuner.rs",
+    "should_refactor": false,
+    "reasoning": "Multiple independent conditions for selection (both must be true, not sequential)"
+  },
+  {
+    "current_name": "should_handle_wal_rotation_and_multiple_segments",
+    "file": "tests/engine_wal.rs",
+    "should_refactor": false,
+    "reasoning": "Two related but independent concerns in same test (rotation capability AND multi-segment handling)"
+  },
+  {
+    "current_name": "should_support_hybrid_local_and_cloud_storage",
+    "file": "tests/engine_cloud.rs",
+    "should_refactor": false,
+    "reasoning": "Hybrid mode with two storage types; independent configuration"
+  },
+  {
+    "current_name": "should_handle_memtable_and_sst_reads",
+    "file": "tests/sst_reads_integration.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent read paths tested in same scenario (memtable OR sst)"
+  },
+  {
+    "current_name": "should_store_and_retrieve_very_large_keys_when_megabyte_sized",
+    "file": "tests/edge_cases.rs",
+    "should_refactor": true,
+    "new_name": "should_store_then_retrieve_very_large_keys_when_megabyte_sized",
+    "reasoning": "Sequential flow: store is prerequisite for retrieve operation"
+  },
+  {
+    "current_name": "should_store_and_retrieve_very_large_values_when_hundred_megabytes",
+    "file": "tests/edge_cases.rs",
+    "should_refactor": true,
+    "new_name": "should_store_then_retrieve_very_large_values_when_hundred_megabytes",
+    "reasoning": "Sequential I/O: store then verify retrieval"
+  },
+  {
+    "current_name": "should_handle_special_characters_in_keys_when_utf8_and_binary_mixed",
+    "file": "tests/edge_cases.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent key types being tested (UTF8 AND binary); not sequential"
+  },
+  {
+    "current_name": "should_handle_range_query_at_boundaries_when_first_last_and_missing",
+    "file": "tests/edge_cases.rs",
+    "should_refactor": false,
+    "reasoning": "Three independent boundary cases tested (first, last, missing); not sequential"
+  },
+  {
+    "current_name": "should_document_and_verify_lww_as_isolation_model_when_testing",
+    "file": "tests/transaction_isolation.rs",
+    "should_refactor": true,
+    "new_name": "should_document_then_verify_lww_as_isolation_model_when_testing",
+    "reasoning": "Sequential flow: document assumptions, THEN verify they hold"
+  },
+  {
+    "current_name": "should_register_and_complete_response",
+    "file": "src/runtime/mod.rs",
+    "should_refactor": true,
+    "new_name": "should_register_then_complete_response",
+    "reasoning": "Sequential operations: register BEFORE completing; causality matters"
+  },
+  {
+    "current_name": "should_validate_send_and_wait_requires_request_id",
+    "file": "src/runtime/mod.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent validation conditions (send AND wait require request_id)"
+  },
+  {
+    "current_name": "should_support_mixed_operations_when_put_and_delete_called",
+    "file": "src/engine/api/transaction.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent operation types (put AND delete) supported together"
+  },
+  {
+    "current_name": "should_support_prefix_with_limit_and_reverse",
+    "file": "src/engine/api/query.rs",
+    "should_refactor": false,
+    "reasoning": "Multiple independent query options (prefix AND limit AND reverse) work together"
+  },
+  {
+    "current_name": "should_handle_mixed_prefix_and_start",
+    "file": "src/engine/api/query.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent query parameters (prefix AND start) conflict/combine"
+  },
+  {
+    "current_name": "should_handle_mixed_end_and_prefix",
+    "file": "src/engine/api/query.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent parameters (end AND prefix) interaction testing"
+  },
+  {
+    "current_name": "should_group_waiters_by_key_and_drain_on_complete",
+    "file": "src/common/singleflight.rs",
+    "should_refactor": true,
+    "new_name": "should_group_waiters_by_key_then_drain_on_complete",
+    "reasoning": "Sequential lifecycle: group first, THEN drain when complete"
+  },
+  {
+    "current_name": "should_handle_mixed_kinds_and_priorities",
+    "file": "src/runtime/scheduler.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent properties (kinds AND priorities) scheduled together"
+  },
+  {
+    "current_name": "should_get_task_mut_and_modify",
+    "file": "src/compaction/planner.rs",
+    "should_refactor": true,
+    "new_name": "should_get_task_mut_then_modify",
+    "reasoning": "Sequential: get mutable task FIRST, THEN modify it"
+  },
+  {
+    "current_name": "should_have_new_and_default_return_equivalent_options",
+    "file": "src/engine/api/write_options.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent factory methods returning equivalent results"
+  },
+  {
+    "current_name": "should_have_new_and_default_return_equivalent_queries",
+    "file": "src/engine/api/query.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent factory methods producing equivalent objects"
+  },
+  {
+    "current_name": "should_create_column_family_handle_with_id_and_name",
+    "file": "src/engine/mod.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent attributes (id AND name) of same handle being tested"
+  },
+  {
+    "current_name": "should_handle_empty_keys_and_values_when_iterating",
+    "file": "src/engine/api/iterator.rs",
+    "should_refactor": false,
+    "reasoning": "Two independent edge cases (empty keys AND empty values) being handled"
+  }
+]

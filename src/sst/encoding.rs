@@ -209,35 +209,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_encode_and_decode_key_delta() {
+    fn should_roundtrip_encode_decode_key_delta() {
         let encoded = encode(b"mykey", 0u16, None, 0, EntryType::Put);
         let (entry, _) = decode(&encoded, 0).unwrap();
         assert_eq!(entry.key_delta, b"mykey");
     }
 
     #[test]
-    fn should_encode_and_decode_with_value() {
+    fn should_roundtrip_encode_decode_with_value() {
         let encoded = encode(b"key", 0u16, Some(b"myvalue"), 0, EntryType::Put);
         let (entry, _) = decode(&encoded, 0).unwrap();
         assert_eq!(entry.value, Some(b"myvalue".as_slice()));
     }
 
     #[test]
-    fn should_encode_and_decode_sequence() {
+    fn should_roundtrip_encode_decode_sequence() {
         let encoded = encode(b"key", 0u16, None, 12345, EntryType::Put);
         let (entry, _) = decode(&encoded, 0).unwrap();
         assert_eq!(entry.sequence, 12345);
     }
 
     #[test]
-    fn should_encode_and_decode_entry_type_delete() {
+    fn should_roundtrip_encode_decode_entry_type_delete() {
         let encoded = encode(b"key", 0u16, None, 0, EntryType::Delete);
         let (entry, _) = decode(&encoded, 0).unwrap();
         assert_eq!(entry.entry_type, EntryType::Delete);
     }
 
     #[test]
-    fn should_encode_and_decode_shared_prefix() {
+    fn should_roundtrip_encode_decode_shared_prefix() {
         let encoded = encode(b"suffix", 42u16, Some(b"val"), 0, EntryType::Put);
         let (entry, _) = decode(&encoded, 0).unwrap();
         assert_eq!(entry.shared_len, 42u16);

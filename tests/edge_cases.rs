@@ -21,7 +21,7 @@ use cntryl_midge::testkit::*;
 // ============================================================================
 
 #[test]
-fn should_store_and_retrieve_very_large_keys_when_megabyte_sized() {
+fn should_retrieve_stored_keys_when_megabyte_sized() {
     // Arrange: Create 1MB+ key (256KB minimum, test with 500KB)
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let engine = open_with_mode(opts, mode);
@@ -44,7 +44,7 @@ fn should_store_and_retrieve_very_large_keys_when_megabyte_sized() {
 }
 
 #[test]
-fn should_store_and_retrieve_very_large_values_when_hundred_megabytes() {
+fn should_retrieve_stored_values_when_hundred_megabytes() {
     // Arrange: Create 100MB value (or reasonable subset for tests)
     // Use 10MB for practical test speed; pattern validates for larger
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {

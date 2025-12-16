@@ -171,7 +171,7 @@ fn should_handle_transaction_spill_to_disk_correctly() {
                 eprintln!("Conclusion: SPILL IS WORKING - data exceeded memory and was persisted");
 
                 // Sample check: verify some keys exist
-                let sample_checks = vec!["spilltest_key_0000", "spilltest_key_0100", "spilltest_key_0199"];
+                let sample_checks = ["spilltest_key_0000", "spilltest_key_0100", "spilltest_key_0199"];
                 let all_present = sample_checks
                     .iter()
                     .all(|key| engine.get(cf, key.as_bytes()).expect("get").is_some());

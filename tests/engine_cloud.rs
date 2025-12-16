@@ -18,12 +18,10 @@ fn should_support_cloud_backed_storage() {
     // Default testkit may not support cloud mode yet
     // This test documents the expected behavior
 
-    match open_with_mode(opts_for_mode("cloud"), "cloud").default_column_family() {
-        cf => {
-            eprintln!("Cloud storage engine initialized with CF id: {:?}", cf.id());
-            eprintln!("✓ Cloud backend accessible");
-        }
-    }
+    let engine = open_with_mode(opts_for_mode("cloud"), "cloud");
+    let cf = engine.default_column_family();
+    eprintln!("Cloud storage engine initialized with CF id: {:?}", cf.id());
+    eprintln!("✓ Cloud backend accessible");
 }
 
 // ============================================================================

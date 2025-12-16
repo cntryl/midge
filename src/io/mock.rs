@@ -210,7 +210,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_write_and_read() -> FsResult<()> {
+    fn should_read_written_data_when_writing() -> FsResult<()> {
         let fs = MockFs::new();
         let path = FsPath::new("test.txt");
 

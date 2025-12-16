@@ -489,8 +489,10 @@ fn should_prevent_sst_cleanup_while_snapshot_active() {
 
     // Create snapshot BEFORE modification
     let snapshot = engine.snapshot();
-    let snap_initial_count = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
-    eprintln!("Snapshot created with {} keys", snap_initial_count);
+    let snap_initial_count = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
 
     // Modify data in current view
     for i in 0..100 {
@@ -498,26 +500,21 @@ fn should_prevent_sst_cleanup_while_snapshot_active() {
         engine.put(cf, key.as_bytes(), b"value_v2").ok();
     }
     engine.flush().ok();
-    eprintln!("Modified all 100 keys and flushed (new L0 SST created)");
 
     // Act: Verify snapshot still sees old data
-    let snap_current_count = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let snap_current_count = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
     let first_val = snapshot.get(cf, b"initial_0000").unwrap();
 
-    eprintln!("Snapshot still has {} keys", snap_current_count);
-    eprintln!("Snapshot value: {:?}", 
-        first_val.as_ref().map(|v| String::from_utf8_lossy(v).to_string()));
-
-    // Assert
-    if snap_current_count == snap_initial_count {
-        eprintln!("✓ Snapshot unchanged despite modifications");
-    } else {
-        eprintln!("✗ Snapshot visibility changed (data pinning failed)");
-    }
+    // Assert - Track what actually happens (snapshots may see new writes depending on implementation)
+    // The key point is that the snapshot is usable and consistent
+    assert_eq!(snap_current_count, snap_initial_count, "Snapshot should maintain consistent count");
+    assert!(first_val.is_some(), "Snapshot should return some value");
 
     // Release snapshot and verify GC can proceed
     drop(snapshot);
-    eprintln!("Snapshot released; SSTs eligible for cleanup");
 }
 
 #[test]
@@ -540,18 +537,12 @@ fn should_cleanup_ssts_when_snapshot_released() {
 
         let snap = engine.snapshot();
         snapshots.push((round, snap));
-        eprintln!("Created snapshot {} (round {})", snapshots.len() - 1, round);
     }
-
-    eprintln!("{} snapshots pinning SSTs", snapshots.len());
 
     // Release snapshots one by one
-    for (i, (round, snap)) in snapshots.into_iter().enumerate() {
+    for (_i, (_round, snap)) in snapshots.into_iter().enumerate() {
         drop(snap);
-        eprintln!("Released snapshot {} (round {}); SSTs eligible for GC", i, round);
     }
-
-    eprintln!("✓ All snapshots released");
 }
 
 #[test]
@@ -559,23 +550,22 @@ fn should_maintain_isolation_with_multiple_snapshots() {
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.default_column_family();
 
-    eprintln!("\n=== MULTIPLE CONCURRENT SNAPSHOTS ===");
-
     // Create snapshot 1
     engine.put(cf, b"k1", b"snap1_sees_this").ok();
     let snap1 = engine.snapshot();
     let snap1_val = snap1.get(cf, b"k1").unwrap();
-
-    eprintln!("Snapshot 1 sees k1={:?}", 
-        snap1_val.as_ref().map(|v| String::from_utf8_lossy(v).to_string()));
 
     // Modify and create snapshot 2
     engine.put(cf, b"k1", b"snap2_sees_this").ok();
     let snap2 = engine.snapshot();
     let snap2_val = snap2.get(cf, b"k1").unwrap();
 
-    eprintln!("Snapshot 2 sees k1={:?}", 
-        snap2_val.as_ref().map(|v| String::from_utf8_lossy(v).to_string()));
+    eprintln!(
+        "Snapshot 2 sees k1={:?}",
+        snap2_val
+            .as_ref()
+            .map(|v| String::from_utf8_lossy(v).to_string())
+    );
 
     // Verify both snapshots see their own views
     let snap1_same = snap1_val.as_ref().map(|v| v.as_ref()) == Some(b"snap1_sees_this");
@@ -615,7 +605,10 @@ fn should_handle_long_lived_snapshots_gracefully() {
 
     // Verify snapshot still works
     let old_val = long_lived_snapshot.get(cf, b"old_key").unwrap();
-    let old_count = long_lived_snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let old_count = long_lived_snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
 
     eprintln!("Long-lived snapshot still sees {} keys", old_count);
 
@@ -645,7 +638,10 @@ fn should_maintain_snapshot_consistency_during_compaction() {
 
     // Snapshot before compaction
     let snapshot = engine.snapshot();
-    let snap_count_before = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let snap_count_before = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
 
     // Overwrite all keys and flush (triggers compaction)
     for i in 0..200 {
@@ -656,13 +652,20 @@ fn should_maintain_snapshot_consistency_during_compaction() {
     eprintln!("Overwrote all keys and flushed (potential compaction)");
 
     // Verify snapshot unchanged
-    let snap_count_during = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let snap_count_during = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
     let snap_val = snapshot.get(cf, b"key_0000").unwrap();
 
     eprintln!("Snapshot before compaction: {} keys", snap_count_before);
     eprintln!("Snapshot during compaction: {} keys", snap_count_during);
-    eprintln!("Snapshot value: {:?}", 
-        snap_val.as_ref().map(|v| String::from_utf8_lossy(v).to_string()));
+    eprintln!(
+        "Snapshot value: {:?}",
+        snap_val
+            .as_ref()
+            .map(|v| String::from_utf8_lossy(v).to_string())
+    );
 
     if snap_count_before == snap_count_during {
         eprintln!("✓ Snapshot maintains consistency through compaction");
@@ -691,59 +694,65 @@ fn document_snapshot_gc_interaction_status() {
 // ============================================================================
 
 #[test]
-fn should_NOT_see_writes_after_snapshot_when_committed_after_snapshot() {
+fn should_not_see_writes_after_snapshot_when_committed_after_snapshot() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Verify snapshot isolation boundary
         // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
-        
+
         engine.put(cf, b"key", b"value_before").unwrap();
-        
+
         // Act: Create snapshot
         let snapshot = engine.snapshot();
-        
+
         // Write committed AFTER snapshot
         engine.put(cf, b"key", b"value_after").unwrap();
-        
+
         // Assert: Snapshot should see pre-snapshot state
         // Note: Current implementation may not support MVCC snapshots
         // This test documents the DESIRED behavior
         let snap_value = snapshot.get(cf, b"key").unwrap();
         let current_value = engine.get(cf, b"key").unwrap();
-        
+
         // When true MVCC is implemented:
         // snapshot should see "value_before" or see nothing if key didn't exist
         // current should see "value_after"
-        eprintln!("Snapshot value: {:?}", snap_value.as_ref().map(|b| String::from_utf8_lossy(b)));
-        eprintln!("Current value:  {:?}", current_value.as_ref().map(|b| String::from_utf8_lossy(b)));
+        eprintln!(
+            "Snapshot value: {:?}",
+            snap_value.as_ref().map(|b| String::from_utf8_lossy(b))
+        );
+        eprintln!(
+            "Current value:  {:?}",
+            current_value.as_ref().map(|b| String::from_utf8_lossy(b))
+        );
         eprintln!("(MVCC snapshot isolation desired for future implementation)");
     });
 }
 
 #[test]
-fn should_NOT_block_compaction_given_snapshot_when_compaction_triggered() {
+fn should_not_block_compaction_given_snapshot_when_compaction_triggered() {
     for_each_storage_mode(&["local"], |mode, opts| {
         // Verify snapshots don't unnecessarily block compaction
         // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
-        
+
         // Write enough data to trigger compaction
         for i in 0..1000 {
             let key = format!("key_{:04}", i);
             engine.put(cf, key.as_bytes(), b"value").ok();
         }
-        
+
         // Act: Hold snapshot while compaction happens
         let _snapshot = engine.snapshot();
         engine.flush().ok(); // Trigger potential compaction
-        
+
         // Assert: Compaction should proceed
         // Snapshot should not deadlock or prevent progress
         let result = engine.get(cf, b"key_0000").ok();
         assert!(result.is_some(), "Compaction with held snapshot failed");
-        
+
         eprintln!("✓ Compaction proceeded while snapshot held");
     });
 }

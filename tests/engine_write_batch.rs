@@ -622,44 +622,62 @@ fn should_increment_sequence_numbers_given_batch_operations_when_write_batch() {
 // ============================================================================
 
 #[test]
-fn should_NOT_allow_partial_batch_commit_given_batch_when_all_or_nothing() {
+fn should_not_allow_partial_batch_commit_given_batch_when_all_or_nothing() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // This test verifies atomicity: batches are atomic
         // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
-        
+
         // Pre-populate
         engine.put(cf, b"existing", b"original").expect("setup");
-        
+
         // Act: Create batch with multiple operations
         let mut batch = WriteBatch::new();
-        batch.put(bytes::Bytes::copy_from_slice(b"new_key1"), bytes::Bytes::copy_from_slice(b"val1"));
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"new_key1"),
+            bytes::Bytes::copy_from_slice(b"val1"),
+        );
         batch.delete(bytes::Bytes::copy_from_slice(b"existing"));
-        batch.put(bytes::Bytes::copy_from_slice(b"new_key2"), bytes::Bytes::copy_from_slice(b"val2"));
-        
+        batch.put(
+            bytes::Bytes::copy_from_slice(b"new_key2"),
+            bytes::Bytes::copy_from_slice(b"val2"),
+        );
+
         engine.write_batch(&batch).expect("write_batch");
-        
+
         // Assert: All operations were applied together (atomicity)
         let k1 = engine.get(cf, b"new_key1").expect("get1");
         let k2 = engine.get(cf, b"new_key2").expect("get2");
         let existing = engine.get(cf, b"existing").expect("get_existing");
-        
+
         // All operations must have succeeded together
-        assert!(k1.is_some(), "Partial batch commit detected: new_key1 missing in {}", mode);
-        assert!(k2.is_some(), "Partial batch commit detected: new_key2 missing in {}", mode);
-        assert_eq!(existing, None, "Partial batch commit detected: existing should be deleted in {}", mode);
+        assert!(
+            k1.is_some(),
+            "Partial batch commit detected: new_key1 missing in {}",
+            mode
+        );
+        assert!(
+            k2.is_some(),
+            "Partial batch commit detected: new_key2 missing in {}",
+            mode
+        );
+        assert_eq!(
+            existing, None,
+            "Partial batch commit detected: existing should be deleted in {}",
+            mode
+        );
     });
 }
 
 #[test]
-fn should_NOT_expose_partial_batch_state_during_write_when_concurrent_reads() {
+fn should_not_expose_partial_batch_state_during_write_when_concurrent_reads() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Verify intermediate batch states are not visible to concurrent readers
         // Arrange
         let engine = std::sync::Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Act: Batch with sequence of operations
         let mut batch = WriteBatch::new();
         for i in 0..5 {
@@ -669,14 +687,19 @@ fn should_NOT_expose_partial_batch_state_during_write_when_concurrent_reads() {
                 bytes::Bytes::copy_from_slice(b"value"),
             );
         }
-        
+
         engine.write_batch(&batch).expect("write_batch");
-        
+
         // Assert: All keys must exist (no partial state visible)
         for i in 0..5 {
             let key = format!("batch_key_{}", i);
             let val = engine.get(cf, key.as_bytes()).expect("get");
-            assert!(val.is_some(), "Partial batch visible: {} missing in {}", key, mode);
+            assert!(
+                val.is_some(),
+                "Partial batch visible: {} missing in {}",
+                key,
+                mode
+            );
         }
     });
 }
