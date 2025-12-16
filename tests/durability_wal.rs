@@ -252,7 +252,7 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
 // ============================================================================
 
 #[test]
-fn should_handle_gracefully_given_truncated_wal_tail_when_recovering() {
+fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange & Act (Phase 1)
         {
@@ -267,13 +267,13 @@ fn should_handle_gracefully_given_truncated_wal_tail_when_recovering() {
             // Simulate crash without flushing final records
         }
 
-        // Assert (Phase 2): Recovers gracefully without panic
+        // Assert (Phase 2): Skips corrupted records, recovers valid ones
         {
             let engine = open_with_mode(opts, mode);
             let _cf = engine.default_column_family();
 
-            // Some early records should be recovered
-            // Recovery should not panic on truncated tail
+            // Some early records should be recovered (before corruption)
+            // Recovery should skip the truncated tail, not panic
             let _ = engine.get(_cf, b"key_00").expect("get");
         }
     });

@@ -3,7 +3,6 @@
 //! Purpose: Verify the documented limitation that range() is stubbed
 //! and determine if delete_range() actually works despite this
 
-use bytes::Bytes;
 use cntryl_midge::testkit::*;
 
 #[test]

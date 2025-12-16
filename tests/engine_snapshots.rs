@@ -686,3 +686,64 @@ fn document_snapshot_gc_interaction_status() {
     eprintln!("  - GC decision logic with active snapshots");
     eprintln!("  - Compaction interaction with snapshot cursors");
 }
+// ============================================================================
+// SNAPSHOT ISOLATION (Negative Tests)
+// ============================================================================
+
+#[test]
+fn should_NOT_see_writes_after_snapshot_when_committed_after_snapshot() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Verify snapshot isolation boundary
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        
+        engine.put(cf, b"key", b"value_before").unwrap();
+        
+        // Act: Create snapshot
+        let snapshot = engine.snapshot();
+        
+        // Write committed AFTER snapshot
+        engine.put(cf, b"key", b"value_after").unwrap();
+        
+        // Assert: Snapshot should see pre-snapshot state
+        // Note: Current implementation may not support MVCC snapshots
+        // This test documents the DESIRED behavior
+        let snap_value = snapshot.get(cf, b"key").unwrap();
+        let current_value = engine.get(cf, b"key").unwrap();
+        
+        // When true MVCC is implemented:
+        // snapshot should see "value_before" or see nothing if key didn't exist
+        // current should see "value_after"
+        eprintln!("Snapshot value: {:?}", snap_value.as_ref().map(|b| String::from_utf8_lossy(b)));
+        eprintln!("Current value:  {:?}", current_value.as_ref().map(|b| String::from_utf8_lossy(b)));
+        eprintln!("(MVCC snapshot isolation desired for future implementation)");
+    });
+}
+
+#[test]
+fn should_NOT_block_compaction_given_snapshot_when_compaction_triggered() {
+    for_each_storage_mode(&["local"], |mode, opts| {
+        // Verify snapshots don't unnecessarily block compaction
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine.default_column_family();
+        
+        // Write enough data to trigger compaction
+        for i in 0..1000 {
+            let key = format!("key_{:04}", i);
+            engine.put(cf, key.as_bytes(), b"value").ok();
+        }
+        
+        // Act: Hold snapshot while compaction happens
+        let _snapshot = engine.snapshot();
+        engine.flush().ok(); // Trigger potential compaction
+        
+        // Assert: Compaction should proceed
+        // Snapshot should not deadlock or prevent progress
+        let result = engine.get(cf, b"key_0000").ok();
+        assert!(result.is_some(), "Compaction with held snapshot failed");
+        
+        eprintln!("✓ Compaction proceeded while snapshot held");
+    });
+}

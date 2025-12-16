@@ -1,12 +1,13 @@
 # Test & Bench Inventory
 
-_Generated 2025-12-16T13:32:19Z by `scripts/generate_inventory.py`._
+_Generated 2025-12-16T15:08:09Z by `scripts/generate_inventory.py`._
 
 Complete inventory of all test and benchmark functions across midge.
 
 **Src Tests**
 
 - `src/common/singleflight.rs`
+
   - tests:
     - `should_fan_out_one_flush_result_to_many_waiters`
     - `should_flush`
@@ -15,6 +16,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_run_flush_once_for_many_submitters`
 
 - `src/common/tlv.rs`
+
   - tests:
     - `should_encode_decode_bytes_with_tag`
     - `should_encode_decode_u64_with_tag`
@@ -22,6 +24,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_encode_decode_varint32_small`
 
 - `src/compaction/executor.rs`
+
   - tests:
     - `should_deduplicate_correctly_across_streams_with_overlapping_keys`
     - `should_deduplicate_multiple_keys_independently`
@@ -34,6 +37,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_stream_deduplicate_multiple_versions_when_using_iterator`
 
 - `src/compaction/merge.rs`
+
   - tests:
     - `should_advance_iterator_and_reinserve_into_heap`
     - `should_correctly_order_heap_items_by_key_ascending`
@@ -62,6 +66,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_yield_newest_sequence_first_when_same_key_same_seq`
 
 - `src/compaction/mod.rs`
+
   - tests:
     - `should_allow_chaining_builder_methods_when_using_with_output_seq`
     - `should_calculate_l0_target_size_correctly`
@@ -81,6 +86,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_sst_extension_when_generating_filename`
 
 - `src/compaction/planner.rs`
+
   - tests:
     - `should_accept_multiple_output_files_when_completing`
     - `should_allow_replacing_output_files_on_completion`
@@ -118,6 +124,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_set_output_files_when_completing_task`
 
 - `src/compaction/strategy.rs`
+
   - tests:
     - `should_calculate_exponential_level_targets_for_higher_levels`
     - `should_calculate_level_target_sizes_when_multiplying_by_level_multiplier`
@@ -149,6 +156,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_l1_target_for_level_one`
 
 - `src/engine/api/errors.rs`
+
   - tests:
     - `should_be_equal_when_both_not_found`
     - `should_be_equal_when_same_invalid_operation_message`
@@ -182,6 +190,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_not_be_equal_when_different_variants`
 
 - `src/engine/api/iterator.rs`
+
   - tests:
     - `should_advance_position_when_calling_next`
     - `should_apply_bounds_before_reversing_when_range_and_reverse_combined`
@@ -237,6 +246,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_default_when_calling_default_method`
 
 - `src/engine/api/kv.rs`
+
   - tests:
     - `should_access_key_from_pair`
     - `should_access_value_from_pair`
@@ -266,6 +276,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_preserve_data_integrity_when_creating_value_from_vec`
 
 - `src/engine/api/options.rs`
+
   - tests:
     - `should_clone_options`
     - `should_create_cloud_replicated_durability`
@@ -303,6 +314,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_different_memtable_sizes_for_different_workloads`
 
 - `src/engine/api/query.rs`
+
   - tests:
     - `should_accept_empty_end_key`
     - `should_accept_empty_prefix`
@@ -357,6 +369,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_work_with_binary_data`
 
 - `src/engine/api/results.rs`
+
   - tests:
     - `should_clone_cas_result_mismatch_none`
     - `should_clone_cas_result_mismatch_some`
@@ -387,6 +400,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_return_swapped_when_cas_succeeded`
 
 - `src/engine/api/snapshot.rs`
+
   - tests:
     - `should_compare_snapshots_by_id_when_using_equality`
     - `should_create_snapshot_with_sequence_when_initialized`
@@ -395,6 +409,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_column_family_when_cf_specific_snapshot_created`
 
 - `src/engine/api/transaction.rs`
+
   - tests:
     - `should_add_deletes_to_write_set_when_delete_called`
     - `should_add_puts_to_write_set_when_put_called`
@@ -407,6 +422,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_transition_through_states_when_commit_sequence_executed`
 
 - `src/engine/api/write_batch.rs`
+
   - tests:
     - `should_add_delete_operations_when_calling_delete`
     - `should_add_put_operations_when_calling_put`
@@ -417,6 +433,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_support_mixed_operations_when_building_batch`
 
 - `src/engine/api/write_options.rs`
+
   - tests:
     - `should_allow_methods_in_any_order`
     - `should_be_independent_after_cloning`
@@ -441,6 +458,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_support_full_fluent_api_chain`
 
 - `src/engine/mod.rs`
+
   - tests:
     - `should_clone_column_family_handle`
     - `should_convert_midgeoptions_local_disk_to_db_path`
@@ -472,6 +490,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_support_empty_column_family_name`
 
 - `src/io/chaos.rs`
+
   - tests:
     - `should_fail_delete`
     - `should_fail_list`
@@ -483,17 +502,20 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_pass_through_when_no_fail`
 
 - `src/io/mock.rs`
+
   - tests:
     - `should_delete_file`
     - `should_write_and_read`
 
 - `src/io/real.rs`
+
   - tests:
     - `should_create_real_fs`
     - `should_sanitize_path_traversal`
     - `should_write_and_read_file`
 
 - `src/io/traits.rs`
+
   - tests:
     - `should_check_capability`
     - `should_combine_capabilities`
@@ -503,6 +525,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_path_as_key`
 
 - `src/iterators/merge.rs`
+
   - tests:
     - `should_continue_returning_none_after_exhaustion`
     - `should_create_merge_iterator_from_sources`
@@ -533,6 +556,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_support_fluent_chaining`
 
 - `src/iterators/skiplist.rs`
+
   - tests:
     - `should_collect_tombstones_visible`
     - `should_convert_optype_delete_to_u8`
@@ -587,6 +611,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_upsert_new_key`
 
 - `src/metadata/manifest.rs`
+
   - tests:
     - `should_add_file_to_manifest`
     - `should_add_multiple_files_to_manifest`
@@ -615,6 +640,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_set_deleted_at_timestamp`
 
 - `src/metadata/persistence.rs`
+
   - tests:
     - `should_delete_manifest_file_when_requested`
     - `should_handle_missing_file_when_deleting`
@@ -623,6 +649,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_roundtrip_manifest_when_persisting`
 
 - `src/metadata/version_manager.rs`
+
   - tests:
     - `should_add_column_family_when_edit_applied`
     - `should_add_edit_when_add_edit_called`
@@ -636,6 +663,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_return_error_when_applying_empty_edits`
 
 - `src/metadata/version_set.rs`
+
   - tests:
     - `should_check_version_existence_when_has_version_called`
     - `should_create_version_set_when_instantiated`
@@ -649,6 +677,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_support_concurrent_reads_when_version_set_used`
 
 - `src/metrics/mod.rs`
+
   - tests:
     - `should_accumulate_read_bytes_per_range_scan`
     - `should_accumulate_write_bytes_per_record`
@@ -695,6 +724,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_write_latency_and_bytes_when_recording_writes`
 
 - `src/runtime/actors/cloud.rs`
+
   - tests:
     - `should_decrement_uploads_when_complete`
     - `should_handle_saturation_when_uploads_go_negative`
@@ -704,6 +734,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_multiple_uploads_in_progress`
 
 - `src/runtime/actors/compaction.rs`
+
   - tests:
     - `should_be_cloneable`
     - `should_clear_running_flag_when_compaction_completes`
@@ -713,6 +744,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_set_running_flag_when_compaction_starts`
 
 - `src/runtime/actors/eviction.rs`
+
   - tests:
     - `should_accumulate_freed_bytes_across_evictions`
     - `should_handle_multiple_evictions_same_sst`
@@ -723,6 +755,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_maintain_monotonic_freed_bytes`
 
 - `src/runtime/actors/flush.rs`
+
   - tests:
     - `should_accumulate_multiple_in_progress`
     - `should_decrement_in_progress_on_complete`
@@ -732,6 +765,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_not_go_negative_with_saturating_sub`
 
 - `src/runtime/actors/gc.rs`
+
   - tests:
     - `should_clear_gc_run_timestamp`
     - `should_initialize_gc_actor_with_no_last_run`
@@ -740,6 +774,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_update_timestamp_on_successive_gc_runs`
 
 - `src/runtime/actors/manifest.rs`
+
   - tests:
     - `should_accumulate_pending_edits_across_operations`
     - `should_increment_pending_edits_on_add_sst`
@@ -748,6 +783,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_maintain_monotonic_edit_count`
 
 - `src/runtime/dispatch.rs`
+
   - tests:
     - `should_create_dispatcher_with_default`
     - `should_route_check_compaction_to_compaction`
@@ -779,6 +815,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_route_wal_sync_to_wal`
 
 - `src/runtime/event_loop.rs`
+
   - tests:
     - `should_create_event_loop_in_memory_mode`
     - `should_create_sst_factory_for_compaction_actor`
@@ -807,10 +844,12 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_correct_block_size_for_sst_factory`
 
 - `src/runtime/intent_persistence.rs`
+
   - tests:
     - `should_roundtrip_intent_log`
 
 - `src/runtime/mod.rs`
+
   - tests:
     - `should_allocate_request_ids_atomically_across_threads`
     - `should_clone_compaction_plan`
@@ -838,6 +877,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_validate_send_and_wait_requires_request_id`
 
 - `src/runtime/scheduler.rs`
+
   - tests:
     - `should_allow_different_kinds_to_run_concurrently`
     - `should_create_scheduler`
@@ -862,6 +902,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_running_tasks`
 
 - `src/runtime/state.rs`
+
   - tests:
     - `should_create_column_family_with_unique_id`
     - `should_create_new_column_family`
@@ -890,6 +931,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_wal_state_separately`
 
 - `src/runtime/task.rs`
+
   - tests:
     - `should_allow_task_id_cloning`
     - `should_compare_task_kinds`
@@ -917,6 +959,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_support_priority_comparison`
 
 - `src/sst/bloom/block_bloom.rs`
+
   - tests:
     - `should_add_multiple_block_blooms`
     - `should_add_single_block_bloom`
@@ -931,6 +974,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_serialize_and_deserialize`
 
 - `src/sst/bloom/factory.rs`
+
   - tests:
     - `should_create_writer`
     - `should_create_writer_with_defaults`
@@ -949,6 +993,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_reject_invalid_deserialization_data`
 
 - `src/sst/bloom/reader.rs`
+
   - tests:
     - `should_calculate_estimated_fpr`
     - `should_deserialize_valid_filter`
@@ -971,6 +1016,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_test_missing_keys_consistently`
 
 - `src/sst/bloom/writer.rs`
+
   - tests:
     - `should_calculate_bit_size_monotonically_increases`
     - `should_calculate_correct_bit_size`
@@ -994,6 +1040,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_serialize_format_matches_specification`
 
 - `src/sst/cache/admission.rs`
+
   - tests:
     - `should_accept_empty_keys`
     - `should_admit_seen_keys`
@@ -1011,6 +1058,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_multiple_keys`
 
 - `src/sst/cache/key.rs`
+
   - tests:
     - `should_be_copyable`
     - `should_compute_consistent_shard_index`
@@ -1029,6 +1077,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_recognize_identical_keys`
 
 - `src/sst/cache/metrics.rs`
+
   - tests:
     - `should_be_cloneable_and_share_state`
     - `should_calculate_fractional_hit_rates`
@@ -1051,6 +1100,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_memory_usage`
 
 - `src/sst/cache/mod.rs`
+
   - tests:
     - `should_clear_all_entries`
     - `should_create_with_shards`
@@ -1062,6 +1112,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_metrics`
 
 - `src/sst/cache/policy/clockpro.rs`
+
   - tests:
     - `should_build_circular_structure`
     - `should_clear_all_state`
@@ -1077,6 +1128,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_accessed_keys`
 
 - `src/sst/cache/policy/lru.rs`
+
   - tests:
     - `should_clear_all_state`
     - `should_evict_least_recently_used`
@@ -1091,6 +1143,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_update_lru_on_reaccess`
 
 - `src/sst/cache/policy/mod.rs`
+
   - tests:
     - `should_be_cloneable_policy_type`
     - `should_create_clockpro_policy`
@@ -1104,6 +1157,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_preserve_policy_semantics_across_types`
 
 - `src/sst/cache/policy/tinylfu.rs`
+
   - tests:
     - `should_clear_all_state`
     - `should_handle_mixed_frequencies`
@@ -1117,6 +1171,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_frequencies`
 
 - `src/sst/cache/shard.rs`
+
   - tests:
     - `should_admit`
     - `should_clear_all_entries`
@@ -1140,6 +1195,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_update_existing_entry`
 
 - `src/sst/cache/value.rs`
+
   - tests:
     - `should_be_cloneable`
     - `should_create_value_with_data`
@@ -1155,6 +1211,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_share_access_count_across_clones`
 
 - `src/sst/compression/mod.rs`
+
   - tests:
     - `should_be_cloneable_policy`
     - `should_be_deterministic_with_adaptive_policy`
@@ -1208,6 +1265,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_none_policy_without_compression`
 
 - `src/sst/encoding.rs`
+
   - tests:
     - `should_encode_and_decode_entry_type_delete`
     - `should_encode_and_decode_key_delta`
@@ -1217,18 +1275,21 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_return_bytes_consumed`
 
 - `src/sst/fs/factory_io.rs`
+
   - tests:
     - `should_create_factory_with_mock_fs`
     - `should_create_factory_with_real_fs`
     - `should_support_method_chaining`
 
 - `src/sst/fs/reader_io.rs`
+
   - tests:
     - `should_chain_with_sst_id`
     - `should_create_new_reader_with_io_fs`
     - `should_have_proper_type_safety`
 
 - `src/sst/index/profiler.rs`
+
   - tests:
     - `should_calculate_entropy_for_random_bytes`
     - `should_calculate_entropy_for_uniform_bytes`
@@ -1251,6 +1312,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_prefix_frequencies`
 
 - `src/sst/index/tuner.rs`
+
   - tests:
     - `should_be_cloneable_and_copyable`
     - `should_be_comparable`
@@ -1283,6 +1345,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_handle_empty_profile`
 
 - `src/sst/read_amp_metrics.rs`
+
   - tests:
     - `should_calculate_avg_ssts_per_read`
     - `should_calculate_l0_overlap_rate`
@@ -1294,6 +1357,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_reset_metrics`
 
 - `src/sst/sparse_index/reader.rs`
+
   - tests:
     - `should_count_entries`
     - `should_find_block_range_for_key`
@@ -1317,6 +1381,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_sort_unsorted_entries`
 
 - `src/sst/sparse_index/shared.rs`
+
   - tests:
     - `should_calculate_block_count`
     - `should_calculate_entry_size_bytes`
@@ -1333,6 +1398,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_handle_zero_block_range`
 
 - `src/sst/sparse_index/writer.rs`
+
   - tests:
     - `should_calculate_correct_size_bytes`
     - `should_create_via_default`
@@ -1354,6 +1420,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_multiple_block_transitions`
 
 - `src/sst/traits.rs`
+
   - tests:
     - `should_add_range_tombstone_default_impl_returns_ok`
     - `should_add_with_meta_default_impl_calls_add_for_some`
@@ -1384,6 +1451,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_writer_handle_large_values`
 
 - `src/sst/trie/builder.rs`
+
   - tests:
     - `should_add_multiple_keys`
     - `should_add_single_key`
@@ -1408,6 +1476,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_node_count`
 
 - `src/sst/trie/encoding.rs`
+
   - tests:
     - `should_encode_block_id_zero`
     - `should_encode_maximum_block_id`
@@ -1430,10 +1499,12 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_roundtrip_single_node`
 
 - `src/sst/trie/mod.rs`
+
   - tests:
     - `should_compute_lcp_correctly`
 
 - `src/sst/trie/node.rs`
+
   - tests:
     - `should_add_children_in_sorted_order`
     - `should_add_many_children_in_order`
@@ -1457,6 +1528,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_return_none_for_missing_child`
 
 - `src/sst/trie/reader.rs`
+
   - tests:
     - `should_create_reader_from_valid_trie`
     - `should_find_all_keys_with_common_prefix`
@@ -1488,6 +1560,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_seek_next_with_find_block`
 
 - `src/sst/trie/writer.rs`
+
   - tests:
     - `should_build_readable_trie_with_multiple_keys`
     - `should_build_trie_when_enabled`
@@ -1513,6 +1586,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_node_count_when_enabled`
 
 - `src/sst/types.rs`
+
   - tests:
     - `should_add_trie_to_footer`
     - `should_block_handle_clone`
@@ -1577,6 +1651,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_range_tombstone_with_empty_range`
 
 - `src/storage/cloud/mod.rs`
+
   - tests:
     - `should_clone_outcomes_with_different_types`
     - `should_convert_result_to_outcome`
@@ -1601,6 +1676,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_send_put_complete_event_via_callback`
 
 - `src/storage/filesystem.rs`
+
   - tests:
     - `should_construct_with_custom_base_path`
     - `should_create_base_directory_if_missing`
@@ -1625,6 +1701,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_write_large_file`
 
 - `src/storage/hybrid/actor.rs`
+
   - tests:
     - `should_correctly_calculate_metrics_under_sustained_load`
     - `should_handle_concurrent_operations_under_pressure`
@@ -1639,6 +1716,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_wait_for_compaction_at_high_watermark`
 
 - `src/storage/hybrid/policy.rs`
+
   - tests:
     - `should_calculate_bytes_until_high_watermark`
     - `should_create_policy_with_default_watermarks`
@@ -1650,6 +1728,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_return_default_policy`
 
 - `src/storage/hybrid/state.rs`
+
   - tests:
     - `should_calculate_atomic_usage_percent`
     - `should_calculate_free_bytes_correctly`
@@ -1667,12 +1746,14 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_update_atomic_disk_state`
 
 - `src/storage/providers/aws.rs`
+
   - tests:
     - `should_create_aws_provider_from_credentials`
     - `should_create_aws_provider_with_keys`
     - `should_create_aws_provider_with_session_token`
 
 - `src/storage/providers/azure.rs`
+
   - tests:
     - `should_accept_delete_operation`
     - `should_accept_get_operation`
@@ -1705,6 +1786,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_send_callback_event_on_put`
 
 - `src/storage/providers/gcs.rs`
+
   - tests:
     - `should_accept_delete_operation`
     - `should_accept_get_operation`
@@ -1718,45 +1800,53 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_handle_special_characters_in_bucket`
 
 - `src/storage/providers/minio.rs`
+
   - tests:
     - `should_create_minio_provider_local`
     - `should_create_minio_provider_remote`
     - `should_support_different_endpoints`
 
 - `src/storage/providers/oci.rs`
+
   - tests:
     - `should_create_oci_provider_with_new`
     - `should_create_oci_s3_compat_provider`
 
 - `src/storage/providers/wasabi.rs`
+
   - tests:
     - `should_create_wasabi_provider`
     - `should_support_different_regions`
 
 - `src/telemetry/config.rs`
+
   - tests:
     - `should_clamp_sample_rate`
     - `should_create_default_config`
     - `should_set_otlp_config`
 
 - `src/telemetry/metrics.rs`
+
   - tests:
     - `should_calculate_cache_hit_ratio`
     - `should_not_record_when_disabled`
     - `should_record_metrics_atomically`
 
 - `src/telemetry/mod.rs`
+
   - tests:
     - `should_initialize_telemetry_when_enabled`
     - `should_support_disabled_telemetry`
 
 - `src/telemetry/spans.rs`
+
   - tests:
     - `should_create_span_with_attributes`
     - `should_format_operation_types`
     - `should_format_span_kinds`
 
 - `src/wal/encoding.rs`
+
   - tests:
     - `should_error_when_magic_invalid`
     - `should_error_when_required_fields_missing`
@@ -1766,6 +1856,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_skip_unknown_tags_when_decoding`
 
 - `src/wal/fs/factory_io.rs`
+
   - tests:
     - `should_create_factory_with_mock_fs`
     - `should_create_factory_with_real_fs`
@@ -1773,18 +1864,21 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_create_writer`
 
 - `src/wal/fs/reader_io.rs`
+
   - tests:
     - `should_create_wal_reader_io`
     - `should_return_none_on_eof`
     - `should_support_close`
 
 - `src/wal/fs/writer_io.rs`
+
   - tests:
     - `should_create_wal_writer_io`
     - `should_support_close`
     - `should_support_flush`
 
 - `src/wal/recovery.rs`
+
   - tests:
     - `should_count_multiple_records_correctly`
     - `should_count_put_records`
@@ -1823,6 +1917,7 @@ Complete inventory of all test and benchmark functions across midge.
 **Integration Tests (tests/)**
 
 - `tests/column_families.rs`
+
   - tests:
     - `should_allow_recreate_cf_with_same_name_given_cf_dropped_when_creating`
     - `should_create_column_family_given_valid_name_when_engine_open`
@@ -1854,6 +1949,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_persist_multiple_cfs_given_restart_when_all_flushed`
 
 - `tests/config_api.rs`
+
   - tests:
     - `should_build_config_given_minimal_defaults_when_only_path_provided`
     - `should_clone_options_preserving_all_settings_given_configured_opts_when_cloning`
@@ -1875,11 +1971,13 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_sensible_defaults_given_no_configuration_when_using_default`
 
 - `tests/delete_range_audit.rs`
+
   - tests:
     - `should_test_range_method_directly_if_available`
     - `should_verify_delete_range_works_despite_range_being_stubbed`
 
 - `tests/durability_atomicity.rs`
+
   - tests:
     - `should_cleanup_partial_output_given_compaction_failure_when_recovering`
     - `should_commit_ssts_manifest_together_given_compaction_success_when_completing`
@@ -1894,6 +1992,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recovering`
 
 - `tests/durability_recovery.rs`
+
   - tests:
     - `should_be_idempotent_given_multiple_recovery_cycles_when_reopening`
     - `should_continue_sequence_numbers_given_recovery_when_new_writes`
@@ -1911,6 +2010,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_skip_wal_entries_given_already_in_sst_when_recovering`
 
 - `tests/durability_wal.rs`
+
   - tests:
     - `should_allow_data_loss_given_skipped_fsync_when_crash_occurs`
     - `should_call_fsync_given_wal_sync_enabled_when_put`
@@ -1924,6 +2024,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening`
 
 - `tests/edge_cases.rs`
+
   - tests:
     - `should_batch_concurrent_puts_when_cloudfirst_mode`
     - `should_handle_delete_all_pattern_when_writing_then_deleting_all_keys`
@@ -1939,6 +2040,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_store_and_retrieve_very_large_values_when_hundred_megabytes`
 
 - `tests/engine_basic.rs`
+
   - tests:
     - `should_get_value_given_existing_key_when_put`
     - `should_handle_binary_data_when_put`
@@ -1951,6 +2053,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_succeed_given_nonexistent_key_when_delete`
 
 - `tests/engine_cloud.rs`
+
   - tests:
     - `should_persist_data_to_cloud_storage`
     - `should_support_cloud_backed_storage`
@@ -1961,6 +2064,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_support_transactions_with_cloud_storage`
 
 - `tests/engine_compaction.rs`
+
   - tests:
     - `should_eliminate_obsolete_versions_through_compaction`
     - `should_handle_concurrent_writes_during_compaction`
@@ -1970,6 +2074,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_progress_through_lsm_levels_or_document_current_behavior`
 
 - `tests/engine_delete_range.rs`
+
   - tests:
     - `should_accept_delete_range_call_with_valid_bounds_when_called`
     - `should_allow_multiple_delete_ranges_when_called_sequentially`
@@ -1983,6 +2088,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_persist_keys_across_delete_range_with_restart_when_durable`
 
 - `tests/engine_init.rs`
+
   - tests:
     - `should_create_engine_in_all_modes`
     - `should_create_engine_in_cloud_mode`
@@ -1990,6 +2096,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_create_engine_in_memory`
 
 - `tests/engine_iterators.rs`
+
   - tests:
     - `should_apply_tombstones_given_streaming_scan_when_keys_deleted`
     - `should_handle_concurrent_streaming_scans_when_multiple_threads`
@@ -2010,6 +2117,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_skip_deleted_keys_given_tombstones_when_scanning`
 
 - `tests/engine_merge.rs`
+
   - tests:
     - `should_apply_multiple_merges_sequentially_given_repeated_operations_when_reading`
     - `should_error_when_merging_without_registered_operator_when_merging`
@@ -2032,6 +2140,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_string_append_operator_given_delimiter_when_merging`
 
 - `tests/engine_snapshots.rs`
+
   - tests:
     - `should_allow_writes_given_snapshot_dropped_when_continuing`
     - `should_cleanup_ssts_when_snapshot_released`
@@ -2054,6 +2163,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_work_correctly_given_empty_database_when_snapshot_created`
 
 - `tests/engine_ttl.rs`
+
   - tests:
     - `should_apply_ttl_given_write_batch_with_ttl_when_committed`
     - `should_check_expiration_at_read_time_given_snapshot_when_ttl_elapses_after_snapshot`
@@ -2069,6 +2179,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_update_ttl_given_overwrite_with_new_ttl_when_writing`
 
 - `tests/engine_wal.rs`
+
   - tests:
     - `should_handle_large_values_in_wal`
     - `should_handle_wal_rotation_and_multiple_segments`
@@ -2078,6 +2189,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_recover_range_tombstones_from_wal`
 
 - `tests/engine_write_batch.rs`
+
   - tests:
     - `should_apply_last_value_given_duplicate_keys_when_write_batch`
     - `should_apply_mixed_operations_in_order_when_write_batch`
@@ -2098,6 +2210,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_write_to_multiple_cfs_given_multi_cf_batch_when_write_batch`
 
 - `tests/hot_sst_tracking.rs`
+
   - tests:
     - `should_accumulate_reads_over_time`
     - `should_skip_cold_ssts_using_key_ranges`
@@ -2105,6 +2218,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_read_counts_per_sst_when_accessed`
 
 - `tests/memory_mode_isolation.rs`
+
   - tests:
     - `should_handle_many_deletes_efficiently_when_deleting_50_keys`
     - `should_handle_many_writes_efficiently_when_writing_100_keys`
@@ -2114,12 +2228,14 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_not_persist_data_across_restart_given_memory_mode_when_reopening`
 
 - `tests/memory_spill_audit.rs`
+
   - tests:
     - `should_commit_large_transaction_when_memory_limit_exceeded`
     - `should_handle_transaction_spill_to_disk_correctly`
     - `should_respect_memory_budget_across_transactions`
 
 - `tests/merge_advanced.rs`
+
   - tests:
     - `should_accumulate_multiple_merges_on_different_keys_when_batch`
     - `should_accumulate_values_given_10_sequential_merges_when_applying`
@@ -2132,6 +2248,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_preserve_merge_with_empty_operand_given_empty_bytes_when_merging`
 
 - `tests/read_amp_api.rs`
+
   - tests:
     - `should_accumulate_metrics_over_multiple_reads`
     - `should_expose_read_amp_metrics_through_api`
@@ -2140,6 +2257,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_track_l0_overlap_in_metrics`
 
 - `tests/snapshots_advanced.rs`
+
   - tests:
     - `should_cleanup_resources_given_snapshot_drop_when_no_longer_needed`
     - `should_handle_many_concurrent_snapshots_given_100_snapshots_when_creating`
@@ -2151,6 +2269,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_see_consistent_state_given_snapshot_across_write_batch_when_committed`
 
 - `tests/sst_reads_integration.rs`
+
   - tests:
     - `should_handle_memtable_and_sst_reads`
     - `should_read_from_sst_after_flush`
@@ -2158,6 +2277,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_key_ranges_for_higher_levels`
 
 - `tests/transaction_advanced.rs`
+
   - tests:
     - `should_handle_transaction_abort_idempotency_given_multiple_restart_cycles`
     - `should_maintain_exactly_once_semantics_given_transaction_with_crash`
@@ -2171,6 +2291,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_survive_mid_spill_crash_given_transaction_recovery`
 
 - `tests/transaction_basic.rs`
+
   - tests:
     - `should_allow_operations_given_previous_commit_failed_when_disk_full`
     - `should_commit_transaction_given_multiple_operations_when_committed`
@@ -2190,6 +2311,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_succeed_given_read_only_transaction_when_committed`
 
 - `tests/transaction_conflicts.rs`
+
   - tests:
     - `should_accept_both_committers_given_concurrent_puts_when_lww`
     - `should_allow_both_puts_to_succeed_given_concurrent_writes_when_lww`
@@ -2218,6 +2340,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_recover_conflict_state_after_engine_restart`
 
 - `tests/transaction_isolation.rs`
+
   - tests:
     - `should_allow_commit_given_read_key_modified_when_concurrent_write`
     - `should_allow_commit_under_read_committed_isolation_when_serializable_not_needed`
@@ -2241,6 +2364,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_see_own_writes_given_transaction_when_reading`
 
 - `tests/transaction_spill.rs`
+
   - tests:
     - `should_cleanup_spill_files_given_transaction_rollback_when_finalizing`
     - `should_commit_large_transaction_given_many_writes_exceeding_memory_limit`
@@ -2263,12 +2387,14 @@ Complete inventory of all test and benchmark functions across midge.
 **Benches (benches/)**
 
 - `benches/tier1_hotpath_api.rs`
+
   - benches:
     - `bench_batch_put`
     - `bench_single_get`
     - `bench_single_put`
 
 - `benches/tier1_hotpath_block_cache.rs`
+
   - benches:
     - `bench_eviction`
     - `bench_get_batch_hit`
@@ -2278,12 +2404,14 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_insert_single`
 
 - `benches/tier1_hotpath_bloom.rs`
+
   - benches:
     - `bench_bloom_batch_lookups`
     - `bench_bloom_compute_hashes`
     - `bench_bloom_maybe_contains`
 
 - `benches/tier1_hotpath_iterator.rs`
+
   - benches:
     - `bench_iter_sequential`
     - `bench_iter_single_step`
@@ -2292,6 +2420,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_range_position`
 
 - `benches/tier1_hotpath_memtable.rs`
+
   - benches:
     - `bench_delete`
     - `bench_get_point`
@@ -2300,21 +2429,25 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_size_bytes`
 
 - `benches/tier1_hotpath_singleflight.rs`
+
   - benches:
     - `bench_singleflight_flush_fanout`
 
 - `benches/tier1_hotpath_sparse_index.rs`
+
   - benches:
     - `bench_sparse_index_find_block`
     - `bench_sparse_index_sizes`
 
 - `benches/tier1_hotpath_sst.rs`
+
   - benches:
     - `bench_decode`
     - `bench_encode`
     - `bench_roundtrip`
 
 - `benches/tier1_hotpath_tlv_encoding.rs`
+
   - benches:
     - `bench_batch_field_encoding`
     - `bench_decode_tlv_field`
@@ -2325,12 +2458,14 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_varint32_encode`
 
 - `benches/tier1_hotpath_trie.rs`
+
   - benches:
     - `bench_trie_find_block`
     - `bench_trie_key_patterns`
     - `bench_trie_prefix_range`
 
 - `benches/tier1_hotpath_wal.rs`
+
   - benches:
     - `bench_wal_decode_record`
     - `bench_wal_encode_record`
@@ -2338,6 +2473,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_wal_roundtrip`
 
 - `benches/tier2_subsystem_block_cache.rs`
+
   - benches:
     - `bench_eviction_scan`
     - `bench_fill_then_hit`
@@ -2346,12 +2482,14 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_lru_eviction_1k`
 
 - `benches/tier2_subsystem_bloom_build.rs`
+
   - benches:
     - `bench_bloom_build_100k_keys`
     - `bench_bloom_build_10k_keys`
     - `bench_bloom_build_1m_keys`
 
 - `benches/tier2_subsystem_iterator_multi_sst.rs`
+
   - benches:
     - `bench_iterator_disjoint_ssts`
     - `bench_iterator_multi_sst_comparison`
@@ -2359,11 +2497,13 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_iterator_partial_overlap_ssts`
 
 - `benches/tier2_subsystem_memtable_rotate.rs`
+
   - benches:
     - `bench_memtable_rotate_large`
     - `bench_memtable_rotate_small`
 
 - `benches/tier2_subsystem_range_scan_cache.rs`
+
   - benches:
     - `bench_range_scan_cache_comparison`
     - `bench_range_scan_cold_cache`
@@ -2372,6 +2512,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_range_scan_warm_cache`
 
 - `benches/tier2_subsystem_read_amplification.rs`
+
   - benches:
     - `bench_read_amp_cache_effectiveness`
     - `bench_read_amp_mixed_get_scan`
@@ -2379,12 +2520,14 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_read_amp_uniform_distribution`
 
 - `benches/tier2_subsystem_sst_point_read_bloom.rs`
+
   - benches:
     - `bench_point_read_bloom_comparison`
     - `bench_point_read_bloom_disabled`
     - `bench_point_read_bloom_enabled`
 
 - `benches/tier3_system_compaction.rs`
+
   - benches:
     - `bench_compact_all`
     - `bench_flush`
@@ -2393,6 +2536,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_incremental_compact`
 
 - `benches/tier3_system_concurrency_stress.rs`
+
   - benches:
     - `bench_compaction_pressure`
     - `bench_concurrent_deletes`
@@ -2401,12 +2545,14 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_mixed_read_write`
 
 - `benches/tier3_system_contention_heavy.rs`
+
   - benches:
     - `bench_engine_heavy_read_contention`
     - `bench_engine_heavy_write_contention`
     - `bench_engine_mixed_contention`
 
 - `benches/tier3_system_durability_modes.rs`
+
   - benches:
     - `bench_durability_async_wal`
     - `bench_durability_concurrent`
@@ -2414,6 +2560,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_durability_write_heavy`
 
 - `benches/tier3_system_engine_advanced.rs`
+
   - benches:
     - `bench_column_family_scaling`
     - `bench_delete_heavy`
@@ -2421,6 +2568,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_ttl`
 
 - `benches/tier3_system_engine_basic.rs`
+
   - benches:
     - `bench_batch_put`
     - `bench_concurrent_reads`
@@ -2432,6 +2580,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_single_put`
 
 - `benches/tier3_system_isolation_mvcc.rs`
+
   - benches:
     - `bench_contention_breakdown`
     - `bench_single_thread_baseline`
@@ -2439,6 +2588,7 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_transaction_isolation`
 
 - `benches/tier3_system_lsm.rs`
+
   - benches:
     - `bench_system_flush_reopen_read`
     - `bench_system_l0_compaction`
@@ -2446,10 +2596,12 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_system_wal_write`
 
 - `benches/tier3_system_read_latency_during_flush.rs`
+
   - benches:
     - `bench_read_latency_during_flush`
 
 - `benches/tier3_system_recovery.rs`
+
   - benches:
     - `bench_recovery_speed_comparison`
     - `bench_recovery_throughput`
@@ -2457,81 +2609,100 @@ Complete inventory of all test and benchmark functions across midge.
     - `bench_recovery_with_wal_sync`
 
 - `benches/tier3_system_scan_l0_only.rs`
+
   - benches:
     - `bench_scan_l0_direct`
     - `bench_scan_l0_prefix`
 
 - `benches/tier3_system_scan_multi_level.rs`
+
   - benches:
     - `bench_scan_multi_level_range`
 
 - `benches/tier3_system_snapshot_consistency.rs`
+
   - benches:
     - `bench_snapshot_consistency_concurrent_writes`
 
 - `benches/tier3_system_sst_trie_index.rs`
+
   - benches:
     - `bench_full_scans`
     - `bench_point_lookups`
     - `bench_prefix_scans`
 
 - `benches/tier3_system_startup_large.rs`
+
   - benches:
     - `bench_engine_startup_100k_sst_files`
 
 - `benches/tier3_system_startup_wal.rs`
+
   - benches:
     - `bench_engine_startup_from_wal`
 
 - `benches/tier3_system_sustained_mixed_workload.rs`
+
   - benches:
     - `bench_sustained_mixed_workload_with_compaction`
 
 - `benches/tier4_integration_ycsb_workload_a.rs`
+
   - benches:
     - `bench_workload_a`
 
 - `benches/tier4_integration_ycsb_workload_b.rs`
+
   - benches:
     - `bench_workload_b`
 
 - `benches/tier4_integration_ycsb_workload_c.rs`
+
   - benches:
     - `bench_workload_c`
 
 - `benches/tier4_integration_ycsb_workload_d.rs`
+
   - benches:
     - `bench_workload_d`
 
 - `benches/tier4_integration_ycsb_workload_e.rs`
+
   - benches:
     - `bench_workload_e`
 
 - `benches/tier4_integration_ycsb_workload_f.rs`
+
   - benches:
     - `bench_workload_f`
 
 - `benches/tier5_soak_compaction_backlog_growth.rs`
+
   - benches:
     - `bench_compaction_backlog_growth`
 
 - `benches/tier5_soak_level_drift.rs`
+
   - benches:
     - `bench_level_drift`
 
 - `benches/tier5_soak_space_amplification.rs`
+
   - benches:
     - `bench_space_amplification`
 
 - `benches/tier6_capacity_cold_start_large.rs`
+
   - benches:
     - `bench_cold_start_large`
 
 - `benches/tier6_capacity_large_dataset_compaction.rs`
+
   - benches:
     - `bench_large_dataset_compaction`
 
 - `benches/tier6_capacity_large_dataset_insert.rs`
+
   - benches:
     - `bench_large_dataset_insert`
 

@@ -45,18 +45,18 @@ fn should_return_none_given_ttl_elapsed_when_reading() {
 }
 
 #[test]
-fn should_not_expire_key_given_zero_ttl_means_no_expiration_when_reading() {
+fn should_not_expire_key_given_zero_ttl_when_zero_means_infinite() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put_with_ttl(cf, b"key1", b"value1", 0).unwrap(); // 0 = no expiration
+        engine.put_with_ttl(cf, b"key1", b"value1", 0).unwrap(); // 0 = no expiration (infinite)
 
         // Act
         thread::sleep(Duration::from_millis(100));
         let result = engine.get(cf, b"key1").unwrap();
 
-        // Assert
+        // Assert - TTL of 0 means never expires
         assert_eq!(result, Some(Bytes::from_static(b"value1")));
     });
 }

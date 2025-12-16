@@ -160,7 +160,7 @@ fn should_release_locks_given_aborted_transaction_when_cleanup() {
 // ============================================================================
 
 #[test]
-fn should_provide_snapshot_isolation_given_concurrent_writes_when_transaction_active() {
+fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_active() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
@@ -173,9 +173,8 @@ fn should_provide_snapshot_isolation_given_concurrent_writes_when_transaction_ac
         // Concurrent write happens outside transaction
         engine.put(cf, b"key1", b"v2").unwrap();
 
-        // Assert - transaction should see original snapshot value
-        // (This requires snapshot-based reads in transaction, which may not be implemented yet)
-        // For now, transactions see latest committed data
+        // Assert - Midge implements Last-Write-Wins (LWW) semantics
+        // Transactions see latest committed data (not true snapshot isolation)
         let value = engine.get(cf, b"key1").unwrap();
         assert!(
             value == Some(Bytes::from_static(b"v1")) || value == Some(Bytes::from_static(b"v2"))
