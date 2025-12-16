@@ -69,11 +69,19 @@ impl GcActor {
     }
 
     /// Delete obsolete SST files
+    ///
+    /// Before deleting an SST, checks:
+    /// 1. File is not active in manifest
+    /// 2. File is not being compacted
+    /// 3. File is not pinned by active snapshot (BLOCKER #8)
     pub fn delete_ssts(
         &mut self,
         state: &mut RuntimeState,
         sst_names: &[String],
     ) -> MidgeResult<()> {
+        // Get set of SSTs pinned by active snapshots
+        let pinned_ssts = state.get_pinned_sst_names();
+
         let mut deleted_count = 0;
         let mut skipped_count = 0;
 
@@ -91,6 +99,16 @@ impl GcActor {
             // Check that file is not being compacted
             if state.compaction.compacting_ssts.contains(sst_name) {
                 tracing::warn!(sst_name, "Skipping delete of SST being compacted");
+                skipped_count += 1;
+                continue;
+            }
+
+            // === BLOCKER #8 FIX: Check that file is not pinned by a snapshot ===
+            if pinned_ssts.contains(sst_name) {
+                tracing::warn!(
+                    sst_name,
+                    "Skipping delete of SST pinned by active snapshot"
+                );
                 skipped_count += 1;
                 continue;
             }

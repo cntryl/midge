@@ -23,6 +23,16 @@ impl ManifestActor {
 
     /// Add a new SST file to the manifest
     pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: FileMeta) -> MidgeResult<()> {
+        // 🔑 CRITICAL: Write intent BEFORE applying mutations
+        // This ensures we can recover if crash occurs during SST addition
+        let intent = crate::runtime::IntentLogEntry::SstAdded {
+            file_meta: file_meta.clone(),
+        };
+        
+        // Persist the intent before applying mutation
+        state.append_intent(intent)?;
+        
+        // Now that intent is durable, apply mutation to in-memory manifest
         // Convert to manifest FileMeta
         let manifest_meta = crate::metadata::FileMeta {
             name: file_meta.name.clone(),
@@ -43,7 +53,7 @@ impl ManifestActor {
             sst_name = %file_meta.name,
             level = file_meta.level,
             cf_id = file_meta.cf_id,
-            "Manifest: added SST"
+            "Manifest: added SST with durability guarantee"
         );
 
         Ok(())
@@ -56,18 +66,29 @@ impl ManifestActor {
         removed: Vec<String>,
         added: Vec<FileMeta>,
     ) -> MidgeResult<()> {
+        // 🔑 CRITICAL: Write intent BEFORE applying mutations
+        // This ensures we can recover incomplete mutations on crash
+        let intent = crate::runtime::IntentLogEntry::CompactionApplied {
+            removed: removed.clone(),
+            added: added.iter().map(|m| m.name.clone()).collect(),
+        };
+        
+        // Persist the intent before applying mutations
+        state.append_intent(intent)?;
+        
+        // Now that intent is durable, apply mutations to in-memory manifest
         // Remove old files
         state.manifest.files.retain(|f| !removed.contains(&f.name));
 
         // Add new files
-        for file_meta in added {
+        for file_meta in &added {
             let manifest_meta = crate::metadata::FileMeta {
                 name: file_meta.name.clone(),
                 level: file_meta.level,
                 size_bytes: file_meta.size_bytes,
                 cf_id: file_meta.cf_id,
-                smallest_key: file_meta.smallest_key,
-                largest_key: file_meta.largest_key,
+                smallest_key: file_meta.smallest_key.clone(),
+                largest_key: file_meta.largest_key.clone(),
                 smallest_seq: file_meta.smallest_seq,
                 largest_seq: file_meta.largest_seq,
                 ..Default::default()
@@ -79,7 +100,8 @@ impl ManifestActor {
 
         tracing::info!(
             removed_count = removed.len(),
-            "Manifest: compaction complete"
+            added_count = added.len(),
+            "Manifest: compaction complete with durability guarantee"
         );
 
         Ok(())

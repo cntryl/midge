@@ -35,6 +35,23 @@ enum DurabilityWaiter {
         last_sequence: u64,
         op_count: usize,
     },
+    Read {
+        request_id: u64,
+        cf_id: u32,
+        key: Vec<u8>,
+        sequence: u64,
+        #[allow(dead_code)]
+        requested_durability: crate::engine::api::Durability,
+    },
+    RangeScan {
+        request_id: u64,
+        cf_id: u32,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        sequence: u64,
+        #[allow(dead_code)]
+        requested_durability: crate::engine::api::Durability,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +258,36 @@ impl EventLoop {
                                         },
                                     );
                                 }
+                                DurabilityWaiter::Read {
+                                    request_id,
+                                    cf_id,
+                                    key,
+                                    sequence,
+                                    requested_durability: _,
+                                } => {
+                                    let value = self.handle_read(cf_id, &key, sequence);
+                                    self.respond(
+                                        request_id,
+                                        RuntimeResponse::ReadValue { request_id, value },
+                                    );
+                                }
+                                DurabilityWaiter::RangeScan {
+                                    request_id,
+                                    cf_id,
+                                    start,
+                                    end,
+                                    sequence,
+                                    requested_durability: _,
+                                } => {
+                                    let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                                    self.respond(
+                                        request_id,
+                                        RuntimeResponse::RangeScanResults {
+                                            request_id,
+                                            results,
+                                        },
+                                    );
+                                }
                             }
                         }
                     }
@@ -259,7 +306,9 @@ impl EventLoop {
                     for w in waiters {
                         let request_id = match w {
                             DurabilityWaiter::WalAppend { request_id, .. }
-                            | DurabilityWaiter::WriteBatch { request_id, .. } => request_id,
+                            | DurabilityWaiter::WriteBatch { request_id, .. }
+                            | DurabilityWaiter::Read { request_id, .. }
+                            | DurabilityWaiter::RangeScan { request_id, .. } => request_id,
                         };
                         self.respond(
                             request_id,
@@ -456,6 +505,7 @@ impl EventLoop {
                 }) => {
                     let result = self.wal_actor.append_merge(
                         &mut self.state,
+                        request_id,
                         cf_id,
                         bytes::Bytes::from(key),
                         bytes::Bytes::from(operand),
@@ -593,6 +643,8 @@ impl EventLoop {
                                 request_id,
                                 sequence,
                             } => {
+                                // Mark sequences as confirmed for idempotency cleanup
+                                self.state.confirm_sequences(request_id);
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {
@@ -608,12 +660,44 @@ impl EventLoop {
                             } => {
                                 // Batch has become durable - clear atomicity barrier
                                 self.state.pending_batch_min_seq = None;
+                                // Mark sequences as confirmed for idempotency cleanup
+                                self.state.confirm_sequences(request_id);
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WriteBatchAppended {
                                         request_id,
                                         last_sequence,
                                         op_count,
+                                    },
+                                );
+                            }
+                            DurabilityWaiter::Read {
+                                request_id,
+                                cf_id,
+                                key,
+                                sequence,
+                                requested_durability: _,
+                            } => {
+                                let value = self.handle_read(cf_id, &key, sequence);
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::ReadValue { request_id, value },
+                                );
+                            }
+                            DurabilityWaiter::RangeScan {
+                                request_id,
+                                cf_id,
+                                start,
+                                end,
+                                sequence,
+                                requested_durability: _,
+                            } => {
+                                let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::RangeScanResults {
+                                        request_id,
+                                        results,
                                     },
                                 );
                             }
@@ -631,6 +715,7 @@ impl EventLoop {
     /// This ensures that operations observing durability (reads, ranges, deletes)
     /// always see a stable state with durability guarantees.
     /// Without this, tests with patterns like "write → read/range/delete" hang forever.
+    #[allow(dead_code)]
     fn sync_if_waiters_exist(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         if self.wal_actor.is_cloud_first() {
             return; // CloudFirst has separate logic
@@ -697,8 +782,40 @@ impl EventLoop {
                                     },
                                 );
                             }
+                            DurabilityWaiter::Read {
+                                request_id,
+                                cf_id,
+                                key,
+                                sequence,
+                                requested_durability: _,
+                            } => {
+                                let value = self.handle_read(cf_id, &key, sequence);
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::ReadValue { request_id, value },
+                                );
+                            }
+                            DurabilityWaiter::RangeScan {
+                                request_id,
+                                cf_id,
+                                start,
+                                end,
+                                sequence,
+                                requested_durability: _,
+                            } => {
+                                let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                                self.respond(
+                                    request_id,
+                                    RuntimeResponse::RangeScanResults {
+                                        request_id,
+                                        results,
+                                    },
+                                );
+                            }
                         }
                     }
+                    // 🔑 Clean up old idempotency entries now that frontier advanced
+                    self.state.cleanup_old_idempotency_entries();
                 }
             }
             Err(e) => {
@@ -1070,6 +1187,7 @@ impl EventLoop {
                 } => {
                     let result = self.wal_actor.append_merge(
                         &mut self.state,
+                        request_id,
                         cf_id,
                         bytes::Bytes::from(key),
                         bytes::Bytes::from(operand),
@@ -1298,20 +1416,59 @@ impl EventLoop {
                     cf_id,
                     key,
                     sequence,
+                    requested_durability,
                 } => {
-                    // 🔑 Establish durability fence: if durability waiters exist, sync before reading
-                    // This ensures "write → await durable → read" patterns work correctly
-                    self.sync_if_waiters_exist(&msg_rx);
+                    // 🔑 CRITICAL: Enforce durability frontier
+                    // Reads must not return data beyond the requested durability level.
+                    // If data at this sequence is not yet durable, queue the read to wait.
+                    // 
+                    // Special case: sequence = u64::MAX means "read latest available value"
+                    // which bypasses durability checks (no guarantee of durable data anyway).
 
-                    // 🔑 Read atomicity: if a WriteBatch is pending, reads at its sequence must wait
-                    if let Some(min_seq) = self.state.pending_batch_min_seq {
-                        if sequence >= min_seq {
-                            self.force_wal_sync(&msg_rx);
+                    let should_read_immediately = if sequence == u64::MAX {
+                        // "Latest available" always reads immediately
+                        true
+                    } else {
+                        // Check if specific sequence is durable
+                        match requested_durability {
+                            crate::engine::api::Durability::Strict
+                            | crate::engine::api::Durability::Steady => {
+                                // For Strict/Steady: check local_durable_seq
+                                sequence <= self.state.wal.local_durable_seq
+                            }
+                            crate::engine::api::Durability::CloudReplicated => {
+                                // For CloudReplicated: check cloud_durable_seq
+                                sequence <= self.state.wal.cloud_durable_seq
+                            }
+                        }
+                    };
+
+                    if should_read_immediately {
+                        // Data is durable at requested level; safe to read
+                        let value = self.handle_read(cf_id, &key, sequence);
+                        self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
+                    } else {
+                        // Data not yet durable; queue read to wait for frontier
+                        if let Some(waiters) = &self.durability_waiters {
+                            waiters.join(DurabilityWaiter::Read {
+                                request_id,
+                                cf_id,
+                                key: key.clone(),
+                                sequence,
+                                requested_durability,
+                            });
+                        } else {
+                            // No durability waiters configured; shouldn't happen in production
+                            // but for safety, respond immediately with error
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: "Durability enforcement unavailable".to_string(),
+                                },
+                            );
                         }
                     }
-
-                    let value = self.handle_read(cf_id, &key, sequence);
-                    self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
                 }
 
                 RuntimeMsg::RangeScan {
@@ -1320,26 +1477,66 @@ impl EventLoop {
                     start,
                     end,
                     sequence,
+                    requested_durability,
                 } => {
-                    // 🔑 Establish durability fence: if durability waiters exist, sync before scanning
-                    // This ensures "write → await durable → range_scan" patterns work correctly
-                    self.sync_if_waiters_exist(&msg_rx);
+                    // 🔑 CRITICAL: Enforce durability frontier
+                    // Range scans must not return data beyond the requested durability level.
+                    // If data at this sequence is not yet durable, queue the scan to wait.
+                    //
+                    // Special case: sequence = u64::MAX means "scan latest available value"
+                    // which bypasses durability checks (no guarantee of durable data anyway).
+                    
+                    let should_scan_immediately = if sequence == u64::MAX {
+                        // "Latest available" always scans immediately
+                        true
+                    } else {
+                        // Check if specific sequence is durable
+                        match requested_durability {
+                            crate::engine::api::Durability::Strict
+                            | crate::engine::api::Durability::Steady => {
+                                // For Strict/Steady: check local_durable_seq
+                                sequence <= self.state.wal.local_durable_seq
+                            }
+                            crate::engine::api::Durability::CloudReplicated => {
+                                // For CloudReplicated: check cloud_durable_seq
+                                sequence <= self.state.wal.cloud_durable_seq
+                            }
+                        }
+                    };
 
-                    // 🔑 Read atomicity: if a WriteBatch is pending, reads at its sequence must wait
-                    if let Some(min_seq) = self.state.pending_batch_min_seq {
-                        if sequence >= min_seq {
-                            self.force_wal_sync(&msg_rx);
+                    if should_scan_immediately {
+                        // Data is durable at requested level; safe to scan
+                        let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::RangeScanResults {
+                                request_id,
+                                results,
+                            },
+                        );
+                    } else {
+                        // Data not yet durable; queue scan to wait for frontier
+                        if let Some(waiters) = &self.durability_waiters {
+                            waiters.join(DurabilityWaiter::RangeScan {
+                                request_id,
+                                cf_id,
+                                start: start.clone(),
+                                end: end.clone(),
+                                sequence,
+                                requested_durability,
+                            });
+                        } else {
+                            // No durability waiters configured; shouldn't happen in production
+                            // but for safety, respond immediately with error
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: "Durability enforcement unavailable".to_string(),
+                                },
+                            );
                         }
                     }
-
-                    let results = self.handle_range_scan(cf_id, &start, &end, sequence);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::RangeScanResults {
-                            request_id,
-                            results,
-                        },
-                    );
                 }
             }
         }

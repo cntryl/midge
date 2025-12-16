@@ -216,3 +216,36 @@ fn should_not_corrupt_state_given_unclean_shutdown_when_recovering() {
     assert!(v1.is_some() || v1.is_none(), "Should recover without corruption");
     assert!(v2.is_some() || v2.is_none(), "Should recover without corruption");
 }
+
+/// INVARIANT TEST: Durability frontier enforcement
+///
+/// This test verifies that reads respect the durability frontier.
+/// When a write is acknowledged to the user, the read must not return
+/// data that hasn't been synced (if using Strict durability).
+///
+/// Currently this is a placeholder; actual implementation requires
+/// chaos engineering or crash simulation. For now, we verify that
+/// the get() API can be called and returns reasonable values.
+#[test]
+#[ignore]  // TODO: Enable after implementing durability frontier enforcement
+fn should_not_return_unsynced_data_on_read_with_strict_durability() {
+    // Arrange
+    let mut opts = opts_for_mode("local");
+    opts.wal_sync = true; // Enable Strict durability
+    
+    let engine = open_with_mode(opts, "local");
+    let cf = engine.default_column_family();
+    
+    // Act
+    engine.put(cf, b"durable_key", b"durable_value").expect("put");
+    
+    // Assert
+    // With Strict durability, after put() returns Ok, the data MUST be on disk.
+    // A read should return the value (no issue here).
+    // The real test would involve:
+    // 1. Crash simulator that kills the process mid-flush
+    // 2. Verify that reads never return data that wasn't fsynced
+    // 3. Verify that after restart, no data is lost
+    let result = engine.get(cf, b"durable_key").expect("get");
+    assert_eq!(result, Some(Bytes::from_static(b"durable_value")));
+}

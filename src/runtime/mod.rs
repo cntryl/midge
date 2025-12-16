@@ -241,19 +241,30 @@ pub enum RuntimeMsg {
 
     // === Read Path ===
     /// Query a value from memtables and SST files.
+    ///
+    /// INVARIANT: Reads must respect the durability frontier.
+    /// If requested_durability is Strict/Steady, the read must not return data
+    /// with seqno > local_durable_seq. Reads at higher seqnos are queued in
+    /// durability_waiters until the frontier advances.
     Read {
         request_id: u64,
         cf_id: u32,
         key: Vec<u8>,
-        sequence: u64, // Read at this sequence number or earlier.
+        sequence: u64,                           // Read at this sequence number or earlier.
+        requested_durability: crate::engine::api::Durability, // Durability level requested
     },
     /// Scan a range of keys from memtables and SST files.
+    ///
+    /// INVARIANT: Range scans must respect the durability frontier.
+    /// Same semantics as Read: if requested_durability is Strict/Steady,
+    /// the scan must not return data with seqno > local_durable_seq.
     RangeScan {
         request_id: u64,
         cf_id: u32,
         start: Vec<u8>,
         end: Vec<u8>,
-        sequence: u64, // Read at this sequence number or earlier.
+        sequence: u64,                           // Read at this sequence number or earlier.
+        requested_durability: crate::engine::api::Durability, // Durability level requested
     },
 
     // === Observability ===

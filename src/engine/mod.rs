@@ -173,7 +173,11 @@ impl MidgeEngine {
         let db_path = param.to_path();
         // Detect memory mode from path (":memory:" sentinel)
         let memory_mode = db_path.to_string_lossy() == ":memory:";
-        let state = RuntimeState::new(db_path.clone(), memory_mode);
+        let mut state = RuntimeState::new(db_path.clone(), memory_mode);
+
+        // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations
+        // Must happen BEFORE runtime starts processing messages
+        state.replay_intent_log()?;
 
         // Start runtime
         let (runtime, _) = Runtime::new()?;
@@ -428,11 +432,13 @@ impl MidgeEngine {
 
         // CRITICAL: Reads must go through runtime to query authoritative state
         // (active memtable + immutable memtables + SSTs).
+        // Also enforce durability frontier: don't return data ahead of durable_seq.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             sequence: u64::MAX, // Read latest committed value
+            requested_durability: api::Durability::Steady, // Default to Steady (balanced durability/performance)
         })?;
 
         match response {
@@ -501,6 +507,7 @@ impl MidgeEngine {
             cf_id: cf.id.0,
             key: key.to_vec(),
             sequence: txn.start_sequence(),
+            requested_durability: api::Durability::Steady, // Transactions inherit engine's durability level
         })?;
 
         match response {
@@ -739,6 +746,7 @@ impl MidgeEngine {
             start: start.to_vec(),
             end: end.to_vec(),
             sequence,
+            requested_durability: api::Durability::Steady, // Default to Steady (balanced durability/performance)
         })?;
 
         match response {

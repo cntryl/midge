@@ -540,7 +540,7 @@ fn should_cleanup_ssts_when_snapshot_released() {
     }
 
     // Release snapshots one by one
-    for (_i, (_round, snap)) in snapshots.into_iter().enumerate() {
+    for (_round, snap) in snapshots.into_iter() {
         drop(snap);
     }
 }

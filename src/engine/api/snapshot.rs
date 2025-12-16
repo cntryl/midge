@@ -65,6 +65,7 @@ impl Snapshot {
             cf_id: cf.id().as_u32(),
             key: key.to_vec(),
             sequence: self.sequence,
+            requested_durability: crate::engine::api::Durability::Steady,
         })?;
 
         match response {
@@ -99,6 +100,7 @@ impl Snapshot {
             start: start.to_vec(),
             end: end.to_vec(),
             sequence,
+            requested_durability: crate::engine::api::Durability::Steady,
         })?;
 
         match response {
