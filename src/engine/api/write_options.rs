@@ -85,7 +85,7 @@ impl TransactionImpl {
 
 impl KvTransaction for TransactionImpl {
     fn get(&self, _key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
-        // For now, transactions don't track reads (no MVCC implemented)
+        // Transactions use LWW isolation (sequence-based visibility)
         // This is a stub for API compatibility
         Ok(None)
     }

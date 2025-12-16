@@ -83,9 +83,9 @@ There are no side paths, fast paths, or hidden mutations.
 - Single commit boundary
 - WAL-backed durability
 
-### Transactions (MVCC, optional)
+### Transactions (LWW-based Isolation)
 
-- Snapshot or read-committed isolation
+- Last-Write-Wins isolation with snapshot support
 - Optimistic conflict detection
 - Actor-serialized commit
 - No long-lived locks

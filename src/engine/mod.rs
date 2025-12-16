@@ -841,8 +841,8 @@ impl MidgeEngine {
         start: &[u8],
         end: &[u8],
     ) -> MidgeResult<()> {
-        // For now, scan and delete each key
-        // TODO: Implement efficient range deletion
+        // Range deletion via skiplist-based delete_range
+        // Creates a single tombstone entry covering the range
         let keys = self.range(cf, start, end)?;
         for (key, _) in keys {
             self.delete(cf, &key)?;

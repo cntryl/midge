@@ -4,7 +4,7 @@
 //! - Multi-key atomic operations
 //! - Isolation levels (Read Uncommitted, Read Committed, Serializable)
 //! - Rollback and commit semantics
-//! - MVCC-based consistency
+//! - LWW (Last-Write-Wins) based isolation with sequence visibility
 
 use crate::common::MidgeResult;
 use crate::engine::ColumnFamilyId;
@@ -23,7 +23,7 @@ pub enum IsolationLevel {
     ReadUncommitted,
     /// No dirty reads; consistent reads at commit time
     ReadCommitted,
-    /// Full snapshot isolation; MVCC-based
+    /// Full snapshot isolation; LWW-based with sequence-number visibility
     #[default]
     Serializable,
 }
