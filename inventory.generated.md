@@ -1,6 +1,6 @@
 # Test & Bench Inventory
 
-_Generated 2025-12-16T12:36:33Z by `scripts/generate_inventory.py`._
+_Generated 2025-12-16T13:32:19Z by `scripts/generate_inventory.py`._
 
 Complete inventory of all test and benchmark functions across midge.
 
@@ -1874,6 +1874,11 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_use_auto_memory_given_no_explicit_budget_when_default`
     - `should_use_sensible_defaults_given_no_configuration_when_using_default`
 
+- `tests/delete_range_audit.rs`
+  - tests:
+    - `should_test_range_method_directly_if_available`
+    - `should_verify_delete_range_works_despite_range_being_stubbed`
+
 - `tests/durability_atomicity.rs`
   - tests:
     - `should_cleanup_partial_output_given_compaction_failure_when_recovering`
@@ -1939,11 +1944,30 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_handle_binary_data_when_put`
     - `should_handle_empty_value_when_put`
     - `should_handle_many_operations_when_sequential`
-    - `should_not_create_filesystem_artifacts_when_memory_mode`
     - `should_overwrite_value_given_existing_key_when_put`
+    - `should_retrieve_written_data_across_storage_modes`
     - `should_return_none_given_deleted_key_when_get`
     - `should_return_none_given_nonexistent_key_when_get`
     - `should_succeed_given_nonexistent_key_when_delete`
+
+- `tests/engine_cloud.rs`
+  - tests:
+    - `should_persist_data_to_cloud_storage`
+    - `should_support_cloud_backed_storage`
+    - `should_support_deletes_on_cloud`
+    - `should_support_hybrid_local_and_cloud_storage`
+    - `should_support_range_scans_on_cloud`
+    - `should_support_snapshots_on_cloud_data`
+    - `should_support_transactions_with_cloud_storage`
+
+- `tests/engine_compaction.rs`
+  - tests:
+    - `should_eliminate_obsolete_versions_through_compaction`
+    - `should_handle_concurrent_writes_during_compaction`
+    - `should_handle_large_values_through_compaction`
+    - `should_maintain_read_consistency_during_compaction`
+    - `should_preserve_range_tombstones_through_multi_level_compaction`
+    - `should_progress_through_lsm_levels_or_document_current_behavior`
 
 - `tests/engine_delete_range.rs`
   - tests:
@@ -2010,15 +2034,20 @@ Complete inventory of all test and benchmark functions across midge.
 - `tests/engine_snapshots.rs`
   - tests:
     - `should_allow_writes_given_snapshot_dropped_when_continuing`
+    - `should_cleanup_ssts_when_snapshot_released`
     - `should_exclude_keys_written_after_snapshot_when_scan_at`
+    - `should_handle_long_lived_snapshots_gracefully`
     - `should_hide_newer_writes_given_snapshot_when_scan_at`
     - `should_hide_writes_given_snapshot_created_before_write_when_get_at`
     - `should_include_deleted_keys_given_snapshot_before_delete_when_scan_at`
+    - `should_maintain_isolation_with_multiple_snapshots`
     - `should_maintain_separate_views_given_multiple_snapshots_when_reading`
+    - `should_maintain_snapshot_consistency_during_compaction`
     - `should_not_block_writes_given_snapshot_held_when_writing`
     - `should_preserve_deleted_range_given_snapshot_before_delete_range_when_scan_at`
     - `should_preserve_snapshot_view_given_compaction_when_reading_at_snapshot`
     - `should_preserve_snapshot_view_given_flush_when_reading_at_snapshot`
+    - `should_prevent_sst_cleanup_while_snapshot_active`
     - `should_return_none_given_snapshot_before_key_exists_when_get_at`
     - `should_see_deleted_key_given_snapshot_before_delete_when_get_at`
     - `should_see_value_given_snapshot_after_write_when_get_at`
@@ -2038,6 +2067,15 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_return_none_given_ttl_elapsed_when_reading`
     - `should_return_value_given_ttl_not_elapsed_when_reading`
     - `should_update_ttl_given_overwrite_with_new_ttl_when_writing`
+
+- `tests/engine_wal.rs`
+  - tests:
+    - `should_handle_large_values_in_wal`
+    - `should_handle_wal_rotation_and_multiple_segments`
+    - `should_recover_data_from_wal_after_flush`
+    - `should_recover_deletes_from_wal`
+    - `should_recover_mixed_operations_from_wal`
+    - `should_recover_range_tombstones_from_wal`
 
 - `tests/engine_write_batch.rs`
   - tests:
@@ -2074,6 +2112,12 @@ Complete inventory of all test and benchmark functions across midge.
     - `should_isolate_data_given_multiple_memory_engines_when_separate_instances`
     - `should_not_create_filesystem_artifacts_when_memory_mode`
     - `should_not_persist_data_across_restart_given_memory_mode_when_reopening`
+
+- `tests/memory_spill_audit.rs`
+  - tests:
+    - `should_commit_large_transaction_when_memory_limit_exceeded`
+    - `should_handle_transaction_spill_to_disk_correctly`
+    - `should_respect_memory_budget_across_transactions`
 
 - `tests/merge_advanced.rs`
   - tests:
