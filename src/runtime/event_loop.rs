@@ -11,54 +11,17 @@
 use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::TryRecvError;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::actors::{
     CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
 };
+use super::durability::{DurabilityCoordinator, DurabilityWaiter};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
-use crate::common::KeyedGroupCommit;
 use crate::sst::traits::SstReader;
 use crate::sst::Memtable;
-
-#[derive(Debug, Clone)]
-enum DurabilityWaiter {
-    WalAppend {
-        request_id: u64,
-        sequence: u64,
-    },
-    WriteBatch {
-        request_id: u64,
-        last_sequence: u64,
-        op_count: usize,
-    },
-    Read {
-        request_id: u64,
-        cf_id: u32,
-        key: Vec<u8>,
-        sequence: u64,
-        #[allow(dead_code)]
-        requested_durability: crate::engine::api::Durability,
-    },
-    RangeScan {
-        request_id: u64,
-        cf_id: u32,
-        start: Vec<u8>,
-        end: Vec<u8>,
-        sequence: u64,
-        #[allow(dead_code)]
-        requested_durability: crate::engine::api::Durability,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct CloudFirstInflightSegment {
-    enqueued_at: Instant,
-    max_sequence: u64,
-}
 
 /// Main synchronous event loop for the runtime.
 ///
@@ -79,14 +42,8 @@ pub struct EventLoop {
     hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     trace_enabled: bool,
 
-    last_cloud_flush: Instant,
-
-    // CloudFirst: track enqueue->ack per WAL segment.
-    cloudfirst_inflight: HashMap<u64, CloudFirstInflightSegment>,
-
-    // Durability group commit: waiters grouped by WAL segment/generation id.
-    // Used in both CloudFirst (keyed by segment id) and Batched (keyed by flush generation).
-    durability_waiters: Option<KeyedGroupCommit<u64, DurabilityWaiter>>,
+    // Durability coordination (extracted to reduce EventLoop cognitive load)
+    durability: DurabilityCoordinator,
 
     /// Per-request router (oneshot channels)
     router: Arc<ResponseRouter>,
@@ -126,7 +83,8 @@ impl EventLoop {
         // 🔑 CRITICAL: Use the correct key for durability_waiters based on mode
         // - CloudFirst: key is segment_id (for rotate_to/complete calls)
         // - Batched: key is flush_generation (returned from wal_actor.sync())
-        let initial_durability_key = if wal_actor.is_cloud_first() {
+        let is_cloud_first = wal_actor.is_cloud_first();
+        let initial_durability_key = if is_cloud_first {
             initial_segment_id
         } else {
             wal_actor.current_flush_generation()
@@ -144,9 +102,7 @@ impl EventLoop {
             hybrid_storage: None,
             hybrid_storage_events: config.hybrid_storage_events.clone(),
             trace_enabled,
-            last_cloud_flush: Instant::now(),
-            cloudfirst_inflight: HashMap::new(),
-            durability_waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
+            durability: DurabilityCoordinator::new(initial_durability_key, is_cloud_first),
             router,
             pending_msg: None,
         };
@@ -202,33 +158,18 @@ impl EventLoop {
                     // If cloud_durable_seq advanced past multiple segments,
                     // complete all inflight segments whose max_sequence is now durable.
                     let durable = self.state.wal.cloud_durable_seq;
-                    let mut ready: Vec<u64> = self
-                        .cloudfirst_inflight
-                        .iter()
-                        .filter_map(|(seg, info)| {
-                            if info.max_sequence <= durable {
-                                Some(*seg)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    ready.sort_unstable();
+                    let ready = self.durability.get_ready_cloud_segments(durable);
 
                     for seg_id in ready {
-                        if let Some(info) = self.cloudfirst_inflight.remove(&seg_id) {
+                        if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id) {
                             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                                 telemetry.metrics().record_cloudfirst_wal_ack_latency_us(
-                                    info.enqueued_at.elapsed().as_micros() as u64,
+                                    enqueued_at.elapsed().as_micros() as u64,
                                 );
                             }
                         }
 
-                        let waiters = self
-                            .durability_waiters
-                            .as_ref()
-                            .map(|w| w.complete(&seg_id))
-                            .unwrap_or_default();
+                        let waiters = self.durability.complete_waiters_at(seg_id);
 
                         for w in waiters {
                             match w {
@@ -298,29 +239,27 @@ impl EventLoop {
             },
             crate::storage::StorageEvent::CloudFail { segment_id, error } => {
                 // Drop inflight timing; the corresponding writes will error.
-                let _ = self.cloudfirst_inflight.remove(&segment_id);
                 self.wal_actor
                     .handle_cloud_upload_failed(segment_id, &error);
 
-                if let Some(waiters) = self.durability_waiters.as_ref().map(|w| w.drain_all()) {
-                    for w in waiters {
-                        let request_id = match w {
-                            DurabilityWaiter::WalAppend { request_id, .. }
-                            | DurabilityWaiter::WriteBatch { request_id, .. }
-                            | DurabilityWaiter::Read { request_id, .. }
-                            | DurabilityWaiter::RangeScan { request_id, .. } => request_id,
-                        };
-                        self.respond(
+                let waiters = self.durability.drain_all_waiters();
+                for w in waiters {
+                    let request_id = match w {
+                        DurabilityWaiter::WalAppend { request_id, .. }
+                        | DurabilityWaiter::WriteBatch { request_id, .. }
+                        | DurabilityWaiter::Read { request_id, .. }
+                        | DurabilityWaiter::RangeScan { request_id, .. } => request_id,
+                    };
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::Error {
                             request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                message: format!("Cloud durability failed: {error}"),
-                            },
-                        );
-                    }
+                            message: format!("Cloud durability failed: {error}"),
+                        },
+                    );
                 }
 
-                self.cloudfirst_inflight.clear();
+                self.durability.clear_inflight();
             }
             _ => {}
         }
@@ -343,38 +282,10 @@ impl EventLoop {
             return;
         }
 
-        // CloudFirst rotate/upload policy.
-        //
-        // Goals:
-        // - Guarantee forward progress for a single synchronous caller (upper-bound latency).
-        // - Allow batching under concurrency (avoid 1 upload per write).
-        //
-        // Note: A single-threaded caller awaiting CloudAck cannot contribute additional writes
-        // to the batch, so max-delay ensures we still flush promptly in that case.
-        // For cloud object uploads, very small segments create disproportionate overhead.
-        // Under sustained load we want multi-MB segments, but when there's only a single
-        // synchronous waiter we still want prompt progress.
-        const CLOUDFIRST_MIN_SEGMENT_BYTES: usize = 8 * 1024 * 1024; // 8MB
-        const CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG: Duration = Duration::from_millis(25);
-        const CLOUDFIRST_MAX_PENDING_WRITES: usize = 2048;
-
         let cloud_pending = self.wal_actor.pending_cloud_writes_len();
         let bytes_buffered = self.wal_actor.bytes_since_sync();
 
-        // Important: do NOT use `should_sync_batch()` here.
-        // That threshold is tuned for local durability batching (~64KB) and would cause
-        // CloudFirst to rotate/upload far too frequently.
-        let flush_due = if cloud_pending <= 1 {
-            // Single synchronous waiter: cannot build a multi-write segment, so flush immediately
-            // to minimize added latency (don't wait for a timer).
-            cloud_pending > 0
-        } else {
-            cloud_pending > 0
-                && (bytes_buffered >= CLOUDFIRST_MIN_SEGMENT_BYTES
-                    || cloud_pending >= CLOUDFIRST_MAX_PENDING_WRITES
-                    || self.last_cloud_flush.elapsed() >= CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG)
-        };
-        if !flush_due {
+        if !self.durability.should_flush_cloudfirst(cloud_pending, bytes_buffered) {
             return;
         }
 
@@ -393,21 +304,15 @@ impl EventLoop {
         }
 
         // Move waiters for the sealed segment into an inflight bucket keyed by `segment_id`.
-        if let Some(waiters) = &self.durability_waiters {
-            let _ = waiters.rotate_to(self.state.wal.current_segment_id);
-        }
+        self.durability.rotate_to(self.state.wal.current_segment_id);
 
         let max_sequence = self.state.wal.local_durable_seq;
         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
 
-        self.cloudfirst_inflight.insert(
-            segment_id,
-            CloudFirstInflightSegment {
-                enqueued_at: Instant::now(),
-                max_sequence,
-            },
-        );
+        self.durability
+            .record_cloud_segment_inflight(segment_id, max_sequence);
+        self.durability.record_cloud_flush();
 
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry
@@ -424,7 +329,6 @@ impl EventLoop {
                 );
             }
         }
-        self.last_cloud_flush = Instant::now();
     }
 
     /// Opportunistically drain pending *write* messages from the channel.
@@ -476,8 +380,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WalAppend {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -521,8 +425,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WalAppend {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -557,8 +461,8 @@ impl EventLoop {
                                         op_count,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WriteBatch {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WriteBatch {
                                     request_id,
                                     last_sequence,
                                     op_count,
@@ -610,11 +514,7 @@ impl EventLoop {
         // 1. Byte threshold exceeded
         // 2. Pending write count threshold exceeded
         // 3. Any durable waiters are pending (important for small workloads!)
-        let has_pending_waiters = self
-            .durability_waiters
-            .as_ref()
-            .map(|w| w.pending_len() > 0)
-            .unwrap_or(false);
+        let has_pending_waiters = self.durability.has_pending_waiters();
 
         let should_sync = self.wal_actor.should_sync_batch()
             || self.wal_actor.pending_sync_count() > 0
@@ -634,73 +534,71 @@ impl EventLoop {
         match self.wal_actor.sync(&mut self.state) {
             Ok(sealed_gen) => {
                 // Rotate group commit to new generation and complete old one
-                if let Some(waiters) = &self.durability_waiters {
-                    let _ = waiters.rotate_to(sealed_gen + 1);
-                    let completed = waiters.complete(&sealed_gen);
-                    for w in completed {
-                        match w {
-                            DurabilityWaiter::WalAppend {
+                self.durability.rotate_to(sealed_gen + 1);
+                let completed = self.durability.complete_waiters_at(sealed_gen);
+                for w in completed {
+                    match w {
+                        DurabilityWaiter::WalAppend {
+                            request_id,
+                            sequence,
+                        } => {
+                            // Mark sequences as confirmed for idempotency cleanup
+                            self.state.confirm_sequences(request_id);
+                            self.respond(
                                 request_id,
-                                sequence,
-                            } => {
-                                // Mark sequences as confirmed for idempotency cleanup
-                                self.state.confirm_sequences(request_id);
-                                self.respond(
+                                RuntimeResponse::WalAppended {
                                     request_id,
-                                    RuntimeResponse::WalAppended {
-                                        request_id,
-                                        sequence,
-                                    },
-                                );
-                            }
-                            DurabilityWaiter::WriteBatch {
+                                    sequence,
+                                },
+                            );
+                        }
+                        DurabilityWaiter::WriteBatch {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                        } => {
+                            // Batch has become durable - clear atomicity barrier
+                            self.state.pending_batch_min_seq = None;
+                            // Mark sequences as confirmed for idempotency cleanup
+                            self.state.confirm_sequences(request_id);
+                            self.respond(
                                 request_id,
-                                last_sequence,
-                                op_count,
-                            } => {
-                                // Batch has become durable - clear atomicity barrier
-                                self.state.pending_batch_min_seq = None;
-                                // Mark sequences as confirmed for idempotency cleanup
-                                self.state.confirm_sequences(request_id);
-                                self.respond(
+                                RuntimeResponse::WriteBatchAppended {
                                     request_id,
-                                    RuntimeResponse::WriteBatchAppended {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                    },
-                                );
-                            }
-                            DurabilityWaiter::Read {
+                                    last_sequence,
+                                    op_count,
+                                },
+                            );
+                        }
+                        DurabilityWaiter::Read {
+                            request_id,
+                            cf_id,
+                            key,
+                            sequence,
+                            requested_durability: _,
+                        } => {
+                            let value = self.handle_read(cf_id, &key, sequence);
+                            self.respond(
                                 request_id,
-                                cf_id,
-                                key,
-                                sequence,
-                                requested_durability: _,
-                            } => {
-                                let value = self.handle_read(cf_id, &key, sequence);
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::ReadValue { request_id, value },
-                                );
-                            }
-                            DurabilityWaiter::RangeScan {
+                                RuntimeResponse::ReadValue { request_id, value },
+                            );
+                        }
+                        DurabilityWaiter::RangeScan {
+                            request_id,
+                            cf_id,
+                            start,
+                            end,
+                            sequence,
+                            requested_durability: _,
+                        } => {
+                            let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                            self.respond(
                                 request_id,
-                                cf_id,
-                                start,
-                                end,
-                                sequence,
-                                requested_durability: _,
-                            } => {
-                                let results = self.handle_range_scan(cf_id, &start, &end, sequence);
-                                self.respond(
+                                RuntimeResponse::RangeScanResults {
                                     request_id,
-                                    RuntimeResponse::RangeScanResults {
-                                        request_id,
-                                        results,
-                                    },
-                                );
-                            }
+                                    results,
+                                },
+                            );
                         }
                     }
                 }
@@ -721,11 +619,7 @@ impl EventLoop {
             return; // CloudFirst has separate logic
         }
 
-        let has_waiters = self
-            .durability_waiters
-            .as_ref()
-            .map(|w| w.pending_len() > 0)
-            .unwrap_or(false);
+        let has_waiters = self.durability.has_pending_waiters();
 
         if has_waiters {
             self.force_wal_sync(msg_rx);
@@ -749,69 +643,67 @@ impl EventLoop {
         match self.wal_actor.sync(&mut self.state) {
             Ok(sealed_gen) => {
                 // Rotate and complete any pending waiters
-                if let Some(waiters) = &self.durability_waiters {
-                    let _ = waiters.rotate_to(sealed_gen + 1);
-                    let completed = waiters.complete(&sealed_gen);
-                    for w in completed {
-                        match w {
-                            DurabilityWaiter::WalAppend {
+                self.durability.rotate_to(sealed_gen + 1);
+                let completed = self.durability.complete_waiters_at(sealed_gen);
+                for w in completed {
+                    match w {
+                        DurabilityWaiter::WalAppend {
+                            request_id,
+                            sequence,
+                        } => {
+                            self.respond(
                                 request_id,
-                                sequence,
-                            } => {
-                                self.respond(
+                                RuntimeResponse::WalAppended {
                                     request_id,
-                                    RuntimeResponse::WalAppended {
-                                        request_id,
-                                        sequence,
-                                    },
-                                );
-                            }
-                            DurabilityWaiter::WriteBatch {
+                                    sequence,
+                                },
+                            );
+                        }
+                        DurabilityWaiter::WriteBatch {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                        } => {
+                            // Batch has become durable - clear atomicity barrier
+                            self.state.pending_batch_min_seq = None;
+                            self.respond(
                                 request_id,
-                                last_sequence,
-                                op_count,
-                            } => {
-                                // Batch has become durable - clear atomicity barrier
-                                self.state.pending_batch_min_seq = None;
-                                self.respond(
+                                RuntimeResponse::WriteBatchAppended {
                                     request_id,
-                                    RuntimeResponse::WriteBatchAppended {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                    },
-                                );
-                            }
-                            DurabilityWaiter::Read {
+                                    last_sequence,
+                                    op_count,
+                                },
+                            );
+                        }
+                        DurabilityWaiter::Read {
+                            request_id,
+                            cf_id,
+                            key,
+                            sequence,
+                            requested_durability: _,
+                        } => {
+                            let value = self.handle_read(cf_id, &key, sequence);
+                            self.respond(
                                 request_id,
-                                cf_id,
-                                key,
-                                sequence,
-                                requested_durability: _,
-                            } => {
-                                let value = self.handle_read(cf_id, &key, sequence);
-                                self.respond(
-                                    request_id,
-                                    RuntimeResponse::ReadValue { request_id, value },
-                                );
-                            }
-                            DurabilityWaiter::RangeScan {
+                                RuntimeResponse::ReadValue { request_id, value },
+                            );
+                        }
+                        DurabilityWaiter::RangeScan {
+                            request_id,
+                            cf_id,
+                            start,
+                            end,
+                            sequence,
+                            requested_durability: _,
+                        } => {
+                            let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                            self.respond(
                                 request_id,
-                                cf_id,
-                                start,
-                                end,
-                                sequence,
-                                requested_durability: _,
-                            } => {
-                                let results = self.handle_range_scan(cf_id, &start, &end, sequence);
-                                self.respond(
+                                RuntimeResponse::RangeScanResults {
                                     request_id,
-                                    RuntimeResponse::RangeScanResults {
-                                        request_id,
-                                        results,
-                                    },
-                                );
-                            }
+                                    results,
+                                },
+                            );
                         }
                     }
                     // 🔑 Clean up old idempotency entries now that frontier advanced
@@ -837,6 +729,80 @@ impl EventLoop {
         // Optional trace
         if self.trace_enabled {
             tracing::trace!(request_id, "response routed");
+        }
+    }
+
+    /// Check if a sequence number is durable at the requested level.
+    /// Special case: u64::MAX (latest available) always returns true and bypasses durability checks.
+    #[inline]
+    fn is_sequence_durable(
+        &self,
+        sequence: u64,
+        requested_durability: crate::engine::api::Durability,
+    ) -> bool {
+        self.durability.is_durable(
+            sequence,
+            requested_durability,
+            self.state.wal.local_durable_seq,
+            self.state.wal.cloud_durable_seq,
+        )
+    }
+
+    /// Handle a Read message: check durability frontier or queue for later.
+    fn handle_msg_read(
+        &self,
+        request_id: u64,
+        cf_id: u32,
+        key: Vec<u8>,
+        sequence: u64,
+        requested_durability: crate::engine::api::Durability,
+    ) {
+        if self.is_sequence_durable(sequence, requested_durability) {
+            // Data is durable; perform the read immediately
+            let value = self.handle_read(cf_id, &key, sequence);
+            self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
+        } else {
+            // Data not durable; queue to wait for frontier
+            self.durability.queue_waiter(DurabilityWaiter::Read {
+                request_id,
+                cf_id,
+                key,
+                sequence,
+                requested_durability,
+            });
+        }
+    }
+
+    /// Handle a RangeScan message: check durability frontier or queue for later.
+    fn handle_msg_range_scan(
+        &self,
+        request_id: u64,
+        cf_id: u32,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        sequence: u64,
+        requested_durability: crate::engine::api::Durability,
+    ) {
+        if self.is_sequence_durable(sequence, requested_durability) {
+            // Data is durable; perform the scan immediately
+            let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+            self.respond(
+                request_id,
+                RuntimeResponse::RangeScanResults {
+                    request_id,
+                    results,
+                },
+            );
+        } else {
+            // Data not durable; queue to wait for frontier
+            self.durability.queue_waiter(DurabilityWaiter::RangeScan {
+                request_id,
+                cf_id,
+                start,
+                end,
+                sequence,
+                requested_durability,
+            });
         }
     }
 
@@ -973,23 +939,11 @@ impl EventLoop {
                         {
                             Ok((last_sequence, op_count, deferred)) => {
                                 if deferred {
-                                    if let Some(waiters) = &self.durability_waiters {
-                                        waiters.join(DurabilityWaiter::WriteBatch {
-                                            request_id,
-                                            last_sequence,
-                                            op_count,
-                                        });
-                                    } else {
-                                        // Should never happen, but avoid hanging the caller.
-                                        self.respond(
-                                            request_id,
-                                            RuntimeResponse::WriteBatchAppended {
-                                                request_id,
-                                                last_sequence,
-                                                op_count,
-                                            },
-                                        );
-                                    }
+                                    self.durability.queue_waiter(DurabilityWaiter::WriteBatch {
+                                        request_id,
+                                        last_sequence,
+                                        op_count,
+                                    });
                                 } else {
                                     // Strict/CloudMirrored: completes immediately inside append_batch.
                                     self.respond(
@@ -1155,8 +1109,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WalAppend {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -1203,8 +1157,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WalAppend {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -1418,57 +1372,7 @@ impl EventLoop {
                     sequence,
                     requested_durability,
                 } => {
-                    // 🔑 CRITICAL: Enforce durability frontier
-                    // Reads must not return data beyond the requested durability level.
-                    // If data at this sequence is not yet durable, queue the read to wait.
-                    // 
-                    // Special case: sequence = u64::MAX means "read latest available value"
-                    // which bypasses durability checks (no guarantee of durable data anyway).
-
-                    let should_read_immediately = if sequence == u64::MAX {
-                        // "Latest available" always reads immediately
-                        true
-                    } else {
-                        // Check if specific sequence is durable
-                        match requested_durability {
-                            crate::engine::api::Durability::Strict
-                            | crate::engine::api::Durability::Steady => {
-                                // For Strict/Steady: check local_durable_seq
-                                sequence <= self.state.wal.local_durable_seq
-                            }
-                            crate::engine::api::Durability::CloudReplicated => {
-                                // For CloudReplicated: check cloud_durable_seq
-                                sequence <= self.state.wal.cloud_durable_seq
-                            }
-                        }
-                    };
-
-                    if should_read_immediately {
-                        // Data is durable at requested level; safe to read
-                        let value = self.handle_read(cf_id, &key, sequence);
-                        self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
-                    } else {
-                        // Data not yet durable; queue read to wait for frontier
-                        if let Some(waiters) = &self.durability_waiters {
-                            waiters.join(DurabilityWaiter::Read {
-                                request_id,
-                                cf_id,
-                                key: key.clone(),
-                                sequence,
-                                requested_durability,
-                            });
-                        } else {
-                            // No durability waiters configured; shouldn't happen in production
-                            // but for safety, respond immediately with error
-                            self.respond(
-                                request_id,
-                                RuntimeResponse::Error {
-                                    request_id,
-                                    message: "Durability enforcement unavailable".to_string(),
-                                },
-                            );
-                        }
-                    }
+                    self.handle_msg_read(request_id, cf_id, key, sequence, requested_durability);
                 }
 
                 RuntimeMsg::RangeScan {
@@ -1479,64 +1383,7 @@ impl EventLoop {
                     sequence,
                     requested_durability,
                 } => {
-                    // 🔑 CRITICAL: Enforce durability frontier
-                    // Range scans must not return data beyond the requested durability level.
-                    // If data at this sequence is not yet durable, queue the scan to wait.
-                    //
-                    // Special case: sequence = u64::MAX means "scan latest available value"
-                    // which bypasses durability checks (no guarantee of durable data anyway).
-                    
-                    let should_scan_immediately = if sequence == u64::MAX {
-                        // "Latest available" always scans immediately
-                        true
-                    } else {
-                        // Check if specific sequence is durable
-                        match requested_durability {
-                            crate::engine::api::Durability::Strict
-                            | crate::engine::api::Durability::Steady => {
-                                // For Strict/Steady: check local_durable_seq
-                                sequence <= self.state.wal.local_durable_seq
-                            }
-                            crate::engine::api::Durability::CloudReplicated => {
-                                // For CloudReplicated: check cloud_durable_seq
-                                sequence <= self.state.wal.cloud_durable_seq
-                            }
-                        }
-                    };
-
-                    if should_scan_immediately {
-                        // Data is durable at requested level; safe to scan
-                        let results = self.handle_range_scan(cf_id, &start, &end, sequence);
-                        self.respond(
-                            request_id,
-                            RuntimeResponse::RangeScanResults {
-                                request_id,
-                                results,
-                            },
-                        );
-                    } else {
-                        // Data not yet durable; queue scan to wait for frontier
-                        if let Some(waiters) = &self.durability_waiters {
-                            waiters.join(DurabilityWaiter::RangeScan {
-                                request_id,
-                                cf_id,
-                                start: start.clone(),
-                                end: end.clone(),
-                                sequence,
-                                requested_durability,
-                            });
-                        } else {
-                            // No durability waiters configured; shouldn't happen in production
-                            // but for safety, respond immediately with error
-                            self.respond(
-                                request_id,
-                                RuntimeResponse::Error {
-                                    request_id,
-                                    message: "Durability enforcement unavailable".to_string(),
-                                },
-                            );
-                        }
-                    }
+                    self.handle_msg_range_scan(request_id, cf_id, start, end, sequence, requested_durability);
                 }
             }
         }

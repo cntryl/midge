@@ -13,6 +13,7 @@
 
 pub mod actors;
 pub mod dispatch;
+pub mod durability;
 pub mod event_loop;
 pub mod intent_persistence;
 pub mod scheduler;
