@@ -38,7 +38,7 @@ Each finding lists: what can go wrong → why current code allows it → severit
 - What can go wrong: Idempotent allocations (request_id → sequences) are not confirmed on cloud ACK; retrying a request may allocate a second sequence or the original entry may never be cleaned—leading to duplicates or unbounded idempotency state.
 - Why: `state.confirm_sequences()` is called in local `sync` completion paths but not when CloudFirst ACK completes in `handle_cloud_upload_complete`/durability completion.
 - Severity: **serious**
-- Fix: On CloudFirst successful ack/response path, call `state.confirm_sequences(request_id)` (or equivalent) for relevant waiters and use `cloud_durable_seq` as confirmation frontier for cleanup. Add tests that append (CloudFirst), ACK, then retry same request_id and assert idempotency behavior.
+- Fix (implemented): Added `confirm_sequences_at(request_id, confirmed_at_seq)` and invoke it when CloudAck advances the cloud frontier (uses `cloud_durable_seq`); added unit tests that exercise append+CloudAck+retry and a CloudFail invalidation case. Changes are available on branch `cloudfirst/idempotency-fix` (PR #8).
 
 
 ### 5) WAL → memtable visibility & ordering (CloudFirst gating)
@@ -82,8 +82,8 @@ Each finding lists: what can go wrong → why current code allows it → severit
    - Prevent tombstone dropping that violates snapshots (make compaction snapshot-aware).
 
 2. High priority (next):
-   - CloudFirst: confirm idempotency entries on ACK; ensure correct waiter completion and cleanup logic.
-   - Add end-to-end tests for CloudFirst failure modes and retries.
+   - CloudFirst: confirm idempotency entries on ACK; ensure correct waiter completion and cleanup logic. ✅ _Implemented (unit tests added; PR open)_ — follow-ups: add end-to-end failure-mode & stress tests.
+   - Add end-to-end tests for CloudFirst failure modes and retries. (in-progress)
 
 3. Medium priority:
    - Offload flush/compaction IO off EventLoop.
