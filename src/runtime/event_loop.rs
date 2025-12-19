@@ -78,7 +78,12 @@ impl EventLoop {
 
         // Create actors - they handle memory_mode internally
         let flush_actor = FlushActor::new(&sst_dir, memory_mode)?;
-        let wal_actor = WalActor::new(wal_dir, config.wal_durability_policy, memory_mode)?;
+        let wal_actor = WalActor::new(
+            wal_dir,
+            config.wal_durability_policy,
+            config.wal_batch_config,
+            memory_mode,
+        )?;
 
         // 🔑 CRITICAL: Use the correct key for durability_waiters based on mode
         // - CloudFirst: key is segment_id (for rotate_to/complete calls)

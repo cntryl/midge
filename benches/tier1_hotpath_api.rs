@@ -42,6 +42,7 @@ fn setup_db(name: &str) -> MidgeEngine {
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         wal_sync: false,
+        wal_batch_config: None,
         // Keep the memtable large enough that we do not trigger flush/compaction
         // during the measurement window.
         memtable_size: 1024 * 1024 * 1024, // 1 GiB

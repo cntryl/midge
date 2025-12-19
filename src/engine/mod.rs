@@ -225,6 +225,11 @@ impl MidgeEngine {
         };
 
         let mut runtime_config = crate::runtime::RuntimeConfig::default();
+        // Honor optional batch config from options if provided
+        // If provided, apply WAL batch config from options (BatchConfig is Copy)
+        if let Some(batch_cfg) = opts.wal_batch_config {
+            runtime_config.wal_batch_config = batch_cfg;
+        }
         let mut state = match &opts.storage_mode {
             crate::testkit::StorageMode::CloudBacked { .. } => {
                 // Local cache is ephemeral; cloud WAL is the source of truth.

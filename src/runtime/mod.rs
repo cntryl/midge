@@ -30,6 +30,7 @@ pub use task::{Task, TaskId, TaskKind, TaskPriority};
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::wal::DurabilityPolicy;
+use crate::wal::policy::BatchConfig;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,6 +41,7 @@ use std::thread::{self, JoinHandle};
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub wal_durability_policy: DurabilityPolicy,
+    pub wal_batch_config: BatchConfig,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
 }
@@ -48,6 +50,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             wal_durability_policy: DurabilityPolicy::Batched,
+            wal_batch_config: BatchConfig::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
         }

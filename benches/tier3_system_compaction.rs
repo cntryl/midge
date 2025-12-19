@@ -147,18 +147,65 @@ fn bench_flush(c: &mut Criterion) {
 
                     b.iter_batched(
                         || {
-                            let engine = setup_engine(
-                                BENCH_FLUSH,
-                                &BenchEngineConfig {
-                                    storage_mode: mode,
-                                    enable_compaction: false,
-                                    ..Default::default()
-                                },
-                            );
-                            let cf = engine.default_column_family();
+                            use std::time::Instant;
+
+                            // Use a larger batch config for benches to reduce fsync frequency during setup
+                            let mut cfg = BenchEngineConfig {
+                                storage_mode: mode,
+                                enable_compaction: false,
+                                ..Default::default()
+                            };
+                            // Increase batch bytes threshold for bench (1MB) and keep short delay
+                            cfg = cfg.with_wal_batch_config(cntryl_midge::wal::policy::BatchConfig { max_delay_ms: 200, max_bytes: 1024 * 1024 });
+                            let engine = setup_engine(BENCH_FLUSH, &cfg);
+                            let _cf = engine.default_column_family();
+
+                            // Use WriteBatch to submit all puts in a single round-trip (much faster)
+                            use cntryl_midge::engine::api::WriteBatch;
+
+                            let mut batch = WriteBatch::new();
                             for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
-                                engine.put(cf, k, v).expect("put failed");
+                                batch.put(k.clone(), v.clone());
                             }
+
+                            let start = Instant::now();
+                            engine.write_batch(&batch).expect("write_batch failed");
+                            let total = start.elapsed();
+                            eprintln!(
+                                "[bench setup] mode={} write_batch of {} ops took {:?} (avg {:?}/op)",
+                                mode.as_str(),
+                                kv_ref.len(),
+                                total,
+                                total / (kv_ref.len() as u32)
+                            );
+
+                            // Optionally: a small sanity check of chunked writes to see per-chunk cost
+                            // (this uses pre-sized chunks above; we've measured them below already)
+
+                            // Submit write_batch in larger chunks (1k ops) to avoid per-op fsync overhead
+                            if kv_ref.len() >= 1000 {
+                                let chunk = 1000usize;
+                                let mut i = 0usize;
+                                while i < kv_ref.len() {
+                                    let end = (i + chunk).min(kv_ref.len());
+                                    let mut bchunk = WriteBatch::new();
+                                    for (k, v) in kv_ref.keys[i..end].iter().zip(&kv_ref.values[i..end]) {
+                                        bchunk.put(k.clone(), v.clone());
+                                    }
+                                    let start_chunk = Instant::now();
+                                    engine.write_batch(&bchunk).expect("write_batch failed");
+                                    let now = Instant::now();
+                                    eprintln!(
+                                        "[bench setup] mode={} chunked write_batch {}..{} took {:?}",
+                                        mode.as_str(),
+                                        i + 1,
+                                        end,
+                                        now.duration_since(start_chunk)
+                                    );
+                                    i = end;
+                                }
+                            }
+
                             engine
                         },
                         |engine| {

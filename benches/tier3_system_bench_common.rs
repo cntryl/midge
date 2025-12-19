@@ -170,6 +170,8 @@ pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] = [BenchStorageMode::Loca
 pub struct BenchEngineConfig {
     pub storage_mode: BenchStorageMode,
     pub wal_sync: bool,
+    /// Optional WAL batch config to control group commit behavior for benches
+    pub wal_batch_config: Option<cntryl_midge::wal::policy::BatchConfig>,
     pub enable_compaction: bool,
     pub memtable_size: usize,
 }
@@ -179,6 +181,7 @@ impl Default for BenchEngineConfig {
         Self {
             storage_mode: BenchStorageMode::LocalDisk,
             wal_sync: false,
+            wal_batch_config: None,
             enable_compaction: false,
             memtable_size: BENCH_MEMTABLE_SIZE,
         }
@@ -203,6 +206,11 @@ impl BenchEngineConfig {
 
     pub fn with_wal_sync(mut self, sync: bool) -> Self {
         self.wal_sync = sync;
+        self
+    }
+
+    pub fn with_wal_batch_config(mut self, cfg: cntryl_midge::wal::policy::BatchConfig) -> Self {
+        self.wal_batch_config = Some(cfg);
         self
     }
 

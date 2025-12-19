@@ -55,12 +55,10 @@ impl FsWalWriterIo {
         let metadata = fs.metadata(&path)?;
         let current_pos = metadata.len;
 
-        Ok(Self {
-            path,
-            fs,
-            current_pos: Mutex::new(current_pos),
-        })
+        Ok(Self { path, fs, current_pos: Mutex::new(current_pos) })
     }
+
+
 }
 
 impl WalWriter for FsWalWriterIo {
@@ -75,7 +73,11 @@ impl WalWriter for FsWalWriterIo {
         let mut pos_guard = self.current_pos.lock().expect("current_pos mutex poisoned");
         let start_pos = *pos_guard;
 
-        // Open file for this write (fs handles pooling)
+        // Coalesce prefix + encoded into one buffer and append once to reduce syscall overhead
+        let mut buf = Vec::with_capacity(4 + encoded.len());
+        buf.extend_from_slice(&len_prefix);
+        buf.extend_from_slice(&encoded);
+
         let mut file = self.fs.open(
             &self.path,
             crate::io::OpenOptions {
@@ -85,10 +87,7 @@ impl WalWriter for FsWalWriterIo {
                 truncate: false,
             },
         )?;
-
-        // Append prefix + data
-        file.append(Bytes::from(len_prefix.to_vec()))?;
-        file.append(Bytes::from(encoded.to_vec()))?;
+        file.append(Bytes::from(buf))?;
 
         let expected = 4u64 + encoded.len() as u64;
         *pos_guard += expected;

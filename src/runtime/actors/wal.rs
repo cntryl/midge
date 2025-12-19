@@ -38,6 +38,7 @@ use crate::runtime::IntentLogEntry;
 use crate::sst::Memtable;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWriter};
 use bytes::Bytes;
+use crate::wal::policy::BatchConfig;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -116,6 +117,11 @@ pub struct WalActor {
     /// Flush generation for batched/local durability group commit
     flush_generation: u64,
 
+    /// Batch configuration governing max_delay_ms and max_bytes
+    batch_config: BatchConfig,
+    /// Last wall-clock time we performed a WAL fsync
+    last_sync_instant: Instant,
+
     // === Optional instrumentation ===
     sync_calls: u64,
     sync_total: Duration,
@@ -125,6 +131,7 @@ impl WalActor {
     pub fn new(
         wal_dir: PathBuf,
         durability_policy: DurabilityPolicy,
+        batch_config: BatchConfig,
         memory_mode: bool,
     ) -> MidgeResult<Self> {
         let (wal_fs, writer) = if memory_mode {
@@ -147,6 +154,8 @@ impl WalActor {
             flush_generation: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
+            batch_config,
+            last_sync_instant: Instant::now(),
         })
     }
 
@@ -837,6 +846,12 @@ impl WalActor {
 
             self.sync_calls += 1;
             self.sync_total += elapsed;
+            self.last_sync_instant = Instant::now();
+
+            // Record telemetry metric for WAL syncs
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_sync();
+            }
 
             if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some()
                 && self.sync_calls.is_multiple_of(1000)
@@ -914,9 +929,14 @@ impl WalActor {
 
     /// Check if batched sync should trigger
     pub fn should_sync_batch(&self) -> bool {
-        // TODO: Add time-based check (max_delay_ms)
-        const MAX_BATCH_BYTES: usize = 64 * 1024; // 64KB
-        self.bytes_since_sync >= MAX_BATCH_BYTES
+        // Time-based check (max_delay_ms) OR byte-count threshold
+        let by_bytes = self.bytes_since_sync >= self.batch_config.max_bytes;
+        let by_time = self
+            .last_sync_instant
+            .elapsed()
+            .as_millis()
+            >= (self.batch_config.max_delay_ms as u128);
+        by_bytes || by_time
     }
 
     /// Rotate to a new WAL segment
@@ -1193,7 +1213,7 @@ mod tests {
         state.sequence = 100; // ensure WAL sequence is distinct from memtable's internal counter
 
         let mut wal_actor =
-            WalActor::new(PathBuf::from("/tmp/test"), DurabilityPolicy::Strict, true)?;
+            WalActor::new(PathBuf::from("/tmp/test"), DurabilityPolicy::Strict, BatchConfig::default(), true)?;
 
         // Act: append a single put
         let (seq, deferred) = wal_actor.append(
@@ -1226,7 +1246,7 @@ mod tests {
         state.sequence = 50;
 
         let mut wal_actor =
-            WalActor::new(PathBuf::from("/tmp/test"), DurabilityPolicy::Strict, true)?;
+            WalActor::new(PathBuf::from("/tmp/test"), DurabilityPolicy::Strict, BatchConfig::default(), true)?;
 
         // Act: append a merge operand
         let (seq, deferred) = wal_actor.append_merge(

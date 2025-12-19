@@ -113,6 +113,7 @@ fn bench_sustained_mixed_workload_with_compaction(c: &mut Criterion) {
             let opts = MidgeOptions {
                 storage_mode: StorageMode::Memory,
                 wal_sync: false,
+                wal_batch_config: None,
                 memtable_size: 64 * 1024 * 1024,
                 compression: false,
                 enable_compaction: true,
