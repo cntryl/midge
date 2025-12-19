@@ -199,10 +199,15 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             memory_budget: None,
         },
         "local" => {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
             let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_local_{}_{}",
+                "target/tmp/midge_test_local_{}_{}_{}",
                 std::process::id(),
-                unique_id
+                unique_id,
+                timestamp
             ));
             std::fs::create_dir_all(&test_dir).ok();
             MidgeOptions {
@@ -215,10 +220,15 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             }
         }
         "cloud" => {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
             let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_cloud_{}_{}",
+                "target/tmp/midge_test_cloud_{}_{}_{}",
                 std::process::id(),
-                unique_id
+                unique_id,
+                timestamp
             ));
             std::fs::create_dir_all(&test_dir).ok();
             MidgeOptions {
