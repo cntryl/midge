@@ -385,6 +385,7 @@ impl SkipListMemtable {
     }
 
     /// Delete (backwards compatible) - tombstone with generated seq
+    #[allow(dead_code)]
     fn delete(&self, key: Vec<u8>) -> MidgeResult<()> {
         let seq = self.next_seq();
         self.delete_with_seq(key, seq)

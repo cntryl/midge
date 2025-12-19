@@ -21,7 +21,7 @@ use super::durability::{DurabilityCoordinator, DurabilityWaiter};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::sst::traits::SstReader;
-use crate::sst::Memtable;
+use crate::sst::Memtable; 
 
 /// Main synchronous event loop for the runtime.
 ///
@@ -1579,48 +1579,90 @@ impl EventLoop {
         cf_id: u32,
         start: &[u8],
         end: &[u8],
-        _seq: u64,
+        _snapshot_seq: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let cf_state = match self.state.column_families.get(&cf_id) {
             Some(state) => state,
             None => return vec![],
         };
 
-        // Collect results from active memtable + immutable memtables
+        // Collect results in order: SSTs (oldest->newest) -> immutable memtables (oldest->newest) -> active memtable
+        // so that newer versions override older ones.
         let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
             std::collections::BTreeMap::new();
 
-        // Scan active memtable - group by key to get latest version only
-        let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+        // --- SSTs: check L0 (newest->oldest) first, then higher levels ---
+        let mut files_by_level: std::collections::BTreeMap<u32, Vec<_>> =
             std::collections::BTreeMap::new();
-        for (key, value, _seq) in cf_state.memtable.iter_all(u64::MAX) {
-            // For each key, keep the first (most recent) value we encounter
-            by_key.entry(key).or_insert(value);
+        for file in &self.state.manifest.files {
+            if file.cf_id == cf_id {
+                files_by_level
+                    .entry(file.level)
+                    .or_default()
+                    .push(file.clone());
+            }
         }
 
-        for (key, value) in by_key.iter() {
-            if value.is_none() {
-                // Skip tombstones (deleted keys)
+        // L0: newest -> oldest (may overlap)
+        if let Some(l0_files) = files_by_level.get(&0) {
+            for file_meta in l0_files.iter().rev() {
+                let sst_path = self.state.sst_dir.join(&file_meta.name);
+                if let Ok(reader) = self.compaction_actor.open_sst_reader(&sst_path) {
+                    if let Ok(pairs) = reader.scan_range(Some(start), Some(end)) {
+                        for (k, v) in pairs {
+                            // SstReader::scan_range returns only (key, value) tuples of present values.
+                            // Treat all returned values as valid for the snapshot (SSTs are persisted).
+                            results.entry(k.to_vec()).or_insert(v.to_vec());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Higher levels
+        for (&level, files) in files_by_level.iter() {
+            if level == 0 {
                 continue;
             }
-            if key.as_slice() >= start && key.as_slice() < end {
-                results.insert(key.clone(), value.clone().expect("value already checked"));
+
+            for file_meta in files.iter().rev() {
+                if let (Some(ref smallest), Some(ref largest)) =
+                    (&file_meta.smallest_key, &file_meta.largest_key)
+                {
+                    if start >= smallest.as_slice() && start >= largest.as_slice() {
+                        // Key range doesn't overlap; skip
+                        continue;
+                    }
+                }
+
+                let sst_path = self.state.sst_dir.join(&file_meta.name);
+                if let Ok(reader) = self.compaction_actor.open_sst_reader(&sst_path) {
+                    if let Ok(pairs) = reader.scan_range(Some(start), Some(end)) {
+                        for (k, v) in pairs {
+                            // SstReader::scan_range returns only (key, value) tuples of present values.
+                            // Treat all returned values as valid for the snapshot (SSTs are persisted).
+                            results.entry(k.to_vec()).or_insert(v.to_vec());
+                        }
+                    }
+                }
             }
         }
 
-        // Scan immutable memtables (oldest → newest for correct override semantics)
+        // --- Immutable memtables: oldest -> newest ---
         for imm in cf_state.immutable_memtables.iter() {
+            // Build by_key for this memtable (keep first seen = most recent within memtable)
             let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
                 std::collections::BTreeMap::new();
             for (key, value, _seq) in imm.iter_all(u64::MAX) {
-                // Keep the first (most recent) value for each key
+                // Current behavior: snapshots return current state (no MVCC), so do not
+                // filter memtable entries by the snapshot sequence. In future when MVCC
+                // is implemented, this should be filtered by `snapshot_seq`.
                 by_key.entry(key).or_insert(value);
             }
 
             for (key, value) in by_key.iter() {
                 if value.is_none() {
-                    // Skip tombstones
-                    continue;
+                    continue; // tombstone
                 }
                 if key.as_slice() >= start && key.as_slice() < end {
                     results.insert(key.clone(), value.clone().expect("value already checked"));
@@ -1628,7 +1670,24 @@ impl EventLoop {
             }
         }
 
-        // Convert to vec of (key, value) tuples
+        // --- Active memtable (newest) overrides everything ---
+        let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::BTreeMap::new();
+        for (key, value, _seq) in cf_state.memtable.iter_all(u64::MAX) {
+            // See note above: snapshots currently reflect current state; do not filter by
+            // snapshot sequence here. This preserves existing behavior documented in tests.
+            by_key.entry(key).or_insert(value);
+        }
+
+        for (key, value) in by_key.iter() {
+            if value.is_none() {
+                continue;
+            }
+            if key.as_slice() >= start && key.as_slice() < end {
+                results.insert(key.clone(), value.clone().expect("value already checked"));
+            }
+        }
+
         results.into_iter().collect()
     }
 }
@@ -2014,5 +2073,89 @@ mod tests {
         // Assert - The 64KB block size is hardcoded in EventLoop::new
         // This test documents that invariant
         drop(event_loop);
+    }
+
+    #[test]
+    fn range_scan_should_include_keys_from_ssts() -> crate::common::MidgeResult<()> {
+        use crate::sst::traits::SstFactory;
+
+        // Arrange: create real filesystem-backed state (not memory mode)
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        // Ensure sst dir exists
+        std::fs::create_dir_all(&state.sst_dir)?;
+
+        let router = Arc::new(ResponseRouter::new());
+        let mut el = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default())?;
+
+        // Create an SST file with one key using the FsSstFactory
+        let sst_name = "00000001.sst".to_string();
+        let sst_path = el.state.sst_dir.join(&sst_name);
+
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(&el.state.sst_dir)?);
+        let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, 0, None)?;
+        Box::new(writer).finish_to_path(&sst_path)?;
+
+        // Add manifest entry pointing to the SST we just wrote
+        let file_meta = crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: std::fs::metadata(&sst_path)?.len(),
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"a".to_vec()),
+            smallest_seq: Some(10),
+            largest_seq: Some(10),
+            ..Default::default()
+        };
+        el.state.manifest.files.push(file_meta);
+
+        // Replace compaction actor factory with a TestFactory that returns a fake reader
+        // so we don't need to create a valid on-disk SST file in this unit test.
+        struct TestFactory;
+        impl crate::sst::traits::SstFactory for TestFactory {
+            fn create(&self) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                Err(crate::common::MidgeError::NotSupported("create not supported in test".into()))
+            }
+            fn open(&self, _path: &std::path::Path) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReader>> {
+                struct FakeReader;
+                impl crate::sst::traits::SstReader for FakeReader {
+                    fn get(&self, key: &[u8]) -> crate::common::MidgeResult<Option<bytes::Bytes>> {
+                        if key == b"a" {
+                            Ok(Some(bytes::Bytes::copy_from_slice(b"va")))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    fn scan_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> crate::common::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+                        let s = start.unwrap_or(&[]);
+                        let e = end.unwrap_or(&[255u8]);
+                        if s <= &b"a"[..] && &b"a"[..] < e {
+                            Ok(vec![(bytes::Bytes::copy_from_slice(b"a"), bytes::Bytes::copy_from_slice(b"va"))])
+                        } else {
+                            Ok(Vec::new())
+                        }
+                    }
+                }
+                Ok(Box::new(FakeReader))
+            }
+        }
+
+        el.compaction_actor = crate::runtime::actors::CompactionActor::new(std::sync::Arc::new(TestFactory));
+
+        // Quick sanity-check: ensure the fake reader returns the key we expect
+        let reader = el.compaction_actor.open_sst_reader(&sst_path)?;
+        let sst_pairs = reader.scan_range(Some(b"a"), Some(b"b"))?;
+        assert!(sst_pairs.iter().any(|(k, v)| k.as_ref() == b"a" && v.as_ref() == b"va"));
+
+        // Act: perform a range scan ["a","b") at sequence u64::MAX
+        let results = el.handle_range_scan(0, b"a", b"b", u64::MAX);
+
+        // Assert: We expect to see the key in SST; current implementation does NOT consult SSTs and this test should fail until fixed.
+        assert!(results.iter().any(|(k, v)| k.as_slice() == b"a" && v.as_slice() == b"va"));
+
+        Ok(())
     }
 }

@@ -61,7 +61,12 @@ impl SstFileIo {
     pub fn open_with_real_fs(path: &std::path::Path) -> MidgeResult<Self> {
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         let fs = Arc::new(crate::io::RealFs::new(parent)?);
-        let path_str = path.to_str().unwrap_or("").to_string();
+        // Use filename relative to parent dir so RealFs (rooted at parent) resolves it correctly
+        let path_str = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
         Self::open(&path_str, fs)
     }
 

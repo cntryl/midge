@@ -30,7 +30,11 @@ impl CompactionActor {
         }
     }
 
-    /// Check if compaction is needed based on current state and pick a plan if so
+    /// Open an SST reader using the actor's configured SstFactory
+    pub fn open_sst_reader(&self, path: &std::path::Path) -> crate::common::MidgeResult<Box<dyn crate::sst::SstReader>> {
+        self.sst_factory.open(path)
+    }
+
     pub fn check_compaction(
         &mut self,
         state: &RuntimeState,

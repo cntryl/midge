@@ -9,7 +9,9 @@
 
 use super::types::{ColumnFamilyId, WalOpKind, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
-use crate::sst::{Memtable, SkipListMemtable};
+#[cfg(test)]
+use crate::sst::Memtable;
+use crate::sst::SkipListMemtable;
 use crate::storage::abstraction::{
     OpenMode, OpenOptions, Storage, StorageError, StorageErrorKind, StoragePath,
 };

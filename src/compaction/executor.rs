@@ -203,17 +203,31 @@ pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVer
 /// Filter out tombstones from a deduplicated version set.
 ///
 /// NOTE:
-///   - This assumes that it is safe to drop tombstones completely (e.g. we are
-///     compacting at or below the global visibility watermark and there are no
-///     snapshots that still need them).
-///   - Future refinement should add a sequence watermark or snapshot horizon
-///     parameter so that only *obsolete* tombstones are dropped.
+///   - This default function removes all tombstones unconditionally (legacy behavior).
+///   - Prefer `filter_tombstones_with_horizon()` which is snapshot-aware and only
+///     drops tombstones older than the provided snapshot horizon.
 pub fn filter_tombstones(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
-    versions
-        .iter()
-        .filter(|v| !v.is_tombstone)
-        .cloned()
-        .collect()
+    filter_tombstones_with_horizon(versions, None)
+}
+
+/// Filter tombstones but preserve those newer than `snapshot_horizon` (if provided).
+///
+/// Semantics:
+///   - If `snapshot_horizon` is `None`, all tombstones are dropped (legacy behavior).
+///   - If `Some(h)`, tombstones with `seq > h` are preserved to prevent resurrection
+///     for snapshots reading at sequence `h` or earlier.
+pub fn filter_tombstones_with_horizon(
+    versions: &[CompactionVersion],
+    snapshot_horizon: Option<u64>,
+) -> Vec<CompactionVersion> {
+    match snapshot_horizon {
+        Some(h) => versions
+            .iter()
+            .filter(|v| !(v.is_tombstone && v.seq <= h)) // drop tombstones older-or-equal to horizon
+            .cloned()
+            .collect(),
+        None => versions.iter().filter(|v| !v.is_tombstone).cloned().collect(),
+    }
 }
 
 /// Write versions to a new SST using the provided `SstFactory`.
@@ -452,6 +466,24 @@ mod tests {
         assert_eq!(deduped[2].key, b"c".to_vec());
         assert_eq!(deduped[2].seq, 2);
     }
+
+    #[test]
+    fn compaction_should_not_drop_recent_tombstones_when_snapshot_horizon_exists() {
+        // Arrange: create versions where one key has a recent tombstone
+        let recent_tombstone = mk_version("k", 200, true, None::<&[u8]>, None);
+        let older_put = mk_version("k", 100, false, Some("v"), None);
+        let versions = vec![older_put, recent_tombstone.clone()];
+
+        // Act: filter tombstones with a snapshot horizon of 150
+        // Tombstones newer than the horizon (seq > 150) must be preserved.
+        let filtered = filter_tombstones_with_horizon(&versions, Some(150));
+
+        // Assert: recent tombstone (seq 200) should be preserved
+        assert!(filtered.iter().any(|v| v.is_tombstone && v.seq == 200),
+            "expected recent tombstone to be preserved by compaction filter (snapshot-aware)");
+    }
+
+
 
     #[test]
     fn should_handle_empty_streams_in_merge() {

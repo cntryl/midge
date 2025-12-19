@@ -1139,6 +1139,13 @@ impl WalActor {
     }
 }
 
+impl Default for WalActor {
+    fn default() -> Self {
+        // Cannot create with default since we need a WAL directory
+        panic!("WalActor::default() should not be called, use WalActor::new(wal_dir)")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,12 +1214,5 @@ mod tests {
         assert_eq!(*m_seq, seq);
 
         Ok(())
-    }
-}
-
-impl Default for WalActor {
-    fn default() -> Self {
-        // Cannot create with default since we need a WAL directory
-        panic!("WalActor::default() should not be called, use WalActor::new(wal_dir)")
     }
 }
