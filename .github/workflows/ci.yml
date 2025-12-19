@@ -23,3 +23,20 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets
+
+  sst_crash_tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Run SST atomic publish crash tests
+        run: cargo test --test sst_atomic_crash -- --nocapture
