@@ -242,6 +242,17 @@ impl WalActor {
         let (first_seq, _count) = state.allocate_sequences_idempotent(request_id, 1);
         let sequence = first_seq;
 
+        // If this request_id has already been confirmed as durable, we can
+        // short-circuit and return the previously-allocated sequence without
+        // writing another WAL record or queuing another pending cloud write.
+        if let Some((_first, _cnt, confirmed_at)) = state.sequence_idempotency_cache.get(&request_id) {
+            if *confirmed_at > 0 {
+                tracing::debug!(request_id = request_id, sequence = sequence, "idempotent request already confirmed; returning existing allocation");
+                // Not deferred — the sequence is already durable
+                return Ok((sequence, false));
+            }
+        }
+
         // Determine operation kind: Delete if value is None, Put otherwise
         let op_kind = if value.is_none() {
             WalOpKind::Delete

@@ -177,6 +177,9 @@ impl EventLoop {
                                     request_id,
                                     sequence,
                                 } => {
+                                    // Mark sequences confirmed using cloud frontier for CloudFirst
+                                    self.state
+                                        .confirm_sequences_at(request_id, self.state.wal.cloud_durable_seq);
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WalAppended {
@@ -190,6 +193,9 @@ impl EventLoop {
                                     last_sequence,
                                     op_count,
                                 } => {
+                                    // Mark sequences confirmed using cloud frontier for CloudFirst
+                                    self.state
+                                        .confirm_sequences_at(request_id, self.state.wal.cloud_durable_seq);
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WriteBatchAppended {
@@ -238,9 +244,19 @@ impl EventLoop {
                 }
             },
             crate::storage::StorageEvent::CloudFail { segment_id, error } => {
-                // Drop inflight timing; the corresponding writes will error.
+                // Attempt to recover the failed segment's max_sequence so we can
+                // invalidate idempotency allocations that were part of it.
+                let failed_max_seq = self.durability.take_cloud_segment_max_sequence(segment_id);
+
+                // Let WAL actor handle its internal failure handling and drop pending writes
                 self.wal_actor
                     .handle_cloud_upload_failed(segment_id, &error);
+
+                // If we know the max_sequence for the failed segment, invalidate idempotency
+                // allocations up to that sequence so retries will allocate fresh sequences.
+                if let Some(max_seq) = failed_max_seq {
+                    self.state.invalidate_idempotency_allocations_up_to(max_seq);
+                }
 
                 let waiters = self.durability.drain_all_waiters();
                 for w in waiters {
@@ -259,6 +275,7 @@ impl EventLoop {
                     );
                 }
 
+                // Clear any remaining inflight segments
                 self.durability.clear_inflight();
             }
             _ => {}
@@ -2155,6 +2172,184 @@ mod tests {
 
         // Assert: We expect to see the key in SST; current implementation does NOT consult SSTs and this test should fail until fixed.
         assert!(results.iter().any(|(k, v)| k.as_slice() == b"a" && v.as_slice() == b"va"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn cloudfirst_ack_should_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
+        // Arrange: create state and event loop with CloudFirst policy
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let config = crate::runtime::RuntimeConfig { wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst, ..Default::default() };
+        let mut el = EventLoop::new(state, false, router, config)?;
+
+        // Add a wal append with a specific request_id
+        let request_id = 123u64;
+        let cf_id = 0u32;
+
+        let (seq, deferred) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k1"),
+            Some(bytes::Bytes::from("v1")),
+            false,
+            None,
+        )?;
+
+        assert!(deferred, "CloudFirst append should be deferred waiting for CloudAck");
+
+        // Queue waiter for this append (simulates EventLoop behavior)
+        el.durability.queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend { request_id, sequence: seq });
+
+        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        let seg_id = el.state.wal.current_segment_id;
+        // Flush and rotate to create a sealed segment
+        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
+        el.wal_actor.rotate(&mut el.state)?;
+        // Move waiters into inflight bucket and record timing as EventLoop does
+        el.durability.rotate_to(el.state.wal.current_segment_id);
+        let max_sequence = el.state.wal.local_durable_seq;
+        el.durability.record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability.record_cloud_flush();
+
+        // Now simulate the storage CloudAck for that segment
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck { segment_id: seg_id, max_sequence });
+
+        // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
+        if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
+            assert!(entry.2 >= el.state.wal.cloud_durable_seq);
+        } else {
+            panic!("idempotency entry missing");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn cloudfirst_retry_after_ack_should_return_same_sequence_without_queueing() -> crate::common::MidgeResult<()> {
+        // Arrange: create state and event loop with CloudFirst policy
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let config = crate::runtime::RuntimeConfig { wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst, ..Default::default() };
+        let mut el = EventLoop::new(state, false, router, config)?;
+
+        // Add a wal append with a specific request_id
+        let request_id = 124u64;
+        let cf_id = 0u32;
+
+        let (seq1, deferred1) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k1"),
+            Some(bytes::Bytes::from("v1")),
+            false,
+            None,
+        )?;
+
+        assert!(deferred1, "CloudFirst append should be deferred waiting for CloudAck");
+
+        // Queue waiter for this append (simulates EventLoop behavior)
+        el.durability.queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend { request_id, sequence: seq1 });
+
+        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        let seg_id = el.state.wal.current_segment_id;
+        // Flush and rotate to create a sealed segment
+        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
+        el.wal_actor.rotate(&mut el.state)?;
+        // Move waiters into inflight bucket and record timing as EventLoop does
+        el.durability.rotate_to(el.state.wal.current_segment_id);
+        let max_sequence = el.state.wal.local_durable_seq;
+        el.durability.record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability.record_cloud_flush();
+
+        // Now simulate the storage CloudAck for that segment
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck { segment_id: seg_id, max_sequence });
+
+        // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
+        if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
+            assert!(entry.2 >= el.state.wal.cloud_durable_seq);
+        } else {
+            panic!("idempotency entry missing");
+        }
+
+        // Retry the same request_id: should return the same sequence and NOT be deferred
+        let (seq2, deferred2) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k1"),
+            Some(bytes::Bytes::from("v1")),
+            false,
+            None,
+        )?;
+
+        assert_eq!(seq1, seq2, "retry should return same sequence");
+        assert!(!deferred2, "retry after confirmation should not be deferred");
+        assert_eq!(el.wal_actor.pending_cloud_writes_len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cloudfirst_fail_invalidates_idempotency_and_retry_allocates_new_seq() -> crate::common::MidgeResult<()> {
+        // Arrange: create state and event loop with CloudFirst policy
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let config = crate::runtime::RuntimeConfig { wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst, ..Default::default() };
+        let mut el = EventLoop::new(state, false, router, config)?;
+
+        // Add a wal append with a specific request_id
+        let request_id = 200u64;
+        let cf_id = 0u32;
+
+        let (seq1, deferred1) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k2"),
+            Some(bytes::Bytes::from("v2")),
+            false,
+            None,
+        )?;
+
+        assert!(deferred1, "CloudFirst append should be deferred waiting for CloudAck");
+
+        // Queue waiter for this append (simulates EventLoop behavior)
+        el.durability.queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend { request_id, sequence: seq1 });
+
+        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        let seg_id = el.state.wal.current_segment_id;
+        // Flush and rotate to create a sealed segment
+        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
+        el.wal_actor.rotate(&mut el.state)?;
+        // Move waiters into inflight bucket and record timing as EventLoop does
+        el.durability.rotate_to(el.state.wal.current_segment_id);
+        let max_sequence = el.state.wal.local_durable_seq;
+        el.durability.record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability.record_cloud_flush();
+
+        // Now simulate the storage CloudFail for that segment
+        el.handle_storage_event(crate::storage::StorageEvent::CloudFail { segment_id: seg_id, error: "upload_failed".to_string() });
+
+        // Retry the same request_id: since the previous allocation failed, we expect a new sequence
+        let (seq2, deferred2) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k2"),
+            Some(bytes::Bytes::from("v2")),
+            false,
+            None,
+        )?;
+
+        assert_ne!(seq1, seq2, "retry after cloud fail should allocate a new sequence");
+        assert!(deferred2, "retry should be deferred when retried after fail (CloudFirst)");
 
         Ok(())
     }

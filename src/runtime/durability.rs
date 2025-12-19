@@ -182,6 +182,12 @@ impl DurabilityCoordinator {
             .map(|info| info.enqueued_at)
     }
 
+    /// Remove and return the max_sequence for a specific inflight segment.
+    /// Useful when a segment fails and we need to invalidate idempotency allocations
+    /// that were part of that segment.
+    pub fn take_cloud_segment_max_sequence(&mut self, segment_id: u64) -> Option<u64> {
+        self.inflight.remove(&segment_id).map(|info| info.max_sequence)
+    }
     /// Clear all inflight segments (on error or shutdown).
     pub fn clear_inflight(&mut self) {
         self.inflight.clear();

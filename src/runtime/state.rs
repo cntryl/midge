@@ -406,6 +406,19 @@ impl RuntimeState {
         }
     }
 
+    /// Confirm sequences for a request_id with an explicit confirmed_at sequence
+    /// Useful for CloudFirst paths where the confirmation frontier is `cloud_durable_seq`.
+    pub fn confirm_sequences_at(&mut self, request_id: u64, confirmed_at_seq: u64) {
+        if let Some(entry) = self.sequence_idempotency_cache.get_mut(&request_id) {
+            entry.2 = confirmed_at_seq;
+            tracing::debug!(
+                request_id = request_id,
+                confirmed_at = confirmed_at_seq,
+                "confirmed sequences for request at explicit frontier"
+            );
+        }
+    }
+
     /// Clean up idempotency cache entries that have been confirmed and are now old.
     /// Called periodically as durability frontier advances.
     pub fn cleanup_old_idempotency_entries(&mut self) {
@@ -417,6 +430,18 @@ impl RuntimeState {
                 // 2. Recently confirmed (confirmed_at > frontier - 100)
                 // Remove old confirmed entries beyond the frontier
                 *confirmed_at == 0 || *confirmed_at > current_frontier.saturating_sub(100)
+            });
+    }
+
+    /// Invalidate cached idempotency allocations that are part of a failed WAL
+    /// segment upload. Any entry whose last allocated sequence is <= `max_sequence`
+    /// is removed so that retries will allocate fresh sequences.
+    pub fn invalidate_idempotency_allocations_up_to(&mut self, max_sequence: u64) {
+        self.sequence_idempotency_cache
+            .retain(|_request_id, (first_seq, count, _)| {
+                let last_seq = first_seq.saturating_add((*count as u64).saturating_sub(1));
+                // Keep entries that extend beyond the failed max_sequence
+                last_seq > max_sequence
             });
     }
 
