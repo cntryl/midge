@@ -86,10 +86,12 @@ enum BatchApplyOp {
         key: Vec<u8>,
         value: Vec<u8>,
         expiration: Option<u64>,
+        sequence: u64,
     },
     Delete {
         cf_id: u32,
         key: Vec<u8>,
+        sequence: u64,
     },
 }
 
@@ -276,12 +278,12 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply to memtable - write is now visible
-                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
             }
             DurabilityPolicy::Batched => {
                 // Apply to memtable immediately, but defer response until fsync completes.
                 // Caller joins the group commit waiter queue; sync completion notifies all.
-                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
                 // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
@@ -290,7 +292,7 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply to memtable - local durability sufficient
-                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
 
                 // TODO: Send CloudUploadWal message to CloudActor
             }
@@ -456,6 +458,7 @@ impl WalActor {
                         key: key_b.to_vec(),
                         value: value_b.to_vec(),
                         expiration: record.expiration,
+                        sequence: seq,
                     });
                 }
                 crate::runtime::WriteBatchOp::Delete { cf_id, key } => {
@@ -478,6 +481,7 @@ impl WalActor {
                     apply_ops.push(BatchApplyOp::Delete {
                         cf_id,
                         key: key_b.to_vec(),
+                        sequence: seq,
                     });
                 }
             }
@@ -580,17 +584,19 @@ impl WalActor {
                         key,
                         value,
                         expiration,
+                        sequence,
                     } => {
                         self.apply_to_memtable(
                             state,
+                            sequence,
                             cf_id,
                             &key,
                             &Some(Bytes::from(value)),
                             expiration,
                         )?;
                     }
-                    BatchApplyOp::Delete { cf_id, key } => {
-                        self.apply_to_memtable(state, cf_id, &key, &None, None)?;
+                    BatchApplyOp::Delete { cf_id, key, sequence } => {
+                        self.apply_to_memtable(state, sequence, cf_id, &key, &None, None)?;
                     }
                 }
             }
@@ -649,12 +655,12 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply merge operand to memtable
-                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand, sequence)?;
             }
             DurabilityPolicy::Batched => {
                 // Apply to memtable immediately, but defer response until fsync completes.
                 // Caller joins the group commit waiter queue; sync completion notifies all.
-                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand, sequence)?;
                 // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
@@ -663,7 +669,7 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply merge operand to memtable
-                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand, sequence)?;
 
                 // TODO: mirror to cloud (not via CloudFirst pending queue)
             }
@@ -740,6 +746,7 @@ impl WalActor {
                             | BatchApplyOp::Delete {
                                 cf_id: p_cf,
                                 key: p_key,
+                                sequence: _
                             } => {
                                 if *p_cf == cf_id && p_key.as_slice() == key {
                                     return true;
@@ -758,6 +765,7 @@ impl WalActor {
     fn apply_to_memtable(
         &self,
         state: &RuntimeState,
+        sequence: u64,
         cf_id: u32,
         key: &[u8],
         value: &Option<Bytes>,
@@ -768,9 +776,12 @@ impl WalActor {
                 cf_state
                     .memtable
                     .as_ref()
-                    .put_with_exp(key.to_vec(), val.to_vec(), expiration)?;
+                    .put_with_seq(key.to_vec(), val.to_vec(), sequence, expiration)?;
             } else {
-                cf_state.memtable.as_ref().delete(key.to_vec())?;
+                cf_state
+                    .memtable
+                    .as_ref()
+                    .delete_with_seq(key.to_vec(), sequence)?;
             }
         }
         Ok(())
@@ -783,12 +794,13 @@ impl WalActor {
         cf_id: u32,
         key: &[u8],
         operand: &Bytes,
+        sequence: u64,
     ) -> MidgeResult<()> {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             cf_state
                 .memtable
                 .as_ref()
-                .merge(key.to_vec(), operand.to_vec())?;
+                .merge_with_seq(key.to_vec(), operand.to_vec(), sequence)?;
         }
         Ok(())
     }
@@ -989,7 +1001,7 @@ impl WalActor {
                     );
                     let key_bytes = Bytes::from(key);
                     let value_bytes = value.map(Bytes::from);
-                    self.apply_to_memtable(state, cf_id, &key_bytes, &value_bytes, expiration)?;
+                    self.apply_to_memtable(state, sequence, cf_id, &key_bytes, &value_bytes, expiration)?;
                 }
                 PendingCloudWrite::Merge {
                     cf_id,
@@ -1005,7 +1017,7 @@ impl WalActor {
                         "Applying pending merge after cloud durability"
                     );
                     let operand_bytes = Bytes::from(operand);
-                    self.apply_merge_to_memtable(state, cf_id, &key, &operand_bytes)?;
+                    self.apply_merge_to_memtable(state, cf_id, &key, &operand_bytes, sequence)?;
                 }
                 PendingCloudWrite::Batch {
                     commit_sequence,
@@ -1027,17 +1039,19 @@ impl WalActor {
                                 key,
                                 value,
                                 expiration,
+                                sequence,
                             } => {
                                 self.apply_to_memtable(
                                     state,
+                                    sequence,
                                     cf_id,
                                     &key,
                                     &Some(Bytes::from(value)),
                                     expiration,
                                 )?;
                             }
-                            BatchApplyOp::Delete { cf_id, key } => {
-                                self.apply_to_memtable(state, cf_id, &key, &None, None)?;
+                            BatchApplyOp::Delete { cf_id, key, sequence } => {
+                                self.apply_to_memtable(state, sequence, cf_id, &key, &None, None)?;
                             }
                         }
                     }
@@ -1122,6 +1136,77 @@ impl WalActor {
         if segment_id >= state.wal.current_segment_id {
             // This sync covers the current segment
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RuntimeState;
+    use bytes::Bytes;
+    use std::path::PathBuf;
+
+    #[test]
+    fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
+        // Arrange: start with a large sequence so memtable's local seq would differ
+        let mut state = RuntimeState::new(PathBuf::from("/tmp/test"), true);
+        state.sequence = 100; // ensure WAL sequence is distinct from memtable's internal counter
+
+        let mut wal_actor = WalActor::new(PathBuf::from("/tmp/test"), DurabilityPolicy::Strict, true)?;
+
+        // Act: append a single put
+        let (seq, deferred) = wal_actor.append(
+            &mut state,
+            1, // request_id
+            0, // cf_id
+            Bytes::from("k"),
+            Some(Bytes::from("v")),
+            false,
+            None,
+        )?;
+
+        // Assert: memtable contains one entry and its seq equals WAL seq
+        assert!(!deferred);
+        let cf_state = state.get_cf(0).expect("cf exists");
+        let entries = cf_state.memtable.iter_all(u64::MAX);
+        assert_eq!(entries.len(), 1);
+        let (key, value, m_seq) = &entries[0];
+        assert_eq!(key.as_slice(), b"k");
+        assert_eq!(value.as_ref().unwrap().as_slice(), b"v");
+        assert_eq!(*m_seq, seq);
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_apply_merge_sequence_to_memtable() -> MidgeResult<()> {
+        // Arrange
+        let mut state = RuntimeState::new(PathBuf::from("/tmp/test"), true);
+        state.sequence = 50;
+
+        let mut wal_actor = WalActor::new(PathBuf::from("/tmp/test"), DurabilityPolicy::Strict, true)?;
+
+        // Act: append a merge operand
+        let (seq, deferred) = wal_actor.append_merge(
+            &mut state,
+            2, // request_id
+            0, // cf_id
+            Bytes::from("mk"),
+            Bytes::from("op"),
+        )?;
+
+        // Assert
+        assert!(!deferred);
+        let cf_state = state.get_cf(0).expect("cf exists");
+        let entries = cf_state.memtable.iter_all(u64::MAX);
+        // Merge operand should exist as an entry
+        assert_eq!(entries.len(), 1);
+        let (key, value, m_seq) = &entries[0];
+        assert_eq!(key.as_slice(), b"mk");
+        assert_eq!(value.as_ref().unwrap().as_slice(), b"op");
+        assert_eq!(*m_seq, seq);
+
+        Ok(())
     }
 }
 

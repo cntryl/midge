@@ -321,11 +321,11 @@ fn apply_record(
             }
 
             if let Some(value) = &record.value {
-                memtable.put_with_exp(record.key.to_vec(), value.to_vec(), record.expiration)?;
+                memtable.put_with_seq(record.key.to_vec(), value.to_vec(), record.seq, record.expiration)?;
             }
         }
         WalOpKind::Delete => {
-            memtable.delete(record.key.to_vec())?;
+            memtable.delete_with_seq(record.key.to_vec(), record.seq)?;
         }
         WalOpKind::DeleteRange => {
             // TODO: range tombstone support; treat as no-op for now.
