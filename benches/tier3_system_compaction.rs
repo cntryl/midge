@@ -168,42 +168,39 @@ fn bench_flush(c: &mut Criterion) {
                                 batch.put(k.clone(), v.clone());
                             }
 
-                            let start = Instant::now();
-                            engine.write_batch(&batch).expect("write_batch failed");
-                            let total = start.elapsed();
-                            eprintln!(
-                                "[bench setup] mode={} write_batch of {} ops took {:?} (avg {:?}/op)",
-                                mode.as_str(),
-                                kv_ref.len(),
-                                total,
-                                total / (kv_ref.len() as u32)
-                            );
-
-                            // Optionally: a small sanity check of chunked writes to see per-chunk cost
-                            // (this uses pre-sized chunks above; we've measured them below already)
-
                             // Submit write_batch in larger chunks (1k ops) to avoid per-op fsync overhead
-                            if kv_ref.len() >= 1000 {
-                                let chunk = 1000usize;
-                                let mut i = 0usize;
-                                while i < kv_ref.len() {
-                                    let end = (i + chunk).min(kv_ref.len());
-                                    let mut bchunk = WriteBatch::new();
-                                    for (k, v) in kv_ref.keys[i..end].iter().zip(&kv_ref.values[i..end]) {
-                                        bchunk.put(k.clone(), v.clone());
-                                    }
-                                    let start_chunk = Instant::now();
-                                    engine.write_batch(&bchunk).expect("write_batch failed");
-                                    let now = Instant::now();
-                                    eprintln!(
-                                        "[bench setup] mode={} chunked write_batch {}..{} took {:?}",
-                                        mode.as_str(),
-                                        i + 1,
-                                        end,
-                                        now.duration_since(start_chunk)
-                                    );
-                                    i = end;
+                            let chunk = 1000usize;
+                            let mut i = 0usize;
+                            while i < kv_ref.len() {
+                                let end = (i + chunk).min(kv_ref.len());
+                                let mut bchunk = WriteBatch::new();
+                                for (k, v) in kv_ref.keys[i..end].iter().zip(&kv_ref.values[i..end]) {
+                                    bchunk.put(k.clone(), v.clone());
                                 }
+                                let start_chunk = Instant::now();
+                                engine.write_batch(&bchunk).expect("write_batch failed");
+                                let now = Instant::now();
+                                eprintln!(
+                                    "[bench setup] mode={} chunked write_batch {}..{} took {:?}",
+                                    mode.as_str(),
+                                    i + 1,
+                                    end,
+                                    now.duration_since(start_chunk)
+                                );
+                                i = end;
+                            }
+
+                            // Log WAL metrics (if telemetry is enabled)
+                            if let Some(t) = cntryl_midge::telemetry::Telemetry::global() {
+                                let m = t.metrics();
+                                use std::sync::atomic::Ordering;
+                                eprintln!(
+                                    "[bench setup] mode={} wal_syncs={} wal_appends={} wal_bytes={}",
+                                    mode.as_str(),
+                                    m.wal_syncs.load(Ordering::Relaxed),
+                                    m.wal_appends.load(Ordering::Relaxed),
+                                    m.wal_bytes_written.load(Ordering::Relaxed)
+                                );
                             }
 
                             engine

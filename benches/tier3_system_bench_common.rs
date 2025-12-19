@@ -247,6 +247,7 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
         memtable_size: config.memtable_size,
         enable_compaction: config.enable_compaction,
         wal_sync: config.wal_sync,
+        wal_batch_config: config.wal_batch_config,
         ..Default::default()
     };
 
