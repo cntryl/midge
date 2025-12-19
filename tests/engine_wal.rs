@@ -119,7 +119,10 @@ fn should_recover_deletes_from_wal() {
     if deleted_count == 10 {
         eprintln!("✓ Deletes recovered correctly from WAL");
     } else {
-        eprintln!("✗ Delete recovery failed: {} deletes not persisted", 10 - deleted_count);
+        eprintln!(
+            "✗ Delete recovery failed: {} deletes not persisted",
+            10 - deleted_count
+        );
     }
 }
 
@@ -143,7 +146,8 @@ fn should_recover_range_tombstones_from_wal() {
 
     // Range delete
     let mut txn = engine.transaction();
-    txn.delete_range(cf_id, b"k020".to_vec(), b"k080".to_vec()).ok();
+    txn.delete_range(cf_id, b"k020".to_vec(), b"k080".to_vec())
+        .ok();
     engine.commit_transaction(txn).ok();
 
     eprintln!("Applied range delete [k020, k080)");
@@ -238,7 +242,8 @@ fn should_recover_mixed_operations_from_wal() {
     }
 
     let mut txn2 = engine.transaction();
-    txn2.delete_range(cf_id, b"dr_05".to_vec(), b"dr_15".to_vec()).ok();
+    txn2.delete_range(cf_id, b"dr_05".to_vec(), b"dr_15".to_vec())
+        .ok();
     engine.commit_transaction(txn2).ok();
 
     eprintln!("Applied: put, delete, put, delete_range");
@@ -258,8 +263,12 @@ fn should_recover_mixed_operations_from_wal() {
         })
         .count();
 
-    eprintln!("Final put_key: {:?}", 
-        put_val.as_ref().map(|v| String::from_utf8_lossy(v).to_string()));
+    eprintln!(
+        "Final put_key: {:?}",
+        put_val
+            .as_ref()
+            .map(|v| String::from_utf8_lossy(v).to_string())
+    );
     eprintln!("Keys in deleted range: {}", dr_remaining);
 
     let mixed_ok = put_val.is_some() && dr_remaining == 0;

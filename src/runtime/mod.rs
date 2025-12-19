@@ -251,7 +251,7 @@ pub enum RuntimeMsg {
         request_id: u64,
         cf_id: u32,
         key: Vec<u8>,
-        sequence: u64,                           // Read at this sequence number or earlier.
+        sequence: u64, // Read at this sequence number or earlier.
         requested_durability: crate::engine::api::Durability, // Durability level requested
     },
     /// Scan a range of keys from memtables and SST files.
@@ -264,7 +264,7 @@ pub enum RuntimeMsg {
         cf_id: u32,
         start: Vec<u8>,
         end: Vec<u8>,
-        sequence: u64,                           // Read at this sequence number or earlier.
+        sequence: u64, // Read at this sequence number or earlier.
         requested_durability: crate::engine::api::Durability, // Durability level requested
     },
 

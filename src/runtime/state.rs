@@ -358,11 +358,7 @@ impl RuntimeState {
     /// Allocate sequences idempotently.
     /// If request_id is already in cache, return cached sequences.
     /// Otherwise, allocate count new sequences and cache them.
-    pub fn allocate_sequences_idempotent(
-        &mut self,
-        request_id: u64,
-        count: usize,
-    ) -> (u64, usize) {
+    pub fn allocate_sequences_idempotent(&mut self, request_id: u64, count: usize) -> (u64, usize) {
         // Check if we have cached sequences for this request
         if let Some((first_seq, cnt)) = self.get_cached_sequences(request_id) {
             tracing::debug!(
@@ -423,14 +419,15 @@ impl RuntimeState {
     /// Called periodically as durability frontier advances.
     pub fn cleanup_old_idempotency_entries(&mut self) {
         let current_frontier = self.wal.local_durable_seq;
-        self.sequence_idempotency_cache
-            .retain(|_request_id, (_first_seq, _count, confirmed_at)| {
+        self.sequence_idempotency_cache.retain(
+            |_request_id, (_first_seq, _count, confirmed_at)| {
                 // Keep entries that are either:
                 // 1. Not yet confirmed (confirmed_at == 0)
                 // 2. Recently confirmed (confirmed_at > frontier - 100)
                 // Remove old confirmed entries beyond the frontier
                 *confirmed_at == 0 || *confirmed_at > current_frontier.saturating_sub(100)
-            });
+            },
+        );
     }
 
     /// Invalidate cached idempotency allocations that are part of a failed WAL
@@ -534,30 +531,27 @@ impl RuntimeState {
     /// Returns false if snapshot_id already exists (duplicate registration).
     pub fn register_snapshot(&mut self, snapshot_id: u64, sequence: u64) -> bool {
         if self.snapshots.active_snapshots.contains_key(&snapshot_id) {
-            tracing::warn!(
-                snapshot_id,
-                "Attempted to register duplicate snapshot ID"
-            );
+            tracing::warn!(snapshot_id, "Attempted to register duplicate snapshot ID");
             return false;
         }
 
-        self.snapshots.active_snapshots.insert(
-            snapshot_id,
-            (sequence, std::time::Instant::now(), 1),
-        );
+        self.snapshots
+            .active_snapshots
+            .insert(snapshot_id, (sequence, std::time::Instant::now(), 1));
 
-        tracing::trace!(
-            snapshot_id,
-            sequence,
-            "Snapshot registered for SST pinning"
-        );
+        tracing::trace!(snapshot_id, sequence, "Snapshot registered for SST pinning");
 
         true
     }
 
     /// Unregister a snapshot, allowing SSTs referenced by it to be garbage collected.
     pub fn unregister_snapshot(&mut self, snapshot_id: u64) {
-        if self.snapshots.active_snapshots.remove(&snapshot_id).is_some() {
+        if self
+            .snapshots
+            .active_snapshots
+            .remove(&snapshot_id)
+            .is_some()
+        {
             tracing::trace!(snapshot_id, "Snapshot unregistered; SSTs eligible for GC");
         }
     }
@@ -567,7 +561,9 @@ impl RuntimeState {
     pub fn get_pinned_sst_names(&self) -> std::collections::HashSet<String> {
         let mut pinned = std::collections::HashSet::new();
 
-        for (snapshot_id, (snapshot_seq, created_at, _ref_count)) in &self.snapshots.active_snapshots {
+        for (snapshot_id, (snapshot_seq, created_at, _ref_count)) in
+            &self.snapshots.active_snapshots
+        {
             // Check if snapshot has exceeded max lifetime
             let age = std::time::Instant::now().duration_since(*created_at);
             if age > self.snapshots.max_snapshot_lifetime {

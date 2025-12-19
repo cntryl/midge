@@ -21,7 +21,7 @@ use super::durability::{DurabilityCoordinator, DurabilityWaiter};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::sst::traits::SstReader;
-use crate::sst::Memtable; 
+use crate::sst::Memtable;
 
 /// Main synchronous event loop for the runtime.
 ///
@@ -161,7 +161,8 @@ impl EventLoop {
                     let ready = self.durability.get_ready_cloud_segments(durable);
 
                     for seg_id in ready {
-                        if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id) {
+                        if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id)
+                        {
                             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                                 telemetry.metrics().record_cloudfirst_wal_ack_latency_us(
                                     enqueued_at.elapsed().as_micros() as u64,
@@ -178,8 +179,10 @@ impl EventLoop {
                                     sequence,
                                 } => {
                                     // Mark sequences confirmed using cloud frontier for CloudFirst
-                                    self.state
-                                        .confirm_sequences_at(request_id, self.state.wal.cloud_durable_seq);
+                                    self.state.confirm_sequences_at(
+                                        request_id,
+                                        self.state.wal.cloud_durable_seq,
+                                    );
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WalAppended {
@@ -194,8 +197,10 @@ impl EventLoop {
                                     op_count,
                                 } => {
                                     // Mark sequences confirmed using cloud frontier for CloudFirst
-                                    self.state
-                                        .confirm_sequences_at(request_id, self.state.wal.cloud_durable_seq);
+                                    self.state.confirm_sequences_at(
+                                        request_id,
+                                        self.state.wal.cloud_durable_seq,
+                                    );
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WriteBatchAppended {
@@ -226,7 +231,8 @@ impl EventLoop {
                                     sequence,
                                     requested_durability: _,
                                 } => {
-                                    let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                                    let results =
+                                        self.handle_range_scan(cf_id, &start, &end, sequence);
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::RangeScanResults {
@@ -302,7 +308,10 @@ impl EventLoop {
         let cloud_pending = self.wal_actor.pending_cloud_writes_len();
         let bytes_buffered = self.wal_actor.bytes_since_sync();
 
-        if !self.durability.should_flush_cloudfirst(cloud_pending, bytes_buffered) {
+        if !self
+            .durability
+            .should_flush_cloudfirst(cloud_pending, bytes_buffered)
+        {
             return;
         }
 
@@ -1400,7 +1409,14 @@ impl EventLoop {
                     sequence,
                     requested_durability,
                 } => {
-                    self.handle_msg_range_scan(request_id, cf_id, start, end, sequence, requested_durability);
+                    self.handle_msg_range_scan(
+                        request_id,
+                        cf_id,
+                        start,
+                        end,
+                        sequence,
+                        requested_durability,
+                    );
                 }
             }
         }
@@ -2103,7 +2119,12 @@ mod tests {
         std::fs::create_dir_all(&state.sst_dir)?;
 
         let router = Arc::new(ResponseRouter::new());
-        let mut el = EventLoop::new(state, false, router, crate::runtime::RuntimeConfig::default())?;
+        let mut el = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+        )?;
 
         // Create an SST file with one key using the FsSstFactory
         let sst_name = "00000001.sst".to_string();
@@ -2133,10 +2154,17 @@ mod tests {
         // so we don't need to create a valid on-disk SST file in this unit test.
         struct TestFactory;
         impl crate::sst::traits::SstFactory for TestFactory {
-            fn create(&self) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
-                Err(crate::common::MidgeError::NotSupported("create not supported in test".into()))
+            fn create(
+                &self,
+            ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                Err(crate::common::MidgeError::NotSupported(
+                    "create not supported in test".into(),
+                ))
             }
-            fn open(&self, _path: &std::path::Path) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReader>> {
+            fn open(
+                &self,
+                _path: &std::path::Path,
+            ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReader>> {
                 struct FakeReader;
                 impl crate::sst::traits::SstReader for FakeReader {
                     fn get(&self, key: &[u8]) -> crate::common::MidgeResult<Option<bytes::Bytes>> {
@@ -2146,11 +2174,19 @@ mod tests {
                             Ok(None)
                         }
                     }
-                    fn scan_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> crate::common::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+                    fn scan_range(
+                        &self,
+                        start: Option<&[u8]>,
+                        end: Option<&[u8]>,
+                    ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>>
+                    {
                         let s = start.unwrap_or(&[]);
                         let e = end.unwrap_or(&[255u8]);
                         if s <= &b"a"[..] && &b"a"[..] < e {
-                            Ok(vec![(bytes::Bytes::copy_from_slice(b"a"), bytes::Bytes::copy_from_slice(b"va"))])
+                            Ok(vec![(
+                                bytes::Bytes::copy_from_slice(b"a"),
+                                bytes::Bytes::copy_from_slice(b"va"),
+                            )])
                         } else {
                             Ok(Vec::new())
                         }
@@ -2160,18 +2196,23 @@ mod tests {
             }
         }
 
-        el.compaction_actor = crate::runtime::actors::CompactionActor::new(std::sync::Arc::new(TestFactory));
+        el.compaction_actor =
+            crate::runtime::actors::CompactionActor::new(std::sync::Arc::new(TestFactory));
 
         // Quick sanity-check: ensure the fake reader returns the key we expect
         let reader = el.compaction_actor.open_sst_reader(&sst_path)?;
         let sst_pairs = reader.scan_range(Some(b"a"), Some(b"b"))?;
-        assert!(sst_pairs.iter().any(|(k, v)| k.as_ref() == b"a" && v.as_ref() == b"va"));
+        assert!(sst_pairs
+            .iter()
+            .any(|(k, v)| k.as_ref() == b"a" && v.as_ref() == b"va"));
 
         // Act: perform a range scan ["a","b") at sequence u64::MAX
         let results = el.handle_range_scan(0, b"a", b"b", u64::MAX);
 
         // Assert: We expect to see the key in SST; current implementation does NOT consult SSTs and this test should fail until fixed.
-        assert!(results.iter().any(|(k, v)| k.as_slice() == b"a" && v.as_slice() == b"va"));
+        assert!(results
+            .iter()
+            .any(|(k, v)| k.as_slice() == b"a" && v.as_slice() == b"va"));
 
         Ok(())
     }
@@ -2182,7 +2223,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
-        let config = crate::runtime::RuntimeConfig { wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst, ..Default::default() };
+        let config = crate::runtime::RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            ..Default::default()
+        };
         let mut el = EventLoop::new(state, false, router, config)?;
 
         // Add a wal append with a specific request_id
@@ -2199,10 +2243,17 @@ mod tests {
             None,
         )?;
 
-        assert!(deferred, "CloudFirst append should be deferred waiting for CloudAck");
+        assert!(
+            deferred,
+            "CloudFirst append should be deferred waiting for CloudAck"
+        );
 
         // Queue waiter for this append (simulates EventLoop behavior)
-        el.durability.queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend { request_id, sequence: seq });
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id,
+                sequence: seq,
+            });
 
         // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
         let seg_id = el.state.wal.current_segment_id;
@@ -2212,11 +2263,15 @@ mod tests {
         // Move waiters into inflight bucket and record timing as EventLoop does
         el.durability.rotate_to(el.state.wal.current_segment_id);
         let max_sequence = el.state.wal.local_durable_seq;
-        el.durability.record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability
+            .record_cloud_segment_inflight(seg_id, max_sequence);
         el.durability.record_cloud_flush();
 
         // Now simulate the storage CloudAck for that segment
-        el.handle_storage_event(crate::storage::StorageEvent::CloudAck { segment_id: seg_id, max_sequence });
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: seg_id,
+            max_sequence,
+        });
 
         // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
         if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
@@ -2229,12 +2284,16 @@ mod tests {
     }
 
     #[test]
-    fn cloudfirst_retry_after_ack_should_return_same_sequence_without_queueing() -> crate::common::MidgeResult<()> {
+    fn cloudfirst_retry_after_ack_should_return_same_sequence_without_queueing(
+    ) -> crate::common::MidgeResult<()> {
         // Arrange: create state and event loop with CloudFirst policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
-        let config = crate::runtime::RuntimeConfig { wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst, ..Default::default() };
+        let config = crate::runtime::RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            ..Default::default()
+        };
         let mut el = EventLoop::new(state, false, router, config)?;
 
         // Add a wal append with a specific request_id
@@ -2251,10 +2310,17 @@ mod tests {
             None,
         )?;
 
-        assert!(deferred1, "CloudFirst append should be deferred waiting for CloudAck");
+        assert!(
+            deferred1,
+            "CloudFirst append should be deferred waiting for CloudAck"
+        );
 
         // Queue waiter for this append (simulates EventLoop behavior)
-        el.durability.queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend { request_id, sequence: seq1 });
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id,
+                sequence: seq1,
+            });
 
         // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
         let seg_id = el.state.wal.current_segment_id;
@@ -2264,11 +2330,15 @@ mod tests {
         // Move waiters into inflight bucket and record timing as EventLoop does
         el.durability.rotate_to(el.state.wal.current_segment_id);
         let max_sequence = el.state.wal.local_durable_seq;
-        el.durability.record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability
+            .record_cloud_segment_inflight(seg_id, max_sequence);
         el.durability.record_cloud_flush();
 
         // Now simulate the storage CloudAck for that segment
-        el.handle_storage_event(crate::storage::StorageEvent::CloudAck { segment_id: seg_id, max_sequence });
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: seg_id,
+            max_sequence,
+        });
 
         // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
         if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
@@ -2289,19 +2359,26 @@ mod tests {
         )?;
 
         assert_eq!(seq1, seq2, "retry should return same sequence");
-        assert!(!deferred2, "retry after confirmation should not be deferred");
+        assert!(
+            !deferred2,
+            "retry after confirmation should not be deferred"
+        );
         assert_eq!(el.wal_actor.pending_cloud_writes_len(), 0);
 
         Ok(())
     }
 
     #[test]
-    fn cloudfirst_fail_invalidates_idempotency_and_retry_allocates_new_seq() -> crate::common::MidgeResult<()> {
+    fn cloudfirst_fail_invalidates_idempotency_and_retry_allocates_new_seq(
+    ) -> crate::common::MidgeResult<()> {
         // Arrange: create state and event loop with CloudFirst policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
-        let config = crate::runtime::RuntimeConfig { wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst, ..Default::default() };
+        let config = crate::runtime::RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            ..Default::default()
+        };
         let mut el = EventLoop::new(state, false, router, config)?;
 
         // Add a wal append with a specific request_id
@@ -2318,10 +2395,17 @@ mod tests {
             None,
         )?;
 
-        assert!(deferred1, "CloudFirst append should be deferred waiting for CloudAck");
+        assert!(
+            deferred1,
+            "CloudFirst append should be deferred waiting for CloudAck"
+        );
 
         // Queue waiter for this append (simulates EventLoop behavior)
-        el.durability.queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend { request_id, sequence: seq1 });
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id,
+                sequence: seq1,
+            });
 
         // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
         let seg_id = el.state.wal.current_segment_id;
@@ -2331,11 +2415,15 @@ mod tests {
         // Move waiters into inflight bucket and record timing as EventLoop does
         el.durability.rotate_to(el.state.wal.current_segment_id);
         let max_sequence = el.state.wal.local_durable_seq;
-        el.durability.record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability
+            .record_cloud_segment_inflight(seg_id, max_sequence);
         el.durability.record_cloud_flush();
 
         // Now simulate the storage CloudFail for that segment
-        el.handle_storage_event(crate::storage::StorageEvent::CloudFail { segment_id: seg_id, error: "upload_failed".to_string() });
+        el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+            segment_id: seg_id,
+            error: "upload_failed".to_string(),
+        });
 
         // Retry the same request_id: since the previous allocation failed, we expect a new sequence
         let (seq2, deferred2) = el.wal_actor.append(
@@ -2348,8 +2436,14 @@ mod tests {
             None,
         )?;
 
-        assert_ne!(seq1, seq2, "retry after cloud fail should allocate a new sequence");
-        assert!(deferred2, "retry should be deferred when retried after fail (CloudFirst)");
+        assert_ne!(
+            seq1, seq2,
+            "retry after cloud fail should allocate a new sequence"
+        );
+        assert!(
+            deferred2,
+            "retry should be deferred when retried after fail (CloudFirst)"
+        );
 
         Ok(())
     }

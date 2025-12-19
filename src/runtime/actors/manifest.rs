@@ -47,10 +47,10 @@ impl ManifestActor {
         let intent = crate::runtime::IntentLogEntry::SstAdded {
             file_meta: file_meta.clone(),
         };
-        
+
         // Persist the intent before applying mutation
         state.append_intent(intent)?;
-        
+
         // Now that intent is durable, apply mutation to in-memory manifest
         // Convert to manifest FileMeta
         let manifest_meta = crate::metadata::FileMeta {
@@ -91,10 +91,10 @@ impl ManifestActor {
             removed: removed.clone(),
             added: added.iter().map(|m| m.name.clone()).collect(),
         };
-        
+
         // Persist the intent before applying mutations
         state.append_intent(intent)?;
-        
+
         // Now that intent is durable, apply mutations to in-memory manifest
         // Remove old files
         state.manifest.files.retain(|f| !removed.contains(&f.name));
@@ -298,7 +298,10 @@ mod tests {
 
         // Assert: adding a manifest entry for a corrupt/unreadable SST MUST fail
         // (current behavior is to accept; this test should fail until we implement validation)
-        assert!(result.is_err(), "expected manifest.add_sst to validate SST file and fail for corrupted file");
+        assert!(
+            result.is_err(),
+            "expected manifest.add_sst to validate SST file and fail for corrupted file"
+        );
     }
 
     #[test]
@@ -330,7 +333,10 @@ mod tests {
         let result = actor.add_sst(&mut state, file_meta);
 
         // Assert: adding a manifest entry for a missing final SST (only tmp present) MUST fail
-        assert!(result.is_err(), "expected manifest.add_sst to fail when only tmp file exists");
+        assert!(
+            result.is_err(),
+            "expected manifest.add_sst to fail when only tmp file exists"
+        );
     }
 
     #[test]
@@ -353,7 +359,10 @@ mod tests {
         use std::io::Write;
         f.write_all(&buf)?;
         f.sync_all()?;
-        assert!(sst_path.exists(), "sst path must exist after creating footer");
+        assert!(
+            sst_path.exists(),
+            "sst path must exist after creating footer"
+        );
         eprintln!("sst file bytes: {}", std::fs::metadata(&sst_path)?.len());
 
         let file_meta = crate::runtime::FileMeta {
@@ -368,7 +377,11 @@ mod tests {
         };
 
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
-        assert_eq!(state.sst_dir.join(&sst_name), sst_path, "state.sst_dir should match the temp dir used for file creation");
+        assert_eq!(
+            state.sst_dir.join(&sst_name),
+            sst_path,
+            "state.sst_dir should match the temp dir used for file creation"
+        );
         let mut actor = ManifestActor::new();
 
         // Act: attempt to add the SST to manifest

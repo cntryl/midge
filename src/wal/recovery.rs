@@ -323,7 +323,12 @@ fn apply_record(
             }
 
             if let Some(value) = &record.value {
-                memtable.put_with_seq(record.key.to_vec(), value.to_vec(), record.seq, record.expiration)?;
+                memtable.put_with_seq(
+                    record.key.to_vec(),
+                    value.to_vec(),
+                    record.seq,
+                    record.expiration,
+                )?;
             }
         }
         WalOpKind::Delete => {

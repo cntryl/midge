@@ -34,13 +34,17 @@ fn should_reject_manifest_add_when_only_tmp_file_exists_integration() {
     let result = actor.add_sst(&mut state, file_meta);
 
     // Assert
-    assert!(result.is_err(), "expected manifest.add_sst to fail when only tmp file exists");
+    assert!(
+        result.is_err(),
+        "expected manifest.add_sst to fail when only tmp file exists"
+    );
 }
 
 // Simulate an SST file present on disk (as if writer succeeded but manifest not yet updated)
 // Verify that add_sst accepts it and that the file is readable
 #[test]
-fn should_accept_sst_present_on_disk_and_allow_manual_manifest_add() -> cntryl_midge::common::MidgeResult<()> {
+fn should_accept_sst_present_on_disk_and_allow_manual_manifest_add(
+) -> cntryl_midge::common::MidgeResult<()> {
     // Arrange
     let tmpdir = tempfile::tempdir().expect("create tmpdir");
     let sst_name = "sst_crash_present.sst".to_string();
@@ -79,7 +83,10 @@ fn should_accept_sst_present_on_disk_and_allow_manual_manifest_add() -> cntryl_m
 
     // Assert: manifest now references the sst by name
     let found = state.manifest.files.iter().any(|f| f.name == sst_name);
-    assert!(found, "manifest should reference the manually added sst file");
+    assert!(
+        found,
+        "manifest should reference the manually added sst file"
+    );
 
     Ok(())
 }

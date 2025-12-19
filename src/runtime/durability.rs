@@ -47,7 +47,7 @@ pub enum DurabilityWaiter {
 }
 
 /// Coordinates all durability-related state and decisions.
-/// 
+///
 /// Owns:
 /// - Group commit waiter queues (KeyedGroupCommit)
 /// - CloudFirst inflight segment tracking
@@ -186,7 +186,9 @@ impl DurabilityCoordinator {
     /// Useful when a segment fails and we need to invalidate idempotency allocations
     /// that were part of that segment.
     pub fn take_cloud_segment_max_sequence(&mut self, segment_id: u64) -> Option<u64> {
-        self.inflight.remove(&segment_id).map(|info| info.max_sequence)
+        self.inflight
+            .remove(&segment_id)
+            .map(|info| info.max_sequence)
     }
     /// Clear all inflight segments (on error or shutdown).
     pub fn clear_inflight(&mut self) {
@@ -194,11 +196,7 @@ impl DurabilityCoordinator {
     }
 
     /// Check if CloudFirst should flush based on thresholds.
-    pub fn should_flush_cloudfirst(
-        &self,
-        cloud_pending: usize,
-        bytes_buffered: usize,
-    ) -> bool {
+    pub fn should_flush_cloudfirst(&self, cloud_pending: usize, bytes_buffered: usize) -> bool {
         if !self.is_cloud_first {
             return false;
         }

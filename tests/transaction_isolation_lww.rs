@@ -6,9 +6,9 @@
 //! This file serves as the single source of truth for transaction semantics.
 //! All other transaction tests MUST be consistent with this level.
 
+use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use std::sync::Arc;
-use bytes::Bytes;
 
 #[test]
 fn document_transaction_isolation_level_lww() {
@@ -166,12 +166,18 @@ fn should_not_isolate_snapshots_when_isolation_disabled() {
     engine.put(cf, b"initial", b"value").unwrap();
 
     let snapshot = engine.snapshot();
-    let initial_count = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let initial_count = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
 
     // Add new data after snapshot
     engine.put(cf, b"added_later", b"value").unwrap();
 
-    let later_count = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let later_count = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
 
     // Note: Not asserting here because snapshot behavior may vary
     // The point is to document that true Snapshot Isolation is NOT guaranteed

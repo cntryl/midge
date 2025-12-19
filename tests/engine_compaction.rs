@@ -79,7 +79,10 @@ fn should_maintain_read_consistency_during_compaction() {
     // Verify engine state after snapshot release
     drop(snapshot);
     let current_val = engine.get(cf, b"concurrent_key_0000").unwrap();
-    eprintln!("Current engine read after snapshot release: {:?}", current_val);
+    eprintln!(
+        "Current engine read after snapshot release: {:?}",
+        current_val
+    );
 }
 
 // ============================================================================
@@ -117,7 +120,10 @@ fn should_handle_concurrent_writes_during_compaction() {
     if total_keys >= 950 {
         eprintln!("✓ All writes persisted through compaction");
     } else {
-        eprintln!("✗ Write loss during compaction: {} keys < 950 expected", total_keys);
+        eprintln!(
+            "✗ Write loss during compaction: {} keys < 950 expected",
+            total_keys
+        );
     }
 }
 
@@ -142,7 +148,8 @@ fn should_preserve_range_tombstones_through_multi_level_compaction() {
 
     // Create a transaction with range delete
     let mut txn = engine.transaction();
-    txn.delete_range(cf_id, b"k300".to_vec(), b"k700".to_vec()).ok();
+    txn.delete_range(cf_id, b"k300".to_vec(), b"k700".to_vec())
+        .ok();
     engine.commit_transaction(txn).ok();
     engine.flush().ok();
 
@@ -225,8 +232,12 @@ fn should_eliminate_obsolete_versions_through_compaction() {
 
     // Verify only latest version visible
     let current = engine.get(cf, b"hotkey").unwrap();
-    eprintln!("Current value: {:?}", 
-        current.as_ref().map(|v| String::from_utf8_lossy(v).to_string()));
+    eprintln!(
+        "Current value: {:?}",
+        current
+            .as_ref()
+            .map(|v| String::from_utf8_lossy(v).to_string())
+    );
 
     if let Some(val) = current {
         let val_str = String::from_utf8_lossy(&val);
@@ -262,17 +273,17 @@ fn document_compaction_implementation_gaps() {
 #[test]
 fn should_document_lsm_level_progression_strategy_when_tested() {
     eprintln!("\n=== ARCHITECTURE: LSM LEVEL PROGRESSION ===\n");
-    
+
     let engine = open_with_mode(opts_for_mode("local"), "local");
     let cf = engine.default_column_family();
-    
+
     eprintln!("Midge uses a Leveled LSM compaction strategy:");
     eprintln!("  L0: Unsorted, multiple files from memtable flushes");
     eprintln!("  L1+: Sorted, single file per level (typically)");
     eprintln!("  Progression: L0 → L1 when L0 size exceeds threshold");
     eprintln!("              L1 → L2 when L1 size exceeds level multiplier target");
     eprintln!("              Etc.\n");
-    
+
     // Write data across multiple memtable flushes
     eprintln!("Writing data in batches to trigger L0 accumulation...");
     for batch in 0..3 {
@@ -283,7 +294,7 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
         engine.flush().ok();
         eprintln!("  Batch {}: Flushed memtable to L0", batch);
     }
-    
+
     // Verify all data is still readable (consistency during compaction)
     let result = engine.scan(cf, &cntryl_midge::Query::new()).ok();
     match result {
@@ -296,7 +307,7 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
             eprintln!("\n! LSM compaction produced scan error (acceptable for in-progress work)");
         }
     }
-    
+
     eprintln!("\n✓ LSM strategy: Levels correctly isolate write amplification");
     eprintln!("✓ Compaction preserves all data during transitions");
     eprintln!("✓ Multiple flushes accumulate in L0 before L0→L1 compaction");

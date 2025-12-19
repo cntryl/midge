@@ -201,7 +201,12 @@ fn should_apply_ttl_given_write_batch_with_ttl_when_committed() {
 
         // Act - write batch with TTL
         let mut batch = cntryl_midge::WriteBatch::new();
-        batch.put_with_ttl(cf.id(), Bytes::from_static(b"key1"), Bytes::from_static(b"value1"), 1);
+        batch.put_with_ttl(
+            cf.id(),
+            Bytes::from_static(b"key1"),
+            Bytes::from_static(b"value1"),
+            1,
+        );
         engine.write_batch(&batch).unwrap();
         thread::sleep(Duration::from_millis(1100));
 

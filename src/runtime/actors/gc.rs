@@ -105,10 +105,7 @@ impl GcActor {
 
             // === BLOCKER #8 FIX: Check that file is not pinned by a snapshot ===
             if pinned_ssts.contains(sst_name) {
-                tracing::warn!(
-                    sst_name,
-                    "Skipping delete of SST pinned by active snapshot"
-                );
+                tracing::warn!(sst_name, "Skipping delete of SST pinned by active snapshot");
                 skipped_count += 1;
                 continue;
             }

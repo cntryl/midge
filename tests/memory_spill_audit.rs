@@ -33,7 +33,10 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
             total_bytes += key.len() + 1024;
         }
 
-        eprintln!("Writing {} bytes total (500 keys x 1KB values)", total_bytes);
+        eprintln!(
+            "Writing {} bytes total (500 keys x 1KB values)",
+            total_bytes
+        );
         eprintln!("Memory budget is 128KB, so spill should trigger at ~128KB");
 
         // Commit the transaction
@@ -64,7 +67,9 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
             }
             Err(e) => {
                 eprintln!("✗ Transaction failed to commit: {:?}", e);
-                eprintln!("Conclusion: Spill may NOT be working - transaction exceeded memory and failed");
+                eprintln!(
+                    "Conclusion: Spill may NOT be working - transaction exceeded memory and failed"
+                );
             }
         }
     });
@@ -114,19 +119,11 @@ fn should_respect_memory_budget_across_transactions() {
                 eprintln!("✓ Both transactions committed within budget");
 
                 // Verify data from both
-                let val1 = engine
-                    .get(cf, b"batch1_key_000")
-                    .expect("get")
-                    .is_some();
-                let val2 = engine
-                    .get(cf, b"batch2_key_000")
-                    .expect("get")
-                    .is_some();
+                let val1 = engine.get(cf, b"batch1_key_000").expect("get").is_some();
+                let val2 = engine.get(cf, b"batch2_key_000").expect("get").is_some();
 
                 if val1 && val2 {
-                    eprintln!(
-                        "✓ Data from both transactions persisted - memory budgeting working"
-                    );
+                    eprintln!("✓ Data from both transactions persisted - memory budgeting working");
                 } else {
                     eprintln!("✗ Some data missing - memory budgeting may have issues");
                 }
@@ -149,7 +146,10 @@ fn should_handle_transaction_spill_to_disk_correctly() {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        eprintln!("Memory budget: 64KB (very small to force spill) - mode: {}", mode);
+        eprintln!(
+            "Memory budget: 64KB (very small to force spill) - mode: {}",
+            mode
+        );
         eprintln!("Sync writes: enabled");
 
         // Single transaction with data > 64KB
@@ -167,11 +167,17 @@ fn should_handle_transaction_spill_to_disk_correctly() {
 
         match commit_result {
             Ok(_) => {
-                eprintln!("✓ Large transaction (100KB) committed successfully with 64KB memory budget");
+                eprintln!(
+                    "✓ Large transaction (100KB) committed successfully with 64KB memory budget"
+                );
                 eprintln!("Conclusion: SPILL IS WORKING - data exceeded memory and was persisted");
 
                 // Sample check: verify some keys exist
-                let sample_checks = ["spilltest_key_0000", "spilltest_key_0100", "spilltest_key_0199"];
+                let sample_checks = [
+                    "spilltest_key_0000",
+                    "spilltest_key_0100",
+                    "spilltest_key_0199",
+                ];
                 let all_present = sample_checks
                     .iter()
                     .all(|key| engine.get(cf, key.as_bytes()).expect("get").is_some());

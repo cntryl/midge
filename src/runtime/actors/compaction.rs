@@ -31,7 +31,10 @@ impl CompactionActor {
     }
 
     /// Open an SST reader using the actor's configured SstFactory
-    pub fn open_sst_reader(&self, path: &std::path::Path) -> crate::common::MidgeResult<Box<dyn crate::sst::SstReader>> {
+    pub fn open_sst_reader(
+        &self,
+        path: &std::path::Path,
+    ) -> crate::common::MidgeResult<Box<dyn crate::sst::SstReader>> {
         self.sst_factory.open(path)
     }
 

@@ -106,7 +106,8 @@ pub trait DynSstWriter: Send {
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .open(&tmp).map_err(crate::common::MidgeError::Io)?;
+                .open(&tmp)
+                .map_err(crate::common::MidgeError::Io)?;
             f.write_all(&bytes).map_err(crate::common::MidgeError::Io)?;
             // Ensure data is on disk
             f.sync_all().map_err(crate::common::MidgeError::Io)?;

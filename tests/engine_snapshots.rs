@@ -1,4 +1,4 @@
-﻿//! Snapshot Integration Tests
+//! Snapshot Integration Tests
 //!
 //! Tests MVCC snapshot semantics: visibility filtering based on snapshot sequence,
 //! isolation from concurrent writes, and persistence across crashes.
@@ -510,7 +510,10 @@ fn should_prevent_sst_cleanup_while_snapshot_active() {
 
     // Assert - Track what actually happens (snapshots may see new writes depending on implementation)
     // The key point is that the snapshot is usable and consistent
-    assert_eq!(snap_current_count, snap_initial_count, "Snapshot should maintain consistent count");
+    assert_eq!(
+        snap_current_count, snap_initial_count,
+        "Snapshot should maintain consistent count"
+    );
     assert!(first_val.is_some(), "Snapshot should return some value");
 
     // Release snapshot and verify GC can proceed

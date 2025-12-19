@@ -226,7 +226,11 @@ pub fn filter_tombstones_with_horizon(
             .filter(|v| !(v.is_tombstone && v.seq <= h)) // drop tombstones older-or-equal to horizon
             .cloned()
             .collect(),
-        None => versions.iter().filter(|v| !v.is_tombstone).cloned().collect(),
+        None => versions
+            .iter()
+            .filter(|v| !v.is_tombstone)
+            .cloned()
+            .collect(),
     }
 }
 
@@ -479,11 +483,11 @@ mod tests {
         let filtered = filter_tombstones_with_horizon(&versions, Some(150));
 
         // Assert: recent tombstone (seq 200) should be preserved
-        assert!(filtered.iter().any(|v| v.is_tombstone && v.seq == 200),
-            "expected recent tombstone to be preserved by compaction filter (snapshot-aware)");
+        assert!(
+            filtered.iter().any(|v| v.is_tombstone && v.seq == 200),
+            "expected recent tombstone to be preserved by compaction filter (snapshot-aware)"
+        );
     }
-
-
 
     #[test]
     fn should_handle_empty_streams_in_merge() {

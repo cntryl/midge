@@ -575,64 +575,74 @@ fn should_recover_snapshot_view_after_engine_restart() {
 #[test]
 fn should_document_and_verify_lww_as_isolation_model_when_testing() {
     eprintln!("\n=== ARCHITECTURE: MIDGE ISOLATION MODEL IS LAST-WRITE-WINS (LWW) ===\n");
-    
+
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         eprintln!("Verifying LWW semantics in {} mode...", mode);
-        
+
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        
+
         // Test 1: Concurrent writes to same key both succeed
         // (NOT Serializable - which would reject at least one)
         eprintln!("  ✓ Concurrent writes allow both to succeed (LWW)");
         let mut txn1 = engine.transaction();
         let mut txn2 = engine.transaction();
-        
-        txn1.put(cf.id(), b"key".to_vec(), b"from_txn1".to_vec()).unwrap();
-        txn2.put(cf.id(), b"key".to_vec(), b"from_txn2".to_vec()).unwrap();
-        
+
+        txn1.put(cf.id(), b"key".to_vec(), b"from_txn1".to_vec())
+            .unwrap();
+        txn2.put(cf.id(), b"key".to_vec(), b"from_txn2".to_vec())
+            .unwrap();
+
         engine.commit_transaction(txn1).ok();
         engine.commit_transaction(txn2).ok();
-        
+
         let final_value = engine.get(cf, b"key").unwrap();
         assert!(final_value.is_some(), "One of the writes should be visible");
-        eprintln!("    Both writes processed: last one visible = {:?}", 
-                  String::from_utf8_lossy(&final_value.unwrap()));
-        
+        eprintln!(
+            "    Both writes processed: last one visible = {:?}",
+            String::from_utf8_lossy(&final_value.unwrap())
+        );
+
         // Test 2: Lost updates are possible
         // (This confirms NOT full Repeatable Read or Snapshot Isolation)
         eprintln!("  ✓ Lost updates possible (not SI/Serializable)");
         engine.put(cf, b"counter", b"0").unwrap();
-        
+
         let mut t1 = engine.transaction();
         let mut t2 = engine.transaction();
-        
+
         // Both read counter
         let _val = engine.get(cf, b"counter").unwrap().unwrap();
-        
+
         // Both increment
         t1.put(cf.id(), b"counter".to_vec(), b"1".to_vec()).unwrap();
         t2.put(cf.id(), b"counter".to_vec(), b"1".to_vec()).unwrap();
-        
+
         engine.commit_transaction(t1).ok();
         engine.commit_transaction(t2).ok(); // One write is lost
-        
+
         let counter = engine.get(cf, b"counter").unwrap().unwrap();
-        eprintln!("    Lost update: both incremented to 1, result = {:?}", 
-                  String::from_utf8_lossy(&counter));
-        
+        eprintln!(
+            "    Lost update: both incremented to 1, result = {:?}",
+            String::from_utf8_lossy(&counter)
+        );
+
         // Test 3: No dirty writes (at least Read Committed)
         eprintln!("  ✓ Dirty writes prevented (Read Committed level)");
         let mut txn = engine.transaction();
-        txn.put(cf.id(), b"dirty_test".to_vec(), b"uncommitted".to_vec()).unwrap();
-        
+        txn.put(cf.id(), b"dirty_test".to_vec(), b"uncommitted".to_vec())
+            .unwrap();
+
         let other_read = engine.get(cf, b"dirty_test").unwrap();
-        assert_eq!(other_read, None, "Other transaction should not see uncommitted write");
+        assert_eq!(
+            other_read, None,
+            "Other transaction should not see uncommitted write"
+        );
         eprintln!("    Uncommitted write hidden from others ✓");
-        
+
         drop(txn); // Don't commit
     });
-    
+
     eprintln!("\n=== LWW VERIFICATION COMPLETE ===");
     eprintln!("Classification: Last-Write-Wins (LWW) with Dirty Write Prevention");
     eprintln!("  - Concurrent writes: both succeed (LWW)");
