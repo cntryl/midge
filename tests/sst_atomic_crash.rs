@@ -1,10 +1,7 @@
 //! Integration tests for SST atomic publish and crash/power-loss scenarios
 
-use cntryl_midge::testkit::*;
 use cntryl_midge::runtime::{FileMeta, ManifestActor, RuntimeState};
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
 
 // Simulate a leftover .tmp file (crash before rename) and ensure manifest.add_sst rejects it
 #[test]
@@ -12,11 +9,11 @@ fn should_reject_manifest_add_when_only_tmp_file_exists_integration() {
     // Arrange
     let tmpdir = tempfile::tempdir().expect("create tmpdir");
     let sst_name = "sst_crash_tmp.sst".to_string();
-    let mut state = RuntimeState::new(tmpdir.path().to_path_buf(), false);
     let tmp_name = format!("{}.tmp", sst_name);
-    let tmp_path = state.sst_dir.join(&tmp_name);
+    let tmp_path = tmpdir.path().join("sst").join(&tmp_name);
 
-    // Write a partial tmp file (simulate crash before rename)
+    // Ensure sst directory exists and write a partial tmp file (simulate crash before rename)
+    fs::create_dir_all(tmpdir.path().join("sst")).expect("create sst dir");
     fs::write(&tmp_path, b"partial-sst").expect("write tmp sst");
 
     let file_meta = FileMeta {
@@ -71,7 +68,6 @@ fn should_accept_sst_present_on_disk_and_allow_manual_manifest_add() -> cntryl_m
         largest_seq: None,
     };
 
-    let mut state = RuntimeState::new(tmpdir.path().to_path_buf(), false);
     let mut actor = ManifestActor::new();
 
     // Sanity
