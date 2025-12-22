@@ -37,7 +37,7 @@ rand = "0.9"
 hdrhistogram = "7.3"
 
 # Compression
-lz4_flex = "0.11"
+lz4_flex = "0.12"
 zstd = "0.13"
 
 # Data Types & Serialization
