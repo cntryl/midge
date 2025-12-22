@@ -27,6 +27,9 @@ pub const RECORD_COUNT: usize = 200_000; // ~200MB dataset at VALUE_SIZE=1_000
 pub const VALUE_SIZE: usize = 1_000;
 pub const BATCH_SIZE: usize = 1024; // Larger batches for efficient bulk load
 
+// Duration for steady-state YCSB workloads (seconds). Used as canonical default.
+pub const WORKLOAD_DURATION_SECS: u64 = 60;
+
 // Load statistics reported separately from RUN phase. We expose a simple struct and a
 // measurement helper so benches can report LOAD throughput/latency independently.
 #[allow(dead_code)]

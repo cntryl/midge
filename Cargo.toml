@@ -32,6 +32,10 @@ dashmap = "6.1"
 parking_lot = "0.12"
 rayon = "1.10"
 
+# Utilities used by stress workloads
+rand = "0.9"
+hdrhistogram = "7.3"
+
 # Compression
 lz4_flex = "0.11"
 zstd = "0.13"
@@ -101,10 +105,8 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 [dev-dependencies]
 clap = { version = "4.5", features = ["derive"] }
 criterion = "0.7"
-hdrhistogram = "7.3"
 paste = "1.0"
 proptest = "1.8"
-rand = "0.9"
 tempfile = "3.23"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
@@ -219,6 +221,10 @@ harness = false
 name = "tier1_hotpath_wal"
 path = "benches/tier1_hotpath_wal.rs"
 harness = false
+
+[[bin]]
+name = "stress"
+path = "stress/main.rs"
 
 [[bench]]
 name = "tier1_hotpath_tlv_encoding"
