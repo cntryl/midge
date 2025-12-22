@@ -26,6 +26,9 @@ mod criterion_helper;
 #[path = "./tier3_system_bench_common.rs"]
 mod bench_common;
 
+#[path = "./common/tier3_harness.rs"]
+mod tier3;
+
 use bench_common::{
     setup_engine_at_path, BenchEngineConfig, BenchStorageMode, DURABLE_STORAGE_MODES,
 };
@@ -131,8 +134,8 @@ fn bench_flush(c: &mut Criterion) {
         let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
 
         // Use multiple single-shot samples (Criterion requires >=10 samples for reliable stats)
-    group.sample_size(10);
-    group.throughput(Throughput::Bytes(total_bytes));
+        group.sample_size(10);
+        group.throughput(Throughput::Bytes(total_bytes));
 
         // Gate remote/cloud-backed modes: run LocalDisk only unless explicitly enabled
         let storage_modes: Vec<BenchStorageMode> =
@@ -176,16 +179,18 @@ fn bench_flush(c: &mut Criterion) {
                     };
 
                     // Use typed Tier-3 harness that enforces single-shot semantics
-                let case = bench_common::tier3::Tier3RestoreCase::new(seed_path.clone(), reopen_cfg);
-                tier3_bench_restore!(b, case,
-                    |engine| {
-                        let wb = template_batch.clone();
-                        engine.write_batch(&wb).expect("write_batch failed");
-                    },
-                    move |engine| {
-                        engine.flush().expect("flush failed");
-                    }
-                );
+                    let case = tier3::Tier3RestoreCase::new(seed_path.clone(), reopen_cfg);
+                    tier3_bench_restore!(
+                        b,
+                        case,
+                        |engine| {
+                            let wb = template_batch.clone();
+                            engine.write_batch(&wb).expect("write_batch failed");
+                        },
+                        move |engine| {
+                            engine.flush().expect("flush failed");
+                        }
+                    );
                 },
             );
         }
@@ -267,7 +272,7 @@ fn bench_compact_all(c: &mut Criterion) {
                     };
 
                     let seed_path = seed_path.clone();
-                    let case = bench_common::tier3::Tier3Case::from_seed(seed_path.clone(), reopen_cfg);
+                    let case = tier3::Tier3Case::from_seed(seed_path.clone(), reopen_cfg);
                     tier3_bench!(b, case, move |engine| {
                         engine.compact_all().expect("compact_all failed");
                     });
@@ -333,8 +338,10 @@ fn bench_flush_throughput(c: &mut Criterion) {
                         ..Default::default()
                     };
 
-                    let case = bench_common::tier3::Tier3RestoreCase::new(seed_path.clone(), reopen_cfg);
-                    tier3_bench_restore!(b, case,
+                    let case = tier3::Tier3RestoreCase::new(seed_path.clone(), reopen_cfg);
+                    tier3_bench_restore!(
+                        b,
+                        case,
                         |engine| {
                             let wb = template_batch.clone();
                             engine.write_batch(&wb).expect("write_batch failed");
@@ -376,7 +383,11 @@ fn bench_incremental_compact(c: &mut Criterion) {
             num_keys_per_batch,
             mode.as_str()
         );
-        let seed_prefix = format!("{}_seed_{}", BENCH_INCR_COMPACT, bench_name.replace('/', "_"));
+        let seed_prefix = format!(
+            "{}_seed_{}",
+            BENCH_INCR_COMPACT,
+            bench_name.replace('/', "_")
+        );
         let seed_path = bench_common::create_seed_dir(&seed_prefix, |p| {
             let build_cfg = BenchEngineConfig {
                 storage_mode: mode,
@@ -444,7 +455,6 @@ fn bench_incremental_compact(c: &mut Criterion) {
 
     group.finish();
 }
-
 
 criterion_group! {
     name = tier3_system_compaction;
