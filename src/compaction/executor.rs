@@ -139,7 +139,7 @@ pub fn collect_versions(
         // Periodically check whether we should abort (cooperative cancellation)
         if let Some(check) = abort_check {
             if check() {
-                tracing::warn!(file = %filename, "compaction aborted during collect_versions");
+                tracing::info!(file = %filename, "compaction aborting due to ingest epoch change");
                 return Ok(Vec::new());
             }
         }
@@ -271,9 +271,9 @@ pub fn write_versions_to_sst(
         if i % 1024 == 0 {
             if let Some(check) = abort_check {
                 if check() {
-                    tracing::warn!(output = %output_filename, "compaction aborted during write_versions_to_sst at {} entries", i);
+                    tracing::info!(output = %output_filename, "compaction aborting during write due to ingest epoch change at {} entries", i);
                     return Err(crate::common::MidgeError::Internal(
-                        "compaction aborted".to_string(),
+                        "compaction aborted due to ingest epoch change".to_string(),
                     ));
                 }
             }

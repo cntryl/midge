@@ -63,6 +63,7 @@ impl Dispatcher {
             | GetCurrentSequence { .. }
             | SetRuntimeConfig { .. }
             | GetRuntimeConfig { .. }
+            | GetIngestState { .. }
             | BeginIngest { .. }
             | EndIngest { .. }
             | Shutdown

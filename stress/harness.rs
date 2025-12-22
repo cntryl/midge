@@ -260,12 +260,13 @@ pub fn run(workload: &str, cfg: &Config) -> Result<()> {
                     scenario
                 );
             }
-            // Enter ingest mode (returns previous snapshot)
-            let prev = engine.enter_ingest_mode()?;
-            // Warm up WAL/filesystem to avoid first-write stalls
+            // Warm up WAL/filesystem to avoid first-write stalls (must be done BEFORE entering ingest)
             crate::ycsb::workload_a::warmup_wal(&engine, cfg.verbose);
             // Probe to detect first-write / WAL behaviour (after warmup)
             crate::ycsb::workload_a::probe_batch_writes(&engine, cfg.verbose, 3);
+
+            // Enter ingest mode (returns previous snapshot) and load dataset
+            let prev = engine.enter_ingest_mode()?;
             // Prepare CFs and load dataset once across CFs
             crate::ycsb::workload_a::prepare_for_load(&engine, cfg.verbose);
             // Restore previous runtime settings

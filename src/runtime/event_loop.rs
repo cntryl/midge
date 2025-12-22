@@ -1002,30 +1002,70 @@ impl EventLoop {
                     );
                 }
 
+                RuntimeMsg::GetIngestState { request_id } => {
+                    let active = self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst);
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::IngestState { request_id, ingest_active: active },
+                    );
+                }
+
                 RuntimeMsg::BeginIngest { request_id } => {
-                    // Prevent new compactions and bump epoch
+                    // Mark begin ingest requested and report active compactions
+                    let active = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
+                    tracing::info!("ingest: begin_ingest requested");
+                    tracing::info!("ingest: waiting for active_compactions={} to drain", active);
+
+                    // Prevent new compactions and mark ingest active
                     self.state.enable_compaction = false;
+                    self.state.ingest_active.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    // Bump epoch so in-flight compactions will see the change
                     let new_epoch = self
                         .state
                         .ingest_epoch
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                         + 1;
-                    tracing::info!(ingest_epoch = new_epoch, "BeginIngest: ingestion barrier enabled, waiting for active compactions to drain");
 
-                    // Wait for active compactions to drain
+                    // Wait for active compactions to drain (only compactions)
                     let (lock, cvar) = &*self.state.active_compactions_notify;
                     let mut guard = lock
                         .lock()
                         .expect("active_compactions_notify lock poisoned");
+
+                    let wait_start = std::time::Instant::now();
+                    let mut warned_500ms = false;
+                    let mut warned_5s = false;
+
                     while self
                         .state
                         .active_compactions
                         .load(std::sync::atomic::Ordering::SeqCst)
                         > 0
                     {
-                        // wait (releases mutex while waiting)
-                        guard = cvar.wait(guard).expect("condvar wait poisoned");
+                        // Wait with timeout so we can log progress thresholds
+                        let timeout = std::time::Duration::from_millis(100);
+                        let (g, _res) = cvar
+                            .wait_timeout(guard, timeout)
+                            .expect("condvar wait poisoned");
+                        guard = g;
+
+                        let elapsed = wait_start.elapsed();
+
+                        if !warned_500ms && elapsed > std::time::Duration::from_millis(500) {
+                            warned_500ms = true;
+                            let a = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
+                            tracing::warn!("ingest: still waiting after 500ms (active_compactions={})", a);
+                        }
+
+                        if !warned_5s && elapsed > std::time::Duration::from_secs(5) {
+                            warned_5s = true;
+                            let a = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
+                            tracing::error!("ingest: begin_ingest blocked >5s — likely entering ingest during active workload (active_compactions={})", a);
+                        }
                     }
+
+                    tracing::info!(ingest_epoch = new_epoch, "BeginIngest: ingestion barrier enabled");
 
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
                 }
@@ -1054,6 +1094,9 @@ impl EventLoop {
                         ingest_epoch = new_epoch,
                         "EndIngest: ingestion barrier lifted"
                     );
+
+                    // Clear ingest active before resuming compaction scheduling
+                    self.state.ingest_active.store(false, std::sync::atomic::Ordering::SeqCst);
 
                     // Optionally kick compaction checks once so background compaction resumes
                     if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
@@ -1171,6 +1214,19 @@ impl EventLoop {
                 // Compaction
                 // =============================================================
                 RuntimeMsg::CheckCompaction { request_id } => {
+                    // Do not schedule compaction while ingest mode is active
+                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                        tracing::error!("ingest: attempted to schedule compaction during ingest mode");
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "ingest: compaction scheduling forbidden during ingest mode".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
                         // Schedule compaction to run in background and respond immediately.
                         // The compaction worker will send a `CompactionComplete` message back
@@ -1199,6 +1255,19 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::RunCompaction { request_id, plan } => {
+                    // Block direct compaction requests during ingest
+                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                        tracing::error!("ingest: attempted to run compaction during ingest mode");
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "ingest: compaction forbidden during ingest mode".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     let cplan = crate::compaction::CompactionPlan {
                         input_files: plan.input_files,
                         output_files: Vec::new(),
@@ -1512,6 +1581,19 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
+                    // Block DDL while ingest active
+                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                        tracing::error!("ingest: attempted DDL (create CF) during ingest mode");
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "ingest: DDL forbidden during ingest mode".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     // DDL durability barrier: ensure WAL is durable before CF creation
                     self.force_wal_sync(&msg_rx);
 
@@ -1528,6 +1610,19 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
+                    // Block DDL while ingest active
+                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                        tracing::error!("ingest: attempted DDL (drop CF) during ingest mode");
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "ingest: DDL forbidden during ingest mode".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     // DDL durability barrier: ensure WAL is durable before CF drop
                     self.force_wal_sync(&msg_rx);
 

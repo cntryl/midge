@@ -348,6 +348,20 @@ impl MidgeEngine {
         }
     }
 
+    /// Return whether an ingest barrier is currently active.
+    pub fn is_ingesting(&self) -> MidgeResult<bool> {
+        let request_id = crate::runtime::next_request_id();
+        let resp = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::GetIngestState { request_id })?;
+        match resp {
+            crate::runtime::RuntimeResponse::IngestState { ingest_active, .. } => Ok(ingest_active),
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to GetIngestState".to_string(),
+            )),
+        }
+    }
+
     /// Enter a temporary ingest mode: disable compaction, relax WAL, increase memtable limits.
     /// Returns the previous configuration snapshot which can be used to restore state.
     pub fn enter_ingest_mode(&self) -> MidgeResult<IngestModeSnapshot> {

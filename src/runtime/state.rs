@@ -170,6 +170,11 @@ pub struct RuntimeState {
 
     /// Condvar used to wait for active_compactions == 0.
     pub active_compactions_notify: std::sync::Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
+
+    /// Whether an ingest barrier is currently active. This is set at BeginIngest
+    /// and cleared at EndIngest so tools and tests can detect when ingest mode
+    /// is enforced.
+    pub ingest_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RuntimeState {
@@ -375,6 +380,7 @@ impl RuntimeState {
                 std::sync::Mutex::new(()),
                 std::sync::Condvar::new(),
             )),
+            ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

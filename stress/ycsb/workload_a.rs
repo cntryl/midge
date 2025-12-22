@@ -265,6 +265,9 @@ pub fn prepare_for_load(engine: &MidgeEngine, verbose: bool) {
 /// Probe batch write latency by performing `count` sample batches and flushing.
 /// Useful to diagnose first-write / WAL/FS behavior before the full load.
 pub fn warmup_wal(engine: &MidgeEngine, verbose: bool) {
+    // Guard: this helper must not be run while ingest mode is active
+    assert!(!engine.is_ingesting().unwrap_or(false), "warmup_wal must not run inside ingest mode");
+
     init_pregen();
     let keys = PREGEN_KEYS.get().expect("pregen not initialized");
     let vals = PREGEN_VALUES.get().expect("pregen not initialized");
@@ -297,6 +300,9 @@ pub fn warmup_wal(engine: &MidgeEngine, verbose: bool) {
 }
 
 pub fn probe_batch_writes(engine: &MidgeEngine, verbose: bool, count: usize) {
+    // Guard: probe must not run while ingest mode is active
+    assert!(!engine.is_ingesting().unwrap_or(false), "probe_batch_writes must not run inside ingest mode");
+
     init_pregen();
     let keys = PREGEN_KEYS.get().expect("pregen not initialized");
     let vals = PREGEN_VALUES.get().expect("pregen not initialized");

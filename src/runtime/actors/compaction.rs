@@ -151,7 +151,13 @@ impl CompactionActor {
                 let output_ssts = match result {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!(error = %e, "compaction worker aborted or failed");
+                        // Distinguish cooperative aborts due to ingest epoch changes
+                        let s = e.to_string();
+                        if s.contains("ingest epoch change") || s.contains("compaction aborted") {
+                            tracing::info!(error = %e, input_files = ?input_files, "compaction: aborting due to ingest epoch change");
+                        } else {
+                            tracing::warn!(error = %e, input_files = ?input_files, "compaction worker aborted or failed");
+                        }
                         Vec::new()
                     }
                 };

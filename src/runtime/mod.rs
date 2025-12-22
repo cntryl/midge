@@ -251,6 +251,9 @@ pub enum RuntimeMsg {
     /// re-enable scheduling.
     EndIngest { request_id: u64 },
 
+    /// Query whether an ingest barrier is currently active.
+    GetIngestState { request_id: u64 },
+
     /// Set runtime configuration atomically. Any field set to `None` will be left unchanged.
     SetRuntimeConfig {
         request_id: u64,
@@ -348,6 +351,7 @@ impl RuntimeMsg {
             | GetCurrentSequence { request_id }
             | SetRuntimeConfig { request_id, .. }
             | GetRuntimeConfig { request_id }
+            | GetIngestState { request_id }
             | BeginIngest { request_id }
             | EndIngest { request_id }
             | Noop { request_id }
@@ -388,6 +392,7 @@ impl RuntimeMsg {
             GetCurrentSequence { .. } => "GetCurrentSequence",
             SetRuntimeConfig { .. } => "SetRuntimeConfig",
             GetRuntimeConfig { .. } => "GetRuntimeConfig",
+            GetIngestState { .. } => "GetIngestState",
             BeginIngest { .. } => "BeginIngest",
             EndIngest { .. } => "EndIngest",
             Shutdown => "Shutdown",
@@ -475,6 +480,11 @@ pub enum RuntimeResponse {
         wal_durability_policy: DurabilityPolicy,
         wal_batch_config: crate::wal::policy::BatchConfig,
     },
+    /// Simple ingest state response
+    IngestState {
+        request_id: u64,
+        ingest_active: bool,
+    },
 }
 
 impl RuntimeResponse {
@@ -491,7 +501,8 @@ impl RuntimeResponse {
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
             | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
             | RuntimeResponse::CurrentSequence { request_id, .. }
-            | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. } => *request_id,
+            | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. }
+            | RuntimeResponse::IngestState { request_id, .. } => *request_id,
         }
     }
 }
