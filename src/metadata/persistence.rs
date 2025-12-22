@@ -19,46 +19,69 @@ impl ManifestPersistence {
         db_path.join(Self::MANIFEST_FILE)
     }
 
-    /// Load manifest from disk, or return default if file doesn't exist
-    ///
-    /// # Arguments
-    /// * `db_path` - Path to the database directory
-    ///
-    /// # Returns
-    /// Deserialized manifest, or default manifest if file doesn't exist
-    ///
-    /// # Errors
-    /// Returns error if manifest file exists but cannot be read or parsed
+    /// Snapshot file name
+    const MANIFEST_SNAPSHOT: &'static str = "manifest.snapshot";
+
+    /// Get the manifest snapshot path
+    pub fn manifest_snapshot_path(db_path: &Path) -> PathBuf {
+        db_path.join(Self::MANIFEST_SNAPSHOT)
+    }
+
+    /// Load manifest, preferring a binary snapshot plus replaying the journal.
+    /// Falls back to legacy YAML manifest if snapshot missing.
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
-        let manifest_path = Self::manifest_path(db_path);
+        // Prefer snapshot when present
+        let snap_path = Self::manifest_snapshot_path(db_path);
+        let mut manifest = if snap_path.exists() {
+            let start = std::time::Instant::now();
+            let contents = fs::read_to_string(&snap_path)
+                .map_err(|e| format!("failed to read manifest snapshot: {}", e))?;
+            let manifest: Manifest = serde_yaml::from_str(&contents)
+                .map_err(|e| format!("failed to parse manifest snapshot YAML: {}", e))?;
+            tracing::info!(path = ?snap_path, files = manifest.files.len(), cf = manifest.column_families.len(), elapsed_ms = start.elapsed().as_secs_f64() * 1000.0, "manifest snapshot loaded");
+            manifest
+        } else {
+            // Legacy YAML
+            let manifest_path = Self::manifest_path(db_path);
+            if !manifest_path.exists() {
+                tracing::debug!(path = ?manifest_path, "manifest file not found, using default");
+                Manifest::default()
+            } else {
+                // Read file (measure read+parse time)
+                let start = std::time::Instant::now();
+                let contents = fs::read_to_string(&manifest_path)
+                    .map_err(|e| format!("failed to read manifest file: {}", e))?;
+                let size_bytes = contents.len() as u64;
 
-        if !manifest_path.exists() {
-            tracing::debug!(
-                path = ?manifest_path,
-                "manifest file not found, using default"
-            );
-            return Ok(Manifest::default());
+                // Deserialize YAML
+                let manifest: Manifest = serde_yaml::from_str(&contents)
+                    .map_err(|e| format!("failed to parse manifest YAML: {}", e))?;
+
+                let elapsed = start.elapsed();
+                tracing::info!(
+                    path = ?manifest_path,
+                    files_count = manifest.files.len(),
+                    cf_count = manifest.column_families.len(),
+                    size_bytes,
+                    elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+                    "manifest loaded successfully"
+                );
+                manifest
+            }
+        };
+
+        // Replay journal edits on top of snapshot/manifest
+        match crate::metadata::replay_journal(db_path) {
+            Ok(edits) => {
+                for edit in &edits {
+                    manifest.apply_edit(edit);
+                }
+                tracing::info!(replayed = edits.len(), "manifest journal replayed");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to replay manifest journal; proceeding with snapshot only");
+            }
         }
-
-        // Read file (measure read+parse time)
-        let start = std::time::Instant::now();
-        let contents = fs::read_to_string(&manifest_path)
-            .map_err(|e| format!("failed to read manifest file: {}", e))?;
-        let size_bytes = contents.len() as u64;
-
-        // Deserialize YAML
-        let manifest: Manifest = serde_yaml::from_str(&contents)
-            .map_err(|e| format!("failed to parse manifest YAML: {}", e))?;
-
-        let elapsed = start.elapsed();
-        tracing::info!(
-            path = ?manifest_path,
-            files_count = manifest.files.len(),
-            cf_count = manifest.column_families.len(),
-            size_bytes,
-            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-            "manifest loaded successfully"
-        );
 
         Ok(manifest)
     }
@@ -96,6 +119,34 @@ impl ManifestPersistence {
             size_bytes = yaml.len(),
             "manifest persisted successfully"
         );
+
+        Ok(())
+    }
+
+    /// Save a full manifest snapshot and truncate journal (atomic as possible).
+    /// Writes to `manifest.snapshot.tmp` then renames into `manifest.snapshot`.
+    pub fn save_snapshot_and_truncate_journal(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
+        fs::create_dir_all(db_path)
+            .map_err(|e| format!("failed to create database directory: {}", e))?;
+
+        let snap_path = Self::manifest_snapshot_path(db_path);
+        let temp = snap_path.with_extension("tmp");
+
+        let yaml = serde_yaml::to_string(manifest)
+            .map_err(|e| format!("failed to serialize manifest to YAML: {}", e))?;
+
+        fs::write(&temp, &yaml).map_err(|e| format!("failed to write temp snapshot: {}", e))?;
+
+        // Ensure data is on disk
+        let f = std::fs::OpenOptions::new().write(true).open(&temp).map_err(|e| format!("failed to open temp snapshot for sync: {}", e))?;
+        f.sync_all().map_err(|e| format!("failed to sync temp snapshot: {}", e))?;
+
+        fs::rename(&temp, &snap_path).map_err(|e| format!("failed to rename snapshot into place: {}", e))?;
+
+        // truncate journal
+        crate::metadata::truncate_journal(db_path).map_err(|e| format!("failed to truncate journal: {:?}", e))?;
+
+        tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 
         Ok(())
     }

@@ -51,6 +51,22 @@ impl ManifestActor {
         // Persist the intent before applying mutation
         state.append_intent(intent)?;
 
+        // Append to manifest journal (durable edit log)
+        let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: file_meta.name.clone(),
+            level: file_meta.level,
+            size_bytes: file_meta.size_bytes,
+            cf_id: file_meta.cf_id,
+            smallest_key: file_meta.smallest_key.clone(),
+            largest_key: file_meta.largest_key.clone(),
+            smallest_seq: file_meta.smallest_seq,
+            largest_seq: file_meta.largest_seq,
+            ..Default::default()
+        });
+        if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+            tracing::warn!(error = ?e, "failed to append AddSst to journal");
+        }
+
         // Now that intent is durable, apply mutation to in-memory manifest
         // Convert to manifest FileMeta
         let manifest_meta = crate::metadata::FileMeta {
@@ -94,6 +110,30 @@ impl ManifestActor {
 
         // Persist the intent before applying mutations
         state.append_intent(intent)?;
+
+        // Append compaction edits to manifest journal
+        for n in &removed {
+            let edit = crate::metadata::ManifestEdit::RemoveSst { name: n.clone() };
+            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+                tracing::warn!(error = ?e, "failed to append RemoveSst to journal");
+            }
+        }
+        for f in &added {
+            let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: f.name.clone(),
+                level: f.level,
+                size_bytes: f.size_bytes,
+                cf_id: f.cf_id,
+                smallest_key: f.smallest_key.clone(),
+                largest_key: f.largest_key.clone(),
+                smallest_seq: f.smallest_seq,
+                largest_seq: f.largest_seq,
+                ..Default::default()
+            });
+            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+                tracing::warn!(error = ?e, "failed to append AddSst to journal");
+            }
+        }
 
         // Now that intent is durable, apply mutations to in-memory manifest
         // Remove old files
@@ -157,7 +197,19 @@ impl ManifestActor {
             )));
         }
 
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
         let cf_id = state.manifest.create_column_family(name.clone());
+
+        // Append create CF to journal
+        let edit = crate::metadata::ManifestEdit::CreateColumnFamily { id: cf_id, name: name.clone(), created_at };
+        if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+            tracing::warn!(error = ?e, "failed to append CreateColumnFamily to journal");
+        }
+
         self.pending_edits += 1;
 
         // Create ColumnFamilyState for the new CF
@@ -183,6 +235,12 @@ impl ManifestActor {
                 "Column family {} not found or already deleted",
                 cf_id
             )));
+        }
+
+        // Append drop CF edit to journal
+        let edit = crate::metadata::ManifestEdit::DropColumnFamily { id: cf_id };
+        if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+            tracing::warn!(error = ?e, "failed to append DropColumnFamily to journal");
         }
 
         // Remove ColumnFamilyState

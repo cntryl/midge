@@ -112,7 +112,13 @@ impl FlushActor {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Update next SST sequence
+        // Update next SST sequence (journal before applying)
+        {
+            let edit = crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq: sst_seq + 1 };
+            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
+                tracing::warn!(error = ?e, "failed to append BumpNextSstSeq to journal");
+            }
+        }
         state.manifest.next_sst_seqs.insert(cf_id, sst_seq + 1);
 
         self.in_progress += 1;
