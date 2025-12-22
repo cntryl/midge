@@ -1,23 +1,7 @@
-//! Tier 3 — Snapshot Read Consistency Under Concurrent Writes
-//!
-//! **Purpose**: Validates MVCC/snapshot isolation under realistic concurrent workload.
-//! Ensures snapshots see consistent point-in-time view despite ongoing writes.
-//!
-//! **Workload**:
-//! - Build initial state (10k keys)
-//! - Writer thread: continuous puts with new keys + overwrites
-//! - Reader threads: take snapshots → full scans → verify consistency
-//! - Vary: concurrent reader count (1, 4, 8)
-//! - Measure: Consistency violations (should be 0), latency distribution
-//!
-//! **Access Pattern**: Writer uses hot keys, readers scan full range
-//!
-//! **Metrics Collected**:
-//! - Snapshot allocation latency
-//! - Scan latency distribution (p50/p95/p99)
-//! - Consistency violation count (target: 0)
-//! - Snapshot memory overhead
-//! - Reader/writer contention cost
+// This test was pruned and moved to `stress/pruned/tier3_system_snapshot_consistency.rs`.
+// Snapshot consistency scenarios are now handled by the stress harness.
+
+// No Criterion benches remain in this file.
 
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;

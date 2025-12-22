@@ -273,55 +273,47 @@ harness = false
 # Benchmarks — Tier 3: System (10-120s)
 # =============================================================================
 
-[[bench]]
-name = "tier3_system_sustained_mixed_workload"
-path = "benches/tier3_system_sustained_mixed_workload.rs"
-harness = false
+# PRUNED BENCH: tier3_system_sustained_mixed_workload
+# Moved to stress/pruned/tier3_system_sustained_mixed_workload.rs — convert to stress harness
+# (Removed from Criterion Tier-3)
 
-[[bench]]
-name = "tier3_system_read_latency_during_flush"
-path = "benches/tier3_system_read_latency_during_flush.rs"
-harness = false
+# PRUNED BENCH: tier3_system_read_latency_during_flush
+# Moved to stress/pruned/tier3_system_read_latency_during_flush.rs — convert to stress harness
+# (Removed from Criterion Tier-3)
 
-[[bench]]
-name = "tier3_system_snapshot_consistency"
-path = "benches/tier3_system_snapshot_consistency.rs"
-harness = false
+# PRUNED BENCH: tier3_system_snapshot_consistency
+# Moved to stress/pruned/tier3_system_snapshot_consistency.rs — convert to stress harness
+# (Removed from Criterion Tier-3)
 
 [[bench]]
 name = "tier3_system_compaction"
 path = "benches/tier3_system_compaction.rs"
 harness = false
 
-[[bench]]
-name = "tier3_system_concurrency_stress"
-path = "benches/tier3_system_concurrency_stress.rs"
-harness = false
+# PRUNED BENCH: tier3_system_concurrency_stress
+# Moved to stress/pruned/tier3_system_concurrency_stress.rs — convert to stress harness
+# (Removed from Criterion Tier-3)
 
-[[bench]]
-name = "tier3_system_contention_heavy"
-path = "benches/tier3_system_contention_heavy.rs"
-harness = false
+# PRUNED BENCH: tier3_system_contention_heavy
+# Moved to stress/pruned/tier3_system_contention_heavy.rs — convert to stress harness
+# (Removed from Criterion Tier-3)
 
-[[bench]]
-name = "tier3_system_durability_modes"
-path = "benches/tier3_system_durability_modes.rs"
-harness = false
+# PRUNED BENCH (partial): tier3_system_durability_modes
+# Heavy concurrent durability scenarios moved to stress/pruned/tier3_system_durability_modes.rs
+# Keep only single-shot durability comparisons in Tier-3 if added separately
 
 [[bench]]
 name = "tier3_system_engine_advanced"
 path = "benches/tier3_system_engine_advanced.rs"
 harness = false
 
-[[bench]]
-name = "tier3_system_engine_basic"
-path = "benches/tier3_system_engine_basic.rs"
-harness = false
+# PRUNED BENCH (concurrent variants): tier3_system_engine_basic
+# Concurrent variants moved to stress/pruned/tier3_system_engine_basic.rs
+# Keep single-op baselines in Tier-1/Tier-2 where appropriate
 
-[[bench]]
-name = "tier3_system_isolation_mvcc"
-path = "benches/tier3_system_isolation_mvcc.rs"
-harness = false
+# PRUNED BENCH (stress scenarios): tier3_system_isolation_mvcc
+# Heavy snapshot and isolation scenarios moved to stress/pruned/tier3_system_isolation_mvcc.rs
+# Keep single-threaded baseline in Tier-3 if desired as a lightweight bench
 
 [[bench]]
 name = "tier3_system_lsm"

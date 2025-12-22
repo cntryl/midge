@@ -318,6 +318,111 @@ pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<MidgeEngine
 }
 
 // ============================================================================
+// Tier-3 harness helpers
+// ============================================================================
+
+/// Recursively copy a directory tree from `src` to `dst`. Creates `dst` if needed.
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Create an on-disk "seed" directory by invoking a builder closure once.
+/// The builder receives the path where it should materialize the database. Use
+/// `setup_engine_at_path` inside the builder to construct the desired SST layout.
+#[allow(dead_code)]
+pub fn create_seed_dir<F>(seed_prefix: &str, builder: F) -> std::path::PathBuf
+where
+    F: FnOnce(&std::path::Path),
+{
+    let seed_path = unique_bench_path(seed_prefix);
+    // Ensure a clean slate
+    let _ = std::fs::remove_dir_all(&seed_path);
+    // Let the builder create the DB at `seed_path` (it may call setup_engine_at_path)
+    builder(&seed_path);
+    seed_path
+}
+
+/// Run a single-shot measurement from a previously created seed directory.
+/// This function clones the seed directory to a unique temp path, reopens the
+/// engine at that path using `config`, invokes `measure_fn` exactly once with
+/// ownership of the opened engine, measures the elapsed time, then cleans up.
+#[allow(dead_code)]
+pub fn run_single_shot_from_seed<F>(
+    seed_path: &std::path::Path,
+    config: &BenchEngineConfig,
+    measure_fn: F,
+) -> std::time::Duration
+where
+    F: FnOnce(MidgeEngine),
+{
+    // Clone seed into a unique temp path so each sample gets an isolated engine
+    let tmp_path = unique_bench_path("tier3_case");
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    copy_dir_all(seed_path, &tmp_path).expect("failed to clone seed dir");
+
+    // Reopen engine at tmp_path with requested config
+    let engine = reopen_engine_at_path(&tmp_path, config);
+
+    // Timed single-shot invocation
+    let start = std::time::Instant::now();
+    measure_fn(engine);
+    let elapsed = start.elapsed();
+
+    // Engine dropped here; remove temp dir
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    elapsed
+}
+
+/// Run a single-shot measurement from a seed but allow a pre-timed "restore" step.
+/// Useful for cases where the per-sample restore is expensive but must not be included
+/// in the timed critical section (e.g., creating multiple L0 files before compact_all).
+#[allow(dead_code)]
+pub fn run_single_shot_with_restore<R, T>(
+    seed_path: &std::path::Path,
+    config: &BenchEngineConfig,
+    restore_fn: R,
+    timed_fn: T,
+) -> std::time::Duration
+where
+    R: FnOnce(&MidgeEngine),
+    T: FnOnce(&MidgeEngine),
+{
+    // Clone seed into a unique temp path so each sample gets an isolated engine
+    let tmp_path = unique_bench_path("tier3_case_restore");
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    copy_dir_all(seed_path, &tmp_path).expect("failed to clone seed dir");
+
+    // Reopen engine at tmp_path with requested config
+    let engine = reopen_engine_at_path(&tmp_path, config);
+
+    // Perform restore steps outside timed window
+    restore_fn(&engine);
+
+    // Timed single-shot invocation
+    let start = std::time::Instant::now();
+    timed_fn(&engine);
+    let elapsed = start.elapsed();
+
+    // Engine dropped here; remove temp dir
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    elapsed
+}
+
+// ============================================================================
 // Benchmark Group Helpers
 // ============================================================================
 

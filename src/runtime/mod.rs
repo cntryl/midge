@@ -29,8 +29,8 @@ pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::wal::DurabilityPolicy;
 use crate::wal::policy::BatchConfig;
+use crate::wal::DurabilityPolicy;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

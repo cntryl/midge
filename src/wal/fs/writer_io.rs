@@ -55,10 +55,12 @@ impl FsWalWriterIo {
         let metadata = fs.metadata(&path)?;
         let current_pos = metadata.len;
 
-        Ok(Self { path, fs, current_pos: Mutex::new(current_pos) })
+        Ok(Self {
+            path,
+            fs,
+            current_pos: Mutex::new(current_pos),
+        })
     }
-
-
 }
 
 impl WalWriter for FsWalWriterIo {
@@ -113,6 +115,13 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn sync(&self) -> MidgeResult<()> {
+        // Developer convenience: allow skipping WAL fsync during benches/dev runs to avoid
+        // expensive platform-specific fsyncs (e.g., antivirus on Windows) that dominate
+        // benchmark setup time. Controlled via MIDGE_SKIP_WAL_SYNC env var.
+        if std::env::var_os("MIDGE_SKIP_WAL_SYNC").is_some() {
+            return Ok(());
+        }
+
         let mut file = self.fs.open(
             &self.path,
             crate::io::OpenOptions {

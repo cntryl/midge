@@ -543,13 +543,13 @@ impl EventLoop {
 
         // Sync if any of these conditions are true:
         // 1. Byte threshold exceeded
-        // 2. Pending write count threshold exceeded
-        // 3. Any durable waiters are pending (important for small workloads!)
-        let has_pending_waiters = self.durability.has_pending_waiters();
+        // 2. Time threshold exceeded
+        // NOTE: Do NOT unconditionally sync just because there are pending writes; that
+        // defeats group commit—let the batch window (time/bytes) determine when to sync.
+        // Durable waiters will be satisfied when the batch window elapses.
+        let _has_pending_waiters = self.durability.has_pending_waiters();
 
-        let should_sync = self.wal_actor.should_sync_batch()
-            || self.wal_actor.pending_sync_count() > 0
-            || has_pending_waiters;
+        let should_sync = self.wal_actor.should_sync_batch();
 
         if !should_sync {
             return;

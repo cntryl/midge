@@ -36,9 +36,9 @@ use crate::common::MidgeResult;
 use crate::io::{Fs, FsPath, RealFs};
 use crate::runtime::IntentLogEntry;
 use crate::sst::Memtable;
+use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWriter};
 use bytes::Bytes;
-use crate::wal::policy::BatchConfig;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -189,6 +189,11 @@ impl WalActor {
 
     pub fn current_flush_generation(&self) -> u64 {
         self.flush_generation
+    }
+
+    /// Number of times sync_internal has been called (for tests/diagnostics)
+    pub fn sync_calls(&self) -> u64 {
+        self.sync_calls
     }
 
     /// Check if cloud write queue has hit backpressure limits
@@ -931,10 +936,7 @@ impl WalActor {
     pub fn should_sync_batch(&self) -> bool {
         // Time-based check (max_delay_ms) OR byte-count threshold
         let by_bytes = self.bytes_since_sync >= self.batch_config.max_bytes;
-        let by_time = self
-            .last_sync_instant
-            .elapsed()
-            .as_millis()
+        let by_time = self.last_sync_instant.elapsed().as_millis()
             >= (self.batch_config.max_delay_ms as u128);
         by_bytes || by_time
     }
@@ -1212,8 +1214,12 @@ mod tests {
         let mut state = RuntimeState::new(PathBuf::from("/tmp/test"), true);
         state.sequence = 100; // ensure WAL sequence is distinct from memtable's internal counter
 
-        let mut wal_actor =
-            WalActor::new(PathBuf::from("/tmp/test"), DurabilityPolicy::Strict, BatchConfig::default(), true)?;
+        let mut wal_actor = WalActor::new(
+            PathBuf::from("/tmp/test"),
+            DurabilityPolicy::Strict,
+            BatchConfig::default(),
+            true,
+        )?;
 
         // Act: append a single put
         let (seq, deferred) = wal_actor.append(
@@ -1245,8 +1251,12 @@ mod tests {
         let mut state = RuntimeState::new(PathBuf::from("/tmp/test"), true);
         state.sequence = 50;
 
-        let mut wal_actor =
-            WalActor::new(PathBuf::from("/tmp/test"), DurabilityPolicy::Strict, BatchConfig::default(), true)?;
+        let mut wal_actor = WalActor::new(
+            PathBuf::from("/tmp/test"),
+            DurabilityPolicy::Strict,
+            BatchConfig::default(),
+            true,
+        )?;
 
         // Act: append a merge operand
         let (seq, deferred) = wal_actor.append_merge(
@@ -1267,6 +1277,54 @@ mod tests {
         assert_eq!(key.as_slice(), b"mk");
         assert_eq!(value.as_ref().unwrap().as_slice(), b"op");
         assert_eq!(*m_seq, seq);
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_force_sync_immediately() -> MidgeResult<()> {
+        // Arrange: WAL actor with a long batch window so batching is possible
+        let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+        let wal_dir = temp.path().to_path_buf();
+        let batch_cfg = BatchConfig {
+            max_delay_ms: 10_000,
+            max_bytes: 1024 * 1024,
+        };
+        let mut wal_actor =
+            WalActor::new(wal_dir.clone(), DurabilityPolicy::Batched, batch_cfg, false)?;
+
+        // Prepare a runtime state
+        let mut state = RuntimeState::new(wal_dir, false);
+
+        // Act: append a small batch (deferred in Batched mode)
+        let ops = vec![
+            crate::runtime::WriteBatchOp::Put {
+                cf_id: 0,
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+                ttl_seconds: None,
+            },
+            crate::runtime::WriteBatchOp::Put {
+                cf_id: 0,
+                key: b"k2".to_vec(),
+                value: b"v2".to_vec(),
+                ttl_seconds: None,
+            },
+        ];
+
+        let (_last_seq, _count, deferred) = wal_actor.append_batch(&mut state, 1, ops)?;
+        assert!(deferred);
+
+        // Should not request an immediate sync (time/bytes thresholds not met)
+        assert!(
+            !wal_actor.should_sync_batch(),
+            "should_sync_batch should be false immediately after small append"
+        );
+        assert_eq!(
+            wal_actor.sync_calls(),
+            0,
+            "no syncs should have been performed yet"
+        );
 
         Ok(())
     }
