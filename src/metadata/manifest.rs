@@ -243,6 +243,12 @@ impl Manifest {
             crate::metadata::ManifestEdit::SetCloudCheckpoint(cp) => {
                 self.cloud_checkpoint = Some(cp.clone());
             }
+            crate::metadata::ManifestEdit::Batch(edits) => {
+                // Apply each edit in order (atomic at journal record boundary)
+                for e in edits {
+                    self.apply_edit(e);
+                }
+            }
         }
     }
 }

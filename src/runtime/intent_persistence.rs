@@ -16,6 +16,32 @@ impl IntentPersistence {
         db_path.join(Self::INTENT_FILE)
     }
 
+    pub fn load_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> Result<Vec<IntentLogEntry>, String> {
+        use crate::io::traits::FsPath;
+
+        let p = FsPath::new(Self::INTENT_FILE);
+        match fs.exists(&p) {
+            Ok(false) => {
+                tracing::debug!(path = ?p, "intent file not found, using empty log");
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(format!("fs exists error: {:?}", e)),
+            Ok(true) => {}
+        }
+
+        let file = fs.open(&p, crate::io::traits::OpenOptions { mode: crate::io::traits::OpenMode::ReadOnly, create: false, create_new: false, truncate: false })
+            .map_err(|e| format!("failed to open intent file: {:?}", e))?;
+        let len = file.len().map_err(|e| format!("failed to stat intent file: {:?}", e))?;
+        let data = file.read_at(0, len).map_err(|e| format!("failed to read intent file: {:?}", e))?;
+        let contents = String::from_utf8(data.to_vec()).map_err(|e| format!("intent file not utf8: {}", e))?;
+
+        let intents: Vec<IntentLogEntry> = serde_yaml::from_str(&contents)
+            .map_err(|e| format!("failed to parse intent YAML: {}", e))?;
+
+        tracing::debug!(path = ?p, entries = intents.len(), "intent log loaded");
+        Ok(intents)
+    }
+
     pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
         let p = Self::intent_path(db_path);
         if !p.exists() {
@@ -33,21 +59,45 @@ impl IntentPersistence {
         Ok(intents)
     }
 
-    pub fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
-        fs::create_dir_all(db_path)
-            .map_err(|e| format!("failed to create database directory: {}", e))?;
+    pub fn save_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, intents: &[IntentLogEntry]) -> Result<(), String> {
+        use crate::io::traits::{FsPath, OpenOptions, OpenMode, Durability};
 
-        let p = Self::intent_path(db_path);
         let yaml = serde_yaml::to_string(intents)
             .map_err(|e| format!("failed to serialize intent log to YAML: {}", e))?;
 
-        let temp = p.with_extension("yaml.tmp");
-        fs::write(&temp, &yaml)
-            .map_err(|e| format!("failed to write temporary intent file: {}", e))?;
-        fs::rename(&temp, &p)
-            .map_err(|e| format!("failed to rename intent file atomically: {}", e))?;
+        let temp = FsPath::new("intent_log.yaml.tmp");
+        let mut f = fs.open(&temp, OpenOptions { mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: true })
+            .map_err(|e| format!("failed to open temp intent file: {:?}", e))?;
+        f.write_at(0, bytes::Bytes::from(yaml.clone())).map_err(|e| format!("failed to write temp intent: {:?}", e))?;
+        f.sync(Durability::Durable).map_err(|e| format!("failed to sync temp intent: {:?}", e))?;
 
-        tracing::debug!(path = ?p, entries = intents.len(), "intent log persisted");
+        fs.rename_atomic(&temp, &FsPath::new(Self::INTENT_FILE)).map_err(|e| format!("failed to rename intent file atomically: {:?}", e))?;
+
+        tracing::debug!(path = ?Self::INTENT_FILE, entries = intents.len(), "intent log persisted");
+        Ok(())
+    }
+
+    pub fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
+        use std::sync::Arc;
+        use crate::io::real::RealFs;
+
+        let real = RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+        let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
+        Self::save_with_fs(&fs, intents)
+    }
+
+    pub fn delete_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> Result<(), String> {
+        use crate::io::traits::FsPath;
+
+        let p = FsPath::new(Self::INTENT_FILE);
+        match fs.exists(&p) {
+            Ok(false) => return Ok(()),
+            Err(e) => return Err(format!("fs exists error: {:?}", e)),
+            Ok(true) => {}
+        }
+
+        fs.remove_file(&p).map_err(|e| format!("failed to delete intent file: {:?}", e))?;
+        tracing::debug!(path = ?p, "intent file deleted");
         Ok(())
     }
 

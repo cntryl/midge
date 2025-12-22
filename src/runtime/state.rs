@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::io::traits::Fs;
+
 /// Column family state
 pub struct ColumnFamilyState {
     pub id: u32,
@@ -125,6 +127,9 @@ pub struct RuntimeState {
     // === Metadata ===
     pub manifest: Manifest,
 
+    // Filesystem abstraction for all IO (never call std::fs directly)
+    pub fs: std::sync::Arc<dyn Fs>,
+
     // === Subsystem State ===
     pub wal: WalState,
     pub compaction: CompactionState,
@@ -190,9 +195,12 @@ impl RuntimeState {
             }
         }
 
-        // Load manifest (only if not in memory mode)
+        // Initialize real filesystem abstraction (used for all metadata IO)
+        let fs: std::sync::Arc<dyn Fs> = std::sync::Arc::new(crate::io::real::RealFs::new(&db_path).expect("failed to initialize RealFs"));
+
+        // Load manifest (prefer snapshot + journal replay) — only if not in memory mode
         let manifest = if !memory_mode {
-            match crate::metadata::ManifestPersistence::load(&db_path) {
+            match crate::metadata::ManifestPersistence::load_with_fs(&fs) {
                 Ok(m) => {
                     tracing::info!("manifest loaded from disk");
                     m
@@ -206,9 +214,9 @@ impl RuntimeState {
             Manifest::default()
         };
 
-        // Load intent log if present
+        // Load intent log if present (using FS via persistence helpers)
         let intent_log = if !memory_mode {
-            match crate::runtime::IntentPersistence::load(&db_path) {
+            match crate::runtime::IntentPersistence::load_with_fs(&fs) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load intent log, starting empty");
@@ -324,6 +332,7 @@ impl RuntimeState {
             sequence_idempotency_cache: HashMap::new(),
             column_families,
             manifest,
+            fs: fs.clone(),
             wal: WalState {
                 current_segment_id: recovered_next_segment_id,
                 ..WalState::default()

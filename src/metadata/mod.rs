@@ -12,7 +12,7 @@ pub use manifest::{CloudCheckpoint, ColumnFamilyMeta, FileMeta, Manifest};
 pub use persistence::ManifestPersistence;
 pub use version_manager::VersionManager;
 pub use version_set::VersionSet;
-pub use journal::{ManifestEdit, append_edit, replay_journal, truncate_journal};
+pub use journal::{ManifestEdit, append_edit, append_edit_batch, append_fsync_marker, replay_journal, truncate_journal};
 
 /// Version identifier
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]

@@ -111,15 +111,13 @@ impl ManifestActor {
         // Persist the intent before applying mutations
         state.append_intent(intent)?;
 
-        // Append compaction edits to manifest journal
+        // Append compaction edits to manifest journal as a single batch (reduces fixed overhead)
+        let mut edits = Vec::with_capacity(removed.len() + added.len());
         for n in &removed {
-            let edit = crate::metadata::ManifestEdit::RemoveSst { name: n.clone() };
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append RemoveSst to journal");
-            }
+            edits.push(crate::metadata::ManifestEdit::RemoveSst { name: n.clone() });
         }
         for f in &added {
-            let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            edits.push(crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
                 name: f.name.clone(),
                 level: f.level,
                 size_bytes: f.size_bytes,
@@ -129,9 +127,11 @@ impl ManifestActor {
                 smallest_seq: f.smallest_seq,
                 largest_seq: f.largest_seq,
                 ..Default::default()
-            });
-            if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
-                tracing::warn!(error = ?e, "failed to append AddSst to journal");
+            }));
+        }
+        if !edits.is_empty() {
+            if let Err(e) = crate::metadata::append_edit_batch(&state.db_path, &edits) {
+                tracing::warn!(error = ?e, "failed to append compaction edit batch to journal");
             }
         }
 
