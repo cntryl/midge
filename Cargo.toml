@@ -80,7 +80,7 @@ futures = { version = "0.3", optional = true }
 hmac = { version = "0.12", optional = true }
 md5 = { version = "0.8", optional = true }
 percent-encoding = { version = "2.3", optional = true }
-reqwest = { version = "0.11", features = ["json"], optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
 sha2 = { version = "0.10", optional = true }
 tokio = { version = "1.40", features = ["rt", "macros"], optional = true }
 ureq = { version = "3", features = ["rustls", "json"], optional = true }
