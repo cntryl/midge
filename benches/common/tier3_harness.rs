@@ -56,7 +56,11 @@ macro_rules! tier3_bench {
     ($b:expr, $case:expr, $body:expr) => {
         $b.iter_custom(|_| {
             let case = $case.clone();
-            case.run($body)
+            let mut d = case.run($body);
+            if d.as_nanos() == 0 {
+                d = std::time::Duration::from_nanos(1);
+            }
+            d
         })
     };
 }
@@ -67,7 +71,11 @@ macro_rules! tier3_bench_restore {
     ($b:expr, $case:expr, $restore:expr, $timed:expr) => {
         $b.iter_custom(|_| {
             let case = $case.clone();
-            case.run($restore, $timed)
+            let mut d = case.run($restore, $timed);
+            if d.as_nanos() == 0 {
+                d = std::time::Duration::from_nanos(1);
+            }
+            d
         })
     };
 }

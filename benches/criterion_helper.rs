@@ -77,9 +77,9 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         //     ~2–3 minutes total on dev hardware.
         // ---------------------------------------------------------------
         BenchTier::Tier3System => Criterion::default()
-            .warm_up_time(Duration::ZERO)
-            .measurement_time(Duration::ZERO)
-            .sample_size(1)
+            .warm_up_time(Duration::from_millis(1))
+            .measurement_time(Duration::from_millis(1))
+            .sample_size(10)
             .noise_threshold(0.05)
             .confidence_level(0.90)
             .nresamples(5_000)

@@ -434,7 +434,7 @@ fn bench_incremental_compact(c: &mut Criterion) {
 
                 let seed_path = seed_path.clone();
                 b.iter_custom(|_iters| {
-                    bench_common::run_single_shot_with_restore(
+                    let mut d = bench_common::run_single_shot_with_restore(
                         &seed_path,
                         &reopen_cfg,
                         |engine| {
@@ -447,7 +447,11 @@ fn bench_incremental_compact(c: &mut Criterion) {
                         |engine| {
                             engine.compact_all().expect("compact_all failed");
                         },
-                    )
+                    );
+                    if d.as_nanos() == 0 {
+                        d = std::time::Duration::from_nanos(1);
+                    }
+                    d
                 });
             },
         );

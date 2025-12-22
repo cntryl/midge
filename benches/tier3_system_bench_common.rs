@@ -392,7 +392,11 @@ where
     // Timed single-shot invocation
     let start = std::time::Instant::now();
     measure_fn(engine);
-    let elapsed = start.elapsed();
+    let mut elapsed = start.elapsed();
+    // Criterion asserts sample durations > 0; ensure a tiny non-zero minimum to avoid panics
+    if elapsed.as_nanos() == 0 {
+        elapsed = std::time::Duration::from_nanos(1);
+    }
 
     // Engine dropped here; remove temp dir
     let _ = std::fs::remove_dir_all(&tmp_path);
@@ -427,7 +431,11 @@ where
     // Timed single-shot invocation
     let start = std::time::Instant::now();
     timed_fn(&engine);
-    let elapsed = start.elapsed();
+    let mut elapsed = start.elapsed();
+    // Criterion asserts sample durations > 0; ensure a tiny non-zero minimum to avoid panics
+    if elapsed.as_nanos() == 0 {
+        elapsed = std::time::Duration::from_nanos(1);
+    }
 
     // Engine dropped here; remove temp dir
     let _ = std::fs::remove_dir_all(&tmp_path);
