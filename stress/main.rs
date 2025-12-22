@@ -1,8 +1,8 @@
 mod harness;
-mod ycsb;
 mod soak;
+mod ycsb;
 
-use harness::{Config, run};
+use harness::{run, Config};
 
 fn main() {
     let cfg = Config::from_env_or_args();

@@ -18,7 +18,13 @@ impl ZipfianGenerator {
         let alpha = 1.0 / (1.0 - theta);
         let eta = (1.0 - (2.0 / items as f64).powf(1.0 - theta)) / (1.0 - (zeta_2 / zeta_n));
 
-        Self { items, theta, zeta_n, alpha, eta }
+        Self {
+            items,
+            theta,
+            zeta_n,
+            alpha,
+            eta,
+        }
     }
 
     fn zeta(n: usize, theta: f64) -> f64 {
@@ -31,8 +37,12 @@ impl ZipfianGenerator {
         let u: f64 = (r as f64) / 18446744073709551616.0; // 2^64
         let uz = u * self.zeta_n;
 
-        if uz < 1.0 { return 0; }
-        if uz < 1.0 + 0.5_f64.powf(self.theta) { return 1; }
+        if uz < 1.0 {
+            return 0;
+        }
+        if uz < 1.0 + 0.5_f64.powf(self.theta) {
+            return 1;
+        }
 
         let v = self.eta * u - (self.eta - 1.0);
         let idx = (self.items as f64 * v.powf(self.alpha)) as usize;

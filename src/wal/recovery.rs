@@ -223,7 +223,7 @@ fn replay_wal_file(
             Err(e) if e.kind == StorageErrorKind::NotFound => {
                 stats.wal_read_ns = stats.wal_read_ns.saturating_add(file_read_ns);
                 stats.apply_ns = stats.apply_ns.saturating_add(file_apply_ns);
-                return Ok(())
+                return Ok(());
             }
             Err(e) => return Err(map_storage_error(e)),
         };
@@ -295,7 +295,8 @@ fn replay_wal_file(
                             for buffered in &records {
                                 let apply_start = std::time::Instant::now();
                                 apply_record(buffered, memtables)?;
-                                file_apply_ns = file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());
+                                file_apply_ns =
+                                    file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());
                             }
                         }
                     }

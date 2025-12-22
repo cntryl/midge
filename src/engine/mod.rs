@@ -112,6 +112,15 @@ impl ColumnFamilyHandle {
     }
 }
 
+/// Snapshot of runtime configuration that can be restored later.
+#[derive(Debug, Clone)]
+pub struct IngestModeSnapshot {
+    pub memtable_size_limit: usize,
+    pub memtable_flush_threshold: usize,
+    pub enable_compaction: bool,
+    pub wal_durability_policy: crate::wal::DurabilityPolicy,
+    pub wal_batch_config: crate::wal::policy::BatchConfig,
+}
 /// The main Midge KV store
 ///
 /// This is a thin façade over the runtime. All state and background work
@@ -271,6 +280,9 @@ impl MidgeEngine {
             state.memtable_flush_threshold = opts.memtable_size;
         }
 
+        // Honor compaction option from open opts
+        state.enable_compaction = opts.enable_compaction;
+
         // Start runtime
         let start = std::time::Instant::now();
         let (runtime, _) = Runtime::new()?;
@@ -307,6 +319,121 @@ impl MidgeEngine {
 
     pub fn default_column_family(&self) -> &ColumnFamilyHandle {
         &self.default_cf
+    }
+
+    /// Fetch the current runtime configuration snapshot for diagnostics or restoration.
+    pub fn get_runtime_config(&self) -> MidgeResult<IngestModeSnapshot> {
+        let request_id = crate::runtime::next_request_id();
+        let resp = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::GetRuntimeConfig { request_id })?;
+        match resp {
+            crate::runtime::RuntimeResponse::RuntimeConfigSnapshot {
+                memtable_size_limit,
+                memtable_flush_threshold,
+                enable_compaction,
+                wal_durability_policy,
+                wal_batch_config,
+                ..
+            } => Ok(IngestModeSnapshot {
+                memtable_size_limit,
+                memtable_flush_threshold,
+                enable_compaction,
+                wal_durability_policy,
+                wal_batch_config,
+            }),
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to GetRuntimeConfig".to_string(),
+            )),
+        }
+    }
+
+    /// Enter a temporary ingest mode: disable compaction, relax WAL, increase memtable limits.
+    /// Returns the previous configuration snapshot which can be used to restore state.
+    pub fn enter_ingest_mode(&self) -> MidgeResult<IngestModeSnapshot> {
+        // Capture current runtime config so we can restore it later
+        let prev = self.get_runtime_config()?;
+
+        // Step 1: Apply performance-oriented runtime knobs (larger memtable, batched WAL)
+        let request_id = crate::runtime::next_request_id();
+        let target_mem = (prev.memtable_size_limit.max(64 * 1024 * 1024)).saturating_mul(4); // grow 4x
+        let batch_cfg = prev.wal_batch_config;
+        let resp =
+            self.runtime_handle
+                .send_and_wait(crate::runtime::RuntimeMsg::SetRuntimeConfig {
+                    request_id,
+                    memtable_size_limit: Some(target_mem),
+                    memtable_flush_threshold: Some(target_mem),
+                    enable_compaction: Some(false), // also set false here for a fast path
+                    wal_durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+                    wal_batch_config: Some(batch_cfg),
+                })?;
+
+        match resp {
+            crate::runtime::RuntimeResponse::Ok { .. } => {
+                // Step 2: Ensure a hard ingest barrier: begin ingest (blocks until inflight compactions drain)
+                let bid = crate::runtime::next_request_id();
+                let br = self
+                    .runtime_handle
+                    .send_and_wait(crate::runtime::RuntimeMsg::BeginIngest { request_id: bid })?;
+                match br {
+                    crate::runtime::RuntimeResponse::Ok { .. } => Ok(prev),
+                    crate::runtime::RuntimeResponse::Error { message, .. } => {
+                        Err(crate::common::MidgeError::Internal(message))
+                    }
+                    _ => Err(crate::common::MidgeError::Internal(
+                        "unexpected response to BeginIngest".to_string(),
+                    )),
+                }
+            }
+            crate::runtime::RuntimeResponse::Error { message, .. } => {
+                Err(crate::common::MidgeError::Internal(message))
+            }
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to SetRuntimeConfig".to_string(),
+            )),
+        }
+    }
+
+    /// Restore runtime configuration from a previously-captured snapshot.
+    pub fn exit_ingest_mode(&self, prev: IngestModeSnapshot) -> MidgeResult<()> {
+        // Step 1: End ingest barrier (flush outstanding memtables and bump epoch)
+        let bid = crate::runtime::next_request_id();
+        let br = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::EndIngest { request_id: bid })?;
+        match br {
+            crate::runtime::RuntimeResponse::Ok { .. } => {
+                // Step 2: Restore previous runtime configuration
+                let request_id = crate::runtime::next_request_id();
+                let resp = self.runtime_handle.send_and_wait(
+                    crate::runtime::RuntimeMsg::SetRuntimeConfig {
+                        request_id,
+                        memtable_size_limit: Some(prev.memtable_size_limit),
+                        memtable_flush_threshold: Some(prev.memtable_flush_threshold),
+                        enable_compaction: Some(prev.enable_compaction),
+                        wal_durability_policy: Some(prev.wal_durability_policy),
+                        wal_batch_config: Some(prev.wal_batch_config),
+                    },
+                )?;
+
+                match resp {
+                    crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
+                    crate::runtime::RuntimeResponse::Error { message, .. } => {
+                        Err(crate::common::MidgeError::Internal(message))
+                    }
+                    _ => Err(crate::common::MidgeError::Internal(
+                        "unexpected response to SetRuntimeConfig".to_string(),
+                    )),
+                }
+            }
+            crate::runtime::RuntimeResponse::Error { message, .. } => {
+                Err(crate::common::MidgeError::Internal(message))
+            }
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to EndIngest".to_string(),
+            )),
+        }
     }
 
     /// Put a key-value pair into a specific column family

@@ -7,7 +7,8 @@
 
 use super::super::state::RuntimeState;
 use crate::common::MidgeResult;
-use crate::compaction::{execute_compaction, Compactor, LeveledCompactionConfig};
+use crate::compaction::{Compactor, LeveledCompactionConfig};
+use crate::runtime::{next_request_id, RuntimeMsg};
 use crate::sst::SstFactory;
 use std::sync::Arc;
 
@@ -42,6 +43,12 @@ impl CompactionActor {
         &mut self,
         state: &RuntimeState,
     ) -> Option<crate::compaction::CompactionPlan> {
+        // If compaction is disabled via runtime configuration, skip checks
+        if !state.enable_compaction {
+            tracing::debug!("compaction disabled in runtime state");
+            return None;
+        }
+
         if self.compaction_running {
             return None;
         }
@@ -75,6 +82,7 @@ impl CompactionActor {
         state: &mut RuntimeState,
         plan: crate::compaction::CompactionPlan,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
     ) -> MidgeResult<Vec<String>> {
         if self.compaction_running {
             return Err(crate::common::MidgeError::Internal(
@@ -112,30 +120,84 @@ impl CompactionActor {
             "Compaction started"
         );
 
-        // Execute the compaction via the compaction module
-        let output_ssts = execute_compaction(&plan, self.sst_factory.as_ref(), &state.sst_dir)?;
+        // Increase active compaction counter so BeginIngest can wait for drain.
+        state
+            .active_compactions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-        // Calculate output sizes for SBA
-        let output_sizes: Vec<u64> = output_ssts
-            .iter()
-            .filter_map(|name| {
-                let path = state.sst_dir.join(name);
-                std::fs::metadata(&path).ok().map(|m| m.len())
-            })
-            .collect();
+        // Spawn background worker to perform the compaction so the event loop remains responsive.
+        // Worker will send a `RuntimeMsg::CompactionComplete` message when finished.
+        if let Some(tx) = worker_msg_tx {
+            let sst_factory = Arc::clone(&self.sst_factory);
+            let sst_dir = state.sst_dir.clone();
+            let input_files = plan.input_files.clone();
+            let plan_clone = plan.clone();
+            let epoch = std::sync::Arc::clone(&state.ingest_epoch);
+            std::thread::spawn(move || {
+                // Capture the epoch at start
+                let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
 
-        // Notify SBA about completion
-        if let Some(hybrid) = sba {
-            hybrid.compaction_completed(output_sizes);
+                // Abort check closure
+                let abort_check = || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch;
+
+                // Execute compaction; allow cooperative abort via abort_check
+                let result = crate::compaction::execute_compaction(
+                    &plan_clone,
+                    sst_factory.as_ref(),
+                    &sst_dir,
+                    Some(&abort_check),
+                );
+
+                let output_ssts = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "compaction worker aborted or failed");
+                        Vec::new()
+                    }
+                };
+
+                // Send completion back to runtime
+                let _ = tx.send(RuntimeMsg::CompactionComplete {
+                    request_id: next_request_id(),
+                    input_ssts: input_files,
+                    output_ssts,
+                });
+            });
+
+            // Return immediately (we scheduled it)
+            Ok(Vec::new())
+        } else {
+            // Fallback to synchronous execution if no worker channel is provided
+            let output_ssts = crate::compaction::execute_compaction(
+                &plan,
+                self.sst_factory.as_ref(),
+                &state.sst_dir,
+                None,
+            )?;
+
+            // Calculate output sizes for SBA
+            let output_sizes: Vec<u64> = output_ssts
+                .iter()
+                .filter_map(|name| {
+                    let path = state.sst_dir.join(name);
+                    std::fs::metadata(&path).ok().map(|m| m.len())
+                })
+                .collect();
+
+            // Notify SBA about completion
+            if let Some(hybrid) = sba {
+                hybrid.compaction_completed(output_sizes);
+            }
+
+            tracing::info!(
+                input_count = plan.input_files.len(),
+                output_count = output_ssts.len(),
+                "Compaction completed"
+            );
+
+            // Defer active_compactions decrement to the caller handling CompactionComplete
+            Ok(output_ssts)
         }
-
-        tracing::info!(
-            input_count = plan.input_files.len(),
-            output_count = output_ssts.len(),
-            "Compaction completed"
-        );
-
-        Ok(output_ssts)
     }
 
     /// Handle compaction completion

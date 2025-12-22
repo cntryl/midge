@@ -208,7 +208,8 @@ fn bench_workload_f(c: &mut Criterion) {
 
             // Single deterministic RUN to get RMW RUN stats (separate from LOAD)
             let start = Instant::now();
-            let run_stats = run_workload_f(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count, 0xDEAD_BEEF);
+            let run_stats =
+                run_workload_f(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count, 0xDEAD_BEEF);
             let dur = start.elapsed();
             let throughput = (OPS_PER_ITER as f64) / dur.as_secs_f64();
             eprintln!("RUN STATS (single-run): scenario={} cf={} ops={} duration_s={:.3} throughput_op_s={:.0} p50={} p99={} p99_9={}",
@@ -251,7 +252,13 @@ fn bench_workload_f(c: &mut Criterion) {
                 .map(|tid| {
                     let engine = Arc::clone(&engine);
                     thread::spawn(move || {
-                        run_workload_f_concurrent(engine, ops_per_thread, RECORD_COUNT, tid, cf_count)
+                        run_workload_f_concurrent(
+                            engine,
+                            ops_per_thread,
+                            RECORD_COUNT,
+                            tid,
+                            cf_count,
+                        )
                     })
                 })
                 .collect();
@@ -259,9 +266,12 @@ fn bench_workload_f(c: &mut Criterion) {
             let thread_stats: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
             let dur = start.elapsed();
             let throughput = (total_ops as f64) / dur.as_secs_f64();
-            let mean_p50: f64 = thread_stats.iter().map(|s| s.p50 as f64).sum::<f64>() / (threads as f64);
-            let mean_p99: f64 = thread_stats.iter().map(|s| s.p99 as f64).sum::<f64>() / (threads as f64);
-            let mean_p999: f64 = thread_stats.iter().map(|s| s.p99_9 as f64).sum::<f64>() / (threads as f64);
+            let mean_p50: f64 =
+                thread_stats.iter().map(|s| s.p50 as f64).sum::<f64>() / (threads as f64);
+            let mean_p99: f64 =
+                thread_stats.iter().map(|s| s.p99 as f64).sum::<f64>() / (threads as f64);
+            let mean_p999: f64 =
+                thread_stats.iter().map(|s| s.p99_9 as f64).sum::<f64>() / (threads as f64);
             eprintln!("RUN STATS (concurrent single-run): cf={} threads={} ops={} duration_s={:.3} throughput_op_s={:.0} avg_p50={} avg_p99={} avg_p99_9={}",
                       cf_count, threads, total_ops, dur.as_secs_f64(), throughput, mean_p50, mean_p99, mean_p999);
 

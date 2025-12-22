@@ -131,10 +131,19 @@ fn is_expired(version: &CompactionVersion, now_secs: u64) -> bool {
 pub fn collect_versions(
     sst_factory: &dyn SstFactory,
     input_files: &[String],
+    abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<Vec<CompactionVersion>> {
     let versions = Vec::new();
 
     for filename in input_files {
+        // Periodically check whether we should abort (cooperative cancellation)
+        if let Some(check) = abort_check {
+            if check() {
+                tracing::warn!(file = %filename, "compaction aborted during collect_versions");
+                return Ok(Vec::new());
+            }
+        }
+
         let path = Path::new(filename);
 
         // Use the generic SstReader API from the factory to open the file.
@@ -251,12 +260,25 @@ pub fn write_versions_to_sst(
     sst_factory: &dyn SstFactory,
     output_filename: &str,
     versions: &[CompactionVersion],
+    abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<()> {
     let mut writer = sst_factory.create()?;
 
     let mut added: usize = 0;
     let add_start = std::time::Instant::now();
-    for version in versions {
+    for (i, version) in versions.iter().enumerate() {
+        // Periodically check if we should abort (every 1024 entries)
+        if i % 1024 == 0 {
+            if let Some(check) = abort_check {
+                if check() {
+                    tracing::warn!(output = %output_filename, "compaction aborted during write_versions_to_sst at {} entries", i);
+                    return Err(crate::common::MidgeError::Internal(
+                        "compaction aborted".to_string(),
+                    ));
+                }
+            }
+        }
+
         let op_type = if version.is_tombstone { 1u8 } else { 0u8 };
 
         writer.add_with_meta(

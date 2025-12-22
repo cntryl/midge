@@ -9,11 +9,24 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ManifestEdit {
     AddSst(FileMeta),
-    RemoveSst { name: String },
-    CreateColumnFamily { id: u32, name: String, created_at: u64 },
-    DropColumnFamily { id: u32 },
-    BumpWalSeq { seq: u64 },
-    BumpNextSstSeq { cf_id: u32, next_seq: u64 },
+    RemoveSst {
+        name: String,
+    },
+    CreateColumnFamily {
+        id: u32,
+        name: String,
+        created_at: u64,
+    },
+    DropColumnFamily {
+        id: u32,
+    },
+    BumpWalSeq {
+        seq: u64,
+    },
+    BumpNextSstSeq {
+        cf_id: u32,
+        next_seq: u64,
+    },
     SetCloudCheckpoint(CloudCheckpoint),
     /// Batch of edits emitted atomically as a single journal TLV record
     Batch(Vec<ManifestEdit>),
@@ -109,19 +122,27 @@ impl Default for ManifestSyncState {
     }
 }
 
-
-
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
-static MANIFEST_SYNC_STATE: Lazy<Mutex<ManifestSyncState>> = Lazy::new(|| Mutex::new(ManifestSyncState { batches_since_fsync: 0, last_fsync: std::time::Instant::now(), last_policy: ManifestSyncPolicy::default() }));
+static MANIFEST_SYNC_STATE: Lazy<Mutex<ManifestSyncState>> = Lazy::new(|| {
+    Mutex::new(ManifestSyncState {
+        batches_since_fsync: 0,
+        last_fsync: std::time::Instant::now(),
+        last_policy: ManifestSyncPolicy::default(),
+    })
+});
 
 const JOURNAL_FILE: &str = "manifest.journal";
 
 /// Append an edit to the manifest journal using a provided Fs (preferred).
-pub fn append_edit_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, edit: &ManifestEdit) -> MidgeResult<()> {
-    use crate::io::traits::{FsPath, OpenOptions, OpenMode, Durability};
+pub fn append_edit_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    edit: &ManifestEdit,
+) -> MidgeResult<()> {
+    use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-    let payload = bincode::serialize(edit).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
+    let payload =
+        bincode::serialize(edit).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
     let mut hasher = Crc32::new();
     hasher.update(&payload);
     let crc = hasher.finalize();
@@ -133,22 +154,36 @@ pub fn append_edit_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, edit:
     buf.extend_from_slice(&payload);
     buf.extend_from_slice(&crc.to_le_bytes());
 
-    let mut f = fs.open(&FsPath::new(JOURNAL_FILE), OpenOptions { mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: false })?;
+    let mut f = fs.open(
+        &FsPath::new(JOURNAL_FILE),
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: true,
+            create_new: false,
+            truncate: false,
+        },
+    )?;
 
     let write_start = std::time::Instant::now();
-    f.append(bytes::Bytes::from(buf)).map_err(crate::common::MidgeError::from)?;
+    f.append(bytes::Bytes::from(buf))
+        .map_err(crate::common::MidgeError::from)?;
     let write_ns = write_start.elapsed().as_nanos();
 
     // Honor optional bench-only skip for manifest fsync to reduce overhead.
     let skip_fsync = std::env::var("MIDGE_SKIP_MANIFEST_FSYNC").ok().as_deref() == Some("1")
-        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC").ok().as_deref() == Some("1"));
+        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC")
+            .ok()
+            .as_deref()
+            == Some("1"));
 
     // Determine sync policy
     let policy = parse_manifest_sync_policy_from_env();
     let mut should_sync = matches!(policy, ManifestSyncPolicy::Always);
 
     if !should_sync {
-        let mut state = MANIFEST_SYNC_STATE.lock().expect("MANIFEST_SYNC_STATE poisoned");
+        let mut state = MANIFEST_SYNC_STATE
+            .lock()
+            .expect("MANIFEST_SYNC_STATE poisoned");
         match policy {
             ManifestSyncPolicy::EveryN(n) => {
                 state.batches_since_fsync += 1;
@@ -168,10 +203,14 @@ pub fn append_edit_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, edit:
     }
 
     if skip_fsync {
-        tracing::info!(write_ns = write_ns, "manifest journal append: write (fsync skipped via bench flag)");
+        tracing::info!(
+            write_ns = write_ns,
+            "manifest journal append: write (fsync skipped via bench flag)"
+        );
     } else if should_sync {
         let fsync_start = std::time::Instant::now();
-        f.sync(Durability::Durable).map_err(crate::common::MidgeError::from)?;
+        f.sync(Durability::Durable)
+            .map_err(crate::common::MidgeError::from)?;
         let fsync_ns = fsync_start.elapsed().as_nanos();
         tracing::info!(write_ns = write_ns, fsync_ns = fsync_ns, policy = ?policy, "manifest journal append: write and fsync times (ns)");
         // Append a durable marker to indicate fsync boundary
@@ -187,26 +226,35 @@ pub fn append_edit_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, edit:
 
 /// Convenience wrapper: append via a RealFs created from db_path (backwards compatible)
 pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<()> {
-    let fs: std::sync::Arc<dyn crate::io::traits::Fs> = std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e)))?);
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+        })?);
     append_edit_with_fs(&fs, edit)
 }
 
-
-
 /// Replay a journal file at db_path. Returns Vec<ManifestEdit> in order.
 /// Stops cleanly on partial or corrupt tail record (returns edits up to that point).
-pub fn replay_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<Vec<ManifestEdit>> {
+pub fn replay_journal_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<Vec<ManifestEdit>> {
     use crate::io::traits::FsPath;
 
     // Open file read-only
-    let file = match fs.open(&FsPath::new(JOURNAL_FILE), crate::io::traits::OpenOptions { mode: crate::io::traits::OpenMode::ReadOnly, create: false, create_new: false, truncate: false }) {
+    let file = match fs.open(
+        &FsPath::new(JOURNAL_FILE),
+        crate::io::traits::OpenOptions {
+            mode: crate::io::traits::OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
+        },
+    ) {
         Ok(f) => f,
-        Err(e) => {
-            match e {
-                crate::io::traits::FsError::NotFound(_) => return Ok(Vec::new()),
-                _ => return Err(crate::common::MidgeError::from(e)),
-            }
-        }
+        Err(e) => match e {
+            crate::io::traits::FsError::NotFound(_) => return Ok(Vec::new()),
+            _ => return Err(crate::common::MidgeError::from(e)),
+        },
     };
 
     let mut edits = Vec::new();
@@ -221,11 +269,15 @@ pub fn replay_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) ->
         if offset + 5 > file_len {
             break; // partial header
         }
-        let typ_b = file.read_at(offset, 1).map_err(crate::common::MidgeError::from)?;
+        let typ_b = file
+            .read_at(offset, 1)
+            .map_err(crate::common::MidgeError::from)?;
         let typ = typ_b[0];
         offset += 1;
 
-        let len_b = file.read_at(offset, 4).map_err(crate::common::MidgeError::from)?;
+        let len_b = file
+            .read_at(offset, 4)
+            .map_err(crate::common::MidgeError::from)?;
         let len = u32::from_le_bytes([len_b[0], len_b[1], len_b[2], len_b[3]]) as usize;
         offset += 4;
 
@@ -234,10 +286,14 @@ pub fn replay_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) ->
             break; // partial payload
         }
 
-        let payload = file.read_at(offset, len as u64).map_err(crate::common::MidgeError::from)?;
+        let payload = file
+            .read_at(offset, len as u64)
+            .map_err(crate::common::MidgeError::from)?;
         offset += len as u64;
 
-        let crc_b = file.read_at(offset, 4).map_err(crate::common::MidgeError::from)?;
+        let crc_b = file
+            .read_at(offset, 4)
+            .map_err(crate::common::MidgeError::from)?;
         let got_crc = u32::from_le_bytes([crc_b[0], crc_b[1], crc_b[2], crc_b[3]]);
         offset += 4;
 
@@ -253,7 +309,11 @@ pub fn replay_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) ->
         if typ == FSYNC_MARKER_TYPE {
             match bincode::deserialize::<FsyncMarker>(&payload) {
                 Ok(marker) => {
-                    tracing::info!(last_seq = marker.last_persisted_sequence, ts = marker.ts_millis, "journal fsync marker encountered");
+                    tracing::info!(
+                        last_seq = marker.last_persisted_sequence,
+                        ts = marker.ts_millis,
+                        "journal fsync marker encountered"
+                    );
                     last_marker_edit_idx = Some(edits.len());
                 }
                 Err(e) => {
@@ -289,15 +349,22 @@ pub fn replay_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) ->
 
 /// Convenience wrapper: replay using RealFs created from db_path
 pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
-    let fs: std::sync::Arc<dyn crate::io::traits::Fs> = std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e)))?);
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+        })?);
     replay_journal_with_fs(&fs)
 }
 
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).
-pub fn append_edit_batch_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, batch: &[ManifestEdit]) -> MidgeResult<()> {
-    use crate::io::traits::{FsPath, OpenOptions, OpenMode, Durability};
+pub fn append_edit_batch_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    batch: &[ManifestEdit],
+) -> MidgeResult<()> {
+    use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-    let payload = bincode::serialize(&batch).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
+    let payload = bincode::serialize(&batch)
+        .map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
     let mut hasher = Crc32::new();
     hasher.update(&payload);
     let crc = hasher.finalize();
@@ -309,22 +376,36 @@ pub fn append_edit_batch_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     buf.extend_from_slice(&payload);
     buf.extend_from_slice(&crc.to_le_bytes());
 
-    let mut f = fs.open(&FsPath::new(JOURNAL_FILE), OpenOptions { mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: false })?;
+    let mut f = fs.open(
+        &FsPath::new(JOURNAL_FILE),
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: true,
+            create_new: false,
+            truncate: false,
+        },
+    )?;
 
     let write_start = std::time::Instant::now();
-    f.append(bytes::Bytes::from(buf)).map_err(crate::common::MidgeError::from)?;
+    f.append(bytes::Bytes::from(buf))
+        .map_err(crate::common::MidgeError::from)?;
     let write_ns = write_start.elapsed().as_nanos();
 
     // Honor optional bench-only skip for manifest fsync to reduce overhead.
     let skip_fsync = std::env::var("MIDGE_SKIP_MANIFEST_FSYNC").ok().as_deref() == Some("1")
-        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC").ok().as_deref() == Some("1"));
+        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC")
+            .ok()
+            .as_deref()
+            == Some("1"));
 
     // Determine sync policy
     let policy = parse_manifest_sync_policy_from_env();
     let mut should_sync = matches!(policy, ManifestSyncPolicy::Always);
 
     if !should_sync {
-        let mut state = MANIFEST_SYNC_STATE.lock().expect("MANIFEST_SYNC_STATE poisoned");
+        let mut state = MANIFEST_SYNC_STATE
+            .lock()
+            .expect("MANIFEST_SYNC_STATE poisoned");
         match policy {
             ManifestSyncPolicy::EveryN(n) => {
                 state.batches_since_fsync += 1;
@@ -344,10 +425,15 @@ pub fn append_edit_batch_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     }
 
     if skip_fsync {
-        tracing::info!(batch_size = batch.len(), write_ns = write_ns, "manifest journal batch append: write (fsync skipped via bench flag)");
+        tracing::info!(
+            batch_size = batch.len(),
+            write_ns = write_ns,
+            "manifest journal batch append: write (fsync skipped via bench flag)"
+        );
     } else if should_sync {
         let fsync_start = std::time::Instant::now();
-        f.sync(Durability::Durable).map_err(crate::common::MidgeError::from)?;
+        f.sync(Durability::Durable)
+            .map_err(crate::common::MidgeError::from)?;
         let fsync_ns = fsync_start.elapsed().as_nanos();
         tracing::info!(batch_size = batch.len(), write_ns = write_ns, fsync_ns = fsync_ns, policy = ?policy, "manifest journal batch append: write and fsync times (ns)");
         // Append a durable marker (we write a marker to denote durability boundary)
@@ -363,16 +449,29 @@ pub fn append_edit_batch_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 
 /// Convenience wrapper: append batch via a RealFs created from db_path (backwards compatible)
 pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<()> {
-    let fs: std::sync::Arc<dyn crate::io::traits::Fs> = std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e)))?);
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+        })?);
     append_edit_batch_with_fs(&fs, batch)
 }
 
 /// Append an FSYNC marker to indicate a durable prefix (fsynced up to now) using provided Fs.
-pub fn append_fsync_marker_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, last_seq: u64) -> MidgeResult<()> {
-    use crate::io::traits::{FsPath, OpenOptions, OpenMode, Durability};
+pub fn append_fsync_marker_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    last_seq: u64,
+) -> MidgeResult<()> {
+    use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
-    let marker = FsyncMarker { last_persisted_sequence: last_seq, ts_millis: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64 };
-    let payload = bincode::serialize(&marker).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
+    let marker = FsyncMarker {
+        last_persisted_sequence: last_seq,
+        ts_millis: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    };
+    let payload = bincode::serialize(&marker)
+        .map_err(|e| crate::common::MidgeError::Internal(e.to_string()))?;
     let mut hasher = Crc32::new();
     hasher.update(&payload);
     let crc = hasher.finalize();
@@ -383,17 +482,32 @@ pub fn append_fsync_marker_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs
     buf.extend_from_slice(&payload);
     buf.extend_from_slice(&crc.to_le_bytes());
 
-    let mut f = fs.open(&FsPath::new(JOURNAL_FILE), OpenOptions { mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: false })?;
+    let mut f = fs.open(
+        &FsPath::new(JOURNAL_FILE),
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: true,
+            create_new: false,
+            truncate: false,
+        },
+    )?;
 
-    f.append(bytes::Bytes::from(buf)).map_err(crate::common::MidgeError::from)?;
+    f.append(bytes::Bytes::from(buf))
+        .map_err(crate::common::MidgeError::from)?;
 
     // Honor optional bench-only skip for manifest fsync when writing markers.
     let skip_fsync = std::env::var("MIDGE_SKIP_MANIFEST_FSYNC").ok().as_deref() == Some("1")
-        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC").ok().as_deref() == Some("1"));
+        && (std::env::var("MIDGE_ALLOW_MANIFEST_SKIP_FSYNC")
+            .ok()
+            .as_deref()
+            == Some("1"));
     if !skip_fsync {
-        f.sync(Durability::Durable).map_err(crate::common::MidgeError::from)?;
+        f.sync(Durability::Durable)
+            .map_err(crate::common::MidgeError::from)?;
     } else {
-        tracing::info!("skip_manifest_fsync enabled: append_fsync_marker did not fsync (bench mode)");
+        tracing::info!(
+            "skip_manifest_fsync enabled: append_fsync_marker did not fsync (bench mode)"
+        );
     }
 
     Ok(())
@@ -401,34 +515,49 @@ pub fn append_fsync_marker_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs
 
 /// Convenience wrapper: append via a RealFs created from db_path (backwards compatible)
 pub fn append_fsync_marker(db_path: &Path, last_seq: u64) -> MidgeResult<()> {
-    let fs: std::sync::Arc<dyn crate::io::traits::Fs> = std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e)))?);
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+        })?);
     append_fsync_marker_with_fs(&fs, last_seq)
 }
 
 /// Truncate or rotate journal after snapshot using provided Fs.
 pub fn truncate_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<()> {
-    use crate::io::traits::{FsPath, OpenOptions, OpenMode};
+    use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 
     // Opening with truncate=true will set length to 0
-    let mut f = fs.open(&FsPath::new(JOURNAL_FILE), OpenOptions { mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: true })?;
+    let mut f = fs.open(
+        &FsPath::new(JOURNAL_FILE),
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: true,
+            create_new: false,
+            truncate: true,
+        },
+    )?;
 
     // Sync file to durable state
-    f.sync(crate::io::traits::Durability::Durable).map_err(crate::common::MidgeError::from)?;
+    f.sync(crate::io::traits::Durability::Durable)
+        .map_err(crate::common::MidgeError::from)?;
 
     Ok(())
 }
 
 /// Convenience wrapper: truncate via a RealFs created from db_path
 pub fn truncate_journal(db_path: &Path) -> MidgeResult<()> {
-    let fs: std::sync::Arc<dyn crate::io::traits::Fs> = std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e)))?);
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
+            crate::common::MidgeError::Internal(format!("failed to create RealFs: {:?}", e))
+        })?);
     truncate_journal_with_fs(&fs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{Manifest, ManifestPersistence};
     use crate::metadata::FileMeta;
+    use crate::metadata::{Manifest, ManifestPersistence};
     use tempfile::tempdir;
 
     #[test]
@@ -472,16 +601,24 @@ mod tests {
         let db = td.path();
 
         // create a valid edit to precede the partial record
-        let file = FileMeta { name: "a.sst".to_string(), ..Default::default() };
+        let file = FileMeta {
+            name: "a.sst".to_string(),
+            ..Default::default()
+        };
         let edit = ManifestEdit::AddSst(file);
         append_edit(db, &edit).expect("append_edit failed");
 
         // Act: append a truncated record to simulate crash
         let path = db.join(JOURNAL_FILE);
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).expect("failed to open temp journal file");
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("failed to open temp journal file");
         use std::io::Write;
 
-        let fake = ManifestEdit::RemoveSst { name: "missing.sst".to_string() };
+        let fake = ManifestEdit::RemoveSst {
+            name: "missing.sst".to_string(),
+        };
         let payload = bincode::serialize(&fake).unwrap();
         let mut hasher = Crc32::new();
         hasher.update(&payload);
@@ -491,9 +628,10 @@ mod tests {
         buf.push(fake.record_type());
         buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         buf.extend_from_slice(&payload[..10.min(payload.len())]); // partial
-        // do NOT write crc
+                                                                  // do NOT write crc
 
-        f.write_all(&buf).expect("failed to write partial journal record");
+        f.write_all(&buf)
+            .expect("failed to write partial journal record");
         f.sync_all().expect("failed to sync partial journal file");
 
         // Assert: replay should only return the first valid record
@@ -508,10 +646,16 @@ mod tests {
         let db = td.path();
 
         let mut manifest = Manifest::default();
-        manifest.files.push(FileMeta { name: "one.sst".to_string(), level: 0, size_bytes: 100, ..Default::default() });
+        manifest.files.push(FileMeta {
+            name: "one.sst".to_string(),
+            level: 0,
+            size_bytes: 100,
+            ..Default::default()
+        });
 
         // Act
-        ManifestPersistence::save_snapshot_and_truncate_journal(db, &manifest).expect("save snapshot failed");
+        ManifestPersistence::save_snapshot_and_truncate_journal(db, &manifest)
+            .expect("save snapshot failed");
 
         // Assert
         let snap = ManifestPersistence::manifest_snapshot_path(db);
@@ -525,16 +669,26 @@ mod tests {
         let db = td.path();
 
         let mut manifest = Manifest::default();
-        manifest.files.push(FileMeta { name: "one.sst".to_string(), level: 0, size_bytes: 100, ..Default::default() });
+        manifest.files.push(FileMeta {
+            name: "one.sst".to_string(),
+            level: 0,
+            size_bytes: 100,
+            ..Default::default()
+        });
 
         // Act
-        ManifestPersistence::save_snapshot_and_truncate_journal(db, &manifest).expect("save snapshot failed");
+        ManifestPersistence::save_snapshot_and_truncate_journal(db, &manifest)
+            .expect("save snapshot failed");
 
         // Assert: journal should be truncated (zero-length) if it exists
         let journal = db.join(JOURNAL_FILE);
         if journal.exists() {
             let meta = std::fs::metadata(&journal).unwrap();
-            assert_eq!(meta.len(), 0, "journal should be zero-length after snapshot/truncate");
+            assert_eq!(
+                meta.len(),
+                0,
+                "journal should be zero-length after snapshot/truncate"
+            );
         }
     }
 
@@ -546,14 +700,23 @@ mod tests {
 
         // Create snapshot
         let mut manifest = Manifest::default();
-        manifest.files.push(FileMeta { name: "base.sst".to_string(), level: 0, size_bytes: 10, ..Default::default() });
-        ManifestPersistence::save_snapshot_and_truncate_journal(db, &manifest).expect("save snapshot failed");
+        manifest.files.push(FileMeta {
+            name: "base.sst".to_string(),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(db, &manifest)
+            .expect("save snapshot failed");
 
         // Act
         let loaded = ManifestPersistence::load(db).expect("load failed");
 
         // Assert
-        assert!(loaded.files.iter().any(|f| f.name == "base.sst"), "loaded manifest should include snapshot entries");
+        assert!(
+            loaded.files.iter().any(|f| f.name == "base.sst"),
+            "loaded manifest should include snapshot entries"
+        );
     }
 
     #[test]
@@ -564,17 +727,34 @@ mod tests {
 
         // Create snapshot
         let mut manifest = Manifest::default();
-        manifest.files.push(FileMeta { name: "base.sst".to_string(), level: 0, size_bytes: 10, ..Default::default() });
-        ManifestPersistence::save_snapshot_and_truncate_journal(db, &manifest).expect("save snapshot failed");
+        manifest.files.push(FileMeta {
+            name: "base.sst".to_string(),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(db, &manifest)
+            .expect("save snapshot failed");
 
         // Act: append an edit that should be replayed on load
-        let edit = ManifestEdit::AddSst(FileMeta { name: "new.sst".to_string(), level: 1, size_bytes: 20, ..Default::default() });
+        let edit = ManifestEdit::AddSst(FileMeta {
+            name: "new.sst".to_string(),
+            level: 1,
+            size_bytes: 20,
+            ..Default::default()
+        });
         append_edit(db, &edit).expect("append_edit failed");
 
         // Assert
         let loaded = ManifestPersistence::load(db).expect("load failed");
-        assert!(loaded.files.iter().any(|f| f.name == "base.sst"), "snapshot entry missing");
-        assert!(loaded.files.iter().any(|f| f.name == "new.sst"), "journal replay entry missing");
+        assert!(
+            loaded.files.iter().any(|f| f.name == "base.sst"),
+            "snapshot entry missing"
+        );
+        assert!(
+            loaded.files.iter().any(|f| f.name == "new.sst"),
+            "journal replay entry missing"
+        );
     }
 
     #[test]
@@ -583,8 +763,15 @@ mod tests {
         let td = tempdir().unwrap();
         let db = td.path();
 
-        let e1 = ManifestEdit::AddSst(FileMeta { name: "b1.sst".to_string(), level: 0, size_bytes: 10, ..Default::default() });
-        let e2 = ManifestEdit::RemoveSst { name: "missing.sst".to_string() };
+        let e1 = ManifestEdit::AddSst(FileMeta {
+            name: "b1.sst".to_string(),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        let e2 = ManifestEdit::RemoveSst {
+            name: "missing.sst".to_string(),
+        };
 
         // Act
         append_edit_batch(db, &[e1.clone(), e2.clone()]).expect("append batch failed");
@@ -610,7 +797,9 @@ mod tests {
         std::env::set_var("MIDGE_MANIFEST_SYNC_POLICY", "EveryN:1");
         // Reset policy state to ensure deterministic behavior in test
         {
-            let mut s = MANIFEST_SYNC_STATE.lock().expect("MANIFEST_SYNC_STATE poisoned");
+            let mut s = MANIFEST_SYNC_STATE
+                .lock()
+                .expect("MANIFEST_SYNC_STATE poisoned");
             s.batches_since_fsync = 0;
             s.last_policy = ManifestSyncPolicy::default();
             s.last_fsync = std::time::Instant::now();
@@ -629,4 +818,3 @@ mod tests {
         std::env::remove_var("MIDGE_MANIFEST_SYNC_POLICY");
     }
 }
-

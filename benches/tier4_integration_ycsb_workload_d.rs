@@ -25,11 +25,11 @@ use hdrhistogram::Histogram;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use std::collections::VecDeque;
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-use std::collections::VecDeque;
 
 use ycsb_common::*;
 
@@ -277,9 +277,12 @@ fn bench_workload_d(c: &mut Criterion) {
             let dur = start.elapsed();
             let total_ops = ops_per_thread * threads;
             let throughput = (total_ops as f64) / dur.as_secs_f64();
-            let mean_p50: f64 = thread_stats.iter().map(|s| s.p50 as f64).sum::<f64>() / (threads as f64);
-            let mean_p99: f64 = thread_stats.iter().map(|s| s.p99 as f64).sum::<f64>() / (threads as f64);
-            let mean_p999: f64 = thread_stats.iter().map(|s| s.p99_9 as f64).sum::<f64>() / (threads as f64);
+            let mean_p50: f64 =
+                thread_stats.iter().map(|s| s.p50 as f64).sum::<f64>() / (threads as f64);
+            let mean_p99: f64 =
+                thread_stats.iter().map(|s| s.p99 as f64).sum::<f64>() / (threads as f64);
+            let mean_p999: f64 =
+                thread_stats.iter().map(|s| s.p99_9 as f64).sum::<f64>() / (threads as f64);
             eprintln!("RUN STATS (concurrent single-run): cf={} threads={} ops={} duration_s={:.3} throughput_op_s={:.0} avg_p50={} avg_p99={} avg_p99_9={}",
                       cf_count, threads, total_ops, dur.as_secs_f64(), throughput, mean_p50, mean_p99, mean_p999);
 

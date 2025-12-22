@@ -61,6 +61,10 @@ impl Dispatcher {
             | RegisterMergeOperator { .. }
             | GetReadAmpMetrics { .. }
             | GetCurrentSequence { .. }
+            | SetRuntimeConfig { .. }
+            | GetRuntimeConfig { .. }
+            | BeginIngest { .. }
+            | EndIngest { .. }
             | Shutdown
             | Noop { .. }
             | StartupPing { .. } => TaskKind::User,

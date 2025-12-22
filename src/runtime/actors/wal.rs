@@ -169,6 +169,22 @@ impl WalActor {
         self.durability_policy
     }
 
+    pub fn batch_config(&self) -> crate::wal::policy::BatchConfig {
+        self.batch_config
+    }
+
+    /// Set durability policy and optional batch config at runtime
+    pub fn set_durability(
+        &mut self,
+        policy: DurabilityPolicy,
+        batch_config: crate::wal::policy::BatchConfig,
+    ) -> MidgeResult<()> {
+        // Update batch config and policy atomically
+        self.batch_config = batch_config;
+        self.durability_policy = policy;
+        Ok(())
+    }
+
     pub fn is_cloud_first(&self) -> bool {
         matches!(self.durability_policy, DurabilityPolicy::CloudFirst)
     }
@@ -382,7 +398,9 @@ impl WalActor {
         tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL append");
 
         // Optional tracing for append averages
-        if std::env::var_os("MIDGE_TRACE_WAL_APPEND").is_some() && self.append_calls.is_multiple_of(1000) {
+        if std::env::var_os("MIDGE_TRACE_WAL_APPEND").is_some()
+            && self.append_calls.is_multiple_of(1000)
+        {
             let avg_ms = (self.append_total.as_secs_f64() * 1000.0) / (self.append_calls as f64);
             eprintln!(
                 "[midge] wal.append: calls={} total_ms={:.2} avg_ms={:.3}",

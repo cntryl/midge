@@ -141,6 +141,8 @@ pub struct RuntimeState {
     pub read_only: bool,
     /// If true, never touch filesystem (pure in-memory mode)
     pub memory_mode: bool,
+    /// Whether background compaction is enabled
+    pub enable_compaction: bool,
 
     // === Intent Log & Determinism ===
     /// Deterministic intent log for recovery and replay
@@ -155,6 +157,19 @@ pub struct RuntimeState {
     // === Observability ===
     /// Read amplification metrics across all reads
     pub read_amp_metrics: ReadAmpMetrics,
+
+    // === Ingest control & coordination ===
+    /// Ingest epoch counter used to cooperatively cancel long-running jobs.
+    /// Bumping this value invalidates currently running compactions which should
+    /// check the epoch and abort if it changes.
+    pub ingest_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+
+    /// Number of active compaction jobs. Used so `BeginIngest` can wait until
+    /// the running compactions drain.
+    pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Condvar used to wait for active_compactions == 0.
+    pub active_compactions_notify: std::sync::Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
 }
 
 impl RuntimeState {
@@ -196,7 +211,9 @@ impl RuntimeState {
         }
 
         // Initialize real filesystem abstraction (used for all metadata IO)
-        let fs: std::sync::Arc<dyn Fs> = std::sync::Arc::new(crate::io::real::RealFs::new(&db_path).expect("failed to initialize RealFs"));
+        let fs: std::sync::Arc<dyn Fs> = std::sync::Arc::new(
+            crate::io::real::RealFs::new(&db_path).expect("failed to initialize RealFs"),
+        );
 
         // Load manifest (prefer snapshot + journal replay) — only if not in memory mode
         let manifest = if !memory_mode {
@@ -350,7 +367,14 @@ impl RuntimeState {
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             write_stalled: false,
             total_memtable_bytes: 0,
+            enable_compaction: true,
             read_amp_metrics: ReadAmpMetrics::new(),
+            ingest_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            active_compactions_notify: std::sync::Arc::new((
+                std::sync::Mutex::new(()),
+                std::sync::Condvar::new(),
+            )),
         }
     }
 

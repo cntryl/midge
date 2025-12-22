@@ -114,7 +114,10 @@ impl FlushActor {
 
         // Update next SST sequence (journal before applying)
         {
-            let edit = crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq: sst_seq + 1 };
+            let edit = crate::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id,
+                next_seq: sst_seq + 1,
+            };
             if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
                 tracing::warn!(error = ?e, "failed to append BumpNextSstSeq to journal");
             }

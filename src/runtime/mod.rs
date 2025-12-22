@@ -243,6 +243,27 @@ pub enum RuntimeMsg {
         operator: std::sync::Arc<dyn crate::engine::MergeOperator>,
     },
 
+    /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
+    /// and wait until in-flight compactions drain.
+    BeginIngest { request_id: u64 },
+
+    /// End an ingest barrier: flush outstanding memtables, bump epoch and
+    /// re-enable scheduling.
+    EndIngest { request_id: u64 },
+
+    /// Set runtime configuration atomically. Any field set to `None` will be left unchanged.
+    SetRuntimeConfig {
+        request_id: u64,
+        memtable_size_limit: Option<usize>,
+        memtable_flush_threshold: Option<usize>,
+        enable_compaction: Option<bool>,
+        wal_durability_policy: Option<DurabilityPolicy>,
+        wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+    },
+
+    /// Get runtime configuration snapshot
+    GetRuntimeConfig { request_id: u64 },
+
     // === Read Path ===
     /// Query a value from memtables and SST files.
     ///
@@ -325,6 +346,10 @@ impl RuntimeMsg {
             | RangeScan { request_id, .. }
             | GetReadAmpMetrics { request_id }
             | GetCurrentSequence { request_id }
+            | SetRuntimeConfig { request_id, .. }
+            | GetRuntimeConfig { request_id }
+            | BeginIngest { request_id }
+            | EndIngest { request_id }
             | Noop { request_id }
             | StartupPing { request_id } => Some(*request_id),
 
@@ -361,6 +386,10 @@ impl RuntimeMsg {
             RangeScan { .. } => "RangeScan",
             GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
             GetCurrentSequence { .. } => "GetCurrentSequence",
+            SetRuntimeConfig { .. } => "SetRuntimeConfig",
+            GetRuntimeConfig { .. } => "GetRuntimeConfig",
+            BeginIngest { .. } => "BeginIngest",
+            EndIngest { .. } => "EndIngest",
             Shutdown => "Shutdown",
             Noop { .. } => "Noop",
             StartupPing { .. } => "StartupPing",
@@ -436,6 +465,16 @@ pub enum RuntimeResponse {
         request_id: u64,
         sequence: u64,
     },
+
+    /// Snapshot of runtime configuration for diagnostics and tooling
+    RuntimeConfigSnapshot {
+        request_id: u64,
+        memtable_size_limit: usize,
+        memtable_flush_threshold: usize,
+        enable_compaction: bool,
+        wal_durability_policy: DurabilityPolicy,
+        wal_batch_config: crate::wal::policy::BatchConfig,
+    },
 }
 
 impl RuntimeResponse {
@@ -451,7 +490,8 @@ impl RuntimeResponse {
             | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
             | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
-            | RuntimeResponse::CurrentSequence { request_id, .. } => *request_id,
+            | RuntimeResponse::CurrentSequence { request_id, .. }
+            | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. } => *request_id,
         }
     }
 }
@@ -679,7 +719,13 @@ impl Runtime {
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
             .spawn(move || {
-                match EventLoop::new(state, trace_enabled, router, config) {
+                match EventLoop::new(
+                    state,
+                    trace_enabled,
+                    router,
+                    config,
+                    Some(self.msg_tx.clone()),
+                ) {
                     Ok(mut event_loop) => {
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));

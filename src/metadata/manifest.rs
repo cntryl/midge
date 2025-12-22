@@ -226,8 +226,17 @@ impl Manifest {
             crate::metadata::ManifestEdit::RemoveSst { name } => {
                 self.remove_file(name);
             }
-            crate::metadata::ManifestEdit::CreateColumnFamily { id, name, created_at } => {
-                self.column_families.push(ColumnFamilyMeta { id: *id, name: name.clone(), created_at: *created_at, deleted_at: None });
+            crate::metadata::ManifestEdit::CreateColumnFamily {
+                id,
+                name,
+                created_at,
+            } => {
+                self.column_families.push(ColumnFamilyMeta {
+                    id: *id,
+                    name: name.clone(),
+                    created_at: *created_at,
+                    deleted_at: None,
+                });
             }
             crate::metadata::ManifestEdit::DropColumnFamily { id } => {
                 let _ = self.delete_column_family(*id);

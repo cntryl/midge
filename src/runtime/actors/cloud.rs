@@ -122,7 +122,10 @@ impl CloudActor {
                 if let Ok(seq) = seq_str.parse::<u64>() {
                     state.cloud.last_cloud_checkpoint_seq = seq;
                     // Record cloud checkpoint in manifest journal
-                    let cp = crate::metadata::CloudCheckpoint { checkpoint_sequence: seq, covering_ssts: vec![] };
+                    let cp = crate::metadata::CloudCheckpoint {
+                        checkpoint_sequence: seq,
+                        covering_ssts: vec![],
+                    };
                     let edit = crate::metadata::ManifestEdit::SetCloudCheckpoint(cp);
                     if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
                         tracing::warn!(error = ?e, "failed to append SetCloudCheckpoint to journal");

@@ -14,9 +14,6 @@
 //!
 //! Workload A is intentionally time-bounded (60s max).
 
-
-
-
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
 #[path = "./tier4_integration_ycsb_common.rs"]
@@ -33,7 +30,7 @@ use rand::{Rng, RngCore, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 use ycsb_common::*;
 
@@ -106,7 +103,7 @@ fn run_workload_a(
         p99: hist.value_at_percentile(99.0),
         p99_9: hist.value_at_percentile(99.9),
     }
-} 
+}
 
 // ----- Concurrent Version ----------------------------------------------------
 
@@ -163,7 +160,7 @@ fn run_workload_a_concurrent(
         p99: hist.value_at_percentile(99.0),
         p99_9: hist.value_at_percentile(99.9),
     }
-} 
+}
 
 // ============================================================================
 // Benchmark driver
@@ -200,8 +197,12 @@ fn bench_workload_a(c: &mut Criterion) {
                 &cf_count,
                 |b, &_cf| {
                     b.iter(|| {
-                        let stats =
-                            run_workload_a(&engine, Duration::from_secs(WORKLOAD_DURATION_SECS), cf_count, 0xABCDEF);
+                        let stats = run_workload_a(
+                            &engine,
+                            Duration::from_secs(WORKLOAD_DURATION_SECS),
+                            cf_count,
+                            0xABCDEF,
+                        );
                         black_box(stats)
                     })
                 },

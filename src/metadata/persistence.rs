@@ -28,7 +28,9 @@ impl ManifestPersistence {
 
     /// Load manifest, preferring a binary snapshot plus replaying the journal.
     /// Falls back to legacy YAML manifest if snapshot missing.
-    pub fn load_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> Result<Manifest, String> {
+    pub fn load_with_fs(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    ) -> Result<Manifest, String> {
         use crate::io::traits::FsPath;
 
         // Prefer snapshot when present
@@ -36,11 +38,25 @@ impl ManifestPersistence {
         let mut manifest = match fs.exists(&snap_path) {
             Ok(true) => {
                 let start = std::time::Instant::now();
-                let file = fs.open(&snap_path, crate::io::traits::OpenOptions { mode: crate::io::traits::OpenMode::ReadOnly, create: false, create_new: false, truncate: false })
+                let file = fs
+                    .open(
+                        &snap_path,
+                        crate::io::traits::OpenOptions {
+                            mode: crate::io::traits::OpenMode::ReadOnly,
+                            create: false,
+                            create_new: false,
+                            truncate: false,
+                        },
+                    )
                     .map_err(|e| format!("failed to open manifest snapshot: {:?}", e))?;
-                let len = file.len().map_err(|e| format!("failed to stat snapshot: {:?}", e))?;
-                let data = file.read_at(0, len).map_err(|e| format!("failed to read snapshot: {:?}", e))?;
-                let contents = String::from_utf8(data.to_vec()).map_err(|e| format!("snapshot not utf8: {}", e))?;
+                let len = file
+                    .len()
+                    .map_err(|e| format!("failed to stat snapshot: {:?}", e))?;
+                let data = file
+                    .read_at(0, len)
+                    .map_err(|e| format!("failed to read snapshot: {:?}", e))?;
+                let contents = String::from_utf8(data.to_vec())
+                    .map_err(|e| format!("snapshot not utf8: {}", e))?;
                 let manifest: Manifest = serde_yaml::from_str(&contents)
                     .map_err(|e| format!("failed to parse manifest snapshot YAML: {}", e))?;
                 tracing::info!(path = ?snap_path, files = manifest.files.len(), cf = manifest.column_families.len(), elapsed_ms = start.elapsed().as_secs_f64() * 1000.0, "manifest snapshot loaded");
@@ -55,11 +71,25 @@ impl ManifestPersistence {
                 } else {
                     // Read file (measure read+parse time)
                     let start = std::time::Instant::now();
-                    let file = fs.open(&manifest_path, crate::io::traits::OpenOptions { mode: crate::io::traits::OpenMode::ReadOnly, create: false, create_new: false, truncate: false })
+                    let file = fs
+                        .open(
+                            &manifest_path,
+                            crate::io::traits::OpenOptions {
+                                mode: crate::io::traits::OpenMode::ReadOnly,
+                                create: false,
+                                create_new: false,
+                                truncate: false,
+                            },
+                        )
                         .map_err(|e| format!("failed to open manifest file: {:?}", e))?;
-                    let len = file.len().map_err(|e| format!("failed to stat manifest file: {:?}", e))?;
-                    let data = file.read_at(0, len).map_err(|e| format!("failed to read manifest file: {:?}", e))?;
-                    let contents = String::from_utf8(data.to_vec()).map_err(|e| format!("manifest not utf8: {}", e))?;
+                    let len = file
+                        .len()
+                        .map_err(|e| format!("failed to stat manifest file: {:?}", e))?;
+                    let data = file
+                        .read_at(0, len)
+                        .map_err(|e| format!("failed to read manifest file: {:?}", e))?;
+                    let contents = String::from_utf8(data.to_vec())
+                        .map_err(|e| format!("manifest not utf8: {}", e))?;
                     let size_bytes = contents.len() as u64;
 
                     // Deserialize YAML
@@ -82,7 +112,8 @@ impl ManifestPersistence {
         };
 
         // Check for an explicit bench-only trust mode (opt-in via env var)
-        let trust_snapshot_enabled = std::env::var("MIDGE_BENCH_TRUST_SNAPSHOT").ok().as_deref() == Some("1")
+        let trust_snapshot_enabled = std::env::var("MIDGE_BENCH_TRUST_SNAPSHOT").ok().as_deref()
+            == Some("1")
             && (std::env::var("MIDGE_ALLOW_TRUST_SNAPSHOT").ok().as_deref() == Some("1"));
         if trust_snapshot_enabled {
             tracing::warn!("trust_snapshot enabled: loading snapshot and skipping journal replay (bench-only mode)");
@@ -113,8 +144,11 @@ impl ManifestPersistence {
     ///
     /// # Errors
     /// Returns error if write fails
-    pub fn save_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, manifest: &Manifest) -> Result<(), String> {
-        use crate::io::traits::{FsPath, OpenOptions, OpenMode, Durability};
+    pub fn save_with_fs(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> Result<(), String> {
+        use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
         // Serialize to YAML
         let yaml = serde_yaml::to_string(manifest)
@@ -122,13 +156,25 @@ impl ManifestPersistence {
 
         // Write temp manifest file
         let temp_path = FsPath::new("manifest.yaml.tmp");
-        let mut f = fs.open(&temp_path, OpenOptions { mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: true })
+        let mut f = fs
+            .open(
+                &temp_path,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: true,
+                },
+            )
             .map_err(|e| format!("failed to open temp manifest file: {:?}", e))?;
-        f.write_at(0, bytes::Bytes::from(yaml.clone())).map_err(|e| format!("failed to write temp manifest: {:?}", e))?;
-        f.sync(Durability::Durable).map_err(|e| format!("failed to sync temp manifest: {:?}", e))?;
+        f.write_at(0, bytes::Bytes::from(yaml.clone()))
+            .map_err(|e| format!("failed to write temp manifest: {:?}", e))?;
+        f.sync(Durability::Durable)
+            .map_err(|e| format!("failed to sync temp manifest: {:?}", e))?;
 
         // Atomic rename
-        fs.rename_atomic(&temp_path, &FsPath::new(Self::MANIFEST_FILE)).map_err(|e| format!("failed to rename manifest file atomically: {:?}", e))?;
+        fs.rename_atomic(&temp_path, &FsPath::new(Self::MANIFEST_FILE))
+            .map_err(|e| format!("failed to rename manifest file atomically: {:?}", e))?;
 
         tracing::debug!(
             path = ?Self::MANIFEST_FILE,
@@ -141,8 +187,11 @@ impl ManifestPersistence {
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// Writes to `manifest.snapshot.tmp` then renames into `manifest.snapshot`.
-    pub fn save_snapshot_and_truncate_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>, manifest: &Manifest) -> Result<(), String> {
-        use crate::io::traits::{FsPath, OpenOptions, OpenMode, Durability};
+    pub fn save_snapshot_and_truncate_journal_with_fs(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> Result<(), String> {
+        use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let temp = FsPath::new("manifest.snapshot.tmp");
@@ -151,15 +200,29 @@ impl ManifestPersistence {
             .map_err(|e| format!("failed to serialize manifest to YAML: {}", e))?;
 
         // Write temp snapshot
-        let mut f = fs.open(&temp, OpenOptions { mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: true }).map_err(|e| format!("failed to open temp snapshot: {:?}", e))?;
-        f.write_at(0, bytes::Bytes::from(yaml.clone())).map_err(|e| format!("failed to write temp snapshot: {:?}", e))?;
-        f.sync(Durability::Durable).map_err(|e| format!("failed to sync temp snapshot: {:?}", e))?;
+        let mut f = fs
+            .open(
+                &temp,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: true,
+                },
+            )
+            .map_err(|e| format!("failed to open temp snapshot: {:?}", e))?;
+        f.write_at(0, bytes::Bytes::from(yaml.clone()))
+            .map_err(|e| format!("failed to write temp snapshot: {:?}", e))?;
+        f.sync(Durability::Durable)
+            .map_err(|e| format!("failed to sync temp snapshot: {:?}", e))?;
 
         // Atomic rename
-        fs.rename_atomic(&temp, &snap_path).map_err(|e| format!("failed to rename snapshot into place: {:?}", e))?;
+        fs.rename_atomic(&temp, &snap_path)
+            .map_err(|e| format!("failed to rename snapshot into place: {:?}", e))?;
 
         // truncate journal
-        crate::metadata::journal::truncate_journal_with_fs(fs).map_err(|e| format!("failed to truncate journal: {:?}", e))?;
+        crate::metadata::journal::truncate_journal_with_fs(fs)
+            .map_err(|e| format!("failed to truncate journal: {:?}", e))?;
 
         tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 
@@ -168,31 +231,37 @@ impl ManifestPersistence {
 
     /// Save manifest to disk in YAML format (compat wrapper for tests and callers using Path)
     pub fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
-        use std::sync::Arc;
         use crate::io::real::RealFs;
+        use std::sync::Arc;
 
-        let real = RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::save_with_fs(&fs, manifest)
     }
 
     /// Load manifest using a RealFs (compat wrapper)
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
-        use std::sync::Arc;
         use crate::io::real::RealFs;
+        use std::sync::Arc;
 
-        let real = RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::load_with_fs(&fs)
     }
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// This wrapper constructs a RealFs and delegates to the fs-backed implementation.
-    pub fn save_snapshot_and_truncate_journal(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
-        use std::sync::Arc;
+    pub fn save_snapshot_and_truncate_journal(
+        db_path: &Path,
+        manifest: &Manifest,
+    ) -> Result<(), String> {
         use crate::io::real::RealFs;
+        use std::sync::Arc;
 
-        let real = RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::save_snapshot_and_truncate_journal_with_fs(&fs, manifest)
     }
@@ -215,7 +284,8 @@ impl ManifestPersistence {
             Ok(true) => {}
         }
 
-        fs.remove_file(&manifest_path).map_err(|e| format!("failed to delete manifest file: {:?}", e))?;
+        fs.remove_file(&manifest_path)
+            .map_err(|e| format!("failed to delete manifest file: {:?}", e))?;
 
         tracing::debug!(path = ?manifest_path, "manifest file deleted");
 
@@ -230,10 +300,11 @@ impl ManifestPersistence {
     /// # Errors
     /// Returns error if delete fails (other than file not existing)
     pub fn delete(db_path: &Path) -> Result<(), String> {
-        use std::sync::Arc;
         use crate::io::real::RealFs;
+        use std::sync::Arc;
 
-        let real = RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
+        let real =
+            RealFs::new(db_path).map_err(|e| format!("failed to initialize real fs: {:?}", e))?;
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(real);
         Self::delete_with_fs(&fs)
     }
@@ -314,14 +385,21 @@ mod tests {
         // Arrange
         let test_dir = create_test_dir();
         let mut manifest = Manifest::default();
-        manifest.files.push(crate::metadata::FileMeta { name: "only.sst".to_string(), level: 0, size_bytes: 10, ..Default::default() });
-        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest).expect("save snapshot failed");
+        manifest.files.push(crate::metadata::FileMeta {
+            name: "only.sst".to_string(),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect("save snapshot failed");
 
         // Act: enable trust snapshot via env var (simulating bench mode)
         std::env::set_var("MIDGE_BENCH_TRUST_SNAPSHOT", "1");
 
         // Assert: load returns snapshot and does NOT panic when journal is missing
-        let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed in trust snapshot mode");
+        let loaded = ManifestPersistence::load(&test_dir)
+            .expect("load should succeed in trust snapshot mode");
         assert!(loaded.files.iter().any(|f| f.name == "only.sst"));
 
         // Cleanup env var

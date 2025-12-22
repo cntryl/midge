@@ -27,11 +27,12 @@ pub fn execute_compaction(
     plan: &CompactionPlan,
     sst_factory: &dyn crate::sst::SstFactory,
     output_dir: &Path,
+    abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<Vec<String>> {
     // --- 1. Collect versions from all input files ---------------------------
     //
     // For now, we load versions into memory. Future: streaming merge iterator.
-    let versions = executor::collect_versions(sst_factory, &plan.input_files)?;
+    let versions = executor::collect_versions(sst_factory, &plan.input_files, abort_check)?;
 
     if versions.is_empty() {
         return Ok(Vec::new());
@@ -48,7 +49,7 @@ pub fn execute_compaction(
     let output_file_str = output_file.to_str().ok_or(MidgeError::InvalidPath)?;
 
     // --- 5. Write merged versions to SST ------------------------------------
-    executor::write_versions_to_sst(sst_factory, output_file_str, &final_versions)?;
+    executor::write_versions_to_sst(sst_factory, output_file_str, &final_versions, abort_check)?;
 
     Ok(vec![output_file
         .file_name()

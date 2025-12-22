@@ -53,6 +53,10 @@ pub struct EventLoop {
     /// This preserves FIFO semantics when we opportunistically `try_recv()` to batch writes:
     /// if we encounter a non-write message, we stash it here and handle it next.
     pending_msg: Option<RuntimeMsg>,
+
+    /// Sender that worker threads can use to post back completion messages
+    /// (compaction threads will use this to report completion).
+    worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
 }
 
 impl EventLoop {
@@ -61,6 +65,7 @@ impl EventLoop {
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
         config: super::RuntimeConfig,
+        worker_msg_tx: Option<crossbeam::channel::Sender<super::RuntimeMsg>>,
     ) -> crate::common::MidgeResult<Self> {
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
@@ -110,6 +115,7 @@ impl EventLoop {
             durability: DurabilityCoordinator::new(initial_durability_key, is_cloud_first),
             router,
             pending_msg: None,
+            worker_msg_tx,
         };
 
         if let Some(storage) = config.hybrid_storage {
@@ -944,6 +950,124 @@ impl EventLoop {
                     );
                 }
 
+                RuntimeMsg::SetRuntimeConfig {
+                    request_id,
+                    memtable_size_limit,
+                    memtable_flush_threshold,
+                    enable_compaction,
+                    wal_durability_policy,
+                    wal_batch_config,
+                } => {
+                    if let Some(ms) = memtable_size_limit {
+                        self.state.memtable_size_limit = ms;
+                    }
+                    if let Some(th) = memtable_flush_threshold {
+                        self.state.memtable_flush_threshold = th;
+                    }
+                    if let Some(ec) = enable_compaction {
+                        self.state.enable_compaction = ec;
+                    }
+
+                    // Apply WAL changes to the wal actor if requested
+                    if wal_durability_policy.is_some() || wal_batch_config.is_some() {
+                        let policy =
+                            wal_durability_policy.unwrap_or(self.wal_actor.durability_policy());
+                        let batch_cfg = wal_batch_config.unwrap_or(self.wal_actor.batch_config());
+                        if let Err(e) = self.wal_actor.set_durability(policy, batch_cfg) {
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            );
+                            continue;
+                        }
+                    }
+
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
+
+                RuntimeMsg::GetRuntimeConfig { request_id } => {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::RuntimeConfigSnapshot {
+                            request_id,
+                            memtable_size_limit: self.state.memtable_size_limit,
+                            memtable_flush_threshold: self.state.memtable_flush_threshold,
+                            enable_compaction: self.state.enable_compaction,
+                            wal_durability_policy: self.wal_actor.durability_policy(),
+                            wal_batch_config: self.wal_actor.batch_config(),
+                        },
+                    );
+                }
+
+                RuntimeMsg::BeginIngest { request_id } => {
+                    // Prevent new compactions and bump epoch
+                    self.state.enable_compaction = false;
+                    let new_epoch = self
+                        .state
+                        .ingest_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+                    tracing::info!(ingest_epoch = new_epoch, "BeginIngest: ingestion barrier enabled, waiting for active compactions to drain");
+
+                    // Wait for active compactions to drain
+                    let (lock, cvar) = &*self.state.active_compactions_notify;
+                    let mut guard = lock
+                        .lock()
+                        .expect("active_compactions_notify lock poisoned");
+                    while self
+                        .state
+                        .active_compactions
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        > 0
+                    {
+                        // wait (releases mutex while waiting)
+                        guard = cvar.wait(guard).expect("condvar wait poisoned");
+                    }
+
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
+
+                RuntimeMsg::EndIngest { request_id } => {
+                    tracing::info!("EndIngest: flushing memtables and restoring scheduling");
+
+                    // Trigger flush for each column family to ensure memtables are persisted
+                    let cf_ids: Vec<u32> = self.state.column_families.keys().cloned().collect();
+                    for cf_id in cf_ids {
+                        // fire-and-forget flush: schedule flush messages and ignore errors
+                        let _ = self.flush_actor.handle_flush(
+                            &mut self.state,
+                            cf_id,
+                            self.hybrid_storage.as_ref(),
+                        );
+                    }
+
+                    // Bump epoch again to invalidate any in-flight compactions that missed the earlier epoch
+                    let new_epoch = self
+                        .state
+                        .ingest_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+                    tracing::info!(
+                        ingest_epoch = new_epoch,
+                        "EndIngest: ingestion barrier lifted"
+                    );
+
+                    // Optionally kick compaction checks once so background compaction resumes
+                    if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                        let _ = self.compaction_actor.run_compaction(
+                            &mut self.state,
+                            plan,
+                            self.hybrid_storage.as_ref(),
+                            self.worker_msg_tx.clone(),
+                        );
+                    }
+
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
+
                 RuntimeMsg::GetCurrentSequence { request_id } => {
                     self.respond(
                         request_id,
@@ -1048,19 +1172,27 @@ impl EventLoop {
                 // =============================================================
                 RuntimeMsg::CheckCompaction { request_id } => {
                     if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                        let resp = self
-                            .compaction_actor
-                            .run_compaction(&mut self.state, plan, self.hybrid_storage.as_ref())
-                            .map(|output_ssts| RuntimeResponse::CompactionComplete {
-                                request_id,
-                                output_ssts,
-                            })
-                            .unwrap_or_else(|e| RuntimeResponse::Error {
-                                request_id,
-                                message: e.to_string(),
-                            });
+                        // Schedule compaction to run in background and respond immediately.
+                        // The compaction worker will send a `CompactionComplete` message back
+                        // when finished which will be handled below.
+                        let schedule_res = self.compaction_actor.run_compaction(
+                            &mut self.state,
+                            plan,
+                            self.hybrid_storage.as_ref(),
+                            self.worker_msg_tx.clone(),
+                        );
 
-                        self.respond(request_id, resp);
+                        // Return immediate response (ack)
+                        match schedule_res {
+                            Ok(_) => self.respond(request_id, RuntimeResponse::Ok { request_id }),
+                            Err(e) => self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            ),
+                        }
                     } else {
                         self.respond(request_id, RuntimeResponse::Ok { request_id });
                     }
@@ -1076,17 +1208,19 @@ impl EventLoop {
                         output_seq: self.state.next_sequence(),
                     };
 
-                    let resp = self
-                        .compaction_actor
-                        .run_compaction(&mut self.state, cplan, self.hybrid_storage.as_ref())
-                        .map(|output_ssts| RuntimeResponse::CompactionComplete {
-                            request_id,
-                            output_ssts,
-                        })
-                        .unwrap_or_else(|e| RuntimeResponse::Error {
+                    let schedule_res = self.compaction_actor.run_compaction(
+                        &mut self.state,
+                        cplan,
+                        self.hybrid_storage.as_ref(),
+                        self.worker_msg_tx.clone(),
+                    );
+                    let resp = match schedule_res {
+                        Ok(_) => RuntimeResponse::Ok { request_id },
+                        Err(e) => RuntimeResponse::Error {
                             request_id,
                             message: e.to_string(),
-                        });
+                        },
+                    };
 
                     self.respond(request_id, resp);
                 }
@@ -1096,6 +1230,20 @@ impl EventLoop {
                     input_ssts,
                     output_ssts,
                 } => {
+                    // Decrement active compactions and notify any waiters
+                    let prev = self
+                        .state
+                        .active_compactions
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    if prev <= 1 {
+                        // notify waiters that active_compactions may be zero now
+                        let (lock, cvar) = &*self.state.active_compactions_notify;
+                        let _guard = lock
+                            .lock()
+                            .expect("active_compactions_notify lock poisoned");
+                        cvar.notify_all();
+                    }
+
                     self.compaction_actor
                         .handle_complete(&mut self.state, input_ssts, output_ssts);
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
@@ -1750,6 +1898,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )
     }
 
@@ -1786,6 +1935,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1804,6 +1954,7 @@ mod tests {
             true,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1855,6 +2006,7 @@ mod tests {
             false,
             router.clone(),
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1876,6 +2028,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1926,6 +2079,7 @@ mod tests {
             false,
             router1,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )
         .expect("Should create");
         let event_loop2 = EventLoop::new(
@@ -1933,6 +2087,7 @@ mod tests {
             true,
             router2,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )
         .expect("Should create");
 
@@ -2025,6 +2180,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )
         .expect("Should create");
 
@@ -2067,6 +2223,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -2085,6 +2242,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -2129,6 +2287,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )?;
 
         // Create an SST file with one key using the FsSstFactory
@@ -2232,7 +2391,7 @@ mod tests {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
             ..Default::default()
         };
-        let mut el = EventLoop::new(state, false, router, config)?;
+        let mut el = EventLoop::new(state, false, router, config, None)?;
 
         // Add a wal append with a specific request_id
         let request_id = 123u64;
@@ -2299,7 +2458,7 @@ mod tests {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
             ..Default::default()
         };
-        let mut el = EventLoop::new(state, false, router, config)?;
+        let mut el = EventLoop::new(state, false, router, config, None)?;
 
         // Add a wal append with a specific request_id
         let request_id = 124u64;
@@ -2384,7 +2543,7 @@ mod tests {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
             ..Default::default()
         };
-        let mut el = EventLoop::new(state, false, router, config)?;
+        let mut el = EventLoop::new(state, false, router, config, None)?;
 
         // Add a wal append with a specific request_id
         let request_id = 200u64;

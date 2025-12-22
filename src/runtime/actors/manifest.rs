@@ -117,17 +117,19 @@ impl ManifestActor {
             edits.push(crate::metadata::ManifestEdit::RemoveSst { name: n.clone() });
         }
         for f in &added {
-            edits.push(crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-                name: f.name.clone(),
-                level: f.level,
-                size_bytes: f.size_bytes,
-                cf_id: f.cf_id,
-                smallest_key: f.smallest_key.clone(),
-                largest_key: f.largest_key.clone(),
-                smallest_seq: f.smallest_seq,
-                largest_seq: f.largest_seq,
-                ..Default::default()
-            }));
+            edits.push(crate::metadata::ManifestEdit::AddSst(
+                crate::metadata::FileMeta {
+                    name: f.name.clone(),
+                    level: f.level,
+                    size_bytes: f.size_bytes,
+                    cf_id: f.cf_id,
+                    smallest_key: f.smallest_key.clone(),
+                    largest_key: f.largest_key.clone(),
+                    smallest_seq: f.smallest_seq,
+                    largest_seq: f.largest_seq,
+                    ..Default::default()
+                },
+            ));
         }
         if !edits.is_empty() {
             if let Err(e) = crate::metadata::append_edit_batch(&state.db_path, &edits) {
@@ -205,7 +207,11 @@ impl ManifestActor {
         let cf_id = state.manifest.create_column_family(name.clone());
 
         // Append create CF to journal
-        let edit = crate::metadata::ManifestEdit::CreateColumnFamily { id: cf_id, name: name.clone(), created_at };
+        let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
+            id: cf_id,
+            name: name.clone(),
+            created_at,
+        };
         if let Err(e) = crate::metadata::append_edit(&state.db_path, &edit) {
             tracing::warn!(error = ?e, "failed to append CreateColumnFamily to journal");
         }
