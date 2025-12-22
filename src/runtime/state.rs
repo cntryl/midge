@@ -248,6 +248,9 @@ impl RuntimeState {
                             bytes_recovered = stats.bytes,
                             max_sequence = ?stats.max_sequence,
                             replay_dir = ?replay_dir,
+                            replay_ms = (stats.total_replay_ns as f64) / 1_000_000.0,
+                            wal_read_ms = (stats.wal_read_ns as f64) / 1_000_000.0,
+                            apply_ms = (stats.apply_ns as f64) / 1_000_000.0,
                             "WAL recovery completed successfully"
                         );
                         for (cf_id, recovered_memtable) in recovery_memtables {

@@ -125,6 +125,10 @@ pub struct WalActor {
     // === Optional instrumentation ===
     sync_calls: u64,
     sync_total: Duration,
+
+    // WAL append instrumentation
+    append_calls: u64,
+    append_total: Duration,
 }
 
 impl WalActor {
@@ -154,6 +158,8 @@ impl WalActor {
             flush_generation: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
+            append_calls: 0,
+            append_total: Duration::from_secs(0),
             batch_config,
             last_sync_instant: Instant::now(),
         })
@@ -293,7 +299,11 @@ impl WalActor {
 
         // ALWAYS append to local WAL first (FsWalWriter)
         if let Some(writer) = &mut self.writer {
+            let a_start = Instant::now();
             writer.append_record(&record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
         }
 
         // Update state tracking
@@ -371,6 +381,17 @@ impl WalActor {
 
         tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL append");
 
+        // Optional tracing for append averages
+        if std::env::var_os("MIDGE_TRACE_WAL_APPEND").is_some() && self.append_calls.is_multiple_of(1000) {
+            let avg_ms = (self.append_total.as_secs_f64() * 1000.0) / (self.append_calls as f64);
+            eprintln!(
+                "[midge] wal.append: calls={} total_ms={:.2} avg_ms={:.3}",
+                self.append_calls,
+                self.append_total.as_secs_f64() * 1000.0,
+                avg_ms
+            );
+        }
+
         // Return deferred=true if using group commit (Batched or CloudFirst modes)
         let deferred = matches!(
             self.durability_policy,
@@ -433,7 +454,11 @@ impl WalActor {
             WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
         begin_record.txn_id = Some(txn_id);
         if let Some(writer) = &mut self.writer {
+            let a_start = Instant::now();
             writer.append_record(&begin_record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
         }
 
         state.wal.pending_writes += 1;
@@ -475,7 +500,11 @@ impl WalActor {
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
+                        let a_start = Instant::now();
                         writer.append_record(&record)?;
+                        let a_elapsed = a_start.elapsed();
+                        self.append_calls += 1;
+                        self.append_total += a_elapsed;
                     }
 
                     // Log seq allocation for this CF
@@ -501,7 +530,11 @@ impl WalActor {
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
+                        let a_start = Instant::now();
                         writer.append_record(&record)?;
+                        let a_elapsed = a_start.elapsed();
+                        self.append_calls += 1;
+                        self.append_total += a_elapsed;
                     }
 
                     state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id })?;
@@ -525,7 +558,11 @@ impl WalActor {
             WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
         commit_record.txn_id = Some(txn_id);
         if let Some(writer) = &mut self.writer {
+            let a_start = Instant::now();
             writer.append_record(&commit_record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
         }
 
         state.wal.pending_writes += 1;
@@ -674,7 +711,11 @@ impl WalActor {
 
         // ALWAYS append to local WAL first (FsWalWriter)
         if let Some(writer) = &self.writer {
+            let a_start = Instant::now();
             writer.append_record(&record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
         }
 
         // Update state tracking

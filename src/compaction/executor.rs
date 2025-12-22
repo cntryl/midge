@@ -254,6 +254,8 @@ pub fn write_versions_to_sst(
 ) -> MidgeResult<()> {
     let mut writer = sst_factory.create()?;
 
+    let mut added: usize = 0;
+    let add_start = std::time::Instant::now();
     for version in versions {
         let op_type = if version.is_tombstone { 1u8 } else { 0u8 };
 
@@ -265,10 +267,17 @@ pub fn write_versions_to_sst(
             op_type,
             version.expiration,
         )?;
+        added += 1;
     }
+    let add_ns = add_start.elapsed().as_nanos();
 
     let path = Path::new(output_filename);
+    let finish_start = std::time::Instant::now();
     writer.finish_to_path(path)?;
+    let finish_ns = finish_start.elapsed().as_nanos();
+
+    tracing::info!(output = %output_filename, versions = added, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "compaction write breakdown");
+
     Ok(())
 }
 

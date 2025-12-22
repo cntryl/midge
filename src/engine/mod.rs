@@ -170,6 +170,7 @@ impl OpenParam for &crate::testkit::MidgeOptions {
 impl MidgeEngine {
     /// Open a database from flexible parameters (PathBuf or MidgeOptions)
     pub fn open<P: OpenParam>(param: P) -> MidgeResult<Self> {
+        let start = std::time::Instant::now();
         let db_path = param.to_path();
         // Detect memory mode from path (":memory:" sentinel)
         let memory_mode = db_path.to_string_lossy() == ":memory:";
@@ -186,6 +187,8 @@ impl MidgeEngine {
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
         let column_families = dashmap::DashMap::new();
         column_families.insert(0, default_cf.clone());
+
+        tracing::info!(db_path = %db_path.display(), open_ms = start.elapsed().as_secs_f64() * 1000.0, "engine open completed");
 
         // Load existing CFs from manifest
         let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
@@ -269,12 +272,15 @@ impl MidgeEngine {
         }
 
         // Start runtime
+        let start = std::time::Instant::now();
         let (runtime, _) = Runtime::new()?;
         let runtime_handle = runtime.start_with_config(state, runtime_config)?;
 
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
         let column_families = dashmap::DashMap::new();
         column_families.insert(0, default_cf.clone());
+
+        tracing::info!(db_path = %db_path.display(), open_ms = start.elapsed().as_secs_f64() * 1000.0, "engine open completed (with options)");
 
         // Load existing CFs from manifest (skip in memory mode and deleted CFs)
         if !memory_mode {

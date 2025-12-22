@@ -40,18 +40,23 @@ impl ManifestPersistence {
             return Ok(Manifest::default());
         }
 
-        // Read file
+        // Read file (measure read+parse time)
+        let start = std::time::Instant::now();
         let contents = fs::read_to_string(&manifest_path)
             .map_err(|e| format!("failed to read manifest file: {}", e))?;
+        let size_bytes = contents.len() as u64;
 
         // Deserialize YAML
         let manifest: Manifest = serde_yaml::from_str(&contents)
             .map_err(|e| format!("failed to parse manifest YAML: {}", e))?;
 
+        let elapsed = start.elapsed();
         tracing::info!(
             path = ?manifest_path,
             files_count = manifest.files.len(),
             cf_count = manifest.column_families.len(),
+            size_bytes,
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
             "manifest loaded successfully"
         );
 

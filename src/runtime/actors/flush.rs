@@ -120,9 +120,11 @@ impl FlushActor {
         tracing::info!(cf_id, sst_name = %sst_name, "Flush started");
 
         // Write frozen memtable to SST file (blocking for now; could be async)
+        let write_start = std::time::Instant::now();
         self.write_memtable_to_sst(&frozen, &sst_path)?;
+        let write_ns = write_start.elapsed().as_nanos();
 
-        tracing::info!(cf_id, sst_name = %sst_name, "SST file written");
+        tracing::info!(cf_id, sst_name = %sst_name, write_ms = (write_ns as f64) / 1_000_000.0, "SST file written");
 
         // Signal flush completion to SBA if available
         if let Some(hybrid) = sba {
@@ -148,15 +150,23 @@ impl FlushActor {
         // Get all entries from memtable and write to SST
         let entries = memtable.iter_all(u64::MAX);
 
+        let add_start = std::time::Instant::now();
+        let mut added_count: usize = 0;
         for (key, value, seq) in entries {
             // Determine op_type: 0=Put, 2=Delete
             let op_type = if value.is_some() { 0 } else { 2 };
 
             writer.add_with_meta(&key, value.as_deref(), seq, op_type, None)?;
+            added_count += 1;
         }
+        let add_ns = add_start.elapsed().as_nanos();
 
-        // Finish and write to path
+        // Finish and write to path (finish_to_path does its own timing)
+        let finish_start = std::time::Instant::now();
         Box::new(writer).finish_to_path(path)?;
+        let finish_ns = finish_start.elapsed().as_nanos();
+
+        tracing::info!(path = ?path, added = added_count, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "memtable -> sst flush breakdown");
 
         Ok(())
     }

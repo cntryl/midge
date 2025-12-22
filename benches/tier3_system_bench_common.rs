@@ -323,6 +323,10 @@ pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<MidgeEngine
 
 /// Recursively copy a directory tree from `src` to `dst`. Creates `dst` if needed.
 fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let start = std::time::Instant::now();
+    let mut bytes_copied: u64 = 0;
+    let mut files_copied: u64 = 0;
+
     if !dst.exists() {
         std::fs::create_dir_all(dst)?;
     }
@@ -334,9 +338,22 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
         if ty.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else {
-            std::fs::copy(&src_path, &dst_path)?;
+            let bytes = std::fs::copy(&src_path, &dst_path)?;
+            bytes_copied = bytes_copied.saturating_add(bytes);
+            files_copied += 1;
         }
     }
+
+    let elapsed = start.elapsed();
+    tracing::info!(
+        src = ?src,
+        dst = ?dst,
+        files = files_copied,
+        bytes = bytes_copied,
+        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+        "seed clone completed"
+    );
+
     Ok(())
 }
 
