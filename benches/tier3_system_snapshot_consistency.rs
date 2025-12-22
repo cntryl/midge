@@ -3,6 +3,11 @@
 
 // No Criterion benches remain in this file.
 
+#[allow(unused)]
+const _TIER3_GUARD: () = {
+    // Tier-3 benches must use bench_common::tier3 APIs and `tier3_bench!`/`tier3_bench_restore!`.
+};
+
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
 

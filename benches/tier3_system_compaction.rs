@@ -46,7 +46,6 @@ const BENCH_FLUSH: &str = "flush";
 const BENCH_COMPACT: &str = "compact";
 const BENCH_FLUSH_TP: &str = "flush_tp";
 const BENCH_INCR_COMPACT: &str = "incr_compact";
-const BENCH_FLUSH_CONCURRENT: &str = "flush_concurrent";
 
 /// Pre-generate immutable keys and values with configurable value size.
 /// Keys: "k" + 15-digit zero-padded number (16 bytes total)
@@ -133,7 +132,9 @@ fn bench_flush(c: &mut Criterion) {
         let kv = PrecomputedKV::new(num_keys, DEFAULT_VALUE_SIZE);
         let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
 
-        group.throughput(Throughput::Bytes(total_bytes));
+        // Use multiple single-shot samples (Criterion requires >=10 samples for reliable stats)
+    group.sample_size(10);
+    group.throughput(Throughput::Bytes(total_bytes));
 
         // Gate remote/cloud-backed modes: run LocalDisk only unless explicitly enabled
         let storage_modes: Vec<BenchStorageMode> =
@@ -145,46 +146,48 @@ fn bench_flush(c: &mut Criterion) {
 
         for mode in storage_modes {
             let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
+
+            // Build a minimal seed DB (empty) once per bench case. Each sample will clone this seed
+            // and the per-sample restore will populate it via a single WriteBatch before timing.
+            let seed_prefix = format!("{}_{}_seed", BENCH_FLUSH, bench_name.replace('/', "_"));
+            let seed_path = bench_common::create_seed_dir(&seed_prefix, |p| {
+                let build_cfg = BenchEngineConfig {
+                    storage_mode: mode,
+                    enable_compaction: false,
+                    ..Default::default()
+                };
+                let _engine = setup_engine_at_path(p, &build_cfg);
+                drop(_engine);
+            });
+
+            // Prepare a reusable batch payload for fast restore between samples
+            use cntryl_midge::engine::api::WriteBatch;
+            let mut template_batch = WriteBatch::new();
+            for (k, v) in kv.keys.iter().zip(kv.values.iter()) {
+                template_batch.put(k.clone(), v.clone());
+            }
+
             group.bench_with_input(
                 BenchmarkId::new(BENCH_FLUSH, &bench_name),
                 &(num_keys, mode),
                 |b, &(_size, mode)| {
-                    // Setup engine ONCE per benchmark case
-                    let mut cfg = BenchEngineConfig {
+                    let reopen_cfg = BenchEngineConfig {
                         storage_mode: mode,
                         enable_compaction: false,
                         ..Default::default()
                     };
-                    // Increase batch bytes threshold for bench (1MB)
-                    cfg = cfg.with_wal_batch_config(cntryl_midge::wal::policy::BatchConfig {
-                        max_delay_ms: 200,
-                        max_bytes: 1024 * 1024,
-                    });
-                    let engine = setup_engine(BENCH_FLUSH, &cfg);
-                    let _cf = engine.default_column_family();
 
-                    // Prepare a reusable batch payload for fast reloads between samples
-                    use cntryl_midge::engine::api::WriteBatch;
-                    let mut template_batch = WriteBatch::new();
-                    for (k, v) in kv.keys.iter().zip(kv.values.iter()) {
-                        template_batch.put(k.clone(), v.clone());
-                    }
-
-                    // Single-shot pattern: each closure invocation performs exactly one reload + one timed flush
-                    // Criterion will call this closure multiple times to collect samples; we do not loop here.
-                    b.iter_custom(|_iters| {
-                        use std::time::Instant;
-
-                        // Restore pre-flush state: reload via a single write_batch (outside timed window)
-                        engine
-                            .write_batch(&template_batch)
-                            .expect("write_batch failed");
-
-                        // Timed operation: exactly one flush call
-                        let start = Instant::now();
+                    // Use typed Tier-3 harness that enforces single-shot semantics
+                let case = bench_common::tier3::Tier3RestoreCase::new(seed_path.clone(), reopen_cfg);
+                tier3_bench_restore!(b, case,
+                    |engine| {
+                        let wb = template_batch.clone();
+                        engine.write_batch(&wb).expect("write_batch failed");
+                    },
+                    move |engine| {
                         engine.flush().expect("flush failed");
-                        start.elapsed()
-                    });
+                    }
+                );
                 },
             );
         }
@@ -197,8 +200,8 @@ fn bench_compact_all(c: &mut Criterion) {
     use std::time::Duration;
     let mut group = c.benchmark_group("system_compact");
     group.warm_up_time(Duration::from_millis(1));
+    // Tier-3: use multiple single-shot samples (Criterion enforces a min sample size)
     group.sample_size(10);
-    group.measurement_time(Duration::from_secs(1));
 
     // Reduced key counts for faster runs; LocalDisk-only for larger
     for &num_keys in &[10_000, 15_000] {
@@ -208,15 +211,13 @@ fn bench_compact_all(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(total_bytes));
 
+        // Prebuild seeds for all applicable modes to avoid repeated on-disk work
+        let mut seeds: Vec<(BenchStorageMode, std::path::PathBuf)> = Vec::new();
         for mode in DURABLE_STORAGE_MODES {
-            // LocalDisk only for larger workload to avoid cloud overhead
             if num_keys > 10_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
                 continue;
             }
             let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
-
-            // Build a deterministic on-disk seed that represents the pre-compaction SST layout.
-            // We create multiple flushed batches so the seed contains several SST files.
             let seed_prefix = format!("{}_{}_seed", BENCH_COMPACT, bench_name.replace('/', "_"));
             let seed_path = bench_common::create_seed_dir(&seed_prefix, |p| {
                 // Use a builder config with compaction disabled so SSTs remain as-written
@@ -249,10 +250,15 @@ fn bench_compact_all(c: &mut Criterion) {
                 // Drop engine to release files
                 drop(engine);
             });
+            seeds.push((mode, seed_path));
+        }
 
+        // Register benches using the prebuilt seeds
+        for (mode, seed_path) in seeds.into_iter() {
+            let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
             group.bench_with_input(
                 BenchmarkId::new(BENCH_COMPACT, &bench_name),
-                &(num_keys, mode),
+                &(num_keys, mode.clone()),
                 |b, &(_size, mode)| {
                     // Reopen the seed per-sample and measure a single compact_all invocation
                     let reopen_cfg = BenchEngineConfig {
@@ -262,10 +268,10 @@ fn bench_compact_all(c: &mut Criterion) {
                         ..Default::default()
                     };
 
-                    b.iter_custom(|_iters| {
-                        bench_common::run_single_shot_from_seed(&seed_path, &reopen_cfg, |engine| {
-                            engine.compact_all().expect("compact_all failed");
-                        })
+                    let seed_path = seed_path.clone();
+                    let case = bench_common::tier3::Tier3Case::from_seed(seed_path.clone(), reopen_cfg);
+                    tier3_bench!(b, case, move |engine| {
+                        engine.compact_all().expect("compact_all failed");
                     });
                 },
             );
@@ -279,8 +285,8 @@ fn bench_flush_throughput(c: &mut Criterion) {
     use std::time::Duration;
     let mut group = c.benchmark_group("system_flush_throughput");
     group.warm_up_time(Duration::from_millis(1));
+    // Tier-3: use multiple single-shot samples (Criterion enforces a min sample size)
     group.sample_size(10);
-    group.measurement_time(Duration::from_secs(1));
 
     // Reduced to keep iterations fast while still measuring throughput accurately
     let num_keys = 5_000;
@@ -292,37 +298,53 @@ fn bench_flush_throughput(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(total_bytes));
 
+        // Prebuild seeds for modes to ensure per-sample isolation
+        let mut seeds: Vec<(BenchStorageMode, std::path::PathBuf)> = Vec::new();
         for mode in DURABLE_STORAGE_MODES {
             let bench_name = format!("{}B_values/{}", value_size, mode.as_str());
+            let seed_prefix = format!("{}_{}_seed", BENCH_FLUSH_TP, bench_name.replace('/', "_"));
+            let seed_path = bench_common::create_seed_dir(&seed_prefix, |p| {
+                let build_cfg = BenchEngineConfig {
+                    storage_mode: mode,
+                    enable_compaction: false,
+                    ..Default::default()
+                };
+                let _engine = setup_engine_at_path(p, &build_cfg);
+                drop(_engine);
+            });
+            seeds.push((mode, seed_path));
+        }
+
+        for (mode, seed_path) in seeds.into_iter() {
+            let bench_name = format!("{}B_values/{}", value_size, mode.as_str());
+            // Prepare per-mode template batch
+            use cntryl_midge::engine::api::WriteBatch;
+            let mut template_batch = WriteBatch::new();
+            for (k, v) in kv.keys.iter().zip(kv.values.iter()) {
+                template_batch.put(k.clone(), v.clone());
+            }
+
+            let seed_path = seed_path.clone();
             group.bench_with_input(
                 BenchmarkId::new(BENCH_FLUSH_TP, &bench_name),
-                &(value_size, mode),
+                &(value_size, mode.clone()),
                 |b, &(_vs, mode)| {
-                    // Setup engine once and create template batch for fast reloads
-                    let engine = setup_engine(
-                        BENCH_FLUSH_TP,
-                        &BenchEngineConfig {
-                            storage_mode: mode,
-                            enable_compaction: false,
-                            ..Default::default()
-                        },
-                    );
-                    use cntryl_midge::engine::api::WriteBatch;
-                    let mut template_batch = WriteBatch::new();
-                    for (k, v) in kv.keys.iter().zip(kv.values.iter()) {
-                        template_batch.put(k.clone(), v.clone());
-                    }
+                    let reopen_cfg = BenchEngineConfig {
+                        storage_mode: mode,
+                        enable_compaction: false,
+                        ..Default::default()
+                    };
 
-                    // Single-shot: restore state then perform exactly one timed flush
-                    b.iter_custom(|_iters| {
-                        use std::time::Instant;
-                        engine
-                            .write_batch(&template_batch)
-                            .expect("write_batch failed");
-                        let start = Instant::now();
-                        engine.flush().expect("flush failed");
-                        start.elapsed()
-                    });
+                    let case = bench_common::tier3::Tier3RestoreCase::new(seed_path.clone(), reopen_cfg);
+                    tier3_bench_restore!(b, case,
+                        |engine| {
+                            let wb = template_batch.clone();
+                            engine.write_batch(&wb).expect("write_batch failed");
+                        },
+                        move |engine| {
+                            engine.flush().expect("flush failed");
+                        }
+                    );
                 },
             );
         }
@@ -335,8 +357,7 @@ fn bench_incremental_compact(c: &mut Criterion) {
     use std::time::Duration;
     let mut group = c.benchmark_group("system_incremental_compact");
     group.warm_up_time(Duration::from_millis(1));
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(1);
 
     // Reduced to keep iterations under ~2s while still testing multi-batch compaction
     let num_keys_per_batch = 2_000;
@@ -348,7 +369,29 @@ fn bench_incremental_compact(c: &mut Criterion) {
 
     group.throughput(Throughput::Bytes(total_bytes));
 
+    // Prebuild seeds for modes to avoid repeated seed creation
+    let mut seeds: Vec<(BenchStorageMode, std::path::PathBuf)> = Vec::new();
     for mode in DURABLE_STORAGE_MODES {
+        let bench_name = format!(
+            "{}batches_x_{}keys/{}",
+            num_batches,
+            num_keys_per_batch,
+            mode.as_str()
+        );
+        let seed_prefix = format!("{}_seed_{}", BENCH_INCR_COMPACT, bench_name.replace('/', "_"));
+        let seed_path = bench_common::create_seed_dir(&seed_prefix, |p| {
+            let build_cfg = BenchEngineConfig {
+                storage_mode: mode,
+                enable_compaction: false,
+                ..Default::default()
+            };
+            let _engine = setup_engine_at_path(p, &build_cfg);
+            drop(_engine);
+        });
+        seeds.push((mode, seed_path));
+    }
+
+    for (mode, seed_path) in seeds.into_iter() {
         let bench_name = format!(
             "{}batches_x_{}keys/{}",
             num_batches,
@@ -359,23 +402,6 @@ fn bench_incremental_compact(c: &mut Criterion) {
             BenchmarkId::new(BENCH_INCR_COMPACT, &bench_name),
             &mode,
             |b, &mode| {
-                // Create a small empty seed DB; we'll clone it per-sample and then create
-                // multiple L0 files as the per-sample "restore" step (outside timed window).
-                let seed_prefix = format!(
-                    "{}_seed_{}",
-                    BENCH_INCR_COMPACT,
-                    bench_name.replace('/', "_")
-                );
-                let seed_path = bench_common::create_seed_dir(&seed_prefix, |p| {
-                    let build_cfg = BenchEngineConfig {
-                        storage_mode: mode,
-                        enable_compaction: false,
-                        ..Default::default()
-                    };
-                    let _engine = setup_engine_at_path(p, &build_cfg);
-                    drop(_engine);
-                });
-
                 // Prepare per-batch template WriteBatches to create multiple L0 files quickly
                 use cntryl_midge::engine::api::WriteBatch;
                 let mut batch_templates: Vec<WriteBatch> = Vec::with_capacity(num_batches);
@@ -397,6 +423,7 @@ fn bench_incremental_compact(c: &mut Criterion) {
                     ..Default::default()
                 };
 
+                let seed_path = seed_path.clone();
                 b.iter_custom(|_iters| {
                     bench_common::run_single_shot_with_restore(
                         &seed_path,
@@ -420,104 +447,10 @@ fn bench_incremental_compact(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark flush under concurrent write load.
-/// Measures flush latency when other threads are actively writing.
-fn bench_flush_concurrent(c: &mut Criterion) {
-    use std::time::Duration;
-    let mut group = c.benchmark_group("system_flush_concurrent");
-    group.warm_up_time(Duration::from_millis(1));
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(1));
-
-    let num_keys = 5_000;
-    let concurrent_writers = 2;
-    let writes_per_writer = 500;
-
-    // Precompute data
-    let kv = PrecomputedKV::new(num_keys, DEFAULT_VALUE_SIZE);
-    let writer_keys: Vec<Vec<Bytes>> = (0..concurrent_writers)
-        .map(|w| {
-            let base = num_keys + w * writes_per_writer;
-            (base..(base + writes_per_writer))
-                .map(|i| {
-                    let mut key = vec![b'w'; KEY_SIZE];
-                    let mut n = i;
-                    for j in (1..KEY_SIZE).rev() {
-                        key[j] = b'0' + (n % 10) as u8;
-                        n /= 10;
-                    }
-                    Bytes::from(key)
-                })
-                .collect()
-        })
-        .collect();
-    let writer_value = Bytes::from(vec![b'v'; DEFAULT_VALUE_SIZE]);
-    let total_bytes: u64 = (num_keys as u64) * (KEY_SIZE as u64 + DEFAULT_VALUE_SIZE as u64);
-
-    group.throughput(Throughput::Bytes(total_bytes));
-
-    // Only test disk mode for concurrent scenarios to keep runtime reasonable
-    let mode = BenchStorageMode::LocalDisk;
-    group.bench_with_input(
-        BenchmarkId::new(BENCH_FLUSH_CONCURRENT, "concurrent_2writers"),
-        &mode,
-        |b, &mode| {
-            let kv_ref = &kv;
-            let writer_keys_ref = &writer_keys;
-            let writer_value_ref = &writer_value;
-
-            // Setup engine once and preload base data via single batch
-            let engine = Arc::new(setup_engine(
-                BENCH_FLUSH_CONCURRENT,
-                &BenchEngineConfig {
-                    storage_mode: mode,
-                    enable_compaction: false,
-                    ..Default::default()
-                },
-            ));
-            use cntryl_midge::engine::api::WriteBatch;
-            let mut base_batch = WriteBatch::new();
-            for (k, v) in kv_ref.keys.iter().zip(kv_ref.values.iter()) {
-                base_batch.put(k.clone(), v.clone());
-            }
-            engine.write_batch(&base_batch).expect("write_batch failed");
-
-            // Prepare writer batches (each writer will submit a single small batch)
-            let writer_batches: Vec<WriteBatch> = writer_keys_ref
-                .iter()
-                .map(|w_keys| {
-                    let mut wb = WriteBatch::new();
-                    for k in w_keys.iter() {
-                        wb.put(k.clone(), writer_value_ref.clone());
-                    }
-                    wb
-                })
-                .collect();
-
-            b.iter(|| {
-                // Spawn concurrent writers while flushing
-                std::thread::scope(|s| {
-                    for wb in &writer_batches {
-                        let engine_ref = &engine;
-                        let wb_clone = wb.clone();
-                        s.spawn(move || {
-                            let _ = engine_ref.write_batch(&wb_clone);
-                        });
-                    }
-                    // Flush in main thread (timed operation)
-                    engine.flush().expect("flush failed");
-                    black_box(());
-                });
-            });
-        },
-    );
-
-    group.finish();
-}
 
 criterion_group! {
     name = tier3_system_compaction;
     config = criterion_config_for_tier(BenchTier::Tier3System);
-    targets = bench_flush, bench_compact_all, bench_flush_throughput, bench_incremental_compact, bench_flush_concurrent
+    targets = bench_flush, bench_compact_all, bench_flush_throughput, bench_incremental_compact
 }
 criterion_main!(tier3_system_compaction);

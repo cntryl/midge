@@ -17,7 +17,10 @@
 //! - Uses unique paths to avoid cross-test interference
 //! - Throughput measured in total bytes
 //! - Uses DURABLE_STORAGE_MODES since LSM ops require persistence
-
+#[allow(unused)]
+const _TIER3_GUARD: () = {
+    // Tier-3 benches must use bench_common::tier3 APIs and `tier3_bench!`/`tier3_bench_restore!`.
+};
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
 

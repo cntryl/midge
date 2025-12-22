@@ -165,7 +165,7 @@ pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] = [BenchStorageMode::Loca
 // ============================================================================
 
 /// Configuration for benchmark engine setup.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct BenchEngineConfig {
     pub storage_mode: BenchStorageMode,
@@ -340,6 +340,85 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
     Ok(())
 }
 
+/// Tier-3 harness helpers (typed) 🛡️
+///
+/// Use `bench_common::tier3::Tier3Case` or `bench_common::tier3::Tier3RestoreCase`
+/// plus the `tier3_bench!` macro for all Tier-3 system benches. These types
+/// enforce single-shot, single-timed-op semantics at the type level so bench
+/// authors cannot reuse engines, loop the timed operation, or accidentally
+/// include setup in the timed section.
+pub mod tier3 {
+    use super::BenchEngineConfig;
+    use cntryl_midge::MidgeEngine;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    /// Tier-3 single-shot case backed by a seed directory.
+    /// Ownership + `FnOnce` prevents reuse and looping of the timed body.
+    #[derive(Clone, Debug)]
+    pub struct Tier3Case {
+        seed_path: PathBuf,
+        config: BenchEngineConfig,
+    }
+
+    impl Tier3Case {
+        pub fn from_seed(seed_path: PathBuf, config: BenchEngineConfig) -> Self {
+            Self { seed_path, config }
+        }
+
+        pub fn run<F>(self, f: F) -> Duration
+        where
+            F: FnOnce(MidgeEngine),
+        {
+            super::run_single_shot_from_seed(&self.seed_path, &self.config, f)
+        }
+    }
+
+    /// A Tier-3 case that explicitly splits restore (pre-timed) and timed phases.
+    #[derive(Clone, Debug)]
+    pub struct Tier3RestoreCase {
+        seed_path: PathBuf,
+        config: BenchEngineConfig,
+    }
+
+    impl Tier3RestoreCase {
+        pub fn new(seed_path: PathBuf, config: BenchEngineConfig) -> Self {
+            Self { seed_path, config }
+        }
+
+        pub fn run<R, T>(self, restore: R, timed: T) -> Duration
+        where
+            R: FnOnce(&MidgeEngine),
+            T: FnOnce(&MidgeEngine),
+        {
+            super::run_single_shot_with_restore(&self.seed_path, &self.config, restore, timed)
+        }
+    }
+
+    /// Macro to enforce the Tier-3 contract and prevent calling `b.iter` directly.
+    /// Usage: `tier3_bench!(b, case, |engine| { ... })`
+    #[macro_export]
+    macro_rules! tier3_bench {
+        ($b:expr, $case:expr, $body:expr) => {
+            $b.iter_custom(|_| {
+                let case = $case.clone();
+                case.run($body)
+            })
+        };
+    }
+
+    /// Variant that performs a restore step (pre-timed) then a single timed op.
+    #[macro_export]
+    macro_rules! tier3_bench_restore {
+        ($b:expr, $case:expr, $restore:expr, $timed:expr) => {
+            $b.iter_custom(|_| {
+                let case = $case.clone();
+                case.run($restore, $timed)
+            })
+        };
+    }
+}
+
 /// Create an on-disk "seed" directory by invoking a builder closure once.
 /// The builder receives the path where it should materialize the database. Use
 /// `setup_engine_at_path` inside the builder to construct the desired SST layout.
@@ -450,7 +529,10 @@ macro_rules! for_each_storage_mode {
 #[cfg(test)]
 #[allow(unused_imports)]
 mod tests {
-    use super::{make_key, unique_bench_path, BenchStorageMode, KEY_SIZE};
+    use super::{
+        create_seed_dir, make_key, setup_engine_at_path, tier3, unique_bench_path,
+        BenchEngineConfig, BenchStorageMode, KEY_SIZE,
+    };
 
     #[test]
     fn test_unique_paths_are_unique() {
@@ -470,5 +552,44 @@ mod tests {
     fn test_storage_mode_display() {
         assert_eq!(format!("{}", BenchStorageMode::Memory), "memory");
         assert_eq!(format!("{}", BenchStorageMode::LocalDisk), "disk");
+    }
+
+    #[test]
+    fn test_tier3_case_run() {
+        let seed = create_seed_dir("test_tier3_case", |p| {
+            let cfg = BenchEngineConfig::default();
+            let _ = setup_engine_at_path(p, &cfg);
+        });
+
+        let case = tier3::Tier3Case::from_seed(seed, BenchEngineConfig::default());
+        // Should run without panicking.
+        let _d = case.run(|_engine| {});
+    }
+
+    #[test]
+    fn test_tier3_restore_case_phases() {
+        use std::sync::{Arc, Mutex};
+        let seed = create_seed_dir("test_tier3_restore", |p| {
+            let cfg = BenchEngineConfig::default();
+            let _ = setup_engine_at_path(p, &cfg);
+        });
+
+        let case = tier3::Tier3RestoreCase::new(seed, BenchEngineConfig::default());
+        let seq = Arc::new(Mutex::new(Vec::new()));
+        // Clone handles for each closure so `seq` remains available after `run`.
+        let seq_restore = seq.clone();
+        let seq_timed = seq.clone();
+
+        let _d = case.run(
+            move |_engine| {
+                seq_restore.lock().unwrap().push("restore");
+            },
+            move |_engine| {
+                seq_timed.lock().unwrap().push("timed");
+            },
+        );
+
+        let captured = seq.lock().unwrap().clone();
+        assert_eq!(captured, vec!["restore", "timed"]);
     }
 }
