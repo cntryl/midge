@@ -61,7 +61,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # OpenTelemetry (Observability)
 opentelemetry = { version = "0.20", optional = true }
-opentelemetry-otlp = { version = "0.13", optional = true }
+opentelemetry-otlp = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.21", optional = true }
 
 # System Utilities
