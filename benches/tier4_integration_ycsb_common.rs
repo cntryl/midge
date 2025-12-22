@@ -19,11 +19,54 @@ use tempfile::TempDir;
 // ============================================================================
 
 #[allow(dead_code)]
-pub const OPS_PER_ITER: usize = 2_000; // Reduced from 5000 for faster iterations
+pub const OPS_PER_ITER: usize = 1_000; // Fewer iterations; prefer larger dataset over many iterations
 #[allow(dead_code)]
-pub const RECORD_COUNT: usize = 10_000; // Reduced from 25000 for faster load
+// Increase the record count so total dataset size >> block cache (default block cache ~128MB)
+// RECORD_COUNT * VALUE_SIZE should be significantly larger than cache to force I/O pressure.
+pub const RECORD_COUNT: usize = 200_000; // ~200MB dataset at VALUE_SIZE=1_000
 pub const VALUE_SIZE: usize = 1_000;
-pub const BATCH_SIZE: usize = 128; // Bumped from 100 for fewer flushes
+pub const BATCH_SIZE: usize = 1024; // Larger batches for efficient bulk load
+
+// Load statistics reported separately from RUN phase. We expose a simple struct and a
+// measurement helper so benches can report LOAD throughput/latency independently.
+#[allow(dead_code)]
+pub struct LoadStats {
+    pub records: usize,
+    pub duration_secs: f64,
+    pub throughput_rps: f64,
+    pub mean_latency_us: f64,
+}
+
+#[allow(dead_code)]
+pub fn load_full_dataset_with_stats(engine: &MidgeEngine) -> LoadStats {
+    let start = std::time::Instant::now();
+    let keys = PREGEN_KEYS.get().expect("call init_ycsb_globals()");
+    let vals = PREGEN_VALUES.get().expect("call init_ycsb_globals()");
+
+    load_data_batched(engine, keys, vals, BATCH_SIZE);
+
+    let duration = start.elapsed();
+    let duration_secs = duration.as_secs_f64();
+    let records = keys.len();
+    let throughput = records as f64 / duration_secs;
+    let mean_latency_us = (duration_secs * 1_000_000.0) / (records as f64);
+
+    LoadStats {
+        records,
+        duration_secs,
+        throughput_rps: throughput,
+        mean_latency_us,
+    }
+}
+
+#[allow(dead_code)]
+pub fn load_full_dataset(engine: &MidgeEngine) {
+    // Deprecated for measurement-aware benches; keep wrapper for compatibility and
+    // print a brief LOAD summary for visibility.
+    let stats = load_full_dataset_with_stats(engine);
+    eprintln!("LOAD STATS: records={} duration_s={:.3} throughput_rec_s={:.0} mean_latency_us={:.3}",
+        stats.records, stats.duration_secs, stats.throughput_rps, stats.mean_latency_us);
+}
 
 #[allow(dead_code)]
 pub const THREAD_COUNTS: [usize; 3] = [1, 2, 8];
@@ -144,14 +187,9 @@ pub fn make_thread_rng(thread_id: usize, workload_seed: u64) -> StdRng {
 // Batched Load
 // ============================================================================
 
-/// Load the full pre-generated dataset (RECORD_COUNT records) into the engine.
-#[allow(dead_code)]
-pub fn load_full_dataset(engine: &MidgeEngine) {
-    let keys = PREGEN_KEYS.get().expect("call init_ycsb_globals()");
-    let vals = PREGEN_VALUES.get().expect("call init_ycsb_globals()");
-    load_data_batched(engine, keys, vals, BATCH_SIZE);
-}
-
+// Load wrapper left intentionally minimal here; public API (load_full_dataset)
+// is already implemented higher in the file and prints a brief summary for
+// compatibility with existing benches.
 /// Generic batched loader: no RNG, no allocations in hot loop.
 pub fn load_data_batched(
     engine: &MidgeEngine,

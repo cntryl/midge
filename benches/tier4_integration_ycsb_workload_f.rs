@@ -127,36 +127,32 @@ fn run_workload_f_concurrent(
 
     let mut rng = make_thread_rng(thread_id, 0xF0F0_F0F0);
     let mut hist = Histogram::<u64>::new(3).unwrap();
-    let mut batch = WriteBatch::new();
 
     for _ in 0..operations_per_thread {
         let key_idx = zipf.next(&mut rng);
         let key = &keys[key_idx];
 
         let cf = &cf_list[rng.gen_range(0..cf_count)];
-        let cf_id = cf.id();
-
-        let new_val_idx = rng.gen_range(0..values.len());
-        let new_val = &values[new_val_idx];
 
         let start = Instant::now();
 
-        let _existing = engine.get(cf, key).unwrap();
-        black_box(&_existing);
+        let existing = engine.get(cf, key).unwrap();
+        black_box(&existing);
 
-        batch.put_cf(cf_id, key.clone(), new_val.clone());
+        let new_val = if let Some(v) = existing {
+            let mut buf = v.to_vec();
+            if !buf.is_empty() {
+                buf[0] = buf[0].wrapping_add(1);
+            }
+            bytes::Bytes::from(buf)
+        } else {
+            values[key_idx % values.len()].clone()
+        };
 
-        if batch.len() >= BATCH_SIZE {
-            engine.write_batch(&batch).unwrap();
-            batch.clear();
-        }
+        engine.put(cf, key.as_ref(), new_val.as_ref()).unwrap();
 
         let elapsed_us = start.elapsed().as_micros() as u64;
         let _ = hist.record(elapsed_us.max(1));
-    }
-
-    if !batch.is_empty() {
-        engine.write_batch(&batch).unwrap();
     }
 
     LatencyStats {
@@ -210,6 +206,14 @@ fn bench_workload_f(c: &mut Criterion) {
             // Pre-load full dataset once per engine
             load_full_dataset(&engine);
 
+            // Single deterministic RUN to get RMW RUN stats (separate from LOAD)
+            let start = Instant::now();
+            let run_stats = run_workload_f(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count, 0xDEAD_BEEF);
+            let dur = start.elapsed();
+            let throughput = (OPS_PER_ITER as f64) / dur.as_secs_f64();
+            eprintln!("RUN STATS (single-run): scenario={} cf={} ops={} duration_s={:.3} throughput_op_s={:.0} p50={} p99={} p99_9={}",
+                      scenario, cf_count, OPS_PER_ITER, dur.as_secs_f64(), throughput, run_stats.p50, run_stats.p99, run_stats.p99_9);
+
             group.bench_with_input(
                 BenchmarkId::new(format!("{scenario}_cf{cf_count}"), "rmw"),
                 &cf_count,
@@ -240,6 +244,26 @@ fn bench_workload_f(c: &mut Criterion) {
             let engine = Arc::new(engine);
             let total_ops = OPS_PER_ITER;
             let ops_per_thread = total_ops / threads;
+
+            // Single concurrent-run to capture throughput and per-thread latency summaries
+            let start = Instant::now();
+            let handles: Vec<_> = (0..threads)
+                .map(|tid| {
+                    let engine = Arc::clone(&engine);
+                    thread::spawn(move || {
+                        run_workload_f_concurrent(engine, ops_per_thread, RECORD_COUNT, tid, cf_count)
+                    })
+                })
+                .collect();
+
+            let thread_stats: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let dur = start.elapsed();
+            let throughput = (total_ops as f64) / dur.as_secs_f64();
+            let mean_p50: f64 = thread_stats.iter().map(|s| s.p50 as f64).sum::<f64>() / (threads as f64);
+            let mean_p99: f64 = thread_stats.iter().map(|s| s.p99 as f64).sum::<f64>() / (threads as f64);
+            let mean_p999: f64 = thread_stats.iter().map(|s| s.p99_9 as f64).sum::<f64>() / (threads as f64);
+            eprintln!("RUN STATS (concurrent single-run): cf={} threads={} ops={} duration_s={:.3} throughput_op_s={:.0} avg_p50={} avg_p99={} avg_p99_9={}",
+                      cf_count, threads, total_ops, dur.as_secs_f64(), throughput, mean_p50, mean_p99, mean_p999);
 
             group.bench_with_input(
                 BenchmarkId::new(format!("concurrent_cf{cf_count}"), threads),
