@@ -2,9 +2,9 @@
 """Generate a Test & Bench Inventory for the repository.
 
 Usage:
-  python scripts/generate_inventory.py [--root PATH] [--output inventory.generated.md] [--replace]
+  python scripts/generate_inventory.py [--root PATH] [--output inventory.md] [--replace]
 
-By default writes `inventory.generated.md` in the repo root.
+By default writes `inventory.md` in the repo root.
 """
 
 from pathlib import Path
@@ -105,7 +105,7 @@ def render_md(src_tests, integration_tests, benches, root):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=".", help="Repository root")
-    parser.add_argument("--output", default="inventory.generated.md")
+    parser.add_argument("--output", default="inventory.md")
     parser.add_argument("--replace", action="store_true", help="Replace existing inventory.md")
     args = parser.parse_args()
 
