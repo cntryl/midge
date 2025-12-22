@@ -355,12 +355,14 @@ pub mod tier3 {
 
     /// Tier-3 single-shot case backed by a seed directory.
     /// Ownership + `FnOnce` prevents reuse and looping of the timed body.
+    #[allow(dead_code)]
     #[derive(Clone, Debug)]
     pub struct Tier3Case {
         seed_path: PathBuf,
         config: BenchEngineConfig,
     }
 
+    #[allow(dead_code)]
     impl Tier3Case {
         pub fn from_seed(seed_path: PathBuf, config: BenchEngineConfig) -> Self {
             Self { seed_path, config }
@@ -375,12 +377,14 @@ pub mod tier3 {
     }
 
     /// A Tier-3 case that explicitly splits restore (pre-timed) and timed phases.
+    #[allow(dead_code)]
     #[derive(Clone, Debug)]
     pub struct Tier3RestoreCase {
         seed_path: PathBuf,
         config: BenchEngineConfig,
     }
 
+    #[allow(dead_code)]
     impl Tier3RestoreCase {
         pub fn new(seed_path: PathBuf, config: BenchEngineConfig) -> Self {
             Self { seed_path, config }

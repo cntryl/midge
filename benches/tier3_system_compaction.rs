@@ -27,14 +27,12 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    setup_engine, setup_engine_at_path, BenchEngineConfig, BenchStorageMode, DURABLE_STORAGE_MODES,
+    setup_engine_at_path, BenchEngineConfig, BenchStorageMode, DURABLE_STORAGE_MODES,
 };
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use criterion_helper::{criterion_config_for_tier, BenchTier};
-use std::hint::black_box;
-use std::sync::Arc;
 
 /// Key size in bytes (fixed for consistent measurements)
 const KEY_SIZE: usize = 16;
@@ -258,7 +256,7 @@ fn bench_compact_all(c: &mut Criterion) {
             let bench_name = format!("{}keys/{}", num_keys, mode.as_str());
             group.bench_with_input(
                 BenchmarkId::new(BENCH_COMPACT, &bench_name),
-                &(num_keys, mode.clone()),
+                &(num_keys, mode),
                 |b, &(_size, mode)| {
                     // Reopen the seed per-sample and measure a single compact_all invocation
                     let reopen_cfg = BenchEngineConfig {
@@ -327,7 +325,7 @@ fn bench_flush_throughput(c: &mut Criterion) {
             let seed_path = seed_path.clone();
             group.bench_with_input(
                 BenchmarkId::new(BENCH_FLUSH_TP, &bench_name),
-                &(value_size, mode.clone()),
+                &(value_size, mode),
                 |b, &(_vs, mode)| {
                     let reopen_cfg = BenchEngineConfig {
                         storage_mode: mode,
