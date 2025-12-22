@@ -43,45 +43,8 @@ fn init_pregen() {
     });
 }
 
-// Zipfian generator (portable copy from bench)
-struct ZipfianGenerator {
-    items: usize,
-    theta: f64,
-    zeta_n: f64,
-    alpha: f64,
-    eta: f64,
-}
+use super::common::ZipfianGenerator;
 
-impl ZipfianGenerator {
-    fn new(items: usize, theta: f64) -> Self {
-        let zeta_n = Self::zeta(items, theta);
-        let zeta_2 = Self::zeta(2, theta);
-        let alpha = 1.0 / (1.0 - theta);
-        let eta = (1.0 - (2.0 / items as f64).powf(1.0 - theta)) / (1.0 - (zeta_2 / zeta_n));
-        Self { items, theta, zeta_n, alpha, eta }
-    }
-
-    fn zeta(n: usize, theta: f64) -> f64 {
-        (1..=n).map(|i| 1.0 / (i as f64).powf(theta)).sum()
-    }
-
-    fn next(&self, rng: &mut StdRng) -> usize {
-        let r = rng.next_u64();
-        let u: f64 = (r as f64) / 18446744073709551616.0; // 2^64
-        let uz = u * self.zeta_n;
-
-        if uz < 1.0 { return 0; }
-        if uz < 1.0 + 0.5_f64.powf(self.theta) { return 1; }
-
-        let v = self.eta * u - (self.eta - 1.0);
-        let idx = (self.items as f64 * v.powf(self.alpha)) as usize;
-        idx % self.items
-    }
-}
-
-fn init_zipf() -> ZipfianGenerator {
-    ZipfianGenerator::new(RECORD_COUNT, 0.99)
-}
 
 fn make_thread_rng(thread_id: usize, workload_seed: u64) -> StdRng {
     StdRng::seed_from_u64(workload_seed ^ ((thread_id as u64) << 32))
@@ -103,7 +66,7 @@ fn run_thread_workload(
     let cf_list = engine.list_column_families().unwrap_or_default();
     let mut rng = make_thread_rng(thread_id, 0xCAFEBABE);
 
-    let zipf = init_zipf();
+    let mut zipf = ZipfianGenerator::new(RECORD_COUNT, 0.99);
     let keys = PREGEN_KEYS.get().expect("pregen not initialized");
     let values = PREGEN_VALUES.get().expect("pregen not initialized");
 
