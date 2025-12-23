@@ -223,7 +223,7 @@ path = "benches/tier1_hotpath_wal.rs"
 harness = false
 
 [[bin]]
-name = "stress"
+name = "cargo-stress"
 path = "stress/main.rs"
 
 [[bench]]
