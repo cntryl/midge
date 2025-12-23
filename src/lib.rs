@@ -69,7 +69,7 @@ pub mod testkit;
 // ---------------------------------------------------------------------------
 
 // Common types
-pub use common::{MidgeError, MidgeResult};
+pub use common::{AckPolicy, MidgeError, MidgeResult};
 
 // Main engine API
 pub use engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
@@ -160,6 +160,9 @@ pub mod prelude {
         MergeOperator,
         // Engine
         MidgeEngine,
+
+        // Caller-visible semantics
+        AckPolicy,
         // Errors
         MidgeError,
         MidgeResult,

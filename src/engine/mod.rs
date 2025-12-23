@@ -222,6 +222,14 @@ impl MidgeEngine {
 
     /// Open a database with test configuration options
     pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
+        if matches!(opts.ack_policy, crate::common::AckPolicy::AfterCloudDurable)
+            && !matches!(opts.storage_mode, crate::testkit::StorageMode::CloudBacked { .. })
+        {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "AckPolicy::AfterCloudDurable requires StorageMode::CloudBacked".to_string(),
+            ));
+        }
+
         let (db_path, memory_mode) = match &opts.storage_mode {
             crate::testkit::StorageMode::Memory => {
                 // For memory mode, use a placeholder path that will never be touched
@@ -242,6 +250,9 @@ impl MidgeEngine {
         if let Some(batch_cfg) = opts.wal_batch_config {
             runtime_config.wal_batch_config = batch_cfg;
         }
+        // Caller-visible acknowledgment semantics.
+        runtime_config.write_ack_policy = opts.ack_policy;
+
         let mut state = match &opts.storage_mode {
             crate::testkit::StorageMode::CloudBacked { .. } => {
                 // Local cache is ephemeral; cloud WAL is the source of truth.

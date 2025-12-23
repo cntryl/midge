@@ -20,6 +20,7 @@ use super::actors::{
 use super::durability::{DurabilityCoordinator, DurabilityWaiter};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
+use crate::common::AckPolicy;
 use crate::sst::traits::SstReader;
 use crate::sst::Memtable;
 
@@ -48,6 +49,8 @@ pub struct EventLoop {
     /// Per-request router (oneshot channels)
     router: Arc<ResponseRouter>,
 
+    write_ack_policy: AckPolicy,
+
     /// One buffered message we pulled from the channel while draining writes.
     ///
     /// This preserves FIFO semantics when we opportunistically `try_recv()` to batch writes:
@@ -60,6 +63,43 @@ pub struct EventLoop {
 }
 
 impl EventLoop {
+    #[inline]
+    fn should_ack_immediately(&self, deferred: bool) -> bool {
+        if self.wal_actor.is_cloud_first() {
+            return matches!(self.write_ack_policy, AckPolicy::Immediate);
+        }
+
+        match self.write_ack_policy {
+            AckPolicy::Immediate => true,
+            AckPolicy::AfterLocalDurable => !deferred,
+            // Non-CloudFirst builds currently have no notion of cloud-durable writes.
+            // This is validated at open time for user-facing paths.
+            AckPolicy::AfterCloudDurable => !deferred,
+        }
+    }
+
+    #[inline]
+    fn maybe_queue_confirm_only_waiter(&self, deferred: bool, request_id: u64, is_batch: bool) {
+        // If we already waited for durability (deferred==false for local; or cloud-first with non-immediate ack)
+        // then the request will be confirmed at response time.
+        if !deferred {
+            return;
+        }
+
+        // Only queue confirm-only waiters when we are acknowledging before durability.
+        if !self.should_ack_immediately(deferred) {
+            return;
+        }
+
+        if is_batch {
+            self.durability
+                .queue_waiter(DurabilityWaiter::ConfirmWriteBatch { request_id });
+        } else {
+            self.durability
+                .queue_waiter(DurabilityWaiter::ConfirmWalAppend { request_id });
+        }
+    }
+
     pub(crate) fn new(
         state: RuntimeState,
         trace_enabled: bool,
@@ -114,6 +154,7 @@ impl EventLoop {
             trace_enabled,
             durability: DurabilityCoordinator::new(initial_durability_key, is_cloud_first),
             router,
+            write_ack_policy: config.write_ack_policy,
             pending_msg: None,
             worker_msg_tx,
         };
@@ -202,6 +243,12 @@ impl EventLoop {
                                         },
                                     );
                                 }
+                                DurabilityWaiter::ConfirmWalAppend { request_id } => {
+                                    self.state.confirm_sequences_at(
+                                        request_id,
+                                        self.state.wal.cloud_durable_seq,
+                                    );
+                                }
                                 DurabilityWaiter::WriteBatch {
                                     request_id,
                                     last_sequence,
@@ -219,6 +266,12 @@ impl EventLoop {
                                             last_sequence,
                                             op_count,
                                         },
+                                    );
+                                }
+                                DurabilityWaiter::ConfirmWriteBatch { request_id } => {
+                                    self.state.confirm_sequences_at(
+                                        request_id,
+                                        self.state.wal.cloud_durable_seq,
                                     );
                                 }
                                 DurabilityWaiter::Read {
@@ -279,7 +332,9 @@ impl EventLoop {
                 for w in waiters {
                     let request_id = match w {
                         DurabilityWaiter::WalAppend { request_id, .. }
+                        | DurabilityWaiter::ConfirmWalAppend { request_id }
                         | DurabilityWaiter::WriteBatch { request_id, .. }
+                        | DurabilityWaiter::ConfirmWriteBatch { request_id }
                         | DurabilityWaiter::Read { request_id, .. }
                         | DurabilityWaiter::RangeScan { request_id, .. } => request_id,
                     };
@@ -409,7 +464,18 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        false,
+                                    );
+                                } else {
+                                    // Already durable; confirm idempotency allocations now.
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {
@@ -454,7 +520,17 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        false,
+                                    );
+                                } else {
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {
@@ -489,7 +565,18 @@ impl EventLoop {
                         .append_batch(&mut self.state, request_id, ops)
                     {
                         Ok((last_sequence, op_count, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        true,
+                                    );
+                                } else {
+                                    self.state.pending_batch_min_seq = None;
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WriteBatchAppended {
@@ -589,6 +676,9 @@ impl EventLoop {
                                 },
                             );
                         }
+                        DurabilityWaiter::ConfirmWalAppend { request_id } => {
+                            self.state.confirm_sequences(request_id);
+                        }
                         DurabilityWaiter::WriteBatch {
                             request_id,
                             last_sequence,
@@ -606,6 +696,11 @@ impl EventLoop {
                                     op_count,
                                 },
                             );
+                        }
+                        DurabilityWaiter::ConfirmWriteBatch { request_id } => {
+                            // Batch has become durable - clear atomicity barrier
+                            self.state.pending_batch_min_seq = None;
+                            self.state.confirm_sequences(request_id);
                         }
                         DurabilityWaiter::Read {
                             request_id,
@@ -688,6 +783,7 @@ impl EventLoop {
                             request_id,
                             sequence,
                         } => {
+                            self.state.confirm_sequences(request_id);
                             self.respond(
                                 request_id,
                                 RuntimeResponse::WalAppended {
@@ -696,6 +792,9 @@ impl EventLoop {
                                 },
                             );
                         }
+                        DurabilityWaiter::ConfirmWalAppend { request_id } => {
+                            self.state.confirm_sequences(request_id);
+                        }
                         DurabilityWaiter::WriteBatch {
                             request_id,
                             last_sequence,
@@ -703,6 +802,7 @@ impl EventLoop {
                         } => {
                             // Batch has become durable - clear atomicity barrier
                             self.state.pending_batch_min_seq = None;
+                            self.state.confirm_sequences(request_id);
                             self.respond(
                                 request_id,
                                 RuntimeResponse::WriteBatchAppended {
@@ -711,6 +811,10 @@ impl EventLoop {
                                     op_count,
                                 },
                             );
+                        }
+                        DurabilityWaiter::ConfirmWriteBatch { request_id } => {
+                            self.state.pending_batch_min_seq = None;
+                            self.state.confirm_sequences(request_id);
                         }
                         DurabilityWaiter::Read {
                             request_id,
@@ -1183,14 +1287,24 @@ impl EventLoop {
                             .append_batch(&mut self.state, request_id, ops)
                         {
                             Ok((last_sequence, op_count, deferred)) => {
-                                if deferred {
-                                    self.durability.queue_waiter(DurabilityWaiter::WriteBatch {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                    });
-                                } else {
-                                    // Strict/CloudMirrored: completes immediately inside append_batch.
+                                if self.should_ack_immediately(deferred) {
+                                    if self.wal_actor.is_cloud_first() {
+                                        // Accepted but not yet cloud-durable; confirm later on CloudAck.
+                                        self.durability
+                                            .queue_waiter(DurabilityWaiter::ConfirmWriteBatch {
+                                                request_id,
+                                            });
+                                    } else if deferred {
+                                        self.maybe_queue_confirm_only_waiter(
+                                            deferred,
+                                            request_id,
+                                            true,
+                                        );
+                                    } else {
+                                        self.state.pending_batch_min_seq = None;
+                                        self.state.confirm_sequences(request_id);
+                                    }
+
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WriteBatchAppended {
@@ -1199,6 +1313,12 @@ impl EventLoop {
                                             op_count,
                                         },
                                     );
+                                } else {
+                                    self.durability.queue_waiter(DurabilityWaiter::WriteBatch {
+                                        request_id,
+                                        last_sequence,
+                                        op_count,
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -1419,7 +1539,23 @@ impl EventLoop {
                     );
                     match result {
                         Ok((seq, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if self.wal_actor.is_cloud_first() {
+                                    // Accepted but not yet cloud-durable; confirm later on CloudAck.
+                                    self.durability
+                                        .queue_waiter(DurabilityWaiter::ConfirmWalAppend {
+                                            request_id,
+                                        });
+                                } else if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        false,
+                                    );
+                                } else {
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {
@@ -1467,7 +1603,22 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if self.wal_actor.is_cloud_first() {
+                                    self.durability
+                                        .queue_waiter(DurabilityWaiter::ConfirmWalAppend {
+                                            request_id,
+                                        });
+                                } else if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        false,
+                                    );
+                                } else {
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {

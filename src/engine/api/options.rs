@@ -26,6 +26,8 @@
 
 use std::path::PathBuf;
 
+use crate::common::AckPolicy;
+
 /// Performance optimization goal.
 ///
 /// Determines the primary optimization target for derived parameters.
@@ -150,6 +152,11 @@ pub struct OpenOptions {
     /// Durability level
     pub durability: Durability,
 
+    /// Derived acknowledgment policy (internal).
+    ///
+    /// Users choose durability; the system derives acknowledgment semantics.
+    pub(crate) ack_policy: AckPolicy,
+
     /// Memory budget
     pub memory_budget: MemoryBudget,
 
@@ -200,6 +207,8 @@ impl OpenOptions {
             durability: Durability::default(),
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
+            // Defaults align with Durability::Steady.
+            ack_policy: AckPolicy::Immediate,
             // Temporary defaults until build() derives them
             block_size: 16 * 1024,
             memtable_size_limit: 64 * 1024 * 1024,
@@ -296,6 +305,15 @@ impl OpenOptions {
 
         // Derive WAL settings
         self.wal_sync_on_write = matches!(self.durability, Durability::Strict);
+
+        // Derive acknowledgment semantics from durability.
+        //
+        // Principle: users choose durability; the system chooses ack semantics.
+        self.ack_policy = match self.durability {
+            Durability::Strict => AckPolicy::AfterLocalDurable,
+            Durability::Steady => AckPolicy::Immediate,
+            Durability::CloudReplicated => AckPolicy::Immediate,
+        };
         self.wal_buffer_size = match self.goal {
             Goal::Latency => 128 * 1024,     // 128KB
             Goal::Throughput => 1024 * 1024, // 1MB
@@ -535,6 +553,24 @@ mod tests {
         let opts = OpenOptions::new().durability(Durability::Steady).build();
 
         assert!(!opts.wal_sync_on_write);
+    }
+
+    #[test]
+    fn should_derive_ack_policy_after_local_durable_for_strict() {
+        let opts = OpenOptions::new().durability(Durability::Strict).build();
+        assert_eq!(opts.ack_policy, AckPolicy::AfterLocalDurable);
+    }
+
+    #[test]
+    fn should_derive_ack_policy_immediate_for_steady() {
+        let opts = OpenOptions::new().durability(Durability::Steady).build();
+        assert_eq!(opts.ack_policy, AckPolicy::Immediate);
+    }
+
+    #[test]
+    fn should_derive_ack_policy_immediate_for_cloud_replicated() {
+        let opts = OpenOptions::new().durability(Durability::CloudReplicated).build();
+        assert_eq!(opts.ack_policy, AckPolicy::Immediate);
     }
 
     #[test]
