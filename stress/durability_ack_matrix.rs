@@ -1,10 +1,10 @@
+use cntryl_midge::wal::BatchConfig;
+use cntryl_midge::{AckPolicy, MidgeEngine, MidgeOptions, StorageMode};
 use cntryl_stress::{stress_test, StressContext};
 use std::time::{SystemTime, UNIX_EPOCH};
-use cntryl_midge::{AckPolicy, MidgeEngine, MidgeOptions, StorageMode};
-use cntryl_midge::wal::BatchConfig;
 
 #[stress_test]
-fn put_10_entries_matrix(ctx: &mut StressContext) {
+fn durability_ack_matrix(ctx: &mut StressContext) {
     let num_entries = 10;
     let value_size = 128;
 
@@ -97,7 +97,10 @@ fn put_10_entries_matrix(ctx: &mut StressContext) {
         let cfg = engine.get_runtime_config().unwrap();
         println!(
             "[matrix] {} => wal_policy={:?} batch_delay_ms={} batch_max_bytes={}",
-            case_name, cfg.wal_durability_policy, cfg.wal_batch_config.max_delay_ms, cfg.wal_batch_config.max_bytes
+            case_name,
+            cfg.wal_durability_policy,
+            cfg.wal_batch_config.max_delay_ms,
+            cfg.wal_batch_config.max_bytes
         );
 
         ctx.measure_ref(&engine, |e: &MidgeEngine| {
@@ -130,7 +133,7 @@ fn print_stats(name: &str, durs_ns: &[u128]) {
     let max_ns = *durs_ns.iter().max().unwrap();
     let mut sorted = durs_ns.to_vec();
     sorted.sort_unstable();
-    let p50 = sorted[count/2];
+    let p50 = sorted[count / 2];
     let p95 = sorted[(count * 95) / 100];
     println!("{}: samples={} total_ms={:.2} mean_us={:.2} min_us={:.2} p50_us={:.2} p95_us={:.2} max_ms={:.2}",
         name,
