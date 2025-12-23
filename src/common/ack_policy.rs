@@ -7,7 +7,7 @@
 ///
 /// The runtime/WAL may achieve durability using batching, fsync, or cloud replication,
 /// but those mechanisms must not implicitly redefine caller-visible acknowledgment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AckPolicy {
     /// Return once the write is accepted into the engine (e.g., queued/accepted).
     Immediate,
@@ -15,16 +15,9 @@ pub enum AckPolicy {
     /// Return only after local durability is guaranteed.
     ///
     /// In practice this commonly means "group commit" semantics.
+    #[default]
     AfterLocalDurable,
 
     /// Return only after cloud durability is guaranteed.
     AfterCloudDurable,
-}
-
-impl Default for AckPolicy {
-    fn default() -> Self {
-        // Preserve current behavior: writes are acknowledged after the runtime acks
-        // the WAL append (which may be gated by local durability/group commit).
-        Self::AfterLocalDurable
-    }
 }
