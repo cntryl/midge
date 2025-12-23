@@ -222,10 +222,6 @@ name = "tier1_hotpath_wal"
 path = "benches/tier1_hotpath_wal.rs"
 harness = false
 
-[[bin]]
-name = "cargo-stress"
-path = "stress/main.rs"
-
 [[bench]]
 name = "tier1_hotpath_tlv_encoding"
 path = "benches/tier1_hotpath_tlv_encoding.rs"
