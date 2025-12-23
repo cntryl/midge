@@ -501,6 +501,22 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Append an intent entry WITHOUT persisting (used for batched writes).
+    /// Caller MUST call `persist_intent_log()` after all batch entries are added.
+    #[inline]
+    pub fn append_intent_deferred(&mut self, entry: crate::runtime::IntentLogEntry) {
+        self.intent_log.push(entry);
+    }
+
+    /// Persist the intent log to disk (call after batched `append_intent_deferred` calls).
+    pub fn persist_intent_log(&self) -> MidgeResult<()> {
+        if !self.memory_mode {
+            crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
+                .map_err(crate::common::MidgeError::Internal)?;
+        }
+        Ok(())
+    }
+
     /// Replay intent log to recover incomplete mutations
     /// Called during startup to apply any interrupted manifest or durability changes
     pub fn replay_intent_log(&mut self) -> MidgeResult<()> {

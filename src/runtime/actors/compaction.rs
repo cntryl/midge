@@ -133,6 +133,8 @@ impl CompactionActor {
             let input_files = plan.input_files.clone();
             let plan_clone = plan.clone();
             let epoch = std::sync::Arc::clone(&state.ingest_epoch);
+            // Generate a stable job_id for this compaction job (for log correlation)
+            let job_id = next_request_id();
             std::thread::spawn(move || {
                 // Capture the epoch at start
                 let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
@@ -154,9 +156,28 @@ impl CompactionActor {
                         // Distinguish cooperative aborts due to ingest epoch changes
                         let s = e.to_string();
                         if s.contains("ingest epoch change") || s.contains("compaction aborted") {
-                            tracing::info!(error = %e, input_files = ?input_files, "compaction: aborting due to ingest epoch change");
+                            // ─────────────────────────────────────────────────────────────────────
+                            // COOPERATIVE CANCELLATION LOG — emitted exactly ONCE per aborted job.
+                            // ─────────────────────────────────────────────────────────────────────
+                            let new_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
+                            tracing::info!(
+                                component = "compaction",
+                                invariant = "cooperative_cancellation",
+                                job_id = job_id,
+                                old_epoch = my_epoch,
+                                new_epoch = new_epoch,
+                                input_files = ?input_files,
+                                "compaction: aborting due to ingest epoch change (job_id={}, old_epoch={}, new_epoch={})",
+                                job_id, my_epoch, new_epoch
+                            );
                         } else {
-                            tracing::warn!(error = %e, input_files = ?input_files, "compaction worker aborted or failed");
+                            tracing::warn!(
+                                component = "compaction",
+                                job_id = job_id,
+                                error = %e,
+                                input_files = ?input_files,
+                                "compaction worker aborted or failed"
+                            );
                         }
                         Vec::new()
                     }

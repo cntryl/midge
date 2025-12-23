@@ -1011,23 +1011,50 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::BeginIngest { request_id } => {
-                    // Mark begin ingest requested and report active compactions
+                    // ─────────────────────────────────────────────────────────────────────
+                    // INGEST BARRIER — scope: active_compactions ONLY
+                    //
+                    // We wait ONLY for active compaction jobs to drain. We do NOT wait for:
+                    //   - WAL sync (batched writes flush on their own schedule)
+                    //   - memtable flush (handled separately on EndIngest)
+                    //   - stats, maintenance, or background monitoring
+                    //
+                    // The invariant: once begin_ingest returns, no compaction work is
+                    // running or can be scheduled until end_ingest is called.
+                    // ─────────────────────────────────────────────────────────────────────
+
                     let active = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
-                    tracing::info!("ingest: begin_ingest requested");
-                    tracing::info!("ingest: waiting for active_compactions={} to drain", active);
+                    let current_epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+
+                    tracing::info!(
+                        component = "ingest",
+                        invariant = "begin_ingest_barrier",
+                        ingest_epoch = current_epoch,
+                        "ingest: begin_ingest requested"
+                    );
+                    tracing::info!(
+                        component = "ingest",
+                        invariant = "begin_ingest_barrier",
+                        active_compactions = active,
+                        ingest_epoch = current_epoch,
+                        "ingest: active_compactions={} (will wait for drain)", active
+                    );
 
                     // Prevent new compactions and mark ingest active
                     self.state.enable_compaction = false;
                     self.state.ingest_active.store(true, std::sync::atomic::Ordering::SeqCst);
 
-                    // Bump epoch so in-flight compactions will see the change
+                    // Bump epoch so in-flight compactions will see the change and abort cooperatively
                     let new_epoch = self
                         .state
                         .ingest_epoch
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                         + 1;
 
-                    // Wait for active compactions to drain (only compactions)
+                    // ─────────────────────────────────────────────────────────────────────
+                    // Wait for active compactions to drain (ONLY compactions).
+                    // This is a blocking wait with timed logging thresholds.
+                    // ─────────────────────────────────────────────────────────────────────
                     let (lock, cvar) = &*self.state.active_compactions_notify;
                     let mut guard = lock
                         .lock()
@@ -1055,17 +1082,37 @@ impl EventLoop {
                         if !warned_500ms && elapsed > std::time::Duration::from_millis(500) {
                             warned_500ms = true;
                             let a = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
-                            tracing::warn!("ingest: still waiting after 500ms (active_compactions={})", a);
+                            tracing::warn!(
+                                component = "ingest",
+                                invariant = "begin_ingest_barrier",
+                                active_compactions = a,
+                                ingest_epoch = new_epoch,
+                                elapsed_ms = elapsed.as_millis(),
+                                "ingest: still waiting after 500ms for compactions to drain (active_compactions={})", a
+                            );
                         }
 
                         if !warned_5s && elapsed > std::time::Duration::from_secs(5) {
                             warned_5s = true;
                             let a = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
-                            tracing::error!("ingest: begin_ingest blocked >5s — likely entering ingest during active workload (active_compactions={})", a);
+                            tracing::error!(
+                                component = "ingest",
+                                invariant = "begin_ingest_barrier",
+                                active_compactions = a,
+                                ingest_epoch = new_epoch,
+                                elapsed_ms = elapsed.as_millis(),
+                                "ingest: begin_ingest blocked >5s — likely misuse: entering ingest during active workload (active_compactions={}). \
+                                 Correct ordering: warmup/probe BEFORE begin_ingest, not during.", a
+                            );
                         }
                     }
 
-                    tracing::info!(ingest_epoch = new_epoch, "BeginIngest: ingestion barrier enabled");
+                    tracing::info!(
+                        component = "ingest",
+                        invariant = "begin_ingest_barrier",
+                        ingest_epoch = new_epoch,
+                        "ingest: ingestion barrier enabled — all compactions drained"
+                    );
 
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
                 }
@@ -1214,14 +1261,26 @@ impl EventLoop {
                 // Compaction
                 // =============================================================
                 RuntimeMsg::CheckCompaction { request_id } => {
-                    // Do not schedule compaction while ingest mode is active
+                    // ─────────────────────────────────────────────────────────────────────
+                    // HARD INVARIANT: No compaction scheduling while ingest is active.
+                    // This is a programmer error — the caller should not have reached here.
+                    // ─────────────────────────────────────────────────────────────────────
                     if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
-                        tracing::error!("ingest: attempted to schedule compaction during ingest mode");
+                        let epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                        tracing::error!(
+                            component = "compaction",
+                            invariant = "no_compaction_during_ingest",
+                            ingest_epoch = epoch,
+                            "BUG: CheckCompaction called while ingest mode is active. \
+                             Violated invariant: compaction must not be scheduled during ingest. \
+                             Correct ordering: complete all compactions BEFORE begin_ingest."
+                        );
+                        // Return error (panic would kill the runtime; use error response for recoverability)
                         self.respond(
                             request_id,
                             RuntimeResponse::Error {
                                 request_id,
-                                message: "ingest: compaction scheduling forbidden during ingest mode".to_string(),
+                                message: "BUG: compaction scheduling attempted during ingest mode — violated invariant".to_string(),
                             },
                         );
                         continue;
@@ -1255,14 +1314,25 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::RunCompaction { request_id, plan } => {
-                    // Block direct compaction requests during ingest
+                    // ─────────────────────────────────────────────────────────────────────
+                    // HARD INVARIANT: No compaction execution while ingest is active.
+                    // ─────────────────────────────────────────────────────────────────────
                     if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
-                        tracing::error!("ingest: attempted to run compaction during ingest mode");
+                        let epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                        tracing::error!(
+                            component = "compaction",
+                            invariant = "no_compaction_during_ingest",
+                            ingest_epoch = epoch,
+                            input_files = ?plan.input_files,
+                            "BUG: RunCompaction called while ingest mode is active. \
+                             Violated invariant: compaction must not run during ingest. \
+                             Correct ordering: complete all compactions BEFORE begin_ingest."
+                        );
                         self.respond(
                             request_id,
                             RuntimeResponse::Error {
                                 request_id,
-                                message: "ingest: compaction forbidden during ingest mode".to_string(),
+                                message: "BUG: compaction execution attempted during ingest mode — violated invariant".to_string(),
                             },
                         );
                         continue;

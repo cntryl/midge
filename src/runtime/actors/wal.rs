@@ -454,18 +454,17 @@ impl WalActor {
         // Advance global sequence to commit_seq
         state.sequence = commit_seq;
 
-        // Log seqno allocations for intent tracing
+        // Log seqno allocations for intent tracing (deferred - single persist at end)
         // Begin seq (cf_id 0)
-        state.append_intent(IntentLogEntry::SeqnoAllocated {
+        state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
             seqno: begin_seq,
             cf_id: 0,
-        })?;
-        // Per-op seqs will be logged below when we know cf_id
+        });
         // Commit seq
-        state.append_intent(IntentLogEntry::SeqnoAllocated {
+        state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
             seqno: commit_seq,
             cf_id: 0,
-        })?;
+        });
 
         // Create and write begin record
         let mut begin_record =
@@ -525,8 +524,8 @@ impl WalActor {
                         self.append_total += a_elapsed;
                     }
 
-                    // Log seq allocation for this CF
-                    state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id })?;
+                    // Log seq allocation for this CF (deferred)
+                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id });
 
                     state.wal.pending_writes += 1;
                     self.pending_sync_count += 1;
@@ -555,7 +554,8 @@ impl WalActor {
                         self.append_total += a_elapsed;
                     }
 
-                    state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id })?;
+                    // Log seq allocation for this CF (deferred)
+                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id });
 
                     state.wal.pending_writes += 1;
                     self.pending_sync_count += 1;
@@ -569,6 +569,9 @@ impl WalActor {
                 }
             }
         }
+
+        // Persist all intent entries at once (single I/O instead of per-op)
+        state.persist_intent_log()?;
 
         // Write commit record
         let last_sequence = commit_seq;
