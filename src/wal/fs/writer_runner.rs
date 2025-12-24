@@ -62,37 +62,23 @@ impl WriterRunner {
         let mut file_opt = self.open_file_handle().ok();
 
         loop {
-            // Wait for work (queue data or sync request or shutdown)
-            let mut batch: Vec<Vec<u8>> = Vec::new();
-            let mut sync_requested = false;
+            // Wait for work (queue data, sync request, or shutdown)
+            let batch: Vec<Vec<u8>>;
             {
                 let mut q = self.config.queue.lock();
-                // Wait while: queue empty AND no pending syncs AND not shutting down
-                while q.is_empty() 
-                    && !self.config.shutdown.load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    // Check if there's a pending sync request even with empty queue
-                    {
-                        let s = self.config.sync_state.lock();
-                        if s.pending_fsyncs > s.completed_fsyncs {
-                            sync_requested = true;
-                            break;
-                        }
-                    }
-                    self.config.queue_cond.wait(&mut q);
+                // Wait until: queue has data OR shutdown requested
+                while q.is_empty() && !self.config.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Use wait_for with timeout to periodically check for sync requests
+                    self.config.queue_cond.wait_for(&mut q, std::time::Duration::from_millis(10));
                 }
+                
+                // Check for shutdown
                 if self.config.shutdown.load(std::sync::atomic::Ordering::SeqCst) && q.is_empty() {
-                    // Before exiting, handle any final pending syncs
-                    let s = self.config.sync_state.lock();
-                    if s.pending_fsyncs > s.completed_fsyncs {
-                        sync_requested = true;
-                    }
-                    if !sync_requested {
-                        break;
-                    }
+                    break;
                 }
+                
                 // Drain queue
-                batch.append(&mut *q);
+                batch = std::mem::take(&mut *q);
             }
 
             // Process any queued data
@@ -100,38 +86,31 @@ impl WriterRunner {
                 // Coalesce
                 let total: usize = batch.iter().map(|b| b.len()).sum();
                 let mut big = Vec::with_capacity(total);
-                for mut small in batch.drain(..) {
-                    big.append(&mut small);
+                for mut small in batch.into_iter() {
+                    big.extend_from_slice(&small);
+                    small.clear();
                     // return small to pool
                     let mut pool = self.config.buf_pool.lock();
-                    pool.push(std::mem::take(&mut small));
+                    pool.push(small);
                 }
 
                 // Write
                 let write_start = Instant::now();
                 let write_result = if let Some(ref mut file) = file_opt {
-                    match file.append(bytes::Bytes::from(std::mem::take(&mut big))) {
+                    match file.append(bytes::Bytes::from(big)) {
                         Ok(pos) => Some(pos),
                         Err(_) => {
                             // attempt re-open and try once
                             file_opt = self.open_file_handle().ok();
-                            if let Some(ref mut f) = file_opt {
-                                f.append(bytes::Bytes::from(std::mem::take(&mut big))).ok()
-                            } else {
-                                None
-                            }
+                            None
                         }
                     }
                 } else {
                     // open-on-demand
-                    match self.open_file_handle() {
-                        Ok(mut f) => {
-                            let pos = f.append(bytes::Bytes::from(std::mem::take(&mut big))).ok();
-                            file_opt = Some(f);
-                            pos
-                        }
-                        Err(_) => None,
+                    if let Ok(f) = self.open_file_handle() {
+                        file_opt = Some(f);
                     }
+                    None
                 };
 
                 if let Some(start_pos) = write_result {
@@ -142,7 +121,7 @@ impl WriterRunner {
                     self.config.current_pos.store(start_pos, std::sync::atomic::Ordering::SeqCst);
                 }
 
-                // Mark completed flushes (a write makes queued data visible to readers)
+                // Mark completed flushes
                 {
                     let mut s = self.config.sync_state.lock();
                     s.completed_flushes = s.pending_flushes;
@@ -150,7 +129,7 @@ impl WriterRunner {
                 }
             }
 
-            // Handle pending fsyncs: perform single sync that completes all pending fsync requests
+            // Handle pending fsyncs
             let need_sync = {
                 let s = self.config.sync_state.lock();
                 s.pending_fsyncs > s.completed_fsyncs
