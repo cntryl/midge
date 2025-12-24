@@ -128,38 +128,79 @@ impl WriterRunner {
                 }
 
                 // Write
+                let big_bytes = bytes::Bytes::from(big);
                 let write_start = Instant::now();
-                let write_result = if let Some(ref mut file) = file_opt {
-                    match file.append(bytes::Bytes::from(big)) {
-                        Ok(pos) => Some(pos),
-                        Err(_) => {
-                            // attempt re-open and try once
+                let mut write_result: Option<u64> = None;
+
+                // Ensure a handle exists if possible
+                if file_opt.is_none() {
+                    file_opt = self.open_file_handle().ok();
+                }
+
+                // Attempt append; if it fails, reopen and retry once.
+                if let Some(ref mut file) = file_opt {
+                    match file.append(big_bytes.clone()) {
+                        Ok(pos) => write_result = Some(pos),
+                        Err(e1) => {
+                            tracing::warn!(error = ?e1, "wal writer append failed; reopening and retrying");
                             file_opt = self.open_file_handle().ok();
-                            None
+                            if let Some(ref mut file2) = file_opt {
+                                match file2.append(big_bytes.clone()) {
+                                    Ok(pos) => write_result = Some(pos),
+                                    Err(e2) => {
+                                        tracing::error!(error = ?e2, "wal writer append failed after retry; re-queueing buffer");
+                                        // Best-effort: requeue to avoid silent WAL loss.
+                                        let mut q = self.config.queue.lock();
+                                        q.push(big_bytes.to_vec());
+                                        self.config.queue_cond.notify_one();
+                                    }
+                                }
+                            } else {
+                                tracing::error!("wal writer could not reopen file handle after append failure; re-queueing buffer");
+                                let mut q = self.config.queue.lock();
+                                q.push(big_bytes.to_vec());
+                                self.config.queue_cond.notify_one();
+                            }
                         }
                     }
                 } else {
-                    // open-on-demand
-                    if let Ok(f) = self.open_file_handle() {
-                        file_opt = Some(f);
-                    }
-                    None
-                };
+                    tracing::error!("wal writer has no file handle; re-queueing buffer");
+                    let mut q = self.config.queue.lock();
+                    q.push(big_bytes.to_vec());
+                    self.config.queue_cond.notify_one();
+                }
 
                 if let Some(start_pos) = write_result {
                     let write_elapsed = write_start.elapsed();
                     if let Some(t) = crate::telemetry::Telemetry::global() {
                         t.metrics().record_wal_write_syscall(write_elapsed.as_nanos() as u64);
                     }
-                    self.config.current_pos.store(start_pos, std::sync::atomic::Ordering::SeqCst);
-                }
+                    // `append()` returns the starting offset; expose end offset as "current_pos".
+                    let end_pos = start_pos.saturating_add(big_bytes.len() as u64);
+                    self.config
+                        .current_pos
+                        .store(end_pos, std::sync::atomic::Ordering::SeqCst);
 
-                // Mark completed flushes
-                {
-                    let mut s = self.config.sync_state.lock();
-                    s.completed_flushes = s.pending_flushes;
-                    self.config.sync_cond.notify_all();
+                    // Mark completed flushes (barrier for "writes before flush() have been written")
+                    {
+                        let mut s = self.config.sync_state.lock();
+                        s.completed_flushes = s.pending_flushes;
+                        self.config.sync_cond.notify_all();
+                    }
                 }
+            }
+
+            // If a flush was requested but there was no data batch, still complete it.
+            // This makes `WalWriter::flush()` a reliable barrier even when the queue was
+            // empty at the time of the call.
+            let need_flush = {
+                let s = self.config.sync_state.lock();
+                s.pending_flushes > s.completed_flushes
+            };
+            if need_flush {
+                let mut s = self.config.sync_state.lock();
+                s.completed_flushes = s.pending_flushes;
+                self.config.sync_cond.notify_all();
             }
 
             // Handle pending fsyncs

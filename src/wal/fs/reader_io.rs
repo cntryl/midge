@@ -57,6 +57,9 @@ impl WalReader for FsWalReaderIo {
     /// - Ok(None) if clean EOF at `pos`
     /// - Err(Corruption) if EOF occurs mid-record
     fn read_at(&mut self, pos: WalPos) -> MidgeResult<Option<WalRecord>> {
+        // Guardrail: prevent pathological allocations on corrupted length prefixes.
+        const MAX_WAL_RECORD_LEN: u64 = 64 * 1024 * 1024; // 64 MiB
+
         // Open file in read-only mode
         let file = self.fs.open(
             &self.path,
@@ -68,22 +71,49 @@ impl WalReader for FsWalReaderIo {
             },
         )?;
 
-        // Read 4-byte length prefix
-        let len_bytes = file.read_at(pos, 4)?;
-        if len_bytes.is_empty() {
+        // io::File::read_at is exact (errors on EOF) for RealFs.
+        // Use file length to implement the WalReader contract:
+        // - Ok(None) on clean EOF at `pos`
+        // - Corruption if EOF occurs mid-record
+        let file_len = file.len()?;
+        if pos == file_len {
             return Ok(None);
         }
-        if len_bytes.len() < 4 {
+        if pos > file_len {
             return Err(MidgeError::Corruption(format!(
-                "Incomplete WAL length prefix at pos {} (got {} bytes)",
-                pos,
-                len_bytes.len()
+                "WAL read_at past EOF: pos={} file_len={}",
+                pos, file_len
             )));
         }
+        if file_len.saturating_sub(pos) < 4 {
+            return Err(MidgeError::Corruption(format!(
+                "Incomplete WAL length prefix at pos {} (need 4 bytes, have {})",
+                pos,
+                file_len.saturating_sub(pos)
+            )));
+        }
+
+        // Read 4-byte length prefix
+        let len_bytes = file.read_at(pos, 4)?;
 
         let mut len_buf = [0u8; 4];
         len_buf.copy_from_slice(&len_bytes[..4]);
         let len = u32::from_le_bytes(len_buf) as u64;
+
+        if len > MAX_WAL_RECORD_LEN {
+            return Err(MidgeError::Corruption(format!(
+                "WAL record too large at pos {} (len={})",
+                pos, len
+            )));
+        }
+
+        let need_end = pos.saturating_add(4).saturating_add(len);
+        if need_end > file_len {
+            return Err(MidgeError::Corruption(format!(
+                "Incomplete WAL record at pos {} (len={}, file_len={})",
+                pos, len, file_len
+            )));
+        }
 
         // Read the encoded record bytes
         let buf = file.read_at(pos + 4, len)?;

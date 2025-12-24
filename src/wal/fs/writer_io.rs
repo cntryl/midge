@@ -160,17 +160,11 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn flush(&self) -> MidgeResult<()> {
-        // Check if there's any pending work to flush
-        let queue_empty = self.queue.lock().is_empty();
-        if queue_empty {
-            // No pending records — nothing to flush
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_flush();
-            }
-            return Ok(());
-        }
-
-        // Mark that a flush is requested and wake the writer; then wait for it to complete
+        // Mark that a flush is requested and wake the writer; then wait for it to complete.
+        //
+        // IMPORTANT: We cannot fast-path based on `queue.is_empty()`. The writer thread drains
+        // the queue into a local batch, making the queue empty while the actual file append is
+        // still in-flight. Callers use flush() as a barrier for "all enqueued records are written".
         let my_flush_id = {
             let mut s = self.sync_state.lock();
             s.pending_flushes = s.pending_flushes.saturating_add(1);

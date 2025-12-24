@@ -202,14 +202,17 @@ fn replay_wal_file(
     open_txns: &mut std::collections::HashMap<u64, Vec<WalRecord>>,
     begun_txns: &mut std::collections::HashSet<u64>,
 ) -> MidgeResult<()> {
+    // Guardrail: prevent pathological allocations on corrupted length prefixes.
+    const MAX_WAL_RECORD_LEN: usize = 64 * 1024 * 1024; // 64 MiB
+
     let mut pos: u64 = 0;
     let mut file_read_ns: u128 = 0;
     let mut file_apply_ns: u128 = 0;
 
     loop {
-        // Read 4-byte length prefix
-        let len_read_start = std::time::Instant::now();
-        let len_bytes = match storage.open_file(
+        // Open file once per iteration and use file length to detect clean EOF.
+        let open_start = std::time::Instant::now();
+        let file = match storage.open_file(
             file_path,
             OpenOptions {
                 mode: OpenMode::ReadOnly,
@@ -219,7 +222,7 @@ fn replay_wal_file(
                 append: false,
             },
         ) {
-            Ok(file) => file.read_at(pos, 4).map_err(map_storage_error)?,
+            Ok(file) => file,
             Err(e) if e.kind == StorageErrorKind::NotFound => {
                 stats.wal_read_ns = stats.wal_read_ns.saturating_add(file_read_ns);
                 stats.apply_ns = stats.apply_ns.saturating_add(file_apply_ns);
@@ -227,11 +230,32 @@ fn replay_wal_file(
             }
             Err(e) => return Err(map_storage_error(e)),
         };
-        file_read_ns = file_read_ns.saturating_add(len_read_start.elapsed().as_nanos());
+        file_read_ns = file_read_ns.saturating_add(open_start.elapsed().as_nanos());
 
-        if len_bytes.is_empty() {
+        let file_len = file.len().map_err(map_storage_error)?;
+        if pos == file_len {
             break; // clean EOF
         }
+        if pos > file_len {
+            return Err(MidgeError::Corruption(format!(
+                "WAL replay read past EOF at pos {} in {} (file_len={})",
+                pos, file_path, file_len
+            )));
+        }
+        if file_len.saturating_sub(pos) < 4 {
+            return Err(MidgeError::Corruption(format!(
+                "Incomplete WAL length prefix at pos {} in {} (need 4 bytes, have {})",
+                pos,
+                file_path,
+                file_len.saturating_sub(pos)
+            )));
+        }
+
+        // Read 4-byte length prefix
+        let len_read_start = std::time::Instant::now();
+        let len_bytes = file.read_at(pos, 4).map_err(map_storage_error)?;
+        file_read_ns = file_read_ns.saturating_add(len_read_start.elapsed().as_nanos());
+
         if len_bytes.len() < 4 {
             return Err(MidgeError::Corruption(format!(
                 "Incomplete WAL length prefix at pos {} in {} (got {} bytes)",
@@ -245,25 +269,26 @@ fn replay_wal_file(
         len_buf.copy_from_slice(&len_bytes[..4]);
 
         let len = u32::from_le_bytes(len_buf) as usize;
+        if len > MAX_WAL_RECORD_LEN {
+            return Err(MidgeError::Corruption(format!(
+                "WAL record too large at pos {} in {} (len={})",
+                pos, file_path, len
+            )));
+        }
+
+        let need_end = pos
+            .saturating_add(4)
+            .saturating_add(len as u64);
+        if need_end > file_len {
+            return Err(MidgeError::Corruption(format!(
+                "Incomplete WAL record at pos {} in {} (len={}, file_len={})",
+                pos, file_path, len, file_len
+            )));
+        }
 
         // Read record payload
         let payload_read_start = std::time::Instant::now();
-        let buf = {
-            let file = storage
-                .open_file(
-                    file_path,
-                    OpenOptions {
-                        mode: OpenMode::ReadOnly,
-                        create: false,
-                        create_new: false,
-                        truncate: false,
-                        append: false,
-                    },
-                )
-                .map_err(map_storage_error)?;
-            file.read_at(pos + 4, len as u64)
-                .map_err(map_storage_error)?
-        };
+        let buf = file.read_at(pos + 4, len as u64).map_err(map_storage_error)?;
         file_read_ns = file_read_ns.saturating_add(payload_read_start.elapsed().as_nanos());
 
         if buf.len() < len {
