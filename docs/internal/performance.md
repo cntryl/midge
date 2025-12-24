@@ -363,7 +363,7 @@ let engine = MidgeEngine::open_with_config(config)?;
 
 **For best cloud performance:**
 - Use `CloudMode::Tiered` for automatic SST migration to cloud
-- Enable `CloudMode::Replicated` for WAL cloud durability
+- Enable `CloudMode::Persisted` for WAL cloud durability
 - Set appropriate `cloud_upload_threshold` based on network bandwidth
 - Use regional cloud buckets close to compute (minimize latency)
 

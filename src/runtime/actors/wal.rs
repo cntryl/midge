@@ -138,6 +138,7 @@ impl WalActor {
         batch_config: BatchConfig,
         memory_mode: bool,
     ) -> MidgeResult<Self> {
+        
         let (wal_fs, writer) = if memory_mode {
             (None, None)
         } else {
@@ -147,7 +148,7 @@ impl WalActor {
             (Some(fs), writer)
         };
 
-        Ok(Self {
+        let actor = Self {
             writer,
             wal_fs,
             pending_sync_count: 0,
@@ -162,7 +163,38 @@ impl WalActor {
             append_total: Duration::from_secs(0),
             batch_config,
             last_sync_instant: Instant::now(),
-        })
+        };
+
+        // Log resolved WAL mode for diagnostics
+        tracing::info!(
+            wal_policy = ?actor.durability_policy,
+            batching_enabled = matches!(actor.durability_policy, DurabilityPolicy::Batched) || matches!(actor.durability_policy, DurabilityPolicy::CloudFirst),
+            max_delay_ms = actor.batch_config.max_delay_ms,
+            max_bytes = actor.batch_config.max_bytes,
+            "WAL actor initialized"
+        );
+
+        Ok(actor)
+    }
+
+    /// Helper that wraps writer.append_record with local counters and telemetry
+    #[allow(dead_code)]
+    fn append_record_instrumented(
+        &mut self,
+        writer: &mut Box<dyn WalWriter>,
+        record: &WalRecord,
+    ) -> MidgeResult<()> {
+        let a_start = Instant::now();
+        writer.append_record(record)?;
+        let a_elapsed = a_start.elapsed();
+        self.append_calls += 1;
+        self.append_total += a_elapsed;
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_wal_append(record.estimated_size() as u64);
+            t.metrics().record_wal_append_count();
+            t.metrics().record_wal_append_ns(a_elapsed.as_nanos() as u64);
+        }
+        Ok(())
     }
 
     pub fn durability_policy(&self) -> DurabilityPolicy {
@@ -320,6 +352,12 @@ impl WalActor {
             let a_elapsed = a_start.elapsed();
             self.append_calls += 1;
             self.append_total += a_elapsed;
+            // Instrumentation: record wal append bytes/count/latency
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_append(record.estimated_size() as u64);
+                t.metrics().record_wal_append_count();
+                t.metrics().record_wal_append_ns(a_elapsed.as_nanos() as u64);
+            }
         }
 
         // Update state tracking
@@ -476,6 +514,11 @@ impl WalActor {
             let a_elapsed = a_start.elapsed();
             self.append_calls += 1;
             self.append_total += a_elapsed;
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_append(begin_record.estimated_size() as u64);
+                t.metrics().record_wal_append_count();
+                t.metrics().record_wal_append_ns(a_elapsed.as_nanos() as u64);
+            }
         }
 
         state.wal.pending_writes += 1;
@@ -525,7 +568,10 @@ impl WalActor {
                     }
 
                     // Log seq allocation for this CF (deferred)
-                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id });
+                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
+                        seqno: seq,
+                        cf_id,
+                    });
 
                     state.wal.pending_writes += 1;
                     self.pending_sync_count += 1;
@@ -555,7 +601,10 @@ impl WalActor {
                     }
 
                     // Log seq allocation for this CF (deferred)
-                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id });
+                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
+                        seqno: seq,
+                        cf_id,
+                    });
 
                     state.wal.pending_writes += 1;
                     self.pending_sync_count += 1;
@@ -584,6 +633,11 @@ impl WalActor {
             let a_elapsed = a_start.elapsed();
             self.append_calls += 1;
             self.append_total += a_elapsed;
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_append(commit_record.estimated_size() as u64);
+                t.metrics().record_wal_append_count();
+                t.metrics().record_wal_append_ns(a_elapsed.as_nanos() as u64);
+            }
         }
 
         state.wal.pending_writes += 1;
@@ -915,9 +969,11 @@ impl WalActor {
             self.sync_total += elapsed;
             self.last_sync_instant = Instant::now();
 
-            // Record telemetry metric for WAL syncs
+            // Record telemetry metric for WAL syncs and fsync latency
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_wal_sync();
+                t.metrics().record_wal_fsync_count();
+                t.metrics().record_wal_fsync_ns(elapsed.as_nanos() as u64);
             }
 
             if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some()
@@ -976,6 +1032,9 @@ impl WalActor {
 
         if let Some(writer) = &mut self.writer {
             writer.flush()?;
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_flush();
+            }
         }
 
         // Treat everything appended so far as ready-to-ship.

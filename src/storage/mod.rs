@@ -1,7 +1,7 @@
 // == COPILOT MASTER RULES FOR STORAGE SUBSYSTEM =====================================
 // These rules define the *correct* architecture of the Midge storage layer. You MUST
 // follow them in all completions that touch storage, providers, WAL durability, or
-// cloud replication.
+// cloud persistence.
 //
 // 1. HYBRID STORAGE ARCHITECTURE
 //    HybridStorage has TWO independent responsibilities:
@@ -31,7 +31,7 @@
 //    - FileSystem MUST be synchronous and callback-driven.
 //    - submit_write MUST create parent dirs before writing.
 //    - Paths MUST be sanitized to avoid directory traversal.
-//    - Used for SSTs + local WAL segments before cloud replication.
+//    - Used for SSTs + local WAL segments before cloud persistence.
 //
 // 6. HYBRID STORAGE UPLOAD PIPELINE
 //    - enqueue_wal_segment() inserts UploadState { segment_id, local_path, max_sequence }.
@@ -50,7 +50,7 @@
 //    - Memtable state MUST reflect only sequences with CloudAck.
 //    - No write becomes visible unless fully durable in cloud.
 //    - WAL NEVER becomes inconsistent due to partial upload.
-//    - SST writes may replicate to cloud, but do NOT block memtables.
+//    - SST writes may be persisted to cloud, but do NOT block memtables.
 //
 // 9. TESTING REQUIREMENTS FOR COPILOT
 //    When generating tests, enforce:
@@ -109,7 +109,7 @@
 //!
 //! - **[`hybrid`]**: Orchestration layer combining filesystem + cloud
 //!   - `HybridStorage`: WAL durability (local → cloud upload pipeline)
-//!   - SST management: local cache + cloud replication
+//!   - SST management: local cache + cloud persistence
 //!   - Retry logic, backpressure, state tracking
 //!
 //! - **[`providers`]**: Cloud provider implementations

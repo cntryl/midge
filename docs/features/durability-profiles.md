@@ -4,7 +4,7 @@ Midge supports multiple **durability profiles** that control how aggressively da
 Each embedding host configures the appropriate profile based on its reliability and performance needs.
 
 - **Strict Durability** — used by the Fitz broker.  
-  Every write is fully fsynced and replicated to blob storage for crash consistency.  
+  Every write is fully fsynced and persisted to blob storage for crash consistency.  
   Suitable for authoritative, production-grade data.
 
 - **Weak Durability** — used by the Portia materialization engine.  

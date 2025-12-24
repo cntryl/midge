@@ -203,14 +203,14 @@
 //!
 //! - **Immutable after finalize()**: SST files never change once written, only read or deleted
 //! - **Blocking I/O required**: SST access patterns (seek + read at offset) need synchronous I/O
-//! - **Local files first**: SSTs are written locally, then replicated to cloud via HybridStorage
+//! - **Local files first**: SSTs are written locally, then persisted to cloud via HybridStorage
 //! - **Hot path on read side**: Reader needs fast, direct access without callback overhead
 //!
 //! ### Integration with Storage Layer
 //!
 //! - **Write path**: Compaction creates SSTs via `FsSstFactoryIo` (using io::Fs abstraction)
 //!   → Files stored in local directory
-//!   → HybridStorage replicates to cloud (via `StorageBackend` callbacks)
+//!   → HybridStorage persists to cloud (via `StorageBackend` callbacks)
 //!
 //! - **Read path**: Queries use `SstFileIo` to read local SSTs
 //!   → Uses io::Fs for flexible filesystem backends (Real, Mock, Chaos)

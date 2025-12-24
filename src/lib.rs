@@ -144,6 +144,8 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 /// ```
 pub mod prelude {
     pub use crate::{
+        // Caller-visible semantics
+        AckPolicy,
         ApiError,
         ApiResult,
         ColumnFamily,
@@ -161,8 +163,6 @@ pub mod prelude {
         // Engine
         MidgeEngine,
 
-        // Caller-visible semantics
-        AckPolicy,
         // Errors
         MidgeError,
         MidgeResult,

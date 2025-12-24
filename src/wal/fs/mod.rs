@@ -10,6 +10,7 @@
 mod factory_io;
 mod reader_io;
 mod writer_io;
+mod writer_runner;
 
 // Re-export the io::Fs-based implementations
 pub use factory_io::FsWalFactoryIo;

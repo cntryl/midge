@@ -51,7 +51,7 @@ Safety: Lose up to 20ms of writes if node crashes
 
 ---
 
-### ☁️ Cloud-Replicated = "Cloud is Truth, Local is Just Cache"
+### ☁️ Cloud-Persisted = "Cloud is Truth, Local is Just Cache"
 
 **What happens on write:**
 ```
@@ -71,7 +71,7 @@ Cache: Only 256MB (hot data only)
 - Docker/Kubernetes (ephemeral nodes)
 - AWS Lambda / serverless
 - Spot instances (can be killed anytime)
-- Multi-region replication
+- Multi-region persistence
 - Anywhere local disk is temporary
 
 ---
@@ -95,7 +95,7 @@ Client → Local WAL (fsync every 20ms) → Return OK ✅
                       (batched every 20ms)
 ```
 
-**Cloud-Replicated (Async without fsync):**
+**Cloud-Persisted (Async without fsync):**
 ```
 Client → Local WAL (NO fsync) → Return OK ✅
                                  (<0.5ms)
@@ -108,7 +108,7 @@ Client → Local WAL (NO fsync) → Return OK ✅
 
 ## The Key Differences
 
-| Question | Strict | Steady | Cloud-Replicated |
+| Question | Strict | Steady | Cloud-Persisted |
 |----------|--------|--------|------------------|
 | **Does it wait for cloud before returning?** | ✅ Yes (slow) | ❌ No (fast) | ❌ No (fastest) |
 | **Does it fsync local disk?** | ✅ Yes (every write) | ✅ Yes (every 20ms) | ❌ No |
@@ -131,7 +131,7 @@ Think of it like saving a document:
 - Fast local save, cloud catches up soon
 - Like saving to your laptop with iCloud sync enabled
 
-**Cloud-Replicated** = "Save to memory, Dropbox syncs periodically"
+**Cloud-Persisted** = "Save to memory, Dropbox syncs periodically"
 - Fastest, but might lose work if laptop dies
 - Like Google Docs auto-save (saves to cloud, not local disk)
 
@@ -151,7 +151,7 @@ START: What kind of application?
 │     (Good balance of speed + safety)
 │
 ├─ Container / Lambda / Spot instance / Temporary node
-│  └─ Use: Cloud-Replicated
+│  └─ Use: Cloud-Persisted
 │     (Local disk is temporary anyway)
 │
 └─ Not sure?
@@ -188,7 +188,7 @@ engine.put(b"user_profile", b"{...}")?; // ⚡ instant
 // Background: uploads to S3 every 20ms
 ```
 
-### Cloud-Replicated (Ephemeral Nodes)
+### Cloud-Persisted (Ephemeral Nodes)
 
 ```rust
 let backend = Arc::new(AwsS3Backend::new("us-east-1", "bucket", None)?);
@@ -228,7 +228,7 @@ CloudConfigBuilder::balanced_durability(backend, "./cache")
     .build()
 ```
 
-**Q: Can I make Cloud-Replicated safer?**
+**Q: Can I make Cloud-Persisted safer?**
 ```rust
 CloudConfigBuilder::replicated_durability(backend, "./cache")
     .with_sync_interval_ms(10)  // Sync every 10ms (RPO = 10ms)
@@ -246,11 +246,11 @@ CloudConfigBuilder::strict_durability(backend, "./cache")
 → **Steady** (it's the default recommendation for a reason!)
 
 **Q: I'm running in Kubernetes, which mode?**
-→ **Cloud-Replicated** (pods are ephemeral, cloud is permanent)
+→ **Cloud-Persisted** (pods are ephemeral, cloud is permanent)
 
 **Q: I need ACID transactions, which mode?**
 → **All modes support ACID!** Choose based on durability needs:
 - Mission-critical → Strict
 - Normal app → Steady  
-- Ephemeral compute → Cloud-Replicated
+- Ephemeral compute → Cloud-Persisted
 

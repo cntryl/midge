@@ -7,7 +7,7 @@
 //! Instead of exposing hundreds of low-level tuning knobs, Midge asks **three core questions**:
 //!
 //! 1. **What's the performance goal?** (`Goal::Latency` | `Goal::Throughput` | `Goal::Cost`)
-//! 2. **What durability guarantee?** (`Durability::Strict` | `Durability::Steady` | `Durability::CloudReplicated`)
+//! 2. **What durability guarantee?** (`Durability::Strict` | `Durability::Steady` | `Durability::CloudPersisted`)
 //! 3. **How much memory?** (`MemoryBudget::Auto` | `MemoryBudget::Bytes(n)`)
 //!
 //! All other parameters (block sizes, buffer sizes, compaction triggers, cache allocation, etc.)
@@ -56,7 +56,7 @@ pub enum Goal {
     /// - Lower compaction concurrency
     /// - Smaller bloom filters
     /// - Higher compression
-    Cost,
+    Economy,
 }
 
 /// Durability guarantee level.
@@ -84,7 +84,7 @@ pub enum Durability {
     /// **Guarantee:** Data survives node failure (cloud durability 11+ nines).
     /// **Latency:** Medium (local fsync + async cloud verification).
     /// **Use case:** Distributed systems, high availability.
-    CloudReplicated,
+    CloudPersisted,
 }
 
 /// Memory budget specification.
@@ -268,7 +268,7 @@ impl OpenOptions {
         // Derive block size based on goal and workload
         self.block_size = match (self.goal, self.workload) {
             (Goal::Latency, _) => 16 * 1024, // 16KB for low latency
-            (Goal::Cost, _) => 32 * 1024,    // 32KB balanced
+            (Goal::Economy, _) => 32 * 1024, // 32KB balanced
             (Goal::Throughput, WorkloadProfile::RangeScan) => 128 * 1024, // 128KB for bulk scans
             (Goal::Throughput, _) => 64 * 1024, // 64KB for throughput
         };
@@ -277,7 +277,7 @@ impl OpenOptions {
         let base_memtable = match self.goal {
             Goal::Latency => 64 * 1024 * 1024,     // 64MB for latency
             Goal::Throughput => 256 * 1024 * 1024, // 256MB for throughput
-            Goal::Cost => 32 * 1024 * 1024,        // 32MB for cost
+            Goal::Economy => 32 * 1024 * 1024,     // 32MB for cost
         };
 
         self.memtable_size_limit = match self.workload {
@@ -290,7 +290,7 @@ impl OpenOptions {
         self.target_sst_size = match self.goal {
             Goal::Latency => 128 * 1024 * 1024,    // 128MB
             Goal::Throughput => 512 * 1024 * 1024, // 512MB
-            Goal::Cost => 256 * 1024 * 1024,       // 256MB
+            Goal::Economy => 256 * 1024 * 1024,    // 256MB
         };
 
         // Allocate remaining memory to block cache
@@ -312,12 +312,12 @@ impl OpenOptions {
         self.ack_policy = match self.durability {
             Durability::Strict => AckPolicy::AfterLocalDurable,
             Durability::Steady => AckPolicy::Immediate,
-            Durability::CloudReplicated => AckPolicy::Immediate,
+            Durability::CloudPersisted => AckPolicy::Immediate,
         };
         self.wal_buffer_size = match self.goal {
             Goal::Latency => 128 * 1024,     // 128KB
             Goal::Throughput => 1024 * 1024, // 1MB
-            Goal::Cost => 256 * 1024,        // 256KB
+            Goal::Economy => 256 * 1024,     // 256KB
         };
 
         // Derive compaction trigger
@@ -387,14 +387,14 @@ mod tests {
 
     #[test]
     fn should_create_cost_goal() {
-        assert_eq!(Goal::Cost, Goal::Cost);
+        assert_eq!(Goal::Economy, Goal::Economy);
     }
 
     #[test]
     fn should_distinguish_different_goals() {
         assert_ne!(Goal::Latency, Goal::Throughput);
-        assert_ne!(Goal::Throughput, Goal::Cost);
-        assert_ne!(Goal::Cost, Goal::Latency);
+        assert_ne!(Goal::Throughput, Goal::Economy);
+        assert_ne!(Goal::Economy, Goal::Latency);
     }
 
     // ========== Durability Enum Tests ==========
@@ -410,15 +410,15 @@ mod tests {
     }
 
     #[test]
-    fn should_create_cloud_replicated_durability() {
-        assert_eq!(Durability::CloudReplicated, Durability::CloudReplicated);
+    fn should_create_cloud_persisted_durability() {
+        assert_eq!(Durability::CloudPersisted, Durability::CloudPersisted);
     }
 
     #[test]
     fn should_distinguish_different_durabilities() {
         assert_ne!(Durability::Strict, Durability::Steady);
-        assert_ne!(Durability::Steady, Durability::CloudReplicated);
-        assert_ne!(Durability::CloudReplicated, Durability::Strict);
+        assert_ne!(Durability::Steady, Durability::CloudPersisted);
+        assert_ne!(Durability::CloudPersisted, Durability::Strict);
     }
 
     // ========== MemoryBudget Enum Tests ==========
@@ -568,8 +568,10 @@ mod tests {
     }
 
     #[test]
-    fn should_derive_ack_policy_immediate_for_cloud_replicated() {
-        let opts = OpenOptions::new().durability(Durability::CloudReplicated).build();
+    fn should_derive_ack_policy_immediate_for_cloud_persisted() {
+        let opts = OpenOptions::new()
+            .durability(Durability::CloudPersisted)
+            .build();
         assert_eq!(opts.ack_policy, AckPolicy::Immediate);
     }
 

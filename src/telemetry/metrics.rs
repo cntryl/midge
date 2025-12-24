@@ -27,6 +27,21 @@ pub struct Metrics {
     pub wal_syncs: Arc<AtomicU64>,
     pub wal_bytes_written: Arc<AtomicU64>,
 
+    // Detailed WAL telemetry requested by perf investigation
+    pub wal_append_count: Arc<AtomicU64>,
+    pub wal_flush_count: Arc<AtomicU64>,
+    pub wal_fsync_count: Arc<AtomicU64>,
+    pub wal_append_ns_total: Arc<AtomicU64>,
+    pub wal_fsync_ns_total: Arc<AtomicU64>,
+
+    // Breakdowns
+    pub wal_encode_count: Arc<AtomicU64>,
+    pub wal_encode_ns_total: Arc<AtomicU64>,
+    pub wal_lock_wait_count: Arc<AtomicU64>,
+    pub wal_lock_wait_ns_total: Arc<AtomicU64>,
+    pub wal_write_syscall_count: Arc<AtomicU64>,
+    pub wal_write_syscall_ns_total: Arc<AtomicU64>,
+
     // SST operations
     pub sst_created: Arc<AtomicU64>,
     pub sst_loaded: Arc<AtomicU64>,
@@ -77,6 +92,19 @@ impl Metrics {
             wal_appends: Arc::new(AtomicU64::new(0)),
             wal_syncs: Arc::new(AtomicU64::new(0)),
             wal_bytes_written: Arc::new(AtomicU64::new(0)),
+
+            wal_append_count: Arc::new(AtomicU64::new(0)),
+            wal_flush_count: Arc::new(AtomicU64::new(0)),
+            wal_fsync_count: Arc::new(AtomicU64::new(0)),
+            wal_append_ns_total: Arc::new(AtomicU64::new(0)),
+            wal_fsync_ns_total: Arc::new(AtomicU64::new(0)),
+
+            wal_encode_count: Arc::new(AtomicU64::new(0)),
+            wal_encode_ns_total: Arc::new(AtomicU64::new(0)),
+            wal_lock_wait_count: Arc::new(AtomicU64::new(0)),
+            wal_lock_wait_ns_total: Arc::new(AtomicU64::new(0)),
+            wal_write_syscall_count: Arc::new(AtomicU64::new(0)),
+            wal_write_syscall_ns_total: Arc::new(AtomicU64::new(0)),
             sst_created: Arc::new(AtomicU64::new(0)),
             sst_loaded: Arc::new(AtomicU64::new(0)),
             compactions_run: Arc::new(AtomicU64::new(0)),
@@ -216,6 +244,74 @@ impl Metrics {
         }
     }
 
+    /// Record raw WAL append count (investigation metric)
+    #[inline]
+    pub fn record_wal_append_count(&self) {
+        if self.enabled {
+            self.wal_append_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record WAL append latency (ns)
+    #[inline]
+    pub fn record_wal_append_ns(&self, ns: u64) {
+        if self.enabled {
+            self.wal_append_ns_total.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Record WAL encode
+    #[inline]
+    pub fn record_wal_encode(&self, ns: u64) {
+        if self.enabled {
+            self.wal_encode_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_encode_ns_total.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Record WAL lock acquisition wait time
+    #[inline]
+    pub fn record_wal_lock_wait(&self, ns: u64) {
+        if self.enabled {
+            self.wal_lock_wait_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_lock_wait_ns_total.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Record WAL write syscall latency
+    #[inline]
+    pub fn record_wal_write_syscall(&self, ns: u64) {
+        if self.enabled {
+            self.wal_write_syscall_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_write_syscall_ns_total.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a WAL flush
+    #[inline]
+    pub fn record_wal_flush(&self) {
+        if self.enabled {
+            self.wal_flush_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record a WAL fsync (count)
+    #[inline]
+    pub fn record_wal_fsync_count(&self) {
+        if self.enabled {
+            self.wal_fsync_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_syncs.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record WAL fsync latency (ns)
+    #[inline]
+    pub fn record_wal_fsync_ns(&self, ns: u64) {
+        if self.enabled {
+            self.wal_fsync_ns_total.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
     /// Record a WAL sync
     #[inline]
     pub fn record_wal_sync(&self) {
@@ -318,6 +414,12 @@ impl Metrics {
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
             write_stalls: self.write_stalls.load(Ordering::Relaxed),
+            // New debug fields
+            wal_append_count: self.wal_append_count.load(Ordering::Relaxed),
+            wal_flush_count: self.wal_flush_count.load(Ordering::Relaxed),
+            wal_fsync_count: self.wal_fsync_count.load(Ordering::Relaxed),
+            wal_append_ns_total: self.wal_append_ns_total.load(Ordering::Relaxed),
+            wal_fsync_ns_total: self.wal_fsync_ns_total.load(Ordering::Relaxed),
         }
     }
 }
@@ -346,6 +448,12 @@ pub struct MetricsSnapshot {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub write_stalls: u64,
+    // New debug fields
+    pub wal_append_count: u64,
+    pub wal_flush_count: u64,
+    pub wal_fsync_count: u64,
+    pub wal_append_ns_total: u64,
+    pub wal_fsync_ns_total: u64,
 }
 
 impl MetricsSnapshot {

@@ -12,7 +12,7 @@
 /// Durability policy for WAL operations.
 ///
 /// Determines when the WAL actor performs `sync()`/fsync on the underlying writer
-/// and whether cloud replication participates in the durability guarantee.
+/// and whether cloud persistence participates in the durability guarantee.
 ///
 /// This enum intentionally does **not** define when a write is *acknowledged* to a caller.
 /// If a caller-visible API waits for local/cloud durability before returning, that behavior
@@ -30,9 +30,9 @@ pub enum DurabilityPolicy {
     #[default]
     Batched,
 
-    /// Write to local WAL + async replicate to cloud.
+    /// Write to local WAL + async persist to cloud.
     /// Durability = local fsync (cloud upload is background optimization).
-    /// Use for: cloud-native deployments with geo-replication.
+    /// Use for: cloud-native deployments with geo-persistence.
     CloudMirrored,
 
     /// Write to local WAL + WAIT for cloud acknowledgment.
@@ -54,7 +54,7 @@ pub struct BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            max_delay_ms: 100,     // 100ms
+            max_delay_ms: 100,    // 100ms
             max_bytes: 64 * 1024, // 64KB
         }
     }

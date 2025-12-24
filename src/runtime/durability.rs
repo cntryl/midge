@@ -25,7 +25,9 @@ pub enum DurabilityWaiter {
     /// Internal waiter used when the caller has already been acknowledged (e.g. AckPolicy::Immediate)
     /// but we still need to confirm the request_id for idempotency cleanup once the durability
     /// frontier advances.
-    ConfirmWalAppend { request_id: u64 },
+    ConfirmWalAppend {
+        request_id: u64,
+    },
     WriteBatch {
         request_id: u64,
         last_sequence: u64,
@@ -34,7 +36,9 @@ pub enum DurabilityWaiter {
     /// Internal waiter used when the caller has already been acknowledged (e.g. AckPolicy::Immediate)
     /// but we still need to (1) clear any pending batch atomicity barrier and (2) confirm the
     /// request_id for idempotency cleanup once the durability frontier advances.
-    ConfirmWriteBatch { request_id: u64 },
+    ConfirmWriteBatch {
+        request_id: u64,
+    },
     Read {
         request_id: u64,
         cf_id: u32,
@@ -107,7 +111,7 @@ impl DurabilityCoordinator {
 
         match requested_durability {
             Durability::Strict | Durability::Steady => sequence <= local_durable_seq,
-            Durability::CloudReplicated => sequence <= cloud_durable_seq,
+            Durability::CloudPersisted => sequence <= cloud_durable_seq,
         }
     }
 

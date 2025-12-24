@@ -642,7 +642,7 @@ cargo bench
 
 ### Long-term
 - 🚧 Distributed coordination (multi-node)
-- 🚧 Replication support
+- 🚧 Persistence support
 - 🚧 Advanced compaction strategies (universal)
 - 🚧 Query optimization (predicate pushdown)
 

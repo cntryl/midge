@@ -50,7 +50,7 @@ fn main() -> MidgeResult<()> {
     println!("3. Cost-optimized, strict durability:");
     let opts = OpenOptions::new()
         .path("./cost_db")
-        .goal(Goal::Cost)
+        .goal(Goal::Economy)
         .durability(Durability::Strict)
         .build();
 
@@ -106,7 +106,7 @@ fn main() -> MidgeResult<()> {
 
     println!("Key Insight: Only 3 questions needed!");
     println!("  1. Goal: Latency | Throughput | Cost");
-    println!("  2. Durability: Strict | Steady | CloudReplicated");
+    println!("  2. Durability: Strict | Steady | CloudPersisted");
     println!("  3. Memory: Auto | Bytes(n)");
     println!();
     println!("All other parameters derived automatically!");

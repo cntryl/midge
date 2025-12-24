@@ -53,7 +53,7 @@ impl RealFs {
 }
 
 impl Fs for RealFs {
-    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
         let full = self.full_path(path);
 
         // Ensure parent directory exists when creating.
@@ -86,6 +86,35 @@ impl Fs for RealFs {
 
         let file = std_opts.open(&full).map_err(|e| io_err("open", &full, e))?;
 
+        Ok(Box::new(RealFile { file }))
+    }
+
+    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        // For real FS, a file handle is independently owned and therefore 'static.
+        let full = self.full_path(path);
+
+        // Ensure parent dir
+        if opts.create || opts.create_new {
+            if let Some(parent) = Self::parent_dir(&full) {
+                fs::create_dir_all(parent).map_err(|e| io_err("create_dir_all", parent, e))?;
+            }
+        }
+
+        let mut std_opts = fs::OpenOptions::new();
+        match opts.mode {
+            OpenMode::ReadOnly => std_opts.read(true),
+            OpenMode::ReadWrite => std_opts.read(true).write(true),
+        };
+        if opts.create {
+            std_opts.create(true);
+        }
+        if opts.create_new {
+            std_opts.create_new(true);
+        }
+        if opts.truncate {
+            std_opts.truncate(true);
+        }
+        let file = std_opts.open(&full).map_err(|e| io_err("open", &full, e))?;
         Ok(Box::new(RealFile { file }))
     }
 

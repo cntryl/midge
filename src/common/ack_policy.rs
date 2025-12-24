@@ -5,7 +5,7 @@
 /// - **Acknowledgment** answers: "When does `put()` return?"
 /// - **Durability** answers: "When is the write guaranteed durable?"
 ///
-/// The runtime/WAL may achieve durability using batching, fsync, or cloud replication,
+/// The runtime/WAL may achieve durability using batching, fsync, or cloud persistence,
 /// but those mechanisms must not implicitly redefine caller-visible acknowledgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AckPolicy {

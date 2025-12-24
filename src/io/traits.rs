@@ -200,6 +200,13 @@ pub trait Fs: Send + Sync + 'static {
     /// Open a file
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>>;
 
+    /// Optional optimized method: open a persistent append handle with 'static lifetime.
+    /// Implementations that can return a 'static file (e.g., real OS-backed files) may
+    /// provide an implementation. Default: return Unsupported.
+    fn open_persistent_handle(&self, _path: &FsPath, _opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        Err(FsError::Unsupported("open_persistent_handle not supported by this backend".to_string()))
+    }
+
     /// Remove a file
     fn remove_file(&self, path: &FsPath) -> FsResult<()>;
 

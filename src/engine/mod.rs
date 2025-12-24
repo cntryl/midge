@@ -223,7 +223,10 @@ impl MidgeEngine {
     /// Open a database with test configuration options
     pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
         if matches!(opts.ack_policy, crate::common::AckPolicy::AfterCloudDurable)
-            && !matches!(opts.storage_mode, crate::testkit::StorageMode::CloudBacked { .. })
+            && !matches!(
+                opts.storage_mode,
+                crate::testkit::StorageMode::CloudBacked { .. }
+            )
         {
             return Err(crate::common::MidgeError::InvalidArgument(
                 "AckPolicy::AfterCloudDurable requires StorageMode::CloudBacked".to_string(),
@@ -293,6 +296,16 @@ impl MidgeEngine {
 
         // Honor compaction option from open opts
         state.enable_compaction = opts.enable_compaction;
+
+        // Log resolved WAL mode and batch configuration for diagnostics
+        tracing::info!(
+            wal_sync = opts.wal_sync,
+            batching_enabled = opts.wal_batch_config.is_some(),
+            batch_max_delay_ms = opts.wal_batch_config.map(|c| c.max_delay_ms),
+            batch_max_bytes = opts.wal_batch_config.map(|c| c.max_bytes),
+            ack_policy = ?opts.ack_policy,
+            "Resolved WAL configuration"
+        );
 
         // Start runtime
         let start = std::time::Instant::now();

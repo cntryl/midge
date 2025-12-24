@@ -91,7 +91,7 @@ let value = engine.get(b"key1")?;
 
 - `Durability::Strict` - Fsync on every write (process crash + power loss safe)
 - `Durability::Steady` - Fsync at intervals (balanced performance/durability)
-- `Durability::CloudReplicated` - Local fsync + verified cloud copy
+- `Durability::CloudPersisted` - Local fsync + verified cloud copy
 
 **Workload Profiles** (optional tuning):
 
@@ -107,13 +107,13 @@ use cntryl_midge::config::{ConfigBuilder, CloudMode, Goal, Durability};
 // Configure for cloud-backed storage (S3, GCS, Azure)
 let config = ConfigBuilder::new("./local_cache")
     .goal(Goal::Throughput)
-    .durability(Durability::CloudReplicated)
+    .durability(Durability::CloudPersisted)
     .cloud_mode(CloudMode::Hybrid)      // Auto-detects AWS/GCP/Azure
     .cloud_bucket("my-bucket")
     .build()?;
 
 let engine = MidgeEngine::open_with_config(config)?;
-// Writes are automatically replicated to cloud storage!
+// Writes are automatically persisted to cloud storage!
 ```
 
 See `examples/config_complete.rs` for comprehensive configuration examples.

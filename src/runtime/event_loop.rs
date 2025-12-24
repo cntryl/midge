@@ -467,9 +467,7 @@ impl EventLoop {
                             if self.should_ack_immediately(deferred) {
                                 if deferred {
                                     self.maybe_queue_confirm_only_waiter(
-                                        deferred,
-                                        request_id,
-                                        false,
+                                        deferred, request_id, false,
                                     );
                                 } else {
                                     // Already durable; confirm idempotency allocations now.
@@ -523,9 +521,7 @@ impl EventLoop {
                             if self.should_ack_immediately(deferred) {
                                 if deferred {
                                     self.maybe_queue_confirm_only_waiter(
-                                        deferred,
-                                        request_id,
-                                        false,
+                                        deferred, request_id, false,
                                     );
                                 } else {
                                     self.state.confirm_sequences(request_id);
@@ -568,9 +564,7 @@ impl EventLoop {
                             if self.should_ack_immediately(deferred) {
                                 if deferred {
                                     self.maybe_queue_confirm_only_waiter(
-                                        deferred,
-                                        request_id,
-                                        true,
+                                        deferred, request_id, true,
                                     );
                                 } else {
                                     self.state.pending_batch_min_seq = None;
@@ -1107,10 +1101,16 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::GetIngestState { request_id } => {
-                    let active = self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst);
+                    let active = self
+                        .state
+                        .ingest_active
+                        .load(std::sync::atomic::Ordering::SeqCst);
                     self.respond(
                         request_id,
-                        RuntimeResponse::IngestState { request_id, ingest_active: active },
+                        RuntimeResponse::IngestState {
+                            request_id,
+                            ingest_active: active,
+                        },
                     );
                 }
 
@@ -1127,8 +1127,14 @@ impl EventLoop {
                     // running or can be scheduled until end_ingest is called.
                     // ─────────────────────────────────────────────────────────────────────
 
-                    let active = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
-                    let current_epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                    let active = self
+                        .state
+                        .active_compactions
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let current_epoch = self
+                        .state
+                        .ingest_epoch
+                        .load(std::sync::atomic::Ordering::SeqCst);
 
                     tracing::info!(
                         component = "ingest",
@@ -1141,12 +1147,15 @@ impl EventLoop {
                         invariant = "begin_ingest_barrier",
                         active_compactions = active,
                         ingest_epoch = current_epoch,
-                        "ingest: active_compactions={} (will wait for drain)", active
+                        "ingest: active_compactions={} (will wait for drain)",
+                        active
                     );
 
                     // Prevent new compactions and mark ingest active
                     self.state.enable_compaction = false;
-                    self.state.ingest_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.state
+                        .ingest_active
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
 
                     // Bump epoch so in-flight compactions will see the change and abort cooperatively
                     let new_epoch = self
@@ -1185,7 +1194,10 @@ impl EventLoop {
 
                         if !warned_500ms && elapsed > std::time::Duration::from_millis(500) {
                             warned_500ms = true;
-                            let a = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
+                            let a = self
+                                .state
+                                .active_compactions
+                                .load(std::sync::atomic::Ordering::SeqCst);
                             tracing::warn!(
                                 component = "ingest",
                                 invariant = "begin_ingest_barrier",
@@ -1198,7 +1210,10 @@ impl EventLoop {
 
                         if !warned_5s && elapsed > std::time::Duration::from_secs(5) {
                             warned_5s = true;
-                            let a = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
+                            let a = self
+                                .state
+                                .active_compactions
+                                .load(std::sync::atomic::Ordering::SeqCst);
                             tracing::error!(
                                 component = "ingest",
                                 invariant = "begin_ingest_barrier",
@@ -1247,7 +1262,9 @@ impl EventLoop {
                     );
 
                     // Clear ingest active before resuming compaction scheduling
-                    self.state.ingest_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    self.state
+                        .ingest_active
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
 
                     // Optionally kick compaction checks once so background compaction resumes
                     if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
@@ -1290,15 +1307,12 @@ impl EventLoop {
                                 if self.should_ack_immediately(deferred) {
                                     if self.wal_actor.is_cloud_first() {
                                         // Accepted but not yet cloud-durable; confirm later on CloudAck.
-                                        self.durability
-                                            .queue_waiter(DurabilityWaiter::ConfirmWriteBatch {
-                                                request_id,
-                                            });
+                                        self.durability.queue_waiter(
+                                            DurabilityWaiter::ConfirmWriteBatch { request_id },
+                                        );
                                     } else if deferred {
                                         self.maybe_queue_confirm_only_waiter(
-                                            deferred,
-                                            request_id,
-                                            true,
+                                            deferred, request_id, true,
                                         );
                                     } else {
                                         self.state.pending_batch_min_seq = None;
@@ -1385,8 +1399,15 @@ impl EventLoop {
                     // HARD INVARIANT: No compaction scheduling while ingest is active.
                     // This is a programmer error — the caller should not have reached here.
                     // ─────────────────────────────────────────────────────────────────────
-                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
-                        let epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                    if self
+                        .state
+                        .ingest_active
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let epoch = self
+                            .state
+                            .ingest_epoch
+                            .load(std::sync::atomic::Ordering::SeqCst);
                         tracing::error!(
                             component = "compaction",
                             invariant = "no_compaction_during_ingest",
@@ -1437,8 +1458,15 @@ impl EventLoop {
                     // ─────────────────────────────────────────────────────────────────────
                     // HARD INVARIANT: No compaction execution while ingest is active.
                     // ─────────────────────────────────────────────────────────────────────
-                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
-                        let epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                    if self
+                        .state
+                        .ingest_active
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let epoch = self
+                            .state
+                            .ingest_epoch
+                            .load(std::sync::atomic::Ordering::SeqCst);
                         tracing::error!(
                             component = "compaction",
                             invariant = "no_compaction_during_ingest",
@@ -1542,15 +1570,12 @@ impl EventLoop {
                             if self.should_ack_immediately(deferred) {
                                 if self.wal_actor.is_cloud_first() {
                                     // Accepted but not yet cloud-durable; confirm later on CloudAck.
-                                    self.durability
-                                        .queue_waiter(DurabilityWaiter::ConfirmWalAppend {
-                                            request_id,
-                                        });
+                                    self.durability.queue_waiter(
+                                        DurabilityWaiter::ConfirmWalAppend { request_id },
+                                    );
                                 } else if deferred {
                                     self.maybe_queue_confirm_only_waiter(
-                                        deferred,
-                                        request_id,
-                                        false,
+                                        deferred, request_id, false,
                                     );
                                 } else {
                                     self.state.confirm_sequences(request_id);
@@ -1605,15 +1630,12 @@ impl EventLoop {
                         Ok((seq, deferred)) => {
                             if self.should_ack_immediately(deferred) {
                                 if self.wal_actor.is_cloud_first() {
-                                    self.durability
-                                        .queue_waiter(DurabilityWaiter::ConfirmWalAppend {
-                                            request_id,
-                                        });
+                                    self.durability.queue_waiter(
+                                        DurabilityWaiter::ConfirmWalAppend { request_id },
+                                    );
                                 } else if deferred {
                                     self.maybe_queue_confirm_only_waiter(
-                                        deferred,
-                                        request_id,
-                                        false,
+                                        deferred, request_id, false,
                                     );
                                 } else {
                                     self.state.confirm_sequences(request_id);
@@ -1803,7 +1825,11 @@ impl EventLoop {
 
                 RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
                     // Block DDL while ingest active
-                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                    if self
+                        .state
+                        .ingest_active
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
                         tracing::error!("ingest: attempted DDL (create CF) during ingest mode");
                         self.respond(
                             request_id,
@@ -1832,7 +1858,11 @@ impl EventLoop {
 
                 RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
                     // Block DDL while ingest active
-                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                    if self
+                        .state
+                        .ingest_active
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
                         tracing::error!("ingest: attempted DDL (drop CF) during ingest mode");
                         self.respond(
                             request_id,

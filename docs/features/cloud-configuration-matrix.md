@@ -6,7 +6,7 @@
 |----------------|-----------|------------|----------|-------------|-----|----------|
 | **Strict** | Cache | 1024 MB | ✅ Yes | Sync (blocking) | **0** (no loss) | Financial transactions, critical metadata |
 | **Steady** | Cache | 1024 MB | ✅ Yes | Async (20ms intervals) | ~20ms | High-throughput OLTP, general purpose |
-| **CloudReplicated** | Tiered | 256 MB | ❌ No | Async (100ms intervals) | ~100ms | Distributed systems, containerized apps |
+| **CloudPersisted** | Tiered | 256 MB | ❌ No | Async (100ms intervals) | ~100ms | Distributed systems, containerized apps |
 
 ## Detailed Configuration Breakdown
 
@@ -68,7 +68,7 @@ let storage = CloudConfigBuilder::balanced_durability(backend, "./cache")
 
 ---
 
-### Cloud-Replicated Durability (Cloud-First)
+### Cloud-Persisted Durability (Cloud-First)
 
 ```rust
 CloudConfigBuilder::replicated_durability(backend, "./cache")
@@ -119,7 +119,7 @@ Strategy: Cache everything, evict oldest on pressure
 └─────────────────────────────────────┘
 ```
 
-### Tiered Mode (Cloud-Replicated)
+### Tiered Mode (Cloud-Persisted)
 
 ```
 Max Cache: 256 MB (small)
@@ -144,7 +144,7 @@ Strategy: Cache hot data only, cold data cloud-only
 
 ## Performance Characteristics
 
-| Metric | Strict | Steady | Cloud-Replicated |
+| Metric | Strict | Steady | Cloud-Persisted |
 |--------|--------|--------|------------------|
 | **Write Latency** | 🔴 High (50-200ms) | 🟢 Low (<1ms) | 🟢 Lowest (<0.5ms) |
 | **Read Latency (cached)** | 🟢 Low | 🟢 Low | 🟢 Low |
@@ -180,7 +180,7 @@ CloudConfigBuilder::balanced_durability(backend, "./cache")
     .with_sync_interval_ms(50)
     .build()
 
-// Cloud-replicated with 500ms intervals (maximize batching)
+// Cloud-persisted with 500ms intervals (maximize batching)
 CloudConfigBuilder::replicated_durability(backend, "./cache")
     .with_sync_interval_ms(500)
     .build()
@@ -225,7 +225,7 @@ START: What are your requirements?
 │     (Balanced, general purpose)
 │
 ├─ Running in ephemeral containers?
-│  └─ ✅ Use: Cloud-Replicated
+│  └─ ✅ Use: Cloud-Persisted
 │     (Cloud-first, minimal disk)
 │
 └─ Custom requirements?
@@ -246,7 +246,7 @@ let storage = CloudConfigBuilder::strict_durability(backend, "./cache").build();
 // STEADY: Balanced (most common choice)
 let storage = CloudConfigBuilder::balanced_durability(backend, "./cache").build();
 
-// CLOUD-REPLICATED: Cloud-first, minimal disk
+// CLOUD-PERSISTED: Cloud-first, minimal disk
 let storage = CloudConfigBuilder::replicated_durability(backend, "./cache").build();
 ```
 

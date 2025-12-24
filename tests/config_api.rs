@@ -63,10 +63,10 @@ fn should_set_goal_given_throughput_when_optimizing_for_bulk_writes() {
 #[test]
 fn should_set_goal_given_cost_when_minimizing_resources() {
     // Arrange & Act
-    let opts = OpenOptions::new().goal(Goal::Cost).build();
+    let opts = OpenOptions::new().goal(Goal::Economy).build();
 
     // Assert
-    assert_eq!(opts.goal, Goal::Cost);
+    assert_eq!(opts.goal, Goal::Economy);
     // Cost should allocate less to cache and memtables
     assert!(
         opts.block_cache_size() <= 256 * 1024 * 1024,

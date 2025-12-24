@@ -15,12 +15,14 @@
 //! • All concurrency protection is via `Mutex` — do NOT add async constructs.
 
 use crate::common::MidgeResult;
-use crate::io::{Durability, Fs, FsPath};
+use crate::io::{Fs, FsPath};
 use crate::wal::encoding;
 use crate::wal::traits::WalWriter;
 use crate::wal::types::{WalOpKind, WalPos, WalRecord};
-use bytes::Bytes;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::{Mutex, Condvar};
+
+use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
 /// Filesystem-backed WAL writer using io::Fs.
 ///
@@ -28,11 +30,31 @@ use std::sync::{Arc, Mutex};
 /// It does not manage segment rotation, sequence assignment, recovery,
 /// or any other higher-level concerns. Those belong to the WAL actor.
 pub struct FsWalWriterIo {
+    #[allow(dead_code)]
     path: FsPath,
+    #[allow(dead_code)]
     fs: Arc<dyn Fs>,
-    current_pos: Mutex<WalPos>,
-}
 
+    // Queue of pending encoded record payloads (Vec<u8>)
+    queue: Arc<Mutex<Vec<Vec<u8>>>>,
+    queue_cond: Arc<Condvar>,
+
+    // Pool of reusable small buffers to avoid per-put allocations
+    buf_pool: Arc<Mutex<Vec<Vec<u8>>>>,
+
+    // Sync/flush request state and condvar for synchronous sync() and flush() calls
+    sync_state: Arc<Mutex<SyncState>>,
+    sync_cond: Arc<Condvar>,
+
+    // Writer thread handle
+    writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+
+    // Shutdown flag
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+
+    // Current position shared with runner
+    current_pos: Arc<std::sync::atomic::AtomicU64>,
+}
 impl FsWalWriterIo {
     /// Create a new WAL writer targeting `wal.log` using the provided filesystem.
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
@@ -55,46 +77,74 @@ impl FsWalWriterIo {
         let metadata = fs.metadata(&path)?;
         let current_pos = metadata.len;
 
-        Ok(Self {
+        let writer = Self {
+            path: path.clone(),
+            fs: Arc::clone(&fs),
+            current_pos: Arc::new(std::sync::atomic::AtomicU64::new(current_pos)),
+            queue: Arc::new(Mutex::new(Vec::new())),
+            queue_cond: Arc::new(Condvar::new()),
+            buf_pool: Arc::new(Mutex::new(Vec::new())),
+            sync_state: Arc::new(Mutex::new(SyncState::default())),
+            sync_cond: Arc::new(Condvar::new()),
+            writer_thread: Mutex::new(None),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        // Spawn background writer thread
+        let config = WriterConfig {
+            fs: Arc::clone(&fs),
             path,
-            fs,
-            current_pos: Mutex::new(current_pos),
-        })
+            queue: writer.queue.clone(),
+            queue_cond: writer.queue_cond.clone(),
+            buf_pool: writer.buf_pool.clone(),
+            sync_state: writer.sync_state.clone(),
+            sync_cond: writer.sync_cond.clone(),
+            current_pos: writer.current_pos.clone(),
+            shutdown: writer.shutdown.clone(),
+        };
+        let runner = WriterRunner::new(config);
+        let handle = std::thread::Builder::new()
+            .name("midge-wal-writer".to_string())
+            .spawn(move || runner.run())?;
+
+        *writer.writer_thread.lock() = Some(handle);
+
+        Ok(writer)
     }
 }
 
 impl WalWriter for FsWalWriterIo {
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
-        // Encode using canonical WAL binary encoding
+        // Encode and enqueue payload into queue; do not perform IO here.
+        let e_start = std::time::Instant::now();
         let encoded = encoding::encode(record)?;
+        let e_elapsed = e_start.elapsed();
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_wal_encode(e_elapsed.as_nanos() as u64);
+        }
 
-        // Compute prefix
         let len_prefix = (encoded.len() as u32).to_le_bytes();
 
-        // Get current position atomically
-        let mut pos_guard = self.current_pos.lock().expect("current_pos mutex poisoned");
-        let start_pos = *pos_guard;
-
-        // Coalesce prefix + encoded into one buffer and append once to reduce syscall overhead
-        let mut buf = Vec::with_capacity(4 + encoded.len());
+        // Get a buffer from pool (or allocate)
+        let mut buf = {
+            let mut pool = self.buf_pool.lock();
+            pool.pop().unwrap_or_else(|| Vec::with_capacity(1024))
+        };
+        buf.clear();
         buf.extend_from_slice(&len_prefix);
         buf.extend_from_slice(&encoded);
 
-        let mut file = self.fs.open(
-            &self.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadWrite,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-        file.append(Bytes::from(buf))?;
+        // Enqueue
+        {
+            let mut q = self.queue.lock();
+            q.push(buf);
+            // notify background writer
+            self.queue_cond.notify_one();
+        }
 
-        let expected = 4u64 + encoded.len() as u64;
-        *pos_guard += expected;
-
-        Ok(start_pos)
+        // Return a best-effort start position; real position updated by writer thread.
+        let pos = self.current_pos.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(pos)
     }
 
     fn append_op(
@@ -110,38 +160,94 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn flush(&self) -> MidgeResult<()> {
-        // Synchronous writes already flushed
+        // Check if there's any pending work to flush
+        let queue_empty = self.queue.lock().is_empty();
+        if queue_empty {
+            // No pending records — nothing to flush
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_flush();
+            }
+            return Ok(());
+        }
+
+        // Mark that a flush is requested and wake the writer; then wait for it to complete
+        let my_flush_id = {
+            let mut s = self.sync_state.lock();
+            s.pending_flushes = s.pending_flushes.saturating_add(1);
+            s.pending_flushes
+        };
+        // Wake writer so it can process queued data
+        self.queue_cond.notify_one();
+
+        // Wait until writer marks the flush as completed
+        let mut s = self.sync_state.lock();
+        while s.completed_flushes < my_flush_id {
+            self.sync_cond.wait(&mut s);
+        }
+
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_wal_flush();
+        }
         Ok(())
     }
 
     fn sync(&self) -> MidgeResult<()> {
-        // Developer convenience: allow skipping WAL fsync during benches/dev runs to avoid
-        // expensive platform-specific fsyncs (e.g., antivirus on Windows) that dominate
-        // benchmark setup time. Controlled via MIDGE_SKIP_WAL_SYNC env var.
+        // Developer convenience: allow skipping WAL fsync during benches/dev runs
         if std::env::var_os("MIDGE_SKIP_WAL_SYNC").is_some() {
             return Ok(());
         }
 
-        let mut file = self.fs.open(
-            &self.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadWrite,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-        file.sync(Durability::Durable)?;
+        // Request a durable fsync and wait for writer to perform it.
+        // Note: we MUST request fsync even if queue is empty, because data may have
+        // been written to the file but not yet fsynced (the writer thread writes
+        // asynchronously).
+        let sync_start = std::time::Instant::now();
+        let my_sync_id = {
+            let mut s = self.sync_state.lock();
+            s.pending_fsyncs = s.pending_fsyncs.saturating_add(1);
+            s.pending_fsyncs
+        };
+        // Wake writer so it can perform fsync
+        self.queue_cond.notify_one();
+
+        let mut s = self.sync_state.lock();
+        while s.completed_fsyncs < my_sync_id {
+            self.sync_cond.wait(&mut s);
+        }
+        let elapsed = sync_start.elapsed();
+        if let Some(t) = crate::telemetry::Telemetry::global() {
+            t.metrics().record_wal_fsync_ns(elapsed.as_nanos() as u64);
+            t.metrics().record_wal_fsync_count();
+        }
         Ok(())
     }
 
     fn current_pos(&self) -> WalPos {
-        *self.current_pos.lock().expect("current_pos mutex poisoned")
+        self.current_pos.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn close(&self) -> MidgeResult<()> {
-        // io::Fs doesn't require explicit close
+        // Signal shutdown to the writer thread
+        self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Wake the writer thread so it can exit
+        self.queue_cond.notify_all();
+        
+        // Join the writer thread to ensure all data is flushed
+        if let Some(handle) = self.writer_thread.lock().take() {
+            let _ = handle.join();
+        }
         Ok(())
+    }
+}
+
+impl Drop for FsWalWriterIo {
+    fn drop(&mut self) {
+        // Ensure writer thread is stopped on drop to prevent thread leaks
+        self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.queue_cond.notify_all();
+        if let Some(handle) = self.writer_thread.lock().take() {
+            let _ = handle.join();
+        }
     }
 }
 

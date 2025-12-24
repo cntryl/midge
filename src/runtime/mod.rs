@@ -28,8 +28,8 @@ pub use scheduler::Scheduler;
 pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
 
-use crate::common::{MidgeError, MidgeResult};
 use crate::common::AckPolicy;
+use crate::common::{MidgeError, MidgeResult};
 use crate::wal::policy::BatchConfig;
 use crate::wal::DurabilityPolicy;
 use crossbeam::channel::{self, Receiver, Sender};
