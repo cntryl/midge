@@ -2,11 +2,16 @@
 //!
 //! Tracks SST files, levels, and version history
 
+pub mod journal;
 pub mod manifest;
 pub mod persistence;
 pub mod version_manager;
 pub mod version_set;
 
+pub use journal::{
+    append_edit, append_edit_batch, append_fsync_marker, replay_journal, truncate_journal,
+    ManifestEdit,
+};
 pub use manifest::{CloudCheckpoint, ColumnFamilyMeta, FileMeta, Manifest};
 pub use persistence::ManifestPersistence;
 pub use version_manager::VersionManager;

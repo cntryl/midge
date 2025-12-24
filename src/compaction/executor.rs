@@ -131,10 +131,19 @@ fn is_expired(version: &CompactionVersion, now_secs: u64) -> bool {
 pub fn collect_versions(
     sst_factory: &dyn SstFactory,
     input_files: &[String],
+    abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<Vec<CompactionVersion>> {
     let versions = Vec::new();
 
     for filename in input_files {
+        // Periodically check whether we should abort (cooperative cancellation)
+        if let Some(check) = abort_check {
+            if check() {
+                tracing::info!(file = %filename, "compaction aborting due to ingest epoch change");
+                return Ok(Vec::new());
+            }
+        }
+
         let path = Path::new(filename);
 
         // Use the generic SstReader API from the factory to open the file.
@@ -203,17 +212,35 @@ pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVer
 /// Filter out tombstones from a deduplicated version set.
 ///
 /// NOTE:
-///   - This assumes that it is safe to drop tombstones completely (e.g. we are
-///     compacting at or below the global visibility watermark and there are no
-///     snapshots that still need them).
-///   - Future refinement should add a sequence watermark or snapshot horizon
-///     parameter so that only *obsolete* tombstones are dropped.
+///   - This default function removes all tombstones unconditionally (legacy behavior).
+///   - Prefer `filter_tombstones_with_horizon()` which is snapshot-aware and only
+///     drops tombstones older than the provided snapshot horizon.
 pub fn filter_tombstones(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
-    versions
-        .iter()
-        .filter(|v| !v.is_tombstone)
-        .cloned()
-        .collect()
+    filter_tombstones_with_horizon(versions, None)
+}
+
+/// Filter tombstones but preserve those newer than `snapshot_horizon` (if provided).
+///
+/// Semantics:
+///   - If `snapshot_horizon` is `None`, all tombstones are dropped (legacy behavior).
+///   - If `Some(h)`, tombstones with `seq > h` are preserved to prevent resurrection
+///     for snapshots reading at sequence `h` or earlier.
+pub fn filter_tombstones_with_horizon(
+    versions: &[CompactionVersion],
+    snapshot_horizon: Option<u64>,
+) -> Vec<CompactionVersion> {
+    match snapshot_horizon {
+        Some(h) => versions
+            .iter()
+            .filter(|v| !(v.is_tombstone && v.seq <= h)) // drop tombstones older-or-equal to horizon
+            .cloned()
+            .collect(),
+        None => versions
+            .iter()
+            .filter(|v| !v.is_tombstone)
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Write versions to a new SST using the provided `SstFactory`.
@@ -233,10 +260,25 @@ pub fn write_versions_to_sst(
     sst_factory: &dyn SstFactory,
     output_filename: &str,
     versions: &[CompactionVersion],
+    abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<()> {
     let mut writer = sst_factory.create()?;
 
-    for version in versions {
+    let mut added: usize = 0;
+    let add_start = std::time::Instant::now();
+    for (i, version) in versions.iter().enumerate() {
+        // Periodically check if we should abort (every 1024 entries)
+        if i % 1024 == 0 {
+            if let Some(check) = abort_check {
+                if check() {
+                    tracing::info!(output = %output_filename, "compaction aborting during write due to ingest epoch change at {} entries", i);
+                    return Err(crate::common::MidgeError::Internal(
+                        "compaction aborted due to ingest epoch change".to_string(),
+                    ));
+                }
+            }
+        }
+
         let op_type = if version.is_tombstone { 1u8 } else { 0u8 };
 
         writer.add_with_meta(
@@ -247,10 +289,17 @@ pub fn write_versions_to_sst(
             op_type,
             version.expiration,
         )?;
+        added += 1;
     }
+    let add_ns = add_start.elapsed().as_nanos();
 
     let path = Path::new(output_filename);
+    let finish_start = std::time::Instant::now();
     writer.finish_to_path(path)?;
+    let finish_ns = finish_start.elapsed().as_nanos();
+
+    tracing::info!(output = %output_filename, versions = added, add_ms = (add_ns as f64) / 1_000_000.0, finish_ms = (finish_ns as f64) / 1_000_000.0, "compaction write breakdown");
+
     Ok(())
 }
 
@@ -451,6 +500,24 @@ mod tests {
 
         assert_eq!(deduped[2].key, b"c".to_vec());
         assert_eq!(deduped[2].seq, 2);
+    }
+
+    #[test]
+    fn compaction_should_not_drop_recent_tombstones_when_snapshot_horizon_exists() {
+        // Arrange: create versions where one key has a recent tombstone
+        let recent_tombstone = mk_version("k", 200, true, None::<&[u8]>, None);
+        let older_put = mk_version("k", 100, false, Some("v"), None);
+        let versions = vec![older_put, recent_tombstone.clone()];
+
+        // Act: filter tombstones with a snapshot horizon of 150
+        // Tombstones newer than the horizon (seq > 150) must be preserved.
+        let filtered = filter_tombstones_with_horizon(&versions, Some(150));
+
+        // Assert: recent tombstone (seq 200) should be preserved
+        assert!(
+            filtered.iter().any(|v| v.is_tombstone && v.seq == 200),
+            "expected recent tombstone to be preserved by compaction filter (snapshot-aware)"
+        );
     }
 
     #[test]

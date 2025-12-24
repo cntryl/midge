@@ -29,7 +29,17 @@ impl FsSstFactoryIo {
     /// Open an SST file using the io::Fs backend
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::SstReader>> {
         let path_str = path.to_str().unwrap_or("").to_string();
+        let start = std::time::Instant::now();
         let reader = super::SstFileIo::open(&path_str, Arc::clone(&self.fs))?;
+        let elapsed = start.elapsed();
+        // Try to gather file size for diagnostics (best-effort)
+        let size = self
+            .fs
+            .metadata(&crate::io::FsPath::new(path_str.as_str()))
+            .ok()
+            .map(|m| m.len)
+            .unwrap_or(0);
+        tracing::info!(path = ?path, size_bytes = size, open_ms = elapsed.as_secs_f64() * 1000.0, "sst reader opened");
         Ok(Box::new(reader))
     }
 }

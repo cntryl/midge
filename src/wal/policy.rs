@@ -1,12 +1,22 @@
 //! WAL durability policies.
 //!
+//! This module defines *how the WAL achieves durability* (e.g., per-write fsync vs batched fsync).
+//!
+//! Important: this is **not** an API-level acknowledgment policy.
+//! Acknowledgment answers “when does `put()` return to the caller?”, while durability answers
+//! “when is the write guaranteed durable?”. Those are related but distinct concerns.
+//!
 //! Policies are pure strategy definitions—they contain no I/O logic.
 //! Invariants and implementation details are enforced via unit tests.
 
 /// Durability policy for WAL operations.
 ///
-/// This determines when the WalActor calls fsync() on the underlying writer
-/// and whether cloud replication is required for durability.
+/// Determines when the WAL actor performs `sync()`/fsync on the underlying writer
+/// and whether cloud replication participates in the durability guarantee.
+///
+/// This enum intentionally does **not** define when a write is *acknowledged* to a caller.
+/// If a caller-visible API waits for local/cloud durability before returning, that behavior
+/// must be defined by a separate acknowledgment/commit policy at the API boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DurabilityPolicy {
     /// Fsync after every single write operation.
@@ -44,7 +54,7 @@ pub struct BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            max_delay_ms: 100,    // 100ms
+            max_delay_ms: 100,     // 100ms
             max_bytes: 64 * 1024, // 64KB
         }
     }

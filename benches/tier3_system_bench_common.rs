@@ -165,11 +165,13 @@ pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] = [BenchStorageMode::Loca
 // ============================================================================
 
 /// Configuration for benchmark engine setup.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct BenchEngineConfig {
     pub storage_mode: BenchStorageMode,
     pub wal_sync: bool,
+    /// Optional WAL batch config to control group commit behavior for benches
+    pub wal_batch_config: Option<cntryl_midge::wal::policy::BatchConfig>,
     pub enable_compaction: bool,
     pub memtable_size: usize,
 }
@@ -179,6 +181,7 @@ impl Default for BenchEngineConfig {
         Self {
             storage_mode: BenchStorageMode::LocalDisk,
             wal_sync: false,
+            wal_batch_config: None,
             enable_compaction: false,
             memtable_size: BENCH_MEMTABLE_SIZE,
         }
@@ -203,6 +206,11 @@ impl BenchEngineConfig {
 
     pub fn with_wal_sync(mut self, sync: bool) -> Self {
         self.wal_sync = sync;
+        self
+    }
+
+    pub fn with_wal_batch_config(mut self, cfg: cntryl_midge::wal::policy::BatchConfig) -> Self {
+        self.wal_batch_config = Some(cfg);
         self
     }
 
@@ -239,6 +247,7 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
         memtable_size: config.memtable_size,
         enable_compaction: config.enable_compaction,
         wal_sync: config.wal_sync,
+        wal_batch_config: config.wal_batch_config,
         ..Default::default()
     };
 
@@ -309,6 +318,148 @@ pub fn setup_engine_arc(prefix: &str, mode: BenchStorageMode) -> Arc<MidgeEngine
 }
 
 // ============================================================================
+// Tier-3 harness helpers
+// ============================================================================
+
+/// Recursively copy a directory tree from `src` to `dst`. Creates `dst` if needed.
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let start = std::time::Instant::now();
+    let mut bytes_copied: u64 = 0;
+    let mut files_copied: u64 = 0;
+
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            let bytes = std::fs::copy(&src_path, &dst_path)?;
+            bytes_copied = bytes_copied.saturating_add(bytes);
+            files_copied += 1;
+        }
+    }
+
+    let elapsed = start.elapsed();
+    tracing::info!(
+        src = ?src,
+        dst = ?dst,
+        files = files_copied,
+        bytes = bytes_copied,
+        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+        "seed clone completed"
+    );
+
+    Ok(())
+}
+
+/// Tier-3 harness helpers (typed) 🛡️
+///
+/// These helpers live in a dedicated module to avoid emitting dead-code lints
+/// in benches that don't use the typed harness. Include them from benches that
+/// need them with:
+///
+/// ```ignore
+/// #[path = "./common/tier3_harness.rs"]
+/// mod tier3;
+/// ```
+/// When included, use `tier3::Tier3Case` or `tier3::Tier3RestoreCase` and the
+/// `tier3_bench!` / `tier3_bench_restore!` macros.
+/// Create an on-disk "seed" directory by invoking a builder closure once.
+/// The builder receives the path where it should materialize the database. Use
+/// `setup_engine_at_path` inside the builder to construct the desired SST layout.
+#[allow(dead_code)]
+pub fn create_seed_dir<F>(seed_prefix: &str, builder: F) -> std::path::PathBuf
+where
+    F: FnOnce(&std::path::Path),
+{
+    let seed_path = unique_bench_path(seed_prefix);
+    // Ensure a clean slate
+    let _ = std::fs::remove_dir_all(&seed_path);
+    // Let the builder create the DB at `seed_path` (it may call setup_engine_at_path)
+    builder(&seed_path);
+    seed_path
+}
+
+/// Run a single-shot measurement from a previously created seed directory.
+/// This function clones the seed directory to a unique temp path, reopens the
+/// engine at that path using `config`, invokes `measure_fn` exactly once with
+/// ownership of the opened engine, measures the elapsed time, then cleans up.
+#[allow(dead_code)]
+pub fn run_single_shot_from_seed<F>(
+    seed_path: &std::path::Path,
+    config: &BenchEngineConfig,
+    measure_fn: F,
+) -> std::time::Duration
+where
+    F: FnOnce(MidgeEngine),
+{
+    // Clone seed into a unique temp path so each sample gets an isolated engine
+    let tmp_path = unique_bench_path("tier3_case");
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    copy_dir_all(seed_path, &tmp_path).expect("failed to clone seed dir");
+
+    // Reopen engine at tmp_path with requested config
+    let engine = reopen_engine_at_path(&tmp_path, config);
+
+    // Timed single-shot invocation
+    let start = std::time::Instant::now();
+    measure_fn(engine);
+    let mut elapsed = start.elapsed();
+    // Criterion asserts sample durations > 0; ensure a tiny non-zero minimum to avoid panics
+    if elapsed.as_nanos() == 0 {
+        elapsed = std::time::Duration::from_nanos(1);
+    }
+
+    // Engine dropped here; remove temp dir
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    elapsed
+}
+
+/// Run a single-shot measurement from a seed but allow a pre-timed "restore" step.
+/// Useful for cases where the per-sample restore is expensive but must not be included
+/// in the timed critical section (e.g., creating multiple L0 files before compact_all).
+#[allow(dead_code)]
+pub fn run_single_shot_with_restore<R, T>(
+    seed_path: &std::path::Path,
+    config: &BenchEngineConfig,
+    restore_fn: R,
+    timed_fn: T,
+) -> std::time::Duration
+where
+    R: FnOnce(&MidgeEngine),
+    T: FnOnce(&MidgeEngine),
+{
+    // Clone seed into a unique temp path so each sample gets an isolated engine
+    let tmp_path = unique_bench_path("tier3_case_restore");
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    copy_dir_all(seed_path, &tmp_path).expect("failed to clone seed dir");
+
+    // Reopen engine at tmp_path with requested config
+    let engine = reopen_engine_at_path(&tmp_path, config);
+
+    // Perform restore steps outside timed window
+    restore_fn(&engine);
+
+    // Timed single-shot invocation
+    let start = std::time::Instant::now();
+    timed_fn(&engine);
+    let mut elapsed = start.elapsed();
+    // Criterion asserts sample durations > 0; ensure a tiny non-zero minimum to avoid panics
+    if elapsed.as_nanos() == 0 {
+        elapsed = std::time::Duration::from_nanos(1);
+    }
+
+    // Engine dropped here; remove temp dir
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    elapsed
+}
+
+// ============================================================================
 // Benchmark Group Helpers
 // ============================================================================
 
@@ -336,7 +487,10 @@ macro_rules! for_each_storage_mode {
 #[cfg(test)]
 #[allow(unused_imports)]
 mod tests {
-    use super::{make_key, unique_bench_path, BenchStorageMode, KEY_SIZE};
+    use super::{
+        create_seed_dir, make_key, run_single_shot_from_seed, run_single_shot_with_restore,
+        setup_engine_at_path, unique_bench_path, BenchEngineConfig, BenchStorageMode, KEY_SIZE,
+    };
 
     #[test]
     fn test_unique_paths_are_unique() {
@@ -356,5 +510,44 @@ mod tests {
     fn test_storage_mode_display() {
         assert_eq!(format!("{}", BenchStorageMode::Memory), "memory");
         assert_eq!(format!("{}", BenchStorageMode::LocalDisk), "disk");
+    }
+
+    #[test]
+    fn test_tier3_case_run() {
+        let seed = create_seed_dir("test_tier3_case", |p| {
+            let cfg = BenchEngineConfig::default();
+            let _ = setup_engine_at_path(p, &cfg);
+        });
+
+        // Should run without panicking.
+        let _d = run_single_shot_from_seed(&seed, &BenchEngineConfig::default(), |_engine| {});
+    }
+
+    #[test]
+    fn test_tier3_restore_case_phases() {
+        use std::sync::{Arc, Mutex};
+        let seed = create_seed_dir("test_tier3_restore", |p| {
+            let cfg = BenchEngineConfig::default();
+            let _ = setup_engine_at_path(p, &cfg);
+        });
+
+        let seq = Arc::new(Mutex::new(Vec::new()));
+        // Clone handles for each closure so `seq` remains available after call.
+        let seq_restore = seq.clone();
+        let seq_timed = seq.clone();
+
+        let _d = run_single_shot_with_restore(
+            &seed,
+            &BenchEngineConfig::default(),
+            move |_engine| {
+                seq_restore.lock().unwrap().push("restore");
+            },
+            move |_engine| {
+                seq_timed.lock().unwrap().push("timed");
+            },
+        );
+
+        let captured = seq.lock().unwrap().clone();
+        assert_eq!(captured, vec!["restore", "timed"]);
     }
 }

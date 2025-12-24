@@ -103,6 +103,13 @@ pub struct MidgeOptions {
     pub storage_mode: StorageMode,
     /// WAL sync enabled
     pub wal_sync: bool,
+
+    /// When writes are acknowledged to callers.
+    ///
+    /// Note: this is distinct from `wal_sync` / WAL durability mechanisms.
+    pub ack_policy: crate::common::AckPolicy,
+    /// Batch config for WAL group commit (optional)
+    pub wal_batch_config: Option<crate::wal::policy::BatchConfig>,
     /// Maximum memtable size before flush
     pub memtable_size: usize,
     /// Compression enabled
@@ -118,6 +125,8 @@ impl Default for MidgeOptions {
         Self {
             storage_mode: StorageMode::Memory,
             wal_sync: false,
+            ack_policy: crate::common::AckPolicy::default(),
+            wal_batch_config: None,
             memtable_size: 64 * 1024 * 1024, // 64 MB
             compression: false,
             enable_compaction: true,
@@ -193,21 +202,30 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
         "memory" => MidgeOptions {
             storage_mode: StorageMode::Memory,
             wal_sync: false,
+            ack_policy: crate::common::AckPolicy::default(),
+            wal_batch_config: None,
             memtable_size: 64 * 1024,
             compression: false,
             enable_compaction: false,
             memory_budget: None,
         },
         "local" => {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
             let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_local_{}_{}",
+                "target/tmp/midge_test_local_{}_{}_{}",
                 std::process::id(),
-                unique_id
+                unique_id,
+                timestamp
             ));
             std::fs::create_dir_all(&test_dir).ok();
             MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: test_dir },
                 wal_sync: true,
+                ack_policy: crate::common::AckPolicy::default(),
+                wal_batch_config: None,
                 memtable_size: 64 * 1024,
                 compression: false,
                 enable_compaction: false,
@@ -215,10 +233,15 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             }
         }
         "cloud" => {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
             let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_cloud_{}_{}",
+                "target/tmp/midge_test_cloud_{}_{}_{}",
                 std::process::id(),
-                unique_id
+                unique_id,
+                timestamp
             ));
             std::fs::create_dir_all(&test_dir).ok();
             MidgeOptions {
@@ -226,6 +249,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                     local_cache_path: test_dir,
                 },
                 wal_sync: true,
+                ack_policy: crate::common::AckPolicy::default(),
+                wal_batch_config: None,
                 memtable_size: 64 * 1024,
                 compression: false,
                 enable_compaction: false,
@@ -422,6 +447,8 @@ pub fn compaction_test_opts() -> MidgeOptions {
             db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
+        ack_policy: crate::common::AckPolicy::default(),
+        wal_batch_config: None,
         memtable_size: 1024 * 1024, // 1 MB for faster flushing in tests
         compression: false,
         enable_compaction: true,
@@ -436,6 +463,8 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
             db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
+        ack_policy: crate::common::AckPolicy::default(),
+        wal_batch_config: None,
         memtable_size: 512 * 1024, // 512 KB for even faster flushing
         compression: false,
         enable_compaction: false,
@@ -506,6 +535,8 @@ pub fn durability_opts() -> MidgeOptions {
             db_path: test_temp_dir().path().to_path_buf(),
         },
         wal_sync: true,
+        ack_policy: crate::common::AckPolicy::default(),
+        wal_batch_config: None,
         memtable_size: 64 * 1024,
         compression: false,
         enable_compaction: false,

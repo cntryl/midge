@@ -45,18 +45,18 @@ fn should_return_none_given_ttl_elapsed_when_reading() {
 }
 
 #[test]
-fn should_not_expire_key_given_zero_ttl_means_no_expiration_when_reading() {
+fn should_not_expire_key_given_zero_ttl_when_zero_means_infinite() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put_with_ttl(cf, b"key1", b"value1", 0).unwrap(); // 0 = no expiration
+        engine.put_with_ttl(cf, b"key1", b"value1", 0).unwrap(); // 0 = no expiration (infinite)
 
         // Act
         thread::sleep(Duration::from_millis(100));
         let result = engine.get(cf, b"key1").unwrap();
 
-        // Assert
+        // Assert - TTL of 0 means never expires
         assert_eq!(result, Some(Bytes::from_static(b"value1")));
     });
 }
@@ -121,8 +121,8 @@ fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
         engine.put_with_ttl(cf, b"key1", b"value1", 1).unwrap(); // 1 second
         thread::sleep(Duration::from_millis(1100));
 
-        // Act - trigger compaction (would need force_compaction API)
-        // engine.force_compaction(cf).unwrap();
+        // Act - trigger compaction
+        engine.compact_all().unwrap();
 
         // Assert - expired entry should be removed
         let result = engine.get(cf, b"key1").unwrap();
@@ -139,7 +139,7 @@ fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() 
         engine.put_with_ttl(cf, b"key1", b"value1", 3600).unwrap(); // 1 hour
 
         // Act - trigger compaction
-        // engine.force_compaction(cf).unwrap();
+        engine.compact_all().unwrap();
 
         // Assert - non-expired entry preserved
         let result = engine.get(cf, b"key1").unwrap();
@@ -197,17 +197,22 @@ fn should_apply_ttl_given_write_batch_with_ttl_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
-        let _cf = engine.default_column_family();
+        let cf = engine.default_column_family();
 
-        // Act - write batch with TTL (need WriteBatch::put_with_ttl API)
-        // let mut batch = engine.create_write_batch();
-        // batch.put_with_ttl(cf, b"key1", b"value1", 1).unwrap();
-        // engine.write_batch(&batch).unwrap();
-        // thread::sleep(Duration::from_millis(1100));
+        // Act - write batch with TTL
+        let mut batch = cntryl_midge::WriteBatch::new();
+        batch.put_with_ttl(
+            cf.id(),
+            Bytes::from_static(b"key1"),
+            Bytes::from_static(b"value1"),
+            1,
+        );
+        engine.write_batch(&batch).unwrap();
+        thread::sleep(Duration::from_millis(1100));
 
         // Assert
-        // let result = engine.get(cf, b"key1").unwrap();
-        // assert_eq!(result, None);
+        let result = engine.get(cf, b"key1").unwrap();
+        assert_eq!(result, None);
     });
 }
 

@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::io::traits::Fs;
+
 /// Column family state
 pub struct ColumnFamilyState {
     pub id: u32,
@@ -79,6 +81,18 @@ pub struct CloudState {
     pub last_cloud_checkpoint_seq: u64,
 }
 
+/// Snapshot pinning state
+///
+/// Tracks active snapshots to prevent SST garbage collection
+/// while snapshots are reading from those SSTs.
+#[derive(Default)]
+pub struct SnapshotState {
+    /// Active snapshots: snapshot_id → (sequence, created_at, ref_count)
+    pub active_snapshots: HashMap<u64, (u64, std::time::Instant, usize)>,
+    /// Maximum time to hold a snapshot (1 hour by default)
+    pub max_snapshot_lifetime: std::time::Duration,
+}
+
 /// Centralized runtime state
 ///
 /// This is the single source of truth for all mutable engine state.
@@ -102,6 +116,10 @@ pub struct RuntimeState {
     /// Minimum sequence of a pending WriteBatch (for read atomicity)
     /// When set, reads at sequences >= this value must wait for durability
     pub pending_batch_min_seq: Option<u64>,
+    /// Idempotency cache: request_id → (first_sequence, count, confirmed_at)
+    /// Prevents duplicate sequence allocation on retry of same request_id.
+    /// Entries cleared when durability frontier advances past confirmed_at.
+    pub sequence_idempotency_cache: HashMap<u64, (u64, usize, u64)>,
 
     // === Column Families ===
     pub column_families: HashMap<u32, ColumnFamilyState>,
@@ -109,16 +127,22 @@ pub struct RuntimeState {
     // === Metadata ===
     pub manifest: Manifest,
 
+    // Filesystem abstraction for all IO (never call std::fs directly)
+    pub fs: std::sync::Arc<dyn Fs>,
+
     // === Subsystem State ===
     pub wal: WalState,
     pub compaction: CompactionState,
     pub cloud: CloudState,
+    pub snapshots: SnapshotState,
 
     // === Configuration ===
     pub memtable_size_limit: usize,
     pub read_only: bool,
     /// If true, never touch filesystem (pure in-memory mode)
     pub memory_mode: bool,
+    /// Whether background compaction is enabled
+    pub enable_compaction: bool,
 
     // === Intent Log & Determinism ===
     /// Deterministic intent log for recovery and replay
@@ -133,6 +157,24 @@ pub struct RuntimeState {
     // === Observability ===
     /// Read amplification metrics across all reads
     pub read_amp_metrics: ReadAmpMetrics,
+
+    // === Ingest control & coordination ===
+    /// Ingest epoch counter used to cooperatively cancel long-running jobs.
+    /// Bumping this value invalidates currently running compactions which should
+    /// check the epoch and abort if it changes.
+    pub ingest_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+
+    /// Number of active compaction jobs. Used so `BeginIngest` can wait until
+    /// the running compactions drain.
+    pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Condvar used to wait for active_compactions == 0.
+    pub active_compactions_notify: std::sync::Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
+
+    /// Whether an ingest barrier is currently active. This is set at BeginIngest
+    /// and cleared at EndIngest so tools and tests can detect when ingest mode
+    /// is enforced.
+    pub ingest_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RuntimeState {
@@ -173,9 +215,14 @@ impl RuntimeState {
             }
         }
 
-        // Load manifest (only if not in memory mode)
+        // Initialize real filesystem abstraction (used for all metadata IO)
+        let fs: std::sync::Arc<dyn Fs> = std::sync::Arc::new(
+            crate::io::real::RealFs::new(&db_path).expect("failed to initialize RealFs"),
+        );
+
+        // Load manifest (prefer snapshot + journal replay) — only if not in memory mode
         let manifest = if !memory_mode {
-            match crate::metadata::ManifestPersistence::load(&db_path) {
+            match crate::metadata::ManifestPersistence::load_with_fs(&fs) {
                 Ok(m) => {
                     tracing::info!("manifest loaded from disk");
                     m
@@ -189,9 +236,9 @@ impl RuntimeState {
             Manifest::default()
         };
 
-        // Load intent log if present
+        // Load intent log if present (using FS via persistence helpers)
         let intent_log = if !memory_mode {
-            match crate::runtime::IntentPersistence::load(&db_path) {
+            match crate::runtime::IntentPersistence::load_with_fs(&fs) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to load intent log, starting empty");
@@ -231,6 +278,9 @@ impl RuntimeState {
                             bytes_recovered = stats.bytes,
                             max_sequence = ?stats.max_sequence,
                             replay_dir = ?replay_dir,
+                            replay_ms = (stats.total_replay_ns as f64) / 1_000_000.0,
+                            wal_read_ms = (stats.wal_read_ns as f64) / 1_000_000.0,
+                            apply_ms = (stats.apply_ns as f64) / 1_000_000.0,
                             "WAL recovery completed successfully"
                         );
                         for (cf_id, recovered_memtable) in recovery_memtables {
@@ -301,14 +351,20 @@ impl RuntimeState {
             sequence: recovered_sequence,
             next_txn_id: 0,
             pending_batch_min_seq: None,
+            sequence_idempotency_cache: HashMap::new(),
             column_families,
             manifest,
+            fs: fs.clone(),
             wal: WalState {
                 current_segment_id: recovered_next_segment_id,
                 ..WalState::default()
             },
             compaction: CompactionState::default(),
             cloud: CloudState::default(),
+            snapshots: SnapshotState {
+                active_snapshots: HashMap::new(),
+                max_snapshot_lifetime: std::time::Duration::from_secs(3600), // 1 hour default
+            },
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             read_only: false,
             memory_mode,
@@ -316,13 +372,116 @@ impl RuntimeState {
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             write_stalled: false,
             total_memtable_bytes: 0,
+            enable_compaction: true,
             read_amp_metrics: ReadAmpMetrics::new(),
+            ingest_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            active_compactions_notify: std::sync::Arc::new((
+                std::sync::Mutex::new(()),
+                std::sync::Condvar::new(),
+            )),
+            ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     pub fn next_sequence(&mut self) -> u64 {
         self.sequence += 1;
         self.sequence
+    }
+
+    /// Check if we have cached sequences for this request_id.
+    /// Returns (first_sequence, count) if found and not yet confirmed.
+    pub fn get_cached_sequences(&self, request_id: u64) -> Option<(u64, usize)> {
+        self.sequence_idempotency_cache
+            .get(&request_id)
+            .map(|(first_seq, count, _confirmed_at)| (*first_seq, *count))
+    }
+
+    /// Allocate sequences idempotently.
+    /// If request_id is already in cache, return cached sequences.
+    /// Otherwise, allocate count new sequences and cache them.
+    pub fn allocate_sequences_idempotent(&mut self, request_id: u64, count: usize) -> (u64, usize) {
+        // Check if we have cached sequences for this request
+        if let Some((first_seq, cnt)) = self.get_cached_sequences(request_id) {
+            tracing::debug!(
+                request_id = request_id,
+                first_seq = first_seq,
+                count = cnt,
+                "reusing cached sequences for retry"
+            );
+            return (first_seq, cnt);
+        }
+
+        // Allocate new sequences
+        let first_seq = self.sequence + 1;
+        self.sequence += count as u64;
+
+        // Cache the allocation with current timestamp
+        // We use local_durable_seq as the confirmation frontier for cleanup
+        self.sequence_idempotency_cache
+            .insert(request_id, (first_seq, count, 0)); // 0 = not confirmed yet
+
+        tracing::debug!(
+            request_id = request_id,
+            first_seq = first_seq,
+            count = count,
+            "allocated new sequences"
+        );
+
+        (first_seq, count)
+    }
+
+    /// Confirm sequences for a request_id (mark as durable).
+    /// This updates the confirmed_at frontier to current local_durable_seq.
+    pub fn confirm_sequences(&mut self, request_id: u64) {
+        if let Some(entry) = self.sequence_idempotency_cache.get_mut(&request_id) {
+            entry.2 = self.wal.local_durable_seq;
+            tracing::debug!(
+                request_id = request_id,
+                confirmed_at = self.wal.local_durable_seq,
+                "confirmed sequences for request"
+            );
+        }
+    }
+
+    /// Confirm sequences for a request_id with an explicit confirmed_at sequence
+    /// Useful for CloudFirst paths where the confirmation frontier is `cloud_durable_seq`.
+    pub fn confirm_sequences_at(&mut self, request_id: u64, confirmed_at_seq: u64) {
+        if let Some(entry) = self.sequence_idempotency_cache.get_mut(&request_id) {
+            entry.2 = confirmed_at_seq;
+            tracing::debug!(
+                request_id = request_id,
+                confirmed_at = confirmed_at_seq,
+                "confirmed sequences for request at explicit frontier"
+            );
+        }
+    }
+
+    /// Clean up idempotency cache entries that have been confirmed and are now old.
+    /// Called periodically as durability frontier advances.
+    pub fn cleanup_old_idempotency_entries(&mut self) {
+        let current_frontier = self.wal.local_durable_seq;
+        self.sequence_idempotency_cache.retain(
+            |_request_id, (_first_seq, _count, confirmed_at)| {
+                // Keep entries that are either:
+                // 1. Not yet confirmed (confirmed_at == 0)
+                // 2. Recently confirmed (confirmed_at > frontier - 100)
+                // Remove old confirmed entries beyond the frontier
+                *confirmed_at == 0 || *confirmed_at > current_frontier.saturating_sub(100)
+            },
+        );
+    }
+
+    /// Invalidate cached idempotency allocations that are part of a failed WAL
+    /// segment upload. Any entry whose last allocated sequence is <= `max_sequence`
+    /// is removed so that retries will allocate fresh sequences.
+    pub fn invalidate_idempotency_allocations_up_to(&mut self, max_sequence: u64) {
+        self.sequence_idempotency_cache
+            .retain(|_request_id, (first_seq, count, _)| {
+                let last_seq = first_seq.saturating_add((*count as u64).saturating_sub(1));
+                // Keep entries that extend beyond the failed max_sequence
+                last_seq > max_sequence
+            });
     }
 
     /// Get the next transaction ID
@@ -340,6 +499,167 @@ impl RuntimeState {
                 .map_err(crate::common::MidgeError::Internal)?;
         }
         Ok(())
+    }
+
+    /// Append an intent entry WITHOUT persisting (used for batched writes).
+    /// Caller MUST call `persist_intent_log()` after all batch entries are added.
+    #[inline]
+    pub fn append_intent_deferred(&mut self, entry: crate::runtime::IntentLogEntry) {
+        self.intent_log.push(entry);
+    }
+
+    /// Persist the intent log to disk (call after batched `append_intent_deferred` calls).
+    pub fn persist_intent_log(&self) -> MidgeResult<()> {
+        if !self.memory_mode {
+            crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
+                .map_err(crate::common::MidgeError::Internal)?;
+        }
+        Ok(())
+    }
+
+    /// Replay intent log to recover incomplete mutations
+    /// Called during startup to apply any interrupted manifest or durability changes
+    pub fn replay_intent_log(&mut self) -> MidgeResult<()> {
+        if self.intent_log.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            intent_count = self.intent_log.len(),
+            "replaying intent log during recovery"
+        );
+
+        for intent in &self.intent_log {
+            match intent {
+                crate::runtime::IntentLogEntry::CompactionApplied { removed, added } => {
+                    // Replay compaction: remove old SSTs, add new ones
+                    self.manifest.files.retain(|f| !removed.contains(&f.name));
+
+                    // Note: We don't have full FileMeta info, so just track file names
+                    // The actual file metadata will be reconstructed from disk on next persist
+                    tracing::info!(
+                        removed_count = removed.len(),
+                        added_count = added.len(),
+                        "replayed compaction intent"
+                    );
+                }
+                crate::runtime::IntentLogEntry::SstAdded { file_meta } => {
+                    // Replay SST addition
+                    let manifest_meta = crate::metadata::FileMeta {
+                        name: file_meta.name.clone(),
+                        level: file_meta.level,
+                        size_bytes: file_meta.size_bytes,
+                        cf_id: file_meta.cf_id,
+                        smallest_key: file_meta.smallest_key.clone(),
+                        largest_key: file_meta.largest_key.clone(),
+                        smallest_seq: file_meta.smallest_seq,
+                        largest_seq: file_meta.largest_seq,
+                        ..Default::default()
+                    };
+                    self.manifest.files.push(manifest_meta);
+
+                    tracing::info!(
+                        sst_name = %file_meta.name,
+                        "replayed SST addition intent"
+                    );
+                }
+                _ => {
+                    // Other intents (WalSynced, DataUploaded, etc.) don't require replay
+                    // They are informational and don't affect the recoverable state
+                }
+            }
+        }
+
+        // Clear the intent log after successful replay
+        // New intents will be written during normal operation
+        self.intent_log.clear();
+        if !self.memory_mode {
+            crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
+                .map_err(crate::common::MidgeError::Internal)?;
+        }
+
+        tracing::info!("intent log replay complete and cleared");
+        Ok(())
+    }
+
+    /// Register a new snapshot to prevent SST garbage collection
+    /// while the snapshot is active and performing range scans.
+    ///
+    /// Returns true if snapshot was registered successfully.
+    /// Returns false if snapshot_id already exists (duplicate registration).
+    pub fn register_snapshot(&mut self, snapshot_id: u64, sequence: u64) -> bool {
+        if self.snapshots.active_snapshots.contains_key(&snapshot_id) {
+            tracing::warn!(snapshot_id, "Attempted to register duplicate snapshot ID");
+            return false;
+        }
+
+        self.snapshots
+            .active_snapshots
+            .insert(snapshot_id, (sequence, std::time::Instant::now(), 1));
+
+        tracing::trace!(snapshot_id, sequence, "Snapshot registered for SST pinning");
+
+        true
+    }
+
+    /// Unregister a snapshot, allowing SSTs referenced by it to be garbage collected.
+    pub fn unregister_snapshot(&mut self, snapshot_id: u64) {
+        if self
+            .snapshots
+            .active_snapshots
+            .remove(&snapshot_id)
+            .is_some()
+        {
+            tracing::trace!(snapshot_id, "Snapshot unregistered; SSTs eligible for GC");
+        }
+    }
+
+    /// Get list of SSTs referenced by active snapshots.
+    /// These SSTs must NOT be deleted during garbage collection.
+    pub fn get_pinned_sst_names(&self) -> std::collections::HashSet<String> {
+        let mut pinned = std::collections::HashSet::new();
+
+        for (snapshot_id, (snapshot_seq, created_at, _ref_count)) in
+            &self.snapshots.active_snapshots
+        {
+            // Check if snapshot has exceeded max lifetime
+            let age = std::time::Instant::now().duration_since(*created_at);
+            if age > self.snapshots.max_snapshot_lifetime {
+                tracing::warn!(
+                    snapshot_id,
+                    age_secs = age.as_secs(),
+                    max_secs = self.snapshots.max_snapshot_lifetime.as_secs(),
+                    "Long-lived snapshot exceeds max lifetime (should be auto-closed)"
+                );
+                // Note: we don't auto-close here; that's for the caller to decide
+                // but we log it for alerting
+            }
+
+            // Find all SSTs with sequence >= snapshot_seq
+            // These contain data visible to the snapshot
+            for file_meta in &self.manifest.files {
+                // Check if this SST overlaps with snapshot's sequence range
+                let smallest = file_meta.smallest_seq.unwrap_or(0);
+                let largest = file_meta.largest_seq.unwrap_or(u64::MAX);
+                if smallest <= *snapshot_seq && largest >= smallest {
+                    pinned.insert(file_meta.name.clone());
+                }
+            }
+        }
+
+        pinned
+    }
+
+    /// Check for timed-out snapshots and return count
+    pub fn count_timed_out_snapshots(&self) -> usize {
+        self.snapshots
+            .active_snapshots
+            .iter()
+            .filter(|(_id, (_seq, created_at, _ref_count))| {
+                std::time::Instant::now().duration_since(*created_at)
+                    > self.snapshots.max_snapshot_lifetime
+            })
+            .count()
     }
 
     pub fn get_cf(&self, cf_id: u32) -> Option<&ColumnFamilyState> {

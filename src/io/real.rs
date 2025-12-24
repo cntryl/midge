@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn should_write_and_read_file() -> FsResult<()> {
+    fn should_read_written_file_when_writing() -> FsResult<()> {
         let temp = TempDir::new().map_err(|e| FsError::Io(e.to_string()))?;
         let fs = RealFs::new(temp.path())?;
 

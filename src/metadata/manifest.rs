@@ -51,7 +51,7 @@ fn default_next_wal_seq() -> u64 {
 }
 
 /// Cloud checkpoint for WAL coordination
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudCheckpoint {
     /// Highest WAL sequence fully materialized to cloud
     pub checkpoint_sequence: u64,
@@ -214,6 +214,50 @@ impl Manifest {
             true
         } else {
             false
+        }
+    }
+
+    /// Apply a ManifestEdit (journal replay or live append)
+    pub fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) {
+        match edit {
+            crate::metadata::ManifestEdit::AddSst(meta) => {
+                self.add_file(meta.clone());
+            }
+            crate::metadata::ManifestEdit::RemoveSst { name } => {
+                self.remove_file(name);
+            }
+            crate::metadata::ManifestEdit::CreateColumnFamily {
+                id,
+                name,
+                created_at,
+            } => {
+                self.column_families.push(ColumnFamilyMeta {
+                    id: *id,
+                    name: name.clone(),
+                    created_at: *created_at,
+                    deleted_at: None,
+                });
+            }
+            crate::metadata::ManifestEdit::DropColumnFamily { id } => {
+                let _ = self.delete_column_family(*id);
+            }
+            crate::metadata::ManifestEdit::BumpWalSeq { seq } => {
+                if *seq > self.last_persisted_sequence {
+                    self.last_persisted_sequence = *seq;
+                }
+            }
+            crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq } => {
+                self.next_sst_seqs.insert(*cf_id, *next_seq);
+            }
+            crate::metadata::ManifestEdit::SetCloudCheckpoint(cp) => {
+                self.cloud_checkpoint = Some(cp.clone());
+            }
+            crate::metadata::ManifestEdit::Batch(edits) => {
+                // Apply each edit in order (atomic at journal record boundary)
+                for e in edits {
+                    self.apply_edit(e);
+                }
+            }
         }
     }
 }

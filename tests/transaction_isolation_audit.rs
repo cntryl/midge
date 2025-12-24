@@ -24,7 +24,7 @@ use std::sync::Arc;
 // If Midge allows dirty reads, it's Read Uncommitted.
 
 #[test]
-fn audit_dirty_read_prevention_uncommitted_writes() {
+fn should_prevent_dirty_reads_when_reading_uncommitted_writes() {
     eprintln!("\n=== AUDIT: DIRTY READ PREVENTION ===");
     eprintln!("Question: Can a transaction see uncommitted writes from another transaction?");
 
@@ -62,7 +62,7 @@ fn audit_dirty_read_prevention_uncommitted_writes() {
 // - Repeatable Read: Lost update possible
 
 #[test]
-fn audit_concurrent_write_conflict_resolution() {
+fn should_resolve_concurrent_write_conflicts_when_concurrent() {
     eprintln!("\n=== AUDIT: CONCURRENT WRITE CONFLICT ===");
     eprintln!("Question: What happens when two transactions write to the same key?");
 
@@ -93,8 +93,12 @@ fn audit_concurrent_write_conflict_resolution() {
 
     eprintln!("TXN1 commit result: {:?}", result1);
     eprintln!("TXN2 commit result: {:?}", result2);
-    eprintln!("Final value: {:?}", 
-        final_value.as_ref().map(|v| String::from_utf8_lossy(v).to_string()));
+    eprintln!(
+        "Final value: {:?}",
+        final_value
+            .as_ref()
+            .map(|v| String::from_utf8_lossy(v).to_string())
+    );
 
     match (result1.is_ok(), result2.is_ok()) {
         (true, true) => {
@@ -136,7 +140,7 @@ fn audit_concurrent_write_conflict_resolution() {
 // LWW/Repeatable Read: Final count = 1 (lost update possible)
 
 #[test]
-fn audit_read_modify_write_conflict() {
+fn should_detect_read_modify_write_conflicts_when_concurrent() {
     eprintln!("\n=== AUDIT: READ-MODIFY-WRITE LOST UPDATE ===");
     eprintln!("Question: Does lost update prevention work?");
 
@@ -214,7 +218,7 @@ fn audit_read_modify_write_conflict() {
 // after snapshot creation.
 
 #[test]
-fn audit_phantom_read_prevention() {
+fn should_prevent_phantom_reads_when_isolation_enforced() {
     eprintln!("\n=== AUDIT: PHANTOM READ PREVENTION (Snapshot Isolation) ===");
     eprintln!("Question: Can rows inserted after transaction starts become visible?");
 
@@ -228,14 +232,20 @@ fn audit_phantom_read_prevention() {
 
     // Create snapshot/transaction
     let snapshot = engine.snapshot();
-    let initial_count = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let initial_count = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
     eprintln!("Snapshot sees {} keys initially", initial_count);
 
     // Insert new key after snapshot created
     engine.put(cf, b"k4", b"v4").unwrap();
 
     // Check if snapshot sees the new key
-    let later_count = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let later_count = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
     eprintln!("Snapshot sees {} keys after insert", later_count);
 
     if later_count > initial_count {
@@ -255,7 +265,7 @@ fn audit_phantom_read_prevention() {
 // LWW would allow it and last write wins.
 
 #[test]
-fn audit_write_skew_detection() {
+fn should_detect_write_skew_when_isolation_enabled() {
     eprintln!("\n=== AUDIT: WRITE SKEW (Serializable) ===");
     eprintln!("Question: Is write skew (concurrent reads of same base, disjoint writes) detected?");
 
@@ -275,10 +285,12 @@ fn audit_write_skew_detection() {
     let _shared2 = engine.get(cf, b"shared").unwrap();
 
     // TXN1 writes to different key
-    txn1.put(cf.id(), b"flag1".to_vec(), b"true".to_vec()).unwrap();
+    txn1.put(cf.id(), b"flag1".to_vec(), b"true".to_vec())
+        .unwrap();
 
     // TXN2 writes to different key
-    txn2.put(cf.id(), b"flag2".to_vec(), b"true".to_vec()).unwrap();
+    txn2.put(cf.id(), b"flag2".to_vec(), b"true".to_vec())
+        .unwrap();
 
     let r1 = engine.commit_transaction(txn1);
     let r2 = engine.commit_transaction(txn2);

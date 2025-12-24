@@ -6,9 +6,9 @@
 //! This file serves as the single source of truth for transaction semantics.
 //! All other transaction tests MUST be consistent with this level.
 
+use bytes::Bytes;
 use cntryl_midge::testkit::*;
 use std::sync::Arc;
-use bytes::Bytes;
 
 #[test]
 fn document_transaction_isolation_level_lww() {
@@ -55,7 +55,7 @@ fn document_transaction_isolation_level_lww() {
 
 /// Verify: Dirty writes ARE prevented (not LWW quirk, but actual guarantee)
 #[test]
-fn verify_dirty_writes_prevented() {
+fn should_prevent_dirty_writes_when_uncommitted() {
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
@@ -75,7 +75,7 @@ fn verify_dirty_writes_prevented() {
 
 /// Verify: Concurrent writes both succeed, last one visible
 #[test]
-fn verify_concurrent_writes_lww() {
+fn should_resolve_concurrent_writes_with_lww_when_enabled() {
     let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
     let cf = engine.default_column_family();
 
@@ -106,7 +106,7 @@ fn verify_concurrent_writes_lww() {
 
 /// Verify: Lost updates ARE POSSIBLE in LWW (this is expected behavior)
 #[test]
-fn verify_lost_update_possible() {
+fn should_permit_lost_updates_when_not_prevented() {
     let engine = Arc::new(open_with_mode(opts_for_mode("memory"), "memory"));
     let cf = engine.default_column_family();
 
@@ -159,19 +159,25 @@ fn verify_lost_update_possible() {
 
 /// Verify: Snapshots see uncommitted changes (NOT true Snapshot Isolation)
 #[test]
-fn verify_snapshots_not_isolated() {
+fn should_not_isolate_snapshots_when_isolation_disabled() {
     let engine = open_with_mode(opts_for_mode("memory"), "memory");
     let cf = engine.default_column_family();
 
     engine.put(cf, b"initial", b"value").unwrap();
 
     let snapshot = engine.snapshot();
-    let initial_count = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let initial_count = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
 
     // Add new data after snapshot
     engine.put(cf, b"added_later", b"value").unwrap();
 
-    let later_count = snapshot.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let later_count = snapshot
+        .scan(cf, &cntryl_midge::Query::new())
+        .unwrap()
+        .len();
 
     // Note: Not asserting here because snapshot behavior may vary
     // The point is to document that true Snapshot Isolation is NOT guaranteed

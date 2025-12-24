@@ -36,12 +36,25 @@ use crate::common::MidgeResult;
 use crate::io::{Fs, FsPath, RealFs};
 use crate::runtime::IntentLogEntry;
 use crate::sst::Memtable;
+use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalOpKind, WalRecord, WalWriter};
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+/// === CloudFirst Backpressure Configuration ===
+/// These constants prevent memory exhaustion when cloud uploads are slow or stalled.
+///
+/// Maximum number of pending cloud writes before returning WriteStall
+const MAX_PENDING_CLOUD_WRITES: usize = 100_000;
+
+/// Approximate memory threshold for pending cloud writes (100MB)
+/// Each write is tracked in pending_cloud_writes; assume ~1KB average per write
+const MAX_PENDING_CLOUD_WRITE_BYTES: usize = 100 * 1024 * 1024;
+
+/// Maximum time to wait for cloud upload acknowledgment (30 seconds)
+const CLOUD_UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 enum PendingCloudWrite {
@@ -51,16 +64,19 @@ enum PendingCloudWrite {
         value: Option<Vec<u8>>,
         sequence: u64,
         expiration: Option<u64>,
+        enqueued_at: Instant,
     },
     Merge {
         cf_id: u32,
         key: Vec<u8>,
         operand: Vec<u8>,
         sequence: u64,
+        enqueued_at: Instant,
     },
     Batch {
         commit_sequence: u64,
         ops: Vec<BatchApplyOp>,
+        enqueued_at: Instant,
     },
 }
 
@@ -71,10 +87,12 @@ enum BatchApplyOp {
         key: Vec<u8>,
         value: Vec<u8>,
         expiration: Option<u64>,
+        sequence: u64,
     },
     Delete {
         cf_id: u32,
         key: Vec<u8>,
+        sequence: u64,
     },
 }
 
@@ -91,20 +109,33 @@ pub struct WalActor {
     /// Pending writes waiting for cloud durability (CloudFirst mode only)
     /// These writes are in local WAL but NOT in memtable yet
     pending_cloud_writes: VecDeque<PendingCloudWrite>,
+    /// Approximate bytes in pending_cloud_writes queue (for backpressure)
+    /// Each write costs ~1KB; used to enforce MAX_PENDING_CLOUD_WRITE_BYTES
+    pending_cloud_write_bytes: usize,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
     /// Flush generation for batched/local durability group commit
     flush_generation: u64,
 
+    /// Batch configuration governing max_delay_ms and max_bytes
+    batch_config: BatchConfig,
+    /// Last wall-clock time we performed a WAL fsync
+    last_sync_instant: Instant,
+
     // === Optional instrumentation ===
     sync_calls: u64,
     sync_total: Duration,
+
+    // WAL append instrumentation
+    append_calls: u64,
+    append_total: Duration,
 }
 
 impl WalActor {
     pub fn new(
         wal_dir: PathBuf,
         durability_policy: DurabilityPolicy,
+        batch_config: BatchConfig,
         memory_mode: bool,
     ) -> MidgeResult<Self> {
         let (wal_fs, writer) = if memory_mode {
@@ -122,15 +153,36 @@ impl WalActor {
             pending_sync_count: 0,
             durability_policy,
             pending_cloud_writes: VecDeque::new(),
+            pending_cloud_write_bytes: 0,
             bytes_since_sync: 0,
             flush_generation: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
+            append_calls: 0,
+            append_total: Duration::from_secs(0),
+            batch_config,
+            last_sync_instant: Instant::now(),
         })
     }
 
     pub fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
+    }
+
+    pub fn batch_config(&self) -> crate::wal::policy::BatchConfig {
+        self.batch_config
+    }
+
+    /// Set durability policy and optional batch config at runtime
+    pub fn set_durability(
+        &mut self,
+        policy: DurabilityPolicy,
+        batch_config: crate::wal::policy::BatchConfig,
+    ) -> MidgeResult<()> {
+        // Update batch config and policy atomically
+        self.batch_config = batch_config;
+        self.durability_policy = policy;
+        Ok(())
     }
 
     pub fn is_cloud_first(&self) -> bool {
@@ -145,6 +197,10 @@ impl WalActor {
         self.pending_cloud_writes.len()
     }
 
+    pub fn pending_cloud_write_bytes(&self) -> usize {
+        self.pending_cloud_write_bytes
+    }
+
     pub fn bytes_since_sync(&self) -> usize {
         self.bytes_since_sync
     }
@@ -157,6 +213,35 @@ impl WalActor {
         self.flush_generation
     }
 
+    /// Number of times sync_internal has been called (for tests/diagnostics)
+    pub fn sync_calls(&self) -> u64 {
+        self.sync_calls
+    }
+
+    /// Check if cloud write queue has hit backpressure limits
+    /// Returns true if we should reject new writes to prevent memory exhaustion
+    pub fn should_apply_backpressure(&self) -> bool {
+        self.pending_cloud_writes.len() >= MAX_PENDING_CLOUD_WRITES
+            || self.pending_cloud_write_bytes >= MAX_PENDING_CLOUD_WRITE_BYTES
+    }
+
+    /// Check for timed-out pending cloud writes
+    /// Returns number of writes that have exceeded CLOUD_UPLOAD_TIMEOUT
+    pub fn count_timed_out_writes(&self) -> usize {
+        let now = Instant::now();
+        self.pending_cloud_writes
+            .iter()
+            .filter(|pw| {
+                let enqueued_at = match pw {
+                    PendingCloudWrite::Single { enqueued_at, .. }
+                    | PendingCloudWrite::Merge { enqueued_at, .. }
+                    | PendingCloudWrite::Batch { enqueued_at, .. } => *enqueued_at,
+                };
+                now.duration_since(enqueued_at) > CLOUD_UPLOAD_TIMEOUT
+            })
+            .count()
+    }
+
     /// Append a record to the WAL
     ///
     /// - Strict: fsync immediately + apply to memtable + respond
@@ -166,11 +251,14 @@ impl WalActor {
     ///
     /// In CloudFirst mode, writes are NOT visible until cloud acknowledges.
     /// Returns the assigned sequence number.
+    ///
+    /// IDEMPOTENCY: Uses request_id to detect retries. If the same request_id is seen twice,
+    /// returns the same sequence number instead of allocating a new one.
     #[allow(clippy::too_many_arguments)]
     pub fn append(
         &mut self,
         state: &mut RuntimeState,
-        _request_id: u64,
+        request_id: u64,
         cf_id: u32,
         key: Bytes,
         value: Option<Bytes>,
@@ -183,8 +271,29 @@ impl WalActor {
                 "key already exists".to_string(),
             ));
         }
-        // Allocate sequence number at append time to preserve a total order under concurrency.
-        let sequence = state.next_sequence();
+
+        // 🔑 CRITICAL: Allocate sequence idempotently using request_id.
+        // If this request_id was already allocated, return the same sequence.
+        // Otherwise, allocate a new sequence and cache it.
+        let (first_seq, _count) = state.allocate_sequences_idempotent(request_id, 1);
+        let sequence = first_seq;
+
+        // If this request_id has already been confirmed as durable, we can
+        // short-circuit and return the previously-allocated sequence without
+        // writing another WAL record or queuing another pending cloud write.
+        if let Some((_first, _cnt, confirmed_at)) =
+            state.sequence_idempotency_cache.get(&request_id)
+        {
+            if *confirmed_at > 0 {
+                tracing::debug!(
+                    request_id = request_id,
+                    sequence = sequence,
+                    "idempotent request already confirmed; returning existing allocation"
+                );
+                // Not deferred — the sequence is already durable
+                return Ok((sequence, false));
+            }
+        }
 
         // Determine operation kind: Delete if value is None, Put otherwise
         let op_kind = if value.is_none() {
@@ -206,7 +315,11 @@ impl WalActor {
 
         // ALWAYS append to local WAL first (FsWalWriter)
         if let Some(writer) = &mut self.writer {
+            let a_start = Instant::now();
             writer.append_record(&record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
         }
 
         // Update state tracking
@@ -222,12 +335,12 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply to memtable - write is now visible
-                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
             }
             DurabilityPolicy::Batched => {
                 // Apply to memtable immediately, but defer response until fsync completes.
                 // Caller joins the group commit waiter queue; sync completion notifies all.
-                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
                 // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
@@ -236,11 +349,39 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply to memtable - local durability sufficient
-                self.apply_to_memtable(state, cf_id, &key, &value, record.expiration)?;
+                self.apply_to_memtable(state, sequence, cf_id, &key, &value, record.expiration)?;
 
                 // TODO: Send CloudUploadWal message to CloudActor
             }
             DurabilityPolicy::CloudFirst => {
+                // === CRITICAL: Check backpressure before queueing ===
+                // If cloud upload is stalled, pending queue grows without bound.
+                // Prevent memory exhaustion by rejecting writes when queue is full.
+                if self.should_apply_backpressure() {
+                    tracing::warn!(
+                        pending_count = self.pending_cloud_writes.len(),
+                        pending_bytes = self.pending_cloud_write_bytes,
+                        "CloudFirst write stall: pending queue at capacity"
+                    );
+                    return Err(MidgeError::WriteStall(
+                        "CloudFirst pending queue at capacity; cloud upload too slow".to_string(),
+                    ));
+                }
+
+                // Check for timed-out writes
+                let timed_out = self.count_timed_out_writes();
+                if timed_out > 0 {
+                    tracing::error!(
+                        timed_out_count = timed_out,
+                        timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
+                        "CloudFirst timeout: pending writes not acknowledged by cloud"
+                    );
+                    return Err(MidgeError::Internal(format!(
+                        "{} pending writes exceeded cloud upload timeout",
+                        timed_out
+                    )));
+                }
+
                 // DO NOT apply to memtable yet!
                 // Queue write for cloud durability confirmation.
                 // Memtable update + response happen in handle_cloud_upload_complete.
@@ -255,6 +396,19 @@ impl WalActor {
         }
 
         tracing::trace!(cf_id, sequence, policy = ?self.durability_policy, "WAL append");
+
+        // Optional tracing for append averages
+        if std::env::var_os("MIDGE_TRACE_WAL_APPEND").is_some()
+            && self.append_calls.is_multiple_of(1000)
+        {
+            let avg_ms = (self.append_total.as_secs_f64() * 1000.0) / (self.append_calls as f64);
+            eprintln!(
+                "[midge] wal.append: calls={} total_ms={:.2} avg_ms={:.3}",
+                self.append_calls,
+                self.append_total.as_secs_f64() * 1000.0,
+                avg_ms
+            );
+        }
 
         // Return deferred=true if using group commit (Batched or CloudFirst modes)
         let deferred = matches!(
@@ -300,25 +454,28 @@ impl WalActor {
         // Advance global sequence to commit_seq
         state.sequence = commit_seq;
 
-        // Log seqno allocations for intent tracing
+        // Log seqno allocations for intent tracing (deferred - single persist at end)
         // Begin seq (cf_id 0)
-        state.append_intent(IntentLogEntry::SeqnoAllocated {
+        state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
             seqno: begin_seq,
             cf_id: 0,
-        })?;
-        // Per-op seqs will be logged below when we know cf_id
+        });
         // Commit seq
-        state.append_intent(IntentLogEntry::SeqnoAllocated {
+        state.append_intent_deferred(IntentLogEntry::SeqnoAllocated {
             seqno: commit_seq,
             cf_id: 0,
-        })?;
+        });
 
         // Create and write begin record
         let mut begin_record =
             WalRecord::new_cf(0, WalOpKind::TxnBegin, marker_key.clone(), None, begin_seq);
         begin_record.txn_id = Some(txn_id);
         if let Some(writer) = &mut self.writer {
+            let a_start = Instant::now();
             writer.append_record(&begin_record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
         }
 
         state.wal.pending_writes += 1;
@@ -360,11 +517,15 @@ impl WalActor {
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
+                        let a_start = Instant::now();
                         writer.append_record(&record)?;
+                        let a_elapsed = a_start.elapsed();
+                        self.append_calls += 1;
+                        self.append_total += a_elapsed;
                     }
 
-                    // Log seq allocation for this CF
-                    state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id })?;
+                    // Log seq allocation for this CF (deferred)
+                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id });
 
                     state.wal.pending_writes += 1;
                     self.pending_sync_count += 1;
@@ -375,6 +536,7 @@ impl WalActor {
                         key: key_b.to_vec(),
                         value: value_b.to_vec(),
                         expiration: record.expiration,
+                        sequence: seq,
                     });
                 }
                 crate::runtime::WriteBatchOp::Delete { cf_id, key } => {
@@ -385,10 +547,15 @@ impl WalActor {
                     record.txn_id = Some(txn_id);
 
                     if let Some(writer) = &mut self.writer {
+                        let a_start = Instant::now();
                         writer.append_record(&record)?;
+                        let a_elapsed = a_start.elapsed();
+                        self.append_calls += 1;
+                        self.append_total += a_elapsed;
                     }
 
-                    state.append_intent(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id })?;
+                    // Log seq allocation for this CF (deferred)
+                    state.append_intent_deferred(IntentLogEntry::SeqnoAllocated { seqno: seq, cf_id });
 
                     state.wal.pending_writes += 1;
                     self.pending_sync_count += 1;
@@ -397,10 +564,14 @@ impl WalActor {
                     apply_ops.push(BatchApplyOp::Delete {
                         cf_id,
                         key: key_b.to_vec(),
+                        sequence: seq,
                     });
                 }
             }
         }
+
+        // Persist all intent entries at once (single I/O instead of per-op)
+        state.persist_intent_log()?;
 
         // Write commit record
         let last_sequence = commit_seq;
@@ -408,7 +579,11 @@ impl WalActor {
             WalRecord::new_cf(0, WalOpKind::TxnCommit, marker_key, None, commit_seq);
         commit_record.txn_id = Some(txn_id);
         if let Some(writer) = &mut self.writer {
+            let a_start = Instant::now();
             writer.append_record(&commit_record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
         }
 
         state.wal.pending_writes += 1;
@@ -438,12 +613,57 @@ impl WalActor {
         }
 
         if self.is_cloud_first() {
+            // === CRITICAL: Check backpressure before queueing batch ===
+            if self.should_apply_backpressure() {
+                tracing::warn!(
+                    op_count,
+                    pending_count = self.pending_cloud_writes.len(),
+                    pending_bytes = self.pending_cloud_write_bytes,
+                    "CloudFirst batch stall: pending queue at capacity"
+                );
+                return Err(MidgeError::WriteStall(
+                    "CloudFirst pending queue at capacity; cloud upload too slow".to_string(),
+                ));
+            }
+
+            // Check for timed-out writes
+            let timed_out = self.count_timed_out_writes();
+            if timed_out > 0 {
+                tracing::error!(
+                    timed_out_count = timed_out,
+                    timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
+                    "CloudFirst batch timeout: pending writes not acknowledged by cloud"
+                );
+                return Err(MidgeError::Internal(format!(
+                    "{} pending writes exceeded cloud upload timeout",
+                    timed_out
+                )));
+            }
+
             // Atomic visibility after cloud durability (gate on commit seq).
+            let batch_estimated_bytes: usize = apply_ops
+                .iter()
+                .map(|op| match op {
+                    BatchApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
+                    BatchApplyOp::Delete { key, .. } => key.len() + 64,
+                })
+                .sum();
+            self.pending_cloud_write_bytes += batch_estimated_bytes;
+
             self.pending_cloud_writes
                 .push_back(PendingCloudWrite::Batch {
                     commit_sequence: last_sequence,
                     ops: apply_ops,
+                    enqueued_at: Instant::now(),
                 });
+
+            tracing::trace!(
+                commit_sequence = last_sequence,
+                op_count,
+                pending_count = self.pending_cloud_writes.len(),
+                pending_bytes = self.pending_cloud_write_bytes,
+                "Queued batch for cloud durability"
+            );
         } else {
             // Apply to memtables in-order (atomic visibility within the actor).
             for apply_op in apply_ops {
@@ -453,17 +673,23 @@ impl WalActor {
                         key,
                         value,
                         expiration,
+                        sequence,
                     } => {
                         self.apply_to_memtable(
                             state,
+                            sequence,
                             cf_id,
                             &key,
                             &Some(Bytes::from(value)),
                             expiration,
                         )?;
                     }
-                    BatchApplyOp::Delete { cf_id, key } => {
-                        self.apply_to_memtable(state, cf_id, &key, &None, None)?;
+                    BatchApplyOp::Delete {
+                        cf_id,
+                        key,
+                        sequence,
+                    } => {
+                        self.apply_to_memtable(state, sequence, cf_id, &key, &None, None)?;
                     }
                 }
             }
@@ -483,12 +709,14 @@ impl WalActor {
     pub fn append_merge(
         &mut self,
         state: &mut RuntimeState,
+        request_id: u64,
         cf_id: u32,
         key: Bytes,
         operand: Bytes,
     ) -> MidgeResult<(u64, bool)> {
-        // Allocate sequence number at append time to preserve a total order under concurrency.
-        let sequence = state.next_sequence();
+        // 🔑 CRITICAL: Allocate sequence idempotently using request_id.
+        let (first_seq, _count) = state.allocate_sequences_idempotent(request_id, 1);
+        let sequence = first_seq;
 
         // Create WAL record for merge
         let record = WalRecord::new_cf(
@@ -504,7 +732,11 @@ impl WalActor {
 
         // ALWAYS append to local WAL first (FsWalWriter)
         if let Some(writer) = &self.writer {
+            let a_start = Instant::now();
             writer.append_record(&record)?;
+            let a_elapsed = a_start.elapsed();
+            self.append_calls += 1;
+            self.append_total += a_elapsed;
         }
 
         // Update state tracking
@@ -520,12 +752,12 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply merge operand to memtable
-                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand, sequence)?;
             }
             DurabilityPolicy::Batched => {
                 // Apply to memtable immediately, but defer response until fsync completes.
                 // Caller joins the group commit waiter queue; sync completion notifies all.
-                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand, sequence)?;
                 // Return deferred=true so caller joins group commit
             }
             DurabilityPolicy::CloudMirrored => {
@@ -534,7 +766,7 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
 
                 // Apply merge operand to memtable
-                self.apply_merge_to_memtable(state, cf_id, &key, &operand)?;
+                self.apply_merge_to_memtable(state, cf_id, &key, &operand, sequence)?;
 
                 // TODO: mirror to cloud (not via CloudFirst pending queue)
             }
@@ -611,6 +843,7 @@ impl WalActor {
                             | BatchApplyOp::Delete {
                                 cf_id: p_cf,
                                 key: p_key,
+                                sequence: _,
                             } => {
                                 if *p_cf == cf_id && p_key.as_slice() == key {
                                     return true;
@@ -629,6 +862,7 @@ impl WalActor {
     fn apply_to_memtable(
         &self,
         state: &RuntimeState,
+        sequence: u64,
         cf_id: u32,
         key: &[u8],
         value: &Option<Bytes>,
@@ -636,12 +870,17 @@ impl WalActor {
     ) -> MidgeResult<()> {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             if let Some(val) = value {
+                cf_state.memtable.as_ref().put_with_seq(
+                    key.to_vec(),
+                    val.to_vec(),
+                    sequence,
+                    expiration,
+                )?;
+            } else {
                 cf_state
                     .memtable
                     .as_ref()
-                    .put_with_exp(key.to_vec(), val.to_vec(), expiration)?;
-            } else {
-                cf_state.memtable.as_ref().delete(key.to_vec())?;
+                    .delete_with_seq(key.to_vec(), sequence)?;
             }
         }
         Ok(())
@@ -654,12 +893,13 @@ impl WalActor {
         cf_id: u32,
         key: &[u8],
         operand: &Bytes,
+        sequence: u64,
     ) -> MidgeResult<()> {
         if let Some(cf_state) = state.column_families.get(&cf_id) {
             cf_state
                 .memtable
                 .as_ref()
-                .merge(key.to_vec(), operand.to_vec())?;
+                .merge_with_seq(key.to_vec(), operand.to_vec(), sequence)?;
         }
         Ok(())
     }
@@ -673,6 +913,12 @@ impl WalActor {
 
             self.sync_calls += 1;
             self.sync_total += elapsed;
+            self.last_sync_instant = Instant::now();
+
+            // Record telemetry metric for WAL syncs
+            if let Some(t) = crate::telemetry::Telemetry::global() {
+                t.metrics().record_wal_sync();
+            }
 
             if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some()
                 && self.sync_calls.is_multiple_of(1000)
@@ -750,9 +996,11 @@ impl WalActor {
 
     /// Check if batched sync should trigger
     pub fn should_sync_batch(&self) -> bool {
-        // TODO: Add time-based check (max_delay_ms)
-        const MAX_BATCH_BYTES: usize = 64 * 1024; // 64KB
-        self.bytes_since_sync >= MAX_BATCH_BYTES
+        // Time-based check (max_delay_ms) OR byte-count threshold
+        let by_bytes = self.bytes_since_sync >= self.batch_config.max_bytes;
+        let by_time = self.last_sync_instant.elapsed().as_millis()
+            >= (self.batch_config.max_delay_ms as u128);
+        by_bytes || by_time
     }
 
     /// Rotate to a new WAL segment
@@ -824,6 +1072,24 @@ impl WalActor {
                 .pop_front()
                 .expect("pending write exists after front() check");
 
+            // Decrement pending cloud write bytes as we dequeue
+            let dequeued_bytes = match &pending {
+                PendingCloudWrite::Single { key, value, .. } => {
+                    key.len() + value.as_ref().map_or(0, |v| v.len()) + 64
+                }
+                PendingCloudWrite::Merge { key, operand, .. } => key.len() + operand.len() + 64,
+                PendingCloudWrite::Batch { ops, .. } => ops
+                    .iter()
+                    .map(|op| match op {
+                        BatchApplyOp::Put { key, value, .. } => key.len() + value.len() + 64,
+                        BatchApplyOp::Delete { key, .. } => key.len() + 64,
+                    })
+                    .sum(),
+            };
+            self.pending_cloud_write_bytes = self
+                .pending_cloud_write_bytes
+                .saturating_sub(dequeued_bytes);
+
             match pending {
                 PendingCloudWrite::Single {
                     cf_id,
@@ -831,26 +1097,54 @@ impl WalActor {
                     value,
                     sequence,
                     expiration,
+                    enqueued_at,
                 } => {
+                    let wait_time = Instant::now().duration_since(enqueued_at);
+                    tracing::debug!(
+                        sequence,
+                        wait_ms = wait_time.as_millis(),
+                        "Applying pending single write after cloud durability"
+                    );
                     let key_bytes = Bytes::from(key);
                     let value_bytes = value.map(Bytes::from);
-                    self.apply_to_memtable(state, cf_id, &key_bytes, &value_bytes, expiration)?;
-                    let _ = sequence;
+                    self.apply_to_memtable(
+                        state,
+                        sequence,
+                        cf_id,
+                        &key_bytes,
+                        &value_bytes,
+                        expiration,
+                    )?;
                 }
                 PendingCloudWrite::Merge {
                     cf_id,
                     key,
                     operand,
                     sequence,
+                    enqueued_at,
                 } => {
+                    let wait_time = Instant::now().duration_since(enqueued_at);
+                    tracing::debug!(
+                        sequence,
+                        wait_ms = wait_time.as_millis(),
+                        "Applying pending merge after cloud durability"
+                    );
                     let operand_bytes = Bytes::from(operand);
-                    self.apply_merge_to_memtable(state, cf_id, &key, &operand_bytes)?;
-                    let _ = sequence;
+                    self.apply_merge_to_memtable(state, cf_id, &key, &operand_bytes, sequence)?;
                 }
                 PendingCloudWrite::Batch {
                     commit_sequence,
                     ops,
+                    enqueued_at,
                 } => {
+                    let wait_time = Instant::now().duration_since(enqueued_at);
+                    let op_count = ops.len();
+                    tracing::debug!(
+                        commit_sequence,
+                        op_count,
+                        wait_ms = wait_time.as_millis(),
+                        "Applying pending batch after cloud durability"
+                    );
                     for op in ops {
                         match op {
                             BatchApplyOp::Put {
@@ -858,21 +1152,26 @@ impl WalActor {
                                 key,
                                 value,
                                 expiration,
+                                sequence,
                             } => {
                                 self.apply_to_memtable(
                                     state,
+                                    sequence,
                                     cf_id,
                                     &key,
                                     &Some(Bytes::from(value)),
                                     expiration,
                                 )?;
                             }
-                            BatchApplyOp::Delete { cf_id, key } => {
-                                self.apply_to_memtable(state, cf_id, &key, &None, None)?;
+                            BatchApplyOp::Delete {
+                                cf_id,
+                                key,
+                                sequence,
+                            } => {
+                                self.apply_to_memtable(state, sequence, cf_id, &key, &None, None)?;
                             }
                         }
                     }
-                    let _ = commit_sequence;
                 }
             }
         }
@@ -903,6 +1202,9 @@ impl WalActor {
         sequence: u64,
         expiration: Option<u64>,
     ) {
+        let estimated_bytes = key.len() + value.as_ref().map_or(0, |v| v.len()) + 64; // 64 for overhead
+        self.pending_cloud_write_bytes += estimated_bytes;
+
         self.pending_cloud_writes
             .push_back(PendingCloudWrite::Single {
                 cf_id,
@@ -910,22 +1212,37 @@ impl WalActor {
                 value,
                 sequence,
                 expiration,
+                enqueued_at: Instant::now(),
             });
 
-        tracing::trace!(sequence, "Queued write for cloud durability");
+        tracing::trace!(
+            sequence,
+            pending_count = self.pending_cloud_writes.len(),
+            pending_bytes = self.pending_cloud_write_bytes,
+            "Queued write for cloud durability"
+        );
     }
 
     /// Queue a merge operand waiting for cloud durability (CloudFirst mode)
     pub fn queue_cloud_merge(&mut self, cf_id: u32, key: Vec<u8>, operand: Vec<u8>, sequence: u64) {
+        let estimated_bytes = key.len() + operand.len() + 64; // 64 for overhead
+        self.pending_cloud_write_bytes += estimated_bytes;
+
         self.pending_cloud_writes
             .push_back(PendingCloudWrite::Merge {
                 cf_id,
                 key,
                 operand,
                 sequence,
+                enqueued_at: Instant::now(),
             });
 
-        tracing::trace!(sequence, "Queued merge for cloud durability");
+        tracing::trace!(
+            sequence,
+            pending_count = self.pending_cloud_writes.len(),
+            pending_bytes = self.pending_cloud_write_bytes,
+            "Queued merge for cloud durability"
+        );
     }
 
     /// Handle sync completion notification
@@ -943,5 +1260,134 @@ impl Default for WalActor {
     fn default() -> Self {
         // Cannot create with default since we need a WAL directory
         panic!("WalActor::default() should not be called, use WalActor::new(wal_dir)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RuntimeState;
+    use bytes::Bytes;
+    use std::path::PathBuf;
+
+    #[test]
+    fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
+        // Arrange: start with a large sequence so memtable's local seq would differ
+        let mut state = RuntimeState::new(PathBuf::from("/tmp/test"), true);
+        state.sequence = 100; // ensure WAL sequence is distinct from memtable's internal counter
+
+        let mut wal_actor = WalActor::new(
+            PathBuf::from("/tmp/test"),
+            DurabilityPolicy::Strict,
+            BatchConfig::default(),
+            true,
+        )?;
+
+        // Act: append a single put
+        let (seq, deferred) = wal_actor.append(
+            &mut state,
+            1, // request_id
+            0, // cf_id
+            Bytes::from("k"),
+            Some(Bytes::from("v")),
+            false,
+            None,
+        )?;
+
+        // Assert: memtable contains one entry and its seq equals WAL seq
+        assert!(!deferred);
+        let cf_state = state.get_cf(0).expect("cf exists");
+        let entries = cf_state.memtable.iter_all(u64::MAX);
+        assert_eq!(entries.len(), 1);
+        let (key, value, m_seq) = &entries[0];
+        assert_eq!(key.as_slice(), b"k");
+        assert_eq!(value.as_ref().unwrap().as_slice(), b"v");
+        assert_eq!(*m_seq, seq);
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_apply_merge_sequence_to_memtable() -> MidgeResult<()> {
+        // Arrange
+        let mut state = RuntimeState::new(PathBuf::from("/tmp/test"), true);
+        state.sequence = 50;
+
+        let mut wal_actor = WalActor::new(
+            PathBuf::from("/tmp/test"),
+            DurabilityPolicy::Strict,
+            BatchConfig::default(),
+            true,
+        )?;
+
+        // Act: append a merge operand
+        let (seq, deferred) = wal_actor.append_merge(
+            &mut state,
+            2, // request_id
+            0, // cf_id
+            Bytes::from("mk"),
+            Bytes::from("op"),
+        )?;
+
+        // Assert
+        assert!(!deferred);
+        let cf_state = state.get_cf(0).expect("cf exists");
+        let entries = cf_state.memtable.iter_all(u64::MAX);
+        // Merge operand should exist as an entry
+        assert_eq!(entries.len(), 1);
+        let (key, value, m_seq) = &entries[0];
+        assert_eq!(key.as_slice(), b"mk");
+        assert_eq!(value.as_ref().unwrap().as_slice(), b"op");
+        assert_eq!(*m_seq, seq);
+
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_force_sync_immediately() -> MidgeResult<()> {
+        // Arrange: WAL actor with a long batch window so batching is possible
+        let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+        let wal_dir = temp.path().to_path_buf();
+        let batch_cfg = BatchConfig {
+            max_delay_ms: 10_000,
+            max_bytes: 1024 * 1024,
+        };
+        let mut wal_actor =
+            WalActor::new(wal_dir.clone(), DurabilityPolicy::Batched, batch_cfg, false)?;
+
+        // Prepare a runtime state
+        let mut state = RuntimeState::new(wal_dir, false);
+
+        // Act: append a small batch (deferred in Batched mode)
+        let ops = vec![
+            crate::runtime::WriteBatchOp::Put {
+                cf_id: 0,
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+                ttl_seconds: None,
+            },
+            crate::runtime::WriteBatchOp::Put {
+                cf_id: 0,
+                key: b"k2".to_vec(),
+                value: b"v2".to_vec(),
+                ttl_seconds: None,
+            },
+        ];
+
+        let (_last_seq, _count, deferred) = wal_actor.append_batch(&mut state, 1, ops)?;
+        assert!(deferred);
+
+        // Should not request an immediate sync (time/bytes thresholds not met)
+        assert!(
+            !wal_actor.should_sync_batch(),
+            "should_sync_batch should be false immediately after small append"
+        );
+        assert_eq!(
+            wal_actor.sync_calls(),
+            0,
+            "no syncs should have been performed yet"
+        );
+
+        Ok(())
     }
 }

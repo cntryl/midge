@@ -112,6 +112,15 @@ impl ColumnFamilyHandle {
     }
 }
 
+/// Snapshot of runtime configuration that can be restored later.
+#[derive(Debug, Clone)]
+pub struct IngestModeSnapshot {
+    pub memtable_size_limit: usize,
+    pub memtable_flush_threshold: usize,
+    pub enable_compaction: bool,
+    pub wal_durability_policy: crate::wal::DurabilityPolicy,
+    pub wal_batch_config: crate::wal::policy::BatchConfig,
+}
 /// The main Midge KV store
 ///
 /// This is a thin façade over the runtime. All state and background work
@@ -170,10 +179,15 @@ impl OpenParam for &crate::testkit::MidgeOptions {
 impl MidgeEngine {
     /// Open a database from flexible parameters (PathBuf or MidgeOptions)
     pub fn open<P: OpenParam>(param: P) -> MidgeResult<Self> {
+        let start = std::time::Instant::now();
         let db_path = param.to_path();
         // Detect memory mode from path (":memory:" sentinel)
         let memory_mode = db_path.to_string_lossy() == ":memory:";
-        let state = RuntimeState::new(db_path.clone(), memory_mode);
+        let mut state = RuntimeState::new(db_path.clone(), memory_mode);
+
+        // 🔑 CRITICAL: Replay intent log to recover any interrupted mutations
+        // Must happen BEFORE runtime starts processing messages
+        state.replay_intent_log()?;
 
         // Start runtime
         let (runtime, _) = Runtime::new()?;
@@ -182,6 +196,8 @@ impl MidgeEngine {
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
         let column_families = dashmap::DashMap::new();
         column_families.insert(0, default_cf.clone());
+
+        tracing::info!(db_path = %db_path.display(), open_ms = start.elapsed().as_secs_f64() * 1000.0, "engine open completed");
 
         // Load existing CFs from manifest
         let manifest = crate::metadata::ManifestPersistence::load(&db_path).unwrap_or_default();
@@ -206,6 +222,14 @@ impl MidgeEngine {
 
     /// Open a database with test configuration options
     pub fn open_with_options(opts: crate::testkit::MidgeOptions) -> MidgeResult<Self> {
+        if matches!(opts.ack_policy, crate::common::AckPolicy::AfterCloudDurable)
+            && !matches!(opts.storage_mode, crate::testkit::StorageMode::CloudBacked { .. })
+        {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "AckPolicy::AfterCloudDurable requires StorageMode::CloudBacked".to_string(),
+            ));
+        }
+
         let (db_path, memory_mode) = match &opts.storage_mode {
             crate::testkit::StorageMode::Memory => {
                 // For memory mode, use a placeholder path that will never be touched
@@ -221,6 +245,14 @@ impl MidgeEngine {
         };
 
         let mut runtime_config = crate::runtime::RuntimeConfig::default();
+        // Honor optional batch config from options if provided
+        // If provided, apply WAL batch config from options (BatchConfig is Copy)
+        if let Some(batch_cfg) = opts.wal_batch_config {
+            runtime_config.wal_batch_config = batch_cfg;
+        }
+        // Caller-visible acknowledgment semantics.
+        runtime_config.write_ack_policy = opts.ack_policy;
+
         let mut state = match &opts.storage_mode {
             crate::testkit::StorageMode::CloudBacked { .. } => {
                 // Local cache is ephemeral; cloud WAL is the source of truth.
@@ -259,13 +291,19 @@ impl MidgeEngine {
             state.memtable_flush_threshold = opts.memtable_size;
         }
 
+        // Honor compaction option from open opts
+        state.enable_compaction = opts.enable_compaction;
+
         // Start runtime
+        let start = std::time::Instant::now();
         let (runtime, _) = Runtime::new()?;
         let runtime_handle = runtime.start_with_config(state, runtime_config)?;
 
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
         let column_families = dashmap::DashMap::new();
         column_families.insert(0, default_cf.clone());
+
+        tracing::info!(db_path = %db_path.display(), open_ms = start.elapsed().as_secs_f64() * 1000.0, "engine open completed (with options)");
 
         // Load existing CFs from manifest (skip in memory mode and deleted CFs)
         if !memory_mode {
@@ -292,6 +330,135 @@ impl MidgeEngine {
 
     pub fn default_column_family(&self) -> &ColumnFamilyHandle {
         &self.default_cf
+    }
+
+    /// Fetch the current runtime configuration snapshot for diagnostics or restoration.
+    pub fn get_runtime_config(&self) -> MidgeResult<IngestModeSnapshot> {
+        let request_id = crate::runtime::next_request_id();
+        let resp = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::GetRuntimeConfig { request_id })?;
+        match resp {
+            crate::runtime::RuntimeResponse::RuntimeConfigSnapshot {
+                memtable_size_limit,
+                memtable_flush_threshold,
+                enable_compaction,
+                wal_durability_policy,
+                wal_batch_config,
+                ..
+            } => Ok(IngestModeSnapshot {
+                memtable_size_limit,
+                memtable_flush_threshold,
+                enable_compaction,
+                wal_durability_policy,
+                wal_batch_config,
+            }),
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to GetRuntimeConfig".to_string(),
+            )),
+        }
+    }
+
+    /// Return whether an ingest barrier is currently active.
+    pub fn is_ingesting(&self) -> MidgeResult<bool> {
+        let request_id = crate::runtime::next_request_id();
+        let resp = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::GetIngestState { request_id })?;
+        match resp {
+            crate::runtime::RuntimeResponse::IngestState { ingest_active, .. } => Ok(ingest_active),
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to GetIngestState".to_string(),
+            )),
+        }
+    }
+
+    /// Enter a temporary ingest mode: disable compaction, relax WAL, increase memtable limits.
+    /// Returns the previous configuration snapshot which can be used to restore state.
+    pub fn enter_ingest_mode(&self) -> MidgeResult<IngestModeSnapshot> {
+        // Capture current runtime config so we can restore it later
+        let prev = self.get_runtime_config()?;
+
+        // Step 1: Apply performance-oriented runtime knobs (larger memtable, batched WAL)
+        let request_id = crate::runtime::next_request_id();
+        let target_mem = (prev.memtable_size_limit.max(64 * 1024 * 1024)).saturating_mul(4); // grow 4x
+        let batch_cfg = prev.wal_batch_config;
+        let resp =
+            self.runtime_handle
+                .send_and_wait(crate::runtime::RuntimeMsg::SetRuntimeConfig {
+                    request_id,
+                    memtable_size_limit: Some(target_mem),
+                    memtable_flush_threshold: Some(target_mem),
+                    enable_compaction: Some(false), // also set false here for a fast path
+                    wal_durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+                    wal_batch_config: Some(batch_cfg),
+                })?;
+
+        match resp {
+            crate::runtime::RuntimeResponse::Ok { .. } => {
+                // Step 2: Ensure a hard ingest barrier: begin ingest (blocks until inflight compactions drain)
+                let bid = crate::runtime::next_request_id();
+                let br = self
+                    .runtime_handle
+                    .send_and_wait(crate::runtime::RuntimeMsg::BeginIngest { request_id: bid })?;
+                match br {
+                    crate::runtime::RuntimeResponse::Ok { .. } => Ok(prev),
+                    crate::runtime::RuntimeResponse::Error { message, .. } => {
+                        Err(crate::common::MidgeError::Internal(message))
+                    }
+                    _ => Err(crate::common::MidgeError::Internal(
+                        "unexpected response to BeginIngest".to_string(),
+                    )),
+                }
+            }
+            crate::runtime::RuntimeResponse::Error { message, .. } => {
+                Err(crate::common::MidgeError::Internal(message))
+            }
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to SetRuntimeConfig".to_string(),
+            )),
+        }
+    }
+
+    /// Restore runtime configuration from a previously-captured snapshot.
+    pub fn exit_ingest_mode(&self, prev: IngestModeSnapshot) -> MidgeResult<()> {
+        // Step 1: End ingest barrier (flush outstanding memtables and bump epoch)
+        let bid = crate::runtime::next_request_id();
+        let br = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::EndIngest { request_id: bid })?;
+        match br {
+            crate::runtime::RuntimeResponse::Ok { .. } => {
+                // Step 2: Restore previous runtime configuration
+                let request_id = crate::runtime::next_request_id();
+                let resp = self.runtime_handle.send_and_wait(
+                    crate::runtime::RuntimeMsg::SetRuntimeConfig {
+                        request_id,
+                        memtable_size_limit: Some(prev.memtable_size_limit),
+                        memtable_flush_threshold: Some(prev.memtable_flush_threshold),
+                        enable_compaction: Some(prev.enable_compaction),
+                        wal_durability_policy: Some(prev.wal_durability_policy),
+                        wal_batch_config: Some(prev.wal_batch_config),
+                    },
+                )?;
+
+                match resp {
+                    crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
+                    crate::runtime::RuntimeResponse::Error { message, .. } => {
+                        Err(crate::common::MidgeError::Internal(message))
+                    }
+                    _ => Err(crate::common::MidgeError::Internal(
+                        "unexpected response to SetRuntimeConfig".to_string(),
+                    )),
+                }
+            }
+            crate::runtime::RuntimeResponse::Error { message, .. } => {
+                Err(crate::common::MidgeError::Internal(message))
+            }
+            _ => Err(crate::common::MidgeError::Internal(
+                "unexpected response to EndIngest".to_string(),
+            )),
+        }
     }
 
     /// Put a key-value pair into a specific column family
@@ -428,11 +595,13 @@ impl MidgeEngine {
 
         // CRITICAL: Reads must go through runtime to query authoritative state
         // (active memtable + immutable memtables + SSTs).
+        // Also enforce durability frontier: don't return data ahead of durable_seq.
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::Read {
             request_id: next_request_id(),
             cf_id: cf.id.0,
             key: key.to_vec(),
             sequence: u64::MAX, // Read latest committed value
+            requested_durability: api::Durability::Steady, // Default to Steady (balanced durability/performance)
         })?;
 
         match response {
@@ -501,6 +670,7 @@ impl MidgeEngine {
             cf_id: cf.id.0,
             key: key.to_vec(),
             sequence: txn.start_sequence(),
+            requested_durability: api::Durability::Steady, // Transactions inherit engine's durability level
         })?;
 
         match response {
@@ -739,6 +909,7 @@ impl MidgeEngine {
             start: start.to_vec(),
             end: end.to_vec(),
             sequence,
+            requested_durability: api::Durability::Steady, // Default to Steady (balanced durability/performance)
         })?;
 
         match response {
@@ -1111,10 +1282,24 @@ impl MidgeEngine {
 
     /// Create a new transaction with serializable isolation
     /// Begin a new transaction for a specific column family (high-level API)
+    ///
+    /// # Panics
+    /// Panics if called while ingest mode is active. This is a programmer error:
+    /// transactions must not be started during ingest. Complete the ingest first.
     pub fn begin_transaction(
         &self,
         cf: &ColumnFamilyHandle,
     ) -> MidgeResult<Box<dyn api::KvTransaction>> {
+        // ─────────────────────────────────────────────────────────────────────────
+        // HARD INVARIANT: No transactions while ingest is active.
+        // ─────────────────────────────────────────────────────────────────────────
+        assert!(
+            !self.is_ingesting().unwrap_or(false),
+            "BUG: begin_transaction called while ingest mode is active. \
+             Violated invariant: transactions must not be started during ingest. \
+             Correct ordering: exit_ingest_mode() BEFORE begin_transaction()."
+        );
+
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1134,11 +1319,25 @@ impl MidgeEngine {
     }
 
     /// Begin a transaction with specified isolation level (high-level API)
+    ///
+    /// # Panics
+    /// Panics if called while ingest mode is active. This is a programmer error:
+    /// transactions must not be started during ingest. Complete the ingest first.
     pub fn begin_transaction_with_isolation(
         &self,
         cf: &ColumnFamilyHandle,
         isolation: api::IsolationLevel,
     ) -> MidgeResult<Box<dyn api::KvTransaction>> {
+        // ─────────────────────────────────────────────────────────────────────────
+        // HARD INVARIANT: No transactions while ingest is active.
+        // ─────────────────────────────────────────────────────────────────────────
+        assert!(
+            !self.is_ingesting().unwrap_or(false),
+            "BUG: begin_transaction_with_isolation called while ingest mode is active. \
+             Violated invariant: transactions must not be started during ingest. \
+             Correct ordering: exit_ingest_mode() BEFORE begin_transaction()."
+        );
+
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1156,7 +1355,19 @@ impl MidgeEngine {
         Ok(Box::new(txn))
     }
 
+    /// # Panics
+    /// Panics if called while ingest mode is active.
     pub fn transaction(&self) -> api::Transaction {
+        // ─────────────────────────────────────────────────────────────────────────
+        // HARD INVARIANT: No transactions while ingest is active.
+        // ─────────────────────────────────────────────────────────────────────────
+        assert!(
+            !self.is_ingesting().unwrap_or(false),
+            "BUG: transaction() called while ingest mode is active. \
+             Violated invariant: transactions must not be started during ingest. \
+             Correct ordering: exit_ingest_mode() BEFORE transaction()."
+        );
+
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1173,7 +1384,20 @@ impl MidgeEngine {
     }
 
     /// Create a new transaction with the specified isolation level
+    ///
+    /// # Panics
+    /// Panics if called while ingest mode is active.
     pub fn transaction_with_isolation(&self, isolation: api::IsolationLevel) -> api::Transaction {
+        // ─────────────────────────────────────────────────────────────────────────
+        // HARD INVARIANT: No transactions while ingest is active.
+        // ─────────────────────────────────────────────────────────────────────────
+        assert!(
+            !self.is_ingesting().unwrap_or(false),
+            "BUG: transaction_with_isolation() called while ingest mode is active. \
+             Violated invariant: transactions must not be started during ingest. \
+             Correct ordering: exit_ingest_mode() BEFORE transaction()."
+        );
+
         let txn_id = self
             .next_snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

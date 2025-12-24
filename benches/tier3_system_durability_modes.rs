@@ -1,20 +1,14 @@
-//! Tier 3 — System Benchmarks: Durability Modes Comparison
-//!
-//! **Target Runtime:** ~2 minutes
-//! **Run Frequency:** Nightly / release builds
-//!
-//! Compares WAL synchronization modes:
-//! - Async WAL (no fsync, highest throughput)
-//! - Sync every write (lowest throughput, highest safety)
-//!
-//! Measures throughput trade-offs for different durability guarantees
-//! across storage modes (LocalDisk and CloudBacked).
-//!
-//! ## Design Notes
-//!
-//! - Uses DURABLE_STORAGE_MODES since durability requires persistence
-//! - Tests both wal_sync=false (async) and wal_sync=true (sync)
-//! - Heavy scenarios are restricted to LocalDisk to keep runtime bounded
+// This file was moved to `stress/pruned/tier3_system_durability_modes.rs`.
+// It contained both single-shot comparisons and heavier stress scenarios. The heavy
+// concurrent durability workloads have been moved to the stress harness; lightweight
+// single-shot durability comparisons can be re-added to Tier-3 as isolated benches.
+
+// Original content preserved at `stress/pruned/tier3_system_durability_modes.rs` for migration.
+
+#[allow(unused)]
+const _TIER3_GUARD: () = {
+    // Tier-3 benches must use bench_common::tier3 APIs and `tier3_bench!`/`tier3_bench_restore!`.
+};
 
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
@@ -34,8 +28,21 @@ use criterion::{
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
-use std::sync::Arc;
-use std::thread;
+
+#[allow(dead_code)]
+fn run_write_heavy_workload(
+    engine: &MidgeEngine,
+    keys: &[Bytes],
+    values: &[Bytes],
+    operations: usize,
+) {
+    let cf = engine.default_column_family();
+    for i in 0..operations {
+        let key_idx = i % keys.len();
+        let val_idx = i % values.len();
+        let _ = engine.put(cf, &keys[key_idx], &values[val_idx]);
+    }
+}
 
 // ============================================================================
 // Configuration
@@ -182,155 +189,23 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
     group.finish();
 }
 
+// bench_durability_concurrent was pruned — moved to `stress/pruned/tier3_system_durability_modes.rs`.
+// See stress/pruned file for the full multi-threaded durability scenario.
 // ============================================================================
-// Multi-threaded Durability Comparison
-// ============================================================================
-
-fn bench_durability_concurrent(c: &mut Criterion) {
-    let mut group = c.benchmark_group("durability/concurrent");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let total_ops = 4 * OPS_PER_THREAD;
-    group.throughput(Throughput::Elements(total_ops as u64));
-
-    // Pre-compute keys and values outside benchmark
-    let keys: Arc<Vec<Bytes>> = Arc::new((0..RECORD_COUNT).map(make_key).collect());
-    let values: Arc<Vec<Bytes>> = Arc::new(
-        (0..OPS_PER_THREAD)
-            .map(|_| make_value_fixed(VALUE_SIZE))
-            .collect(),
-    );
-
-    for mode in DURABLE_STORAGE_MODES {
-        // Heavy scenario: skip cloud-backed to keep bench fast
-        if !matches!(mode, BenchStorageMode::LocalDisk) {
-            continue;
-        }
-
-        for &wal_sync in &[false, true] {
-            let sync_name = if wal_sync { "sync" } else { "async" };
-            let bench_name = format!("{}/{}", mode.as_str(), sync_name);
-
-            let keys = Arc::clone(&keys);
-            let values = Arc::clone(&values);
-
-            group.bench_with_input(
-                BenchmarkId::new("4threads", &bench_name),
-                &(mode, wal_sync),
-                |b, &(mode, wal_sync)| {
-                    let keys = Arc::clone(&keys);
-                    let values = Arc::clone(&values);
-
-                    b.iter_batched(
-                        || {
-                            let engine = setup_db_with_options("concurrent", mode, wal_sync);
-                            // Load data outside timed section
-                            let cf = engine.default_column_family();
-                            for (i, key) in keys.iter().take(RECORD_COUNT).enumerate() {
-                                engine.put(cf, key, &values[i % values.len()]).unwrap();
-                            }
-                            Arc::new(engine)
-                        },
-                        |engine| {
-                            let keys = Arc::clone(&keys);
-                            let values = Arc::clone(&values);
-
-                            thread::scope(|scope| {
-                                for _ in 0..4 {
-                                    let e = Arc::clone(&engine);
-                                    let keys = Arc::clone(&keys);
-                                    let values = Arc::clone(&values);
-                                    scope.spawn(move || {
-                                        run_mixed_workload(&e, &keys, &values, OPS_PER_THREAD);
-                                    });
-                                }
-                            });
-
-                            engine
-                        },
-                        BatchSize::LargeInput,
-                    )
-                },
-            );
-        }
-    }
-
-    group.finish();
-}
-
-// ============================================================================
-// Write-Heavy Workload
+// Write-Heavy Workload (pruned)
 // ============================================================================
 
-fn run_write_heavy_workload(
-    engine: &MidgeEngine,
-    keys: &[Bytes],
-    values: &[Bytes],
-    operations: usize,
-) {
-    let cf = engine.default_column_family();
-    for i in 0..operations {
-        let key_idx = i % keys.len();
-        let val_idx = i % values.len();
-        let _ = engine.put(cf, &keys[key_idx], &values[val_idx]);
-    }
-}
+// The heavy write-heavy workload has been moved to `stress/pruned/tier3_system_durability_modes.rs`.
+// The helper implementation is preserved in the pruned version; this file keeps a stub comment
+// to avoid duplicate definitions while preserving history.
 
-fn bench_durability_write_heavy(c: &mut Criterion) {
-    let mut group = c.benchmark_group("durability/write_heavy");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(OPS_PER_THREAD as u64));
-
-    // Pre-compute keys and values outside benchmark
-    let keys: Vec<Bytes> = (0..RECORD_COUNT + OPS_PER_THREAD).map(make_key).collect();
-    let values: Vec<_> = (0..OPS_PER_THREAD)
-        .map(|_| make_value_fixed(VALUE_SIZE))
-        .collect();
-
-    for mode in DURABLE_STORAGE_MODES {
-        // Heavy scenario: skip cloud-backed to keep bench fast
-        if !matches!(mode, BenchStorageMode::LocalDisk) {
-            continue;
-        }
-
-        for &wal_sync in &[false, true] {
-            let sync_name = if wal_sync { "sync" } else { "async" };
-            let bench_name = format!("{}/{}", mode.as_str(), sync_name);
-
-            group.bench_with_input(
-                BenchmarkId::new("100pct_writes", &bench_name),
-                &(mode, wal_sync),
-                |b, &(mode, wal_sync)| {
-                    let keys_ref = &keys;
-                    let values_ref = &values;
-
-                    b.iter_batched(
-                        || {
-                            let engine = setup_db_with_options("write_heavy", mode, wal_sync);
-                            load_data_batched(&engine, keys_ref, values_ref);
-                            engine
-                        },
-                        |engine| {
-                            run_write_heavy_workload(&engine, keys_ref, values_ref, OPS_PER_THREAD);
-                            engine
-                        },
-                        BatchSize::LargeInput,
-                    )
-                },
-            );
-        }
-    }
-
-    group.finish();
-}
+// bench_durability_write_heavy was pruned — moved to `stress/pruned/tier3_system_durability_modes.rs`.
 
 criterion_group! {
     name = tier3_system_durability_modes;
     config = criterion_config_for_tier(BenchTier::Tier3System);
     targets =
         bench_durability_async_wal,
-        bench_durability_wal_sync_every,
-        bench_durability_concurrent,
-        bench_durability_write_heavy
+        bench_durability_wal_sync_every
 }
 criterion_main!(tier3_system_durability_modes);

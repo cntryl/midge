@@ -61,12 +61,15 @@ pub mod metrics;
 // Testing
 pub mod testkit;
 
+// Stress harnesses and long-running workloads live under `stress/` (binary crate),
+// not in the library public API. See `stress/` for the harness and workloads.
+
 // ---------------------------------------------------------------------------
 // Public Export Surface
 // ---------------------------------------------------------------------------
 
 // Common types
-pub use common::{MidgeError, MidgeResult};
+pub use common::{AckPolicy, MidgeError, MidgeResult};
 
 // Main engine API
 pub use engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
@@ -157,6 +160,9 @@ pub mod prelude {
         MergeOperator,
         // Engine
         MidgeEngine,
+
+        // Caller-visible semantics
+        AckPolicy,
         // Errors
         MidgeError,
         MidgeResult,

@@ -13,6 +13,7 @@
 
 pub mod actors;
 pub mod dispatch;
+pub mod durability;
 pub mod event_loop;
 pub mod intent_persistence;
 pub mod scheduler;
@@ -28,6 +29,8 @@ pub use state::RuntimeState;
 pub use task::{Task, TaskId, TaskKind, TaskPriority};
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::common::AckPolicy;
+use crate::wal::policy::BatchConfig;
 use crate::wal::DurabilityPolicy;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::collections::HashMap;
@@ -39,6 +42,8 @@ use std::thread::{self, JoinHandle};
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub wal_durability_policy: DurabilityPolicy,
+    pub wal_batch_config: BatchConfig,
+    pub write_ack_policy: AckPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
 }
@@ -47,6 +52,8 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             wal_durability_policy: DurabilityPolicy::Batched,
+            wal_batch_config: BatchConfig::default(),
+            write_ack_policy: AckPolicy::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
         }
@@ -239,21 +246,56 @@ pub enum RuntimeMsg {
         operator: std::sync::Arc<dyn crate::engine::MergeOperator>,
     },
 
+    /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
+    /// and wait until in-flight compactions drain.
+    BeginIngest { request_id: u64 },
+
+    /// End an ingest barrier: flush outstanding memtables, bump epoch and
+    /// re-enable scheduling.
+    EndIngest { request_id: u64 },
+
+    /// Query whether an ingest barrier is currently active.
+    GetIngestState { request_id: u64 },
+
+    /// Set runtime configuration atomically. Any field set to `None` will be left unchanged.
+    SetRuntimeConfig {
+        request_id: u64,
+        memtable_size_limit: Option<usize>,
+        memtable_flush_threshold: Option<usize>,
+        enable_compaction: Option<bool>,
+        wal_durability_policy: Option<DurabilityPolicy>,
+        wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+    },
+
+    /// Get runtime configuration snapshot
+    GetRuntimeConfig { request_id: u64 },
+
     // === Read Path ===
     /// Query a value from memtables and SST files.
+    ///
+    /// INVARIANT: Reads must respect the durability frontier.
+    /// If requested_durability is Strict/Steady, the read must not return data
+    /// with seqno > local_durable_seq. Reads at higher seqnos are queued in
+    /// durability_waiters until the frontier advances.
     Read {
         request_id: u64,
         cf_id: u32,
         key: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
+        requested_durability: crate::engine::api::Durability, // Durability level requested
     },
     /// Scan a range of keys from memtables and SST files.
+    ///
+    /// INVARIANT: Range scans must respect the durability frontier.
+    /// Same semantics as Read: if requested_durability is Strict/Steady,
+    /// the scan must not return data with seqno > local_durable_seq.
     RangeScan {
         request_id: u64,
         cf_id: u32,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
+        requested_durability: crate::engine::api::Durability, // Durability level requested
     },
 
     // === Observability ===
@@ -310,6 +352,11 @@ impl RuntimeMsg {
             | RangeScan { request_id, .. }
             | GetReadAmpMetrics { request_id }
             | GetCurrentSequence { request_id }
+            | SetRuntimeConfig { request_id, .. }
+            | GetRuntimeConfig { request_id }
+            | GetIngestState { request_id }
+            | BeginIngest { request_id }
+            | EndIngest { request_id }
             | Noop { request_id }
             | StartupPing { request_id } => Some(*request_id),
 
@@ -346,6 +393,11 @@ impl RuntimeMsg {
             RangeScan { .. } => "RangeScan",
             GetReadAmpMetrics { .. } => "GetReadAmpMetrics",
             GetCurrentSequence { .. } => "GetCurrentSequence",
+            SetRuntimeConfig { .. } => "SetRuntimeConfig",
+            GetRuntimeConfig { .. } => "GetRuntimeConfig",
+            GetIngestState { .. } => "GetIngestState",
+            BeginIngest { .. } => "BeginIngest",
+            EndIngest { .. } => "EndIngest",
             Shutdown => "Shutdown",
             Noop { .. } => "Noop",
             StartupPing { .. } => "StartupPing",
@@ -421,6 +473,21 @@ pub enum RuntimeResponse {
         request_id: u64,
         sequence: u64,
     },
+
+    /// Snapshot of runtime configuration for diagnostics and tooling
+    RuntimeConfigSnapshot {
+        request_id: u64,
+        memtable_size_limit: usize,
+        memtable_flush_threshold: usize,
+        enable_compaction: bool,
+        wal_durability_policy: DurabilityPolicy,
+        wal_batch_config: crate::wal::policy::BatchConfig,
+    },
+    /// Simple ingest state response
+    IngestState {
+        request_id: u64,
+        ingest_active: bool,
+    },
 }
 
 impl RuntimeResponse {
@@ -436,7 +503,9 @@ impl RuntimeResponse {
             | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::ColumnFamilyCreated { request_id, .. }
             | RuntimeResponse::ReadAmpMetricsSnapshot { request_id, .. }
-            | RuntimeResponse::CurrentSequence { request_id, .. } => *request_id,
+            | RuntimeResponse::CurrentSequence { request_id, .. }
+            | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. }
+            | RuntimeResponse::IngestState { request_id, .. } => *request_id,
         }
     }
 }
@@ -664,7 +733,13 @@ impl Runtime {
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
             .spawn(move || {
-                match EventLoop::new(state, trace_enabled, router, config) {
+                match EventLoop::new(
+                    state,
+                    trace_enabled,
+                    router,
+                    config,
+                    Some(self.msg_tx.clone()),
+                ) {
                     Ok(mut event_loop) => {
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));
@@ -952,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn should_register_and_complete_response() {
+    fn should_register_then_complete_response() {
         // Arrange
         let router = ResponseRouter::new();
 

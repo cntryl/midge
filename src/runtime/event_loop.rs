@@ -11,37 +11,18 @@
 use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::TryRecvError;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::actors::{
     CloudActor, CompactionActor, EvictionActor, FlushActor, GcActor, ManifestActor, WalActor,
 };
+use super::durability::{DurabilityCoordinator, DurabilityWaiter};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
-use crate::common::KeyedGroupCommit;
+use crate::common::AckPolicy;
 use crate::sst::traits::SstReader;
 use crate::sst::Memtable;
-
-#[derive(Debug, Clone)]
-enum DurabilityWaiter {
-    WalAppend {
-        request_id: u64,
-        sequence: u64,
-    },
-    WriteBatch {
-        request_id: u64,
-        last_sequence: u64,
-        op_count: usize,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct CloudFirstInflightSegment {
-    enqueued_at: Instant,
-    max_sequence: u64,
-}
 
 /// Main synchronous event loop for the runtime.
 ///
@@ -62,31 +43,69 @@ pub struct EventLoop {
     hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     trace_enabled: bool,
 
-    last_cloud_flush: Instant,
-
-    // CloudFirst: track enqueue->ack per WAL segment.
-    cloudfirst_inflight: HashMap<u64, CloudFirstInflightSegment>,
-
-    // Durability group commit: waiters grouped by WAL segment/generation id.
-    // Used in both CloudFirst (keyed by segment id) and Batched (keyed by flush generation).
-    durability_waiters: Option<KeyedGroupCommit<u64, DurabilityWaiter>>,
+    // Durability coordination (extracted to reduce EventLoop cognitive load)
+    durability: DurabilityCoordinator,
 
     /// Per-request router (oneshot channels)
     router: Arc<ResponseRouter>,
+
+    write_ack_policy: AckPolicy,
 
     /// One buffered message we pulled from the channel while draining writes.
     ///
     /// This preserves FIFO semantics when we opportunistically `try_recv()` to batch writes:
     /// if we encounter a non-write message, we stash it here and handle it next.
     pending_msg: Option<RuntimeMsg>,
+
+    /// Sender that worker threads can use to post back completion messages
+    /// (compaction threads will use this to report completion).
+    worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
 }
 
 impl EventLoop {
+    #[inline]
+    fn should_ack_immediately(&self, deferred: bool) -> bool {
+        if self.wal_actor.is_cloud_first() {
+            return matches!(self.write_ack_policy, AckPolicy::Immediate);
+        }
+
+        match self.write_ack_policy {
+            AckPolicy::Immediate => true,
+            AckPolicy::AfterLocalDurable => !deferred,
+            // Non-CloudFirst builds currently have no notion of cloud-durable writes.
+            // This is validated at open time for user-facing paths.
+            AckPolicy::AfterCloudDurable => !deferred,
+        }
+    }
+
+    #[inline]
+    fn maybe_queue_confirm_only_waiter(&self, deferred: bool, request_id: u64, is_batch: bool) {
+        // If we already waited for durability (deferred==false for local; or cloud-first with non-immediate ack)
+        // then the request will be confirmed at response time.
+        if !deferred {
+            return;
+        }
+
+        // Only queue confirm-only waiters when we are acknowledging before durability.
+        if !self.should_ack_immediately(deferred) {
+            return;
+        }
+
+        if is_batch {
+            self.durability
+                .queue_waiter(DurabilityWaiter::ConfirmWriteBatch { request_id });
+        } else {
+            self.durability
+                .queue_waiter(DurabilityWaiter::ConfirmWalAppend { request_id });
+        }
+    }
+
     pub(crate) fn new(
         state: RuntimeState,
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
         config: super::RuntimeConfig,
+        worker_msg_tx: Option<crossbeam::channel::Sender<super::RuntimeMsg>>,
     ) -> crate::common::MidgeResult<Self> {
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
@@ -104,12 +123,18 @@ impl EventLoop {
 
         // Create actors - they handle memory_mode internally
         let flush_actor = FlushActor::new(&sst_dir, memory_mode)?;
-        let wal_actor = WalActor::new(wal_dir, config.wal_durability_policy, memory_mode)?;
+        let wal_actor = WalActor::new(
+            wal_dir,
+            config.wal_durability_policy,
+            config.wal_batch_config,
+            memory_mode,
+        )?;
 
         // 🔑 CRITICAL: Use the correct key for durability_waiters based on mode
         // - CloudFirst: key is segment_id (for rotate_to/complete calls)
         // - Batched: key is flush_generation (returned from wal_actor.sync())
-        let initial_durability_key = if wal_actor.is_cloud_first() {
+        let is_cloud_first = wal_actor.is_cloud_first();
+        let initial_durability_key = if is_cloud_first {
             initial_segment_id
         } else {
             wal_actor.current_flush_generation()
@@ -127,11 +152,11 @@ impl EventLoop {
             hybrid_storage: None,
             hybrid_storage_events: config.hybrid_storage_events.clone(),
             trace_enabled,
-            last_cloud_flush: Instant::now(),
-            cloudfirst_inflight: HashMap::new(),
-            durability_waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
+            durability: DurabilityCoordinator::new(initial_durability_key, is_cloud_first),
             router,
+            write_ack_policy: config.write_ack_policy,
             pending_msg: None,
+            worker_msg_tx,
         };
 
         if let Some(storage) = config.hybrid_storage {
@@ -185,33 +210,19 @@ impl EventLoop {
                     // If cloud_durable_seq advanced past multiple segments,
                     // complete all inflight segments whose max_sequence is now durable.
                     let durable = self.state.wal.cloud_durable_seq;
-                    let mut ready: Vec<u64> = self
-                        .cloudfirst_inflight
-                        .iter()
-                        .filter_map(|(seg, info)| {
-                            if info.max_sequence <= durable {
-                                Some(*seg)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    ready.sort_unstable();
+                    let ready = self.durability.get_ready_cloud_segments(durable);
 
                     for seg_id in ready {
-                        if let Some(info) = self.cloudfirst_inflight.remove(&seg_id) {
+                        if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id)
+                        {
                             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                                 telemetry.metrics().record_cloudfirst_wal_ack_latency_us(
-                                    info.enqueued_at.elapsed().as_micros() as u64,
+                                    enqueued_at.elapsed().as_micros() as u64,
                                 );
                             }
                         }
 
-                        let waiters = self
-                            .durability_waiters
-                            .as_ref()
-                            .map(|w| w.complete(&seg_id))
-                            .unwrap_or_default();
+                        let waiters = self.durability.complete_waiters_at(seg_id);
 
                         for w in waiters {
                             match w {
@@ -219,6 +230,11 @@ impl EventLoop {
                                     request_id,
                                     sequence,
                                 } => {
+                                    // Mark sequences confirmed using cloud frontier for CloudFirst
+                                    self.state.confirm_sequences_at(
+                                        request_id,
+                                        self.state.wal.cloud_durable_seq,
+                                    );
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WalAppended {
@@ -227,17 +243,65 @@ impl EventLoop {
                                         },
                                     );
                                 }
+                                DurabilityWaiter::ConfirmWalAppend { request_id } => {
+                                    self.state.confirm_sequences_at(
+                                        request_id,
+                                        self.state.wal.cloud_durable_seq,
+                                    );
+                                }
                                 DurabilityWaiter::WriteBatch {
                                     request_id,
                                     last_sequence,
                                     op_count,
                                 } => {
+                                    // Mark sequences confirmed using cloud frontier for CloudFirst
+                                    self.state.confirm_sequences_at(
+                                        request_id,
+                                        self.state.wal.cloud_durable_seq,
+                                    );
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WriteBatchAppended {
                                             request_id,
                                             last_sequence,
                                             op_count,
+                                        },
+                                    );
+                                }
+                                DurabilityWaiter::ConfirmWriteBatch { request_id } => {
+                                    self.state.confirm_sequences_at(
+                                        request_id,
+                                        self.state.wal.cloud_durable_seq,
+                                    );
+                                }
+                                DurabilityWaiter::Read {
+                                    request_id,
+                                    cf_id,
+                                    key,
+                                    sequence,
+                                    requested_durability: _,
+                                } => {
+                                    let value = self.handle_read(cf_id, &key, sequence);
+                                    self.respond(
+                                        request_id,
+                                        RuntimeResponse::ReadValue { request_id, value },
+                                    );
+                                }
+                                DurabilityWaiter::RangeScan {
+                                    request_id,
+                                    cf_id,
+                                    start,
+                                    end,
+                                    sequence,
+                                    requested_durability: _,
+                                } => {
+                                    let results =
+                                        self.handle_range_scan(cf_id, &start, &end, sequence);
+                                    self.respond(
+                                        request_id,
+                                        RuntimeResponse::RangeScanResults {
+                                            request_id,
+                                            results,
                                         },
                                     );
                                 }
@@ -250,28 +314,41 @@ impl EventLoop {
                 }
             },
             crate::storage::StorageEvent::CloudFail { segment_id, error } => {
-                // Drop inflight timing; the corresponding writes will error.
-                let _ = self.cloudfirst_inflight.remove(&segment_id);
+                // Attempt to recover the failed segment's max_sequence so we can
+                // invalidate idempotency allocations that were part of it.
+                let failed_max_seq = self.durability.take_cloud_segment_max_sequence(segment_id);
+
+                // Let WAL actor handle its internal failure handling and drop pending writes
                 self.wal_actor
                     .handle_cloud_upload_failed(segment_id, &error);
 
-                if let Some(waiters) = self.durability_waiters.as_ref().map(|w| w.drain_all()) {
-                    for w in waiters {
-                        let request_id = match w {
-                            DurabilityWaiter::WalAppend { request_id, .. }
-                            | DurabilityWaiter::WriteBatch { request_id, .. } => request_id,
-                        };
-                        self.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                message: format!("Cloud durability failed: {error}"),
-                            },
-                        );
-                    }
+                // If we know the max_sequence for the failed segment, invalidate idempotency
+                // allocations up to that sequence so retries will allocate fresh sequences.
+                if let Some(max_seq) = failed_max_seq {
+                    self.state.invalidate_idempotency_allocations_up_to(max_seq);
                 }
 
-                self.cloudfirst_inflight.clear();
+                let waiters = self.durability.drain_all_waiters();
+                for w in waiters {
+                    let request_id = match w {
+                        DurabilityWaiter::WalAppend { request_id, .. }
+                        | DurabilityWaiter::ConfirmWalAppend { request_id }
+                        | DurabilityWaiter::WriteBatch { request_id, .. }
+                        | DurabilityWaiter::ConfirmWriteBatch { request_id }
+                        | DurabilityWaiter::Read { request_id, .. }
+                        | DurabilityWaiter::RangeScan { request_id, .. } => request_id,
+                    };
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::Error {
+                            request_id,
+                            message: format!("Cloud durability failed: {error}"),
+                        },
+                    );
+                }
+
+                // Clear any remaining inflight segments
+                self.durability.clear_inflight();
             }
             _ => {}
         }
@@ -294,38 +371,13 @@ impl EventLoop {
             return;
         }
 
-        // CloudFirst rotate/upload policy.
-        //
-        // Goals:
-        // - Guarantee forward progress for a single synchronous caller (upper-bound latency).
-        // - Allow batching under concurrency (avoid 1 upload per write).
-        //
-        // Note: A single-threaded caller awaiting CloudAck cannot contribute additional writes
-        // to the batch, so max-delay ensures we still flush promptly in that case.
-        // For cloud object uploads, very small segments create disproportionate overhead.
-        // Under sustained load we want multi-MB segments, but when there's only a single
-        // synchronous waiter we still want prompt progress.
-        const CLOUDFIRST_MIN_SEGMENT_BYTES: usize = 8 * 1024 * 1024; // 8MB
-        const CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG: Duration = Duration::from_millis(25);
-        const CLOUDFIRST_MAX_PENDING_WRITES: usize = 2048;
-
         let cloud_pending = self.wal_actor.pending_cloud_writes_len();
         let bytes_buffered = self.wal_actor.bytes_since_sync();
 
-        // Important: do NOT use `should_sync_batch()` here.
-        // That threshold is tuned for local durability batching (~64KB) and would cause
-        // CloudFirst to rotate/upload far too frequently.
-        let flush_due = if cloud_pending <= 1 {
-            // Single synchronous waiter: cannot build a multi-write segment, so flush immediately
-            // to minimize added latency (don't wait for a timer).
-            cloud_pending > 0
-        } else {
-            cloud_pending > 0
-                && (bytes_buffered >= CLOUDFIRST_MIN_SEGMENT_BYTES
-                    || cloud_pending >= CLOUDFIRST_MAX_PENDING_WRITES
-                    || self.last_cloud_flush.elapsed() >= CLOUDFIRST_MAX_FLUSH_DELAY_BACKLOG)
-        };
-        if !flush_due {
+        if !self
+            .durability
+            .should_flush_cloudfirst(cloud_pending, bytes_buffered)
+        {
             return;
         }
 
@@ -344,21 +396,15 @@ impl EventLoop {
         }
 
         // Move waiters for the sealed segment into an inflight bucket keyed by `segment_id`.
-        if let Some(waiters) = &self.durability_waiters {
-            let _ = waiters.rotate_to(self.state.wal.current_segment_id);
-        }
+        self.durability.rotate_to(self.state.wal.current_segment_id);
 
         let max_sequence = self.state.wal.local_durable_seq;
         let local_path = self.state.wal_dir.join(format!("{segment_id}.wal"));
         storage.enqueue_wal_segment(segment_id, local_path, max_sequence);
 
-        self.cloudfirst_inflight.insert(
-            segment_id,
-            CloudFirstInflightSegment {
-                enqueued_at: Instant::now(),
-                max_sequence,
-            },
-        );
+        self.durability
+            .record_cloud_segment_inflight(segment_id, max_sequence);
+        self.durability.record_cloud_flush();
 
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry
@@ -375,7 +421,6 @@ impl EventLoop {
                 );
             }
         }
-        self.last_cloud_flush = Instant::now();
     }
 
     /// Opportunistically drain pending *write* messages from the channel.
@@ -419,7 +464,18 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        false,
+                                    );
+                                } else {
+                                    // Already durable; confirm idempotency allocations now.
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {
@@ -427,8 +483,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WalAppend {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -456,6 +512,7 @@ impl EventLoop {
                 }) => {
                     let result = self.wal_actor.append_merge(
                         &mut self.state,
+                        request_id,
                         cf_id,
                         bytes::Bytes::from(key),
                         bytes::Bytes::from(operand),
@@ -463,7 +520,17 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        false,
+                                    );
+                                } else {
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {
@@ -471,8 +538,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WalAppend {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -498,7 +565,18 @@ impl EventLoop {
                         .append_batch(&mut self.state, request_id, ops)
                     {
                         Ok((last_sequence, op_count, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        true,
+                                    );
+                                } else {
+                                    self.state.pending_batch_min_seq = None;
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WriteBatchAppended {
@@ -507,8 +585,8 @@ impl EventLoop {
                                         op_count,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WriteBatch {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WriteBatch {
                                     request_id,
                                     last_sequence,
                                     op_count,
@@ -558,17 +636,13 @@ impl EventLoop {
 
         // Sync if any of these conditions are true:
         // 1. Byte threshold exceeded
-        // 2. Pending write count threshold exceeded
-        // 3. Any durable waiters are pending (important for small workloads!)
-        let has_pending_waiters = self
-            .durability_waiters
-            .as_ref()
-            .map(|w| w.pending_len() > 0)
-            .unwrap_or(false);
+        // 2. Time threshold exceeded
+        // NOTE: Do NOT unconditionally sync just because there are pending writes; that
+        // defeats group commit—let the batch window (time/bytes) determine when to sync.
+        // Durable waiters will be satisfied when the batch window elapses.
+        let _has_pending_waiters = self.durability.has_pending_waiters();
 
-        let should_sync = self.wal_actor.should_sync_batch()
-            || self.wal_actor.pending_sync_count() > 0
-            || has_pending_waiters;
+        let should_sync = self.wal_actor.should_sync_batch();
 
         if !should_sync {
             return;
@@ -584,39 +658,79 @@ impl EventLoop {
         match self.wal_actor.sync(&mut self.state) {
             Ok(sealed_gen) => {
                 // Rotate group commit to new generation and complete old one
-                if let Some(waiters) = &self.durability_waiters {
-                    let _ = waiters.rotate_to(sealed_gen + 1);
-                    let completed = waiters.complete(&sealed_gen);
-                    for w in completed {
-                        match w {
-                            DurabilityWaiter::WalAppend {
+                self.durability.rotate_to(sealed_gen + 1);
+                let completed = self.durability.complete_waiters_at(sealed_gen);
+                for w in completed {
+                    match w {
+                        DurabilityWaiter::WalAppend {
+                            request_id,
+                            sequence,
+                        } => {
+                            // Mark sequences as confirmed for idempotency cleanup
+                            self.state.confirm_sequences(request_id);
+                            self.respond(
                                 request_id,
-                                sequence,
-                            } => {
-                                self.respond(
+                                RuntimeResponse::WalAppended {
                                     request_id,
-                                    RuntimeResponse::WalAppended {
-                                        request_id,
-                                        sequence,
-                                    },
-                                );
-                            }
-                            DurabilityWaiter::WriteBatch {
+                                    sequence,
+                                },
+                            );
+                        }
+                        DurabilityWaiter::ConfirmWalAppend { request_id } => {
+                            self.state.confirm_sequences(request_id);
+                        }
+                        DurabilityWaiter::WriteBatch {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                        } => {
+                            // Batch has become durable - clear atomicity barrier
+                            self.state.pending_batch_min_seq = None;
+                            // Mark sequences as confirmed for idempotency cleanup
+                            self.state.confirm_sequences(request_id);
+                            self.respond(
                                 request_id,
-                                last_sequence,
-                                op_count,
-                            } => {
-                                // Batch has become durable - clear atomicity barrier
-                                self.state.pending_batch_min_seq = None;
-                                self.respond(
+                                RuntimeResponse::WriteBatchAppended {
                                     request_id,
-                                    RuntimeResponse::WriteBatchAppended {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                    },
-                                );
-                            }
+                                    last_sequence,
+                                    op_count,
+                                },
+                            );
+                        }
+                        DurabilityWaiter::ConfirmWriteBatch { request_id } => {
+                            // Batch has become durable - clear atomicity barrier
+                            self.state.pending_batch_min_seq = None;
+                            self.state.confirm_sequences(request_id);
+                        }
+                        DurabilityWaiter::Read {
+                            request_id,
+                            cf_id,
+                            key,
+                            sequence,
+                            requested_durability: _,
+                        } => {
+                            let value = self.handle_read(cf_id, &key, sequence);
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::ReadValue { request_id, value },
+                            );
+                        }
+                        DurabilityWaiter::RangeScan {
+                            request_id,
+                            cf_id,
+                            start,
+                            end,
+                            sequence,
+                            requested_durability: _,
+                        } => {
+                            let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::RangeScanResults {
+                                    request_id,
+                                    results,
+                                },
+                            );
                         }
                     }
                 }
@@ -631,16 +745,13 @@ impl EventLoop {
     /// This ensures that operations observing durability (reads, ranges, deletes)
     /// always see a stable state with durability guarantees.
     /// Without this, tests with patterns like "write → read/range/delete" hang forever.
+    #[allow(dead_code)]
     fn sync_if_waiters_exist(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         if self.wal_actor.is_cloud_first() {
             return; // CloudFirst has separate logic
         }
 
-        let has_waiters = self
-            .durability_waiters
-            .as_ref()
-            .map(|w| w.pending_len() > 0)
-            .unwrap_or(false);
+        let has_waiters = self.durability.has_pending_waiters();
 
         if has_waiters {
             self.force_wal_sync(msg_rx);
@@ -664,41 +775,80 @@ impl EventLoop {
         match self.wal_actor.sync(&mut self.state) {
             Ok(sealed_gen) => {
                 // Rotate and complete any pending waiters
-                if let Some(waiters) = &self.durability_waiters {
-                    let _ = waiters.rotate_to(sealed_gen + 1);
-                    let completed = waiters.complete(&sealed_gen);
-                    for w in completed {
-                        match w {
-                            DurabilityWaiter::WalAppend {
+                self.durability.rotate_to(sealed_gen + 1);
+                let completed = self.durability.complete_waiters_at(sealed_gen);
+                for w in completed {
+                    match w {
+                        DurabilityWaiter::WalAppend {
+                            request_id,
+                            sequence,
+                        } => {
+                            self.state.confirm_sequences(request_id);
+                            self.respond(
                                 request_id,
-                                sequence,
-                            } => {
-                                self.respond(
+                                RuntimeResponse::WalAppended {
                                     request_id,
-                                    RuntimeResponse::WalAppended {
-                                        request_id,
-                                        sequence,
-                                    },
-                                );
-                            }
-                            DurabilityWaiter::WriteBatch {
+                                    sequence,
+                                },
+                            );
+                        }
+                        DurabilityWaiter::ConfirmWalAppend { request_id } => {
+                            self.state.confirm_sequences(request_id);
+                        }
+                        DurabilityWaiter::WriteBatch {
+                            request_id,
+                            last_sequence,
+                            op_count,
+                        } => {
+                            // Batch has become durable - clear atomicity barrier
+                            self.state.pending_batch_min_seq = None;
+                            self.state.confirm_sequences(request_id);
+                            self.respond(
                                 request_id,
-                                last_sequence,
-                                op_count,
-                            } => {
-                                // Batch has become durable - clear atomicity barrier
-                                self.state.pending_batch_min_seq = None;
-                                self.respond(
+                                RuntimeResponse::WriteBatchAppended {
                                     request_id,
-                                    RuntimeResponse::WriteBatchAppended {
-                                        request_id,
-                                        last_sequence,
-                                        op_count,
-                                    },
-                                );
-                            }
+                                    last_sequence,
+                                    op_count,
+                                },
+                            );
+                        }
+                        DurabilityWaiter::ConfirmWriteBatch { request_id } => {
+                            self.state.pending_batch_min_seq = None;
+                            self.state.confirm_sequences(request_id);
+                        }
+                        DurabilityWaiter::Read {
+                            request_id,
+                            cf_id,
+                            key,
+                            sequence,
+                            requested_durability: _,
+                        } => {
+                            let value = self.handle_read(cf_id, &key, sequence);
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::ReadValue { request_id, value },
+                            );
+                        }
+                        DurabilityWaiter::RangeScan {
+                            request_id,
+                            cf_id,
+                            start,
+                            end,
+                            sequence,
+                            requested_durability: _,
+                        } => {
+                            let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::RangeScanResults {
+                                    request_id,
+                                    results,
+                                },
+                            );
                         }
                     }
+                    // 🔑 Clean up old idempotency entries now that frontier advanced
+                    self.state.cleanup_old_idempotency_entries();
                 }
             }
             Err(e) => {
@@ -720,6 +870,80 @@ impl EventLoop {
         // Optional trace
         if self.trace_enabled {
             tracing::trace!(request_id, "response routed");
+        }
+    }
+
+    /// Check if a sequence number is durable at the requested level.
+    /// Special case: u64::MAX (latest available) always returns true and bypasses durability checks.
+    #[inline]
+    fn is_sequence_durable(
+        &self,
+        sequence: u64,
+        requested_durability: crate::engine::api::Durability,
+    ) -> bool {
+        self.durability.is_durable(
+            sequence,
+            requested_durability,
+            self.state.wal.local_durable_seq,
+            self.state.wal.cloud_durable_seq,
+        )
+    }
+
+    /// Handle a Read message: check durability frontier or queue for later.
+    fn handle_msg_read(
+        &self,
+        request_id: u64,
+        cf_id: u32,
+        key: Vec<u8>,
+        sequence: u64,
+        requested_durability: crate::engine::api::Durability,
+    ) {
+        if self.is_sequence_durable(sequence, requested_durability) {
+            // Data is durable; perform the read immediately
+            let value = self.handle_read(cf_id, &key, sequence);
+            self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
+        } else {
+            // Data not durable; queue to wait for frontier
+            self.durability.queue_waiter(DurabilityWaiter::Read {
+                request_id,
+                cf_id,
+                key,
+                sequence,
+                requested_durability,
+            });
+        }
+    }
+
+    /// Handle a RangeScan message: check durability frontier or queue for later.
+    fn handle_msg_range_scan(
+        &self,
+        request_id: u64,
+        cf_id: u32,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        sequence: u64,
+        requested_durability: crate::engine::api::Durability,
+    ) {
+        if self.is_sequence_durable(sequence, requested_durability) {
+            // Data is durable; perform the scan immediately
+            let results = self.handle_range_scan(cf_id, &start, &end, sequence);
+            self.respond(
+                request_id,
+                RuntimeResponse::RangeScanResults {
+                    request_id,
+                    results,
+                },
+            );
+        } else {
+            // Data not durable; queue to wait for frontier
+            self.durability.queue_waiter(DurabilityWaiter::RangeScan {
+                request_id,
+                cf_id,
+                start,
+                end,
+                sequence,
+                requested_durability,
+            });
         }
     }
 
@@ -830,6 +1054,214 @@ impl EventLoop {
                     );
                 }
 
+                RuntimeMsg::SetRuntimeConfig {
+                    request_id,
+                    memtable_size_limit,
+                    memtable_flush_threshold,
+                    enable_compaction,
+                    wal_durability_policy,
+                    wal_batch_config,
+                } => {
+                    if let Some(ms) = memtable_size_limit {
+                        self.state.memtable_size_limit = ms;
+                    }
+                    if let Some(th) = memtable_flush_threshold {
+                        self.state.memtable_flush_threshold = th;
+                    }
+                    if let Some(ec) = enable_compaction {
+                        self.state.enable_compaction = ec;
+                    }
+
+                    // Apply WAL changes to the wal actor if requested
+                    if wal_durability_policy.is_some() || wal_batch_config.is_some() {
+                        let policy =
+                            wal_durability_policy.unwrap_or(self.wal_actor.durability_policy());
+                        let batch_cfg = wal_batch_config.unwrap_or(self.wal_actor.batch_config());
+                        if let Err(e) = self.wal_actor.set_durability(policy, batch_cfg) {
+                            self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            );
+                            continue;
+                        }
+                    }
+
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
+
+                RuntimeMsg::GetRuntimeConfig { request_id } => {
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::RuntimeConfigSnapshot {
+                            request_id,
+                            memtable_size_limit: self.state.memtable_size_limit,
+                            memtable_flush_threshold: self.state.memtable_flush_threshold,
+                            enable_compaction: self.state.enable_compaction,
+                            wal_durability_policy: self.wal_actor.durability_policy(),
+                            wal_batch_config: self.wal_actor.batch_config(),
+                        },
+                    );
+                }
+
+                RuntimeMsg::GetIngestState { request_id } => {
+                    let active = self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst);
+                    self.respond(
+                        request_id,
+                        RuntimeResponse::IngestState { request_id, ingest_active: active },
+                    );
+                }
+
+                RuntimeMsg::BeginIngest { request_id } => {
+                    // ─────────────────────────────────────────────────────────────────────
+                    // INGEST BARRIER — scope: active_compactions ONLY
+                    //
+                    // We wait ONLY for active compaction jobs to drain. We do NOT wait for:
+                    //   - WAL sync (batched writes flush on their own schedule)
+                    //   - memtable flush (handled separately on EndIngest)
+                    //   - stats, maintenance, or background monitoring
+                    //
+                    // The invariant: once begin_ingest returns, no compaction work is
+                    // running or can be scheduled until end_ingest is called.
+                    // ─────────────────────────────────────────────────────────────────────
+
+                    let active = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
+                    let current_epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+
+                    tracing::info!(
+                        component = "ingest",
+                        invariant = "begin_ingest_barrier",
+                        ingest_epoch = current_epoch,
+                        "ingest: begin_ingest requested"
+                    );
+                    tracing::info!(
+                        component = "ingest",
+                        invariant = "begin_ingest_barrier",
+                        active_compactions = active,
+                        ingest_epoch = current_epoch,
+                        "ingest: active_compactions={} (will wait for drain)", active
+                    );
+
+                    // Prevent new compactions and mark ingest active
+                    self.state.enable_compaction = false;
+                    self.state.ingest_active.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    // Bump epoch so in-flight compactions will see the change and abort cooperatively
+                    let new_epoch = self
+                        .state
+                        .ingest_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+
+                    // ─────────────────────────────────────────────────────────────────────
+                    // Wait for active compactions to drain (ONLY compactions).
+                    // This is a blocking wait with timed logging thresholds.
+                    // ─────────────────────────────────────────────────────────────────────
+                    let (lock, cvar) = &*self.state.active_compactions_notify;
+                    let mut guard = lock
+                        .lock()
+                        .expect("active_compactions_notify lock poisoned");
+
+                    let wait_start = std::time::Instant::now();
+                    let mut warned_500ms = false;
+                    let mut warned_5s = false;
+
+                    while self
+                        .state
+                        .active_compactions
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        > 0
+                    {
+                        // Wait with timeout so we can log progress thresholds
+                        let timeout = std::time::Duration::from_millis(100);
+                        let (g, _res) = cvar
+                            .wait_timeout(guard, timeout)
+                            .expect("condvar wait poisoned");
+                        guard = g;
+
+                        let elapsed = wait_start.elapsed();
+
+                        if !warned_500ms && elapsed > std::time::Duration::from_millis(500) {
+                            warned_500ms = true;
+                            let a = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
+                            tracing::warn!(
+                                component = "ingest",
+                                invariant = "begin_ingest_barrier",
+                                active_compactions = a,
+                                ingest_epoch = new_epoch,
+                                elapsed_ms = elapsed.as_millis(),
+                                "ingest: still waiting after 500ms for compactions to drain (active_compactions={})", a
+                            );
+                        }
+
+                        if !warned_5s && elapsed > std::time::Duration::from_secs(5) {
+                            warned_5s = true;
+                            let a = self.state.active_compactions.load(std::sync::atomic::Ordering::SeqCst);
+                            tracing::error!(
+                                component = "ingest",
+                                invariant = "begin_ingest_barrier",
+                                active_compactions = a,
+                                ingest_epoch = new_epoch,
+                                elapsed_ms = elapsed.as_millis(),
+                                "ingest: begin_ingest blocked >5s — likely misuse: entering ingest during active workload (active_compactions={}). \
+                                 Correct ordering: warmup/probe BEFORE begin_ingest, not during.", a
+                            );
+                        }
+                    }
+
+                    tracing::info!(
+                        component = "ingest",
+                        invariant = "begin_ingest_barrier",
+                        ingest_epoch = new_epoch,
+                        "ingest: ingestion barrier enabled — all compactions drained"
+                    );
+
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
+
+                RuntimeMsg::EndIngest { request_id } => {
+                    tracing::info!("EndIngest: flushing memtables and restoring scheduling");
+
+                    // Trigger flush for each column family to ensure memtables are persisted
+                    let cf_ids: Vec<u32> = self.state.column_families.keys().cloned().collect();
+                    for cf_id in cf_ids {
+                        // fire-and-forget flush: schedule flush messages and ignore errors
+                        let _ = self.flush_actor.handle_flush(
+                            &mut self.state,
+                            cf_id,
+                            self.hybrid_storage.as_ref(),
+                        );
+                    }
+
+                    // Bump epoch again to invalidate any in-flight compactions that missed the earlier epoch
+                    let new_epoch = self
+                        .state
+                        .ingest_epoch
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+                    tracing::info!(
+                        ingest_epoch = new_epoch,
+                        "EndIngest: ingestion barrier lifted"
+                    );
+
+                    // Clear ingest active before resuming compaction scheduling
+                    self.state.ingest_active.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                    // Optionally kick compaction checks once so background compaction resumes
+                    if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                        let _ = self.compaction_actor.run_compaction(
+                            &mut self.state,
+                            plan,
+                            self.hybrid_storage.as_ref(),
+                            self.worker_msg_tx.clone(),
+                        );
+                    }
+
+                    self.respond(request_id, RuntimeResponse::Ok { request_id });
+                }
+
                 RuntimeMsg::GetCurrentSequence { request_id } => {
                     self.respond(
                         request_id,
@@ -855,26 +1287,24 @@ impl EventLoop {
                             .append_batch(&mut self.state, request_id, ops)
                         {
                             Ok((last_sequence, op_count, deferred)) => {
-                                if deferred {
-                                    if let Some(waiters) = &self.durability_waiters {
-                                        waiters.join(DurabilityWaiter::WriteBatch {
-                                            request_id,
-                                            last_sequence,
-                                            op_count,
-                                        });
-                                    } else {
-                                        // Should never happen, but avoid hanging the caller.
-                                        self.respond(
-                                            request_id,
-                                            RuntimeResponse::WriteBatchAppended {
+                                if self.should_ack_immediately(deferred) {
+                                    if self.wal_actor.is_cloud_first() {
+                                        // Accepted but not yet cloud-durable; confirm later on CloudAck.
+                                        self.durability
+                                            .queue_waiter(DurabilityWaiter::ConfirmWriteBatch {
                                                 request_id,
-                                                last_sequence,
-                                                op_count,
-                                            },
+                                            });
+                                    } else if deferred {
+                                        self.maybe_queue_confirm_only_waiter(
+                                            deferred,
+                                            request_id,
+                                            true,
                                         );
+                                    } else {
+                                        self.state.pending_batch_min_seq = None;
+                                        self.state.confirm_sequences(request_id);
                                     }
-                                } else {
-                                    // Strict/CloudMirrored: completes immediately inside append_batch.
+
                                     self.respond(
                                         request_id,
                                         RuntimeResponse::WriteBatchAppended {
@@ -883,6 +1313,12 @@ impl EventLoop {
                                             op_count,
                                         },
                                     );
+                                } else {
+                                    self.durability.queue_waiter(DurabilityWaiter::WriteBatch {
+                                        request_id,
+                                        last_sequence,
+                                        op_count,
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -945,26 +1381,83 @@ impl EventLoop {
                 // Compaction
                 // =============================================================
                 RuntimeMsg::CheckCompaction { request_id } => {
-                    if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-                        let resp = self
-                            .compaction_actor
-                            .run_compaction(&mut self.state, plan, self.hybrid_storage.as_ref())
-                            .map(|output_ssts| RuntimeResponse::CompactionComplete {
+                    // ─────────────────────────────────────────────────────────────────────
+                    // HARD INVARIANT: No compaction scheduling while ingest is active.
+                    // This is a programmer error — the caller should not have reached here.
+                    // ─────────────────────────────────────────────────────────────────────
+                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                        let epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                        tracing::error!(
+                            component = "compaction",
+                            invariant = "no_compaction_during_ingest",
+                            ingest_epoch = epoch,
+                            "BUG: CheckCompaction called while ingest mode is active. \
+                             Violated invariant: compaction must not be scheduled during ingest. \
+                             Correct ordering: complete all compactions BEFORE begin_ingest."
+                        );
+                        // Return error (panic would kill the runtime; use error response for recoverability)
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
                                 request_id,
-                                output_ssts,
-                            })
-                            .unwrap_or_else(|e| RuntimeResponse::Error {
-                                request_id,
-                                message: e.to_string(),
-                            });
+                                message: "BUG: compaction scheduling attempted during ingest mode — violated invariant".to_string(),
+                            },
+                        );
+                        continue;
+                    }
 
-                        self.respond(request_id, resp);
+                    if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
+                        // Schedule compaction to run in background and respond immediately.
+                        // The compaction worker will send a `CompactionComplete` message back
+                        // when finished which will be handled below.
+                        let schedule_res = self.compaction_actor.run_compaction(
+                            &mut self.state,
+                            plan,
+                            self.hybrid_storage.as_ref(),
+                            self.worker_msg_tx.clone(),
+                        );
+
+                        // Return immediate response (ack)
+                        match schedule_res {
+                            Ok(_) => self.respond(request_id, RuntimeResponse::Ok { request_id }),
+                            Err(e) => self.respond(
+                                request_id,
+                                RuntimeResponse::Error {
+                                    request_id,
+                                    message: e.to_string(),
+                                },
+                            ),
+                        }
                     } else {
                         self.respond(request_id, RuntimeResponse::Ok { request_id });
                     }
                 }
 
                 RuntimeMsg::RunCompaction { request_id, plan } => {
+                    // ─────────────────────────────────────────────────────────────────────
+                    // HARD INVARIANT: No compaction execution while ingest is active.
+                    // ─────────────────────────────────────────────────────────────────────
+                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                        let epoch = self.state.ingest_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                        tracing::error!(
+                            component = "compaction",
+                            invariant = "no_compaction_during_ingest",
+                            ingest_epoch = epoch,
+                            input_files = ?plan.input_files,
+                            "BUG: RunCompaction called while ingest mode is active. \
+                             Violated invariant: compaction must not run during ingest. \
+                             Correct ordering: complete all compactions BEFORE begin_ingest."
+                        );
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "BUG: compaction execution attempted during ingest mode — violated invariant".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     let cplan = crate::compaction::CompactionPlan {
                         input_files: plan.input_files,
                         output_files: Vec::new(),
@@ -974,17 +1467,19 @@ impl EventLoop {
                         output_seq: self.state.next_sequence(),
                     };
 
-                    let resp = self
-                        .compaction_actor
-                        .run_compaction(&mut self.state, cplan, self.hybrid_storage.as_ref())
-                        .map(|output_ssts| RuntimeResponse::CompactionComplete {
-                            request_id,
-                            output_ssts,
-                        })
-                        .unwrap_or_else(|e| RuntimeResponse::Error {
+                    let schedule_res = self.compaction_actor.run_compaction(
+                        &mut self.state,
+                        cplan,
+                        self.hybrid_storage.as_ref(),
+                        self.worker_msg_tx.clone(),
+                    );
+                    let resp = match schedule_res {
+                        Ok(_) => RuntimeResponse::Ok { request_id },
+                        Err(e) => RuntimeResponse::Error {
                             request_id,
                             message: e.to_string(),
-                        });
+                        },
+                    };
 
                     self.respond(request_id, resp);
                 }
@@ -994,6 +1489,20 @@ impl EventLoop {
                     input_ssts,
                     output_ssts,
                 } => {
+                    // Decrement active compactions and notify any waiters
+                    let prev = self
+                        .state
+                        .active_compactions
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    if prev <= 1 {
+                        // notify waiters that active_compactions may be zero now
+                        let (lock, cvar) = &*self.state.active_compactions_notify;
+                        let _guard = lock
+                            .lock()
+                            .expect("active_compactions_notify lock poisoned");
+                        cvar.notify_all();
+                    }
+
                     self.compaction_actor
                         .handle_complete(&mut self.state, input_ssts, output_ssts);
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
@@ -1030,7 +1539,23 @@ impl EventLoop {
                     );
                     match result {
                         Ok((seq, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if self.wal_actor.is_cloud_first() {
+                                    // Accepted but not yet cloud-durable; confirm later on CloudAck.
+                                    self.durability
+                                        .queue_waiter(DurabilityWaiter::ConfirmWalAppend {
+                                            request_id,
+                                        });
+                                } else if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        false,
+                                    );
+                                } else {
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {
@@ -1038,8 +1563,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WalAppend {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -1070,6 +1595,7 @@ impl EventLoop {
                 } => {
                     let result = self.wal_actor.append_merge(
                         &mut self.state,
+                        request_id,
                         cf_id,
                         bytes::Bytes::from(key),
                         bytes::Bytes::from(operand),
@@ -1077,7 +1603,22 @@ impl EventLoop {
 
                     match result {
                         Ok((seq, deferred)) => {
-                            if !deferred {
+                            if self.should_ack_immediately(deferred) {
+                                if self.wal_actor.is_cloud_first() {
+                                    self.durability
+                                        .queue_waiter(DurabilityWaiter::ConfirmWalAppend {
+                                            request_id,
+                                        });
+                                } else if deferred {
+                                    self.maybe_queue_confirm_only_waiter(
+                                        deferred,
+                                        request_id,
+                                        false,
+                                    );
+                                } else {
+                                    self.state.confirm_sequences(request_id);
+                                }
+
                                 self.respond(
                                     request_id,
                                     RuntimeResponse::WalAppended {
@@ -1085,8 +1626,8 @@ impl EventLoop {
                                         sequence: seq,
                                     },
                                 );
-                            } else if let Some(waiters) = &self.durability_waiters {
-                                waiters.join(DurabilityWaiter::WalAppend {
+                            } else {
+                                self.durability.queue_waiter(DurabilityWaiter::WalAppend {
                                     request_id,
                                     sequence: seq,
                                 });
@@ -1261,6 +1802,19 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
+                    // Block DDL while ingest active
+                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                        tracing::error!("ingest: attempted DDL (create CF) during ingest mode");
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "ingest: DDL forbidden during ingest mode".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     // DDL durability barrier: ensure WAL is durable before CF creation
                     self.force_wal_sync(&msg_rx);
 
@@ -1277,6 +1831,19 @@ impl EventLoop {
                 }
 
                 RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => {
+                    // Block DDL while ingest active
+                    if self.state.ingest_active.load(std::sync::atomic::Ordering::SeqCst) {
+                        tracing::error!("ingest: attempted DDL (drop CF) during ingest mode");
+                        self.respond(
+                            request_id,
+                            RuntimeResponse::Error {
+                                request_id,
+                                message: "ingest: DDL forbidden during ingest mode".to_string(),
+                            },
+                        );
+                        continue;
+                    }
+
                     // DDL durability barrier: ensure WAL is durable before CF drop
                     self.force_wal_sync(&msg_rx);
 
@@ -1298,20 +1865,9 @@ impl EventLoop {
                     cf_id,
                     key,
                     sequence,
+                    requested_durability,
                 } => {
-                    // 🔑 Establish durability fence: if durability waiters exist, sync before reading
-                    // This ensures "write → await durable → read" patterns work correctly
-                    self.sync_if_waiters_exist(&msg_rx);
-
-                    // 🔑 Read atomicity: if a WriteBatch is pending, reads at its sequence must wait
-                    if let Some(min_seq) = self.state.pending_batch_min_seq {
-                        if sequence >= min_seq {
-                            self.force_wal_sync(&msg_rx);
-                        }
-                    }
-
-                    let value = self.handle_read(cf_id, &key, sequence);
-                    self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
+                    self.handle_msg_read(request_id, cf_id, key, sequence, requested_durability);
                 }
 
                 RuntimeMsg::RangeScan {
@@ -1320,25 +1876,15 @@ impl EventLoop {
                     start,
                     end,
                     sequence,
+                    requested_durability,
                 } => {
-                    // 🔑 Establish durability fence: if durability waiters exist, sync before scanning
-                    // This ensures "write → await durable → range_scan" patterns work correctly
-                    self.sync_if_waiters_exist(&msg_rx);
-
-                    // 🔑 Read atomicity: if a WriteBatch is pending, reads at its sequence must wait
-                    if let Some(min_seq) = self.state.pending_batch_min_seq {
-                        if sequence >= min_seq {
-                            self.force_wal_sync(&msg_rx);
-                        }
-                    }
-
-                    let results = self.handle_range_scan(cf_id, &start, &end, sequence);
-                    self.respond(
+                    self.handle_msg_range_scan(
                         request_id,
-                        RuntimeResponse::RangeScanResults {
-                            request_id,
-                            results,
-                        },
+                        cf_id,
+                        start,
+                        end,
+                        sequence,
+                        requested_durability,
                     );
                 }
             }
@@ -1535,48 +2081,90 @@ impl EventLoop {
         cf_id: u32,
         start: &[u8],
         end: &[u8],
-        _seq: u64,
+        _snapshot_seq: u64,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let cf_state = match self.state.column_families.get(&cf_id) {
             Some(state) => state,
             None => return vec![],
         };
 
-        // Collect results from active memtable + immutable memtables
+        // Collect results in order: SSTs (oldest->newest) -> immutable memtables (oldest->newest) -> active memtable
+        // so that newer versions override older ones.
         let mut results: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
             std::collections::BTreeMap::new();
 
-        // Scan active memtable - group by key to get latest version only
-        let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+        // --- SSTs: check L0 (newest->oldest) first, then higher levels ---
+        let mut files_by_level: std::collections::BTreeMap<u32, Vec<_>> =
             std::collections::BTreeMap::new();
-        for (key, value, _seq) in cf_state.memtable.iter_all(u64::MAX) {
-            // For each key, keep the first (most recent) value we encounter
-            by_key.entry(key).or_insert(value);
+        for file in &self.state.manifest.files {
+            if file.cf_id == cf_id {
+                files_by_level
+                    .entry(file.level)
+                    .or_default()
+                    .push(file.clone());
+            }
         }
 
-        for (key, value) in by_key.iter() {
-            if value.is_none() {
-                // Skip tombstones (deleted keys)
+        // L0: newest -> oldest (may overlap)
+        if let Some(l0_files) = files_by_level.get(&0) {
+            for file_meta in l0_files.iter().rev() {
+                let sst_path = self.state.sst_dir.join(&file_meta.name);
+                if let Ok(reader) = self.compaction_actor.open_sst_reader(&sst_path) {
+                    if let Ok(pairs) = reader.scan_range(Some(start), Some(end)) {
+                        for (k, v) in pairs {
+                            // SstReader::scan_range returns only (key, value) tuples of present values.
+                            // Treat all returned values as valid for the snapshot (SSTs are persisted).
+                            results.entry(k.to_vec()).or_insert(v.to_vec());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Higher levels
+        for (&level, files) in files_by_level.iter() {
+            if level == 0 {
                 continue;
             }
-            if key.as_slice() >= start && key.as_slice() < end {
-                results.insert(key.clone(), value.clone().expect("value already checked"));
+
+            for file_meta in files.iter().rev() {
+                if let (Some(ref smallest), Some(ref largest)) =
+                    (&file_meta.smallest_key, &file_meta.largest_key)
+                {
+                    if start >= smallest.as_slice() && start >= largest.as_slice() {
+                        // Key range doesn't overlap; skip
+                        continue;
+                    }
+                }
+
+                let sst_path = self.state.sst_dir.join(&file_meta.name);
+                if let Ok(reader) = self.compaction_actor.open_sst_reader(&sst_path) {
+                    if let Ok(pairs) = reader.scan_range(Some(start), Some(end)) {
+                        for (k, v) in pairs {
+                            // SstReader::scan_range returns only (key, value) tuples of present values.
+                            // Treat all returned values as valid for the snapshot (SSTs are persisted).
+                            results.entry(k.to_vec()).or_insert(v.to_vec());
+                        }
+                    }
+                }
             }
         }
 
-        // Scan immutable memtables (oldest → newest for correct override semantics)
+        // --- Immutable memtables: oldest -> newest ---
         for imm in cf_state.immutable_memtables.iter() {
+            // Build by_key for this memtable (keep first seen = most recent within memtable)
             let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
                 std::collections::BTreeMap::new();
             for (key, value, _seq) in imm.iter_all(u64::MAX) {
-                // Keep the first (most recent) value for each key
+                // Current behavior: snapshots return current state (no MVCC), so do not
+                // filter memtable entries by the snapshot sequence. In future when MVCC
+                // is implemented, this should be filtered by `snapshot_seq`.
                 by_key.entry(key).or_insert(value);
             }
 
             for (key, value) in by_key.iter() {
                 if value.is_none() {
-                    // Skip tombstones
-                    continue;
+                    continue; // tombstone
                 }
                 if key.as_slice() >= start && key.as_slice() < end {
                     results.insert(key.clone(), value.clone().expect("value already checked"));
@@ -1584,7 +2172,24 @@ impl EventLoop {
             }
         }
 
-        // Convert to vec of (key, value) tuples
+        // --- Active memtable (newest) overrides everything ---
+        let mut by_key: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+            std::collections::BTreeMap::new();
+        for (key, value, _seq) in cf_state.memtable.iter_all(u64::MAX) {
+            // See note above: snapshots currently reflect current state; do not filter by
+            // snapshot sequence here. This preserves existing behavior documented in tests.
+            by_key.entry(key).or_insert(value);
+        }
+
+        for (key, value) in by_key.iter() {
+            if value.is_none() {
+                continue;
+            }
+            if key.as_slice() >= start && key.as_slice() < end {
+                results.insert(key.clone(), value.clone().expect("value already checked"));
+            }
+        }
+
         results.into_iter().collect()
     }
 }
@@ -1609,6 +2214,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )
     }
 
@@ -1645,6 +2251,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1663,6 +2270,7 @@ mod tests {
             true,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1714,6 +2322,7 @@ mod tests {
             false,
             router.clone(),
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1735,6 +2344,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1785,6 +2395,7 @@ mod tests {
             false,
             router1,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )
         .expect("Should create");
         let event_loop2 = EventLoop::new(
@@ -1792,6 +2403,7 @@ mod tests {
             true,
             router2,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )
         .expect("Should create");
 
@@ -1884,6 +2496,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         )
         .expect("Should create");
 
@@ -1926,6 +2539,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1944,6 +2558,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
+            None,
         );
 
         // Assert
@@ -1970,5 +2585,346 @@ mod tests {
         // Assert - The 64KB block size is hardcoded in EventLoop::new
         // This test documents that invariant
         drop(event_loop);
+    }
+
+    #[test]
+    fn range_scan_should_include_keys_from_ssts() -> crate::common::MidgeResult<()> {
+        use crate::sst::traits::SstFactory;
+
+        // Arrange: create real filesystem-backed state (not memory mode)
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        // Ensure sst dir exists
+        std::fs::create_dir_all(&state.sst_dir)?;
+
+        let router = Arc::new(ResponseRouter::new());
+        let mut el = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            None,
+        )?;
+
+        // Create an SST file with one key using the FsSstFactory
+        let sst_name = "00000001.sst".to_string();
+        let sst_path = el.state.sst_dir.join(&sst_name);
+
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(&el.state.sst_dir)?);
+        let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, 0, None)?;
+        Box::new(writer).finish_to_path(&sst_path)?;
+
+        // Add manifest entry pointing to the SST we just wrote
+        let file_meta = crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: std::fs::metadata(&sst_path)?.len(),
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"a".to_vec()),
+            smallest_seq: Some(10),
+            largest_seq: Some(10),
+            ..Default::default()
+        };
+        el.state.manifest.files.push(file_meta);
+
+        // Replace compaction actor factory with a TestFactory that returns a fake reader
+        // so we don't need to create a valid on-disk SST file in this unit test.
+        struct TestFactory;
+        impl crate::sst::traits::SstFactory for TestFactory {
+            fn create(
+                &self,
+            ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                Err(crate::common::MidgeError::NotSupported(
+                    "create not supported in test".into(),
+                ))
+            }
+            fn open(
+                &self,
+                _path: &std::path::Path,
+            ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReader>> {
+                struct FakeReader;
+                impl crate::sst::traits::SstReader for FakeReader {
+                    fn get(&self, key: &[u8]) -> crate::common::MidgeResult<Option<bytes::Bytes>> {
+                        if key == b"a" {
+                            Ok(Some(bytes::Bytes::copy_from_slice(b"va")))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    fn scan_range(
+                        &self,
+                        start: Option<&[u8]>,
+                        end: Option<&[u8]>,
+                    ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>>
+                    {
+                        let s = start.unwrap_or(&[]);
+                        let e = end.unwrap_or(&[255u8]);
+                        if s <= &b"a"[..] && &b"a"[..] < e {
+                            Ok(vec![(
+                                bytes::Bytes::copy_from_slice(b"a"),
+                                bytes::Bytes::copy_from_slice(b"va"),
+                            )])
+                        } else {
+                            Ok(Vec::new())
+                        }
+                    }
+                }
+                Ok(Box::new(FakeReader))
+            }
+        }
+
+        el.compaction_actor =
+            crate::runtime::actors::CompactionActor::new(std::sync::Arc::new(TestFactory));
+
+        // Quick sanity-check: ensure the fake reader returns the key we expect
+        let reader = el.compaction_actor.open_sst_reader(&sst_path)?;
+        let sst_pairs = reader.scan_range(Some(b"a"), Some(b"b"))?;
+        assert!(sst_pairs
+            .iter()
+            .any(|(k, v)| k.as_ref() == b"a" && v.as_ref() == b"va"));
+
+        // Act: perform a range scan ["a","b") at sequence u64::MAX
+        let results = el.handle_range_scan(0, b"a", b"b", u64::MAX);
+
+        // Assert: We expect to see the key in SST; current implementation does NOT consult SSTs and this test should fail until fixed.
+        assert!(results
+            .iter()
+            .any(|(k, v)| k.as_slice() == b"a" && v.as_slice() == b"va"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn cloudfirst_ack_should_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
+        // Arrange: create state and event loop with CloudFirst policy
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let config = crate::runtime::RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            ..Default::default()
+        };
+        let mut el = EventLoop::new(state, false, router, config, None)?;
+
+        // Add a wal append with a specific request_id
+        let request_id = 123u64;
+        let cf_id = 0u32;
+
+        let (seq, deferred) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k1"),
+            Some(bytes::Bytes::from("v1")),
+            false,
+            None,
+        )?;
+
+        assert!(
+            deferred,
+            "CloudFirst append should be deferred waiting for CloudAck"
+        );
+
+        // Queue waiter for this append (simulates EventLoop behavior)
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id,
+                sequence: seq,
+            });
+
+        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        let seg_id = el.state.wal.current_segment_id;
+        // Flush and rotate to create a sealed segment
+        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
+        el.wal_actor.rotate(&mut el.state)?;
+        // Move waiters into inflight bucket and record timing as EventLoop does
+        el.durability.rotate_to(el.state.wal.current_segment_id);
+        let max_sequence = el.state.wal.local_durable_seq;
+        el.durability
+            .record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability.record_cloud_flush();
+
+        // Now simulate the storage CloudAck for that segment
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: seg_id,
+            max_sequence,
+        });
+
+        // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
+        if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
+            assert!(entry.2 >= el.state.wal.cloud_durable_seq);
+        } else {
+            panic!("idempotency entry missing");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn cloudfirst_retry_after_ack_should_return_same_sequence_without_queueing(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: create state and event loop with CloudFirst policy
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let config = crate::runtime::RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            ..Default::default()
+        };
+        let mut el = EventLoop::new(state, false, router, config, None)?;
+
+        // Add a wal append with a specific request_id
+        let request_id = 124u64;
+        let cf_id = 0u32;
+
+        let (seq1, deferred1) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k1"),
+            Some(bytes::Bytes::from("v1")),
+            false,
+            None,
+        )?;
+
+        assert!(
+            deferred1,
+            "CloudFirst append should be deferred waiting for CloudAck"
+        );
+
+        // Queue waiter for this append (simulates EventLoop behavior)
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id,
+                sequence: seq1,
+            });
+
+        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        let seg_id = el.state.wal.current_segment_id;
+        // Flush and rotate to create a sealed segment
+        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
+        el.wal_actor.rotate(&mut el.state)?;
+        // Move waiters into inflight bucket and record timing as EventLoop does
+        el.durability.rotate_to(el.state.wal.current_segment_id);
+        let max_sequence = el.state.wal.local_durable_seq;
+        el.durability
+            .record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability.record_cloud_flush();
+
+        // Now simulate the storage CloudAck for that segment
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id: seg_id,
+            max_sequence,
+        });
+
+        // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
+        if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
+            assert!(entry.2 >= el.state.wal.cloud_durable_seq);
+        } else {
+            panic!("idempotency entry missing");
+        }
+
+        // Retry the same request_id: should return the same sequence and NOT be deferred
+        let (seq2, deferred2) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k1"),
+            Some(bytes::Bytes::from("v1")),
+            false,
+            None,
+        )?;
+
+        assert_eq!(seq1, seq2, "retry should return same sequence");
+        assert!(
+            !deferred2,
+            "retry after confirmation should not be deferred"
+        );
+        assert_eq!(el.wal_actor.pending_cloud_writes_len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cloudfirst_fail_invalidates_idempotency_and_retry_allocates_new_seq(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: create state and event loop with CloudFirst policy
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let config = crate::runtime::RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::CloudFirst,
+            ..Default::default()
+        };
+        let mut el = EventLoop::new(state, false, router, config, None)?;
+
+        // Add a wal append with a specific request_id
+        let request_id = 200u64;
+        let cf_id = 0u32;
+
+        let (seq1, deferred1) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k2"),
+            Some(bytes::Bytes::from("v2")),
+            false,
+            None,
+        )?;
+
+        assert!(
+            deferred1,
+            "CloudFirst append should be deferred waiting for CloudAck"
+        );
+
+        // Queue waiter for this append (simulates EventLoop behavior)
+        el.durability
+            .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+                request_id,
+                sequence: seq1,
+            });
+
+        // Simulate sealing & uploading segment for CloudFirst as EventLoop would do
+        let seg_id = el.state.wal.current_segment_id;
+        // Flush and rotate to create a sealed segment
+        el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
+        el.wal_actor.rotate(&mut el.state)?;
+        // Move waiters into inflight bucket and record timing as EventLoop does
+        el.durability.rotate_to(el.state.wal.current_segment_id);
+        let max_sequence = el.state.wal.local_durable_seq;
+        el.durability
+            .record_cloud_segment_inflight(seg_id, max_sequence);
+        el.durability.record_cloud_flush();
+
+        // Now simulate the storage CloudFail for that segment
+        el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+            segment_id: seg_id,
+            error: "upload_failed".to_string(),
+        });
+
+        // Retry the same request_id: since the previous allocation failed, we expect a new sequence
+        let (seq2, deferred2) = el.wal_actor.append(
+            &mut el.state,
+            request_id,
+            cf_id,
+            bytes::Bytes::from("k2"),
+            Some(bytes::Bytes::from("v2")),
+            false,
+            None,
+        )?;
+
+        assert_ne!(
+            seq1, seq2,
+            "retry after cloud fail should allocate a new sequence"
+        );
+        assert!(
+            deferred2,
+            "retry should be deferred when retried after fail (CloudFirst)"
+        );
+
+        Ok(())
     }
 }

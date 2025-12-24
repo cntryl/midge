@@ -3,7 +3,6 @@
 //! Purpose: Verify the documented limitation that range() is stubbed
 //! and determine if delete_range() actually works despite this
 
-use bytes::Bytes;
 use cntryl_midge::testkit::*;
 
 #[test]
@@ -37,20 +36,18 @@ fn should_verify_delete_range_works_despite_range_being_stubbed() {
             let key = format!("key{:02}", i);
             let exists = engine.get(cf, key.as_bytes()).unwrap().is_some();
 
-            if i < 2 || i >= 8 {
-                if exists {
-                    retained_count += 1;
-                    eprintln!("    ✓ {} retained (outside range)", key);
-                } else {
-                    eprintln!("    ✗ {} deleted (should be retained!)", key);
-                }
-            } else {
+            if (2..8).contains(&i) {
                 if !exists {
                     deleted_count += 1;
                     eprintln!("    ✓ {} deleted (in range)", key);
                 } else {
                     eprintln!("    ✗ {} retained (should be deleted!)", key);
                 }
+            } else if exists {
+                retained_count += 1;
+                eprintln!("    ✓ {} retained (outside range)", key);
+            } else {
+                eprintln!("    ✗ {} deleted (should be retained!)", key);
             }
         }
 

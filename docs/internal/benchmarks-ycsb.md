@@ -147,6 +147,13 @@ This is significantly more realistic than uniform random access.
 | **WAL Sync** | Disabled | Pure engine performance |
 | **Compaction** | Enabled | Realistic conditions |
 
+### Load vs Run phases 🔧
+
+- **Database lifetime:** The database is created once per benchmark scenario; the **LOAD phase** populates the dataset and the **RUN phase** executes workload operations against the same database instance. We do **not** delete or recreate storage between phases.
+- **Overlap realism:** Background flushes/compactions started by the LOAD phase are allowed to run concurrently during RUN; benches do not wait for quiescence between phases.
+- **Reporting:** LOAD and RUN phases are reported separately — LOAD reports total duration and throughput (records/sec) and mean per-record latency; RUN reports operation latency percentiles and throughput. These metrics are **not** averaged together.
+- **Worker model:** Workers are independent tight loops (no cross-thread coordination beyond termination), and writes in RUN are performed synchronously to preserve causal visibility where appropriate.
+
 ## Running Benchmarks
 
 ### Quick Validation (Smoke Tests)

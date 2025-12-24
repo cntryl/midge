@@ -9,7 +9,9 @@
 
 use super::types::{ColumnFamilyId, WalOpKind, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
-use crate::sst::{Memtable, SkipListMemtable};
+#[cfg(test)]
+use crate::sst::Memtable;
+use crate::sst::SkipListMemtable;
 use crate::storage::abstraction::{
     OpenMode, OpenOptions, Storage, StorageError, StorageErrorKind, StoragePath,
 };
@@ -49,6 +51,13 @@ pub struct RecoveryStats {
     /// The runtime should restore its sequence counter from this value.
     /// None if no records were recovered.
     pub max_sequence: Option<u64>,
+
+    /// Total nanoseconds spent reading WAL files from storage.
+    pub wal_read_ns: u128,
+    /// Total nanoseconds spent applying records to memtables.
+    pub apply_ns: u128,
+    /// Total nanoseconds spent in overall replay (per call)
+    pub total_replay_ns: u128,
 }
 
 impl Default for RecoveryStats {
@@ -64,6 +73,9 @@ impl RecoveryStats {
             bytes: 0,
             had_corruption: false,
             max_sequence: None,
+            wal_read_ns: 0,
+            apply_ns: 0,
+            total_replay_ns: 0,
         }
     }
 
@@ -191,8 +203,12 @@ fn replay_wal_file(
     begun_txns: &mut std::collections::HashSet<u64>,
 ) -> MidgeResult<()> {
     let mut pos: u64 = 0;
+    let mut file_read_ns: u128 = 0;
+    let mut file_apply_ns: u128 = 0;
+
     loop {
         // Read 4-byte length prefix
+        let len_read_start = std::time::Instant::now();
         let len_bytes = match storage.open_file(
             file_path,
             OpenOptions {
@@ -204,9 +220,14 @@ fn replay_wal_file(
             },
         ) {
             Ok(file) => file.read_at(pos, 4).map_err(map_storage_error)?,
-            Err(e) if e.kind == StorageErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind == StorageErrorKind::NotFound => {
+                stats.wal_read_ns = stats.wal_read_ns.saturating_add(file_read_ns);
+                stats.apply_ns = stats.apply_ns.saturating_add(file_apply_ns);
+                return Ok(());
+            }
             Err(e) => return Err(map_storage_error(e)),
         };
+        file_read_ns = file_read_ns.saturating_add(len_read_start.elapsed().as_nanos());
 
         if len_bytes.is_empty() {
             break; // clean EOF
@@ -226,6 +247,7 @@ fn replay_wal_file(
         let len = u32::from_le_bytes(len_buf) as usize;
 
         // Read record payload
+        let payload_read_start = std::time::Instant::now();
         let buf = {
             let file = storage
                 .open_file(
@@ -242,6 +264,8 @@ fn replay_wal_file(
             file.read_at(pos + 4, len as u64)
                 .map_err(map_storage_error)?
         };
+        file_read_ns = file_read_ns.saturating_add(payload_read_start.elapsed().as_nanos());
+
         if buf.len() < len {
             return Err(MidgeError::Corruption(format!(
                 "Incomplete WAL record at pos {} in {} (len={}, got={})",
@@ -269,7 +293,10 @@ fn replay_wal_file(
                     if begun_txns.remove(&txn_id) {
                         if let Some(records) = open_txns.remove(&txn_id) {
                             for buffered in &records {
+                                let apply_start = std::time::Instant::now();
                                 apply_record(buffered, memtables)?;
+                                file_apply_ns =
+                                    file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());
                             }
                         }
                     }
@@ -284,12 +311,26 @@ fn replay_wal_file(
                     }
                 }
 
+                let apply_start = std::time::Instant::now();
                 apply_record(&record, memtables)?;
+                file_apply_ns = file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());
             }
         }
 
         pos += 4 + len as u64;
     }
+
+    stats.wal_read_ns = stats.wal_read_ns.saturating_add(file_read_ns);
+    stats.apply_ns = stats.apply_ns.saturating_add(file_apply_ns);
+
+    tracing::info!(
+        path = %file_path,
+        records = stats.record_count,
+        bytes = stats.bytes,
+        wal_read_ms = (file_read_ns as f64) / 1_000_000.0,
+        apply_ms = (file_apply_ns as f64) / 1_000_000.0,
+        "replayed wal file"
+    );
 
     Ok(())
 }
@@ -321,11 +362,16 @@ fn apply_record(
             }
 
             if let Some(value) = &record.value {
-                memtable.put_with_exp(record.key.to_vec(), value.to_vec(), record.expiration)?;
+                memtable.put_with_seq(
+                    record.key.to_vec(),
+                    value.to_vec(),
+                    record.seq,
+                    record.expiration,
+                )?;
             }
         }
         WalOpKind::Delete => {
-            memtable.delete(record.key.to_vec())?;
+            memtable.delete_with_seq(record.key.to_vec(), record.seq)?;
         }
         WalOpKind::DeleteRange => {
             // TODO: range tombstone support; treat as no-op for now.

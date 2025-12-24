@@ -1,14 +1,13 @@
-//! Tier-3 System Benchmarks: Engine Basic Operations
-//!
-//! Tests core engine operations (put/get/delete) under realistic conditions.
-//! These represent the fundamental building blocks of all database operations.
-//!
-//! ## Design Notes
-//!
-//! - Returns engine from timed closure to prevent Drop during measurement
-//! - Throughput measured in bytes (key + value sizes)
-//! - Uses SamplingMode::Flat for system benchmarks
-//! - Tests all storage modes: Memory, LocalDisk, and CloudBacked
+// This file was moved to `stress/pruned/tier3_system_engine_basic.rs`.
+// The concurrent variants in this file are better suited to the stress harness.
+// Single-op baselines should be placed in Tier-1 or Tier-2 where they are stable.
+
+// Original content preserved at `stress/pruned/tier3_system_engine_basic.rs` for migration.
+
+#[allow(unused)]
+const _TIER3_GUARD: () = {
+    // Tier-3 benches must use bench_common::tier3 APIs and `tier3_bench!`/`tier3_bench_restore!`.
+};
 
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
@@ -17,8 +16,8 @@ mod criterion_helper;
 mod bench_common;
 
 use bench_common::{
-    make_key, make_value_fixed, precompute_kv, setup_engine_arc, setup_engine_with_mode,
-    ALL_STORAGE_MODES, BYTES_PER_OP, KEY_SIZE, VALUE_SIZE,
+    make_key, make_value_fixed, precompute_kv, setup_engine_with_mode, ALL_STORAGE_MODES,
+    BYTES_PER_OP, KEY_SIZE, VALUE_SIZE,
 };
 
 use bytes::Bytes;
@@ -197,206 +196,12 @@ fn bench_batch_put(c: &mut Criterion) {
     group.finish();
 }
 
-// ============================================================================
-// Mixed CRUD Benchmark
-// ============================================================================
+// bench_mixed_crud was pruned — moved to `stress/pruned/tier3_system_engine_basic.rs`.
+// See stress/pruned file for the full scenario implementation.
+// bench_concurrent_reads was pruned — moved to `stress/pruned/tier3_system_engine_basic.rs`.
+// bench_concurrent_writes was pruned — moved to `stress/pruned/tier3_system_engine_basic.rs`.
 
-fn bench_mixed_crud(c: &mut Criterion) {
-    let mut group = c.benchmark_group("engine_basic/mixed_crud");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let num_keys = 2_000usize;
-    let (keys, vals) = precompute_kv(num_keys, VALUE_SIZE);
-
-    // Approximate: 25% put, 50% get, 25% delete
-    // Precompute operations so the inner loop is branch-only
-    #[derive(Clone, Copy)]
-    enum Op {
-        Put(usize),
-        Get(usize),
-        Delete(usize),
-    }
-
-    let ops: Vec<Op> = (0..num_keys)
-        .map(|i| {
-            let key_idx = i % num_keys;
-            match i % 4 {
-                0 => Op::Put(key_idx),
-                1 | 2 => Op::Get(key_idx),
-                _ => Op::Delete(key_idx),
-            }
-        })
-        .collect();
-
-    let bytes_total = (num_keys as u64) * BYTES_PER_OP;
-    group.throughput(Throughput::Bytes(bytes_total));
-
-    for mode in ALL_STORAGE_MODES {
-        group.bench_with_input(
-            BenchmarkId::new("crud_cycle", mode.as_str()),
-            &mode,
-            |b, &mode| {
-                b.iter_batched(
-                    || {
-                        let engine = setup_engine_with_mode("mixed_crud", mode);
-                        let cf = engine.default_column_family();
-                        // Preload half of keys
-                        for i in 0..(num_keys / 2) {
-                            engine.put(cf, &keys[i], &vals[i]).unwrap();
-                        }
-                        engine
-                    },
-                    |engine| {
-                        let cf = engine.default_column_family();
-                        for op in &ops {
-                            match *op {
-                                Op::Put(idx) => {
-                                    engine.put(cf, &keys[idx], &vals[idx]).unwrap();
-                                }
-                                Op::Get(idx) => {
-                                    let _ = engine.get(cf, &keys[idx]);
-                                }
-                                Op::Delete(idx) => {
-                                    let _ = engine.delete(cf, &keys[idx]);
-                                }
-                            }
-                        }
-                        engine // prevent Drop during timing
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-    }
-
-    group.finish();
-}
-
-// ============================================================================
-// Concurrent Reads Benchmark
-// ============================================================================
-
-fn bench_concurrent_reads(c: &mut Criterion) {
-    let mut group = c.benchmark_group("engine_basic/concurrent_reads");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let num_keys = 10_000usize;
-    let ops_per_thread = 500usize;
-    let num_threads = 4usize;
-    let (keys, vals) = precompute_kv(num_keys, VALUE_SIZE);
-
-    // Precompute per-thread index sequences
-    let thread_indices: Vec<Vec<usize>> = (0..num_threads)
-        .map(|t| {
-            (0..ops_per_thread)
-                .map(|i| (t * ops_per_thread + i) % num_keys)
-                .collect()
-        })
-        .collect();
-
-    let bytes_total = (num_threads * ops_per_thread) as u64 * BYTES_PER_OP;
-    group.throughput(Throughput::Bytes(bytes_total));
-
-    for mode in ALL_STORAGE_MODES {
-        group.bench_with_input(
-            BenchmarkId::new("4_threads", mode.as_str()),
-            &mode,
-            |b, &mode| {
-                b.iter_batched(
-                    || {
-                        let engine = setup_engine_arc("concurrent_reads", mode);
-                        let cf = engine.default_column_family();
-                        for i in 0..num_keys {
-                            engine.put(cf, &keys[i], &vals[i]).unwrap();
-                        }
-                        engine
-                    },
-                    |engine| {
-                        let cf = engine.default_column_family();
-                        std::thread::scope(|s| {
-                            for indices in &thread_indices {
-                                let engine_ref = &engine;
-                                let cf_ref = &cf;
-                                let keys_ref = &keys;
-
-                                s.spawn(move || {
-                                    for &idx in indices {
-                                        let _ = engine_ref.get(cf_ref, &keys_ref[idx]);
-                                    }
-                                });
-                            }
-                        });
-                        engine // prevent Drop during timing
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-    }
-
-    group.finish();
-}
-
-// ============================================================================
-// Concurrent Writes Benchmark
-// ============================================================================
-
-fn bench_concurrent_writes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("engine_basic/concurrent_writes");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let ops_per_thread = 250usize;
-    let num_threads = 4usize;
-    let total_ops = num_threads * ops_per_thread;
-
-    // Precompute keys/values for each thread (non-overlapping key ranges)
-    let thread_data: Vec<(Vec<Bytes>, Vec<Bytes>)> = (0..num_threads)
-        .map(|t| {
-            let start = t * ops_per_thread;
-            let keys: Vec<Bytes> = (start..(start + ops_per_thread)).map(make_key).collect();
-            let vals: Vec<Bytes> = (0..ops_per_thread)
-                .map(|_| make_value_fixed(VALUE_SIZE))
-                .collect();
-            (keys, vals)
-        })
-        .collect();
-
-    let bytes_total = (total_ops as u64) * BYTES_PER_OP;
-    group.throughput(Throughput::Bytes(bytes_total));
-
-    for mode in ALL_STORAGE_MODES {
-        group.bench_with_input(
-            BenchmarkId::new("4_threads", mode.as_str()),
-            &mode,
-            |b, &mode| {
-                b.iter_batched(
-                    || setup_engine_arc("concurrent_writes", mode),
-                    |engine| {
-                        let cf = engine.default_column_family();
-                        std::thread::scope(|s| {
-                            for (keys, vals) in &thread_data {
-                                let engine_ref = &engine;
-                                let cf_ref = &cf;
-
-                                s.spawn(move || {
-                                    for (k, v) in keys.iter().zip(vals.iter()) {
-                                        engine_ref.put(cf_ref, k, v).unwrap();
-                                    }
-                                });
-                            }
-                        });
-                        engine // prevent Drop during timing
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-    }
-
-    group.finish();
-}
-
-// ============================================================================
+// Update criterion targets to remove pruned concurrent benches.// ============================================================================
 // Point Lookup Miss Benchmark
 // ============================================================================
 
@@ -455,9 +260,6 @@ criterion_group! {
         bench_single_get,
         bench_single_delete,
         bench_batch_put,
-        bench_mixed_crud,
-        bench_concurrent_reads,
-        bench_concurrent_writes,
         bench_point_lookup_miss
 }
 criterion_main!(tier3_system_engine_basic);

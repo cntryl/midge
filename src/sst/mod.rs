@@ -322,14 +322,14 @@ impl SkipListMemtable {
             .collect()
     }
 
-    /// Put with optional expiration (Unix millis)
-    pub fn put_with_exp(
+    /// Put with explicit sequence and optional expiration (Unix millis)
+    pub fn put_with_seq(
         &self,
         key: Vec<u8>,
         value: Vec<u8>,
+        seq: u64,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        let seq = self.next_seq();
         let size_delta = key.len() + value.len() + 16;
         self.skiplist.upsert_exp(
             Bytes::from(key),
@@ -343,9 +343,19 @@ impl SkipListMemtable {
         Ok(())
     }
 
-    /// Store a merge operand
-    pub fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> MidgeResult<()> {
+    /// Put with optional expiration (backwards compatible) - generates seq internally
+    pub fn put_with_exp(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()> {
         let seq = self.next_seq();
+        self.put_with_seq(key, value, seq, expiration)
+    }
+
+    /// Store a merge operand with explicit sequence
+    pub fn merge_with_seq(&self, key: Vec<u8>, operand: Vec<u8>, seq: u64) -> MidgeResult<()> {
         let size_delta = key.len() + operand.len() + 16;
         self.skiplist.upsert_exp(
             Bytes::from(key),
@@ -357,6 +367,28 @@ impl SkipListMemtable {
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Store a merge operand (backwards compatible)
+    pub fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> MidgeResult<()> {
+        let seq = self.next_seq();
+        self.merge_with_seq(key, operand, seq)
+    }
+
+    /// Delete with explicit sequence (tombstone)
+    pub fn delete_with_seq(&self, key: Vec<u8>, seq: u64) -> MidgeResult<()> {
+        let size_delta = key.len() + 16;
+        self.skiplist.delete(Bytes::from(key), seq);
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Delete (backwards compatible) - tombstone with generated seq
+    #[allow(dead_code)]
+    fn delete(&self, key: Vec<u8>) -> MidgeResult<()> {
+        let seq = self.next_seq();
+        self.delete_with_seq(key, seq)
     }
 }
 

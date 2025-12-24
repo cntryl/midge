@@ -75,7 +75,11 @@ impl WalWriter for FsWalWriterIo {
         let mut pos_guard = self.current_pos.lock().expect("current_pos mutex poisoned");
         let start_pos = *pos_guard;
 
-        // Open file for this write (fs handles pooling)
+        // Coalesce prefix + encoded into one buffer and append once to reduce syscall overhead
+        let mut buf = Vec::with_capacity(4 + encoded.len());
+        buf.extend_from_slice(&len_prefix);
+        buf.extend_from_slice(&encoded);
+
         let mut file = self.fs.open(
             &self.path,
             crate::io::OpenOptions {
@@ -85,10 +89,7 @@ impl WalWriter for FsWalWriterIo {
                 truncate: false,
             },
         )?;
-
-        // Append prefix + data
-        file.append(Bytes::from(len_prefix.to_vec()))?;
-        file.append(Bytes::from(encoded.to_vec()))?;
+        file.append(Bytes::from(buf))?;
 
         let expected = 4u64 + encoded.len() as u64;
         *pos_guard += expected;
@@ -114,6 +115,13 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn sync(&self) -> MidgeResult<()> {
+        // Developer convenience: allow skipping WAL fsync during benches/dev runs to avoid
+        // expensive platform-specific fsyncs (e.g., antivirus on Windows) that dominate
+        // benchmark setup time. Controlled via MIDGE_SKIP_WAL_SYNC env var.
+        if std::env::var_os("MIDGE_SKIP_WAL_SYNC").is_some() {
+            return Ok(());
+        }
+
         let mut file = self.fs.open(
             &self.path,
             crate::io::OpenOptions {

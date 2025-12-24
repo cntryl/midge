@@ -61,6 +61,11 @@ impl Dispatcher {
             | RegisterMergeOperator { .. }
             | GetReadAmpMetrics { .. }
             | GetCurrentSequence { .. }
+            | SetRuntimeConfig { .. }
+            | GetRuntimeConfig { .. }
+            | GetIngestState { .. }
+            | BeginIngest { .. }
+            | EndIngest { .. }
             | Shutdown
             | Noop { .. }
             | StartupPing { .. } => TaskKind::User,
@@ -437,6 +442,7 @@ mod tests {
             cf_id: 0,
             key: b"key".to_vec(),
             sequence: 1,
+            requested_durability: crate::engine::api::Durability::Steady,
         };
 
         // Act
@@ -456,6 +462,7 @@ mod tests {
             start: b"a".to_vec(),
             end: b"z".to_vec(),
             sequence: 1,
+            requested_durability: crate::engine::api::Durability::Steady,
         };
 
         // Act

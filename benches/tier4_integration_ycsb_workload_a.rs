@@ -1,16 +1,18 @@
-//! YCSB Workload A — 50% Read / 50% Update (Update-Heavy)
+//! YCSB Workload A — 50% Read / 50% Update
 //!
-//! Behavior Profile:
-//! - Random point reads (Zipfian)
-//! - Random updates (Zipfian)
-//! - Batched writes (BATCH_SIZE)
-//! - Varying CF counts (1, 2, 4, 8, 16)
-//! - Varying thread counts (1, 2, 8)
+//! This benchmark is a *steady-state characterization*, not a soak test.
 //!
-//! Latency Tracking:
-//! - p50, p99, p99.9 read/update latencies
+//! Execution model:
+//! - Load phase completes fully.
+//! - Run phase executes for a fixed wall-clock duration.
+//! - Benchmark exits once steady-state IO and latency are observed.
 //!
-//! All hot loops: NO allocations, NO formatting, NO RNG except u64 mixing.
+//! Rationale:
+//! - Extended runtime beyond steady-state adds no additional signal.
+//! - Endurance, capacity, and long-term compaction behavior are measured
+//!   in separate soak and capacity benchmarks.
+//!
+//! Workload A is intentionally time-bounded (60s max).
 
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
@@ -28,7 +30,7 @@ use rand::{Rng, RngCore, SeedableRng};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ycsb_common::*;
 
@@ -52,41 +54,33 @@ struct LatencyStats {
 
 fn run_workload_a(
     engine: &MidgeEngine,
-    operations: usize,
-    _record_count: usize,
+    duration: Duration,
     cf_count: usize,
     rng_seed: u64,
 ) -> LatencyStats {
     let cf_list = engine.list_column_families().unwrap_or_default();
     let mut rng = StdRng::seed_from_u64(rng_seed);
 
-    // Precomputed data - get references once outside the loop
     let zipf = ZIPF_DEFAULT.get().unwrap();
     let keys = PREGEN_KEYS.get().unwrap();
     let values = PREGEN_VALUES.get().unwrap();
 
-    // Latency histogram
     let mut hist = Histogram::<u64>::new(3).unwrap();
-
-    // Pre-allocated WriteBatch
     let mut batch = WriteBatch::new();
 
-    for _ in 0..operations {
-        // Pick key
+    let start_run = Instant::now();
+
+    while start_run.elapsed() < duration {
         let key_id = zipf.next(&mut rng);
         let key = &keys[key_id];
-
-        // Pick CF
         let cf = &cf_list[rng.gen_range(0..cf_count)];
         let cf_id = cf.id();
 
         let start = Instant::now();
 
         if rng.next_u32() & 1 == 0 {
-            // ----- READ -----
             let _ = black_box(engine.get(cf, key));
         } else {
-            // ----- WRITE -----
             let value = &values[key_id];
             batch.put_cf(cf_id, key.clone(), value.clone());
 
@@ -115,8 +109,7 @@ fn run_workload_a(
 
 fn run_workload_a_concurrent(
     engine: Arc<MidgeEngine>,
-    ops_per_thread: usize,
-    _record_count: usize,
+    duration: Duration,
     thread_id: usize,
     cf_count: usize,
 ) -> LatencyStats {
@@ -131,7 +124,9 @@ fn run_workload_a_concurrent(
     let mut hist = Histogram::<u64>::new(3).unwrap();
     let mut batch = WriteBatch::new();
 
-    for _ in 0..ops_per_thread {
+    let start_run = Instant::now();
+
+    while start_run.elapsed() < duration {
         let key_id = zipf.next(&mut rng);
         let key = &keys[key_id];
 
@@ -202,8 +197,12 @@ fn bench_workload_a(c: &mut Criterion) {
                 &cf_count,
                 |b, &_cf| {
                     b.iter(|| {
-                        let stats =
-                            run_workload_a(&engine, OPS_PER_ITER, RECORD_COUNT, cf_count, 0xABCDEF);
+                        let stats = run_workload_a(
+                            &engine,
+                            Duration::from_secs(WORKLOAD_DURATION_SECS),
+                            cf_count,
+                            0xABCDEF,
+                        );
                         black_box(stats)
                     })
                 },
@@ -222,7 +221,6 @@ fn bench_workload_a(c: &mut Criterion) {
             load_full_dataset(&engine);
 
             let engine = Arc::new(engine);
-            let ops_per_thread = OPS_PER_ITER / threads;
 
             group.bench_with_input(
                 BenchmarkId::new(format!("concurrent_cf{cf_count}"), threads),
@@ -235,8 +233,7 @@ fn bench_workload_a(c: &mut Criterion) {
                                 thread::spawn(move || {
                                     run_workload_a_concurrent(
                                         engine,
-                                        ops_per_thread,
-                                        RECORD_COUNT,
+                                        Duration::from_secs(WORKLOAD_DURATION_SECS),
                                         tid,
                                         cf_count,
                                     )

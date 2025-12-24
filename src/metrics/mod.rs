@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn should_track_write_latency_and_bytes_when_recording_writes() {
+    fn should_track_write_metrics_latency_and_bytes_when_recording_writes() {
         // Arrange
         let metrics = EngineMetrics::new();
 
@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn should_track_wal_writes_and_syncs() {
+    fn should_track_wal_write_then_sync_metrics() {
         // Arrange
         let metrics = EngineMetrics::new();
 

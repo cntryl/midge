@@ -15,7 +15,10 @@
 //! - Throughput measured in bytes where applicable
 //! - SamplingMode::Flat for system-level stability
 //! - Benchmarks run against all storage modes (Memory, LocalDisk, CloudBacked)
-
+#[allow(unused)]
+const _TIER3_GUARD: () = {
+    // Tier-3 benches must use bench_common::tier3 APIs and `tier3_bench!`/`tier3_bench_restore!`.
+};
 #[path = "./criterion_helper.rs"]
 mod criterion_helper;
 

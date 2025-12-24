@@ -94,8 +94,66 @@ pub trait DynSstWriter: Send {
 
     /// Finalize and write SST directly to path
     fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+        use std::io::Write;
+
+        // Finish bytes first and record write time
+        let finish_start = std::time::Instant::now();
         let bytes = self.finish_bytes()?;
-        std::fs::write(path, &bytes)?;
+        let write_bytes = bytes.len() as u64;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+
+        // Write to a temp file first
+        let tmp = path.with_extension("tmp");
+        let write_start = std::time::Instant::now();
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)
+                .map_err(crate::common::MidgeError::Io)?;
+            f.write_all(&bytes).map_err(crate::common::MidgeError::Io)?;
+            // Ensure data is on disk
+            let sync_start = std::time::Instant::now();
+            f.sync_all().map_err(crate::common::MidgeError::Io)?;
+            let sync_ns = sync_start.elapsed().as_nanos();
+
+            tracing::debug!(path = ?tmp, write_bytes, sync_ns, "sst temp file written and fsynced");
+        }
+        let write_ns = write_start.elapsed().as_nanos();
+
+        // Atomically rename into place
+        let rename_start = std::time::Instant::now();
+        std::fs::rename(&tmp, path).map_err(crate::common::MidgeError::Io)?;
+        let rename_ns = rename_start.elapsed().as_nanos();
+
+        // Fsync parent directory to persist the rename. On some platforms (Windows)
+        // opening a directory for fsync can return PermissionDenied — treat dir fsync
+        // as best-effort and do not fail the whole operation if it isn't supported.
+        let dir_fsync_start = std::time::Instant::now();
+        match std::fs::File::open(parent) {
+            Ok(dir_f) => {
+                if let Err(e) = dir_f.sync_all() {
+                    // Best-effort: log and continue
+                    tracing::debug!("failed to fsync parent dir for sst: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::debug!("failed to open parent dir for fsync: {}", e);
+            }
+        }
+        let dir_fsync_ns = dir_fsync_start.elapsed().as_nanos();
+
+        tracing::info!(
+            path = ?path,
+            bytes = write_bytes,
+            finish_total_ms = finish_start.elapsed().as_secs_f64() * 1000.0,
+            write_ms = (write_ns as f64) / 1_000_000.0,
+            rename_ms = (rename_ns as f64) / 1_000_000.0,
+            dir_fsync_ms = (dir_fsync_ns as f64) / 1_000_000.0,
+            "sst finished to path"
+        );
+
         Ok(())
     }
 }

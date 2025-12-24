@@ -433,7 +433,7 @@ mod tests {
     // ============================================================================
 
     #[test]
-    fn should_advance_iterator_and_reinserve_into_heap() {
+    fn should_advance_iterator_then_reinserve_into_heap() {
         // Arrange: input with multiple entries from same source (must be pre-sorted)
         let s0 = vec![
             entry("a", "a3", 3),
