@@ -66,15 +66,48 @@ impl WriterRunner {
             let batch: Vec<Vec<u8>>;
             {
                 let mut q = self.config.queue.lock();
-                // Wait until: queue has data OR shutdown requested
-                while q.is_empty() && !self.config.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
-                    // Use wait_for with timeout to periodically check for sync requests
-                    self.config.queue_cond.wait_for(&mut q, std::time::Duration::from_millis(10));
+                // Wait until: queue has data OR a sync/flush is requested OR shutdown requested.
+                //
+                // IMPORTANT: `WalWriter::sync()` must work even when the queue is empty. The writer
+                // thread performs I/O asynchronously, so an fsync request may arrive with no queued
+                // buffers. If we only wake on queued data, callers can deadlock forever.
+                while q.is_empty()
+                    && !self
+                        .config
+                        .shutdown
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let has_pending_sync = {
+                        let s = self.config.sync_state.lock();
+                        (s.pending_fsyncs > s.completed_fsyncs)
+                            || (s.pending_flushes > s.completed_flushes)
+                    };
+
+                    if has_pending_sync {
+                        break;
+                    }
+
+                    // Periodically wake to re-check shutdown/sync flags.
+                    self.config
+                        .queue_cond
+                        .wait_for(&mut q, std::time::Duration::from_millis(10));
                 }
                 
-                // Check for shutdown
-                if self.config.shutdown.load(std::sync::atomic::Ordering::SeqCst) && q.is_empty() {
-                    break;
+                // Check for shutdown (but still allow pending fsync/flush requests to complete)
+                if self
+                    .config
+                    .shutdown
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    && q.is_empty()
+                {
+                    let has_pending_sync = {
+                        let s = self.config.sync_state.lock();
+                        (s.pending_fsyncs > s.completed_fsyncs)
+                            || (s.pending_flushes > s.completed_flushes)
+                    };
+                    if !has_pending_sync {
+                        break;
+                    }
                 }
                 
                 // Drain queue
@@ -136,6 +169,9 @@ impl WriterRunner {
             };
 
             if need_sync {
+                if file_opt.is_none() {
+                    file_opt = self.open_file_handle().ok();
+                }
                 if let Some(ref mut file) = file_opt {
                     let sync_start = Instant::now();
                     let _ = file.sync(Durability::Durable);
