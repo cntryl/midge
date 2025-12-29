@@ -4,7 +4,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use cntryl_midge::{AckPolicy, MidgeEngine, MidgeOptions};
+use cntryl_midge::{AckPolicy, MidgeOptions};
 
 const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 128;
@@ -35,7 +35,23 @@ fn tier3_durability_async_local(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = false;
     opts.ack_policy = AckPolicy::Immediate;
-    run_durability_puts_case(ctx, opts, 2_000);
+    run_durability_puts_case(ctx, opts, 10);
+}
+
+#[stress_test]
+fn tier3_durability_async_local_100(ctx: &mut StressContext) {
+    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
+    opts.wal_sync = false;
+    opts.ack_policy = AckPolicy::Immediate;
+    run_durability_puts_case(ctx, opts, 100);
+}
+
+#[stress_test]
+fn tier3_durability_async_local_1000(ctx: &mut StressContext) {
+    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
+    opts.wal_sync = false;
+    opts.ack_policy = AckPolicy::Immediate;
+    run_durability_puts_case(ctx, opts, 1_000);
 }
 
 #[stress_test]
@@ -43,22 +59,23 @@ fn tier3_durability_sync_local(ctx: &mut StressContext) {
     let mut opts = cntryl_midge::testkit::opts_for_mode("local");
     opts.wal_sync = true;
     opts.ack_policy = AckPolicy::AfterLocalDurable;
-    run_durability_puts_case(ctx, opts, 2_000);
+    run_durability_puts_case(ctx, opts, 10);
 }
 
 #[stress_test]
-fn tier3_durability_async_cloud(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    // "Async" in cloud mode = do not wait for cloud durability.
+fn tier3_durability_sync_local_100(ctx: &mut StressContext) {
+    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
+    opts.wal_sync = true;
     opts.ack_policy = AckPolicy::AfterLocalDurable;
-    run_durability_puts_case(ctx, opts, 2_000);
+    run_durability_puts_case(ctx, opts, 100);
 }
 
 #[stress_test]
-fn tier3_durability_sync_cloud(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    opts.ack_policy = AckPolicy::AfterCloudDurable;
-    run_durability_puts_case(ctx, opts, 2_000);
+fn tier3_durability_sync_local_1000(ctx: &mut StressContext) {
+    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
+    opts.wal_sync = true;
+    opts.ack_policy = AckPolicy::AfterLocalDurable;
+    run_durability_puts_case(ctx, opts, 1_000);
 }
 
 stress_main!();

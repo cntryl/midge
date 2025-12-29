@@ -31,15 +31,18 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 2: Warm-up (not measured)
     {
-        let zipf = ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA);
+        let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
         let _warmup_ops = ycsb::run_multi_client_for_duration(
             Arc::clone(&engine),
             clients,
             WARMUP,
             |client_id| {
-                let zipf = zipf.clone();
+                let zipf = Arc::clone(&zipf);
                 move |e, cf, op_index| {
-                    let mut draw: u64 = 0;
+                    let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+
+                    // Reserve draw=0 for op selection; use draw>=1 for key selection.
+                    let mut draw: u64 = 1;
                     let key_idx = zipf
                         .next_from_u64(&mut || {
                             let r = ycsb::deterministic_u64(
@@ -53,8 +56,8 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         }) as u64;
                     let k = ycsb::make_key(key_idx);
 
-                    // 95% reads, 5% updates (deterministic schedule)
-                    if (op_index % 20) != 0 {
+                    // Deterministic, stochastic 95/5 mix (avoids periodic scheduling).
+                    if (op_r % 100) < 95 {
                         let _ = e.get(cf, &k[..]).expect("warmup get");
                     } else {
                         let v = ycsb::make_value((op_index % 251) as u8);
@@ -67,15 +70,18 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 3: Measured (duration-based; multi-client)
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
-        let zipf = ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA);
+        let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
         ycsb::run_multi_client_for_duration(
             Arc::clone(&engine),
             clients,
             MEASURED,
             |client_id| {
-                let zipf = zipf.clone();
+                let zipf = Arc::clone(&zipf);
                 move |e, cf, op_index| {
-                    let mut draw: u64 = 0;
+                    let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+
+                    // Reserve draw=0 for op selection; use draw>=1 for key selection.
+                    let mut draw: u64 = 1;
                     let key_idx = zipf
                         .next_from_u64(&mut || {
                             let r = ycsb::deterministic_u64(
@@ -89,7 +95,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         }) as u64;
                     let k = ycsb::make_key(key_idx);
 
-                    if (op_index % 20) != 0 {
+                    if (op_r % 100) < 95 {
                         let _ = e.get(cf, &k[..]).expect("measured get");
                     } else {
                         let v = ycsb::make_value((op_index % 251) as u8);

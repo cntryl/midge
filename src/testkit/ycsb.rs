@@ -5,10 +5,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::{ColumnFamily, MidgeEngine};
+use crate::{ColumnFamily, MidgeEngine, WriteBatch};
 
 use super::MidgeOptions;
 
@@ -61,12 +62,27 @@ pub fn load_initial_dataset(
     cf: &ColumnFamily,
     initial_keys: usize,
 ) {
+    // Load is not measured; optimize aggressively to keep Tier-4 runs practical.
+    // WriteBatch amortizes WAL and scheduling overhead.
+    const BATCH_OPS: usize = 1024;
+
+    let mut batch = WriteBatch::new();
+    let cf_id = cf.id();
+
     for i in 0..initial_keys as u64 {
         let k = make_key(i);
         let v = make_value((i as usize % 251) as u8);
-        engine
-            .put(cf, &k[..], &v[..])
-            .expect("load phase put");
+
+        batch.put_owned_cf(cf_id, k.to_vec(), v.to_vec());
+
+        if batch.len() >= BATCH_OPS {
+            engine.write_batch(&batch).expect("load phase write_batch");
+            batch.clear();
+        }
+    }
+
+    if !batch.is_empty() {
+        engine.write_batch(&batch).expect("load phase write_batch");
     }
 
     engine.flush().expect("load phase flush");
@@ -135,17 +151,23 @@ where
     Step: FnMut(&MidgeEngine, &ColumnFamily, u64) + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(clients + 1));
     let mut handles = Vec::with_capacity(clients);
 
     for client_id in 0..clients {
         let engine = Arc::clone(&engine);
         let stop = Arc::clone(&stop);
+        let barrier = Arc::clone(&barrier);
         let mut step = make_client(client_id);
 
         handles.push(thread::spawn(move || {
-            let cf = engine.default_column_family();
+            let cf: &ColumnFamily = engine.default_column_family();
+
+            // Start all clients together to reduce launch skew.
+            barrier.wait();
+
             let mut op_index: u64 = 0;
-            while !stop.load(Ordering::Relaxed) {
+            while !stop.load(Ordering::Acquire) {
                 step(&engine, cf, op_index);
                 op_index = op_index.wrapping_add(1);
             }
@@ -153,8 +175,10 @@ where
         }));
     }
 
+    // Release all clients at the same time, then start the measurement window.
+    barrier.wait();
     thread::sleep(duration);
-    stop.store(true, Ordering::Relaxed);
+    stop.store(true, Ordering::Release);
 
     let mut total_ops: u64 = 0;
     for h in handles {

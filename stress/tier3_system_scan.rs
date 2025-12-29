@@ -3,8 +3,6 @@
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
 use cntryl_midge::{Key, MidgeEngine, MidgeOptions, Query};
-
-const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 64;
 
 fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {

@@ -8,6 +8,10 @@ publish = false
 cntryl-midge = { path = ".." }
 cntryl-stress = "0.1.1"
 
+[features]
+# Enables slower, more pathological Tier-3 compaction/flush topology scenarios.
+tier3-heavy = []
+
 [[bin]]
 name = "tier3_system_compaction"
 path = "tier3_system_compaction.rs"
@@ -37,6 +41,10 @@ name = "tier3_system_sst"
 path = "tier3_system_sst.rs"
 
 [[bin]]
+name = "tier4_system_durability_cloud"
+path = "tier4_system_durability_cloud.rs"
+
+[[bin]]
 name = "tier4_ycsb_workload_a"
 path = "tier4_ycsb_workload_a.rs"
 
@@ -59,3 +67,7 @@ path = "tier4_ycsb_workload_e.rs"
 [[bin]]
 name = "tier4_ycsb_workload_f"
 path = "tier4_ycsb_workload_f.rs"
+
+[[bin]]
+name = "tier4_streaming_workload"
+path = "tier4_streaming_workload.rs"

@@ -31,13 +31,13 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 2: Warm-up (not measured)
     {
-        let zipf = ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA);
+        let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
         let _warmup_ops = ycsb::run_multi_client_for_duration(
             Arc::clone(&engine),
             clients,
             WARMUP,
             |client_id| {
-                let zipf = zipf.clone();
+                let zipf = Arc::clone(&zipf);
                 move |e, cf, op_index| {
                     let mut draw: u64 = 0;
                     let key_idx = zipf
@@ -60,13 +60,13 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 3: Measured (duration-based; multi-client)
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
-        let zipf = ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA);
+        let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
         ycsb::run_multi_client_for_duration(
             Arc::clone(&engine),
             clients,
             MEASURED,
             |client_id| {
-                let zipf = zipf.clone();
+                let zipf = Arc::clone(&zipf);
                 move |e, cf, op_index| {
                     let mut draw: u64 = 0;
                     let key_idx = zipf

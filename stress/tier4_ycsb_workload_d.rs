@@ -27,7 +27,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
 
     // Workload D: 95% reads, 5% inserts; read-latest bias.
-    // Deterministic schedule: every 20th op is an insert.
+    // Use a deterministic, stochastic mix (avoid periodic scheduling artifacts).
 
     // Phase 2: Warm-up (not measured)
     {
@@ -36,22 +36,27 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
             clients,
             WARMUP,
             |client_id| {
+                let mut inserts_so_far: u64 = 0;
                 move |e, cf, op_index| {
-                    if (op_index % 20) == 0 {
-                        let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
+                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                    let is_insert = (r0 % 100) >= 95;
+
+                    if is_insert {
+                        inserts_so_far = inserts_so_far.wrapping_add(1);
+                        let key_id = (INITIAL_KEYS as u64)
+                            .wrapping_add((client_id as u64) << 32)
+                            .wrapping_add(inserts_so_far);
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
                         e.put(cf, &k[..], &v[..]).expect("warmup insert");
                         return;
                     }
 
-                    let inserts_so_far = op_index / 20;
                     let latest = (INITIAL_KEYS as u64)
-                        .wrapping_add(((client_id as u64) << 32))
+                        .wrapping_add((client_id as u64) << 32)
                         .wrapping_add(inserts_so_far);
 
                     let recent_window = (latest / 10).max(1);
-                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
                     let pick = if (r0 % 100) < 90 {
                         let r1 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 1);
                         latest.saturating_sub(1).saturating_sub(r1 % recent_window)
@@ -74,22 +79,27 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
             clients,
             MEASURED,
             |client_id| {
+                let mut inserts_so_far: u64 = 0;
                 move |e, cf, op_index| {
-                    if (op_index % 20) == 0 {
-                        let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
+                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                    let is_insert = (r0 % 100) >= 95;
+
+                    if is_insert {
+                        inserts_so_far = inserts_so_far.wrapping_add(1);
+                        let key_id = (INITIAL_KEYS as u64)
+                            .wrapping_add((client_id as u64) << 32)
+                            .wrapping_add(inserts_so_far);
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
                         e.put(cf, &k[..], &v[..]).expect("measured insert");
                         return;
                     }
 
-                    let inserts_so_far = op_index / 20;
                     let latest = (INITIAL_KEYS as u64)
-                        .wrapping_add(((client_id as u64) << 32))
+                        .wrapping_add((client_id as u64) << 32)
                         .wrapping_add(inserts_so_far);
 
                     let recent_window = (latest / 10).max(1);
-                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
                     let pick = if (r0 % 100) < 90 {
                         let r1 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 1);
                         latest.saturating_sub(1).saturating_sub(r1 % recent_window)

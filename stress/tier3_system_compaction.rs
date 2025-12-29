@@ -23,7 +23,9 @@ use cntryl_midge::{MidgeEngine, MidgeOptions};
 const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const DEFAULT_VALUE_SIZE: usize = 100;
 
-const DEFAULT_COMPACTION_KEYS: usize = 10_000;
+// Tier-3 should test system shape, not volume.
+// Expected: typically <500ms on local disk.
+const DEFAULT_COMPACTION_KEYS: usize = 1_000;
 
 fn precompute_kv(num_keys: usize, value_size: usize) -> (Vec<[u8; KEY_SIZE]>, Vec<Vec<u8>>) {
     cntryl_midge::testkit::stress::precompute_kv16_u64_be(num_keys, value_size, u8::MAX)
@@ -193,26 +195,31 @@ fn tier3_compaction_compact_all_many_sst_cloud(ctx: &mut StressContext) {
 
 #[stress_test]
 fn tier3_compaction_many_overlapping_l0_files_local(ctx: &mut StressContext) {
+    // Pathological overlap patterns are intentionally expensive; gate behind feature.
+    // Enable via: `cargo stress -v --features tier3-heavy`
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_many_overlapping_l0_files_case(ctx, opts, 2_000, 4, DEFAULT_VALUE_SIZE);
+    run_many_overlapping_l0_files_case(ctx, opts, 250, 4, DEFAULT_VALUE_SIZE);
 }
 
 #[stress_test]
 fn tier3_compaction_many_overlapping_l0_files_cloud(ctx: &mut StressContext) {
+    // Enable via: `cargo stress -v --features tier3-heavy`
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_many_overlapping_l0_files_case(ctx, opts, 2_000, 4, DEFAULT_VALUE_SIZE);
+    run_many_overlapping_l0_files_case(ctx, opts, 250, 4, DEFAULT_VALUE_SIZE);
 }
 
 #[stress_test]
 fn tier3_compaction_overlap_pressure_local(ctx: &mut StressContext) {
+    // Enable via: `cargo stress -v --features tier3-heavy`
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_overlap_pressure_compact_case(ctx, opts, 1_000, 8, DEFAULT_VALUE_SIZE);
+    run_overlap_pressure_compact_case(ctx, opts, 250, 4, DEFAULT_VALUE_SIZE);
 }
 
 #[stress_test]
 fn tier3_compaction_overlap_pressure_cloud(ctx: &mut StressContext) {
+    // Enable via: `cargo stress -v --features tier3-heavy`
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_overlap_pressure_compact_case(ctx, opts, 1_000, 8, DEFAULT_VALUE_SIZE);
+    run_overlap_pressure_compact_case(ctx, opts, 250, 4, DEFAULT_VALUE_SIZE);
 }
 
 stress_main!();

@@ -28,7 +28,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     let cf = engine.default_column_family();
     ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
 
-    // Workload E: 95% scans, 5% inserts. Deterministic schedule: every 20th op is an insert.
+    // Workload E: 95% scans, 5% inserts. Use a deterministic, stochastic mix.
     // Scans target the dense initial keyspace for stable scan lengths.
 
     // Phase 2: Warm-up (not measured)
@@ -39,7 +39,10 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
             WARMUP,
             |client_id| {
                 move |e, cf, op_index| {
-                    if (op_index % 20) == 0 {
+                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                    let is_insert = (r0 % 100) >= 95;
+
+                    if is_insert {
                         let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
@@ -70,7 +73,10 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
             MEASURED,
             |client_id| {
                 move |e, cf, op_index| {
-                    if (op_index % 20) == 0 {
+                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                    let is_insert = (r0 % 100) >= 95;
+
+                    if is_insert {
                         let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
