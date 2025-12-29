@@ -2,6 +2,9 @@
 //!
 //! Mock implementations for testing and configuration for integration tests
 
+pub mod kv;
+pub mod bench;
+
 use crate::engine::ColumnFamilyHandle;
 use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use bytes::Bytes;
