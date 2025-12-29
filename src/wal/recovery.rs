@@ -276,9 +276,7 @@ fn replay_wal_file(
             )));
         }
 
-        let need_end = pos
-            .saturating_add(4)
-            .saturating_add(len as u64);
+        let need_end = pos.saturating_add(4).saturating_add(len as u64);
         if need_end > file_len {
             return Err(MidgeError::Corruption(format!(
                 "Incomplete WAL record at pos {} in {} (len={}, file_len={})",
@@ -288,7 +286,9 @@ fn replay_wal_file(
 
         // Read record payload
         let payload_read_start = std::time::Instant::now();
-        let buf = file.read_at(pos + 4, len as u64).map_err(map_storage_error)?;
+        let buf = file
+            .read_at(pos + 4, len as u64)
+            .map_err(map_storage_error)?;
         file_read_ns = file_read_ns.saturating_add(payload_read_start.elapsed().as_nanos());
 
         if buf.len() < len {

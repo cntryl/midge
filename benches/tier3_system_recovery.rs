@@ -31,6 +31,7 @@ use bench_common::{
     BenchEngineConfig, BenchStorageMode, BYTES_PER_OP, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
 };
 
+use cntryl_midge::Durability;
 use criterion::{
     criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
@@ -84,7 +85,7 @@ fn bench_recovery_throughput(c: &mut Criterion) {
                             let config = BenchEngineConfig {
                                 storage_mode: mode,
                                 enable_compaction: false,
-                                wal_sync: false,
+                                durability: Durability::Steady,
                                 ..Default::default()
                             };
 
@@ -158,7 +159,7 @@ fn bench_recovery_with_wal_sync(c: &mut Criterion) {
                             let config = BenchEngineConfig {
                                 storage_mode: mode,
                                 enable_compaction: false,
-                                wal_sync: true,
+                                durability: Durability::Strict,
                                 ..Default::default()
                             };
 
@@ -233,7 +234,7 @@ fn bench_recovery_with_l0_data(c: &mut Criterion) {
                             let config = BenchEngineConfig {
                                 storage_mode: mode,
                                 enable_compaction: false,
-                                wal_sync: false,
+                                durability: Durability::Steady,
                                 ..Default::default()
                             };
 
@@ -317,7 +318,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
                         let config = BenchEngineConfig {
                             storage_mode: mode,
                             enable_compaction: false,
-                            wal_sync: false,
+                            durability: Durability::Steady,
                             ..Default::default()
                         };
 
@@ -371,7 +372,7 @@ fn bench_recovery_speed_comparison(c: &mut Criterion) {
                         let config = BenchEngineConfig {
                             storage_mode: mode,
                             enable_compaction: false,
-                            wal_sync: false,
+                            durability: Durability::Steady,
                             ..Default::default()
                         };
 

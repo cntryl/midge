@@ -19,8 +19,8 @@ use crate::io::{Fs, FsPath};
 use crate::wal::encoding;
 use crate::wal::traits::WalWriter;
 use crate::wal::types::{WalOpKind, WalPos, WalRecord};
+use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
-use parking_lot::{Mutex, Condvar};
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
@@ -222,10 +222,11 @@ impl WalWriter for FsWalWriterIo {
 
     fn close(&self) -> MidgeResult<()> {
         // Signal shutdown to the writer thread
-        self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         // Wake the writer thread so it can exit
         self.queue_cond.notify_all();
-        
+
         // Join the writer thread to ensure all data is flushed
         if let Some(handle) = self.writer_thread.lock().take() {
             let _ = handle.join();
@@ -237,7 +238,8 @@ impl WalWriter for FsWalWriterIo {
 impl Drop for FsWalWriterIo {
     fn drop(&mut self) {
         // Ensure writer thread is stopped on drop to prevent thread leaks
-        self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.queue_cond.notify_all();
         if let Some(handle) = self.writer_thread.lock().take() {
             let _ = handle.join();

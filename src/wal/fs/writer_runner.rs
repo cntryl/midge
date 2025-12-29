@@ -1,6 +1,6 @@
 use crate::io::{Durability, Fs, FsPath, FsResult};
+use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
-use parking_lot::{Mutex, Condvar};
 use std::time::Instant;
 
 #[derive(Default)]
@@ -92,7 +92,7 @@ impl WriterRunner {
                         .queue_cond
                         .wait_for(&mut q, std::time::Duration::from_millis(10));
                 }
-                
+
                 // Check for shutdown (but still allow pending fsync/flush requests to complete)
                 if self
                     .config
@@ -109,7 +109,7 @@ impl WriterRunner {
                         break;
                     }
                 }
-                
+
                 // Drain queue
                 batch = std::mem::take(&mut *q);
             }
@@ -173,7 +173,8 @@ impl WriterRunner {
                 if let Some(start_pos) = write_result {
                     let write_elapsed = write_start.elapsed();
                     if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_wal_write_syscall(write_elapsed.as_nanos() as u64);
+                        t.metrics()
+                            .record_wal_write_syscall(write_elapsed.as_nanos() as u64);
                     }
                     // `append()` returns the starting offset; expose end offset as "current_pos".
                     let end_pos = start_pos.saturating_add(big_bytes.len() as u64);
@@ -218,7 +219,8 @@ impl WriterRunner {
                     let _ = file.sync(Durability::Durable);
                     let sync_elapsed = sync_start.elapsed();
                     if let Some(t) = crate::telemetry::Telemetry::global() {
-                        t.metrics().record_wal_fsync_ns(sync_elapsed.as_nanos() as u64);
+                        t.metrics()
+                            .record_wal_fsync_ns(sync_elapsed.as_nanos() as u64);
                         t.metrics().record_wal_fsync_count();
                     }
                 }
@@ -229,7 +231,11 @@ impl WriterRunner {
             }
 
             // Check for shutdown after processing
-            if self.config.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            if self
+                .config
+                .shutdown
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 break;
             }
         }

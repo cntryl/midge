@@ -305,6 +305,11 @@ harness = false
 # Keep only single-shot durability comparisons in Tier-3 if added separately
 
 [[bench]]
+name = "tier3_system_durability_modes"
+path = "benches/tier3_system_durability_modes.rs"
+harness = false
+
+[[bench]]
 name = "tier3_system_engine_advanced"
 path = "benches/tier3_system_engine_advanced.rs"
 harness = false

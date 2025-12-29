@@ -358,6 +358,13 @@ impl OpenOptions {
         self.wal_sync_on_write
     }
 
+    /// Get the derived acknowledgment policy.
+    ///
+    /// This is derived from `durability` during `build()`.
+    pub fn ack_policy(&self) -> AckPolicy {
+        self.ack_policy
+    }
+
     /// Get derived WAL buffer size
     pub fn wal_buffer_size(&self) -> usize {
         self.wal_buffer_size

@@ -62,7 +62,7 @@ fn bench_scan_multi_level_range(c: &mut Criterion) {
                             &BenchEngineConfig {
                                 storage_mode: mode,
                                 enable_compaction: true,
-                                memtable_size: 1024 * 1024,
+                                memtable_size: Some(1024 * 1024),
                                 ..Default::default()
                             },
                         );

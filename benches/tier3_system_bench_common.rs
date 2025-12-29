@@ -16,7 +16,7 @@
 //! ```
 
 use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeOptions, StorageMode};
+use cntryl_midge::{Durability, Goal, MemoryBudget, MidgeEngine, MidgeOptions, OpenOptions, StorageMode, WorkloadProfile};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -169,21 +169,29 @@ pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] = [BenchStorageMode::Loca
 #[allow(dead_code)]
 pub struct BenchEngineConfig {
     pub storage_mode: BenchStorageMode,
-    pub wal_sync: bool,
+    /// High-level tuning knobs (use the public OpenOptions builder).
+    pub goal: Goal,
+    pub durability: Durability,
+    pub workload: WorkloadProfile,
+    pub memory_budget: MemoryBudget,
     /// Optional WAL batch config to control group commit behavior for benches
     pub wal_batch_config: Option<cntryl_midge::wal::policy::BatchConfig>,
     pub enable_compaction: bool,
-    pub memtable_size: usize,
+    /// Optional override for memtable size (bytes). If None, derived from OpenOptions.
+    pub memtable_size: Option<usize>,
 }
 
 impl Default for BenchEngineConfig {
     fn default() -> Self {
         Self {
             storage_mode: BenchStorageMode::LocalDisk,
-            wal_sync: false,
+            goal: Goal::default(),
+            durability: Durability::default(),
+            workload: WorkloadProfile::default(),
+            memory_budget: MemoryBudget::default(),
             wal_batch_config: None,
             enable_compaction: false,
-            memtable_size: BENCH_MEMTABLE_SIZE,
+            memtable_size: None,
         }
     }
 }
@@ -204,8 +212,23 @@ impl BenchEngineConfig {
         }
     }
 
-    pub fn with_wal_sync(mut self, sync: bool) -> Self {
-        self.wal_sync = sync;
+    pub fn with_goal(mut self, goal: Goal) -> Self {
+        self.goal = goal;
+        self
+    }
+
+    pub fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
+        self
+    }
+
+    pub fn with_workload(mut self, workload: WorkloadProfile) -> Self {
+        self.workload = workload;
+        self
+    }
+
+    pub fn with_memory_budget(mut self, budget: MemoryBudget) -> Self {
+        self.memory_budget = budget;
         self
     }
 
@@ -220,8 +243,44 @@ impl BenchEngineConfig {
     }
 
     pub fn with_memtable_size(mut self, size: usize) -> Self {
-        self.memtable_size = size;
+        self.memtable_size = Some(size);
         self
+    }
+
+    /// Build a `MidgeOptions` object from this bench config.
+    ///
+    /// `db_path` is required for `LocalDisk` storage mode and should be the
+    /// filesystem path the engine will use. Pass `None` for `Memory` mode.
+    pub fn build_midge_options(&self, db_path: Option<std::path::PathBuf>) -> MidgeOptions {
+        // Use the public OpenOptions builder as the source of truth for derived knobs.
+        // This keeps benches aligned with user-facing configuration semantics.
+        let open_opts = OpenOptions::new()
+            .goal(self.goal)
+            .durability(self.durability)
+            .workload(self.workload)
+            .memory_budget(self.memory_budget)
+            .build();
+
+        let storage_mode = match self.storage_mode {
+            BenchStorageMode::Memory => StorageMode::Memory,
+            BenchStorageMode::LocalDisk => {
+                let p = db_path.expect("LocalDisk bench requires a db_path");
+                StorageMode::LocalDisk { db_path: p }
+            }
+            BenchStorageMode::CloudBacked => {
+                panic!("CloudBacked mode not yet supported in benchmarks")
+            }
+        };
+
+        let mut opts = MidgeOptions::default();
+        opts.storage_mode = storage_mode;
+        opts.memtable_size = self.memtable_size.unwrap_or(open_opts.memtable_size_limit());
+        opts.enable_compaction = self.enable_compaction;
+        // Derived from durability/goal/workload by OpenOptions.
+        opts.wal_sync = open_opts.wal_sync_on_write();
+        opts.ack_policy = open_opts.ack_policy();
+        opts.wal_batch_config = self.wal_batch_config.clone();
+        opts
     }
 }
 
@@ -236,20 +295,9 @@ pub fn setup_engine(prefix: &str, config: &BenchEngineConfig) -> MidgeEngine {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    let storage_mode = match config.storage_mode {
-        BenchStorageMode::Memory => StorageMode::Memory,
-        BenchStorageMode::LocalDisk => StorageMode::LocalDisk { db_path: path },
-        BenchStorageMode::CloudBacked => panic!("CloudBacked mode not yet supported in benchmarks"),
-    };
-
-    let opts = MidgeOptions {
-        storage_mode,
-        memtable_size: config.memtable_size,
-        enable_compaction: config.enable_compaction,
-        wal_sync: config.wal_sync,
-        wal_batch_config: config.wal_batch_config,
-        ..Default::default()
-    };
+    // Build MidgeOptions from the bench config. `build_midge_options` handles
+    // storage mode selection and will panic for unsupported modes when appropriate.
+    let opts = config.build_midge_options(Some(path));
 
     MidgeEngine::open(opts).expect("failed to open engine")
 }
@@ -277,35 +325,26 @@ pub fn setup_engine_at_path(path: &std::path::Path, config: &BenchEngineConfig) 
 /// Does NOT delete existing data - use for recovery/reopen tests.
 #[allow(dead_code)]
 pub fn reopen_engine_at_path(path: &std::path::Path, config: &BenchEngineConfig) -> MidgeEngine {
-    let storage_mode = match config.storage_mode {
-        BenchStorageMode::Memory => panic!("setup_engine_at_path requires persistent storage"),
-        BenchStorageMode::LocalDisk => StorageMode::LocalDisk {
-            db_path: path.to_path_buf(),
-        },
-        BenchStorageMode::CloudBacked => panic!("CloudBacked mode not yet supported in benchmarks"),
-    };
+    // Ensure caller doesn't request Memory mode for reopen at path.
+    if let BenchStorageMode::Memory = config.storage_mode {
+        panic!("setup_engine_at_path requires persistent storage");
+    }
 
-    let opts = MidgeOptions {
-        storage_mode,
-        memtable_size: config.memtable_size,
-        enable_compaction: config.enable_compaction,
-        wal_sync: config.wal_sync,
-        ..Default::default()
-    };
+    let opts = config.build_midge_options(Some(path.to_path_buf()));
 
     MidgeEngine::open(opts).expect("failed to open engine")
 }
 
-/// Setup engine with storage mode and WAL sync option.
+/// Setup engine with storage mode and durability.
 #[allow(dead_code)]
-pub fn setup_engine_with_mode_and_sync(
+pub fn setup_engine_with_mode_and_durability(
     prefix: &str,
     mode: BenchStorageMode,
-    wal_sync: bool,
+    durability: Durability,
 ) -> MidgeEngine {
     let config = BenchEngineConfig {
         storage_mode: mode,
-        wal_sync,
+        durability,
         ..Default::default()
     };
     setup_engine(prefix, &config)

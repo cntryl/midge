@@ -60,7 +60,7 @@ fn bench_engine_startup_from_wal(c: &mut Criterion) {
                         let config = BenchEngineConfig {
                             storage_mode: mode,
                             enable_compaction: false,
-                            memtable_size: 100 * 1024 * 1024,
+                            memtable_size: Some(100 * 1024 * 1024),
                             ..Default::default()
                         };
 

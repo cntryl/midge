@@ -1982,7 +1982,9 @@ mod tests {
         let engine = MidgeEngine::open(opts).expect("open memory engine");
         // These operations should be no-ops and return Ok
         engine.flush().expect("memory flush should succeed");
-        engine.compact_all().expect("memory compact_all should succeed");
+        engine
+            .compact_all()
+            .expect("memory compact_all should succeed");
     }
 
     #[test]

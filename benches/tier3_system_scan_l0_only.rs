@@ -62,7 +62,7 @@ fn bench_scan_l0_direct(c: &mut Criterion) {
                             &BenchEngineConfig {
                                 storage_mode: mode,
                                 enable_compaction: false,
-                                memtable_size: 2 * 1024 * 1024,
+                                memtable_size: Some(2 * 1024 * 1024),
                                 ..Default::default()
                             },
                         );
@@ -130,7 +130,7 @@ fn bench_scan_l0_prefix(c: &mut Criterion) {
                             &BenchEngineConfig {
                                 storage_mode: mode,
                                 enable_compaction: false,
-                                memtable_size: 2 * 1024 * 1024,
+                                memtable_size: Some(2 * 1024 * 1024),
                                 ..Default::default()
                             },
                         );

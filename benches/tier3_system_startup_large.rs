@@ -59,7 +59,7 @@ fn bench_engine_startup_100k_sst_files(c: &mut Criterion) {
                         let config = BenchEngineConfig {
                             storage_mode: mode,
                             enable_compaction: false,
-                            memtable_size: 64 * 1024,
+                            memtable_size: Some(64 * 1024),
                             ..Default::default()
                         };
 

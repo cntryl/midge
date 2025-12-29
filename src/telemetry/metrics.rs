@@ -283,7 +283,8 @@ impl Metrics {
     pub fn record_wal_write_syscall(&self, ns: u64) {
         if self.enabled {
             self.wal_write_syscall_count.fetch_add(1, Ordering::Relaxed);
-            self.wal_write_syscall_ns_total.fetch_add(ns, Ordering::Relaxed);
+            self.wal_write_syscall_ns_total
+                .fetch_add(ns, Ordering::Relaxed);
         }
     }
 

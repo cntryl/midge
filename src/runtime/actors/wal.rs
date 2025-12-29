@@ -138,7 +138,6 @@ impl WalActor {
         batch_config: BatchConfig,
         memory_mode: bool,
     ) -> MidgeResult<Self> {
-        
         let (wal_fs, writer) = if memory_mode {
             (None, None)
         } else {
@@ -190,9 +189,11 @@ impl WalActor {
         self.append_calls += 1;
         self.append_total += a_elapsed;
         if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_wal_append(record.estimated_size() as u64);
+            t.metrics()
+                .record_wal_append(record.estimated_size() as u64);
             t.metrics().record_wal_append_count();
-            t.metrics().record_wal_append_ns(a_elapsed.as_nanos() as u64);
+            t.metrics()
+                .record_wal_append_ns(a_elapsed.as_nanos() as u64);
         }
         Ok(())
     }
@@ -354,9 +355,11 @@ impl WalActor {
             self.append_total += a_elapsed;
             // Instrumentation: record wal append bytes/count/latency
             if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_append(record.estimated_size() as u64);
+                t.metrics()
+                    .record_wal_append(record.estimated_size() as u64);
                 t.metrics().record_wal_append_count();
-                t.metrics().record_wal_append_ns(a_elapsed.as_nanos() as u64);
+                t.metrics()
+                    .record_wal_append_ns(a_elapsed.as_nanos() as u64);
             }
         }
 
@@ -515,9 +518,11 @@ impl WalActor {
             self.append_calls += 1;
             self.append_total += a_elapsed;
             if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_append(begin_record.estimated_size() as u64);
+                t.metrics()
+                    .record_wal_append(begin_record.estimated_size() as u64);
                 t.metrics().record_wal_append_count();
-                t.metrics().record_wal_append_ns(a_elapsed.as_nanos() as u64);
+                t.metrics()
+                    .record_wal_append_ns(a_elapsed.as_nanos() as u64);
             }
         }
 
@@ -634,9 +639,11 @@ impl WalActor {
             self.append_calls += 1;
             self.append_total += a_elapsed;
             if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_append(commit_record.estimated_size() as u64);
+                t.metrics()
+                    .record_wal_append(commit_record.estimated_size() as u64);
                 t.metrics().record_wal_append_count();
-                t.metrics().record_wal_append_ns(a_elapsed.as_nanos() as u64);
+                t.metrics()
+                    .record_wal_append_ns(a_elapsed.as_nanos() as u64);
             }
         }
 
