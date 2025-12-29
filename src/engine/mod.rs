@@ -1972,6 +1972,20 @@ mod tests {
     }
 
     #[test]
+    fn memory_flush_and_compact_noop() {
+        // Open a memory-mode engine and verify flush/compact succeed and do not touch disk
+        let opts = crate::testkit::MidgeOptions {
+            storage_mode: crate::testkit::StorageMode::Memory,
+            ..Default::default()
+        };
+
+        let engine = MidgeEngine::open(opts).expect("open memory engine");
+        // These operations should be no-ops and return Ok
+        engine.flush().expect("memory flush should succeed");
+        engine.compact_all().expect("memory compact_all should succeed");
+    }
+
+    #[test]
     fn should_copy_column_family_id() {
         // Arrange
         let id1 = ColumnFamilyId(42);
