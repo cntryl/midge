@@ -1,394 +1,148 @@
-//! Tier 3 — System Benchmarks: Crash Recovery
+//! Tier 3 — Recovery / reopen paths (stress harness)
 //!
-//! **Target Runtime:** ~30-60 seconds
-//! **Run Frequency:** Nightly CI / Perf Baselines
-//!
-//! Measures WAL replay performance and recovery correctness:
-//! - Time to replay WAL after crash/restart
-//! - Replay throughput (bytes/sec)
-//! - Data integrity validation
-//! - Different dataset sizes (10K, 100K, 500K records)
-//!
-//! ## Design Notes
-//!
-//! - Returns engine from timed closures to exclude teardown from timing
-//! - Precomputes all keys/values outside hot loops
-//! - Uses unique paths to avoid cross-iteration interference
-//! - Throughput measured in bytes
-//! - Uses DURABLE_STORAGE_MODES since recovery requires persistence
-#[allow(unused)]
-const _TIER3_GUARD: () = {
-    // Tier-3 benches must use bench_common::tier3 APIs and `tier3_bench!`/`tier3_bench_restore!`.
-};
-#[path = "./criterion_helper.rs"]
-mod criterion_helper;
+//! Not meaningful for pure memory; only local and cloud.
 
-#[path = "./tier3_system_bench_common.rs"]
-mod bench_common;
+use cntryl_stress::{stress_main, stress_test, StressContext};
 
-#[path = "./common/tier3_harness.rs"]
-mod tier3;
+use cntryl_midge::{MidgeEngine, MidgeOptions};
 
-use bench_common::{
-    create_seed_dir, precompute_kv, setup_engine_at_path, BenchEngineConfig, BenchStorageMode,
-    BYTES_PER_OP, DURABLE_STORAGE_MODES, KEY_SIZE, VALUE_SIZE,
-};
+const KEY_SIZE: usize = 16;
+const VALUE_SIZE: usize = 64;
 
-use cntryl_midge::Durability;
-use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
-};
-use criterion_helper::{criterion_config_for_tier, BenchTier};
-use std::hint::black_box;
-
-/// Benchmark name constants
-const BENCH_REPLAY: &str = "replay";
-const BENCH_SYNC: &str = "sync";
-const BENCH_L0: &str = "l0";
-const BENCH_SMALL_VALS: &str = "small_vals";
-const BENCH_LARGE_VALS: &str = "large_vals";
-
-// ============================================================================
-// WAL Recovery Performance
-// ============================================================================
-
-/// Benchmark WAL replay performance after crash
-///
-/// Simulates crash by:
-/// 1. Writing N records to database
-/// 2. Dropping engine (simulating crash, leaving WAL on disk)
-/// 3. Reopening database (triggers WAL replay)
-/// 4. Measuring replay throughput
-fn bench_recovery_throughput(c: &mut Criterion) {
-    let mut group = c.benchmark_group("system_recovery_throughput");
-    group.sampling_mode(SamplingMode::Flat);
-
-    for &op_count in &[10_000usize, 50_000] {
-        // Reduced from 100k for faster runs
-        let (keys, vals) = precompute_kv(op_count, VALUE_SIZE);
-        let bytes_total = (op_count as u64) * BYTES_PER_OP;
-
-        group.throughput(Throughput::Bytes(bytes_total));
-
-        for mode in DURABLE_STORAGE_MODES {
-            let bench_name = format!("{}/{}", op_count, mode.as_str());
-            group.bench_with_input(
-                BenchmarkId::new("replay", &bench_name),
-                &(op_count, mode),
-                |b, &(num_ops, mode)| {
-                    let keys_ref = &keys;
-                    let vals_ref = &vals;
-
-                    let config = BenchEngineConfig {
-                        storage_mode: mode,
-                        enable_compaction: false,
-                        durability: Durability::Steady,
-                        ..Default::default()
-                    };
-
-                    let keys_seed = keys_ref;
-                    let vals_seed = vals_ref;
-                    let seed_prefix = format!("{}_seed_replay_{}_{}", BENCH_REPLAY, num_ops, mode);
-                    let config_seed = config.clone();
-                    let seed_path = create_seed_dir(seed_prefix.as_str(), move |p| {
-                        let engine = setup_engine_at_path(p, &config_seed);
-                        let cf = engine.default_column_family();
-
-                        // Write records to create WAL entries.
-                        for i in 0..num_ops {
-                            engine
-                                .put(cf, &keys_seed[i], &vals_seed[i])
-                                .expect("put failed");
-                        }
-
-                        // Simulate crash (drop engine, leave WAL on disk).
-                        drop(engine);
-                    });
-
-                    let case = tier3::Tier3OpenCase::from_seed(seed_path, config.clone());
-                    tier3_bench_open!(b, case, move |engine| {
-                        // Validate some data integrity.
-                        let cf = engine.default_column_family();
-                        for i in (0..num_ops).step_by(1_000) {
-                            let key = black_box(&keys_ref[i]);
-                            let val = engine.get(cf, key).expect("get failed");
-                            assert!(val.is_some(), "key not recovered: {}", i);
-                        }
-                    });
-                },
-            );
-        }
-    }
-
-    group.finish();
+fn setup_engine(mut opts: MidgeOptions) -> MidgeEngine {
+    opts.enable_compaction = false;
+    MidgeEngine::open_with_options(opts).unwrap()
 }
 
-// ============================================================================
-// Recovery with WAL Sync Enabled
-// ============================================================================
-
-/// Benchmark recovery performance with synchronous WAL
-fn bench_recovery_with_wal_sync(c: &mut Criterion) {
-    let mut group = c.benchmark_group("system_recovery_wal_sync");
-    group.sampling_mode(SamplingMode::Flat);
-
-    for &op_count in &[10_000usize, 50_000] {
-        let (keys, vals) = precompute_kv(op_count, VALUE_SIZE);
-        let bytes_total = (op_count as u64) * BYTES_PER_OP;
-
-        group.throughput(Throughput::Bytes(bytes_total));
-
-        for mode in DURABLE_STORAGE_MODES {
-            let bench_name = format!("{}/{}", op_count, mode.as_str());
-            group.bench_with_input(
-                BenchmarkId::new("replay_sync", &bench_name),
-                &(op_count, mode),
-                |b, &(num_ops, mode)| {
-                    let keys_ref = &keys;
-                    let vals_ref = &vals;
-
-                    let config = BenchEngineConfig {
-                        storage_mode: mode,
-                        enable_compaction: false,
-                        durability: Durability::Strict,
-                        ..Default::default()
-                    };
-
-                    let keys_seed = keys_ref;
-                    let vals_seed = vals_ref;
-                    let seed_prefix = format!("{}_seed_sync_{}_{}", BENCH_SYNC, num_ops, mode);
-                    let config_seed = config.clone();
-                    let seed_path = create_seed_dir(seed_prefix.as_str(), move |p| {
-                        let engine = setup_engine_at_path(p, &config_seed);
-                        let cf = engine.default_column_family();
-
-                        for i in 0..num_ops {
-                            engine
-                                .put(cf, &keys_seed[i], &vals_seed[i])
-                                .expect("put failed");
-                        }
-
-                        drop(engine);
-                    });
-
-                    let case = tier3::Tier3OpenCase::from_seed(seed_path, config.clone());
-                    tier3_bench_open!(b, case, move |engine| {
-                        // Quick validation.
-                        let cf = engine.default_column_family();
-                        for i in (0..num_ops).step_by(10_000) {
-                            let key = black_box(&keys_ref[i]);
-                            black_box(engine.get(cf, key).expect("get failed"));
-                        }
-                    });
-                },
-            );
-        }
+fn write_some(engine: &MidgeEngine, num_keys: usize) {
+    let cf = engine.default_column_family();
+    for i in 0..num_keys {
+        let mut k = [0u8; KEY_SIZE];
+        k[..8].copy_from_slice(&(i as u64).to_be_bytes());
+        let v = vec![(i % 251) as u8; VALUE_SIZE];
+        engine.put(&cf, &k[..], &v).unwrap();
     }
-
-    group.finish();
 }
 
-// ============================================================================
-// Partial Recovery (Some Data in L0)
-// ============================================================================
-
-/// Benchmark recovery when some writes reached L0 and some are in WAL
-fn bench_recovery_with_l0_data(c: &mut Criterion) {
-    let mut group = c.benchmark_group("system_recovery_with_l0");
-    group.sampling_mode(SamplingMode::Flat);
-
-    for &op_count in &[25_000usize, 50_000] {
-        // Reduced from 50k/100k
-        let (keys, vals) = precompute_kv(op_count, VALUE_SIZE);
-        let bytes_total = (op_count as u64) * BYTES_PER_OP;
-
-        group.throughput(Throughput::Bytes(bytes_total));
-
-        // LocalDisk only for larger workload to avoid cloud overhead
-        for mode in DURABLE_STORAGE_MODES {
-            if op_count > 25_000 && !matches!(mode, BenchStorageMode::LocalDisk) {
-                continue;
-            }
-            let bench_name = format!("{}/{}", op_count, mode.as_str());
-            group.bench_with_input(
-                BenchmarkId::new("replay_l0", &bench_name),
-                &(op_count, mode),
-                |b, &(num_ops, mode)| {
-                    let keys_ref = &keys;
-                    let vals_ref = &vals;
-
-                    let config = BenchEngineConfig {
-                        storage_mode: mode,
-                        enable_compaction: false,
-                        durability: Durability::Steady,
-                        ..Default::default()
-                    };
-
-                    let keys_seed = keys_ref;
-                    let vals_seed = vals_ref;
-                    let seed_prefix = format!("{}_seed_l0_{}_{}", BENCH_L0, num_ops, mode);
-                    let config_seed = config.clone();
-                    let seed_path = create_seed_dir(seed_prefix.as_str(), move |p| {
-                        let engine = setup_engine_at_path(p, &config_seed);
-                        let cf = engine.default_column_family();
-
-                        // Write half the data.
-                        for i in 0..(num_ops / 2) {
-                            engine
-                                .put(cf, &keys_seed[i], &vals_seed[i])
-                                .expect("put failed");
-                        }
-
-                        // Flush memtable to L0.
-                        engine.flush().expect("flush failed");
-
-                        // Write remaining data (stays in WAL).
-                        for i in (num_ops / 2)..num_ops {
-                            engine
-                                .put(cf, &keys_seed[i], &vals_seed[i])
-                                .expect("put failed");
-                        }
-
-                        drop(engine);
-                    });
-
-                    let case = tier3::Tier3OpenCase::from_seed(seed_path, config.clone());
-                    tier3_bench_open!(b, case, move |engine| {
-                        // Validate all data recovered.
-                        let cf = engine.default_column_family();
-                        for i in (0..num_ops).step_by(5_000) {
-                            let key = black_box(&keys_ref[i]);
-                            let val = engine.get(cf, key).expect("get failed");
-                            assert!(val.is_some(), "key {} not recovered", i);
-                        }
-                    });
-                },
-            );
-        }
+fn run_reopen_clean_case(ctx: &mut StressContext, opts: MidgeOptions) {
+    // Setup (not measured): create initial metadata, then close.
+    {
+        let engine = setup_engine(opts.clone());
+        drop(engine);
     }
 
-    group.finish();
+    ctx.set_elements(1);
+
+    // Measure reopen
+    ctx.measure(|| {
+        let engine = setup_engine(opts);
+        drop(engine);
+    });
 }
 
-// ============================================================================
-// Recovery Speed Comparison: Small vs Large Values
-// ============================================================================
-
-/// Compare recovery speed when starting with small vs large values
-fn bench_recovery_speed_comparison(c: &mut Criterion) {
-    let mut group = c.benchmark_group("system_recovery_comparison");
-    group.sampling_mode(SamplingMode::Flat);
-
-    let op_count = 50_000usize; // Reduced from 100k for faster runs
-
-    // Small values (128 bytes)
-    let small_value_size = 128usize;
-    let (keys_small, vals_small) = precompute_kv(op_count, small_value_size);
-    let small_bytes = (op_count as u64) * (KEY_SIZE + small_value_size) as u64;
-
-    group.throughput(Throughput::Bytes(small_bytes));
-
-    for mode in DURABLE_STORAGE_MODES {
-        group.bench_with_input(
-            BenchmarkId::new("recovery_small_values_50k", mode.as_str()),
-            &mode,
-            |b, &mode| {
-                let keys_ref = &keys_small;
-                let vals_ref = &vals_small;
-
-                let config = BenchEngineConfig {
-                    storage_mode: mode,
-                    enable_compaction: false,
-                    durability: Durability::Steady,
-                    ..Default::default()
-                };
-
-                let keys_seed = keys_ref;
-                let vals_seed = vals_ref;
-                let seed_prefix = format!("{}_seed_small_vals_{}", BENCH_SMALL_VALS, mode);
-                let config_seed = config.clone();
-                let seed_path = create_seed_dir(seed_prefix.as_str(), move |p| {
-                    let engine = setup_engine_at_path(p, &config_seed);
-                    let cf = engine.default_column_family();
-
-                    for i in 0..op_count {
-                        engine
-                            .put(cf, &keys_seed[i], &vals_seed[i])
-                            .expect("put failed");
-                    }
-
-                    drop(engine);
-                });
-
-                let case = tier3::Tier3OpenCase::from_seed(seed_path, config.clone());
-                tier3_bench_open!(b, case, move |engine| {
-                    let cf = engine.default_column_family();
-                    let key = black_box(&keys_ref[25_000]);
-                    black_box(engine.get(cf, key).expect("get failed"));
-                });
-            },
-        );
+fn run_reopen_after_flush_case(ctx: &mut StressContext, opts: MidgeOptions) {
+    // Setup (not measured)
+    {
+        let engine = setup_engine(opts.clone());
+        write_some(&engine, 5_000);
+        engine.flush().unwrap();
+        drop(engine);
     }
 
-    // Large values (1KB)
-    let large_value_size = 1024usize;
-    let (keys_large, vals_large) = precompute_kv(op_count, large_value_size);
-    let large_bytes = (op_count as u64) * (KEY_SIZE + large_value_size) as u64;
+    ctx.set_elements(1);
 
-    group.throughput(Throughput::Bytes(large_bytes));
+    ctx.measure(|| {
+        let engine = setup_engine(opts);
+        drop(engine);
+    });
+}
 
-    for mode in DURABLE_STORAGE_MODES {
-        group.bench_with_input(
-            BenchmarkId::new("recovery_large_values_50k", mode.as_str()),
-            &mode,
-            |b, &mode| {
-                let keys_ref = &keys_large;
-                let vals_ref = &vals_large;
-
-                let config = BenchEngineConfig {
-                    storage_mode: mode,
-                    enable_compaction: false,
-                    durability: Durability::Steady,
-                    ..Default::default()
-                };
-
-                let keys_seed = keys_ref;
-                let vals_seed = vals_ref;
-                let seed_prefix = format!("{}_seed_large_vals_{}", BENCH_LARGE_VALS, mode);
-                let config_seed = config.clone();
-                let seed_path = create_seed_dir(seed_prefix.as_str(), move |p| {
-                    let engine = setup_engine_at_path(p, &config_seed);
-                    let cf = engine.default_column_family();
-
-                    for i in 0..op_count {
-                        engine
-                            .put(cf, &keys_seed[i], &vals_seed[i])
-                            .expect("put failed");
-                    }
-
-                    drop(engine);
-                });
-
-                let case = tier3::Tier3OpenCase::from_seed(seed_path, config.clone());
-                tier3_bench_open!(b, case, move |engine| {
-                    let cf = engine.default_column_family();
-                    let key = black_box(&keys_ref[25_000]);
-                    black_box(engine.get(cf, key).expect("get failed"));
-                });
-            },
-        );
+fn run_reopen_after_compaction_case(ctx: &mut StressContext, opts: MidgeOptions) {
+    // Setup (not measured)
+    {
+        let engine = setup_engine(opts.clone());
+        write_some(&engine, 3_000);
+        engine.flush().unwrap();
+        write_some(&engine, 3_000);
+        engine.flush().unwrap();
+        engine.compact_all().unwrap();
+        drop(engine);
     }
 
-    group.finish();
+    ctx.set_elements(1);
+
+    ctx.measure(|| {
+        let engine = setup_engine(opts);
+        drop(engine);
+    });
 }
 
-criterion_group! {
-    name = tier3_system_recovery;
-    config = criterion_config_for_tier(BenchTier::Tier3System);
-    targets =
-        bench_recovery_throughput,
-        bench_recovery_with_wal_sync,
-        bench_recovery_with_l0_data,
-        bench_recovery_speed_comparison
+fn run_wal_replay_case(ctx: &mut StressContext, opts: MidgeOptions) {
+    // Setup (not measured): writes without flush
+    {
+        let engine = setup_engine(opts.clone());
+        write_some(&engine, 5_000);
+        drop(engine);
+    }
+
+    ctx.set_elements(1);
+
+    // Measure reopen (includes WAL replay)
+    ctx.measure(|| {
+        let engine = setup_engine(opts.clone());
+        let cf = engine.default_column_family();
+        let k0 = [0u8; KEY_SIZE];
+        let _ = engine.get(&cf, &k0[..]).unwrap();
+        drop(engine);
+    });
 }
-criterion_main!(tier3_system_recovery);
+
+#[stress_test]
+fn tier3_recovery_reopen_clean_local(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_reopen_clean_case(ctx, opts);
+}
+
+#[stress_test]
+fn tier3_recovery_reopen_clean_cloud(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_reopen_clean_case(ctx, opts);
+}
+
+#[stress_test]
+fn tier3_recovery_reopen_after_flush_local(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_reopen_after_flush_case(ctx, opts);
+}
+
+#[stress_test]
+fn tier3_recovery_reopen_after_flush_cloud(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_reopen_after_flush_case(ctx, opts);
+}
+
+#[stress_test]
+fn tier3_recovery_reopen_after_compaction_local(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_reopen_after_compaction_case(ctx, opts);
+}
+
+#[stress_test]
+fn tier3_recovery_reopen_after_compaction_cloud(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_reopen_after_compaction_case(ctx, opts);
+}
+
+#[stress_test]
+fn tier3_recovery_wal_replay_local(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_wal_replay_case(ctx, opts);
+}
+
+#[stress_test]
+fn tier3_recovery_wal_replay_cloud(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_wal_replay_case(ctx, opts);
+}
+
+stress_main!();

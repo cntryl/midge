@@ -1,0 +1,191 @@
+//! Tier 3 — Scan behavior scenarios (stress harness)
+
+use cntryl_stress::{stress_main, stress_test, StressContext};
+
+use cntryl_midge::{Key, MidgeEngine, MidgeOptions, Query};
+
+const KEY_SIZE: usize = 16;
+const VALUE_SIZE: usize = 64;
+
+fn setup_engine(mut opts: MidgeOptions) -> MidgeEngine {
+    opts.enable_compaction = false;
+    MidgeEngine::open_with_options(opts).unwrap()
+}
+
+fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
+    let cf = engine.default_column_family();
+    for i in 0..num_keys {
+        let mut k = [0u8; KEY_SIZE];
+        k[0] = prefix;
+        k[1..9].copy_from_slice(&(i as u64).to_be_bytes());
+        let v = vec![(i % 251) as u8; VALUE_SIZE];
+        engine.put(&cf, &k[..], &v).unwrap();
+    }
+}
+
+fn run_scan_query_case(ctx: &mut StressContext, opts: MidgeOptions, setup: impl FnOnce(&MidgeEngine), query: Query) {
+    let engine = setup_engine(opts);
+    let cf = engine.default_column_family();
+
+    // Setup (not measured)
+    setup(&engine);
+
+    // Measure exactly one scan
+    ctx.measure_ref(&engine, |e| {
+        let results = e.scan(&cf, &query).expect("scan failed");
+        results.len()
+    });
+
+    drop(engine);
+}
+
+#[stress_test]
+fn tier3_scan_memtable_only_mem(ctx: &mut StressContext) {
+    ctx.set_elements(1);
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+
+    let prefix = Key::copy_from_slice(&[0xAA]);
+    let query = Query::new().prefix(prefix);
+
+    run_scan_query_case(
+        ctx,
+        opts,
+        |e| {
+            write_prefixed_keys(e, 5_000, 0xAA);
+        },
+        query,
+    );
+}
+
+#[stress_test]
+fn tier3_scan_l0_only_local(ctx: &mut StressContext) {
+    ctx.set_elements(1);
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+
+    let prefix = Key::copy_from_slice(&[0xAB]);
+    let query = Query::new().prefix(prefix);
+
+    run_scan_query_case(
+        ctx,
+        opts,
+        |e| {
+            write_prefixed_keys(e, 5_000, 0xAB);
+            e.flush().unwrap();
+        },
+        query,
+    );
+}
+
+#[stress_test]
+fn tier3_scan_l0_only_cloud(ctx: &mut StressContext) {
+    ctx.set_elements(1);
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+
+    let prefix = Key::copy_from_slice(&[0xAC]);
+    let query = Query::new().prefix(prefix);
+
+    run_scan_query_case(
+        ctx,
+        opts,
+        |e| {
+            write_prefixed_keys(e, 5_000, 0xAC);
+            e.flush().unwrap();
+        },
+        query,
+    );
+}
+
+#[stress_test]
+fn tier3_scan_multi_level_local(ctx: &mut StressContext) {
+    ctx.set_elements(1);
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+
+    let prefix = Key::copy_from_slice(&[0xAD]);
+    let query = Query::new().prefix(prefix);
+
+    run_scan_query_case(
+        ctx,
+        opts,
+        |e| {
+            // Build L1 via compact_all, then add a fresh L0.
+            write_prefixed_keys(e, 3_000, 0xAD);
+            e.flush().unwrap();
+            write_prefixed_keys(e, 3_000, 0xAD);
+            e.flush().unwrap();
+            e.compact_all().unwrap();
+            write_prefixed_keys(e, 1_000, 0xAD);
+            e.flush().unwrap();
+        },
+        query,
+    );
+}
+
+#[stress_test]
+fn tier3_scan_multi_level_cloud(ctx: &mut StressContext) {
+    ctx.set_elements(1);
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+
+    let prefix = Key::copy_from_slice(&[0xAE]);
+    let query = Query::new().prefix(prefix);
+
+    run_scan_query_case(
+        ctx,
+        opts,
+        |e| {
+            write_prefixed_keys(e, 3_000, 0xAE);
+            e.flush().unwrap();
+            write_prefixed_keys(e, 3_000, 0xAE);
+            e.flush().unwrap();
+            e.compact_all().unwrap();
+            write_prefixed_keys(e, 1_000, 0xAE);
+            e.flush().unwrap();
+        },
+        query,
+    );
+}
+
+#[stress_test]
+fn tier3_scan_after_compaction_local(ctx: &mut StressContext) {
+    ctx.set_elements(1);
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+
+    let prefix = Key::copy_from_slice(&[0xAF]);
+    let query = Query::new().prefix(prefix);
+
+    run_scan_query_case(
+        ctx,
+        opts,
+        |e| {
+            write_prefixed_keys(e, 5_000, 0xAF);
+            e.flush().unwrap();
+            write_prefixed_keys(e, 5_000, 0xAF);
+            e.flush().unwrap();
+            e.compact_all().unwrap();
+        },
+        query,
+    );
+}
+
+#[stress_test]
+fn tier3_scan_after_compaction_cloud(ctx: &mut StressContext) {
+    ctx.set_elements(1);
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+
+    let prefix = Key::copy_from_slice(&[0xB0]);
+    let query = Query::new().prefix(prefix);
+
+    run_scan_query_case(
+        ctx,
+        opts,
+        |e| {
+            write_prefixed_keys(e, 5_000, 0xB0);
+            e.flush().unwrap();
+            write_prefixed_keys(e, 5_000, 0xB0);
+            e.flush().unwrap();
+            e.compact_all().unwrap();
+        },
+        query,
+    );
+}
+
+stress_main!();
