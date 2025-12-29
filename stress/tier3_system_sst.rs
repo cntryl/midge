@@ -4,22 +4,15 @@ use cntryl_stress::{stress_main, stress_test, StressContext};
 
 use cntryl_midge::{MidgeEngine, MidgeOptions};
 
-const KEY_SIZE: usize = 16;
+const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 64;
 
-fn setup_engine(mut opts: MidgeOptions) -> MidgeEngine {
-    opts.enable_compaction = false;
-    MidgeEngine::open_with_options(opts).unwrap()
+fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
+    cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
 fn precompute_keys(num: usize) -> Vec<[u8; KEY_SIZE]> {
-    let mut keys = Vec::with_capacity(num);
-    for i in 0..num {
-        let mut k = [0u8; KEY_SIZE];
-        k[..8].copy_from_slice(&(i as u64).to_be_bytes());
-        keys.push(k);
-    }
-    keys
+    cntryl_midge::testkit::stress::precompute_keys16_u64_be(num)
 }
 
 fn run_sst_point_lookup_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, num_gets: usize) {

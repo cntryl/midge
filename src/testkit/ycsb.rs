@@ -3,6 +3,9 @@
 //! These helpers are intentionally deterministic and "boring": Tier-4 aims to
 //! measure steady-state behavior over time (load → warm-up → measured).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::{ColumnFamily, MidgeEngine};
@@ -93,4 +96,70 @@ where
     }
 
     (ops, bytes)
+}
+
+fn splitmix64(mut x: u64) -> u64 {
+    // Deterministic, fast mixing function.
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Deterministically derive a pseudo-random u64 from `(seed, client_id, op_index, draw_index)`.
+///
+/// Use this to feed Zipfian generators without introducing true randomness.
+pub fn deterministic_u64(seed: u64, client_id: usize, op_index: u64, draw_index: u64) -> u64 {
+    let base = seed
+        ^ ((client_id as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93))
+        ^ op_index
+        ^ draw_index.rotate_left(17);
+    splitmix64(base)
+}
+
+/// Run `clients` independent client loops concurrently for `duration` and return total ops.
+///
+/// Core contract:
+/// - One shared engine instance (passed by `Arc`)
+/// - Each client runs a tight loop with no sleeps/pacing
+/// - The only shared state between clients is the engine and the stop flag
+pub fn run_multi_client_for_duration<MakeClient, Step>(
+    engine: Arc<MidgeEngine>,
+    clients: usize,
+    duration: Duration,
+    make_client: MakeClient,
+) -> u64
+where
+    MakeClient: Fn(usize) -> Step,
+    Step: FnMut(&MidgeEngine, &ColumnFamily, u64) + Send + 'static,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut handles = Vec::with_capacity(clients);
+
+    for client_id in 0..clients {
+        let engine = Arc::clone(&engine);
+        let stop = Arc::clone(&stop);
+        let mut step = make_client(client_id);
+
+        handles.push(thread::spawn(move || {
+            let cf = engine.default_column_family();
+            let mut op_index: u64 = 0;
+            while !stop.load(Ordering::Relaxed) {
+                step(&engine, cf, op_index);
+                op_index = op_index.wrapping_add(1);
+            }
+            op_index
+        }));
+    }
+
+    thread::sleep(duration);
+    stop.store(true, Ordering::Relaxed);
+
+    let mut total_ops: u64 = 0;
+    for h in handles {
+        total_ops = total_ops.wrapping_add(h.join().unwrap_or(0));
+    }
+
+    total_ops
 }

@@ -6,19 +6,17 @@ use cntryl_stress::{stress_main, stress_test, StressContext};
 
 use cntryl_midge::{MidgeEngine, MidgeOptions};
 
-const KEY_SIZE: usize = 16;
+const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 64;
 
-fn setup_engine(mut opts: MidgeOptions) -> MidgeEngine {
-    opts.enable_compaction = false;
-    MidgeEngine::open_with_options(opts).unwrap()
+fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
+    cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
 fn write_some(engine: &MidgeEngine, num_keys: usize) {
     let cf = engine.default_column_family();
     for i in 0..num_keys {
-        let mut k = [0u8; KEY_SIZE];
-        k[..8].copy_from_slice(&(i as u64).to_be_bytes());
+        let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
         engine.put(&cf, &k[..], &v).unwrap();
     }

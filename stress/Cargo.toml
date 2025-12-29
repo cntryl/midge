@@ -1,0 +1,61 @@
+[package]
+name = "cntryl-midge-stress"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cntryl-midge = { path = ".." }
+cntryl-stress = "0.1.1"
+
+[[bin]]
+name = "tier3_system_compaction"
+path = "tier3_system_compaction.rs"
+
+[[bin]]
+name = "tier3_system_durability"
+path = "tier3_system_durability.rs"
+
+[[bin]]
+name = "tier3_system_engine"
+path = "tier3_system_engine.rs"
+
+[[bin]]
+name = "tier3_system_mvcc"
+path = "tier3_system_mvcc.rs"
+
+[[bin]]
+name = "tier3_system_recovery"
+path = "tier3_system_recovery.rs"
+
+[[bin]]
+name = "tier3_system_scan"
+path = "tier3_system_scan.rs"
+
+[[bin]]
+name = "tier3_system_sst"
+path = "tier3_system_sst.rs"
+
+[[bin]]
+name = "tier4_ycsb_workload_a"
+path = "tier4_ycsb_workload_a.rs"
+
+[[bin]]
+name = "tier4_ycsb_workload_b"
+path = "tier4_ycsb_workload_b.rs"
+
+[[bin]]
+name = "tier4_ycsb_workload_c"
+path = "tier4_ycsb_workload_c.rs"
+
+[[bin]]
+name = "tier4_ycsb_workload_d"
+path = "tier4_ycsb_workload_d.rs"
+
+[[bin]]
+name = "tier4_ycsb_workload_e"
+path = "tier4_ycsb_workload_e.rs"
+
+[[bin]]
+name = "tier4_ycsb_workload_f"
+path = "tier4_ycsb_workload_f.rs"

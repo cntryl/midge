@@ -6,26 +6,19 @@ use cntryl_stress::{stress_main, stress_test, StressContext};
 
 use cntryl_midge::{AckPolicy, MidgeEngine, MidgeOptions};
 
-const KEY_SIZE: usize = 16;
+const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 128;
-
-fn setup_engine(mut opts: MidgeOptions) -> MidgeEngine {
-    // Durability scenarios should not run background compaction.
-    opts.enable_compaction = false;
-    MidgeEngine::open_with_options(opts).unwrap()
-}
 
 fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: usize) {
     ctx.set_elements(num_ops as u64);
     ctx.set_bytes((num_ops * (KEY_SIZE + VALUE_SIZE)) as u64);
 
-    let engine = setup_engine(opts);
+    let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.default_column_family();
 
     ctx.measure_ref(&engine, |e| {
         for i in 0..num_ops {
-            let mut k = [0u8; KEY_SIZE];
-            k[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
             let v = vec![(i % 251) as u8; VALUE_SIZE];
             e.put(&cf, &k[..], &v).unwrap();
         }

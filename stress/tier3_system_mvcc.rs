@@ -4,12 +4,11 @@ use cntryl_stress::{stress_main, stress_test, StressContext};
 
 use cntryl_midge::{MidgeEngine, MidgeOptions};
 
-const KEY_SIZE: usize = 16;
+const KEY_SIZE: usize = cntryl_midge::testkit::stress::KEY_SIZE;
 const VALUE_SIZE: usize = 64;
 
-fn setup_engine(mut opts: MidgeOptions) -> MidgeEngine {
-    opts.enable_compaction = false;
-    MidgeEngine::open_with_options(opts).unwrap()
+fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
+    cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
 fn run_overwrite_hot_keys_case(ctx: &mut StressContext, opts: MidgeOptions, num_hot: usize, rounds: usize) {
@@ -19,9 +18,7 @@ fn run_overwrite_hot_keys_case(ctx: &mut StressContext, opts: MidgeOptions, num_
     // Setup (not measured)
     let mut keys = Vec::with_capacity(num_hot);
     for i in 0..num_hot {
-        let mut k = [0u8; KEY_SIZE];
-        k[..8].copy_from_slice(&(i as u64).to_be_bytes());
-        keys.push(k);
+        keys.push(cntryl_midge::testkit::stress::key16_u64_be(i as u64));
     }
 
     let total_ops = num_hot * rounds;
@@ -52,8 +49,7 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
     // Setup (not measured)
     let mut keys = Vec::with_capacity(num_keys);
     for i in 0..num_keys {
-        let mut k = [0u8; KEY_SIZE];
-        k[..8].copy_from_slice(&(i as u64).to_be_bytes());
+        let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
         keys.push(k);
         engine.put(&cf, &k[..], &vec![1u8; VALUE_SIZE]).unwrap();
     }

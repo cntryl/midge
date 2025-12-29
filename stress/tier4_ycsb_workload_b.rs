@@ -4,7 +4,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use std::cell::Cell;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cntryl_midge::testkit::ycsb;
@@ -17,81 +17,145 @@ const MEASURED: Duration = Duration::from_secs(30);
 
 const ZIPFIAN_THETA: f64 = 0.99;
 
-fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions) {
-    // Load phase (populate initial dataset)
-    let engine = ycsb::open_tier4_engine(opts);
+const CLIENTS_1: usize = 1;
+const CLIENTS_4: usize = 4;
+const CLIENTS_8: usize = 8;
+
+const WORKLOAD_SEED: u64 = 0xB0B0_EA5E_5678_9ABC;
+
+fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
+    // Phase 1: Load (not measured)
+    let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.default_column_family();
-    ycsb::load_initial_dataset(&engine, &cf, INITIAL_KEYS);
+    ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
 
-    // Warm-up phase (unmeasured)
+    // Phase 2: Warm-up (not measured)
     {
-        let mut rng = ycsb::XorShift64::new(0xB0B0_BA11_5678_9ABC);
         let zipf = ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA);
-        let _ = ycsb::run_for_duration(WARMUP, |i| {
-            let key_idx = zipf.next_from_u64(&mut || rng.next_u64()) as u64;
-            let k = ycsb::make_key(key_idx);
+        let _warmup_ops = ycsb::run_multi_client_for_duration(
+            Arc::clone(&engine),
+            clients,
+            WARMUP,
+            |client_id| {
+                let zipf = zipf.clone();
+                move |e, cf, op_index| {
+                    let mut draw: u64 = 0;
+                    let key_idx = zipf
+                        .next_from_u64(&mut || {
+                            let r = ycsb::deterministic_u64(
+                                WORKLOAD_SEED,
+                                client_id,
+                                op_index,
+                                draw,
+                            );
+                            draw = draw.wrapping_add(1);
+                            r
+                        }) as u64;
+                    let k = ycsb::make_key(key_idx);
 
-            if (rng.next_u64() % 100) < 95 {
-                let _ = engine.get(&cf, &k[..]).expect("warmup get");
-            } else {
-                let v = ycsb::make_value((i % 251) as u8);
-                engine.put(&cf, &k[..], &v[..]).expect("warmup put");
-            }
-
-            (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64
-        });
+                    // 95% reads, 5% updates (deterministic schedule)
+                    if (op_index % 20) != 0 {
+                        let _ = e.get(cf, &k[..]).expect("warmup get");
+                    } else {
+                        let v = ycsb::make_value((op_index % 251) as u8);
+                        e.put(cf, &k[..], &v[..]).expect("warmup put");
+                    }
+                }
+            },
+        );
     }
 
-    // Measured phase (steady-state only; duration-based)
-    // Expected: read-mostly throughput; updates introduce occasional stalls.
-    let ops_done = Cell::new(0u64);
-    let bytes_done = Cell::new(0u64);
-
-    ctx.measure_ref(&engine, |e| {
-        let mut rng = ycsb::XorShift64::new(0xB0B0_EA5E_5678_9ABC);
+    // Phase 3: Measured (duration-based; multi-client)
+    let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
         let zipf = ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA);
+        ycsb::run_multi_client_for_duration(
+            Arc::clone(&engine),
+            clients,
+            MEASURED,
+            |client_id| {
+                let zipf = zipf.clone();
+                move |e, cf, op_index| {
+                    let mut draw: u64 = 0;
+                    let key_idx = zipf
+                        .next_from_u64(&mut || {
+                            let r = ycsb::deterministic_u64(
+                                WORKLOAD_SEED,
+                                client_id,
+                                op_index,
+                                draw,
+                            );
+                            draw = draw.wrapping_add(1);
+                            r
+                        }) as u64;
+                    let k = ycsb::make_key(key_idx);
 
-        let (ops, bytes) = ycsb::run_for_duration(MEASURED, |i| {
-            let key_idx = zipf.next_from_u64(&mut || rng.next_u64()) as u64;
-            let k = ycsb::make_key(key_idx);
-
-            if (rng.next_u64() % 100) < 95 {
-                let _ = e.get(&cf, &k[..]).expect("measured get");
-            } else {
-                let v = ycsb::make_value((i % 251) as u8);
-                e.put(&cf, &k[..], &v[..]).expect("measured put");
-            }
-
-            (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64
-        });
-
-        ops_done.set(ops);
-        bytes_done.set(bytes);
+                    if (op_index % 20) != 0 {
+                        let _ = e.get(cf, &k[..]).expect("measured get");
+                    } else {
+                        let v = ycsb::make_value((op_index % 251) as u8);
+                        e.put(cf, &k[..], &v[..]).expect("measured put");
+                    }
+                }
+            },
+        )
     });
 
-    ctx.set_elements(ops_done.get());
-    ctx.set_bytes(bytes_done.get());
+    ctx.set_elements(measured_ops);
+    ctx.set_bytes(measured_ops * (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64);
 }
 
 #[stress_test]
-fn tier4_ycsb_b_mem(ctx: &mut StressContext) {
-    // Expected: read-mostly; high throughput; stable latency.
+fn tier4_ycsb_b_mem_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    run_workload_b(ctx, opts);
+    run_workload_b(ctx, opts, CLIENTS_1);
 }
 
 #[stress_test]
-fn tier4_ycsb_b_local(ctx: &mut StressContext) {
-    // Expected: high throughput with occasional stalls on updates/flush.
+fn tier4_ycsb_b_mem_4_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, CLIENTS_4);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_mem_8_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_b(ctx, opts, CLIENTS_8);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_local_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_workload_b(ctx, opts);
+    run_workload_b(ctx, opts, CLIENTS_1);
 }
 
 #[stress_test]
-fn tier4_ycsb_b_cloud(ctx: &mut StressContext) {
-    // Expected: lower throughput; higher tail latency due to cloud durability.
+fn tier4_ycsb_b_local_4_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, CLIENTS_4);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_local_8_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_b(ctx, opts, CLIENTS_8);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_workload_b(ctx, opts);
+    run_workload_b(ctx, opts, CLIENTS_1);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_4_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, CLIENTS_4);
+}
+
+#[stress_test]
+fn tier4_ycsb_b_cloud_8_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_b(ctx, opts, CLIENTS_8);
 }
 
 stress_main!();

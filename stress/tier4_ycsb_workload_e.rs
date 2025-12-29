@@ -4,7 +4,7 @@
 
 use cntryl_stress::{stress_main, stress_test, StressContext};
 
-use std::cell::Cell;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cntryl_midge::testkit::ycsb;
@@ -16,98 +16,145 @@ const MEASURED: Duration = Duration::from_secs(30);
 
 const SCAN_LEN: u64 = 64;
 
-fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions) {
-    // Load phase (populate initial dataset)
-    let engine = ycsb::open_tier4_engine(opts);
+const CLIENTS_1: usize = 1;
+const CLIENTS_4: usize = 4;
+const CLIENTS_8: usize = 8;
+
+const WORKLOAD_SEED: u64 = 0xE0E0_EA5E_5678_9ABC;
+
+fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
+    // Phase 1: Load (not measured)
+    let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.default_column_family();
-    ycsb::load_initial_dataset(&engine, &cf, INITIAL_KEYS);
+    ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
 
-    // Warm-up phase (unmeasured)
+    // Workload E: 95% scans, 5% inserts. Deterministic schedule: every 20th op is an insert.
+    // Scans target the dense initial keyspace for stable scan lengths.
+
+    // Phase 2: Warm-up (not measured)
     {
-        let mut rng = ycsb::XorShift64::new(0xE0E0_EA11_5678_9ABC);
-        let mut next_key_id = INITIAL_KEYS as u64;
+        let _warmup_ops = ycsb::run_multi_client_for_duration(
+            Arc::clone(&engine),
+            clients,
+            WARMUP,
+            |client_id| {
+                move |e, cf, op_index| {
+                    if (op_index % 20) == 0 {
+                        let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
+                        let k = ycsb::make_key(key_id);
+                        let v = ycsb::make_value((op_index % 251) as u8);
+                        e.put(cf, &k[..], &v[..]).expect("warmup insert");
+                        return;
+                    }
 
-        let _ = ycsb::run_for_duration(WARMUP, |i| {
-            if (rng.next_u64() % 100) < 95 {
-                let max_start = next_key_id.saturating_sub(SCAN_LEN + 1).max(1);
-                let start_id = rng.next_u64() % max_start;
-                let start = ycsb::make_key(start_id);
-                let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
+                    let max_start = (INITIAL_KEYS as u64).saturating_sub(SCAN_LEN + 1).max(1);
+                    let start_id = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0)
+                        % max_start;
+                    let start = ycsb::make_key(start_id);
+                    let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
 
-                let scanned = engine
-                    .range(&cf, &start[..], &end[..])
-                    .expect("warmup range")
-                    .len() as u64;
-
-                scanned * (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64
-            } else {
-                let k = ycsb::make_key(next_key_id);
-                let v = ycsb::make_value((i % 251) as u8);
-                engine.put(&cf, &k[..], &v[..]).expect("warmup insert");
-                next_key_id += 1;
-                (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64
-            }
-        });
+                    let _scanned = e
+                        .range(cf, &start[..], &end[..])
+                        .expect("warmup range")
+                        .len();
+                }
+            },
+        );
     }
 
-    // Measured phase (steady-state only; duration-based)
-    // Expected: scan-heavy throughput; latency is sensitive to compaction.
-    let ops_done = Cell::new(0u64);
-    let bytes_done = Cell::new(0u64);
+    // Phase 3: Measured (duration-based; multi-client)
+    let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
+        ycsb::run_multi_client_for_duration(
+            Arc::clone(&engine),
+            clients,
+            MEASURED,
+            |client_id| {
+                move |e, cf, op_index| {
+                    if (op_index % 20) == 0 {
+                        let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
+                        let k = ycsb::make_key(key_id);
+                        let v = ycsb::make_value((op_index % 251) as u8);
+                        e.put(cf, &k[..], &v[..]).expect("measured insert");
+                        return;
+                    }
 
-    ctx.measure_ref(&engine, |e| {
-        let mut rng = ycsb::XorShift64::new(0xE0E0_EA5E_5678_9ABC);
-        let mut next_key_id = INITIAL_KEYS as u64;
+                    let max_start = (INITIAL_KEYS as u64).saturating_sub(SCAN_LEN + 1).max(1);
+                    let start_id = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0)
+                        % max_start;
+                    let start = ycsb::make_key(start_id);
+                    let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
 
-        let (ops, bytes) = ycsb::run_for_duration(MEASURED, |i| {
-            if (rng.next_u64() % 100) < 95 {
-                let max_start = next_key_id.saturating_sub(SCAN_LEN + 1).max(1);
-                let start_id = rng.next_u64() % max_start;
-                let start = ycsb::make_key(start_id);
-                let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
-
-                let scanned = e
-                    .range(&cf, &start[..], &end[..])
-                    .expect("measured range")
-                    .len() as u64;
-
-                scanned * (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64
-            } else {
-                let k = ycsb::make_key(next_key_id);
-                let v = ycsb::make_value((i % 251) as u8);
-                e.put(&cf, &k[..], &v[..]).expect("measured insert");
-                next_key_id += 1;
-                (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64
-            }
-        });
-
-        ops_done.set(ops);
-        bytes_done.set(bytes);
+                    let _scanned = e
+                        .range(cf, &start[..], &end[..])
+                        .expect("measured range")
+                        .len();
+                }
+            },
+        )
     });
 
-    ctx.set_elements(ops_done.get());
-    ctx.set_bytes(bytes_done.get());
+    // Approximate bytes touched: 95% scans of length SCAN_LEN, 5% inserts.
+    let bytes_per_kv = (ycsb::KEY_SIZE + ycsb::VALUE_SIZE) as u64;
+    let est_inserts = measured_ops / 20;
+    let est_scans = measured_ops.saturating_sub(est_inserts);
+    let est_bytes = est_inserts * bytes_per_kv + est_scans * (SCAN_LEN * bytes_per_kv);
+
+    ctx.set_elements(measured_ops);
+    ctx.set_bytes(est_bytes);
 }
 
 #[stress_test]
-fn tier4_ycsb_e_mem(ctx: &mut StressContext) {
-    // Expected: scan-heavy; throughput stable, latency proportional to scan length.
+fn tier4_ycsb_e_mem_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("memory");
-    run_workload_e(ctx, opts);
+    run_workload_e(ctx, opts, CLIENTS_1);
 }
 
 #[stress_test]
-fn tier4_ycsb_e_local(ctx: &mut StressContext) {
-    // Expected: scan-heavy; sensitive to compaction and iterator efficiency.
+fn tier4_ycsb_e_mem_4_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_e(ctx, opts, CLIENTS_4);
+}
+
+#[stress_test]
+fn tier4_ycsb_e_mem_8_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("memory");
+    run_workload_e(ctx, opts, CLIENTS_8);
+}
+
+#[stress_test]
+fn tier4_ycsb_e_local_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("local");
-    run_workload_e(ctx, opts);
+    run_workload_e(ctx, opts, CLIENTS_1);
 }
 
 #[stress_test]
-fn tier4_ycsb_e_cloud(ctx: &mut StressContext) {
-    // Expected: slowest scans; higher variance from storage backpressure.
+fn tier4_ycsb_e_local_4_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_e(ctx, opts, CLIENTS_4);
+}
+
+#[stress_test]
+fn tier4_ycsb_e_local_8_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("local");
+    run_workload_e(ctx, opts, CLIENTS_8);
+}
+
+#[stress_test]
+fn tier4_ycsb_e_cloud_1_client(ctx: &mut StressContext) {
     let opts = cntryl_midge::testkit::opts_for_mode("cloud");
-    run_workload_e(ctx, opts);
+    run_workload_e(ctx, opts, CLIENTS_1);
+}
+
+#[stress_test]
+fn tier4_ycsb_e_cloud_4_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_e(ctx, opts, CLIENTS_4);
+}
+
+#[stress_test]
+fn tier4_ycsb_e_cloud_8_clients(ctx: &mut StressContext) {
+    let opts = cntryl_midge::testkit::opts_for_mode("cloud");
+    run_workload_e(ctx, opts, CLIENTS_8);
 }
 
 stress_main!();
