@@ -1,13 +1,7 @@
 use cntryl_midge::wal::BatchConfig;
 use cntryl_midge::{
-    AckPolicy,
-    MidgeEngine,
-    MidgeOptions,
-    OpenOptions,
-    Goal,
-    Durability,
+    AckPolicy, Durability, Goal, MidgeEngine, MidgeOptions, OpenOptions, StorageMode,
     WorkloadProfile,
-    StorageMode,
 };
 use cntryl_stress::{stress_test, StressContext};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,7 +41,9 @@ fn run_durability_case(ctx: &mut StressContext, mut opts: MidgeOptions) {
     ));
 
     // Ensure storage path is local for these stress runs
-    opts.storage_mode = StorageMode::LocalDisk { db_path: db_path.clone() };
+    opts.storage_mode = StorageMode::LocalDisk {
+        db_path: db_path.clone(),
+    };
 
     // IMPORTANT: open_with_options() is the path that actually honors MidgeOptions.
     let engine = MidgeEngine::open_with_options(opts).unwrap();
@@ -63,62 +59,40 @@ fn run_durability_case(ctx: &mut StressContext, mut opts: MidgeOptions) {
     let _ = std::fs::remove_dir_all(db_path);
 }
 
-#[stress_test]
-fn durability_ack_batched_after_local_durable_10ms(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
-    opts.wal_sync = false;
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
-    opts.wal_batch_config = Some(BatchConfig { max_delay_ms: 10, max_bytes: 64 * 1024 });
-    opts.enable_compaction = false;
-    run_durability_case(ctx, opts);
+// Per-case durability matrix (one test function per row)
+//
+// ACK POLICY           WAL SYNC     BATCH
+// ------------------------------------------------
+// Immediate            false        10ms
+// Immediate            false        100ms
+// AfterLocalDurable    false        10ms
+// AfterLocalDurable    false        100ms
+// AfterLocalDurable    true         10ms
+// AfterLocalDurable    true         100ms
+//
+// This generates a separate `#[stress_test]` for each case so the harness
+// produces one result per matrix row (no ambiguous single aggregate result).
+
+macro_rules! define_durability_case {
+    ($func:ident, $name:expr, $ack:expr, $wal_sync:expr, $batch_ms:expr) => {
+        #[stress_test]
+        fn $func(ctx: &mut StressContext) {
+            let mut opts = cntryl_midge::testkit::opts_for_mode("local");
+            opts.wal_sync = $wal_sync;
+            opts.ack_policy = $ack;
+            opts.enable_compaction = false;
+            opts.wal_batch_config = $batch_ms.map(|ms| BatchConfig { max_delay_ms: ms, max_bytes: 64 * 1024 });
+
+            // If the stress harness adds named subcases in the future, the
+            // `$name` value can be forwarded to it for better output.
+            run_durability_case(ctx, opts);
+        }
+    };
 }
 
-#[stress_test]
-fn durability_ack_batched_after_local_durable_100ms(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
-    opts.wal_sync = false;
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
-    opts.wal_batch_config = Some(BatchConfig { max_delay_ms: 100, max_bytes: 64 * 1024 });
-    opts.enable_compaction = false;
-    run_durability_case(ctx, opts);
-}
-
-#[stress_test]
-fn durability_ack_batched_immediate_10ms(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
-    opts.wal_sync = false;
-    opts.ack_policy = AckPolicy::Immediate;
-    opts.wal_batch_config = Some(BatchConfig { max_delay_ms: 10, max_bytes: 64 * 1024 });
-    opts.enable_compaction = false;
-    run_durability_case(ctx, opts);
-}
-
-#[stress_test]
-fn durability_ack_batched_immediate_100ms(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
-    opts.wal_sync = false;
-    opts.ack_policy = AckPolicy::Immediate;
-    opts.wal_batch_config = Some(BatchConfig { max_delay_ms: 100, max_bytes: 64 * 1024 });
-    opts.enable_compaction = false;
-    run_durability_case(ctx, opts);
-}
-
-#[stress_test]
-fn durability_ack_strict_after_local_durable_10ms(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
-    opts.wal_sync = true;
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
-    opts.wal_batch_config = Some(BatchConfig { max_delay_ms: 10, max_bytes: 64 * 1024 });
-    opts.enable_compaction = false;
-    run_durability_case(ctx, opts);
-}
-
-#[stress_test]
-fn durability_ack_strict_after_local_durable_100ms(ctx: &mut StressContext) {
-    let mut opts = cntryl_midge::testkit::opts_for_mode("local");
-    opts.wal_sync = true;
-    opts.ack_policy = AckPolicy::AfterLocalDurable;
-    opts.wal_batch_config = Some(BatchConfig { max_delay_ms: 100, max_bytes: 64 * 1024 });
-    opts.enable_compaction = false;
-    run_durability_case(ctx, opts);
-}
+define_durability_case!(durability_immediate_async_10ms, "immediate_async_10ms", AckPolicy::Immediate, false, Some(10));
+define_durability_case!(durability_immediate_async_100ms, "immediate_async_100ms", AckPolicy::Immediate, false, Some(100));
+define_durability_case!(durability_after_local_async_10ms, "after_local_async_10ms", AckPolicy::AfterLocalDurable, false, Some(10));
+define_durability_case!(durability_after_local_async_100ms, "after_local_async_100ms", AckPolicy::AfterLocalDurable, false, Some(100));
+define_durability_case!(durability_after_local_strict_10ms, "after_local_strict_10ms", AckPolicy::AfterLocalDurable, true, Some(10));
+define_durability_case!(durability_after_local_strict_100ms, "after_local_strict_100ms", AckPolicy::AfterLocalDurable, true, Some(100));

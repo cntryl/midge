@@ -113,9 +113,9 @@ impl EventLoop {
         let initial_segment_id = state.wal.current_segment_id;
 
         let sst_factory = if memory_mode {
-            // Don't create SST factory in memory mode
-            let fs = Arc::new(crate::io::RealFs::new(&sst_dir)?);
-            Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)) // Dummy, won't be used
+            // Use in-memory MockFs for SST factory in memory mode
+            let fs = Arc::new(crate::io::MockFs::new());
+            Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024))
         } else {
             let fs = Arc::new(crate::io::RealFs::new(&sst_dir)?);
             Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)) // 64KB block size

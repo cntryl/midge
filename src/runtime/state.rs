@@ -215,10 +215,14 @@ impl RuntimeState {
             }
         }
 
-        // Initialize real filesystem abstraction (used for all metadata IO)
-        let fs: std::sync::Arc<dyn Fs> = std::sync::Arc::new(
-            crate::io::real::RealFs::new(&db_path).expect("failed to initialize RealFs"),
-        );
+        // Initialize filesystem abstraction (use MockFs in memory mode)
+        let fs: std::sync::Arc<dyn Fs> = if memory_mode {
+            std::sync::Arc::new(crate::io::MockFs::new())
+        } else {
+            std::sync::Arc::new(
+                crate::io::real::RealFs::new(&db_path).expect("failed to initialize RealFs"),
+            )
+        };
 
         // Load manifest (prefer snapshot + journal replay) — only if not in memory mode
         let manifest = if !memory_mode {
@@ -372,7 +376,7 @@ impl RuntimeState {
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
             write_stalled: false,
             total_memtable_bytes: 0,
-            enable_compaction: true,
+            enable_compaction: !memory_mode,
             read_amp_metrics: ReadAmpMetrics::new(),
             ingest_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),

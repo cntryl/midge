@@ -362,7 +362,7 @@ fn bench_incremental_compact(c: &mut Criterion) {
     use std::time::Duration;
     let mut group = c.benchmark_group("system_incremental_compact");
     group.warm_up_time(Duration::from_millis(1));
-    group.sample_size(1);
+    group.sample_size(10);
 
     // Reduced to keep iterations under ~2s while still testing multi-batch compaction
     let num_keys_per_batch = 2_000;

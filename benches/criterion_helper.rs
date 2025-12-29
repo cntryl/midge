@@ -78,7 +78,7 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // ---------------------------------------------------------------
         BenchTier::Tier3System => Criterion::default()
             .warm_up_time(Duration::from_millis(1))
-            .measurement_time(Duration::from_millis(1))
+            .measurement_time(Duration::from_millis(500))
             .sample_size(10)
             .noise_threshold(0.05)
             .confidence_level(0.90)
