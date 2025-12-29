@@ -5,8 +5,8 @@
 //! - storage-mode parameterization
 //! - engine setup from high-level knobs (via `OpenOptions`)
 
-use crate::{Durability, Goal, MemoryBudget, MidgeEngine, OpenOptions, WorkloadProfile};
 use crate::testkit::{MidgeOptions, StorageMode};
+use crate::{Durability, Goal, MemoryBudget, MidgeEngine, OpenOptions, WorkloadProfile};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -51,10 +51,12 @@ impl BenchStorageMode {
 }
 
 /// All storage modes for comprehensive benchmarking.
-pub const ALL_STORAGE_MODES: [BenchStorageMode; 2] = [BenchStorageMode::Memory, BenchStorageMode::LocalDisk];
+pub const ALL_STORAGE_MODES: [BenchStorageMode; 2] =
+    [BenchStorageMode::Memory, BenchStorageMode::LocalDisk];
 
 /// Fast storage modes (excludes cloud for quick iteration).
-pub const FAST_STORAGE_MODES: [BenchStorageMode; 2] = [BenchStorageMode::Memory, BenchStorageMode::LocalDisk];
+pub const FAST_STORAGE_MODES: [BenchStorageMode; 2] =
+    [BenchStorageMode::Memory, BenchStorageMode::LocalDisk];
 
 /// Durable storage modes (excludes memory).
 pub const DURABLE_STORAGE_MODES: [BenchStorageMode; 1] = [BenchStorageMode::LocalDisk];
@@ -167,7 +169,9 @@ impl BenchEngineConfig {
 
         MidgeOptions {
             storage_mode,
-            memtable_size: self.memtable_size.unwrap_or(open_opts.memtable_size_limit()),
+            memtable_size: self
+                .memtable_size
+                .unwrap_or(open_opts.memtable_size_limit()),
             enable_compaction: self.enable_compaction,
             // Derived from durability/goal/workload by OpenOptions.
             wal_sync: open_opts.wal_sync_on_write(),

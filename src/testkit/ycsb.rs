@@ -57,11 +57,7 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> MidgeEngine {
     MidgeEngine::open_with_options(opts).expect("open tier4 engine")
 }
 
-pub fn load_initial_dataset(
-    engine: &MidgeEngine,
-    cf: &ColumnFamily,
-    initial_keys: usize,
-) {
+pub fn load_initial_dataset(engine: &MidgeEngine, cf: &ColumnFamily, initial_keys: usize) {
     // Load is not measured; optimize aggressively to keep Tier-4 runs practical.
     // WriteBatch amortizes WAL and scheduling overhead.
     const BATCH_OPS: usize = 1024;
