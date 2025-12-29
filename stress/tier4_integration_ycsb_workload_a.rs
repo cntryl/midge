@@ -14,9 +14,9 @@
 //!
 //! Workload A is intentionally time-bounded (60s max).
 
-#[path = "./criterion_helper.rs"]
+#[path = "../../../../benches/criterion_helper.rs"]
 mod criterion_helper;
-#[path = "./tier4_integration_ycsb_common.rs"]
+#[path = "../../../../stress/tier4_integration_ycsb_common.rs"]
 mod ycsb_common;
 
 use cntryl_midge::{MidgeEngine, WriteBatch};

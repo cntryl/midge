@@ -4,6 +4,7 @@
 
 pub mod kv;
 pub mod bench;
+pub mod zipfian;
 
 use crate::engine::ColumnFamilyHandle;
 use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};

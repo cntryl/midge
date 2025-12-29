@@ -13,9 +13,9 @@
 //! All hot loops: no string formatting, no heap allocs beyond precomputed
 //! keys/values, no CF name construction, and minimal RNG per op.
 
-#[path = "./criterion_helper.rs"]
+#[path = "../../../../benches/criterion_helper.rs"]
 mod criterion_helper;
-#[path = "./tier4_integration_ycsb_common.rs"]
+#[path = "../../../../stress/tier4_integration_ycsb_common.rs"]
 mod ycsb_common;
 
 use cntryl_midge::{MidgeEngine, WriteBatch};

@@ -16,14 +16,18 @@ mod criterion_helper;
 #[path = "./tier3_system_bench_common.rs"]
 mod bench_common;
 
+#[path = "./common/tier3_harness.rs"]
+mod tier3;
+
 use bench_common::{
-    make_key, make_value_fixed, BenchStorageMode, DURABLE_STORAGE_MODES, VALUE_SIZE,
+    create_seed_dir, make_key, make_value_fixed, setup_engine_at_path, BenchEngineConfig,
+    BenchStorageMode, DURABLE_STORAGE_MODES, VALUE_SIZE,
 };
 
 use bytes::Bytes;
 use cntryl_midge::{Durability, MidgeEngine, WriteBatch};
 use criterion::{
-    criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput,
+    criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use criterion_helper::{criterion_config_for_tier, BenchTier};
 use std::hint::black_box;
@@ -68,24 +72,20 @@ fn bench_params() -> (usize, usize, usize, usize) {
 // Database Setup - Durability Modes
 // ============================================================================
 
-fn setup_db_with_options(db_name: &str, mode: BenchStorageMode, wal_sync: bool) -> MidgeEngine {
-    // Use the shared BenchEngineConfig and setup_engine helper so benches
-    // consistently configure and open engines (avoids duplicating MidgeOptions).
+fn config_for_mode(mode: BenchStorageMode, wal_sync: bool) -> BenchEngineConfig {
     let durability = if wal_sync {
         Durability::Strict
     } else {
         Durability::Steady
     };
 
-    let config = bench_common::BenchEngineConfig {
+    BenchEngineConfig {
         storage_mode: mode,
         durability,
         enable_compaction: false,
         memtable_size: Some(8 * 1024 * 1024),
         ..Default::default()
-    };
-
-    bench_common::setup_engine(db_name, &config)
+    }
 }
 
 fn load_data_batched(engine: &MidgeEngine, keys: &[Bytes], values: &[Bytes], batch_size: usize) {
@@ -143,18 +143,20 @@ fn bench_durability_async_wal(c: &mut Criterion) {
                 let keys_ref = &keys;
                 let values_ref = &values;
 
-                b.iter_batched(
-                    || {
-                        let engine = setup_db_with_options("async_baseline", mode, false);
-                        load_data_batched(&engine, keys_ref, values_ref, batch);
-                        engine
-                    },
-                    |engine| {
-                        run_mixed_workload(&engine, keys_ref, values_ref, ops);
-                        engine
-                    },
-                    BatchSize::LargeInput,
-                )
+                // Exclude expensive DB creation + dataset load from timing.
+                let config = config_for_mode(mode, false);
+                let seed_prefix = format!("durability_async_seed_{}", mode.as_str());
+                let seed_path = create_seed_dir(seed_prefix.as_str(), |p| {
+                    let engine = setup_engine_at_path(p, &config);
+                    load_data_batched(&engine, keys_ref, values_ref, batch);
+                    drop(engine);
+                });
+
+                let case = tier3::Tier3Case::from_seed(seed_path, config);
+
+                tier3_bench!(b, case, move |engine| {
+                    run_mixed_workload(&engine, keys_ref, values_ref, ops);
+                });
             },
         );
     }
@@ -185,18 +187,20 @@ fn bench_durability_wal_sync_every(c: &mut Criterion) {
                 let keys_ref = &keys;
                 let values_ref = &values;
 
-                b.iter_batched(
-                    || {
-                        let engine = setup_db_with_options("sync_every", mode, true);
-                        load_data_batched(&engine, keys_ref, values_ref, batch);
-                        engine
-                    },
-                    |engine| {
-                        run_mixed_workload(&engine, keys_ref, values_ref, ops);
-                        engine
-                    },
-                    BatchSize::LargeInput,
-                )
+                // Exclude expensive DB creation + dataset load from timing.
+                let config = config_for_mode(mode, true);
+                let seed_prefix = format!("durability_sync_seed_{}", mode.as_str());
+                let seed_path = create_seed_dir(seed_prefix.as_str(), |p| {
+                    let engine = setup_engine_at_path(p, &config);
+                    load_data_batched(&engine, keys_ref, values_ref, batch);
+                    drop(engine);
+                });
+
+                let case = tier3::Tier3Case::from_seed(seed_path, config);
+
+                tier3_bench!(b, case, move |engine| {
+                    run_mixed_workload(&engine, keys_ref, values_ref, ops);
+                });
             },
         );
     }

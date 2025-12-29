@@ -356,6 +356,38 @@ where
     elapsed
 }
 
+/// Run a single-shot measurement where the *timed* work includes opening the engine.
+///
+/// The seed directory is cloned to a unique temp directory outside the timed window.
+/// The provided closure is executed inside the timed window and receives the temp
+/// directory path and the config.
+///
+/// Return a value from the closure if you want its `Drop` to be excluded from timing.
+pub fn run_single_shot_open_from_seed<F, R>(
+    seed_path: &Path,
+    config: &BenchEngineConfig,
+    f: F,
+) -> std::time::Duration
+where
+    F: FnOnce(&Path, &BenchEngineConfig) -> R,
+{
+    let tmp_path = unique_bench_path("tier3_open_case");
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    copy_dir_all(seed_path, &tmp_path).expect("failed to clone seed dir");
+
+    let start = std::time::Instant::now();
+    let result = f(&tmp_path, config);
+    let mut elapsed = start.elapsed();
+
+    if elapsed.as_nanos() == 0 {
+        elapsed = std::time::Duration::from_nanos(1);
+    }
+
+    drop(result);
+    let _ = std::fs::remove_dir_all(&tmp_path);
+    elapsed
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
