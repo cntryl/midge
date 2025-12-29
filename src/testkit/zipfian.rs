@@ -34,10 +34,15 @@ impl ZipfianGenerator {
         (1..=n).map(|i| 1.0 / (i as f64).powf(theta)).sum()
     }
 
-    pub fn next<R: RngCore>(&self, rng: &mut R) -> usize {
+    /// Sample the next index using an injected `u64` source.
+    ///
+    /// This exists so in-repo stress binaries can use the Zipfian generator
+    /// without depending on `rand` directly (the stress temp crate only
+    /// depends on `cntryl_midge`).
+    pub fn next_from_u64<F: FnMut() -> u64>(&self, next_u64: &mut F) -> usize {
         // Deterministic [0,1) from u64, no FP RNG in hot loop.
         let u: f64 = {
-            let r = rng.next_u64();
+            let r = next_u64();
             (r as f64) / 18446744073709551616.0 // 2^64
         };
 
@@ -54,5 +59,9 @@ impl ZipfianGenerator {
         let idx = (self.items as f64 * v.powf(self.alpha)) as usize;
 
         idx % self.items
+    }
+
+    pub fn next<R: RngCore>(&self, rng: &mut R) -> usize {
+        self.next_from_u64(&mut || rng.next_u64())
     }
 }
