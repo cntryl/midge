@@ -366,7 +366,7 @@ mod tests {
     // ============================================================================
 
     #[test]
-    fn should_sort_by_key_primary_and_sequence_secondary() {
+    fn should_sort_by_key_with_sequence_as_secondary() {
         // Arrange: complex case with overlapping keys and sequences
         let s0 = vec![
             entry("a", "a3", 3),
@@ -556,6 +556,8 @@ mod tests {
         let item_a = HeapItem::new(&entry("aaa", "v", 1), 0);
         let item_b = HeapItem::new(&entry("bbb", "v", 1), 0);
 
+        // Act: compare ordering
+
         // Assert: smaller key should have Greater ordering (max-heap inversion)
         assert_eq!(item_a.cmp(&item_b), Ordering::Greater);
     }
@@ -565,6 +567,8 @@ mod tests {
         // Arrange: HeapItems with same key, different sequences
         let item_high = HeapItem::new(&entry("k", "v", 10), 0);
         let item_low = HeapItem::new(&entry("k", "v", 5), 0);
+
+        // Act: compare ordering
 
         // Assert: higher sequence should win
         assert_eq!(item_high.cmp(&item_low), Ordering::Greater);
@@ -576,6 +580,8 @@ mod tests {
         let item_idx0 = HeapItem::new(&entry("k", "v", 5), 0);
         let item_idx1 = HeapItem::new(&entry("k", "v", 5), 1);
 
+        // Act: compare ordering
+
         // Assert: lower index should have Greater ordering
         assert_eq!(item_idx0.cmp(&item_idx1), Ordering::Greater);
     }
@@ -586,6 +592,8 @@ mod tests {
         let item1 = HeapItem::new(&entry("k", "v", 5), 0);
         let item2 = HeapItem::new(&entry("k", "v", 5), 0);
         let item3 = HeapItem::new(&entry("k", "v", 3), 0);
+
+        // Act: equality checks
 
         // Assert
         assert_eq!(item1, item2);
@@ -605,7 +613,10 @@ mod tests {
         // Act: use iterator trait methods
         assert!(iter.next().is_some());
         assert!(iter.next().is_some());
-        assert!(iter.next().is_none());
+        let exhausted = iter.next().is_none();
+
+        // Assert
+        assert!(exhausted);
     }
 
     #[test]
