@@ -173,7 +173,7 @@ impl Fs for RealFs {
             // fs::File::open works for directories on Unix.
             let dir = fs::File::open(&full).map_err(|e| io_err("open_dir", &full, e))?;
             dir.sync_all().map_err(|e| io_err("fsync_dir", &full, e))?;
-            return Ok(());
+            Ok(())
         }
 
         // Windows: std doesn't reliably support directory handles with fsync semantics.
@@ -221,7 +221,6 @@ impl File for RealFile {
         // Prefer true positional IO (no shared cursor).
         #[cfg(unix)]
         {
-            use std::os::unix::fs::FileExt;
             read_exact_at_unix(&self.file, offset, &mut buf)?;
             Ok(bytes::Bytes::from(buf))
         }
@@ -251,7 +250,6 @@ impl File for RealFile {
         // Prefer true positional IO (no shared cursor).
         #[cfg(unix)]
         {
-            use std::os::unix::fs::FileExt;
             write_all_at_unix(&self.file, offset, bytes)?;
             Ok(())
         }
