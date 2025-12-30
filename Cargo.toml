@@ -3,16 +3,12 @@ name = "cntryl-midge"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.91"
-authors = ["Midge Contributors"]
 description = "A high-performance embedded key-value database with LSM-tree storage"
 license = "Apache-2.0"
 repository = "https://github.com/cntryl/midge"
 readme = "README.md"
-homepage = "https://github.com/cntryl/midge"
-documentation = "https://docs.rs/cntryl-midge"
 keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
-exclude = ["/benches", "/scripts", "/.github"]
 
 [lib]
 name = "cntryl_midge"
