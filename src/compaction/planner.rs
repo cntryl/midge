@@ -170,7 +170,10 @@ mod tests {
 
     #[test]
     fn should_create_task_with_provided_fields_when_new() {
-        // Arrange / Act
+        // Arrange
+        // (constructor args)
+
+        // Act
         let task = CompactionTask::new(1, 0, 0, 1, vec!["file1.sst".to_string()]);
 
         // Assert
@@ -184,7 +187,10 @@ mod tests {
 
     #[test]
     fn should_initialize_output_files_empty_when_task_created() {
-        // Arrange / Act
+        // Arrange
+        // (constructor args)
+
+        // Act
         let task = CompactionTask::new(5, 2, 1, 2, vec!["input.sst".to_string()]);
 
         // Assert: output_files must be empty initially
@@ -326,7 +332,10 @@ mod tests {
 
     #[test]
     fn should_create_empty_log_when_new() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let log = CompactionLog::new();
 
         // Assert
@@ -336,7 +345,10 @@ mod tests {
 
     #[test]
     fn should_create_empty_log_when_default() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let log = CompactionLog::default();
 
         // Assert
@@ -346,7 +358,10 @@ mod tests {
 
     #[test]
     fn should_initialize_next_task_id_to_one() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let log = CompactionLog::new();
 
         // Assert: next_task_id must start at 1 (not 0)
@@ -497,12 +512,12 @@ mod tests {
     }
 
     #[test]
-    fn should_get_task_mut_and_modify() {
+    fn should_modify_output_files_via_get_task_mut() {
         // Arrange
         let mut log = CompactionLog::new();
         let id = log.add_task(0, 0, 1, vec![]);
 
-        // Act: get mutable reference and modify
+        // Act
         if let Some(task) = log.get_task_mut(id) {
             task.output_files.push("output.sst".to_string());
         }
@@ -519,14 +534,19 @@ mod tests {
         let id2 = log.add_task(1, 1, 2, vec!["file2.sst".to_string()]);
         let id3 = log.add_task(2, 2, 3, vec!["file3.sst".to_string()]);
 
-        // Act & Assert: verify each task retrieved correctly
-        assert_eq!(log.get_task(id1).unwrap().cf_id, 0);
-        assert_eq!(log.get_task(id2).unwrap().cf_id, 1);
-        assert_eq!(log.get_task(id3).unwrap().cf_id, 2);
+        // Act
+        let t1 = log.get_task(id1).unwrap();
+        let t2 = log.get_task(id2).unwrap();
+        let t3 = log.get_task(id3).unwrap();
 
-        assert_eq!(log.get_task(id1).unwrap().input_files[0], "file1.sst");
-        assert_eq!(log.get_task(id2).unwrap().input_files[0], "file2.sst");
-        assert_eq!(log.get_task(id3).unwrap().input_files[0], "file3.sst");
+        // Assert: verify each task retrieved correctly
+        assert_eq!(t1.cf_id, 0);
+        assert_eq!(t2.cf_id, 1);
+        assert_eq!(t3.cf_id, 2);
+
+        assert_eq!(t1.input_files[0], "file1.sst");
+        assert_eq!(t2.input_files[0], "file2.sst");
+        assert_eq!(t3.input_files[0], "file3.sst");
     }
 
     // ============================================================================
