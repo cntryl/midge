@@ -1,5 +1,7 @@
 # Midge
 
+[![CI](https://github.com/cntryl/midge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cntryl/midge/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/cntryl-midge.svg)](https://crates.io/crates/cntryl-midge) [![docs.rs](https://docs.rs/cntryl-midge/badge.svg)](https://docs.rs/cntryl-midge) [![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 A high-performance, embedded LSM-tree storage engine written in Rust.
 
 ## Features
@@ -29,14 +31,10 @@ A high-performance, embedded LSM-tree storage engine written in Rust.
 
 ## Documentation
 
-- [Configuration Specification](docs/specs/configuration_spec.md) - High-level config system design
-- [SPEC.md](docs/wip/SPEC.md) - Complete specification of LSM implementation
-- [TTL Architecture](docs/wip/TTL_ARCHITECTURE.md) - TTL implementation status and roadmap
-- [Compaction Filters](docs/wip/COMPACTION_FILTERS.md) - User-defined compaction logic
-- [Transactions & Snapshots](docs/wip/TRANSACTIONS.md) - Per-transaction isolation & snapshot usage
-- [Rate Limiting](docs/wip/RATE_LIMITING.md) - I/O throttling and resource management
- - [ROADMAP.md](ROADMAP.md) - Phase-based roadmap and tactical TODOs
- - [docs/roadmap.md](docs/roadmap.md) - Documentation mirror of the roadmap
+- Architecture notes and design rationale: `docs/THE_BIG_IDEA.md`
+- For examples, see the `examples/` directory (`basic_usage.rs`, `metrics_usage.rs`, `smart_config.rs`).
+
+Additional documentation is available in the `docs/` folder where present; some in-repo docs are work-in-progress.
 
 ## Quick Start
 
@@ -116,7 +114,7 @@ let engine = MidgeEngine::open_with_config(config)?;
 // Writes are automatically persisted to cloud storage!
 ```
 
-See `examples/config_complete.rs` for comprehensive configuration examples.
+See `examples/smart_config.rs` and `examples/basic_usage.rs` for configuration and usage examples.
 
 ### Low-Level MidgeOptions API
 
@@ -174,6 +172,28 @@ Run benchmarks:
 cargo bench
 ```
 
+Developer commands (use when contributing):
+
+```bash
+# Format and lint
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+
+# Build & test
+cargo build
+cargo test
+
+# Ensure package contents for publish
+cargo package --list
+cargo publish --dry-run
+```
+
+Contributing & workflow:
+
+- Create a topic branch and open a PR against `main`.
+- CI runs on push/PR and enforces clippy + tests; ensure your branch is green.
+- Run `cargo test` and `cargo clippy --all-targets -- -D warnings` locally before pushing.
+
 ### Writing Tests
 
 **This project enforces strict test quality guidelines.** All tests are validated automatically.
@@ -187,25 +207,32 @@ cargo bench
 
 **See:**
 
-- 📋 Quick reference: `TEST_QUICKREF.md`
-- 📚 Full guidelines: `docs/dev/test_guidelines.md`
-- 🤖 Copilot follows: `.github/copilot-instructions.md`
+- 📋 Quick reference and validator: `testutils/validate_tests.rs` — run `cargo run --bin validate_tests -- --summary` or `cargo run --bin validate_tests -- --file src/your_file.rs`
+- 📚 Contributor guidance: `.github/copilot-instructions.md` (quick contributor notes + validation rules)
 
 **Validation:**
 
 ```bash
-# Meta-test (runs automatically with cargo test)
-cargo test test_guidelines_compliance
+# Run the test suite and meta-tests:
+cargo test
 
-# Detailed check on specific file
-.\validate-tests.ps1 -FilePath src\your_file.rs
+# Run the test validator:
+
+# Rust-backed validator (cargo)
+cargo run --bin validate_tests -- --summary
+cargo run --bin validate_tests -- --file src/your_file.rs
+
+# Python validator (no Rust compile required)
+python scripts/validate_tests.py --summary
+python scripts/validate_tests.py --file src/your_file.rs
 ```
 
 ## Status
 
 **Production Readiness:** 🟡 Beta
 
-- ✅ 760 tests passing (570 lib + 158 integration + 32 doctests)
+- ✅ **1478 tests passing** (unit + integration + doctests; run `cargo test` locally)
+- ✅ CI enforces `cargo clippy --all-targets -- -D warnings` and `cargo test`
 - ✅ Crash recovery matrix validation (5-scenario smoke test + 1K/10K proof tests)
 - ✅ YCSB benchmark suite (Workloads A, B, C implemented and validated)
 - ✅ Core LSM functionality complete
@@ -214,7 +241,23 @@ cargo test test_guidelines_compliance
 - ✅ Autotuning metrics integration
 - 🚧 Additional features in development
 
+## Publishing 🔖
+
+Checklist to prepare for a crates.io release:
+
+- Bump `version` in `Cargo.toml` and update changelog/release notes (if present).
+- Ensure `readme` is set in `Cargo.toml` (this repository includes `README.md`).
+- Verify `license` field matches the `LICENSE` file (Apache-2.0).
+- Run the validation commands locally:
+  - `cargo clippy --all-targets -- -D warnings`
+  - `cargo test`
+  - `cargo package --list` (inspect files that will be published)
+  - `cargo publish --dry-run`
+- After dry-run successful, push a release commit and run `cargo publish` when you're ready.
+
+> Tip: CI runs on push/PR to `main` and will fail if clippy or tests fail — make sure the branch is green before publishing.
+
 ## License
 
-[Add license information]
+Midge is licensed under the [Apache-2.0](LICENSE) license.
 
