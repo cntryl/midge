@@ -116,8 +116,10 @@ mod tests {
 
     #[test]
     fn should_encode_decode_varint32_small() {
-        // Arrange & Act
+        // Arrange
         let mut buf = BytesMut::new();
+
+        // Act
         encode_varint32(&mut buf, 42);
         let decoded = decode_varint32(&buf).unwrap();
 
