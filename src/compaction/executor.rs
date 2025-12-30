@@ -610,10 +610,11 @@ mod tests {
             expiration: None,
         });
 
+        // Act
         let dedup_iter = StreamDeduplicate::new(version_iter);
         let result: Vec<_> = dedup_iter.collect();
 
-        // Should have 3 keys: a(5), b(6), c(2)
+        // Assert: Should have 3 keys: a(5), b(6), c(2)
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].seq, 5); // a: highest is 5
         assert_eq!(result[1].seq, 6); // b: highest is 6
