@@ -181,7 +181,10 @@ mod tests {
 
     #[test]
     fn should_create_empty_iterator_when_new() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let iter = MergeIterator::new();
 
         // Assert
@@ -190,7 +193,10 @@ mod tests {
 
     #[test]
     fn should_create_default_iterator_when_default() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let iter = MergeIterator::default();
 
         // Assert
@@ -199,7 +205,10 @@ mod tests {
 
     #[test]
     fn should_handle_no_input_iterators_when_from_empty_list() {
-        // Arrange / Act
+        // Arrange
+        // (empty input list)
+
+        // Act
         let merged: Vec<MergeEntry> =
             MergeIterator::from_iterators::<std::vec::IntoIter<MergeEntry>>(vec![]).collect();
 
