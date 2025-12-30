@@ -12,8 +12,8 @@ use cntryl_midge::testkit::zipfian::ZipfianGenerator;
 use cntryl_midge::MidgeOptions;
 
 const INITIAL_KEYS: usize = 100_000;
-const WARMUP: Duration = Duration::from_secs(1);
-const MEASURED: Duration = Duration::from_secs(5);
+const WARMUP: Duration = Duration::from_secs(10);
+const MEASURED: Duration = Duration::from_secs(30);
 
 const ZIPFIAN_THETA: f64 = 0.99;
 
