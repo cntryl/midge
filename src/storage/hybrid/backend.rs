@@ -27,10 +27,11 @@ use super::policy;
 use super::state;
 use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use crossbeam::channel as cb;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Status of a cloud upload operation
@@ -161,8 +162,7 @@ impl HybridStorage {
                             Ok(data) => data,
                             Err(e) => {
                                 let error = format!("read {:?}: {}", upload.local_path, e);
-                                let mut events =
-                                    event_queue.lock().expect("event_queue lock poisoned");
+                                let mut events = event_queue.lock();
                                 events.push_back(StorageEvent::CloudFail {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
@@ -187,8 +187,7 @@ impl HybridStorage {
                                         .metrics()
                                         .record_cloudfirst_wal_upload_completed(upload_start.elapsed().as_micros() as u64);
                                 }
-                                let mut events =
-                                    event_queue.lock().expect("event_queue lock poisoned");
+                                let mut events = event_queue.lock();
                                 let ack = StorageEvent::CloudAck {
                                     segment_id: upload.segment_id,
                                     max_sequence: upload.max_sequence,
@@ -215,8 +214,7 @@ impl HybridStorage {
                                     StorageOutcome::Err(e) => e,
                                     _ => "Unknown error".to_string(),
                                 };
-                                let mut events =
-                                    event_queue.lock().expect("event_queue lock poisoned");
+                                let mut events = event_queue.lock();
                                 let fail = StorageEvent::CloudFail {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
@@ -228,8 +226,7 @@ impl HybridStorage {
                             }
                             _ => {
                                 let error = "Channel error".to_string();
-                                let mut events =
-                                    event_queue.lock().expect("event_queue lock poisoned");
+                                let mut events = event_queue.lock();
                                 let fail = StorageEvent::CloudFail {
                                     segment_id: upload.segment_id,
                                     error: error.clone(),
@@ -267,10 +264,7 @@ impl HybridStorage {
             max_sequence,
         };
 
-        let mut queue = self
-            .upload_queue
-            .lock()
-            .expect("upload_queue lock poisoned");
+        let mut queue = self.upload_queue.lock();
         queue.push_back(upload_state);
 
         tracing::debug!(
@@ -298,14 +292,11 @@ impl HybridStorage {
     pub fn process_uploads(&self) -> Vec<StorageEvent> {
         // 1) Drain worker completion events first.
         let drained_events = {
-            let mut events = self.event_queue.lock().expect("event_queue lock poisoned");
+            let mut events = self.event_queue.lock();
             events.drain(..).collect::<Vec<_>>()
         };
 
-        let mut queue = self
-            .upload_queue
-            .lock()
-            .expect("upload_queue lock poisoned");
+        let mut queue = self.upload_queue.lock();
 
         // 2) Apply drained events to the upload state machine.
         for event in &drained_events {
@@ -373,10 +364,7 @@ impl HybridStorage {
 
     /// Try to reserve space for an upcoming flush.
     pub fn reserve_for_flush(&self, est_size: u64) -> actor::ReservationResult {
-        let mut actor = self
-            .budget_actor
-            .lock()
-            .expect("budget_actor lock poisoned");
+        let mut actor = self.budget_actor.lock();
         actor
             .handle_event(actor::StorageBudgetEvent::ReserveForFlush { est_size })
             .unwrap_or(actor::ReservationResult::Ok)
@@ -384,19 +372,13 @@ impl HybridStorage {
 
     /// Signal that a flush completed with actual size
     pub fn flush_completed(&self, actual_size: u64) {
-        let mut actor = self
-            .budget_actor
-            .lock()
-            .expect("budget_actor lock poisoned");
+        let mut actor = self.budget_actor.lock();
         let _ = actor.handle_event(actor::StorageBudgetEvent::FlushCompleted { actual_size });
     }
 
     /// Signal that a cloud upload completed
     pub fn cloud_upload_completed(&self, sst_id: u64, actual_size: u64) {
-        let mut actor = self
-            .budget_actor
-            .lock()
-            .expect("budget_actor lock poisoned");
+        let mut actor = self.budget_actor.lock();
         let _ = actor.handle_event(actor::StorageBudgetEvent::CloudUploadCompleted {
             sst_id,
             actual_size,
@@ -405,46 +387,32 @@ impl HybridStorage {
 
     /// Signal that compaction is starting
     pub fn compaction_planned(&self, input_sizes: Vec<u64>) {
-        let mut actor = self
-            .budget_actor
-            .lock()
-            .expect("budget_actor lock poisoned");
+        let mut actor = self.budget_actor.lock();
         let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionPlanned { input_sizes });
     }
 
     /// Signal that compaction completed
     pub fn compaction_completed(&self, output_sizes: Vec<u64>) {
-        let mut actor = self
-            .budget_actor
-            .lock()
-            .expect("budget_actor lock poisoned");
+        let mut actor = self.budget_actor.lock();
         let _ = actor.handle_event(actor::StorageBudgetEvent::CompactionCompleted { output_sizes });
     }
 
     /// Get current disk state snapshot
     pub fn disk_state(&self) -> state::DiskState {
-        let actor = self
-            .budget_actor
-            .lock()
-            .expect("budget_actor lock poisoned");
+        let actor = self.budget_actor.lock();
         actor.disk_state()
     }
 
     /// Get mutable access to the budget actor for testing and monitoring
     pub fn budget_actor(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, actor::StorageBudgetActor>, String> {
-        self.budget_actor
-            .lock()
-            .map_err(|e| format!("Failed to lock budget actor: {}", e))
+    ) -> Result<parking_lot::MutexGuard<'_, actor::StorageBudgetActor>, String> {
+        Ok(self.budget_actor.lock())
     }
 
     /// Get count of pending uploads (for monitoring)
     pub fn pending_upload_count(&self) -> usize {
-        self.upload_queue
-            .lock()
-            .expect("upload_queue lock poisoned")
-            .len()
+        self.upload_queue.lock().len()
     }
 }
 

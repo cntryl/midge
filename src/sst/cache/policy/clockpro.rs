@@ -18,8 +18,8 @@
 
 use super::CachePolicy;
 use crate::sst::cache::key::CacheKey;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Per-entry metadata for CLOCK-Pro (3 bits of state)
 #[derive(Clone, Copy, Debug, Default)]
@@ -103,9 +103,9 @@ impl Default for ClockProPolicy {
 
 impl CachePolicy for ClockProPolicy {
     fn on_access(&self, key: CacheKey) {
-        let mut slots = self.slots.lock().expect("slots lock");
-        let mut key_to_slot = self.key_to_slot.lock().expect("key_to_slot lock");
-        let hot_target = self.hot_target.lock().expect("hot_target lock");
+        let mut slots = self.slots.lock();
+        let mut key_to_slot = self.key_to_slot.lock();
+        let hot_target = self.hot_target.lock();
 
         if let Some(&slot_idx) = key_to_slot.get(&key) {
             // Existing entry: set reference bit and promote to hot if cold
@@ -114,9 +114,9 @@ impl CachePolicy for ClockProPolicy {
                 slots[slot_idx].ref_bit = true;
 
                 // Promote cold → hot on access if hot set not full
-                if was_cold && *self.hot_count.lock().expect("hot_count lock") < *hot_target {
+                if was_cold && *self.hot_count.lock() < *hot_target {
                     slots[slot_idx].hot_bit = true;
-                    *self.hot_count.lock().expect("hot_count lock") += 1;
+                    *self.hot_count.lock() += 1;
                 }
             }
         } else {
@@ -131,17 +131,17 @@ impl CachePolicy for ClockProPolicy {
             };
 
             key_to_slot.insert(key, slot_idx);
-            *self.resident_count.lock().expect("resident_count lock") += 1;
+            *self.resident_count.lock() += 1;
         }
     }
 
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
-        let mut slots = self.slots.lock().expect("slots lock");
-        let mut key_to_slot = self.key_to_slot.lock().expect("key_to_slot lock");
-        let mut hand = self.hand.lock().expect("hand lock");
-        let mut resident_count = self.resident_count.lock().expect("resident_count lock");
-        let mut hot_count = self.hot_count.lock().expect("hot_count lock");
-        let mut hot_target = self.hot_target.lock().expect("hot_target lock");
+        let mut slots = self.slots.lock();
+        let mut key_to_slot = self.key_to_slot.lock();
+        let mut hand = self.hand.lock();
+        let mut resident_count = self.resident_count.lock();
+        let mut hot_count = self.hot_count.lock();
+        let mut hot_target = self.hot_target.lock();
 
         if slots.is_empty() {
             return None;
@@ -199,10 +199,10 @@ impl CachePolicy for ClockProPolicy {
     }
 
     fn on_remove(&self, key: CacheKey) {
-        let mut slots = self.slots.lock().expect("slots lock");
-        let mut key_to_slot = self.key_to_slot.lock().expect("key_to_slot lock");
-        let mut hot_count = self.hot_count.lock().expect("hot_count lock");
-        let mut resident_count = self.resident_count.lock().expect("resident_count lock");
+        let mut slots = self.slots.lock();
+        let mut key_to_slot = self.key_to_slot.lock();
+        let mut hot_count = self.hot_count.lock();
+        let mut resident_count = self.resident_count.lock();
 
         if let Some(slot_idx) = key_to_slot.remove(&key) {
             if slot_idx < slots.len() {
@@ -218,11 +218,11 @@ impl CachePolicy for ClockProPolicy {
     fn on_stale(&self, key: CacheKey) {
         // Advance hand when encountering stale entries
         // Treat as evicted test entry - clean up tracking
-        let mut slots = self.slots.lock().expect("slots lock");
-        let mut key_to_slot = self.key_to_slot.lock().expect("key_to_slot lock");
-        let mut hot_count = self.hot_count.lock().expect("hot_count lock");
-        let mut resident_count = self.resident_count.lock().expect("resident_count lock");
-        let mut hand = self.hand.lock().expect("hand lock");
+        let mut slots = self.slots.lock();
+        let mut key_to_slot = self.key_to_slot.lock();
+        let mut hot_count = self.hot_count.lock();
+        let mut resident_count = self.resident_count.lock();
+        let mut hand = self.hand.lock();
 
         if let Some(slot_idx) = key_to_slot.remove(&key) {
             if slot_idx < slots.len() {
@@ -239,11 +239,11 @@ impl CachePolicy for ClockProPolicy {
     }
 
     fn clear(&self) {
-        self.slots.lock().expect("slots lock").clear();
-        self.key_to_slot.lock().expect("key_to_slot lock").clear();
-        *self.hand.lock().expect("hand lock") = 0;
-        *self.resident_count.lock().expect("resident_count lock") = 0;
-        *self.hot_count.lock().expect("hot_count lock") = 0;
+        self.slots.lock().clear();
+        self.key_to_slot.lock().clear();
+        *self.hand.lock() = 0;
+        *self.resident_count.lock() = 0;
+        *self.hot_count.lock() = 0;
     }
 }
 
@@ -262,7 +262,7 @@ mod tests {
         policy.on_remove(key1);
 
         // Assert - verify key_to_slot map is empty after removal
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert_eq!(key_map.len(), 0);
     }
 
@@ -278,7 +278,7 @@ mod tests {
         policy.on_access(key2);
 
         // Assert - both keys should be in the map
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert_eq!(key_map.len(), 2);
         assert!(key_map.contains_key(&key1));
         assert!(key_map.contains_key(&key2));
@@ -298,7 +298,7 @@ mod tests {
         policy.clear();
 
         // Assert
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert_eq!(key_map.len(), 0);
     }
 
@@ -336,7 +336,7 @@ mod tests {
         policy.on_access(CacheKey::for_data(1, 0));
 
         // Assert
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert_eq!(key_map.len(), 1);
     }
 
@@ -349,7 +349,7 @@ mod tests {
         policy.on_access(CacheKey::for_data(1, 0));
 
         // Assert
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert!(!key_map.is_empty());
     }
 
@@ -366,7 +366,7 @@ mod tests {
         policy.on_remove(key1);
 
         // Assert
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert!(!key_map.contains_key(&key1));
         assert!(key_map.contains_key(&key2));
     }
@@ -387,7 +387,7 @@ mod tests {
         }
 
         // Assert - 4 keys should remain
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert_eq!(key_map.len(), 4);
     }
 
@@ -416,7 +416,7 @@ mod tests {
         policy.on_access(key); // And again
 
         // Assert
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert_eq!(key_map.len(), 1); // Only one entry
     }
 
@@ -432,7 +432,7 @@ mod tests {
         }
 
         // Assert
-        let key_map = policy.key_to_slot.lock().expect("key_to_slot lock");
+        let key_map = policy.key_to_slot.lock();
         assert_eq!(key_map.len(), 100);
     }
 }

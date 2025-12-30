@@ -1169,9 +1169,7 @@ impl EventLoop {
                     // This is a blocking wait with timed logging thresholds.
                     // ─────────────────────────────────────────────────────────────────────
                     let (lock, cvar) = &*self.state.active_compactions_notify;
-                    let mut guard = lock
-                        .lock()
-                        .expect("active_compactions_notify lock poisoned");
+                    let mut guard = lock.lock();
 
                     let wait_start = std::time::Instant::now();
                     let mut warned_500ms = false;
@@ -1185,10 +1183,9 @@ impl EventLoop {
                     {
                         // Wait with timeout so we can log progress thresholds
                         let timeout = std::time::Duration::from_millis(100);
-                        let (g, _res) = cvar
-                            .wait_timeout(guard, timeout)
-                            .expect("condvar wait poisoned");
-                        guard = g;
+                        // parking_lot::Condvar::wait_for will block up to `timeout` and return
+                        // a boolean that indicates whether the wait ended because of notify.
+                        let _notified = cvar.wait_for(&mut guard, timeout);
 
                         let elapsed = wait_start.elapsed();
 
@@ -1525,9 +1522,7 @@ impl EventLoop {
                     if prev <= 1 {
                         // notify waiters that active_compactions may be zero now
                         let (lock, cvar) = &*self.state.active_compactions_notify;
-                        let _guard = lock
-                            .lock()
-                            .expect("active_compactions_notify lock poisoned");
+                        let _guard = lock.lock();
                         cvar.notify_all();
                     }
 

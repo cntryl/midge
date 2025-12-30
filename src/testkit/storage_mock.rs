@@ -1,8 +1,9 @@
 //! Mock storage backend for tests.
 
 use crate::storage::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Mock storage backend for testing.
 pub struct MockStorage {
@@ -25,7 +26,7 @@ impl Default for MockStorage {
 
 impl StorageBackend for MockStorage {
     fn submit_read(&self, key: String, callback: StorageCallback) {
-        let data = self.data.lock().expect("storage mutex poisoned");
+        let data = self.data.lock();
         let result = data
             .get(&key)
             .cloned()
@@ -39,7 +40,7 @@ impl StorageBackend for MockStorage {
     }
 
     fn submit_write(&self, key: String, data: Vec<u8>, callback: StorageCallback) {
-        let mut storage = self.data.lock().expect("storage mutex poisoned");
+        let mut storage = self.data.lock();
         storage.insert(key.clone(), data);
 
         let event = StorageEvent::WriteComplete {
@@ -50,7 +51,7 @@ impl StorageBackend for MockStorage {
     }
 
     fn submit_delete(&self, key: String, callback: StorageCallback) {
-        let mut storage = self.data.lock().expect("storage mutex poisoned");
+        let mut storage = self.data.lock();
         storage.remove(&key);
 
         let event = StorageEvent::DeleteComplete {
@@ -61,7 +62,7 @@ impl StorageBackend for MockStorage {
     }
 
     fn submit_list(&self, prefix: String, callback: StorageCallback) {
-        let data = self.data.lock().expect("storage mutex poisoned");
+        let data = self.data.lock();
         let results: Vec<_> = data
             .keys()
             .filter(|k| k.starts_with(&prefix))

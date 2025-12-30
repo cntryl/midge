@@ -29,7 +29,8 @@ pub mod executor;
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageOutcome};
 use crate::common::MidgeError;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 pub use aws::AwsCredentials;
 pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
@@ -145,26 +146,20 @@ impl MockCloudBackend {
     }
 
     pub fn object_count(&self) -> usize {
-        self.storage.lock().expect("storage mutex poisoned").len()
+        self.storage.lock().len()
     }
 
     pub fn get_uploads(&self) -> Vec<(String, u64)> {
-        self.uploads.lock().expect("uploads mutex poisoned").clone()
+        self.uploads.lock().clone()
     }
 
     pub fn get_downloads(&self) -> Vec<String> {
-        self.downloads
-            .lock()
-            .expect("downloads mutex poisoned")
-            .clone()
+        self.downloads.lock().clone()
     }
 
     pub fn clear_history(&self) {
-        self.uploads.lock().expect("uploads mutex poisoned").clear();
-        self.downloads
-            .lock()
-            .expect("downloads mutex poisoned")
-            .clear();
+        self.uploads.lock().clear();
+        self.downloads.lock().clear();
     }
 }
 
@@ -176,14 +171,8 @@ impl Default for MockCloudBackend {
 
 impl CloudBackend for MockCloudBackend {
     fn submit_put(&self, key: String, data: Vec<u8>, callback: CloudCallback) {
-        self.storage
-            .lock()
-            .expect("storage mutex poisoned")
-            .insert(key.clone(), data.clone());
-        self.uploads
-            .lock()
-            .expect("uploads mutex poisoned")
-            .push((key.clone(), data.len() as u64));
+        self.storage.lock().insert(key.clone(), data.clone());
+        self.uploads.lock().push((key.clone(), data.len() as u64));
         let event = CloudEvent::PutComplete {
             key,
             result: CloudOutcome::Ok(()),
@@ -192,17 +181,8 @@ impl CloudBackend for MockCloudBackend {
     }
 
     fn submit_get(&self, key: String, callback: CloudCallback) {
-        let result = self
-            .storage
-            .lock()
-            .expect("storage mutex poisoned")
-            .get(&key)
-            .cloned()
-            .ok_or(MidgeError::NotFound);
-        self.downloads
-            .lock()
-            .expect("downloads mutex poisoned")
-            .push(key.clone());
+        let result = self.storage.lock().get(&key).cloned().ok_or(MidgeError::NotFound);
+        self.downloads.lock().push(key.clone());
         let event = CloudEvent::GetComplete {
             key,
             result: CloudOutcome::from_result(result),

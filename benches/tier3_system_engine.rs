@@ -58,7 +58,9 @@ fn run_write_batch_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: us
     }
 
     // Measure exactly one write_batch
-    ctx.measure_ref(&engine, |e| e.write_batch(&batch).expect("write_batch failed"));
+    ctx.measure_ref(&engine, |e| {
+        e.write_batch(&batch).expect("write_batch failed")
+    });
 
     drop(engine);
 }

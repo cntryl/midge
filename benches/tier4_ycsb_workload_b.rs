@@ -43,17 +43,11 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
                     // Reserve draw=0 for op selection; use draw>=1 for key selection.
                     let mut draw: u64 = 1;
-                    let key_idx = zipf
-                        .next_from_u64(&mut || {
-                            let r = ycsb::deterministic_u64(
-                                WORKLOAD_SEED,
-                                client_id,
-                                op_index,
-                                draw,
-                            );
-                            draw = draw.wrapping_add(1);
-                            r
-                        }) as u64;
+                    let key_idx = zipf.next_from_u64(&mut || {
+                        let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
+                        draw = draw.wrapping_add(1);
+                        r
+                    }) as u64;
                     let k = ycsb::make_key(key_idx);
 
                     // Deterministic, stochastic 95/5 mix (avoids periodic scheduling).
@@ -71,39 +65,28 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     // Phase 3: Measured (duration-based; multi-client)
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
         let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
-        ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
-            clients,
-            MEASURED,
-            |client_id| {
-                let zipf = Arc::clone(&zipf);
-                move |e, cf, op_index| {
-                    let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+        ycsb::run_multi_client_for_duration(Arc::clone(&engine), clients, MEASURED, |client_id| {
+            let zipf = Arc::clone(&zipf);
+            move |e, cf, op_index| {
+                let op_r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
 
-                    // Reserve draw=0 for op selection; use draw>=1 for key selection.
-                    let mut draw: u64 = 1;
-                    let key_idx = zipf
-                        .next_from_u64(&mut || {
-                            let r = ycsb::deterministic_u64(
-                                WORKLOAD_SEED,
-                                client_id,
-                                op_index,
-                                draw,
-                            );
-                            draw = draw.wrapping_add(1);
-                            r
-                        }) as u64;
-                    let k = ycsb::make_key(key_idx);
+                // Reserve draw=0 for op selection; use draw>=1 for key selection.
+                let mut draw: u64 = 1;
+                let key_idx = zipf.next_from_u64(&mut || {
+                    let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
+                    draw = draw.wrapping_add(1);
+                    r
+                }) as u64;
+                let k = ycsb::make_key(key_idx);
 
-                    if (op_r % 100) < 95 {
-                        let _ = e.get(cf, &k[..]).expect("measured get");
-                    } else {
-                        let v = ycsb::make_value((op_index % 251) as u8);
-                        e.put(cf, &k[..], &v[..]).expect("measured put");
-                    }
+                if (op_r % 100) < 95 {
+                    let _ = e.get(cf, &k[..]).expect("measured get");
+                } else {
+                    let v = ycsb::make_value((op_index % 251) as u8);
+                    e.put(cf, &k[..], &v[..]).expect("measured put");
                 }
-            },
-        )
+            }
+        })
     });
 
     ctx.set_elements(measured_ops);

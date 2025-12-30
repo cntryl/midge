@@ -51,8 +51,8 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     }
 
                     let max_start = (INITIAL_KEYS as u64).saturating_sub(SCAN_LEN + 1).max(1);
-                    let start_id = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0)
-                        % max_start;
+                    let start_id =
+                        ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0) % max_start;
                     let start = ycsb::make_key(start_id);
                     let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
 
@@ -67,36 +67,31 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
     // Phase 3: Measured (duration-based; multi-client)
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
-        ycsb::run_multi_client_for_duration(
-            Arc::clone(&engine),
-            clients,
-            MEASURED,
-            |client_id| {
-                move |e, cf, op_index| {
-                    let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                    let is_insert = (r0 % 100) >= 95;
+        ycsb::run_multi_client_for_duration(Arc::clone(&engine), clients, MEASURED, |client_id| {
+            move |e, cf, op_index| {
+                let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
+                let is_insert = (r0 % 100) >= 95;
 
-                    if is_insert {
-                        let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
-                        let k = ycsb::make_key(key_id);
-                        let v = ycsb::make_value((op_index % 251) as u8);
-                        e.put(cf, &k[..], &v[..]).expect("measured insert");
-                        return;
-                    }
-
-                    let max_start = (INITIAL_KEYS as u64).saturating_sub(SCAN_LEN + 1).max(1);
-                    let start_id = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0)
-                        % max_start;
-                    let start = ycsb::make_key(start_id);
-                    let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
-
-                    let _scanned = e
-                        .range(cf, &start[..], &end[..])
-                        .expect("measured range")
-                        .len();
+                if is_insert {
+                    let key_id = INITIAL_KEYS as u64 + ((client_id as u64) << 32) + op_index;
+                    let k = ycsb::make_key(key_id);
+                    let v = ycsb::make_value((op_index % 251) as u8);
+                    e.put(cf, &k[..], &v[..]).expect("measured insert");
+                    return;
                 }
-            },
-        )
+
+                let max_start = (INITIAL_KEYS as u64).saturating_sub(SCAN_LEN + 1).max(1);
+                let start_id =
+                    ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0) % max_start;
+                let start = ycsb::make_key(start_id);
+                let end = ycsb::make_key(start_id.saturating_add(SCAN_LEN));
+
+                let _scanned = e
+                    .range(cf, &start[..], &end[..])
+                    .expect("measured range")
+                    .len();
+            }
+        })
     });
 
     // Approximate bytes touched: 95% scans of length SCAN_LEN, 5% inserts.

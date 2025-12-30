@@ -1,6 +1,6 @@
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::Mutex;
 
 /// Policy for deciding when accumulated work should be flushed.
 ///
@@ -71,10 +71,7 @@ where
 
     /// Join the current generation for the current key.
     pub fn join(&self, waiter: W) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("keyed group commit mutex poisoned");
+        let mut state = self.state.lock();
         state.pending.push(waiter);
     }
 
@@ -82,10 +79,7 @@ where
     ///
     /// Returns the sealed key + number of waiters moved to inflight, if any.
     pub fn rotate_to(&self, new_key: K) -> Option<(K, usize)> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("keyed group commit mutex poisoned");
+        let mut state = self.state.lock();
 
         let old_key = state.current_key.clone();
         state.current_key = new_key;
@@ -102,19 +96,13 @@ where
 
     /// Drain all waiters for the given key.
     pub fn complete(&self, key: &K) -> Vec<W> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("keyed group commit mutex poisoned");
+        let mut state = self.state.lock();
         state.inflight.remove(key).unwrap_or_default()
     }
 
     /// Drain all pending + inflight waiters.
     pub fn drain_all(&self) -> Vec<W> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("keyed group commit mutex poisoned");
+        let mut state = self.state.lock();
         let mut out = Vec::new();
 
         out.append(&mut state.pending);
@@ -125,18 +113,12 @@ where
     }
 
     pub fn pending_len(&self) -> usize {
-        let state = self
-            .state
-            .lock()
-            .expect("keyed group commit mutex poisoned");
+        let state = self.state.lock();
         state.pending.len()
     }
 
     pub fn inflight_len(&self) -> usize {
-        let state = self
-            .state
-            .lock()
-            .expect("keyed group commit mutex poisoned");
+        let state = self.state.lock();
         state.inflight.len()
     }
 }
@@ -177,7 +159,7 @@ impl<T, R> Accumulator<T, R> {
     {
         let (tx, rx) = crossbeam::channel::bounded::<R>(1);
 
-        let mut state = self.state.lock().expect("accumulator mutex poisoned");
+        let mut state = self.state.lock();
         state.pending.push(item);
 
         // A pending item always belongs to a generation.
@@ -201,7 +183,7 @@ impl<T, R> Accumulator<T, R> {
         // Intentional: policy check and flush are separated to keep `flush_fn`
         // execution out of the lock.
         let should_flush = {
-            let state = self.state.lock().expect("accumulator mutex poisoned");
+            let state = self.state.lock();
             !state.pending.is_empty() && policy.should_flush(&state.pending)
         };
 
@@ -222,7 +204,7 @@ impl<T, R> Accumulator<T, R> {
     {
         // Take the batch and the waiter list out under the lock.
         let (batch, waiters) = {
-            let mut state = self.state.lock().expect("accumulator mutex poisoned");
+            let mut state = self.state.lock();
 
             if state.pending.is_empty() {
                 // Invariant: no pending work => no generation.
@@ -255,12 +237,12 @@ impl<T, R> Accumulator<T, R> {
     }
 
     pub fn pending_len(&self) -> usize {
-        let state = self.state.lock().expect("accumulator mutex poisoned");
+        let state = self.state.lock();
         state.pending.len()
     }
 
     pub fn has_inflight(&self) -> bool {
-        let state = self.state.lock().expect("accumulator mutex poisoned");
+        let state = self.state.lock();
         state.generation.is_some()
     }
 }

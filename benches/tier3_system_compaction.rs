@@ -153,7 +153,11 @@ fn run_overlap_pressure_compact_case(
             // Reuse the same key range each batch to maximize overlap.
             let k = base_keys[idx];
             engine
-                .put(cf, &k[..], base_values[batch * num_keys_per_batch + idx].as_slice())
+                .put(
+                    cf,
+                    &k[..],
+                    base_values[batch * num_keys_per_batch + idx].as_slice(),
+                )
                 .expect("setup put");
         }
         engine.flush().expect("setup flush");

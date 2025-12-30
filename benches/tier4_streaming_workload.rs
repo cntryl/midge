@@ -49,7 +49,12 @@ struct PhaseResult {
     lag_max: u64,
 }
 
-fn run_streaming_phase(engine: Arc<MidgeEngine>, head: Arc<AtomicU64>, duration: Duration, count: bool) -> PhaseResult {
+fn run_streaming_phase(
+    engine: Arc<MidgeEngine>,
+    head: Arc<AtomicU64>,
+    duration: Duration,
+    count: bool,
+) -> PhaseResult {
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(WRITERS + READERS + 1));
 
@@ -188,7 +193,11 @@ fn run_streaming(ctx: &mut StressContext, opts: MidgeOptions) {
     ctx.set_bytes(total_ops.saturating_mul(bytes_per_op));
 
     // Extra shape diagnostics (not used for throughput math).
-    let avg_lag = if reads == 0 { 0.0 } else { (lag_sum as f64) / (reads as f64) };
+    let avg_lag = if reads == 0 {
+        0.0
+    } else {
+        (lag_sum as f64) / (reads as f64)
+    };
     let miss_rate = if reads == 0 {
         0.0
     } else {

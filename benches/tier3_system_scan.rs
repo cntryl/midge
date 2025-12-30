@@ -14,7 +14,12 @@ fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
     }
 }
 
-fn run_scan_query_case(ctx: &mut StressContext, opts: MidgeOptions, setup: impl FnOnce(&MidgeEngine), query: Query) {
+fn run_scan_query_case(
+    ctx: &mut StressContext,
+    opts: MidgeOptions,
+    setup: impl FnOnce(&MidgeEngine),
+    query: Query,
+) {
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.default_column_family();
 

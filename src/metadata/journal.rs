@@ -95,7 +95,7 @@ fn parse_manifest_sync_policy_from_env() -> ManifestSyncPolicy {
     }
 
     // Reset sync state when policy changes to maintain deterministic behavior in tests
-    if let Ok(mut state) = MANIFEST_SYNC_STATE.try_lock() {
+    if let Some(mut state) = MANIFEST_SYNC_STATE.try_lock() {
         if state.last_policy != policy {
             state.batches_since_fsync = 0;
             state.last_policy = policy;
@@ -123,7 +123,7 @@ impl Default for ManifestSyncState {
 }
 
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 static MANIFEST_SYNC_STATE: Lazy<Mutex<ManifestSyncState>> = Lazy::new(|| {
     Mutex::new(ManifestSyncState {
         batches_since_fsync: 0,
@@ -181,9 +181,7 @@ pub fn append_edit_with_fs(
     let mut should_sync = matches!(policy, ManifestSyncPolicy::Always);
 
     if !should_sync {
-        let mut state = MANIFEST_SYNC_STATE
-            .lock()
-            .expect("MANIFEST_SYNC_STATE poisoned");
+        let mut state = MANIFEST_SYNC_STATE.lock();
         match policy {
             ManifestSyncPolicy::EveryN(n) => {
                 state.batches_since_fsync += 1;
@@ -403,9 +401,7 @@ pub fn append_edit_batch_with_fs(
     let mut should_sync = matches!(policy, ManifestSyncPolicy::Always);
 
     if !should_sync {
-        let mut state = MANIFEST_SYNC_STATE
-            .lock()
-            .expect("MANIFEST_SYNC_STATE poisoned");
+        let mut state = MANIFEST_SYNC_STATE.lock();
         match policy {
             ManifestSyncPolicy::EveryN(n) => {
                 state.batches_since_fsync += 1;
@@ -797,9 +793,7 @@ mod tests {
         std::env::set_var("MIDGE_MANIFEST_SYNC_POLICY", "EveryN:1");
         // Reset policy state to ensure deterministic behavior in test
         {
-            let mut s = MANIFEST_SYNC_STATE
-                .lock()
-                .expect("MANIFEST_SYNC_STATE poisoned");
+            let mut s = MANIFEST_SYNC_STATE.lock();
             s.batches_since_fsync = 0;
             s.last_policy = ManifestSyncPolicy::default();
             s.last_fsync = std::time::Instant::now();

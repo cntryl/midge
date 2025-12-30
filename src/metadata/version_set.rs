@@ -5,6 +5,7 @@
 
 use crate::common::MidgeResult;
 use crate::metadata::manifest::{ColumnFamilyMeta, FileMeta, Manifest};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -91,7 +92,7 @@ pub struct VersionSet {
     /// Current active version ID (atomic)
     current_version: AtomicU64,
     /// All versions (kept for reference counting)
-    versions: Arc<std::sync::Mutex<Vec<Arc<Version>>>>,
+    versions: Arc<Mutex<Vec<Arc<Version>>>>,
 }
 
 impl VersionSet {
@@ -101,7 +102,7 @@ impl VersionSet {
 
         Self {
             current_version: AtomicU64::new(version_id),
-            versions: Arc::new(std::sync::Mutex::new(versions)),
+            versions: Arc::new(Mutex::new(versions)),
         }
     }
 
@@ -112,7 +113,7 @@ impl VersionSet {
 
     /// Get a specific version by ID
     pub fn get_version(&self, version_id: u64) -> MidgeResult<Arc<Version>> {
-        let versions = self.versions.lock().expect("versions lock poisoned");
+        let versions = self.versions.lock();
         versions
             .iter()
             .find(|v| v.version_id() == version_id)
@@ -128,7 +129,7 @@ impl VersionSet {
 
     /// Install a new version (called by manifest writer)
     pub fn install_version(&self, version: Arc<Version>) -> MidgeResult<()> {
-        let mut versions = self.versions.lock().expect("versions lock poisoned");
+        let mut versions = self.versions.lock();
         versions.push(version.clone());
         self.current_version
             .store(version.version_id(), Ordering::SeqCst);
@@ -137,22 +138,18 @@ impl VersionSet {
 
     /// Get count of managed versions
     pub fn version_count(&self) -> usize {
-        self.versions.lock().expect("versions lock poisoned").len()
+        self.versions.lock().len()
     }
 
     /// Get all versions
     pub fn all_versions(&self) -> Vec<Arc<Version>> {
-        self.versions
-            .lock()
-            .expect("versions lock poisoned")
-            .clone()
+        self.versions.lock().clone()
     }
 
     /// Check if a version exists
     pub fn has_version(&self, version_id: u64) -> bool {
         self.versions
             .lock()
-            .expect("versions lock poisoned")
             .iter()
             .any(|v| v.version_id() == version_id)
     }

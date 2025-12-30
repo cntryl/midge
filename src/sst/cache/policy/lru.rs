@@ -2,8 +2,8 @@
 
 use super::CachePolicy;
 use crate::sst::cache::key::CacheKey;
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
 
 /// LRU eviction policy
 ///
@@ -33,8 +33,8 @@ impl Default for LruPolicy {
 
 impl CachePolicy for LruPolicy {
     fn on_access(&self, key: CacheKey) {
-        let mut queue = self.queue.lock().expect("LRU queue lock");
-        let mut positions = self.positions.lock().expect("LRU positions lock");
+        let mut queue = self.queue.lock();
+        let mut positions = self.positions.lock();
 
         // If key already exists, remove it from queue
         if let Some(&pos) = positions.get(&key) {
@@ -53,8 +53,8 @@ impl CachePolicy for LruPolicy {
     }
 
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
-        let mut queue = self.queue.lock().expect("LRU queue lock");
-        let mut positions = self.positions.lock().expect("LRU positions lock");
+        let mut queue = self.queue.lock();
+        let mut positions = self.positions.lock();
 
         // Find first victim not in exclude list
         let mut victim_idx = None;
@@ -81,8 +81,8 @@ impl CachePolicy for LruPolicy {
     }
 
     fn on_remove(&self, key: CacheKey) {
-        let mut queue = self.queue.lock().expect("LRU queue lock");
-        let mut positions = self.positions.lock().expect("LRU positions lock");
+        let mut queue = self.queue.lock();
+        let mut positions = self.positions.lock();
 
         if let Some(pos) = positions.remove(&key) {
             queue.remove(pos);
@@ -101,8 +101,8 @@ impl CachePolicy for LruPolicy {
     }
 
     fn clear(&self) {
-        let mut queue = self.queue.lock().expect("LRU queue lock");
-        let mut positions = self.positions.lock().expect("LRU positions lock");
+        let mut queue = self.queue.lock();
+        let mut positions = self.positions.lock();
         queue.clear();
         positions.clear();
     }

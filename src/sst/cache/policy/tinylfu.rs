@@ -2,8 +2,8 @@
 
 use super::CachePolicy;
 use crate::sst::cache::key::CacheKey;
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
 
 /// TinyLFU eviction policy
 ///
@@ -37,8 +37,8 @@ impl Default for TinyLfuPolicy {
 
 impl CachePolicy for TinyLfuPolicy {
     fn on_access(&self, key: CacheKey) {
-        let mut recent = self.recent.lock().expect("TinyLFU recent lock");
-        let mut frequencies = self.frequencies.lock().expect("TinyLFU frequencies lock");
+        let mut recent = self.recent.lock();
+        let mut frequencies = self.frequencies.lock();
 
         // Add to recent window
         recent.push_back(key);
@@ -51,8 +51,8 @@ impl CachePolicy for TinyLfuPolicy {
     }
 
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
-        let mut recent = self.recent.lock().expect("TinyLFU recent lock");
-        let frequencies = self.frequencies.lock().expect("TinyLFU frequencies lock");
+        let mut recent = self.recent.lock();
+        let frequencies = self.frequencies.lock();
 
         // Find victim with lowest frequency among recent accesses (excluding protected types)
         let mut victim: Option<CacheKey> = None;
@@ -80,8 +80,8 @@ impl CachePolicy for TinyLfuPolicy {
     }
 
     fn on_remove(&self, key: CacheKey) {
-        let mut recent = self.recent.lock().expect("TinyLFU recent lock");
-        let mut frequencies = self.frequencies.lock().expect("TinyLFU frequencies lock");
+        let mut recent = self.recent.lock();
+        let mut frequencies = self.frequencies.lock();
 
         recent.retain(|k| *k != key);
         frequencies.remove(&key);
@@ -89,8 +89,8 @@ impl CachePolicy for TinyLfuPolicy {
 
     fn on_stale(&self, key: CacheKey) {
         // Decrement frequency for stale keys to prevent policy drift
-        let mut recent = self.recent.lock().expect("TinyLFU recent lock");
-        let mut frequencies = self.frequencies.lock().expect("TinyLFU frequencies lock");
+        let mut recent = self.recent.lock();
+        let mut frequencies = self.frequencies.lock();
 
         recent.retain(|k| *k != key);
         if let Some(freq) = frequencies.get_mut(&key) {
@@ -102,8 +102,8 @@ impl CachePolicy for TinyLfuPolicy {
     }
 
     fn clear(&self) {
-        let mut recent = self.recent.lock().expect("TinyLFU recent lock");
-        let mut frequencies = self.frequencies.lock().expect("TinyLFU frequencies lock");
+        let mut recent = self.recent.lock();
+        let mut frequencies = self.frequencies.lock();
         recent.clear();
         frequencies.clear();
     }

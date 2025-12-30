@@ -11,7 +11,12 @@ fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
     cntryl_midge::testkit::stress::open_engine_no_compaction(opts)
 }
 
-fn run_overwrite_hot_keys_case(ctx: &mut StressContext, opts: MidgeOptions, num_hot: usize, rounds: usize) {
+fn run_overwrite_hot_keys_case(
+    ctx: &mut StressContext,
+    opts: MidgeOptions,
+    num_hot: usize,
+    rounds: usize,
+) {
     let engine = setup_engine(opts);
     let cf = engine.default_column_family();
 

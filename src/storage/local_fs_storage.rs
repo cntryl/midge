@@ -15,10 +15,10 @@ use crate::storage::abstraction::{
     RenameOptions, RenameReport, Storage, StorageCapabilities, StorageError, StorageErrorKind,
     StorageFile, StoragePath, StorageResult, SyncMode,
 };
+use parking_lot::Mutex;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
 
 /// Local filesystem-backed `Storage` rooted at `root`.
 #[derive(Debug, Clone)]
@@ -94,7 +94,7 @@ impl StorageFile for LocalFsFile {
     }
 
     fn read_at(&self, offset: u64, len: u64) -> StorageResult<Vec<u8>> {
-        let mut file = self.file.lock().expect("file mutex poisoned");
+        let mut file = self.file.lock();
         let meta = file
             .metadata()
             .map_err(|e| LocalFsStorage::map_fs_err(e, "metadata"))?;
@@ -132,7 +132,7 @@ impl StorageFile for LocalFsFile {
     }
 
     fn write_at(&mut self, offset: u64, data: &[u8]) -> StorageResult<u64> {
-        let mut file = self.file.lock().expect("file mutex poisoned");
+        let mut file = self.file.lock();
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| LocalFsStorage::map_fs_err(e, "seek"))?;
 
@@ -153,7 +153,7 @@ impl StorageFile for LocalFsFile {
     }
 
     fn append(&mut self, data: &[u8]) -> StorageResult<(u64, u64)> {
-        let mut file = self.file.lock().expect("file mutex poisoned");
+        let mut file = self.file.lock();
         let start = file
             .seek(SeekFrom::End(0))
             .map_err(|e| LocalFsStorage::map_fs_err(e, "seek_end"))?;
@@ -175,7 +175,7 @@ impl StorageFile for LocalFsFile {
     }
 
     fn len(&self) -> StorageResult<u64> {
-        let file = self.file.lock().expect("file mutex poisoned");
+        let file = self.file.lock();
         let meta = file
             .metadata()
             .map_err(|e| LocalFsStorage::map_fs_err(e, "metadata"))?;
@@ -183,7 +183,7 @@ impl StorageFile for LocalFsFile {
     }
 
     fn sync(&mut self, mode: SyncMode) -> StorageResult<()> {
-        let file = self.file.lock().expect("file mutex poisoned");
+        let file = self.file.lock();
         match mode {
             SyncMode::Data => file
                 .sync_data()

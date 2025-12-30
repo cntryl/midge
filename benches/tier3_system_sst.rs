@@ -15,7 +15,12 @@ fn precompute_keys(num: usize) -> Vec<[u8; KEY_SIZE]> {
     cntryl_midge::testkit::stress::precompute_keys16_u64_be(num)
 }
 
-fn run_sst_point_lookup_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, num_gets: usize) {
+fn run_sst_point_lookup_case(
+    ctx: &mut StressContext,
+    opts: MidgeOptions,
+    num_keys: usize,
+    num_gets: usize,
+) {
     let engine = setup_engine(opts);
     let cf = engine.default_column_family();
 

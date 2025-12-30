@@ -169,7 +169,7 @@ pub struct RuntimeState {
     pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
     /// Condvar used to wait for active_compactions == 0.
-    pub active_compactions_notify: std::sync::Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
+    pub active_compactions_notify: std::sync::Arc<(parking_lot::Mutex<()>, parking_lot::Condvar)>,
 
     /// Whether an ingest barrier is currently active. This is set at BeginIngest
     /// and cleared at EndIngest so tools and tests can detect when ingest mode
@@ -381,8 +381,8 @@ impl RuntimeState {
             ingest_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             active_compactions_notify: std::sync::Arc::new((
-                std::sync::Mutex::new(()),
-                std::sync::Condvar::new(),
+                parking_lot::Mutex::new(()),
+                parking_lot::Condvar::new(),
             )),
             ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
