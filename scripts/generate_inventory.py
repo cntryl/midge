@@ -15,6 +15,8 @@ from datetime import datetime
 
 FN_SHOULD = re.compile(r"^\s*fn\s+(should_[A-Za-z0-9_]+)", re.MULTILINE)
 FN_BENCH = re.compile(r"^\s*fn\s+(bench_[A-Za-z0-9_]+)", re.MULTILINE)
+# Match a stress test attribute followed by the function declaration (e.g. "#[stress_test]\nfn name(...)")
+FN_STRESS = re.compile(r"^\s*#\s*\[\s*stress_test.*\]\s*\n\s*fn\s+([A-Za-z0-9_]+)", re.MULTILINE)
 TEST_ATTR = re.compile(r"^\s*#\s*\[.*test.*\]")
 
 
@@ -49,7 +51,16 @@ def gather_benches(files, root):
             if prefix.startswith('//') or prefix.startswith('///') or prefix.startswith('/*'):
                 continue
             names.append(m.group(1))
+        # Also discover stress tests annotated with #[stress_test]
+        for m in FN_STRESS.finditer(text):
+            # ensure attribute isn't commented out (handled by regex anchoring, but keep parity)
+            line_start = text.rfind('\n', 0, m.start()) + 1
+            prefix = text[line_start:m.start()].strip()
+            if prefix.startswith('//') or prefix.startswith('///') or prefix.startswith('/*'):
+                continue
+            names.append(m.group(1))
         if names:
+            # dedupe and sort
             mapping[rel(p, root).replace('\\\\', '/')]=sorted(set(names))
     return mapping
 
@@ -88,11 +99,11 @@ def render_md(src_tests, integration_tests, benches, root):
     else:
         lines.append("(none)\n")
 
-    lines.append("**Benches (benches/)**\n")
+    lines.append("**Benches & Stress (benches/)**\n")
     if benches:
         for f, names in sorted(benches.items()):
             lines.append(f"- `{f}`")
-            lines.append("  - benches:")
+            lines.append("  - benches & stress:")
             for n in names:
                 lines.append(f"    - `{n}`")
             lines.append("")
@@ -126,7 +137,7 @@ def main():
     print(f"Wrote inventory to {out_path}")
     print(f"Found {sum(len(v) for v in src_tests.values())} src tests in {len(src_tests)} files")
     print(f"Found {sum(len(v) for v in integration_tests.values())} integration tests in {len(integration_tests)} files")
-    print(f"Found {sum(len(v) for v in benches.values())} benches in {len(benches)} files")
+    print(f"Found {sum(len(v) for v in benches.values())} benches/stress in {len(benches)} files")
 
     if args.replace:
         target = root / "inventory.md"
