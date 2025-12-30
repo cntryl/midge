@@ -48,7 +48,10 @@ mod tests {
 
     #[test]
     fn should_return_ok_when_insert_succeeded() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result = InsertResult::Ok;
 
         // Assert
@@ -57,7 +60,10 @@ mod tests {
 
     #[test]
     fn should_detect_ok_variant_when_calling_is_ok() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result = InsertResult::Ok;
 
         // Assert
@@ -80,9 +86,11 @@ mod tests {
     fn should_detect_already_exists_variant_when_calling_is_ok() {
         // Arrange
         let value = Bytes::from_static(b"value");
+
+        // Act
         let result = InsertResult::AlreadyExists(value);
 
-        // Act & Assert
+        // Assert
         assert!(!result.is_ok());
     }
 
@@ -140,7 +148,10 @@ mod tests {
 
     #[test]
     fn should_debug_format_insert_result_ok() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result = InsertResult::Ok;
         let debug_str = format!("{:?}", result);
 
@@ -152,6 +163,8 @@ mod tests {
     fn should_debug_format_insert_result_already_exists() {
         // Arrange
         let value = Bytes::from_static(b"val");
+
+n        // Act
         let result = InsertResult::AlreadyExists(value);
         let debug_str = format!("{:?}", result);
 
@@ -164,7 +177,10 @@ mod tests {
 
     #[test]
     fn should_return_swapped_when_cas_succeeded() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result = CasResult::Swapped;
 
         // Assert
@@ -173,7 +189,10 @@ mod tests {
 
     #[test]
     fn should_detect_swapped_variant_when_calling_is_ok() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result = CasResult::Swapped;
 
         // Assert
@@ -182,7 +201,10 @@ mod tests {
 
     #[test]
     fn should_detect_swapped_variant_not_mismatch() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+n        // Act
         let result = CasResult::Swapped;
 
         // Assert
@@ -191,7 +213,10 @@ mod tests {
 
     #[test]
     fn should_return_mismatch_with_none_when_key_not_found() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+n        // Act
         let result = CasResult::Mismatch(None);
 
         // Assert
@@ -213,15 +238,21 @@ mod tests {
     #[test]
     fn should_detect_mismatch_variant_when_calling_is_mismatch() {
         // Arrange
+        // (no setup required)
+
+        // Act
         let result = CasResult::Mismatch(None);
 
-        // Act & Assert
+        // Assert
         assert!(result.is_mismatch());
     }
 
     #[test]
     fn should_not_detect_swapped_as_mismatch() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result = CasResult::Swapped;
 
         // Assert
@@ -231,20 +262,36 @@ mod tests {
     #[test]
     fn should_not_detect_mismatch_as_ok() {
         // Arrange
+        // (no setup required)
+
+        // Act
         let result = CasResult::Mismatch(None);
 
-        // Act & Assert
+        // Assert
         assert!(!result.is_ok());
     }
 
     #[test]
-    fn should_detect_mismatch_with_value_as_mismatch() {
+    fn should_detect_mismatch_variant_when_value_present() {
         // Arrange
         let value = Bytes::from_static(b"value");
+
+        // Act
+        let result = CasResult::Mismatch(Some(value.clone()));
+
+        // Assert
+        assert!(result.is_mismatch());
+    }
+
+    #[test]
+    fn should_not_detect_mismatch_as_ok_when_value_present() {
+        // Arrange
+        let value = Bytes::from_static(b"value");
+
+        // Act
         let result = CasResult::Mismatch(Some(value));
 
-        // Act & Assert
-        assert!(result.is_mismatch());
+        // Assert
         assert!(!result.is_ok());
     }
 
@@ -302,7 +349,10 @@ mod tests {
 
     #[test]
     fn should_debug_format_cas_result_swapped() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result = CasResult::Swapped;
         let debug_str = format!("{:?}", result);
 
@@ -313,6 +363,9 @@ mod tests {
     #[test]
     fn should_debug_format_cas_result_mismatch() {
         // Arrange
+        // (no setup required)
+
+n        // Act
         let result = CasResult::Mismatch(None);
         let debug_str = format!("{:?}", result);
 

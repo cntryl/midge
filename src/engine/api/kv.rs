@@ -57,7 +57,8 @@ mod tests {
 
     #[test]
     fn should_create_key_from_empty_slice() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let key = key(b"");
 
         // Assert
@@ -102,7 +103,8 @@ mod tests {
 
     #[test]
     fn should_create_key_from_empty_vec() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let key = key_owned(vec![]);
 
         // Assert
@@ -138,7 +140,8 @@ mod tests {
 
     #[test]
     fn should_create_value_from_empty_slice() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let value = value(b"");
 
         // Assert
@@ -183,7 +186,8 @@ mod tests {
 
     #[test]
     fn should_create_value_from_empty_vec() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let value = value_owned(vec![]);
 
         // Assert
@@ -224,7 +228,10 @@ mod tests {
         // Arrange
         let pair: KvPair = (key(b"k"), value(b"v"));
 
-        // Act & Assert
+        // Act
+        // (access key)
+
+        // Assert
         assert_eq!(pair.0.as_ref(), b"k");
     }
 
@@ -233,7 +240,10 @@ mod tests {
         // Arrange
         let pair: KvPair = (key(b"k"), value(b"v"));
 
-        // Act & Assert
+        // Act
+        // (access value)
+
+        // Assert
         assert_eq!(pair.1.as_ref(), b"v");
     }
 
@@ -242,7 +252,8 @@ mod tests {
 
     #[test]
     fn should_create_optional_value_some() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let opt_value: OptionalValue = Some(value(b"value"));
 
         // Assert
@@ -252,7 +263,8 @@ mod tests {
 
     #[test]
     fn should_create_optional_value_none() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let opt_value: OptionalValue = None;
 
         // Assert

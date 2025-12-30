@@ -559,14 +559,19 @@ mod tests {
         ];
         let mut iter = Iterator::forward(results);
 
-        // Act & Assert
-        assert_eq!(iter.remaining(), 3);
+        // Act: advance and capture remaining counts at each step
+        let r0 = iter.remaining();
         iter.next();
-        assert_eq!(iter.remaining(), 2);
+        let r1 = iter.remaining();
         iter.next();
-        assert_eq!(iter.remaining(), 1);
+        let r2 = iter.remaining();
         iter.next();
-        assert_eq!(iter.remaining(), 0);
+        let r3 = iter.remaining();
+        // Assert: remaining counts should decrease as we consume items
+        assert_eq!(r0, 3);
+        assert_eq!(r1, 2);
+        assert_eq!(r2, 1);
+        assert_eq!(r3, 0);
     }
 
     #[test]
@@ -617,7 +622,8 @@ mod tests {
 
     #[test]
     fn should_not_mark_exhausted_when_iterator_created() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let results = vec![(vec![1], vec![10])];
         let iter = Iterator::forward(results);
 
@@ -711,7 +717,10 @@ mod tests {
 
     #[test]
     fn should_initialize_builder_with_defaults_when_created() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let builder = IteratorBuilder::new();
 
         // Assert - verify defaults through behavior
@@ -723,16 +732,20 @@ mod tests {
 
     #[test]
     fn should_use_default_when_calling_default_method() {
-        // Arrange & Act
+        // Arrange
+        let builder1 = IteratorBuilder::new();
+        let builder2 = IteratorBuilder::default();
+
+        // Act
+        let results = vec![(vec![1], vec![10])];
+        let iter1 = builder1.build(results.clone());
+        let iter2 = builder2.build(results);
         let builder1 = IteratorBuilder::new();
         let builder2 = IteratorBuilder::default();
 
         // Assert - both should behave the same
-        let results1 = vec![(vec![1], vec![10])];
-        let results2 = vec![(vec![1], vec![10])];
-        let iter1 = builder1.build(results1);
-        let iter2 = builder2.build(results2);
         assert_eq!(iter1.direction(), iter2.direction());
+        assert_eq!(iter1.remaining(), iter2.remaining());
     }
 
     // ========== IteratorBuilder Chaining Tests ==========
@@ -957,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn should_combine_start_and_end_bounds_when_both_set() {
+    fn should_filter_to_specified_range() {
         // Arrange
         let results = vec![
             (vec![1], vec![10]),
@@ -1050,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_empty_keys_and_values_when_iterating() {
+    fn should_handle_empty_key_value_when_iterating() {
         // Arrange
         let results = vec![(vec![], vec![])];
 

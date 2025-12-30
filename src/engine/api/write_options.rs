@@ -116,7 +116,10 @@ mod tests {
 
     #[test]
     fn should_initialize_all_fields_to_false_when_creating_new_options() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+n        // Act
         let opts = WriteOptions::new();
 
         // Assert
@@ -126,7 +129,10 @@ mod tests {
 
     #[test]
     fn should_create_options_with_all_default_values_when_calling_default() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+n        // Act
         let opts = WriteOptions::default();
 
         // Assert - all fields should match new()
@@ -135,12 +141,15 @@ mod tests {
     }
 
     #[test]
-    fn should_have_new_and_default_return_equivalent_options() {
+    fn should_return_equivalent_options_when_created_via_new_or_default() {
         // Arrange
+        // (no setup required)
+
+n        // Act
         let new_opts = WriteOptions::new();
         let default_opts = WriteOptions::default();
 
-        // Act & Assert
+n        // Assert
         assert_eq!(new_opts.sync, default_opts.sync);
         assert_eq!(new_opts.disable_wal, default_opts.disable_wal);
     }
@@ -150,7 +159,10 @@ mod tests {
 
     #[test]
     fn should_set_sync_to_true_when_calling_sync() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().sync();
 
         // Assert
@@ -160,7 +172,10 @@ mod tests {
 
     #[test]
     fn should_return_self_for_chaining_when_calling_sync() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().sync().disable_wal();
 
         // Assert
@@ -170,7 +185,10 @@ mod tests {
 
     #[test]
     fn should_keep_sync_true_when_calling_sync_multiple_times() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().sync().sync();
 
         // Assert
@@ -182,7 +200,10 @@ mod tests {
 
     #[test]
     fn should_set_disable_wal_to_true_when_calling_disable_wal() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().disable_wal();
 
         // Assert
@@ -192,7 +213,10 @@ mod tests {
 
     #[test]
     fn should_return_self_for_chaining_when_calling_disable_wal() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().disable_wal().sync();
 
         // Assert
@@ -202,7 +226,10 @@ mod tests {
 
     #[test]
     fn should_keep_disable_wal_true_when_calling_disable_wal_multiple_times() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().disable_wal().disable_wal();
 
         // Assert
@@ -282,7 +309,10 @@ mod tests {
 
     #[test]
     fn should_debug_format_options_with_defaults() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new();
         let debug_str = format!("{:?}", opts);
 
@@ -292,7 +322,10 @@ mod tests {
 
     #[test]
     fn should_debug_format_options_with_sync() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().sync();
         let debug_str = format!("{:?}", opts);
 
@@ -305,7 +338,10 @@ mod tests {
 
     #[test]
     fn should_support_full_fluent_api_chain() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().sync().disable_wal();
 
         // Assert
@@ -320,7 +356,10 @@ mod tests {
 
         let opts2 = WriteOptions::new().disable_wal().sync();
 
-        // Act & Assert
+        // Act
+        // (no action required)
+
+        // Assert
         assert_eq!(opts1.sync, opts2.sync);
         assert_eq!(opts1.disable_wal, opts2.disable_wal);
     }
@@ -329,7 +368,10 @@ mod tests {
 
     #[test]
     fn should_handle_multiple_sync_calls() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new().sync().sync().sync();
 
         // Assert
@@ -338,7 +380,10 @@ mod tests {
 
     #[test]
     fn should_handle_alternating_method_calls() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = WriteOptions::new()
             .sync()
             .disable_wal()

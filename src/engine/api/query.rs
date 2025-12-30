@@ -102,7 +102,10 @@ mod tests {
 
     #[test]
     fn should_initialize_all_fields_to_none_when_creating_new_query() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let query = Query::new();
 
         // Assert
@@ -115,7 +118,10 @@ mod tests {
 
     #[test]
     fn should_create_query_with_all_default_values_when_calling_default() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let query = Query::default();
 
         // Assert - all fields should match new()
@@ -127,12 +133,15 @@ mod tests {
     }
 
     #[test]
-    fn should_have_new_and_default_return_equivalent_queries() {
+    fn should_return_equivalent_queries() {
         // Arrange
         let new_query = Query::new();
         let default_query = Query::default();
 
-        // Act & Assert
+        // Act
+        // (compare fields)
+
+        // Assert
         assert_eq!(new_query.start, default_query.start);
         assert_eq!(new_query.end, default_query.end);
         assert_eq!(new_query.prefix, default_query.prefix);
@@ -142,7 +151,10 @@ mod tests {
 
     #[test]
     fn should_initialize_reverse_to_false_when_creating_query() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let query = Query::new();
 
         // Assert
@@ -333,7 +345,10 @@ mod tests {
 
     #[test]
     fn should_set_limit_when_calling_limit() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let query = Query::new().limit(42);
 
         // Assert
@@ -342,7 +357,8 @@ mod tests {
 
     #[test]
     fn should_return_self_for_chaining_when_calling_limit() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let query = Query::new().limit(10).reverse();
 
         // Assert
@@ -352,7 +368,8 @@ mod tests {
 
     #[test]
     fn should_overwrite_limit_when_calling_limit_twice() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let query = Query::new().limit(10).limit(20);
 
         // Assert
@@ -361,7 +378,8 @@ mod tests {
 
     #[test]
     fn should_accept_zero_limit() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let query = Query::new().limit(0);
 
         // Assert
@@ -370,7 +388,8 @@ mod tests {
 
     #[test]
     fn should_accept_large_limit() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let query = Query::new().limit(usize::MAX);
 
         // Assert
@@ -382,7 +401,8 @@ mod tests {
 
     #[test]
     fn should_set_reverse_to_true_when_calling_reverse() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let query = Query::new().reverse();
 
         // Assert
@@ -404,7 +424,8 @@ mod tests {
 
     #[test]
     fn should_keep_reverse_true_when_calling_reverse_multiple_times() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let query = Query::new().reverse().reverse();
 
         // Assert
@@ -690,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn should_support_prefix_with_limit_and_reverse() {
+    fn should_support_prefix_with_limit_reverse() {
         // Arrange
         let prefix = Bytes::from_static(b"user:");
 
@@ -716,7 +737,10 @@ mod tests {
             .limit(10)
             .reverse();
 
-        // Act & Assert
+        // Act
+        // (build both queries)
+
+        // Assert
         assert_eq!(q1.limit, q2.limit);
         assert_eq!(q1.reverse, q2.reverse);
         assert_eq!(q1.start, q2.start);
@@ -742,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_mixed_prefix_and_start() {
+    fn should_handle_mixed_prefix_start() {
         // Arrange
         let start = Bytes::from_static(b"start");
         let prefix = Bytes::from_static(b"prefix");
@@ -758,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_mixed_end_and_prefix() {
+    fn should_handle_mixed_end_prefix() {
         // Arrange
         let end = Bytes::from_static(b"end");
         let prefix = Bytes::from_static(b"pre");

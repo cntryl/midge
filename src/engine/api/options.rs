@@ -475,6 +475,13 @@ mod tests {
 
     #[test]
     fn should_distinguish_workload_profiles() {
+        // Arrange
+        // (no setup required)
+
+        // Act
+        // (compare variants)
+
+        // Assert
         assert_ne!(WorkloadProfile::Mixed, WorkloadProfile::WriteHeavy);
         assert_ne!(WorkloadProfile::WriteHeavy, WorkloadProfile::ReadMostly);
         assert_ne!(WorkloadProfile::ReadMostly, WorkloadProfile::RangeScan);
@@ -485,7 +492,13 @@ mod tests {
 
     #[test]
     fn should_create_options_with_defaults() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = OpenOptions::new();
+
+        // Assert
         assert_eq!(opts.goal, Goal::Latency);
         assert_eq!(opts.durability, Durability::Steady);
         assert_eq!(opts.memory_budget, MemoryBudget::Auto);
@@ -494,26 +507,45 @@ mod tests {
 
     #[test]
     fn should_set_path_when_calling_path() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = OpenOptions::new().path("./test_db");
+
+        // Assert
         assert_eq!(opts.path, PathBuf::from("./test_db"));
     }
 
     #[test]
     fn should_set_goal_when_calling_goal() {
+        // Arrange
+        // Act
         let opts = OpenOptions::new().goal(Goal::Throughput);
+
+        // Assert
         assert_eq!(opts.goal, Goal::Throughput);
     }
 
     #[test]
     fn should_set_durability_when_calling_durability() {
+        // Arrange
+        // Act
         let opts = OpenOptions::new().durability(Durability::Strict);
+
+        // Assert
         assert_eq!(opts.durability, Durability::Strict);
     }
 
     #[test]
     fn should_set_memory_budget_when_calling_memory_budget() {
+        // Arrange
         let budget = MemoryBudget::Bytes(2 * 1024 * 1024 * 1024);
+
+        // Act
         let opts = OpenOptions::new().memory_budget(budget);
+
+        // Assert
         assert_eq!(opts.memory_budget, budget);
     }
 
@@ -525,6 +557,10 @@ mod tests {
 
     #[test]
     fn should_support_fluent_builder_chain() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = OpenOptions::new()
             .path("./db")
             .goal(Goal::Latency)
@@ -532,6 +568,7 @@ mod tests {
             .workload(WorkloadProfile::ReadMostly)
             .build();
 
+        // Assert
         assert_eq!(opts.path, PathBuf::from("./db"));
         assert_eq!(opts.goal, Goal::Latency);
         assert_eq!(opts.durability, Durability::Strict);
@@ -540,8 +577,13 @@ mod tests {
 
     #[test]
     fn should_derive_parameters_when_building() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = OpenOptions::new().goal(Goal::Latency).build();
 
+        // Assert
         assert!(opts.block_size > 0);
         assert!(opts.memtable_size_limit > 0);
         assert!(opts.target_sst_size > 0);
@@ -576,34 +618,54 @@ mod tests {
 
     #[test]
     fn should_derive_ack_policy_immediate_for_cloud_persisted() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = OpenOptions::new()
             .durability(Durability::CloudPersisted)
             .build();
+        // Assert
         assert_eq!(opts.ack_policy, AckPolicy::Immediate);
     }
 
     #[test]
     fn should_use_different_block_sizes_for_different_goals() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let latency_opts = OpenOptions::new().goal(Goal::Latency).build();
         let throughput_opts = OpenOptions::new().goal(Goal::Throughput).build();
 
+        // Assert
         assert_ne!(latency_opts.block_size, throughput_opts.block_size);
     }
 
     #[test]
     fn should_use_different_memtable_sizes_for_different_workloads() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let normal = OpenOptions::new().workload(WorkloadProfile::Mixed).build();
         let write_heavy = OpenOptions::new()
             .workload(WorkloadProfile::WriteHeavy)
             .build();
 
+        // Assert
         assert!(write_heavy.memtable_size_limit >= normal.memtable_size_limit);
     }
 
     #[test]
     fn should_derive_parameters_from_default() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = OpenOptions::default().build();
 
+        // Assert
         assert_eq!(opts.goal, Goal::Latency);
         assert!(opts.block_size > 0);
         assert!(opts.memtable_size_limit > 0);
@@ -611,8 +673,13 @@ mod tests {
 
     #[test]
     fn should_provide_getter_methods() {
+        // Arrange
+        // (no setup required)
+
+        // Act
         let opts = OpenOptions::new().build();
 
+        // Assert - getters should be callable
         let _ = opts.block_size();
         let _ = opts.memtable_size_limit();
         let _ = opts.target_sst_size();
@@ -630,20 +697,28 @@ mod tests {
 
     #[test]
     fn should_respect_explicit_memory_budget() {
+        // Arrange
         // Use a realistic budget larger than 2x memtable size to have cache allocation
         let budget = MemoryBudget::Bytes(512 * 1024 * 1024); // 512MB
+
+        // Act
         let opts = OpenOptions::new().memory_budget(budget).build();
 
-        // With explicit budget, cache size should be derived from it
+        // Assert
         assert!(opts.block_cache_size > 0);
     }
 
     #[test]
     fn should_clone_options() {
+        // Arrange
         let original = OpenOptions::new()
             .goal(Goal::Throughput)
             .durability(Durability::Strict);
+
+        // Act
         let cloned = original.clone();
+
+        // Assert
 
         assert_eq!(cloned.goal, original.goal);
         assert_eq!(cloned.durability, original.durability);
