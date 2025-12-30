@@ -136,39 +136,6 @@ cloud-oci = ["cloud-common", "dep:urlencoding"]
 cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]
 cloud_integration = ["cloud-all"]
 
-# =============================================================================
-# Build Profiles
-# =============================================================================
-
-[profile.release]
-codegen-units = 1
-lto = "thin"
-opt-level = 3
-
-[profile.bench]
-codegen-units = 1
-lto = "thin"
-opt-level = 3
-
-# =============================================================================
-# Metadata
-# =============================================================================
-
-[package.metadata.docs.rs]
-all-features = true
-targets = ["x86_64-unknown-linux-gnu"]
-
-# =============================================================================
-# Binaries
-# =============================================================================
-
-[[bin]]
-name = "validate_tests"
-path = "testutils/validate_tests.rs"
-
-[[bin]]
-name = "detect_deadlocks"
-path = "testutils/detect_deadlocks.rs"
 
 # =============================================================================
 # Benchmarks — Tier 1: Hot Path (<1s)

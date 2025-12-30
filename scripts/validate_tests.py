@@ -247,15 +247,43 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Validate test naming and structure rules")
     p.add_argument("--summary", "-s", action="store_true", help="Show summary for repository")
     p.add_argument("--file", "-f", type=Path, help="Check a single file")
+    p.add_argument("--json", "-j", type=Path, help="Dump results to JSON file")
     return p.parse_args()
+
+
+import json
+
+
+def results_to_dict(results: list) -> list:
+    out = []
+    for r in results:
+        out.append({
+            "file": r.file,
+            "test": r.test_name,
+            "line": r.line,
+            "line_count": r.line_count,
+            "issues": r.issues,
+        })
+    return out
 
 
 def main() -> None:
     args = parse_args()
+
     if args.summary:
         print_summary()
+        if args.json:
+            all_results = get_all_test_results()
+            with open(args.json, "w", encoding="utf-8") as fh:
+                json.dump(results_to_dict(all_results), fh, indent=2)
+            print(f"Wrote JSON report to {args.json}")
     elif args.file:
         print_file_results(args.file)
+        if args.json:
+            results = find_tests_in_file(args.file)
+            with open(args.json, "w", encoding="utf-8") as fh:
+                json.dump(results_to_dict(results), fh, indent=2)
+            print(f"Wrote JSON report to {args.json}")
     else:
         print("Test Validation Helper")
         print("======================")
