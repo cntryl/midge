@@ -503,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_should_not_drop_recent_tombstones_when_snapshot_horizon_exists() {
+    fn should_not_drop_recent_tombstones_when_snapshot_horizon_exists() {
         // Arrange: create versions where one key has a recent tombstone
         let recent_tombstone = mk_version("k", 200, true, None::<&[u8]>, None);
         let older_put = mk_version("k", 100, false, Some("v"), None);
