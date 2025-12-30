@@ -126,3 +126,4 @@ tools/
 tmp/
 .docker/bench/results
 .docker/bench/target
+scripts/*.json

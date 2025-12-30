@@ -188,7 +188,10 @@ mod tests {
 
     #[test]
     fn should_create_compaction_plan_with_constructor() {
-        // Arrange / Act
+        // Arrange
+        // (constructor args)
+
+        // Act
         let plan = CompactionPlan::new(5, 2, 3);
 
         // Assert: plan initialized correctly
@@ -214,7 +217,10 @@ mod tests {
 
     #[test]
     fn should_allow_chaining_builder_methods_when_using_with_output_seq() {
-        // Arrange / Act
+        // Arrange
+        // (builder chaining)
+
+        // Act
         let plan = CompactionPlan::new(1, 0, 1)
             .with_output_seq(456)
             .with_output_seq(789);
@@ -253,7 +259,10 @@ mod tests {
 
     #[test]
     fn should_create_leveled_compaction_config_with_default_values() {
-        // Arrange / Act
+        // Arrange
+        // (default config)
+
+        // Act
         let config = LeveledCompactionConfig::default();
 
         // Assert
@@ -270,7 +279,10 @@ mod tests {
 
     #[test]
     fn should_initialize_empty_file_vectors_when_creating_plan() {
-        // Arrange / Act
+        // Arrange
+        // (constructor)
+
+        // Act
         let plan = CompactionPlan::new(0, 0, 1);
 
         // Assert: input and output file lists should be empty
@@ -296,7 +308,10 @@ mod tests {
 
     #[test]
     fn should_handle_maximum_column_family_id() {
-        // Arrange / Act
+        // Arrange
+        // (constructor with max cf id)
+
+        // Act
         let plan = CompactionPlan::new(u32::MAX, 0, 1).with_output_seq(100);
 
         // Assert
@@ -305,7 +320,10 @@ mod tests {
 
     #[test]
     fn should_handle_maximum_output_sequence_number() {
-        // Arrange / Act
+        // Arrange
+        // (constructor with max output seq)
+
+        // Act
         let plan = CompactionPlan::new(0, 0, 1).with_output_seq(u64::MAX);
 
         // Assert
