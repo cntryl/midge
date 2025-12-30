@@ -315,19 +315,24 @@ mod tests {
 
     #[test]
     fn should_flush_only_when_policy_triggers() {
+        // Arrange
         let acc: Accumulator<u32, u32> = Accumulator::new();
         let policy = LenFlushPolicy::new(3);
 
         let rx1 = acc.submit_async(1);
         let rx2 = acc.submit_async(2);
 
+        // Act (policy should not trigger yet)
         let ran = acc.flush_if_needed(&policy, |batch| batch.len() as u32);
         assert!(!ran);
 
+        // Arrange more (bring to threshold)
         let rx3 = acc.submit_async(3);
+        // Act (policy should now trigger)
         let ran = acc.flush_if_needed(&policy, |batch| batch.len() as u32);
         assert!(ran);
 
+        // Assert
         assert_eq!(rx1.recv().unwrap(), 3);
         assert_eq!(rx2.recv().unwrap(), 3);
         assert_eq!(rx3.recv().unwrap(), 3);
@@ -335,18 +340,21 @@ mod tests {
 
     #[test]
     fn should_run_flush_once_for_many_submitters() {
+        // Arrange
         let acc: Accumulator<u32, u32> = Accumulator::new();
         let policy = LenFlushPolicy::new(1);
 
         let rx1 = acc.submit_async(1);
         let rx2 = acc.submit_async(2);
 
+        // Act: flush should run only once
         let flushes = AtomicUsize::new(0);
         let ran = acc.flush_if_needed(&policy, |batch| {
             flushes.fetch_add(1, Ordering::Relaxed);
             batch.len() as u32
         });
 
+        // Assert
         assert!(ran);
         assert_eq!(flushes.load(Ordering::Relaxed), 1);
         assert_eq!(rx1.recv().unwrap(), 2);
@@ -355,23 +363,27 @@ mod tests {
 
     #[test]
     fn should_group_waiters_by_key_and_drain_on_complete() {
+        // Note: this test verifies a single behavior: waiters grouped per key are drained when that key is completed.
+
+        // Arrange
         let gc: KeyedGroupCommit<u64, u64> = KeyedGroupCommit::new(10);
 
         // Join under current key (10)
         gc.join(1);
         gc.join(2);
 
-        // Seal key=10 and start key=11
+        // Act: Seal key=10 and start key=11
         let sealed = gc.rotate_to(11);
         assert_eq!(sealed, Some((10, 2)));
 
-        // Join under new key (11)
+        // Arrange (join under new key 11)
         gc.join(3);
 
+        // Act & Assert: Complete key=10 drains waiters
         let w10 = gc.complete(&10);
         assert_eq!(w10, vec![1, 2]);
 
-        // Key=11 is still pending (not sealed yet)
+        // Assert: Key=11 is still pending (not sealed yet)
         assert_eq!(gc.complete(&11), Vec::<u64>::new());
         assert_eq!(gc.pending_len(), 1);
     }
