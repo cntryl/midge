@@ -240,7 +240,10 @@ mod tests {
 
     #[test]
     fn should_create_shared_key_credential() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let cred = AzureCredential::SharedKey {
             account_key: "mykey".to_string(),
         };
@@ -256,7 +259,10 @@ mod tests {
 
     #[test]
     fn should_create_sas_token_credential() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let cred = AzureCredential::SasToken {
             token: "token123".to_string(),
         };
@@ -272,7 +278,10 @@ mod tests {
 
     #[test]
     fn should_create_connection_string_credential() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let cred = AzureCredential::ConnectionString {
             connection_string: "DefaultEndpointsProtocol=https;...".to_string(),
         };
@@ -288,7 +297,10 @@ mod tests {
 
     #[test]
     fn should_create_managed_identity_credential() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let cred = AzureCredential::ManagedIdentity;
 
         // Assert
@@ -302,7 +314,10 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_shared_key() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider = AzureProvider::with_shared_key(
             "myaccount".to_string(),
             "mycontainer".to_string(),
@@ -322,7 +337,10 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_different_shared_keys() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider1 = AzureProvider::with_shared_key(
             "account1".to_string(),
             "container1".to_string(),
@@ -342,7 +360,10 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_sas_token() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider = AzureProvider::with_sas_token(
             "myaccount".to_string(),
             "mycontainer".to_string(),
@@ -361,7 +382,10 @@ mod tests {
 
     #[test]
     fn should_normalize_sas_token_with_question_mark() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider = AzureProvider::with_sas_token(
             "account".to_string(),
             "container".to_string(),
@@ -380,7 +404,10 @@ mod tests {
 
     #[test]
     fn should_normalize_sas_token_without_question_mark() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider = AzureProvider::with_sas_token(
             "account".to_string(),
             "container".to_string(),
@@ -424,7 +451,10 @@ mod tests {
 
     #[test]
     fn should_create_provider_with_managed_identity() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider = AzureProvider::with_managed_identity(
             "myaccount".to_string(),
             "mycontainer".to_string(),
@@ -440,7 +470,10 @@ mod tests {
 
     #[test]
     fn should_default_to_managed_identity_with_new() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider = AzureProvider::new("account".to_string(), "container".to_string());
 
         // Assert
@@ -454,7 +487,10 @@ mod tests {
 
     #[test]
     fn should_handle_empty_account_name() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider = AzureProvider::new("".to_string(), "container".to_string());
 
         // Assert
@@ -464,7 +500,10 @@ mod tests {
 
     #[test]
     fn should_handle_empty_container_name() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider = AzureProvider::new("account".to_string(), "".to_string());
 
         // Assert
@@ -474,7 +513,10 @@ mod tests {
 
     #[test]
     fn should_handle_special_characters_in_names() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let provider =
             AzureProvider::new("my-account-123".to_string(), "my-container-456".to_string());
 
@@ -495,8 +537,11 @@ mod tests {
         );
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        // Act & Assert - Just verify it doesn't panic
+        // Act
         provider.submit_put("key".into(), vec![1, 2, 3], tx);
+
+        // Assert
+        // (no assertion required; verifying it doesn't panic)
     }
 
     #[test]
@@ -509,8 +554,11 @@ mod tests {
         );
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        // Act & Assert
+        // Act
         provider.submit_put("key".into(), vec![1, 2, 3], tx);
+
+        // Assert
+        // (no assertion required; verifying it doesn't panic)
     }
 
     #[test]
@@ -520,8 +568,11 @@ mod tests {
             AzureProvider::with_managed_identity("account".to_string(), "container".to_string());
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        // Act & Assert
+        // Act
         provider.submit_put("key".into(), vec![1, 2, 3], tx);
+
+        // Assert
+        // (no assertion required; verifying it doesn't panic)
     }
 
     #[test]
@@ -530,8 +581,11 @@ mod tests {
         let provider = AzureProvider::new("account".to_string(), "container".to_string());
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        // Act & Assert
+        // Act
         provider.submit_get("key".into(), tx);
+
+        // Assert
+        // (no assertion required; verifying it doesn't panic)
     }
 
     #[test]
@@ -540,8 +594,11 @@ mod tests {
         let provider = AzureProvider::new("account".to_string(), "container".to_string());
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        // Act & Assert
+        // Act
         provider.submit_delete("key".into(), tx);
+
+        // Assert
+        // (no assertion required; verifying it doesn't panic)
     }
 
     #[test]
@@ -550,8 +607,11 @@ mod tests {
         let provider = AzureProvider::new("account".to_string(), "container".to_string());
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        // Act & Assert
+        // Act
         provider.submit_list("prefix".into(), tx);
+
+        // Assert
+        // (no assertion required; verifying it doesn't panic)
     }
 
     #[test]
@@ -560,8 +620,11 @@ mod tests {
         let provider = AzureProvider::new("account".to_string(), "container".to_string());
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        // Act & Assert
+        // Act
         provider.submit_head("key".into(), tx);
+
+        // Assert
+        // (no assertion required; verifying it doesn't panic)
     }
 
     #[test]
@@ -570,8 +633,11 @@ mod tests {
         let provider = AzureProvider::new("account".to_string(), "container".to_string());
         let (tx, _rx) = std::sync::mpsc::channel();
 
-        // Act & Assert
+        // Act
         provider.submit_get_range("key".into(), 0, Some(1024), tx);
+
+        // Assert
+        // (no assertion required; verifying it doesn't panic)
     }
 
     #[test]
@@ -585,11 +651,17 @@ mod tests {
             let key = format!("key{}", i);
             provider.submit_put(key, vec![i as u8], tx);
         }
+
+        // Assert
+        // (no assertion required; verifying no panics during multiple operations)
     }
 
     #[test]
     fn should_handle_multiple_credential_types() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let sk =
             AzureProvider::with_shared_key("a".to_string(), "c".to_string(), "key".to_string());
         let sas =
