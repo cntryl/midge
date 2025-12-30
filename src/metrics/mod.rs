@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn should_track_write_metrics_latency_and_bytes_when_recording_writes() {
+    fn should_track_write_metrics_when_recording_writes() {
         // Arrange
         let metrics = EngineMetrics::new();
 
@@ -598,7 +598,10 @@ mod tests {
 
     #[test]
     fn should_initialize_latency_metric_with_zero_count() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let latency = LatencyMetric::new();
 
         // Assert
@@ -690,7 +693,8 @@ mod tests {
 
     #[test]
     fn should_initialize_engine_metrics_with_zeros() {
-        // Arrange / Act
+        // Arrange
+        // Act
         let metrics = EngineMetrics::new();
 
         // Assert: all counters start at 0
@@ -716,7 +720,8 @@ mod tests {
 
     #[test]
     fn should_initialize_engine_metrics_via_default() {
-        // Arrange / Act
+        // Arrange
+        // Act
         let metrics = EngineMetrics::default();
 
         // Assert: default == new
@@ -998,7 +1003,10 @@ mod tests {
 
     #[test]
     fn should_create_default_performance_metrics() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let metrics = PerformanceMetrics::default();
 
         // Assert

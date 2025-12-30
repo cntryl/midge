@@ -314,25 +314,37 @@ mod tests {
     }
 
     #[test]
-    fn should_flush_only_when_policy_triggers() {
+    fn should_not_flush_when_policy_not_triggered() {
+        // Arrange
+        let acc: Accumulator<u32, u32> = Accumulator::new();
+        let policy = LenFlushPolicy::new(3);
+
+        let _rx1 = acc.submit_async(1);
+        let _rx2 = acc.submit_async(2);
+
+        // Act
+        let ran = acc.flush_if_needed(&policy, |batch| batch.len() as u32);
+
+        // Assert
+        assert!(!ran);
+        assert_eq!(acc.pending_len(), 2);
+    }
+
+    #[test]
+    fn should_flush_when_policy_triggers() {
         // Arrange
         let acc: Accumulator<u32, u32> = Accumulator::new();
         let policy = LenFlushPolicy::new(3);
 
         let rx1 = acc.submit_async(1);
         let rx2 = acc.submit_async(2);
-
-        // Act (policy should not trigger yet)
-        let ran = acc.flush_if_needed(&policy, |batch| batch.len() as u32);
-        assert!(!ran);
-
-        // Arrange more (bring to threshold)
         let rx3 = acc.submit_async(3);
-        // Act (policy should now trigger)
+
+        // Act
         let ran = acc.flush_if_needed(&policy, |batch| batch.len() as u32);
-        assert!(ran);
 
         // Assert
+        assert!(ran);
         assert_eq!(rx1.recv().unwrap(), 3);
         assert_eq!(rx2.recv().unwrap(), 3);
         assert_eq!(rx3.recv().unwrap(), 3);
@@ -362,8 +374,8 @@ mod tests {
     }
 
     #[test]
-    fn should_group_waiters_by_key_and_drain_on_complete() {
-        // Note: this test verifies a single behavior: waiters grouped per key are drained when that key is completed.
+    fn should_drain_waiters_when_key_completed() {
+        // This test verifies that waiters grouped per key are drained when that key is completed.
 
         // Arrange
         let gc: KeyedGroupCommit<u64, u64> = KeyedGroupCommit::new(10);
@@ -379,8 +391,10 @@ mod tests {
         // Arrange (join under new key 11)
         gc.join(3);
 
-        // Act & Assert: Complete key=10 drains waiters
+        // Act: complete key=10 and collect waiters
         let w10 = gc.complete(&10);
+
+        // Assert: Key=10's waiters drained
         assert_eq!(w10, vec![1, 2]);
 
         // Assert: Key=11 is still pending (not sealed yet)

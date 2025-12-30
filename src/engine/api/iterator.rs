@@ -221,15 +221,41 @@ mod tests {
     // Tests for Direction invariants: equality, copy semantics, debug representation
 
     #[test]
-    fn should_have_forward_and_reverse_variants_when_comparing_direction() {
+    fn should_have_forward_variant() {
+        // Arrange
+        let forward = Direction::Forward;
+
+        // Act
+        let forward = Direction::Forward;
+
+        // Assert
+        assert_eq!(forward, Direction::Forward);
+    }
+
+    #[test]
+    fn should_have_reverse_variant() {
+        // Arrange
+        let reverse = Direction::Reverse;
+
+        // Act
+        let reverse = Direction::Reverse;
+
+        // Assert
+        assert_eq!(reverse, Direction::Reverse);
+    }
+
+    #[test]
+    fn should_distinguish_forward_from_reverse() {
         // Arrange
         let forward = Direction::Forward;
         let reverse = Direction::Reverse;
 
-        // Act & Assert
-        assert_eq!(forward, Direction::Forward);
-        assert_eq!(reverse, Direction::Reverse);
+        // Act
+        // (compare values)
+
+        // Assert
         assert_ne!(forward, reverse);
+    }
     }
 
     #[test]
@@ -265,7 +291,8 @@ mod tests {
 
     #[test]
     fn should_initialize_position_at_zero_when_creating_iterator() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let results = vec![(vec![1], vec![10])];
         let iter = Iterator::forward(results);
 
@@ -275,7 +302,8 @@ mod tests {
 
     #[test]
     fn should_set_exhausted_false_when_creating_new_iterator() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let results = vec![(vec![1], vec![10])];
         let iter = Iterator::forward(results);
 
@@ -313,7 +341,8 @@ mod tests {
 
     #[test]
     fn should_set_correct_length_when_creating_iterator() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let results = vec![
             (vec![1], vec![10]),
             (vec![2], vec![20]),

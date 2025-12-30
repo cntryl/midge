@@ -52,7 +52,10 @@ mod tests {
 
     #[test]
     fn should_create_not_found_error() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let error = ApiError::NotFound;
 
         // Assert
@@ -61,7 +64,10 @@ mod tests {
 
     #[test]
     fn should_create_already_exists_error() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let error = ApiError::AlreadyExists;
 
         // Assert
@@ -70,7 +76,10 @@ mod tests {
 
     #[test]
     fn should_create_transaction_conflict_error() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let error = ApiError::TransactionConflict;
 
         // Assert
@@ -106,7 +115,10 @@ mod tests {
 
     #[test]
     fn should_display_not_found_error() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let error = ApiError::NotFound;
         let displayed = format!("{}", error);
 
@@ -116,7 +128,8 @@ mod tests {
 
     #[test]
     fn should_display_already_exists_error() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let error = ApiError::AlreadyExists;
         let displayed = format!("{}", error);
 
@@ -126,7 +139,8 @@ mod tests {
 
     #[test]
     fn should_display_transaction_conflict_error() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let error = ApiError::TransactionConflict;
         let displayed = format!("{}", error);
 
@@ -167,7 +181,8 @@ mod tests {
 
     #[test]
     fn should_debug_format_not_found() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let error = ApiError::NotFound;
         let debug_str = format!("{:?}", error);
 
@@ -177,7 +192,8 @@ mod tests {
 
     #[test]
     fn should_debug_format_already_exists() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let error = ApiError::AlreadyExists;
         let debug_str = format!("{:?}", error);
 
@@ -247,7 +263,8 @@ mod tests {
         let error1 = ApiError::NotFound;
         let error2 = ApiError::NotFound;
 
-        // Act & Assert
+        // Act
+        // Assert
         assert_eq!(error1, error2);
     }
 
@@ -257,7 +274,8 @@ mod tests {
         let error1 = ApiError::NotFound;
         let error2 = ApiError::AlreadyExists;
 
-        // Act & Assert
+        // Act
+        // Assert
         assert_ne!(error1, error2);
     }
 
@@ -268,7 +286,8 @@ mod tests {
         let error1 = ApiError::InvalidOperation(msg.clone());
         let error2 = ApiError::InvalidOperation(msg);
 
-        // Act & Assert
+        // Act
+        // Assert
         assert_eq!(error1, error2);
     }
 
@@ -278,7 +297,8 @@ mod tests {
         let error1 = ApiError::InvalidOperation("msg1".to_string());
         let error2 = ApiError::InvalidOperation("msg2".to_string());
 
-        // Act & Assert
+        // Act
+        // Assert
         assert_ne!(error1, error2);
     }
 
@@ -307,7 +327,10 @@ mod tests {
 
     #[test]
     fn should_create_ok_api_result() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result: ApiResult<i32> = Ok(42);
 
         // Assert
@@ -317,7 +340,10 @@ mod tests {
 
     #[test]
     fn should_create_err_api_result() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let result: ApiResult<i32> = Err(ApiError::NotFound);
 
         // Assert
@@ -357,7 +383,8 @@ mod tests {
         // Arrange
         let error: Box<dyn std::error::Error> = Box::new(ApiError::NotFound);
 
-        // Act & Assert
+        // Act
+        // Assert
         assert_eq!(error.to_string(), "Key not found");
     }
 
@@ -377,7 +404,8 @@ mod tests {
 
     #[test]
     fn should_handle_empty_message_in_invalid_operation() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let error = ApiError::InvalidOperation(String::new());
 
         // Assert

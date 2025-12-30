@@ -315,7 +315,10 @@ mod tests {
 
     #[test]
     fn should_create_compactor_with_default_config_when_new() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let compactor = Compactor::new();
 
         // Assert
@@ -326,7 +329,10 @@ mod tests {
 
     #[test]
     fn should_create_compactor_with_default_when_using_default_trait() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let compactor = Compactor::default();
 
         // Assert
@@ -405,7 +411,9 @@ mod tests {
         let l1_target = compactor.config.l1_target_size;
         let multiplier = compactor.config.level_multiplier;
 
-        // Act & Assert: verify exponential growth
+        // Act: calculate higher level targets
+        
+        // Assert: verify exponential growth
         assert_eq!(compactor.level_target_size(2), l1_target * multiplier);
         assert_eq!(
             compactor.level_target_size(3),
@@ -435,7 +443,10 @@ mod tests {
 
     #[test]
     fn should_create_default_config_with_sensible_values() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let config = LeveledCompactionConfig::default();
 
         // Assert
@@ -448,7 +459,10 @@ mod tests {
 
     #[test]
     fn should_have_l1_target_as_multiple_of_l0_threshold() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let config = LeveledCompactionConfig::default();
 
         // Assert: L1 = L0 * multiplier
@@ -926,7 +940,10 @@ mod tests {
 
     #[test]
     fn should_initialize_output_files_empty_in_plan() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let plan = CompactionPlan::new(0, 0, 1);
 
         // Assert
@@ -935,7 +952,10 @@ mod tests {
 
     #[test]
     fn should_initialize_input_files_empty_in_plan() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let plan = CompactionPlan::new(0, 0, 1);
 
         // Assert
@@ -944,7 +964,10 @@ mod tests {
 
     #[test]
     fn should_initialize_output_seq_zero_in_plan() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let plan = CompactionPlan::new(0, 0, 1);
 
         // Assert
@@ -953,7 +976,10 @@ mod tests {
 
     #[test]
     fn should_set_output_seq_with_builder() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
 
         // Assert
@@ -962,7 +988,10 @@ mod tests {
 
     #[test]
     fn should_set_levels_correctly_in_plan() {
-        // Arrange / Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let plan = CompactionPlan::new(5, 2, 3);
 
         // Assert
