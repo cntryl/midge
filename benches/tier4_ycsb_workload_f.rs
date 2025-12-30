@@ -27,7 +27,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.default_column_family();
-    ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
+    ycsb::load_initial_dataset(engine.as_ref(), cf, INITIAL_KEYS);
 
     // Phase 2: Warm-up (not measured)
     {

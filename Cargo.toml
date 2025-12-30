@@ -6,7 +6,6 @@ rust-version = "1.91"
 authors = ["Midge Contributors"]
 description = "A high-performance embedded key-value database with LSM-tree storage"
 license = "Apache-2.0"
-license-file = "LICENSE"
 repository = "https://github.com/cntryl/midge"
 readme = "README.md"
 homepage = "https://github.com/cntryl/midge"

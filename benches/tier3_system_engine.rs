@@ -25,12 +25,12 @@ fn run_put_get_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize
 
     ctx.measure_ref(&engine, |e| {
         for (k, v) in keys.iter().zip(values.iter()) {
-            e.put(&cf, &k[..], v).unwrap();
+            e.put(cf, &k[..], v).unwrap();
         }
 
         let mut found = 0usize;
         for k in keys.iter() {
-            if e.get(&cf, &k[..]).unwrap().is_some() {
+            if e.get(cf, &k[..]).unwrap().is_some() {
                 found += 1;
             }
         }
@@ -38,7 +38,7 @@ fn run_put_get_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize
     });
 
     // Quick correctness smoke (not timed)
-    assert!(engine.get(&cf, &keys[0][..]).unwrap().is_some());
+    assert!(engine.get(cf, &keys[0][..]).unwrap().is_some());
 
     drop(engine);
 }

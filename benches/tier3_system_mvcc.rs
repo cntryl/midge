@@ -31,13 +31,13 @@ fn run_overwrite_hot_keys_case(ctx: &mut StressContext, opts: MidgeOptions, num_
             let fill = (r % 251) as u8;
             let v = vec![fill; VALUE_SIZE];
             for k in keys.iter() {
-                e.put(&cf, &k[..], &v).unwrap();
+                e.put(cf, &k[..], &v).unwrap();
             }
         }
     });
 
     // Not timed
-    assert!(engine.get(&cf, &keys[0][..]).unwrap().is_some());
+    assert!(engine.get(cf, &keys[0][..]).unwrap().is_some());
 
     drop(engine);
 }
@@ -51,14 +51,14 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
         keys.push(k);
-        engine.put(&cf, &k[..], &vec![1u8; VALUE_SIZE]).unwrap();
+        engine.put(cf, &k[..], &[1u8; VALUE_SIZE]).unwrap();
     }
     engine.flush().unwrap();
 
-    let snap = engine.snapshot_cf(&cf);
+    let snap = engine.snapshot_cf(cf);
 
     for k in keys.iter() {
-        engine.put(&cf, &k[..], &vec![2u8; VALUE_SIZE]).unwrap();
+        engine.put(cf, &k[..], &[2u8; VALUE_SIZE]).unwrap();
     }
     engine.flush().unwrap();
     engine.compact_all().unwrap();
@@ -69,7 +69,7 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
     ctx.measure_ref(&snap, |s| {
         let mut ok = 0usize;
         for k in keys.iter() {
-            let v = s.get(&cf, &k[..]).unwrap();
+            let v = s.get(cf, &k[..]).unwrap();
             if let Some(bytes) = v {
                 if bytes.as_ref() == vec![1u8; VALUE_SIZE].as_slice() {
                     ok += 1;
@@ -82,7 +82,7 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
     // Not timed
     // NOTE: Midge does not guarantee true snapshot isolation (see transaction isolation docs/tests).
     // This check is only to ensure the snapshot read path remains functional.
-    let v0 = snap.get(&cf, &keys[0][..]).unwrap().unwrap();
+    let v0 = snap.get(cf, &keys[0][..]).unwrap().unwrap();
     assert_eq!(v0.len(), VALUE_SIZE);
 
     drop(engine);

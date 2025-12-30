@@ -18,7 +18,7 @@ fn write_some(engine: &MidgeEngine, num_keys: usize) {
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        engine.put(&cf, &k[..], &v).unwrap();
+        engine.put(cf, &k[..], &v).unwrap();
     }
 }
 
@@ -90,7 +90,7 @@ fn run_wal_replay_case(ctx: &mut StressContext, opts: MidgeOptions) {
         let engine = setup_engine(opts.clone());
         let cf = engine.default_column_family();
         let k0 = [0u8; KEY_SIZE];
-        let _ = engine.get(&cf, &k0[..]).unwrap();
+        let _ = engine.get(cf, &k0[..]).unwrap();
         drop(engine);
     });
 }

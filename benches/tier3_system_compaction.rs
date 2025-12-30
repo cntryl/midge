@@ -46,7 +46,7 @@ fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, 
 
     // Setup (not measured)
     for (k, v) in keys.iter().zip(values.iter()) {
-        engine.put(&cf, &k[..], v).expect("setup put");
+        engine.put(cf, &k[..], v).expect("setup put");
     }
 
     // Measure exactly one flush
@@ -82,7 +82,7 @@ fn run_compact_all_many_sst_case(
         };
         for idx in start..end {
             engine
-                .put(&cf, &keys[idx][..], values[idx].as_slice())
+                .put(cf, &keys[idx][..], values[idx].as_slice())
                 .expect("setup put");
         }
         engine.flush().expect("setup flush");
@@ -120,7 +120,7 @@ fn run_many_overlapping_l0_files_case(
             // Introduce overlap across batches.
             k[0] = (batch % 10) as u8;
             engine
-                .put(&cf, &k[..], base_values[idx].as_slice())
+                .put(cf, &k[..], base_values[idx].as_slice())
                 .expect("setup put");
         }
         engine.flush().expect("setup flush");
@@ -153,7 +153,7 @@ fn run_overlap_pressure_compact_case(
             // Reuse the same key range each batch to maximize overlap.
             let k = base_keys[idx];
             engine
-                .put(&cf, &k[..], base_values[batch * num_keys_per_batch + idx].as_slice())
+                .put(cf, &k[..], base_values[batch * num_keys_per_batch + idx].as_slice())
                 .expect("setup put");
         }
         engine.flush().expect("setup flush");

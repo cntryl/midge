@@ -20,12 +20,12 @@ fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops
         for i in 0..num_ops {
             let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
             let v = vec![(i % 251) as u8; VALUE_SIZE];
-            e.put(&cf, &k[..], &v).unwrap();
+            e.put(cf, &k[..], &v).unwrap();
         }
     });
 
     // Not timed
-    assert!(engine.get(&cf, &[0u8; KEY_SIZE]).is_ok());
+    assert!(engine.get(cf, &[0u8; KEY_SIZE]).is_ok());
 
     drop(engine);
 }

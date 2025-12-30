@@ -10,7 +10,7 @@ fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_prefix_u64_be(prefix, i as u64);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        engine.put(&cf, &k[..], &v).unwrap();
+        engine.put(cf, &k[..], &v).unwrap();
     }
 }
 
@@ -23,7 +23,7 @@ fn run_scan_query_case(ctx: &mut StressContext, opts: MidgeOptions, setup: impl 
 
     // Measure exactly one scan
     ctx.measure_ref(&engine, |e| {
-        let results = e.scan(&cf, &query).expect("scan failed");
+        let results = e.scan(cf, &query).expect("scan failed");
         results.len()
     });
 

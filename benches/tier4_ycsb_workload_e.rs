@@ -26,7 +26,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.default_column_family();
-    ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
+    ycsb::load_initial_dataset(engine.as_ref(), cf, INITIAL_KEYS);
 
     // Workload E: 95% scans, 5% inserts. Use a deterministic, stochastic mix.
     // Scans target the dense initial keyspace for stable scan lengths.

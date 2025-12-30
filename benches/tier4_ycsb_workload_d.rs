@@ -24,7 +24,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     // Phase 1: Load (not measured)
     let engine = Arc::new(ycsb::open_tier4_engine(opts));
     let cf = engine.default_column_family();
-    ycsb::load_initial_dataset(engine.as_ref(), &cf, INITIAL_KEYS);
+    ycsb::load_initial_dataset(engine.as_ref(), cf, INITIAL_KEYS);
 
     // Workload D: 95% reads, 5% inserts; read-latest bias.
     // Use a deterministic, stochastic mix (avoid periodic scheduling artifacts).
