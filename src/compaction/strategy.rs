@@ -412,7 +412,7 @@ mod tests {
         let multiplier = compactor.config.level_multiplier;
 
         // Act: calculate higher level targets
-        
+
         // Assert: verify exponential growth
         assert_eq!(compactor.level_target_size(2), l1_target * multiplier);
         assert_eq!(
