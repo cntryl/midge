@@ -223,7 +223,6 @@ mod tests {
     #[test]
     fn should_have_forward_variant() {
         // Arrange
-        let forward = Direction::Forward;
 
         // Act
         let forward = Direction::Forward;
@@ -235,7 +234,6 @@ mod tests {
     #[test]
     fn should_have_reverse_variant() {
         // Arrange
-        let reverse = Direction::Reverse;
 
         // Act
         let reverse = Direction::Reverse;
@@ -739,8 +737,6 @@ mod tests {
         let results = vec![(vec![1], vec![10])];
         let iter1 = builder1.build(results.clone());
         let iter2 = builder2.build(results);
-        let builder1 = IteratorBuilder::new();
-        let builder2 = IteratorBuilder::default();
 
         // Assert - both should behave the same
         assert_eq!(iter1.direction(), iter2.direction());

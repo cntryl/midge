@@ -60,7 +60,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # OpenTelemetry (Observability)
-opentelemetry = { version = "0.20", optional = true }
+opentelemetry = { version = "0.20", optional = true, features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.13", optional = true }
 tracing-opentelemetry = { version = "0.21", optional = true }
 
@@ -87,13 +87,12 @@ ureq = { version = "3", features = ["rustls", "json"], optional = true }
 url = { version = "2.5", optional = true }
 urlencoding = { version = "2.1", optional = true }
 
-# Platform-Specific: Linux (io_uring - optional)
-io-uring = { version = "0.7", optional = true }
-
 # Platform-Specific Dependencies
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Platform-Specific: Linux (io_uring - optional)
+io-uring = { version = "0.7", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }

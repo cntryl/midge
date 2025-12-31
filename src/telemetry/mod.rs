@@ -68,7 +68,7 @@ impl Telemetry {
 
     #[cfg(feature = "telemetry")]
     #[allow(dead_code)]
-    fn setup_tracing(_config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
+    fn setup_tracing(config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
         use tracing_subscriber::Layer;
@@ -80,10 +80,13 @@ impl Telemetry {
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
             );
 
+        #[cfg(feature = "telemetry-otlp")]
         let registry = tracing_subscriber::registry().with(fmt_layer);
 
         #[cfg(feature = "telemetry-otlp")]
-        let registry = if let Some(otel_config) = &config.otlp_config {
+        if let Some(otel_config) = &config.otlp_config {
+            use opentelemetry_otlp::WithExportConfig;
+
             let tracer = opentelemetry_otlp::new_pipeline()
                 .tracing()
                 .with_exporter(
@@ -99,12 +102,13 @@ impl Telemetry {
                     ))
                 })?;
 
-            registry.with(tracing_opentelemetry::layer().with_tracer(tracer))
-        } else {
-            #[allow(unreachable_code)]
             registry
-        };
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .init();
+            return Ok(());
+        }
 
+        let registry = tracing_subscriber::registry().with(fmt_layer);
         registry.init();
         Ok(())
     }
