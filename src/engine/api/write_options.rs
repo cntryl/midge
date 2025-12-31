@@ -119,7 +119,7 @@ mod tests {
         // Arrange
         // (no setup required)
 
-n        // Act
+        // Act
         let opts = WriteOptions::new();
 
         // Assert
@@ -132,7 +132,7 @@ n        // Act
         // Arrange
         // (no setup required)
 
-n        // Act
+        // Act
         let opts = WriteOptions::default();
 
         // Assert - all fields should match new()
@@ -145,11 +145,11 @@ n        // Act
         // Arrange
         // (no setup required)
 
-n        // Act
+        // Act
         let new_opts = WriteOptions::new();
         let default_opts = WriteOptions::default();
 
-n        // Assert
+        // Assert
         assert_eq!(new_opts.sync, default_opts.sync);
         assert_eq!(new_opts.disable_wal, default_opts.disable_wal);
     }

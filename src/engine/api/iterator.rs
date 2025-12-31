@@ -256,7 +256,6 @@ mod tests {
         // Assert
         assert_ne!(forward, reverse);
     }
-    }
 
     #[test]
     fn should_be_copyable_when_passing_direction() {

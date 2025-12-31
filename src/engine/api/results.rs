@@ -164,7 +164,7 @@ mod tests {
         // Arrange
         let value = Bytes::from_static(b"val");
 
-n        // Act
+        // Act
         let result = InsertResult::AlreadyExists(value);
         let debug_str = format!("{:?}", result);
 
@@ -204,7 +204,7 @@ n        // Act
         // Arrange
         // (no setup required)
 
-n        // Act
+        // Act
         let result = CasResult::Swapped;
 
         // Assert
@@ -216,7 +216,7 @@ n        // Act
         // Arrange
         // (no setup required)
 
-n        // Act
+        // Act
         let result = CasResult::Mismatch(None);
 
         // Assert
@@ -365,7 +365,7 @@ n        // Act
         // Arrange
         // (no setup required)
 
-n        // Act
+        // Act
         let result = CasResult::Mismatch(None);
         let debug_str = format!("{:?}", result);
 
