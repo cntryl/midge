@@ -227,7 +227,10 @@ mod tests {
 
     #[test]
     fn should_create_empty_batch_when_initialized() {
-        // Arrange & Act
+        // Arrange
+        // (no setup required)
+
+        // Act
         let batch = WriteBatch::new();
 
         // Assert

@@ -553,7 +553,10 @@ mod tests {
 
     #[test]
     fn should_create_dispatcher_with_default() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let dispatcher = Dispatcher;
 
         // Assert - Just verify it's usable

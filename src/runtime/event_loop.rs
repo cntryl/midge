@@ -2247,7 +2247,8 @@ mod tests {
 
     #[test]
     fn should_create_event_loop_in_memory_mode() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let result = create_test_event_loop();
 
         // Assert
@@ -2256,7 +2257,8 @@ mod tests {
 
     #[test]
     fn should_initialize_all_actors() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert - Just verify construction doesn't panic and has all actors
@@ -2304,7 +2306,8 @@ mod tests {
 
     #[test]
     fn should_start_with_no_hybrid_storage() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert - eviction_actor should be None initially
@@ -2319,6 +2322,7 @@ mod tests {
         // Arrange
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
+        // Act
         // Create a mock hybrid storage (we need to use a real one or skip this test)
         // For now, we'll skip detailed testing of set_hybrid_storage since it requires
         // complex setup with actual HybridStorage instance
@@ -2441,7 +2445,8 @@ mod tests {
 
     #[test]
     fn should_initialize_flush_actor() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert - Verify through construction success
@@ -2451,7 +2456,8 @@ mod tests {
 
     #[test]
     fn should_initialize_compaction_actor() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert - CompactionActor is initialized
@@ -2461,7 +2467,8 @@ mod tests {
 
     #[test]
     fn should_initialize_wal_actor() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert - WalActor is initialized
@@ -2470,7 +2477,8 @@ mod tests {
 
     #[test]
     fn should_initialize_cloud_actor() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert
@@ -2479,7 +2487,8 @@ mod tests {
 
     #[test]
     fn should_initialize_gc_actor() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert
@@ -2488,7 +2497,8 @@ mod tests {
 
     #[test]
     fn should_initialize_manifest_actor() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert
@@ -2499,7 +2509,8 @@ mod tests {
 
     #[test]
     fn should_maintain_actor_ownership() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert - All actors should be owned by event loop
@@ -2535,7 +2546,9 @@ mod tests {
         // Arrange
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
-        // Act & Assert
+        // Act
+
+        // Assert
         // hybrid_storage starts as None
         assert!(event_loop.hybrid_storage.is_none());
     }
@@ -2545,7 +2558,9 @@ mod tests {
         // Arrange
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
-        // Act & Assert
+        // Act
+
+        // Assert
         // eviction_actor starts as None
         assert!(event_loop.eviction_actor.is_none());
     }
@@ -2594,7 +2609,8 @@ mod tests {
 
     #[test]
     fn should_create_sst_factory_for_compaction_actor() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
         // Assert - SST factory is created and passed to CompactionActor
@@ -2607,13 +2623,15 @@ mod tests {
         // Arrange - Create event loop which creates SST factory with 64KB block size
         let event_loop = create_test_event_loop().expect("Should create event loop");
 
+        // Act
+
         // Assert - The 64KB block size is hardcoded in EventLoop::new
         // This test documents that invariant
         drop(event_loop);
     }
 
     #[test]
-    fn range_scan_should_include_keys_from_ssts() -> crate::common::MidgeResult<()> {
+    fn should_range_scan_include_keys_from_ssts() -> crate::common::MidgeResult<()> {
         use crate::sst::traits::SstFactory;
 
         // Arrange: create real filesystem-backed state (not memory mode)
@@ -2723,7 +2741,7 @@ mod tests {
     }
 
     #[test]
-    fn cloudfirst_ack_should_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
+    fn should_cloudfirst_ack_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
         // Arrange: create state and event loop with CloudFirst policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
@@ -2733,6 +2751,8 @@ mod tests {
             ..Default::default()
         };
         let mut el = EventLoop::new(state, false, router, config, None)?;
+
+        // Act
 
         // Add a wal append with a specific request_id
         let request_id = 123u64;
@@ -2778,7 +2798,7 @@ mod tests {
             max_sequence,
         });
 
-        // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
+        // Assert: After handling, the idempotency entry for request_id should be confirmed at cloud frontier
         if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
             assert!(entry.2 >= el.state.wal.cloud_durable_seq);
         } else {
@@ -2789,7 +2809,7 @@ mod tests {
     }
 
     #[test]
-    fn cloudfirst_retry_after_ack_should_return_same_sequence_without_queueing(
+    fn should_cloudfirst_retry_after_ack_return_same_sequence_without_queueing(
     ) -> crate::common::MidgeResult<()> {
         // Arrange: create state and event loop with CloudFirst policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
@@ -2800,6 +2820,8 @@ mod tests {
             ..Default::default()
         };
         let mut el = EventLoop::new(state, false, router, config, None)?;
+
+        // Act
 
         // Add a wal append with a specific request_id
         let request_id = 124u64;
@@ -2852,6 +2874,7 @@ mod tests {
             panic!("idempotency entry missing");
         }
 
+        // Assert: Retry the same request_id: should return the same sequence and NOT be deferred
         // Retry the same request_id: should return the same sequence and NOT be deferred
         let (seq2, deferred2) = el.wal_actor.append(
             &mut el.state,
@@ -2874,7 +2897,7 @@ mod tests {
     }
 
     #[test]
-    fn cloudfirst_fail_invalidates_idempotency_and_retry_allocates_new_seq(
+    fn should_cloudfirst_fail_invalidates_idempotency_then_retry_allocates_new_seq(
     ) -> crate::common::MidgeResult<()> {
         // Arrange: create state and event loop with CloudFirst policy
         let tmp = tempfile::tempdir().expect("create tmpdir");
@@ -2885,6 +2908,8 @@ mod tests {
             ..Default::default()
         };
         let mut el = EventLoop::new(state, false, router, config, None)?;
+
+        // Act
 
         // Add a wal append with a specific request_id
         let request_id = 200u64;
@@ -2941,6 +2966,7 @@ mod tests {
             None,
         )?;
 
+        // Assert: retry should allocate a new sequence and be deferred
         assert_ne!(
             seq1, seq2,
             "retry after cloud fail should allocate a new sequence"

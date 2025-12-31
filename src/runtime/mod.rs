@@ -792,7 +792,10 @@ mod tests {
 
     #[test]
     fn should_generate_unique_request_ids() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let id1 = next_request_id();
         let id2 = next_request_id();
         let id3 = next_request_id();
@@ -805,7 +808,10 @@ mod tests {
 
     #[test]
     fn should_increment_request_ids_monotonically() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let id1 = next_request_id();
         let id2 = next_request_id();
         let id3 = next_request_id();
@@ -849,7 +855,10 @@ mod tests {
 
     #[test]
     fn should_start_from_nonzero() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let id = next_request_id();
 
         // Assert - Should never be 0
@@ -884,7 +893,13 @@ mod tests {
 
     #[test]
     fn should_extract_request_id_from_all_request_response_messages() {
-        // Arrange & Act & Assert
+        // Arrange
+        // (no setup)
+
+        // Act
+        // (none)
+
+        // Assert
         assert!(RuntimeMsg::FlushMemtable {
             request_id: 1,
             cf_id: 0
@@ -936,7 +951,13 @@ mod tests {
 
     #[test]
     fn should_extract_request_id_from_all_responses() {
-        // Arrange & Act & Assert
+        // Arrange
+        // (no setup)
+
+        // Act
+        // (none)
+
+        // Assert
         assert_eq!(RuntimeResponse::Ok { request_id: 1 }.request_id(), 1);
 
         assert_eq!(
@@ -1017,7 +1038,10 @@ mod tests {
 
     #[test]
     fn should_create_response_router() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let router = ResponseRouter::new();
 
         // Assert - Should be usable, register should return a receiver
@@ -1075,7 +1099,10 @@ mod tests {
 
     #[test]
     fn should_create_runtime_handle() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let (runtime, handle) = Runtime::new().expect("Should create runtime");
 
         // Assert
@@ -1116,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn should_validate_send_and_wait_requires_request_id() {
+    fn should_require_request_id_for_send_wait() {
         // Arrange
         let (runtime, handle) = Runtime::new().expect("Should create runtime");
         let msg = RuntimeMsg::Shutdown;
@@ -1133,7 +1160,10 @@ mod tests {
 
     #[test]
     fn should_create_runtime() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let result = Runtime::new();
 
         // Assert
@@ -1144,7 +1174,10 @@ mod tests {
 
     #[test]
     fn should_create_with_trace_disabled_by_default() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let (_runtime, _handle) = Runtime::new().expect("Should create runtime");
 
         // Assert - Default should have tracing disabled
@@ -1166,13 +1199,16 @@ mod tests {
 
     #[test]
     fn should_create_compaction_plan() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let plan = CompactionPlan {
             input_files: vec!["sst_001.sst".to_string()],
             source_level: 0,
             target_level: 1,
             cf_id: 0,
-        };
+        }; 
 
         // Assert
         assert_eq!(plan.input_files.len(), 1);
@@ -1202,7 +1238,10 @@ mod tests {
 
     #[test]
     fn should_create_file_meta() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let meta = FileMeta {
             name: "sst_001.sst".to_string(),
             level: 0,

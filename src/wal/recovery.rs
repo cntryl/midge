@@ -439,26 +439,37 @@ mod tests {
 
     #[test]
     fn should_return_empty_record_count_when_wal_directory_missing() {
+        // Arrange
         let mut memtables = HashMap::new();
         let dir = TempDir::new().unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let non_existent = StoragePath::new("midge_nonexistent_wal_dir_12345");
+
+        // Act
         let stats = replay_wal(&storage, &non_existent, &mut memtables).unwrap();
+
+        // Assert
         assert_eq!(stats.record_count, 0);
     }
 
     #[test]
     fn should_return_none_max_sequence_when_wal_directory_missing() {
+        // Arrange
         let mut memtables = HashMap::new();
         let dir = TempDir::new().unwrap();
         let storage = LocalFsStorage::new(dir.path()).unwrap();
         let non_existent = StoragePath::new("midge_nonexistent_wal_dir_12345");
+
+        // Act
         let stats = replay_wal(&storage, &non_existent, &mut memtables).unwrap();
+
+        // Assert
         assert_eq!(stats.max_sequence, None);
     }
 
     #[test]
     fn should_recover_put_record_key_value_when_replaying_wal() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -478,9 +489,11 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let _stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         let recovered_memtable = &memtables[&0];
         let value = recovered_memtable.get(b"test_key").unwrap();
         assert_eq!(value, Some(b"test_value".to_vec()));
@@ -488,6 +501,7 @@ mod tests {
 
     #[test]
     fn should_increment_record_count_when_replaying_put() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -507,14 +521,17 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert!(stats.record_count > 0);
     }
 
     #[test]
     fn should_track_max_sequence_from_put_record() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -534,14 +551,17 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert_eq!(stats.max_sequence, Some(1));
     }
 
     #[test]
     fn should_recover_delete_operation_when_replaying_wal() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -565,9 +585,11 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let _stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         let recovered_memtable = &memtables[&0];
         let value = recovered_memtable.get(b"test_key").unwrap();
         assert_eq!(value, None);
@@ -609,6 +631,7 @@ mod tests {
 
     #[test]
     fn should_separate_records_by_column_family_when_recovering() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -639,14 +662,17 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let _stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert_eq!(memtables.len(), 2);
     }
 
     #[test]
     fn should_recover_both_column_families_with_correct_data() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -677,15 +703,18 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let _stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert!(memtables[&0].get(b"key0").unwrap().is_some());
         assert!(memtables[&1].get(b"key1").unwrap().is_some());
     }
 
     #[test]
     fn should_count_records_across_multiple_column_families() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -716,14 +745,17 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert_eq!(stats.record_count, 2);
     }
 
     #[test]
     fn should_track_max_sequence_across_multiple_records() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -760,14 +792,17 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert_eq!(stats.max_sequence, Some(10));
     }
 
     #[test]
     fn should_count_multiple_records_correctly() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -804,14 +839,17 @@ mod tests {
             writer.sync().unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert_eq!(stats.record_count, 3);
     }
 
     #[test]
     fn should_return_none_max_sequence_when_no_records() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -823,14 +861,17 @@ mod tests {
             let _writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert_eq!(stats.max_sequence, None);
     }
 
     #[test]
     fn should_return_zero_record_count_when_no_records() {
+        // Arrange
         let dir = TempDir::new().unwrap();
         let wal_subdir = dir.path().join("wal");
         std::fs::create_dir(&wal_subdir).unwrap();
@@ -842,9 +883,11 @@ mod tests {
             let _writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
         }
 
+        // Act
         let mut memtables = HashMap::new();
         let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
+        // Assert
         assert_eq!(stats.record_count, 0);
     }
 

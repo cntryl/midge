@@ -282,7 +282,10 @@ mod tests {
 
     #[test]
     fn should_create_block_handle_with_zero_offset() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let handle = BlockHandle::new(0, 100);
 
         // Assert
@@ -292,7 +295,10 @@ mod tests {
 
     #[test]
     fn should_create_block_handle_with_large_offset() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let handle = BlockHandle::new(u64::MAX - 1000, 500);
 
         // Assert
@@ -302,7 +308,10 @@ mod tests {
 
     #[test]
     fn should_create_block_handle_with_max_size() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let handle = BlockHandle::new(1000, u64::MAX);
 
         // Assert
@@ -315,7 +324,10 @@ mod tests {
         let h1 = BlockHandle::new(100, 200);
         let h2 = BlockHandle::new(100, 200);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert_eq!(h1, h2);
     }
 
@@ -325,7 +337,10 @@ mod tests {
         let h1 = BlockHandle::new(100, 200);
         let h2 = BlockHandle::new(101, 200);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert_ne!(h1, h2);
     }
 
@@ -335,7 +350,10 @@ mod tests {
         let h1 = BlockHandle::new(100, 200);
         let h2 = BlockHandle::new(100, 201);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert_ne!(h1, h2);
     }
 
@@ -401,7 +419,10 @@ mod tests {
 
     #[test]
     fn should_create_block_with_empty_data() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let block = Block::new(Bytes::new(), BlockType::Index);
 
         // Assert
@@ -554,9 +575,13 @@ mod tests {
 
     #[test]
     fn should_footer_builder_pattern() {
-        // Arrange & Act
+        // Arrange
+        // (setup)
         let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200))
             .with_trie(BlockHandle::new(200, 50));
+
+        // Act
+        // (none)
 
         // Assert
         assert_eq!(footer.meta_index_handle.offset, 0);
@@ -570,7 +595,10 @@ mod tests {
         let footer = Footer::new(BlockHandle::new(100, 200), BlockHandle::new(300, 400));
         let encoded = footer.encode();
 
-        // Act & Assert - Trie handle bytes should be zero (None means 0,0)
+        // Act
+        // (none)
+
+        // Assert - Trie handle bytes should be zero (None means 0,0)
         assert_eq!(encoded[32..40], vec![0u8; 8][..]);
         assert_eq!(encoded[40..48], vec![0u8; 8][..]);
     }
@@ -579,7 +607,10 @@ mod tests {
 
     #[test]
     fn should_create_range_tombstone() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let rt = RangeTombstone::new(b"start".to_vec(), b"end".to_vec(), 100);
 
         // Assert
@@ -593,7 +624,8 @@ mod tests {
         // Arrange
         let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
 
-        // Act & Assert
+        // Act
+        // Assert
         assert!(rt.covers(b"m"));
     }
 
@@ -602,7 +634,10 @@ mod tests {
         // Arrange
         let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
 
-        // Act & Assert - Start is inclusive
+        // Act
+        // (none)
+
+        // Assert - Start is inclusive
         assert!(rt.covers(b"a"));
     }
 
@@ -611,7 +646,10 @@ mod tests {
         // Arrange
         let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
 
-        // Act & Assert - End is exclusive
+        // Act
+        // (none)
+
+        // Assert - End is exclusive
         assert!(!rt.covers(b"z"));
     }
 
@@ -620,7 +658,10 @@ mod tests {
         // Arrange
         let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!rt.covers(b"0"));
     }
 
@@ -629,7 +670,10 @@ mod tests {
         // Arrange
         let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!rt.covers(b"zz"));
     }
 
@@ -638,7 +682,10 @@ mod tests {
         // Arrange
         let rt = RangeTombstone::new(b"a".to_vec(), b"a".to_vec(), 10);
 
-        // Act & Assert - [a, a) is empty
+        // Act
+        // (none)
+
+        // Assert - [a, a) is empty
         assert!(!rt.covers(b"a"));
     }
 
@@ -647,7 +694,10 @@ mod tests {
         // Arrange
         let rt = RangeTombstone::new(vec![0u8, 100u8], vec![255u8], 5);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(rt.covers(&[0u8, 200u8]));
         assert!(!rt.covers(&[255u8]));
     }
@@ -657,7 +707,10 @@ mod tests {
         // Arrange
         let rt = RangeTombstone::new(b"key".to_vec(), b"kez".to_vec(), 1);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(rt.covers(b"key"));
         assert!(rt.covers(b"key_data"));
         assert!(!rt.covers(b"kez"));
@@ -681,7 +734,10 @@ mod tests {
 
     #[test]
     fn should_create_sst_entry_with_value() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("value")), 100, 0, None);
 
         // Assert
@@ -694,7 +750,10 @@ mod tests {
 
     #[test]
     fn should_create_sst_entry_without_value() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let entry = SstEntry::new(b"key".to_vec(), None, 100, 2, None);
 
         // Assert
@@ -706,7 +765,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), None, 1, 2, None);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(entry.is_tombstone());
     }
 
@@ -715,7 +777,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, None);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!entry.is_tombstone());
     }
 
@@ -724,7 +789,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 1, None);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!entry.is_tombstone());
     }
 
@@ -733,7 +801,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 3, None);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!entry.is_tombstone());
     }
 
@@ -742,7 +813,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, None);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!entry.is_expired(u64::MAX));
     }
 
@@ -751,7 +825,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(1000));
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!entry.is_expired(999));
     }
 
@@ -760,7 +837,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(1000));
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(entry.is_expired(1000));
     }
 
@@ -769,7 +849,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(1000));
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(entry.is_expired(1001));
     }
 
@@ -778,7 +861,10 @@ mod tests {
         // Arrange
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(0));
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(entry.is_expired(0));
     }
 
@@ -793,7 +879,10 @@ mod tests {
             Some(u64::MAX),
         );
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!entry.is_expired(u64::MAX - 1));
     }
 
@@ -819,8 +908,12 @@ mod tests {
 
     #[test]
     fn should_entry_with_large_sequence() {
-        // Arrange & Act
+        // Arrange
+        // (setup)
         let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), u64::MAX, 0, None);
+
+        // Act
+        // (none)
 
         // Assert
         assert_eq!(entry.sequence, u64::MAX);
@@ -828,8 +921,10 @@ mod tests {
 
     #[test]
     fn should_entry_with_binary_key() {
-        // Arrange & Act
+        // Arrange
         let binary_key = vec![0u8, 1u8, 255u8];
+
+        // Act
         let entry = SstEntry::new(binary_key.clone(), Some(Bytes::from("val")), 1, 0, None);
 
         // Assert
@@ -840,8 +935,13 @@ mod tests {
 
     #[test]
     fn should_create_key_state_absent() {
-        // Act & Assert
+        // Arrange
+        // (no setup)
+
+        // Act
         let state = KeyState::Absent;
+
+        // Assert
         match state {
             KeyState::Absent => {}
             _ => panic!("Expected Absent state"),
@@ -850,8 +950,13 @@ mod tests {
 
     #[test]
     fn should_create_key_state_tombstone() {
-        // Act & Assert
+        // Arrange
+        // (no setup)
+
+        // Act
         let state = KeyState::Tombstone(100);
+
+        // Assert
         match state {
             KeyState::Tombstone(seq) => assert_eq!(seq, 100),
             _ => panic!("Expected Tombstone state"),
@@ -860,8 +965,13 @@ mod tests {
 
     #[test]
     fn should_create_key_state_value() {
-        // Act & Assert
+        // Arrange
+        // (no setup)
+
+        // Act
         let state = KeyState::Value(Bytes::from("val"), 100, Some(500), 0);
+
+        // Assert
         match state {
             KeyState::Value(val, seq, exp, op) => {
                 assert_eq!(val, Bytes::from("val"));
@@ -933,6 +1043,9 @@ mod tests {
 
     #[test]
     fn should_key_state_value_with_zero_expiration() {
+        // Arrange
+        // (no setup)
+
         // Act
         let state = KeyState::Value(Bytes::from("val"), 1, Some(0), 0);
 
@@ -945,6 +1058,9 @@ mod tests {
 
     #[test]
     fn should_key_state_value_with_max_sequence() {
+        // Arrange
+        // (no setup)
+
         // Act
         let state = KeyState::Value(Bytes::from("val"), u64::MAX, None, 0);
 
@@ -957,6 +1073,9 @@ mod tests {
 
     #[test]
     fn should_key_state_tombstone_with_zero_sequence() {
+        // Arrange
+        // (no setup)
+
         // Act
         let state = KeyState::Tombstone(0);
 

@@ -218,10 +218,13 @@ mod tests {
 
     #[test]
     fn should_inject_open_failure() -> FsResult<()> {
+        // Arrange
         let inner = Arc::new(MockFs::new());
         let chaos = ChaosFs::new(inner, 1); // fail every 1st operation
 
         let path = FsPath::new("test.txt");
+
+        // Act
         let result = chaos.open(
             &path,
             OpenOptions {
@@ -232,16 +235,20 @@ mod tests {
             },
         );
 
+        // Assert
         assert!(result.is_err());
         Ok(())
     }
 
     #[test]
     fn should_pass_through_when_no_fail() -> FsResult<()> {
+        // Arrange
         let inner = Arc::new(MockFs::new());
         let chaos = ChaosFs::new(inner, 0); // never fail
 
         let path = FsPath::new("test.txt");
+
+        // Act
         let result = chaos.open(
             &path,
             OpenOptions {
@@ -252,6 +259,7 @@ mod tests {
             },
         );
 
+        // Assert
         assert!(result.is_ok());
         Ok(())
     }

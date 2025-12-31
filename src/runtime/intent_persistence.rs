@@ -166,15 +166,18 @@ mod tests {
 
     #[test]
     fn should_roundtrip_intent_log() {
+        // Arrange
         let test_dir = create_test_dir();
         let intents = vec![IntentLogEntry::WalSynced {
             segment_id: 1,
             seqno: 42,
         }];
 
+        // Act
         IntentPersistence::save(&test_dir, &intents).expect("save should succeed");
         let loaded = IntentPersistence::load(&test_dir).expect("load should succeed");
 
+        // Assert
         assert_eq!(loaded.len(), 1);
         match &loaded[0] {
             IntentLogEntry::WalSynced { segment_id, seqno } => {

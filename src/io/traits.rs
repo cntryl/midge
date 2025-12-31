@@ -274,10 +274,15 @@ mod tests {
 
     #[test]
     fn should_use_path_as_key() {
+        // Arrange
         use std::collections::HashMap;
         let mut map = HashMap::new();
         let path = FsPath::new("key");
+
+        // Act
         map.insert(path, "value");
+
+        // Assert
         assert_eq!(map.get(&FsPath::new("key")), Some(&"value"));
     }
 
@@ -296,8 +301,13 @@ mod tests {
 
     #[test]
     fn should_combine_capabilities() {
+        // Arrange
         let caps = FileCaps::READV_AT;
+
+        // Act
         let combined = FileCaps(caps.0 | FileCaps::WRITEV_AT.0);
+
+        // Assert
         assert!(combined.contains(FileCaps::READV_AT));
         assert!(combined.contains(FileCaps::WRITEV_AT));
     }

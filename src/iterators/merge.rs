@@ -309,8 +309,10 @@ mod tests {
 
     #[test]
     fn should_create_merge_iterator_from_sources() {
-        // Arrange / Act
+        // Arrange
         let source = Box::new(MockIterator::new(vec![(b"a".to_vec(), b"1".to_vec())]));
+
+        // Act
         let merge = MergeIterator::new(vec![source]);
 
         // Assert: creation succeeds, count is 0 before init
@@ -319,7 +321,9 @@ mod tests {
 
     #[test]
     fn should_create_merge_iterator_with_zero_sources() {
-        // Arrange / Act
+        // Arrange
+        
+        // Act
         let merge = MergeIterator::new(vec![]);
 
         // Assert
@@ -334,6 +338,8 @@ mod tests {
     fn should_set_start_bound() {
         // Arrange
         let source = Box::new(MockIterator::new(vec![]));
+
+        // Act
         let merge = MergeIterator::new(vec![source]).start(b"x".to_vec());
 
         // Assert: start is set
@@ -345,6 +351,8 @@ mod tests {
     fn should_set_end_bound() {
         // Arrange
         let source = Box::new(MockIterator::new(vec![]));
+
+        // Act
         let merge = MergeIterator::new(vec![source]).end(b"z".to_vec());
 
         // Assert: end is set
@@ -356,6 +364,8 @@ mod tests {
     fn should_support_fluent_chaining() {
         // Arrange
         let source = Box::new(MockIterator::new(vec![]));
+
+        // Act
         let merge = MergeIterator::new(vec![source])
             .start(b"a".to_vec())
             .end(b"z".to_vec());
@@ -369,6 +379,8 @@ mod tests {
     fn should_overwrite_start_bound_on_multiple_calls() {
         // Arrange
         let source = Box::new(MockIterator::new(vec![]));
+
+        // Act
         let merge = MergeIterator::new(vec![source])
             .start(b"a".to_vec())
             .start(b"m".to_vec());
@@ -381,6 +393,8 @@ mod tests {
     fn should_overwrite_end_bound_on_multiple_calls() {
         // Arrange
         let source = Box::new(MockIterator::new(vec![]));
+
+        // Act
         let merge = MergeIterator::new(vec![source])
             .end(b"z".to_vec())
             .end(b"m".to_vec());
@@ -443,9 +457,11 @@ mod tests {
 
     #[test]
     fn should_init_empty_sources() {
-        // Arrange / Act
+        // Arrange
         let source: Box<dyn SourceIterator> = Box::new(MockIterator::new(vec![]));
         let mut merge = MergeIterator::new(vec![source]);
+
+        // Act
         merge.init().unwrap();
 
         // Assert: count is 0
@@ -608,6 +624,9 @@ mod tests {
         // Arrange
         let source = Box::new(MockIterator::new(vec![(b"a".to_vec(), b"1".to_vec())]));
         let merge = MergeIterator::new(vec![source]);
+
+        // Act
+        // (none)
 
         // Assert: count is 0 before init
         assert_eq!(merge.count(), 0);

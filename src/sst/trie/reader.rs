@@ -204,7 +204,8 @@ mod tests {
 
     #[test]
     fn should_reject_empty_trie_data() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let reader = TrieReader::new(&[]);
 
         // Assert
@@ -217,7 +218,9 @@ mod tests {
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"apple"), Some(0));
         assert_eq!(reader.find_block(b"application"), Some(1));
         assert_eq!(reader.find_block(b"banana"), Some(2));
@@ -230,7 +233,9 @@ mod tests {
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"apricot"), None);
         assert_eq!(reader.find_block(b"zoo"), None);
         assert_eq!(reader.find_block(b""), None);
@@ -243,7 +248,9 @@ mod tests {
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"app"), None);
         assert_eq!(reader.find_block(b"appl"), None);
         assert_eq!(reader.find_block(b"ban"), None);
@@ -255,7 +262,9 @@ mod tests {
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"apple"), Some(0));
     }
 
@@ -265,7 +274,9 @@ mod tests {
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"cherry"), Some(3));
     }
 
@@ -275,7 +286,9 @@ mod tests {
         let data = build_large_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"key_0000"), Some(0));
         assert_eq!(reader.find_block(b"key_0050"), Some(50));
         assert_eq!(reader.find_block(b"key_0099"), Some(99));
@@ -387,7 +400,9 @@ mod tests {
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.seek_next(b"apple"), Some(0));
         assert_eq!(reader.seek_next(b"banana"), Some(2));
     }
@@ -398,7 +413,9 @@ mod tests {
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.seek_next(b"missing"), None);
     }
 
@@ -489,7 +506,9 @@ mod tests {
         let data = build_test_trie();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"apple"), Some(0));
         assert_eq!(reader.find_block(b"application"), Some(1));
         assert_eq!(reader.find_block(b"banana"), Some(2));
@@ -506,7 +525,9 @@ mod tests {
         let data = builder.finish();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"key-with-dash"), Some(0));
         assert_eq!(reader.find_block(b"key.with.dot"), Some(1));
         assert_eq!(reader.find_block(b"key_with_underscore"), Some(2));
@@ -522,7 +543,9 @@ mod tests {
         let data = builder.finish();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(&[0, 1, 2]), Some(0));
         assert_eq!(reader.find_block(&[0, 1, 3]), Some(1));
         assert_eq!(reader.find_block(&[5, 6, 7]), Some(2));
@@ -537,7 +560,9 @@ mod tests {
         let data = builder.finish();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"key1"), Some(u32::MAX - 1));
         assert_eq!(reader.find_block(b"key2"), Some(0));
     }
@@ -554,7 +579,9 @@ mod tests {
         let data = builder.finish();
         let reader = TrieReader::new(&data).unwrap();
 
-        // Act & Assert
+        // Act
+
+        // Assert
         assert_eq!(reader.find_block(b"a"), Some(0));
         assert_eq!(reader.find_block(b"ab"), Some(1));
         assert_eq!(reader.find_block(b"abc"), Some(2));

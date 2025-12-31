@@ -221,7 +221,10 @@ mod tests {
 
     #[test]
     fn should_create_version_manager_when_instantiated() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let manager = create_test_version_manager();
 
         // Assert

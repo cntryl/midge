@@ -414,10 +414,13 @@ mod tests {
 
     #[test]
     fn should_read_written_file_when_writing() -> FsResult<()> {
+        // Arrange
         let temp = TempDir::new().map_err(|e| FsError::Io(e.to_string()))?;
         let fs = RealFs::new(temp.path())?;
 
         let path = FsPath::new("test.txt");
+
+        // Act
         let mut file = fs.open(
             &path,
             OpenOptions {
@@ -442,16 +445,21 @@ mod tests {
         )?;
 
         let data = file.read_at(0, 5)?;
+
+        // Assert
         assert_eq!(data, bytes::Bytes::from("hello"));
         Ok(())
     }
 
     #[test]
     fn should_sanitize_path_traversal() -> FsResult<()> {
+        // Arrange
         let temp = TempDir::new().map_err(|e| FsError::Io(e.to_string()))?;
         let fs = RealFs::new(temp.path())?;
 
         let path = FsPath::new("../escape.txt");
+
+        // Act
         let mut file = fs.open(
             &path,
             OpenOptions {
@@ -465,6 +473,7 @@ mod tests {
         file.append(bytes::Bytes::from("data"))?;
         drop(file);
 
+        // Assert
         // File should be in temp dir, not parent
         assert!(fs.exists(&FsPath::new("escape.txt"))?);
         Ok(())

@@ -732,7 +732,10 @@ mod tests {
 
     #[test]
     fn should_initialize_wal_state_with_defaults() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let wal = WalState::default();
 
         // Assert
@@ -753,6 +756,9 @@ mod tests {
             cloud_durable_seq: 8,
             ..Default::default()
         };
+
+        // Act
+        // (none)
 
         // Assert - Verify monotonicity constraints
         assert!(wal.cloud_durable_seq <= wal.local_durable_seq);
@@ -778,7 +784,10 @@ mod tests {
 
     #[test]
     fn should_initialize_compaction_state() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let compaction = CompactionState::default();
 
         // Assert
@@ -805,7 +814,10 @@ mod tests {
 
     #[test]
     fn should_initialize_cloud_state() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let cloud = CloudState::default();
 
         // Assert
@@ -831,7 +843,10 @@ mod tests {
 
     #[test]
     fn should_create_runtime_state_in_memory_mode() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Assert
@@ -844,7 +859,10 @@ mod tests {
 
     #[test]
     fn should_initialize_default_column_family() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Assert
@@ -926,7 +944,10 @@ mod tests {
         // Arrange
         let state = RuntimeState::new("/tmp/test_midge".into(), true);
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(state.get_cf(999).is_none());
     }
 
@@ -1034,6 +1055,9 @@ mod tests {
         // Arrange
         let state = RuntimeState::new("/tmp/test_midge".into(), true);
 
+        // Act
+        // (none)
+
         // Assert
         assert!(state.memtable_size_limit > 0);
         assert_eq!(state.memtable_size_limit, 64 * 1024 * 1024); // 64MB
@@ -1041,7 +1065,7 @@ mod tests {
 
     #[test]
     fn should_respect_read_only_flag() {
-        // Arrange & Act
+        // Arrange
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
 
         // Assert - Initially not read-only

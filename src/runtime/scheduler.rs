@@ -139,7 +139,10 @@ mod tests {
 
     #[test]
     fn should_create_scheduler() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let scheduler = Scheduler::new();
 
         // Assert
@@ -150,7 +153,10 @@ mod tests {
 
     #[test]
     fn should_create_scheduler_with_default() {
-        // Arrange & Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let scheduler = Scheduler::default();
 
         // Assert
@@ -368,7 +374,29 @@ mod tests {
     }
 
     #[test]
-    fn should_decrement_running_counter() {
+    fn should_decrement_running_counter_after_single_completion() {
+        // Arrange
+        let mut scheduler = Scheduler::new();
+
+        // Schedule and get 2 flush tasks
+        for i in 0..2 {
+            let task = Task::new(TaskKind::Flush, format!("flush_{}", i));
+            scheduler.schedule(task);
+        }
+
+        let t1 = scheduler.next().unwrap();
+        let _t2 = scheduler.next().unwrap();
+        assert!(scheduler.has_running());
+
+        // Act
+        scheduler.complete(t1.id, TaskKind::Flush);
+
+        // Assert - Still has 1 running
+        assert!(scheduler.has_running());
+    }
+
+    #[test]
+    fn should_decrement_running_counter_to_zero_after_completing_all() {
         // Arrange
         let mut scheduler = Scheduler::new();
 
@@ -382,13 +410,8 @@ mod tests {
         let t2 = scheduler.next().unwrap();
         assert!(scheduler.has_running());
 
-        // Act - Complete first task
+        // Act
         scheduler.complete(t1.id, TaskKind::Flush);
-
-        // Assert - Still has 1 running
-        assert!(scheduler.has_running());
-
-        // Act - Complete second task
         scheduler.complete(t2.id, TaskKind::Flush);
 
         // Assert - No longer has running
@@ -444,7 +467,10 @@ mod tests {
         // Arrange
         let mut scheduler = Scheduler::new();
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert_eq!(scheduler.pending_count(), 0);
 
         scheduler.schedule(Task::new(TaskKind::Flush, "t1"));
@@ -467,7 +493,10 @@ mod tests {
         // Arrange
         let mut scheduler = Scheduler::new();
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!scheduler.has_running());
 
         scheduler.schedule(Task::new(TaskKind::Flush, "flush"));
@@ -481,7 +510,10 @@ mod tests {
         // Arrange
         let mut scheduler = Scheduler::new();
 
-        // Act & Assert
+        // Act
+        // (none)
+
+        // Assert
         assert!(!scheduler.has_running());
 
         scheduler.schedule(Task::new(TaskKind::Flush, "flush"));
@@ -512,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_mixed_kinds_and_priorities() {
+    fn should_handle_mixed_kinds_priorities() {
         // Arrange
         let mut scheduler = Scheduler::new();
 
@@ -539,7 +571,10 @@ mod tests {
         // Arrange
         let mut scheduler = Scheduler::new();
 
-        // Act & Assert - Multiple calls to next on empty scheduler
+        // Act
+        // (none)
+
+        // Assert - Multiple calls to next on empty scheduler
         assert!(scheduler.next().is_none());
         assert!(scheduler.next().is_none());
         assert!(scheduler.next().is_none());

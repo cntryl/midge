@@ -183,31 +183,51 @@ mod tests {
 
     #[test]
     fn should_create_snapshot_with_sequence_when_initialized() {
+        // Arrange
         let snapshot = test_snapshot(42, None, 1);
 
-        assert_eq!(snapshot.sequence(), 42);
-        assert_eq!(snapshot.column_family(), None);
-        assert_eq!(snapshot.snapshot_id(), 1);
+        // Act
+        let seq = snapshot.sequence();
+        let cf = snapshot.column_family();
+        let id = snapshot.snapshot_id();
+
+        // Assert
+        assert_eq!(seq, 42);
+        assert_eq!(cf, None);
+        assert_eq!(id, 1);
     }
 
     #[test]
     fn should_track_column_family_when_cf_specific_snapshot_created() {
+        // Arrange
         let cf_id = ColumnFamilyId(2);
         let snapshot = test_snapshot(100, Some(cf_id), 5);
 
-        assert_eq!(snapshot.sequence(), 100);
-        assert_eq!(snapshot.column_family(), Some(cf_id));
-        assert_eq!(snapshot.snapshot_id(), 5);
+        // Act
+        let seq = snapshot.sequence();
+        let cf = snapshot.column_family();
+        let id = snapshot.snapshot_id();
+
+        // Assert
+        assert_eq!(seq, 100);
+        assert_eq!(cf, Some(cf_id));
+        assert_eq!(id, 5);
     }
 
     #[test]
     fn should_compare_snapshots_by_id_when_using_equality() {
+        // Arrange
         let snap1 = test_snapshot(10, None, 1);
         let snap2 = test_snapshot(10, None, 1);
         let snap3 = test_snapshot(20, None, 2);
 
-        assert_eq!(snap1, snap2);
-        assert_ne!(snap1, snap3);
+        // Act
+        let eq = snap1 == snap2;
+        let neq = snap1 != snap3;
+
+        // Assert
+        assert!(eq);
+        assert!(neq);
     }
 
     #[test]
@@ -218,15 +238,20 @@ mod tests {
 
     #[test]
     fn should_handle_multiple_snapshots_with_different_ids() {
+        // Arrange
         let snap1 = test_snapshot(1, None, 100);
         let snap2 = test_snapshot(2, None, 101);
         let snap3 = test_snapshot(3, None, 102);
 
         let snapshots = [snap1, snap2, snap3];
 
+        // Act
+        let ids: Vec<u64> = snapshots.iter().map(|s| s.snapshot_id()).collect();
+
+        // Assert
         assert_eq!(snapshots.len(), 3);
-        assert_eq!(snapshots[0].snapshot_id(), 100);
-        assert_eq!(snapshots[1].snapshot_id(), 101);
-        assert_eq!(snapshots[2].snapshot_id(), 102);
+        assert_eq!(ids[0], 100);
+        assert_eq!(ids[1], 101);
+        assert_eq!(ids[2], 102);
     }
 }

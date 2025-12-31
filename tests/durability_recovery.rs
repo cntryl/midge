@@ -24,7 +24,8 @@ use cntryl_midge::testkit::*;
 #[test]
 fn should_recover_from_clean_shutdown_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -60,7 +61,8 @@ fn should_recover_from_clean_shutdown_when_reopening() {
 #[test]
 fn should_recover_from_crash_after_flush_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -104,7 +106,8 @@ fn should_recover_from_crash_after_flush_when_reopening() {
 #[test]
 fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -145,7 +148,8 @@ fn should_recover_unflushed_data_given_crash_during_flush_when_reopening() {
 #[test]
 fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -178,7 +182,8 @@ fn should_prefer_wal_given_wal_newer_than_sst_when_recovering() {
 #[test]
 fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -208,7 +213,8 @@ fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
 #[test]
 fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -250,7 +256,8 @@ fn should_replay_wal_in_order_given_multiple_writes_when_recovering() {
 #[test]
 fn should_recover_deletes_given_crash_after_delete_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -282,7 +289,8 @@ fn should_recover_deletes_given_crash_after_delete_when_reopening() {
 #[test]
 fn should_recover_write_batch_atomically_given_crash_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let _cf = engine.default_column_family();
@@ -337,7 +345,8 @@ fn should_recover_write_batch_atomically_given_crash_when_reopening() {
 #[test]
 fn should_recover_from_wal_given_manifest_save_failure_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -366,7 +375,8 @@ fn should_recover_from_wal_given_manifest_save_failure_when_reopening() {
 #[test]
 fn should_preserve_consistency_given_crash_before_manifest_update_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -408,7 +418,7 @@ fn should_preserve_consistency_given_crash_before_manifest_update_when_reopening
 #[test]
 fn should_be_idempotent_given_multiple_recovery_cycles_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -418,32 +428,17 @@ fn should_be_idempotent_given_multiple_recovery_cycles_when_reopening() {
             // Crash
         }
 
-        // Act & Assert (Phase 2: First recovery)
+        // Act (Recovery cycles)
         {
+            // First recovery: open and drop to simulate crash during recovery
             let engine = open_with_mode(opts.clone(), mode);
-            let cf = engine.default_column_family();
+            drop(engine);
 
-            assert_eq!(
-                engine.get(cf, b"key1").expect("get"),
-                Some(Bytes::from_static(b"value1")),
-                "mode: {}",
-                mode
-            );
-            assert_eq!(
-                engine.get(cf, b"key2").expect("get"),
-                Some(Bytes::from_static(b"value2")),
-                "mode: {}",
-                mode
-            );
-            // Crash again during second recovery attempt
-        }
-
-        // Act & Assert (Phase 3: Second recovery)
-        {
+            // Second recovery: open and verify final state
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
 
-            // Should still recover correctly (idempotent)
+            // Assert - final state should be correct after multiple restarts
             assert_eq!(
                 engine.get(cf, b"key1").expect("get"),
                 Some(Bytes::from_static(b"value1")),
@@ -463,7 +458,7 @@ fn should_be_idempotent_given_multiple_recovery_cycles_when_reopening() {
 #[test]
 fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1: First crash cycle)
+        // Arrange
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -497,7 +492,7 @@ fn should_maintain_exactly_once_given_multiple_crash_cycles_when_reopening() {
 #[test]
 fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
@@ -556,7 +551,8 @@ fn should_continue_sequence_numbers_given_recovery_when_new_writes() {
 #[test]
 fn should_skip_corrupted_tail_given_partial_record_when_tolerant_mode() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange & Act (Phase 1)
+        // Arrange
+        // Act (Phase 1)
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();

@@ -211,9 +211,11 @@ mod tests {
 
     #[test]
     fn should_read_written_data_when_writing() -> FsResult<()> {
+        // Arrange
         let fs = MockFs::new();
         let path = FsPath::new("test.txt");
 
+        // Act
         let mut file = fs.open(
             &path,
             OpenOptions {
@@ -238,15 +240,19 @@ mod tests {
         )?;
 
         let data = file.read_at(0, 5)?;
+
+        // Assert
         assert_eq!(data, Bytes::from("hello"));
         Ok(())
     }
 
     #[test]
     fn should_delete_file() -> FsResult<()> {
+        // Arrange
         let fs = MockFs::new();
         let path = FsPath::new("test.txt");
 
+        // Act
         let mut file = fs.open(
             &path,
             OpenOptions {
@@ -260,6 +266,8 @@ mod tests {
         drop(file);
 
         fs.remove_file(&path)?;
+
+        // Assert
         assert!(!fs.exists(&path)?);
         Ok(())
     }

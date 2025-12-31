@@ -971,7 +971,10 @@ mod tests {
 
     #[test]
     fn should_convert_optype_put_to_u8() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let code = OpType::Put.as_u8();
 
         // Assert: Put maps to 0
@@ -980,7 +983,10 @@ mod tests {
 
     #[test]
     fn should_convert_optype_delete_to_u8() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let code = OpType::Delete.as_u8();
 
         // Assert: Delete maps to 2
@@ -989,7 +995,10 @@ mod tests {
 
     #[test]
     fn should_convert_optype_merge_to_u8() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let code = OpType::Merge.as_u8();
 
         // Assert: Merge maps to 3
@@ -998,7 +1007,13 @@ mod tests {
 
     #[test]
     fn should_support_optype_equality() {
-        // Arrange / Act / Assert
+        // Arrange
+        // (no setup)
+
+        // Act
+        // (none)
+
+        // Assert
         assert_eq!(OpType::Put, OpType::Put);
         assert_eq!(OpType::Delete, OpType::Delete);
         assert_eq!(OpType::Merge, OpType::Merge);
@@ -1024,7 +1039,10 @@ mod tests {
 
     #[test]
     fn should_create_new_skiplist() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let sl = SkipList::new();
 
         // Assert: creation succeeds
@@ -1034,7 +1052,10 @@ mod tests {
 
     #[test]
     fn should_support_default_trait() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let sl = SkipList::default();
 
         // Assert: same as new()
@@ -1498,8 +1519,10 @@ mod tests {
 
     #[test]
     fn should_return_empty_keys_for_empty_skiplist() {
-        // Arrange / Act
+        // Arrange
         let sl = SkipList::new();
+
+        // Act
         let keys = sl.get_all_keys();
 
         // Assert

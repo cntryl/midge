@@ -272,7 +272,10 @@ mod tests {
 
     #[test]
     fn should_create_default_manifest() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let manifest = Manifest::default();
 
         // Assert
@@ -287,7 +290,10 @@ mod tests {
 
     #[test]
     fn should_create_manifest_via_new() {
-        // Arrange / Act
+        // Arrange
+        // (no setup)
+
+        // Act
         let manifest = Manifest::new();
 
         // Assert: same as default

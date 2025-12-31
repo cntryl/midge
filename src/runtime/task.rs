@@ -126,7 +126,8 @@ mod tests {
 
     #[test]
     fn should_generate_unique_task_ids() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let id1 = TaskId::new();
         let id2 = TaskId::new();
         let id3 = TaskId::new();
@@ -139,7 +140,8 @@ mod tests {
 
     #[test]
     fn should_increment_task_ids_monotonically() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let id1 = TaskId::new();
         let id2 = TaskId::new();
         let id3 = TaskId::new();
@@ -151,7 +153,8 @@ mod tests {
 
     #[test]
     fn should_create_task_id_from_default() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let id1 = TaskId::default();
         let id2 = TaskId::default();
 
@@ -220,6 +223,8 @@ mod tests {
 
     #[test]
     fn should_have_four_priority_levels() {
+        // Arrange
+        // Act
         // Assert
         assert!(TaskPriority::Low < TaskPriority::Normal);
         assert!(TaskPriority::Normal < TaskPriority::High);
@@ -249,6 +254,7 @@ mod tests {
 
     #[test]
     fn should_default_to_normal_priority() {
+        // Arrange
         // Act
         let default_priority = TaskPriority::default();
 
@@ -258,7 +264,10 @@ mod tests {
 
     #[test]
     fn should_support_priority_comparison() {
-        // Act & Assert
+        // Arrange
+        // Act
+
+        // Assert
         assert_eq!(TaskPriority::Low, TaskPriority::Low);
         assert_ne!(TaskPriority::Low, TaskPriority::High);
         assert!(TaskPriority::High < TaskPriority::Critical);
@@ -268,7 +277,8 @@ mod tests {
 
     #[test]
     fn should_have_all_task_kinds() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let kinds = [
             TaskKind::Flush,
             TaskKind::Compaction,
@@ -309,7 +319,8 @@ mod tests {
 
     #[test]
     fn should_create_task_with_default_priority() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let task = Task::new(TaskKind::Flush, "test task");
 
         // Assert
@@ -320,7 +331,8 @@ mod tests {
 
     #[test]
     fn should_create_task_with_custom_priority() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let task = Task::new(TaskKind::Compaction, "compact").with_priority(TaskPriority::High);
 
         // Assert
@@ -330,7 +342,8 @@ mod tests {
 
     #[test]
     fn should_generate_unique_task_id_per_task() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let task1 = Task::new(TaskKind::Flush, "task1");
         let task2 = Task::new(TaskKind::Flush, "task2");
 
@@ -340,7 +353,8 @@ mod tests {
 
     #[test]
     fn should_preserve_task_description() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let description = "flush memtable for cf_0";
         let task = Task::new(TaskKind::Flush, description);
 
@@ -364,7 +378,8 @@ mod tests {
 
     #[test]
     fn should_support_priority_chaining() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let task = Task::new(TaskKind::Cloud, "upload").with_priority(TaskPriority::Critical);
 
         // Assert
@@ -374,7 +389,8 @@ mod tests {
 
     #[test]
     fn should_create_tasks_with_all_kinds() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let tasks = vec![
             Task::new(TaskKind::Flush, "flush"),
             Task::new(TaskKind::Compaction, "compact"),
@@ -394,7 +410,8 @@ mod tests {
 
     #[test]
     fn should_create_tasks_with_all_priorities() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let tasks = [
             Task::new(TaskKind::Flush, "t1").with_priority(TaskPriority::Low),
             Task::new(TaskKind::Flush, "t2").with_priority(TaskPriority::Normal),
@@ -417,7 +434,9 @@ mod tests {
         let original_kind = task.kind;
         let original_priority = task.priority;
 
-        // Act & Assert - Fields remain unchanged
+        // Act
+
+        // Assert - Fields remain unchanged
         assert_eq!(task.id, original_id);
         assert_eq!(task.kind, original_kind);
         assert_eq!(task.priority, original_priority);
@@ -425,7 +444,8 @@ mod tests {
 
     #[test]
     fn should_handle_empty_description() {
-        // Arrange & Act
+        // Arrange
+        // Act
         let task = Task::new(TaskKind::Wal, "");
 
         // Assert
