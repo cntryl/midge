@@ -39,13 +39,9 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // - Looser noise threshold (accept Windows jitter)
         // ---------------------------------------------------------------
         BenchTier::Tier1Hot => Criterion::default()
-            .warm_up_time(Duration::from_millis(800))
-            .measurement_time(Duration::from_millis(2000))
-            .sample_size(10)
-            .noise_threshold(0.05)
-            .confidence_level(0.90)
-            .significance_level(0.10)
-            .nresamples(10_000)
+            .warm_up_time(Duration::from_secs(1))
+            .measurement_time(Duration::from_secs(5))
+            .sample_size(50)
             .without_plots(),
 
         // ---------------------------------------------------------------
@@ -55,12 +51,9 @@ pub fn criterion_config_for_tier(tier: BenchTier) -> Criterion {
         // Used very frequently during perf tuning.
         // ---------------------------------------------------------------
         BenchTier::Tier2Subsystem => Criterion::default()
-            .warm_up_time(Duration::from_millis(300))
-            .measurement_time(Duration::from_secs(1))
-            .sample_size(15)
-            .noise_threshold(0.02)
-            .confidence_level(0.95)
-            .nresamples(30_000)
+            .warm_up_time(Duration::from_secs(1))
+            .measurement_time(Duration::from_secs(5))
+            .sample_size(50)
             .without_plots(),
     }
 }
