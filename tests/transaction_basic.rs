@@ -4,6 +4,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::WriteOptions;
 use std::sync::Arc;
 
 // ============================================================================
@@ -204,6 +205,84 @@ fn should_read_own_writes_given_transaction_when_reading() {
         assert_eq!(value, Some(Bytes::from_static(b"value1")));
 
         engine.commit_transaction(txn).unwrap();
+    });
+}
+
+#[test]
+fn should_read_own_writes_given_kv_transaction_when_getting() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.default_column_family();
+
+        // Act
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+        txn.put(b"test_key", b"test_value").unwrap();
+        let value = txn.get(b"test_key").unwrap();
+
+        // Assert
+        assert_eq!(value, Some(Bytes::from_static(b"test_value")));
+    });
+}
+
+#[test]
+fn should_hide_deleted_value_given_kv_transaction_when_getting() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.default_column_family();
+
+        // Act
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+        txn.put(b"k", b"v").unwrap();
+        txn.delete(b"k").unwrap();
+        let value = txn.get(b"k").unwrap();
+
+        // Assert
+        assert_eq!(value, None);
+    });
+}
+
+#[test]
+fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.default_column_family();
+
+        // Act
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+        txn.put(b"key_commit", b"value_commit").unwrap();
+        engine
+            .commit_transaction_boxed(txn, WriteOptions::default())
+            .unwrap();
+
+        // Assert
+        assert_eq!(
+            engine.get(cf, b"key_commit").unwrap(),
+            Some(Bytes::from_static(b"value_commit"))
+        );
+    });
+}
+
+#[test]
+fn should_fail_given_disable_wal_when_committing_boxed_transaction() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.default_column_family();
+        let mut txn = engine.begin_transaction(&cf).unwrap();
+        txn.put(b"key_commit", b"value_commit").unwrap();
+        let write_opts = WriteOptions::new().disable_wal();
+
+        // Act
+        let err = engine
+            .commit_transaction_boxed(txn, write_opts)
+            .expect_err("disable_wal should be rejected");
+
+        // Assert
+        let msg = err.to_string();
+        assert!(msg.contains("disable_wal"));
     });
 }
 

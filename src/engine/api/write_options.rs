@@ -1,6 +1,7 @@
 //! Write options for transactions and operations
 
 use crate::common::MidgeResult;
+use crate::common::MidgeError;
 
 /// Options for write operations (transactions and batch writes)
 #[derive(Debug, Clone)]
@@ -58,18 +59,32 @@ pub trait KvTransaction: Send {
 
     /// Check if transaction is active
     fn is_active(&self) -> bool;
+
+    /// Consume this transaction and return the underlying low-level transaction.
+    ///
+    /// This enables engine APIs (e.g. commit) to work with boxed transactions.
+    fn into_inner(self: Box<Self>) -> crate::engine::api::Transaction;
 }
 
 /// Concrete transaction implementation wrapping api::Transaction
 pub struct TransactionImpl {
     inner: crate::engine::api::Transaction,
     cf_id: crate::engine::ColumnFamilyId,
+    runtime_handle: crate::runtime::RuntimeHandle,
 }
 
 impl TransactionImpl {
     /// Create a new transaction for a specific column family
-    pub fn new(cf_id: crate::engine::ColumnFamilyId, txn: crate::engine::api::Transaction) -> Self {
-        Self { inner: txn, cf_id }
+    pub fn new(
+        cf_id: crate::engine::ColumnFamilyId,
+        txn: crate::engine::api::Transaction,
+        runtime_handle: crate::runtime::RuntimeHandle,
+    ) -> Self {
+        Self {
+            inner: txn,
+            cf_id,
+            runtime_handle,
+        }
     }
 
     /// Get the inner transaction
@@ -84,10 +99,42 @@ impl TransactionImpl {
 }
 
 impl KvTransaction for TransactionImpl {
-    fn get(&self, _key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
-        // Transactions use LWW isolation (sequence-based visibility)
-        // This is a stub for API compatibility
-        Ok(None)
+    fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+        // Read-your-own-writes: consult transaction-local write set first.
+        if let Some(value_opt) = self.inner.get_from_write_set(self.cf_id, key) {
+            return Ok(value_opt.map(bytes::Bytes::from));
+        }
+
+        // Otherwise, read from engine state at the appropriate visibility frontier.
+        // - Serializable: snapshot at start_sequence
+        // - ReadCommitted / ReadUncommitted: latest committed
+        let sequence = match self.inner.isolation_level() {
+            crate::engine::api::IsolationLevel::Serializable => self.inner.start_sequence(),
+            crate::engine::api::IsolationLevel::ReadCommitted
+            | crate::engine::api::IsolationLevel::ReadUncommitted => u64::MAX,
+        };
+
+        let response = self
+            .runtime_handle
+            .send_and_wait(crate::runtime::RuntimeMsg::Read {
+                request_id: crate::runtime::next_request_id(),
+                cf_id: self.cf_id.as_u32(),
+                key: key.to_vec(),
+                sequence,
+                requested_durability: crate::engine::api::Durability::Steady,
+            })?;
+
+        match response {
+            crate::runtime::RuntimeResponse::ReadValue { value, .. } => {
+                Ok(value.map(bytes::Bytes::from))
+            }
+            crate::runtime::RuntimeResponse::Error { message, .. } => {
+                Err(MidgeError::Internal(message))
+            }
+            _ => Err(MidgeError::Internal(
+                "Unexpected response to transactional get".to_string(),
+            )),
+        }
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
@@ -104,6 +151,10 @@ impl KvTransaction for TransactionImpl {
 
     fn is_active(&self) -> bool {
         self.inner.state() == crate::engine::api::TransactionState::Active
+    }
+
+    fn into_inner(self: Box<Self>) -> crate::engine::api::Transaction {
+        (*self).inner
     }
 }
 

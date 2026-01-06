@@ -1327,7 +1327,7 @@ impl MidgeEngine {
         };
         let inner =
             api::Transaction::new(txn_id, api::IsolationLevel::Serializable, start_sequence);
-        let txn = api::TransactionImpl::new(cf.id(), inner);
+        let txn = api::TransactionImpl::new(cf.id(), inner, self.runtime_handle.clone());
         Ok(Box::new(txn))
     }
 
@@ -1364,7 +1364,7 @@ impl MidgeEngine {
             _ => fallback_sequence,
         };
         let inner = api::Transaction::new(txn_id, isolation, start_sequence);
-        let txn = api::TransactionImpl::new(cf.id(), inner);
+        let txn = api::TransactionImpl::new(cf.id(), inner, self.runtime_handle.clone());
         Ok(Box::new(txn))
     }
 
@@ -1429,12 +1429,22 @@ impl MidgeEngine {
     /// Commit a transaction atomically (high-level API with WriteOptions)
     pub fn commit_transaction_boxed(
         &self,
-        _txn_box: Box<dyn api::KvTransaction>,
-        _opts: api::WriteOptions,
+        txn_box: Box<dyn api::KvTransaction>,
+        opts: api::WriteOptions,
     ) -> MidgeResult<()> {
-        // For now, we downcast to TransactionImpl and use the inner transaction
-        // This is a workaround until we refactor transaction handling
-        // For API compatibility with tests
+        if opts.disable_wal {
+            return Err(MidgeError::InvalidArgument(
+                "Transactions do not support disable_wal".to_string(),
+            ));
+        }
+
+        let txn = txn_box.into_inner();
+        self.commit_transaction(txn)?;
+
+        if opts.sync {
+            self.sync()?;
+        }
+
         Ok(())
     }
 
