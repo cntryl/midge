@@ -24,11 +24,12 @@ fn should_prevent_dirty_read_given_uncommitted_write_when_reading() {
 
         // Act
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn.put(b"key".to_vec(), b"uncommitted".to_vec(, None))
+        txn.put(b"key".to_vec(), b"uncommitted".to_vec(), None)
             .unwrap();
 
         // Other transaction should not see uncommitted write
-        let value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key").unwrap();
 
         // Assert
         assert_eq!(value, None); // No dirty read
@@ -44,7 +45,7 @@ fn should_not_see_uncommitted_write_given_concurrent_transaction_when_reading() 
 
         // Act
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn1.put(b"key".to_vec(), b"uncommitted".to_vec(, None))
+        txn1.put(b"key".to_vec(), b"uncommitted".to_vec(), None)
             .unwrap();
 
         let txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
@@ -69,19 +70,20 @@ fn should_allow_dirty_write_given_uncommitted_update_when_serialized() {
 
         // Act
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn1.put(b"key".to_vec(), b"value1".to_vec(, None))
+        txn1.put(b"key".to_vec(), b"value1".to_vec(), None)
             .unwrap();
 
         // txn2 can write to same key (LWW semantics)
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn2.put(b"key".to_vec(), b"value2".to_vec(, None))
+        txn2.put(b"key".to_vec(), b"value2".to_vec(), None)
             .unwrap();
 
         engine.commit(txn1, cntryl_midge::WriteOptions::default()).unwrap();
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert - last write wins
-        let value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"value2")));
     });
 }
@@ -99,7 +101,7 @@ fn should_read_uncommitted_value_given_put_in_same_transaction_when_reading() {
 
         // Act
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn.put(b"key".to_vec(), b"value".to_vec(, None))
+        txn.put(b"key".to_vec(), b"value".to_vec(), None)
             .unwrap();
         let value = txn.get(b"key").unwrap();
 
@@ -141,16 +143,21 @@ fn should_read_at_begin_sequence_given_snapshot_when_reading() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"initial").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"initial".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act
         let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
         // Concurrent write after transaction started
-        engine.put(cf, b"key", b"updated").unwrap();
+        let mut concurrent_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        concurrent_tx.put(b"key".to_vec(), b"updated".to_vec(), None).unwrap();
+        engine.commit(concurrent_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Transaction should see snapshot at start
-        let value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key").unwrap();
 
         // Assert - current engine sees updated value
         assert_eq!(value, Some(Bytes::from_static(b"updated")));
@@ -165,14 +172,18 @@ fn should_not_see_concurrent_writes_given_snapshot_isolation_when_reading() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"initial").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"initial".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act
         let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         let start_seq = txn.start_sequence();
 
         // Concurrent update
-        engine.put(cf, b"key", b"updated").unwrap();
+        let mut concurrent_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        concurrent_tx.put(b"key".to_vec(), b"updated".to_vec(), None).unwrap();
+        engine.commit(concurrent_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert - transaction holds snapshot view
         assert!(start_seq > 0);
@@ -187,18 +198,27 @@ fn should_return_old_value_given_snapshot_before_write_when_reading() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"v1").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"v1".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
-        // Act
-        let snap = engine.snapshot();
-        engine.put(cf, b"key", b"v2").unwrap();
+        // Act - transaction captures snapshot at start
+        let snap_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let snap_seq = snap_tx.start_sequence();
+        
+        // Write v2 after snapshot transaction started
+        let mut update_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        update_tx.put(b"key".to_vec(), b"v2".to_vec(), None).unwrap();
+        engine.commit(update_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
-        // Assert - snapshots hold their sequence view
-        let current_value = engine.get(cf, b"key").unwrap();
+        // Assert - new transaction sees updated value
+        let current_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let current_value = current_tx.get(b"key").unwrap();
         assert_eq!(current_value, Some(Bytes::from_static(b"v2")));
 
-        // Snapshot is at earlier sequence
-        assert!(snap.sequence() < engine.snapshot().sequence());
+        // Snapshot transaction was at earlier sequence
+        let current_seq = current_tx.start_sequence();
+        assert!(snap_seq < current_seq);
     });
 }
 
@@ -208,14 +228,18 @@ fn should_provide_consistent_view_given_transaction_when_scanning() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key1", b"v1").unwrap();
-        engine.put(cf, b"key2", b"v2").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
+        setup_tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act
         // let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
         // Concurrent update during scan
-        engine.put(cf, b"key3", b"v3").unwrap();
+        let mut concurrent_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        concurrent_tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
+        engine.commit(concurrent_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert - transaction scan should not see key3
         // let results = txn.range(cf.id(), b"key1", b"key9").collect();
@@ -233,14 +257,19 @@ fn should_allow_commit_given_read_key_modified_when_concurrent_write() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"initial").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"initial".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act
         let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        let _value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let _value = read_tx.get(b"key").unwrap();
 
         // Concurrent modification
-        engine.put(cf, b"key", b"concurrent").unwrap();
+        let mut concurrent_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        concurrent_tx.put(b"key".to_vec(), b"concurrent".to_vec(), None).unwrap();
+        engine.commit(concurrent_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Transaction commit should succeed (LWW semantics)
         let result = engine.commit(txn, cntryl_midge::WriteOptions::default());
@@ -256,22 +285,28 @@ fn should_allow_put_commit_given_read_key_modified_when_concurrent_write() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"initial").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"initial".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        let _value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let _value = read_tx.get(b"key").unwrap();
 
         // Concurrent modification
-        engine.put(cf, b"key", b"concurrent").unwrap();
+        let mut concurrent_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        concurrent_tx.put(b"key".to_vec(), b"concurrent".to_vec(), None).unwrap();
+        engine.commit(concurrent_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Transaction writes new value
-        txn.put(b"key".to_vec(), b"txn_value".to_vec(, None))
+        txn.put(b"key".to_vec(), b"txn_value".to_vec(), None)
             .unwrap();
         engine.commit(txn, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert - transaction write wins
-        let final_value = engine.get(cf, b"key").unwrap();
+        let final_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let final_value = final_tx.get(b"key").unwrap();
         assert_eq!(final_value, Some(Bytes::from_static(b"txn_value")));
     });
 }

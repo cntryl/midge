@@ -35,7 +35,7 @@ fn should_allow_concurrent_puts_to_same_key_given_lww_semantics() {
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert - last committed wins
-        let mut read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
         let value = read_tx.get(b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"value2")));
     });
@@ -81,14 +81,14 @@ fn should_accept_both_committers_given_concurrent_puts_when_lww() {
 
         // Act
         let handle1 = std::thread::spawn(move || {
-            let mut txn = engine1.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn.put(b"key".to_vec(), b"value1".to_vec(, None)).unwrap();
+            let mut txn = engine1.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn.put(b"key".to_vec(), b"value1".to_vec(), None).unwrap();
             engine1.commit(txn, cntryl_midge::WriteOptions::default())
         });
 
         let handle2 = std::thread::spawn(move || {
-            let mut txn = engine2.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn.put(b"key".to_vec(), b"value2".to_vec(, None)).unwrap();
+            let mut txn = engine2.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn.put(b"key".to_vec(), b"value2".to_vec(), None).unwrap();
             engine2.commit(txn, cntryl_midge::WriteOptions::default())
         });
 
@@ -107,17 +107,18 @@ fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
 
         // Act
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn1.put(b"key".to_vec(), b"value1".to_vec(, None))
+        txn1.put(b"key".to_vec(), b"value1".to_vec(), None)
             .unwrap();
         engine.commit(txn1, cntryl_midge::WriteOptions::default()).unwrap();
 
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn2.put(b"key".to_vec(), b"value2".to_vec(, None))
+        txn2.put(b"key".to_vec(), b"value2".to_vec(), None)
             .unwrap();
         drop(txn2); // Rollback
 
         // Assert
-        let value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"value1")));
     });
 }
@@ -128,21 +129,24 @@ fn should_allow_concurrent_delete_put_operations_given_lww_semantics() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"initial").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"initial".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
         txn1.delete(b"key".to_vec()).unwrap();
-        txn2.put(b"key".to_vec(), b"value".to_vec(, None))
+        txn2.put(b"key".to_vec(), b"value".to_vec(), None)
             .unwrap();
 
         engine.commit(txn1, cntryl_midge::WriteOptions::default()).unwrap();
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert - last operation wins
-        let value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"value")));
     });
 }
@@ -162,14 +166,15 @@ fn should_allow_overlapping_put_after_delete_range_given_lww_semantics() {
 
         txn1.delete_range(b"key1".to_vec(), b"key3".to_vec())
             .unwrap();
-        txn2.put(b"key2".to_vec(), b"newvalue".to_vec(, None))
+        txn2.put(b"key2".to_vec(), b"newvalue".to_vec(), None)
             .unwrap();
 
         engine.commit(txn1, cntryl_midge::WriteOptions::default()).unwrap();
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert
-        let value = engine.get(cf, b"key2").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key2").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"newvalue")));
     });
 }
@@ -185,7 +190,7 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
-        txn1.put(b"key".to_vec(), b"value".to_vec(, None))
+        txn1.put(b"key".to_vec(), b"value".to_vec(), None)
             .unwrap();
         txn2.delete_range(b"key".to_vec(), b"keyz".to_vec())
             .unwrap();
@@ -194,7 +199,8 @@ fn should_allow_put_then_delete_range_given_lww_semantics() {
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert
-        let value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key").unwrap();
         assert_eq!(value, None);
     });
 }
@@ -221,7 +227,8 @@ fn should_allow_concurrent_delete_ranges_given_lww_semantics() {
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert - both succeed
-        assert!(engine.get(cf, b"key1").unwrap().is_none());
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        assert!(read_tx.get(b"key1").unwrap().is_none());
     });
 }
 
@@ -231,7 +238,9 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"value").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"value".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
@@ -245,7 +254,8 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert
-        assert!(engine.get(cf, b"key").unwrap().is_none());
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        assert!(read_tx.get(b"key").unwrap().is_none());
     });
 }
 
@@ -264,9 +274,9 @@ fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first()
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
-        txn1.put(b"key".to_vec(), b"value1".to_vec(, None))
+        txn1.put(b"key".to_vec(), b"value1".to_vec(), None)
             .unwrap();
-        txn2.put(b"key".to_vec(), b"value2".to_vec(, None))
+        txn2.put(b"key".to_vec(), b"value2".to_vec(), None)
             .unwrap();
 
         let result1 = engine.commit(txn1, cntryl_midge::WriteOptions::default());
@@ -275,7 +285,8 @@ fn should_conflict_on_concurrent_inserts_given_same_key_when_one_commits_first()
         // Assert - both succeed with LWW semantics (last write wins)
         assert!(result1.is_ok());
         assert!(result2.is_ok());
-        let value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"value2")));
     });
 }
@@ -286,17 +297,20 @@ fn should_conflict_on_insert_given_key_already_exists_when_committed() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"existing").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"existing".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act - transaction attempts put on existing key
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn.put(b"key".to_vec(), b"newvalue".to_vec(, None))
+        txn.put(b"key".to_vec(), b"newvalue".to_vec(), None)
             .unwrap();
         let result = engine.commit(txn, cntryl_midge::WriteOptions::default());
 
         // Assert - put succeeds (LWW semantics, not insert semantics)
         assert!(result.is_ok());
-        let value = engine.get(cf, b"key").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx.get(b"key").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"newvalue")));
     });
 }
@@ -311,24 +325,29 @@ fn should_allow_lost_update_given_put_read_modify_write_when_concurrent() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"counter", b"0").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"counter".to_vec(), b"0".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act - simulate lost update with LWW semantics
-        let _val1 = engine.get(cf, b"counter").unwrap().unwrap();
-        let _val2 = engine.get(cf, b"counter").unwrap().unwrap();
+        let read_tx1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let _val1 = read_tx1.get(b"counter").unwrap().unwrap();
+        let read_tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let _val2 = read_tx2.get(b"counter").unwrap().unwrap();
 
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn1.put(b"counter".to_vec(), b"1".to_vec(, None))
+        txn1.put(b"counter".to_vec(), b"1".to_vec(), None)
             .unwrap();
         engine.commit(txn1, cntryl_midge::WriteOptions::default()).unwrap();
 
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn2.put(b"counter".to_vec(), b"1".to_vec(, None))
+        txn2.put(b"counter".to_vec(), b"1".to_vec(), None)
             .unwrap();
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert - lost update allowed with LWW
-        let final_value = engine.get(cf, b"counter").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let final_value = read_tx.get(b"counter").unwrap();
         assert_eq!(final_value, Some(Bytes::from_static(b"1")));
     });
 }
@@ -339,28 +358,32 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"counter", b"0").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"counter".to_vec(), b"0".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act - read-modify-write pattern with concurrent modification
-        let original = engine.get(cf, b"counter").unwrap().unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let original = read_tx.get(b"counter").unwrap().unwrap();
         assert_eq!(original, Bytes::from_static(b"0"));
 
         // Concurrent transaction modifies the counter
         let mut txn_concurrent = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         txn_concurrent
-            .put(cf.id(), b"counter".to_vec(), b"2".to_vec())
+            .put(b"counter".to_vec(), b"2".to_vec(), None)
             .unwrap();
         engine.commit(txn_concurrent, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Original transaction continues with stale value
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn.put(b"counter".to_vec(), b"1".to_vec(, None))
+        txn.put(b"counter".to_vec(), b"1".to_vec(), None)
             .unwrap();
         let result = engine.commit(txn, cntryl_midge::WriteOptions::default());
 
         // Assert - LWW semantics mean last write wins (value is 1)
         assert!(result.is_ok());
-        let value = engine.get(cf, b"counter").unwrap();
+        let read_tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = read_tx2.get(b"counter").unwrap();
         assert_eq!(value, Some(Bytes::from_static(b"1")));
     });
 }
@@ -380,21 +403,22 @@ fn should_preserve_both_updates_given_non_overlapping_keys_when_concurrent_commi
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
-        txn1.put(b"key1".to_vec(), b"value1".to_vec(, None))
+        txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
             .unwrap();
-        txn2.put(b"key2".to_vec(), b"value2".to_vec(, None))
+        txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
             .unwrap();
 
         engine.commit(txn1, cntryl_midge::WriteOptions::default()).unwrap();
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
         assert_eq!(
-            engine.get(cf, b"key1").unwrap(),
+            read_tx.get(b"key1").unwrap(),
             Some(Bytes::from_static(b"value1"))
         );
         assert_eq!(
-            engine.get(cf, b"key2").unwrap(),
+            read_tx.get(b"key2").unwrap(),
             Some(Bytes::from_static(b"value2"))
         );
     });
@@ -409,14 +433,15 @@ fn should_commit_transaction_given_no_conflicts() {
 
         // Act
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn.put(b"key".to_vec(), b"value".to_vec(, None))
+        txn.put(b"key".to_vec(), b"value".to_vec(), None)
             .unwrap();
         let result = engine.commit(txn, cntryl_midge::WriteOptions::default());
 
         // Assert
         assert!(result.is_ok());
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
         assert_eq!(
-            engine.get(cf, b"key").unwrap(),
+            read_tx.get(b"key").unwrap(),
             Some(Bytes::from_static(b"value"))
         );
     });
@@ -434,15 +459,15 @@ fn should_commit_transaction_given_concurrent_modifications_to_different_keys() 
 
         // Act
         let handle1 = std::thread::spawn(move || {
-            let mut txn = engine1.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn.put(b"key1".to_vec(), b"value1".to_vec(, None))
+            let mut txn = engine1.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .unwrap();
             engine1.commit(txn, cntryl_midge::WriteOptions::default())
         });
 
         let handle2 = std::thread::spawn(move || {
-            let mut txn = engine2.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn.put(b"key2".to_vec(), b"value2".to_vec(, None))
+            let mut txn = engine2.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .unwrap();
             engine2.commit(txn, cntryl_midge::WriteOptions::default())
         });
@@ -450,12 +475,13 @@ fn should_commit_transaction_given_concurrent_modifications_to_different_keys() 
         // Assert
         assert!(handle1.join().unwrap().is_ok());
         assert!(handle2.join().unwrap().is_ok());
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
         assert_eq!(
-            engine.get(cf, b"key1").unwrap(),
+            read_tx.get(b"key1").unwrap(),
             Some(Bytes::from_static(b"value1"))
         );
         assert_eq!(
-            engine.get(cf, b"key2").unwrap(),
+            read_tx.get(b"key2").unwrap(),
             Some(Bytes::from_static(b"value2"))
         );
     });
@@ -467,7 +493,9 @@ fn should_read_values_within_transaction() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key", b"value").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key".to_vec(), b"value".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act
         let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
@@ -487,13 +515,14 @@ fn should_commit_new_key_given_clean_transaction() {
 
         // Act
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn.put(b"newkey".to_vec(), b"newvalue".to_vec(, None))
+        txn.put(b"newkey".to_vec(), b"newvalue".to_vec(), None)
             .unwrap();
         engine.commit(txn, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Assert
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
         assert_eq!(
-            engine.get(cf, b"newkey").unwrap(),
+            read_tx.get(b"newkey").unwrap(),
             Some(Bytes::from_static(b"newvalue"))
         );
     });
@@ -516,10 +545,10 @@ fn should_allow_concurrent_writes_to_different_keys() {
         for i in 0..10 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                let mut txn = engine_clone.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+                let mut txn = engine_clone.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
                 let key = format!("key{}", i);
                 let value = format!("value{}", i);
-                txn.put(key.as_bytes().to_vec(), value.as_bytes(, None).to_vec())
+                txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 engine_clone.commit(txn, cntryl_midge::WriteOptions::default())
             });
@@ -531,11 +560,12 @@ fn should_allow_concurrent_writes_to_different_keys() {
             assert!(handle.join().unwrap().is_ok());
         }
 
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
         for i in 0..10 {
             let key = format!("key{}", i);
             let expected = format!("value{}", i);
             assert_eq!(
-                engine.get(cf, key.as_bytes()).unwrap(),
+                read_tx.get(key.as_bytes()).unwrap(),
                 Some(Bytes::from(expected.as_bytes().to_vec()))
             );
         }
@@ -555,9 +585,9 @@ fn should_handle_high_contention_writes_without_panic() {
         for i in 0..20 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                let mut txn = engine_clone.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+                let mut txn = engine_clone.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
                 let value = format!("value{}", i);
-                txn.put(b"hotkey".to_vec(), value.as_bytes(, None).to_vec())
+                txn.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 engine_clone.commit(txn, cntryl_midge::WriteOptions::default())
             });
@@ -570,7 +600,8 @@ fn should_handle_high_contention_writes_without_panic() {
         }
 
         // One of the values should win
-        assert!(engine.get(cf, b"hotkey").unwrap().is_some());
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        assert!(read_tx.get(b"hotkey").unwrap().is_some());
     });
 }
 
@@ -581,18 +612,20 @@ fn should_handle_concurrent_read_modify_writes_without_panic() {
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
         let cf_id = cf.id();
-        engine.put(cf, b"counter", b"0").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"counter".to_vec(), b"0".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
         let mut handles = vec![];
 
         // Act - 10 threads incrementing counter
         for i in 0..10 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                let cf = engine_clone.default_column_family();
-                let _value = engine_clone.get(cf, b"counter").unwrap();
-                let mut txn = engine_clone.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+                let read_tx = engine_clone.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).unwrap();
+                let _value = read_tx.get(b"counter").unwrap();
+                let mut txn = engine_clone.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
                 let new_value = format!("{}", i);
-                txn.put(b"counter".to_vec(), new_value.as_bytes(, None).to_vec())
+                txn.put(b"counter".to_vec(), new_value.as_bytes().to_vec(), None)
                     .unwrap();
                 engine_clone.commit(txn, cntryl_midge::WriteOptions::default())
             });
@@ -619,14 +652,14 @@ fn should_handle_high_concurrency_optimistic_locking() {
         for i in 0..50 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                let cf = engine_clone.default_column_family();
                 // Optimistic lock pattern: read first
-                let _current = engine_clone.get(cf, b"value").unwrap();
+                let read_tx = engine_clone.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).unwrap();
+                let _current = read_tx.get(b"value").unwrap();
 
                 // Then write in transaction
-                let mut txn = engine_clone.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+                let mut txn = engine_clone.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
                 let write_val = format!("{}", i);
-                txn.put(b"value".to_vec(), write_val.as_bytes(, None).to_vec())
+                txn.put(b"value".to_vec(), write_val.as_bytes().to_vec(), None)
                     .unwrap();
                 engine_clone.commit(txn, cntryl_midge::WriteOptions::default())
             });
@@ -639,7 +672,8 @@ fn should_handle_high_concurrency_optimistic_locking() {
         }
 
         // Final value should be one of the writes
-        assert!(engine.get(cf, b"value").unwrap().is_some());
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        assert!(read_tx.get(b"value").unwrap().is_some());
     });
 }
 
@@ -666,12 +700,12 @@ fn should_recover_conflict_state_after_engine_restart() {
 
             // Create conflicting transactions where last-write wins
             let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn1.put(b"conflict_key".to_vec(), b"value1".to_vec(, None))
+            txn1.put(b"conflict_key".to_vec(), b"value1".to_vec(), None)
                 .unwrap();
             engine.commit(txn1, cntryl_midge::WriteOptions::default()).unwrap();
 
             let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn2.put(b"conflict_key".to_vec(), b"value2".to_vec(, None))
+            txn2.put(b"conflict_key".to_vec(), b"value2".to_vec(), None)
                 .unwrap();
             engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
@@ -684,7 +718,8 @@ fn should_recover_conflict_state_after_engine_restart() {
             let cf = engine.default_column_family();
 
             // Assert - last written value persists
-            let value = engine.get(cf, b"conflict_key").unwrap();
+            let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+            let value = read_tx.get(b"conflict_key").unwrap();
             assert_eq!(value, Some(Bytes::from_static(b"value2")));
         }
     });
@@ -699,16 +734,18 @@ fn should_persist_lost_update_prevention_after_restart() {
             let cf = engine.default_column_family();
 
             // Initial value
-            engine.put(cf, b"counter", b"0").unwrap();
+            let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            setup_tx.put(b"counter".to_vec(), b"0".to_vec(), None).unwrap();
+            engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
             // Two transactions attempt concurrent increment
             let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn1.put(b"counter".to_vec(), b"1".to_vec(, None))
+            txn1.put(b"counter".to_vec(), b"1".to_vec(), None)
                 .unwrap();
             engine.commit(txn1, cntryl_midge::WriteOptions::default()).unwrap();
 
             let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-            txn2.put(b"counter".to_vec(), b"2".to_vec(, None))
+            txn2.put(b"counter".to_vec(), b"2".to_vec(), None)
                 .unwrap();
             engine.commit(txn2, cntryl_midge::WriteOptions::default()).unwrap();
 
@@ -721,7 +758,8 @@ fn should_persist_lost_update_prevention_after_restart() {
             let cf = engine.default_column_family();
 
             // Assert - last written value (2) persists
-            let value = engine.get(cf, b"counter").unwrap();
+            let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+            let value = read_tx.get(b"counter").unwrap();
             assert_eq!(value, Some(Bytes::from_static(b"2")));
         }
     });
@@ -742,9 +780,9 @@ fn should_not_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
-        txn1.put(b"key1".to_vec(), b"value1".to_vec(, None))
+        txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
             .unwrap();
-        txn2.put(b"key2".to_vec(), b"value2".to_vec(, None))
+        txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
             .unwrap();
 
         let r1 = engine.commit(txn1, cntryl_midge::WriteOptions::default());
@@ -762,8 +800,9 @@ fn should_not_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
             mode
         );
 
-        let v1 = engine.get(cf, b"key1").unwrap();
-        let v2 = engine.get(cf, b"key2").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let v1 = read_tx.get(b"key1").unwrap();
+        let v2 = read_tx.get(b"key2").unwrap();
         assert_eq!(v1, Some(Bytes::from_static(b"value1")));
         assert_eq!(v2, Some(Bytes::from_static(b"value2")));
     });
@@ -778,24 +817,27 @@ fn should_preserve_both_writes_when_non_overlapping_keys_given_concurrent_commit
         let cf = engine.default_column_family();
 
         // Pre-populate
-        engine.put(cf, b"key1", b"old1").unwrap();
-        engine.put(cf, b"key2", b"old2").unwrap();
+        let mut setup_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        setup_tx.put(b"key1".to_vec(), b"old1".to_vec(), None).unwrap();
+        setup_tx.put(b"key2".to_vec(), b"old2".to_vec(), None).unwrap();
+        engine.commit(setup_tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Act: Two concurrent updates to different keys
         let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
-        txn1.put(b"key1".to_vec(), b"new1".to_vec(, None))
+        txn1.put(b"key1".to_vec(), b"new1".to_vec(), None)
             .unwrap();
-        txn2.put(b"key2".to_vec(), b"new2".to_vec(, None))
+        txn2.put(b"key2".to_vec(), b"new2".to_vec(), None)
             .unwrap();
 
         engine.commit(txn1, cntryl_midge::WriteOptions::default()).ok();
         engine.commit(txn2, cntryl_midge::WriteOptions::default()).ok();
 
         // Assert: Both updates must be visible
-        let v1 = engine.get(cf, b"key1").unwrap();
-        let v2 = engine.get(cf, b"key2").unwrap();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let v1 = read_tx.get(b"key1").unwrap();
+        let v2 = read_tx.get(b"key2").unwrap();
 
         assert_eq!(
             v1,
