@@ -1293,8 +1293,11 @@ impl MidgeEngine {
         )
     }
 
-    /// Create a new transaction with serializable isolation
-    /// Begin a new transaction for a specific column family (high-level API)
+    /// Begin a new transaction
+    ///
+    /// # Arguments
+    /// * `cf` - Column family handle
+    /// * `isolation` - Isolation level for the transaction
     ///
     /// # Panics
     /// Panics if called while ingest mode is active. This is a programmer error:
@@ -1302,7 +1305,8 @@ impl MidgeEngine {
     pub fn begin_transaction(
         &self,
         cf: &ColumnFamilyHandle,
-    ) -> MidgeResult<Box<dyn api::KvTransaction>> {
+        isolation: api::IsolationLevel,
+    ) -> MidgeResult<api::Transaction> {
         // ─────────────────────────────────────────────────────────────────────────
         // HARD INVARIANT: No transactions while ingest is active.
         // ─────────────────────────────────────────────────────────────────────────
@@ -1325,131 +1329,25 @@ impl MidgeEngine {
             Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
             _ => fallback_sequence,
         };
-        let inner =
-            api::Transaction::new(txn_id, api::IsolationLevel::Serializable, start_sequence);
-        let txn = api::TransactionImpl::new(cf.id(), inner, self.runtime_handle.clone());
-        Ok(Box::new(txn))
-    }
-
-    /// Begin a transaction with specified isolation level (high-level API)
-    ///
-    /// # Panics
-    /// Panics if called while ingest mode is active. This is a programmer error:
-    /// transactions must not be started during ingest. Complete the ingest first.
-    pub fn begin_transaction_with_isolation(
-        &self,
-        cf: &ColumnFamilyHandle,
-        isolation: api::IsolationLevel,
-    ) -> MidgeResult<Box<dyn api::KvTransaction>> {
-        // ─────────────────────────────────────────────────────────────────────────
-        // HARD INVARIANT: No transactions while ingest is active.
-        // ─────────────────────────────────────────────────────────────────────────
-        assert!(
-            !self.is_ingesting().unwrap_or(false),
-            "BUG: begin_transaction_with_isolation called while ingest mode is active. \
-             Violated invariant: transactions must not be started during ingest. \
-             Correct ordering: exit_ingest_mode() BEFORE begin_transaction()."
-        );
-
-        let txn_id = self
-            .next_snapshot_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let request_id = next_request_id();
-        let start_sequence = match self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
-        {
-            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
-            _ => fallback_sequence,
-        };
-        let inner = api::Transaction::new(txn_id, isolation, start_sequence);
-        let txn = api::TransactionImpl::new(cf.id(), inner, self.runtime_handle.clone());
-        Ok(Box::new(txn))
-    }
-
-    /// # Panics
-    /// Panics if called while ingest mode is active.
-    pub fn transaction(&self) -> api::Transaction {
-        // ─────────────────────────────────────────────────────────────────────────
-        // HARD INVARIANT: No transactions while ingest is active.
-        // ─────────────────────────────────────────────────────────────────────────
-        assert!(
-            !self.is_ingesting().unwrap_or(false),
-            "BUG: transaction() called while ingest mode is active. \
-             Violated invariant: transactions must not be started during ingest. \
-             Correct ordering: exit_ingest_mode() BEFORE transaction()."
-        );
-
-        let txn_id = self
-            .next_snapshot_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let request_id = next_request_id();
-        let start_sequence = match self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
-        {
-            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
-            _ => fallback_sequence,
-        };
-        api::Transaction::new(txn_id, api::IsolationLevel::Serializable, start_sequence)
-    }
-
-    /// Create a new transaction with the specified isolation level
-    ///
-    /// # Panics
-    /// Panics if called while ingest mode is active.
-    pub fn transaction_with_isolation(&self, isolation: api::IsolationLevel) -> api::Transaction {
-        // ─────────────────────────────────────────────────────────────────────────
-        // HARD INVARIANT: No transactions while ingest is active.
-        // ─────────────────────────────────────────────────────────────────────────
-        assert!(
-            !self.is_ingesting().unwrap_or(false),
-            "BUG: transaction_with_isolation() called while ingest mode is active. \
-             Violated invariant: transactions must not be started during ingest. \
-             Correct ordering: exit_ingest_mode() BEFORE transaction()."
-        );
-
-        let txn_id = self
-            .next_snapshot_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let fallback_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let request_id = next_request_id();
-        let start_sequence = match self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::GetCurrentSequence { request_id })
-        {
-            Ok(RuntimeResponse::CurrentSequence { sequence, .. }) => sequence,
-            _ => fallback_sequence,
-        };
-        api::Transaction::new(txn_id, isolation, start_sequence)
-    }
-
-    /// Commit a transaction atomically (high-level API with WriteOptions)
-    pub fn commit_transaction_boxed(
-        &self,
-        txn_box: Box<dyn api::KvTransaction>,
-        opts: api::WriteOptions,
-    ) -> MidgeResult<()> {
-        if opts.disable_wal {
-            return Err(MidgeError::InvalidArgument(
-                "Transactions do not support disable_wal".to_string(),
-            ));
-        }
-
-        let txn = txn_box.into_inner();
-        self.commit_transaction(txn)?;
-
-        if opts.sync {
-            self.sync()?;
-        }
-
-        Ok(())
+        Ok(api::Transaction::new(txn_id, isolation, start_sequence))
     }
 
     /// Commit a transaction atomically
-    pub fn commit_transaction(&self, mut txn: api::Transaction) -> MidgeResult<()> {
+    ///
+    /// # Arguments
+    /// * `txn` - Transaction to commit
+    /// * `opts` - Write options specifying durability guarantees
+    pub fn commit_transaction(
+        &self,
+        mut txn: api::Transaction,
+        opts: api::WriteOptions,
+    ) -> MidgeResult<()> {
+        if opts.is_no_wal() {
+            return Err(MidgeError::InvalidArgument(
+                "Transactions do not support no_wal policy".to_string(),
+            ));
+        }
+
         // Transition through state machine: Active → ReadPhase → Committing
         txn.enter_read_phase()?;
         txn.enter_commit_phase()?;
@@ -1458,6 +1356,11 @@ impl MidgeEngine {
             // Read-only transaction - mark committed with current ID
             let txn_id = txn.id();
             txn.mark_committed(txn_id)?;
+            
+            // Apply sync if requested
+            if opts.is_sync() {
+                self.sync()?;
+            }
             return Ok(());
         }
 
@@ -1569,6 +1472,12 @@ impl MidgeEngine {
 
         let txn_id = txn.id();
         txn.mark_committed(txn_id)?;
+        
+        // Apply sync if requested
+        if opts.is_sync() {
+            self.sync()?;
+        }
+        
         Ok(())
     }
 

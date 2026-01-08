@@ -1,461 +1,81 @@
-//! Write options for transactions and operations
+//! Write options for explicit durability control
+//!
+//! Provides explicit control over write durability semantics.
+//! Callers must always specify durability policy - no defaults.
 
-use crate::common::MidgeResult;
-use crate::common::MidgeError;
+use crate::common::AckPolicy;
 
-/// Options for write operations (transactions and batch writes)
-#[derive(Debug, Clone)]
+/// Write options - MUST be explicitly provided for all commits
+///
+/// Deliberately NO Default impl to force explicit choices
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteOptions {
-    /// Whether to synchronously wait for the write to be durable
-    pub sync: bool,
-    /// Disable WAL for this write (unsafe, not recommended)
-    pub disable_wal: bool,
+    /// Durability policy
+    policy: DurabilityPolicy,
+}
+
+/// Durability policy - explicit choices only
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurabilityPolicy {
+    /// fsync immediately - full durability
+    Sync,
+    /// Write to OS buffer - fast but not durable on crash
+    Buffered,
+    /// Skip WAL entirely - fastest but completely non-durable
+    /// Only use for bulk loads or testing
+    NoWAL,
 }
 
 impl WriteOptions {
-    /// Create default write options
-    pub fn new() -> Self {
+    /// Create WriteOptions with Sync policy
+    pub fn sync() -> Self {
         Self {
-            sync: false,
-            disable_wal: false,
+            policy: DurabilityPolicy::Sync,
         }
     }
 
-    /// Enable synchronous durability
-    pub fn sync(mut self) -> Self {
-        self.sync = true;
-        self
-    }
-
-    /// Disable WAL (dangerous - only for testing)
-    pub fn disable_wal(mut self) -> Self {
-        self.disable_wal = true;
-        self
-    }
-}
-
-impl Default for WriteOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// User-facing transaction trait
-///
-/// Provides ergonomic interface for transactional operations.
-/// Transactions are scoped to a single column family for safety.
-pub trait KvTransaction: Send {
-    /// Read a key within the transaction
-    fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>>;
-
-    /// Write a key within the transaction
-    fn put(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
-
-    /// Delete a key within the transaction
-    fn delete(&mut self, key: &[u8]) -> MidgeResult<()>;
-
-    /// Get the transaction ID
-    fn id(&self) -> u64;
-
-    /// Check if transaction is active
-    fn is_active(&self) -> bool;
-
-    /// Consume this transaction and return the underlying low-level transaction.
-    ///
-    /// This enables engine APIs (e.g. commit) to work with boxed transactions.
-    fn into_inner(self: Box<Self>) -> crate::engine::api::Transaction;
-}
-
-/// Concrete transaction implementation wrapping api::Transaction
-pub struct TransactionImpl {
-    inner: crate::engine::api::Transaction,
-    cf_id: crate::engine::ColumnFamilyId,
-    runtime_handle: crate::runtime::RuntimeHandle,
-}
-
-impl TransactionImpl {
-    /// Create a new transaction for a specific column family
-    pub fn new(
-        cf_id: crate::engine::ColumnFamilyId,
-        txn: crate::engine::api::Transaction,
-        runtime_handle: crate::runtime::RuntimeHandle,
-    ) -> Self {
+    /// Create WriteOptions with Buffered policy
+    pub fn buffered() -> Self {
         Self {
-            inner: txn,
-            cf_id,
-            runtime_handle,
+            policy: DurabilityPolicy::Buffered,
         }
     }
 
-    /// Get the inner transaction
-    pub fn inner(&self) -> &crate::engine::api::Transaction {
-        &self.inner
-    }
-
-    /// Consume and return the inner transaction
-    pub fn into_inner(self) -> crate::engine::api::Transaction {
-        self.inner
-    }
-}
-
-impl KvTransaction for TransactionImpl {
-    fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
-        // Read-your-own-writes: consult transaction-local write set first.
-        if let Some(value_opt) = self.inner.get_from_write_set(self.cf_id, key) {
-            return Ok(value_opt.map(bytes::Bytes::from));
-        }
-
-        // Otherwise, read from engine state at the appropriate visibility frontier.
-        // - Serializable: snapshot at start_sequence
-        // - ReadCommitted / ReadUncommitted: latest committed
-        let sequence = match self.inner.isolation_level() {
-            crate::engine::api::IsolationLevel::Serializable => self.inner.start_sequence(),
-            crate::engine::api::IsolationLevel::ReadCommitted
-            | crate::engine::api::IsolationLevel::ReadUncommitted => u64::MAX,
-        };
-
-        let response = self
-            .runtime_handle
-            .send_and_wait(crate::runtime::RuntimeMsg::Read {
-                request_id: crate::runtime::next_request_id(),
-                cf_id: self.cf_id.as_u32(),
-                key: key.to_vec(),
-                sequence,
-                requested_durability: crate::engine::api::Durability::Steady,
-            })?;
-
-        match response {
-            crate::runtime::RuntimeResponse::ReadValue { value, .. } => {
-                Ok(value.map(bytes::Bytes::from))
-            }
-            crate::runtime::RuntimeResponse::Error { message, .. } => {
-                Err(MidgeError::Internal(message))
-            }
-            _ => Err(MidgeError::Internal(
-                "Unexpected response to transactional get".to_string(),
-            )),
+    /// Create WriteOptions with NoWAL policy (dangerous)
+    pub fn no_wal() -> Self {
+        Self {
+            policy: DurabilityPolicy::NoWAL,
         }
     }
 
-    fn put(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        self.inner.put(self.cf_id, key.to_vec(), value.to_vec())
+    /// Get durability policy
+    pub fn policy(&self) -> DurabilityPolicy {
+        self.policy
     }
 
-    fn delete(&mut self, key: &[u8]) -> MidgeResult<()> {
-        self.inner.delete(self.cf_id, key.to_vec())
+    /// Check if this is sync mode
+    pub fn is_sync(&self) -> bool {
+        matches!(self.policy, DurabilityPolicy::Sync)
     }
 
-    fn id(&self) -> u64 {
-        self.inner.id()
+    /// Check if WAL is disabled
+    pub fn is_no_wal(&self) -> bool {
+        matches!(self.policy, DurabilityPolicy::NoWAL)
     }
 
-    fn is_active(&self) -> bool {
-        self.inner.state() == crate::engine::api::TransactionState::Active
+    /// Convert to AckPolicy for internal use
+    pub(crate) fn to_ack_policy(&self) -> AckPolicy {
+        match self.policy {
+            DurabilityPolicy::Sync => AckPolicy::AfterLocalDurable,
+            DurabilityPolicy::Buffered => AckPolicy::Immediate,
+            DurabilityPolicy::NoWAL => AckPolicy::Immediate, // WAL disabled elsewhere
+        }
     }
 
-    fn into_inner(self: Box<Self>) -> crate::engine::api::Transaction {
-        (*self).inner
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ========== WriteOptions Initialization Tests ==========
-    // Tests for WriteOptions::new() invariants: all fields initialized with defaults
-
-    #[test]
-    fn should_initialize_all_fields_to_false_when_creating_new_options() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new();
-
-        // Assert
-        assert!(!opts.sync);
-        assert!(!opts.disable_wal);
-    }
-
-    #[test]
-    fn should_create_options_with_all_default_values_when_calling_default() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::default();
-
-        // Assert - all fields should match new()
-        assert!(!opts.sync);
-        assert!(!opts.disable_wal);
-    }
-
-    #[test]
-    fn should_return_equivalent_options_when_created_via_new_or_default() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let new_opts = WriteOptions::new();
-        let default_opts = WriteOptions::default();
-
-        // Assert
-        assert_eq!(new_opts.sync, default_opts.sync);
-        assert_eq!(new_opts.disable_wal, default_opts.disable_wal);
-    }
-
-    // ========== WriteOptions Sync Method Tests ==========
-    // Tests for sync() method: sets sync field to true, returns self for chaining
-
-    #[test]
-    fn should_set_sync_to_true_when_calling_sync() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().sync();
-
-        // Assert
-        assert!(opts.sync);
-        assert!(!opts.disable_wal);
-    }
-
-    #[test]
-    fn should_return_self_for_chaining_when_calling_sync() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().sync().disable_wal();
-
-        // Assert
-        assert!(opts.sync);
-        assert!(opts.disable_wal);
-    }
-
-    #[test]
-    fn should_keep_sync_true_when_calling_sync_multiple_times() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().sync().sync();
-
-        // Assert
-        assert!(opts.sync);
-    }
-
-    // ========== WriteOptions Disable WAL Method Tests ==========
-    // Tests for disable_wal() method: sets disable_wal field to true, returns self for chaining
-
-    #[test]
-    fn should_set_disable_wal_to_true_when_calling_disable_wal() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().disable_wal();
-
-        // Assert
-        assert!(!opts.sync);
-        assert!(opts.disable_wal);
-    }
-
-    #[test]
-    fn should_return_self_for_chaining_when_calling_disable_wal() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().disable_wal().sync();
-
-        // Assert
-        assert!(opts.sync);
-        assert!(opts.disable_wal);
-    }
-
-    #[test]
-    fn should_keep_disable_wal_true_when_calling_disable_wal_multiple_times() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().disable_wal().disable_wal();
-
-        // Assert
-        assert!(opts.disable_wal);
-    }
-
-    // ========== WriteOptions Clone Tests ==========
-    // Tests for Clone trait: independent copies
-
-    #[test]
-    fn should_clone_options_with_all_defaults() {
-        // Arrange
-        let original = WriteOptions::new();
-
-        // Act
-        let cloned = original.clone();
-
-        // Assert
-        assert_eq!(cloned.sync, original.sync);
-        assert_eq!(cloned.disable_wal, original.disable_wal);
-    }
-
-    #[test]
-    fn should_clone_options_with_sync_enabled() {
-        // Arrange
-        let original = WriteOptions::new().sync();
-
-        // Act
-        let cloned = original.clone();
-
-        // Assert
-        assert!(cloned.sync);
-        assert!(!cloned.disable_wal);
-    }
-
-    #[test]
-    fn should_clone_options_with_wal_disabled() {
-        // Arrange
-        let original = WriteOptions::new().disable_wal();
-
-        // Act
-        let cloned = original.clone();
-
-        // Assert
-        assert!(!cloned.sync);
-        assert!(cloned.disable_wal);
-    }
-
-    #[test]
-    fn should_clone_options_with_both_flags_set() {
-        // Arrange
-        let original = WriteOptions::new().sync().disable_wal();
-
-        // Act
-        let cloned = original.clone();
-
-        // Assert
-        assert!(cloned.sync);
-        assert!(cloned.disable_wal);
-    }
-
-    #[test]
-    fn should_be_independent_after_cloning() {
-        // Arrange
-        let original = WriteOptions::new();
-
-        // Act
-        let cloned = original.clone();
-        let modified_cloned = cloned.sync();
-
-        // Assert - original unchanged
-        assert!(!original.sync);
-        assert!(modified_cloned.sync);
-    }
-
-    // ========== WriteOptions Debug Trait Tests ==========
-
-    #[test]
-    fn should_debug_format_options_with_defaults() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new();
-        let debug_str = format!("{:?}", opts);
-
-        // Assert
-        assert!(debug_str.contains("WriteOptions"));
-    }
-
-    #[test]
-    fn should_debug_format_options_with_sync() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().sync();
-        let debug_str = format!("{:?}", opts);
-
-        // Assert
-        assert!(debug_str.contains("sync"));
-    }
-
-    // ========== WriteOptions Fluent API Tests ==========
-    // Tests for method chaining with all combinations
-
-    #[test]
-    fn should_support_full_fluent_api_chain() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().sync().disable_wal();
-
-        // Assert
-        assert!(opts.sync);
-        assert!(opts.disable_wal);
-    }
-
-    #[test]
-    fn should_allow_methods_in_any_order() {
-        // Arrange
-        let opts1 = WriteOptions::new().sync().disable_wal();
-
-        let opts2 = WriteOptions::new().disable_wal().sync();
-
-        // Act
-        // (no action required)
-
-        // Assert
-        assert_eq!(opts1.sync, opts2.sync);
-        assert_eq!(opts1.disable_wal, opts2.disable_wal);
-    }
-
-    // ========== Edge Cases ==========
-
-    #[test]
-    fn should_handle_multiple_sync_calls() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new().sync().sync().sync();
-
-        // Assert
-        assert!(opts.sync);
-    }
-
-    #[test]
-    fn should_handle_alternating_method_calls() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let opts = WriteOptions::new()
-            .sync()
-            .disable_wal()
-            .sync()
-            .disable_wal();
-
-        // Assert
-        assert!(opts.sync);
-        assert!(opts.disable_wal);
-    }
-
-    #[test]
-    fn should_preserve_field_values_through_chaining() {
-        // Arrange
-        let intermediate = WriteOptions::new().sync();
-
-        // Act
-        let final_opts = intermediate.disable_wal();
-
-        // Assert
-        assert!(final_opts.sync);
-        assert!(final_opts.disable_wal);
+    /// Check if WAL should be used
+    pub(crate) fn use_wal(&self) -> bool {
+        !matches!(self.policy, DurabilityPolicy::NoWAL)
     }
 }
+
+// Deliberately NO Default impl - must be explicit

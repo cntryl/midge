@@ -23,8 +23,8 @@ pub use query::Query;
 pub use results::{CasResult, InsertResult};
 pub use snapshot::Snapshot;
 pub use transaction::{IsolationLevel, Transaction, TransactionState, WriteIntent};
+pub use write_options::{DurabilityPolicy, WriteOptions};
 pub use write_batch::WriteBatch;
-pub use write_options::{KvTransaction, TransactionImpl, WriteOptions};
 
 // Re-export caller-visible acknowledgment semantics.
 pub use crate::common::AckPolicy;

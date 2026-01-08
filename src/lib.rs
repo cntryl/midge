@@ -1,14 +1,16 @@
 //! Midge - High-performance embedded LSM-tree database
 //!
-//! Clean architectural layers:
+//! # Architecture
+//!
+//! Internal modules (implementation details):
 //!   - `common`      - foundational types with zero dependencies
-//!   - `io`          - base filesystem abstraction (Fs, File, RealFs, MockFs, ChaosFs)
+//!   - `io`          - base filesystem abstraction
 //!   - `engine`      - main KV store and public API surface
 //!   - `runtime`     - background actors (compaction, flush, metrics)
 //!   - `metadata`    - manifest + version mgmt
-//!   - `wal`         - write-ahead log (uses io:: abstraction)
-//!   - `sst`         - sorted-string table (uses io:: abstraction)
-//!   - `storage`     - storage orchestration layer (fs, cloud, hybrid)
+//!   - `wal`         - write-ahead log
+//!   - `sst`         - sorted-string table
+//!   - `storage`     - storage orchestration layer
 //!   - `compaction`  - compaction planning + execution
 //!   - `iterators`   - iterator implementations
 //!   - `metrics`     - performance instrumentation
@@ -16,8 +18,8 @@
 //!
 //! # Public API Surface
 //!
-//! Only modules re-exported at the bottom of this file are intended to be
-//! stable for external consumption. Internal modules are free to evolve.
+//! Only types re-exported at the bottom of this file are intended to be
+//! stable for external consumption. Internal modules are hidden by default.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
@@ -25,101 +27,81 @@
 // Foundation - no dependencies
 pub mod common;
 
-// Base I/O abstraction - domain-agnostic filesystem
-pub mod io;
+// Internal modules - implementation details (pub for internal use)
+pub(crate) mod io;
+pub(crate) mod telemetry;
+pub(crate) mod storage;
+pub(crate) mod iterators;
+pub(crate) mod wal;
+pub(crate) mod sst;
+pub(crate) mod metadata;
+pub(crate) mod runtime;
+pub(crate) mod compaction;
+pub(crate) mod metrics;
 
-// Telemetry (observability)
-pub mod telemetry;
-
-// Storage abstraction
-pub mod storage;
-
-// Data structures
-pub mod iterators;
-
-// Logging
-pub mod wal;
-
-// SSTs and memtables
-pub mod sst;
-
-// Metadata management
-pub mod metadata;
-
-// Main engine
+// Main engine (public)
 pub mod engine;
 
-// Background processing
-pub mod runtime;
-
-// Data organization
-pub mod compaction;
-
-// Observability
-pub mod metrics;
-
-// Testing
+// Testing utilities (public for integration tests)
 pub mod testkit;
-
-// Stress harnesses and long-running workloads live under `stress/` (binary crate),
-// not in the library public API. See `stress/` for the harness and workloads.
 
 // ---------------------------------------------------------------------------
 // Public Export Surface
 // ---------------------------------------------------------------------------
 
-// Common types
+// Core error types
 pub use common::{AckPolicy, MidgeError, MidgeResult};
 
-// Main engine API
+// Main engine
 pub use engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
 
-// High-level API types
+// Transaction API
 pub use engine::api::{
+    // Transaction types
+    IsolationLevel,
+    Transaction,
+    TransactionState,
+    
+    // Write options
+    DurabilityPolicy,
+    WriteOptions,
+    
+    // Core data types
+    Key,
+    Value,
+    KvPair,
+    
+    // Configuration
+    OpenOptions,
+    Goal,
+    MemoryBudget,
+    WorkloadProfile,
+    Durability,
+    
+    // Query/Scan
+    Query,
+    Direction,
+    
+    // Batch operations
+    WriteBatch,
+    
+    // Results
+    CasResult,
+    InsertResult,
+    
+    // Column families
+    ColumnFamily,
+    
+    // Snapshots
+    Snapshot,
+    
     // Errors
     ApiError,
     ApiResult,
-    // Results
-    CasResult,
-    // Column families
-    ColumnFamily,
-
-    Direction,
-
-    Durability,
-    Goal,
-    InsertResult,
-
-    IsolationLevel,
-
-    Iterator,
-    // KV types
-    Key,
-    KvPair,
-
-    KvTransaction,
-    MemoryBudget,
-    // Merge operators
-    MergeOperator,
-    // Engine configuration
-    OpenOptions,
-    // Query + scans
-    Query,
-    // Snapshots
-    Snapshot,
-
-    // Transactions
-    Transaction,
-    Value,
-    WorkloadProfile,
-
-    // Writes
-    WriteBatch,
-    WriteOptions,
 };
 
 // Observability
-pub use metrics::{EngineMetrics, PerformanceMetrics};
+pub use metrics::EngineMetrics;
 
 // Testing utilities
 pub use testkit::{MidgeOptions, MockStorage, StorageMode};
@@ -134,50 +116,56 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 ///
 /// ```no_run
 /// use cntryl_midge::prelude::*;
-/// use std::path::PathBuf;
 ///
-/// let engine = MidgeEngine::open(PathBuf::from("./db"))?;
-/// let mut batch = WriteBatch::new();
-/// batch.put(b"key".to_vec().into(), b"value".to_vec().into());
-/// engine.write_batch(&batch)?;
+/// let engine = MidgeEngine::open(OpenOptions::new().path("./db").build())?;
+/// let cf = engine.default_column_family();
+///
+/// // Explicit transactions
+/// let mut tx = engine.transaction(cf.id())?;
+/// tx.put(cf.id(), b"key".to_vec(), b"value".to_vec())?;
+/// engine.commit_transaction(tx)?;
 /// # Ok::<(), cntryl_midge::MidgeError>(())
 /// ```
 pub mod prelude {
     pub use crate::{
-        // Caller-visible semantics
-        AckPolicy,
-        ApiError,
-        ApiResult,
-        ColumnFamily,
-
-        ColumnFamilyHandle,
-        Direction,
-
-        Iterator,
-        // Types
-        Key,
-        KvPair,
-
-        // Merge operators
-        MergeOperator,
-        // Engine
+        // Core types
         MidgeEngine,
-
-        // Errors
         MidgeError,
         MidgeResult,
+        
+        // Column families
+        ColumnFamilyHandle,
+        ColumnFamilyId,
+        
+        // Transactions
+        Transaction,
+        IsolationLevel,
+        
+        // Write options
+        WriteOptions,
+        DurabilityPolicy,
+        
+        // Data types
+        Key,
+        Value,
+        KvPair,
+        
         // Configuration
         OpenOptions,
-
-        // Query + iteration
+        Goal,
+        WorkloadProfile,
+        Durability,
+        MemoryBudget,
+        
+        // Query
         Query,
-        Snapshot,
-
-        // Transactions + snapshots
-        Transaction,
-        Value,
-        // Writes
+        Direction,
+        
+        // Batch
         WriteBatch,
-        WriteOptions,
+        
+        // API
+        ApiError,
+        ApiResult,
     };
 }

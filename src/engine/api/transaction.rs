@@ -2,9 +2,9 @@
 //!
 //! Provides transaction support with:
 //! - Multi-key atomic operations
-//! - Isolation levels (Read Uncommitted, Read Committed, Serializable)
+//! - Snapshot isolation with repeatable reads
 //! - Rollback and commit semantics
-//! - LWW (Last-Write-Wins) based isolation with sequence visibility
+//! - Column-family scoped transactions
 
 use crate::common::MidgeResult;
 use crate::engine::ColumnFamilyId;
