@@ -119,9 +119,9 @@ fn should_see_own_writes_given_transaction_when_reading() {
 
         // Act
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        txn.put(b"key1".to_vec(), b"value1".to_vec(, None))
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None)
             .unwrap();
-        txn.put(b"key2".to_vec(), b"value2".to_vec(, None))
+        txn.put(b"key2".to_vec(), b"value2".to_vec(), None)
             .unwrap();
 
         let val1 = txn.get(b"key1").unwrap();
