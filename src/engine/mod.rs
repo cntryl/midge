@@ -1112,7 +1112,85 @@ impl MidgeEngine {
 
 
     // === Internal helpers ===
+
+    // === Compatibility API for Tests ===
+    // These methods provide backwards compatibility for tests during migration
+
+    /// Compatibility: Simple put operation (wraps in transaction)
+    #[doc(hidden)]
+    pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+        let mut tx = self.begin_tx(cf.id(), api::TransactionMode::ReadWrite)?;
+        tx.put(key.to_vec(), value.to_vec(), None)?;
+        self.commit(tx, api::WriteOptions::buffered())
+    }
+
+    /// Compatibility: Simple get operation (wraps in transaction)
+    #[doc(hidden)]
+    pub fn get(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+        let tx = self.begin_tx(cf.id(), api::TransactionMode::ReadOnly)?;
+        tx.get(key)
+    }
+
+    /// Compatibility: Simple delete operation (wraps in transaction)
+    #[doc(hidden)]
+    pub fn delete(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
+        let mut tx = self.begin_tx(cf.id(), api::TransactionMode::ReadWrite)?;
+        tx.delete(key.to_vec())?;
+        self.commit(tx, api::WriteOptions::buffered())
+    }
+
+    /// Compatibility: Put with TTL (wraps in transaction)
+    #[doc(hidden)]
+    pub fn put_with_ttl(
+        &self,
+        cf: &ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+        ttl_seconds: u64,
+    ) -> MidgeResult<()> {
+        let mut tx = self.begin_tx(cf.id(), api::TransactionMode::ReadWrite)?;
+        tx.put(key.to_vec(), value.to_vec(), Some(ttl_seconds))?;
+        self.commit(tx, api::WriteOptions::buffered())
+    }
+
+    /// Compatibility: Delete range operation (wraps in transaction)
+    #[doc(hidden)]
+    pub fn delete_range(&self, cf: &ColumnFamilyHandle, start: &[u8], end: &[u8]) -> MidgeResult<()> {
+        let mut tx = self.begin_tx(cf.id(), api::TransactionMode::ReadWrite)?;
+        tx.delete_range(start.to_vec(), end.to_vec())?;
+        self.commit(tx, api::WriteOptions::buffered())
+    }
+
+    /// Compatibility: Range scan operation (wraps in transaction)
+    #[doc(hidden)]
+    pub fn range(
+        &self,
+        cf: &ColumnFamilyHandle,
+        start: &[u8],
+        end: &[u8],
+    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+        let tx = self.begin_tx(cf.id(), api::TransactionMode::ReadOnly)?;
+        self.tx_scan(&tx, start, end)
+    }
+
+    /// Compatibility: Scan with query (wraps in transaction)
+    #[doc(hidden)]
+    pub fn scan(
+        &self,
+        cf: &ColumnFamilyHandle,
+        query: &api::Query,
+    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+        let tx = self.begin_tx(cf.id(), api::TransactionMode::ReadOnly)?;
+        self.tx_scan_range(&tx, query)
+    }
+
+    /// Compatibility: Create a read-only snapshot transaction
+    #[doc(hidden)]
+    pub fn snapshot(&self) -> MidgeResult<api::Transaction> {
+        self.begin_tx(ColumnFamilyId::DEFAULT, api::TransactionMode::ReadOnly)
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
