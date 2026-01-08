@@ -463,10 +463,11 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed
         let mut handles = vec![];
 
         // Act - spawn 20 transactions writing different keys
+        let cf = engine.default_column_family();
+        let cf_id = cf.id();
         for i in 0..20 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                let cf = engine_clone.default_column_family();
                 let mut txn = engine_clone.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
                 let key = format!("key{}", i);
                 let value = format!("value{}", i);
@@ -551,7 +552,7 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
                 let mut txn = engine_clone.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
                 let key = format!("key{}", i);
                 let value = format!("value{}", i);
-                txn.put(key.as_bytes().to_vec(), value.as_bytes(, None).to_vec())
+                txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 engine_clone.commit(txn, cntryl_midge::WriteOptions::default())
             });

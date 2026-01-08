@@ -82,7 +82,7 @@ fn should_panic_when_begin_transaction_called_during_ingest() {
 
     // Act: attempt to begin a transaction while in ingest mode
     // This should panic with a BUG message
-    let _txn = engine.begin_transaction(cf);
+    let _txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
 
     // Cleanup (unreachable due to panic)
     let _ = engine.exit_ingest_mode(prev);
@@ -93,6 +93,7 @@ fn should_panic_when_begin_transaction_called_during_ingest() {
 fn should_panic_when_transaction_called_during_ingest() {
     // Arrange
     let (engine, _tmp) = create_test_engine();
+    let cf = engine.default_column_family();
     let prev = engine.enter_ingest_mode().expect("enter ingest failed");
 
     // Act: attempt to create a transaction while in ingest mode
@@ -108,11 +109,12 @@ fn should_panic_when_transaction_called_during_ingest() {
 fn should_panic_when_transaction_with_isolation_called_during_ingest() {
     // Arrange
     let (engine, _tmp) = create_test_engine();
+    let cf = engine.default_column_family();
     let prev = engine.enter_ingest_mode().expect("enter ingest failed");
 
     // Act: attempt to create a transaction with isolation while in ingest mode
     // This should panic with a BUG message
-    let _txn = engine.transaction_with_isolation(IsolationLevel::Serializable);
+    let _txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
 
     // Cleanup (unreachable due to panic)
     let _ = engine.exit_ingest_mode(prev);
@@ -126,7 +128,7 @@ fn should_complete_ingest_cycle_correctly() {
 
     // Pre-ingest: transactions should work
     {
-        let txn = engine.begin_transaction(cf);
+        let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
         assert!(txn.is_ok(), "transaction should work before ingest");
     }
 
@@ -144,7 +146,7 @@ fn should_complete_ingest_cycle_correctly() {
 
     // Post-ingest: transactions should work again
     {
-        let txn = engine.begin_transaction(cf);
+        let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
         assert!(txn.is_ok(), "transaction should work after ingest");
     }
 }
@@ -159,14 +161,17 @@ fn should_allow_writes_during_ingest_mode() {
     let prev = engine.enter_ingest_mode().expect("enter ingest failed");
 
     // Assert: writes should still work during ingest (that's the point!)
-    let result = engine.put(cf, b"test_key", b"test_value");
+    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+    tx.put(b"test_key".to_vec(), b"test_value".to_vec(), None).expect("put");
+    let result = engine.commit(tx, cntryl_midge::WriteOptions::default());
     assert!(result.is_ok(), "writes should work during ingest mode");
 
     // Cleanup
     engine.exit_ingest_mode(prev).expect("exit ingest failed");
 
     // Verify the write persisted
-    let value = engine.get(cf, b"test_key").expect("get failed");
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    let value = tx.get(b"test_key").expect("get failed");
     assert_eq!(value.as_deref(), Some(b"test_value".as_slice()));
 }
 
@@ -181,12 +186,12 @@ fn should_allow_batch_writes_during_ingest_mode() {
     let prev = engine.enter_ingest_mode().expect("enter ingest failed");
 
     // Assert: batch writes should work during ingest
-    let mut batch = cntryl_midge::WriteBatch::new();
-    batch.put_cf(cf_id, b"key1".to_vec().into(), b"val1".to_vec().into());
-    batch.put_cf(cf_id, b"key2".to_vec().into(), b"val2".to_vec().into());
-    batch.put_cf(cf_id, b"key3".to_vec().into(), b"val3".to_vec().into());
+    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+    tx.put(b"key1".to_vec(), b"val1".to_vec(), None).expect("put");
+    tx.put(b"key2".to_vec(), b"val2".to_vec(), None).expect("put");
+    tx.put(b"key3".to_vec(), b"val3".to_vec(), None).expect("put");
 
-    let result = engine.write_batch(&batch);
+    let result = engine.commit(tx, cntryl_midge::WriteOptions::default());
     assert!(
         result.is_ok(),
         "batch writes should work during ingest mode"
@@ -203,13 +208,16 @@ fn should_allow_reads_during_ingest_mode() {
     let cf = engine.default_column_family();
 
     // Write some data before ingest
-    engine.put(cf, b"pre_key", b"pre_value").unwrap();
+    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+    tx.put(b"pre_key".to_vec(), b"pre_value".to_vec(), None).unwrap();
+    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
 
     // Act: enter ingest mode
     let prev = engine.enter_ingest_mode().expect("enter ingest failed");
 
     // Assert: reads should work during ingest
-    let result = engine.get(cf, b"pre_key");
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    let result = tx.get(b"pre_key");
     assert!(result.is_ok(), "reads should work during ingest mode");
     assert_eq!(result.unwrap().as_deref(), Some(b"pre_value".as_slice()));
 
@@ -227,7 +235,7 @@ fn should_include_correct_ordering_in_panic_message() {
 
     // Act: catch the panic to verify the message
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = engine.begin_transaction(cf);
+        let _ = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
     }));
 
     // Cleanup first
@@ -264,30 +272,35 @@ fn should_support_multiple_ingest_cycles() {
     // Act: first cycle
     {
         let prev = engine.enter_ingest_mode().expect("enter ingest failed");
-        engine.put(cf, b"cycle1_key", b"cycle1_val").unwrap();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(b"cycle1_key".to_vec(), b"cycle1_val".to_vec(), None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
         engine.exit_ingest_mode(prev).expect("exit ingest failed");
     }
 
     // Verify transactions work between cycles
     {
-        let txn = engine.begin_transaction(cf);
+        let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite);
         assert!(txn.is_ok());
     }
 
     // Act: second cycle
     {
         let prev = engine.enter_ingest_mode().expect("enter ingest failed");
-        engine.put(cf, b"cycle2_key", b"cycle2_val").unwrap();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(b"cycle2_key".to_vec(), b"cycle2_val".to_vec(), None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
         engine.exit_ingest_mode(prev).expect("exit ingest failed");
     }
 
     // Assert: both writes persisted
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
     assert_eq!(
-        engine.get(cf, b"cycle1_key").unwrap().as_deref(),
+        tx.get(b"cycle1_key").unwrap().as_deref(),
         Some(b"cycle1_val".as_slice())
     );
     assert_eq!(
-        engine.get(cf, b"cycle2_key").unwrap().as_deref(),
+        tx.get(b"cycle2_key").unwrap().as_deref(),
         Some(b"cycle2_val".as_slice())
     );
 }
