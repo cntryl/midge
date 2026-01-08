@@ -6,15 +6,25 @@
 //! - Rollback and commit semantics
 //! - Column-family scoped transactions
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::engine::ColumnFamilyId;
 use std::collections::HashMap;
+
 
 /// Read set entry: (value, sequence number)
 type ReadSetEntry = (Option<Vec<u8>>, u64);
 
 /// Read set: (cf_id, key) → (value, sequence)
 type ReadSet = HashMap<(ColumnFamilyId, Vec<u8>), ReadSetEntry>;
+
+/// Transaction mode controls read/write capabilities
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionMode {
+    /// Read-only transaction; writes forbidden
+    ReadOnly,
+    /// Read-write transaction; all operations allowed
+    ReadWrite,
+}
 
 /// Isolation level for transaction
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -45,14 +55,23 @@ pub enum TransactionState {
     CommitFailed,
 }
 
-/// Write intent: pending put, delete, or delete_range operation
+/// Write intent: pending put, insert, delete, or delete_range operation
 #[derive(Debug, Clone)]
 pub enum WriteIntent {
-    /// Put operation
+    /// Put operation (upsert)
     Put {
         cf_id: ColumnFamilyId,
         key: Vec<u8>,
         value: Vec<u8>,
+        ttl_seconds: Option<u64>,
+        sequence: u64,
+    },
+    /// Insert operation (error if exists)
+    Insert {
+        cf_id: ColumnFamilyId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_seconds: Option<u64>,
         sequence: u64,
     },
     /// Delete operation
@@ -71,12 +90,24 @@ pub enum WriteIntent {
 }
 
 impl WriteIntent {
-    /// Create a put intent
-    pub fn put(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>) -> Self {
+    /// Create a put intent (upsert)
+    pub fn put(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> Self {
         Self::Put {
             cf_id,
             key,
             value,
+            ttl_seconds,
+            sequence: 0,
+        }
+    }
+
+    /// Create an insert intent (error if exists)
+    pub fn insert(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> Self {
+        Self::Insert {
+            cf_id,
+            key,
+            value,
+            ttl_seconds,
             sequence: 0,
         }
     }
@@ -103,6 +134,7 @@ impl WriteIntent {
     pub fn cf_id(&self) -> ColumnFamilyId {
         match self {
             Self::Put { cf_id, .. }
+            | Self::Insert { cf_id, .. }
             | Self::Delete { cf_id, .. }
             | Self::DeleteRange { cf_id, .. } => *cf_id,
         }
@@ -110,14 +142,23 @@ impl WriteIntent {
 
     pub fn key(&self) -> Option<&[u8]> {
         match self {
-            Self::Put { key, .. } | Self::Delete { key, .. } => Some(key),
+            Self::Put { key, .. } | Self::Insert { key, .. } | Self::Delete { key, .. } => {
+                Some(key)
+            }
             Self::DeleteRange { .. } => None,
         }
     }
 
     pub fn value(&self) -> Option<&[u8]> {
         match self {
-            Self::Put { value, .. } => Some(value),
+            Self::Put { value, .. } | Self::Insert { value, .. } => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn ttl_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Put { ttl_seconds, .. } | Self::Insert { ttl_seconds, .. } => *ttl_seconds,
             _ => None,
         }
     }
@@ -130,6 +171,10 @@ impl WriteIntent {
         matches!(self, Self::Put { .. })
     }
 
+    pub fn is_insert(&self) -> bool {
+        matches!(self, Self::Insert { .. })
+    }
+
     pub fn is_delete_range(&self) -> bool {
         matches!(self, Self::DeleteRange { .. })
     }
@@ -137,6 +182,7 @@ impl WriteIntent {
     pub fn sequence(&self) -> u64 {
         match self {
             Self::Put { sequence, .. }
+            | Self::Insert { sequence, .. }
             | Self::Delete { sequence, .. }
             | Self::DeleteRange { sequence, .. } => *sequence,
         }
@@ -145,6 +191,7 @@ impl WriteIntent {
     pub fn set_sequence(&mut self, seq: u64) {
         match self {
             Self::Put { sequence, .. }
+            | Self::Insert { sequence, .. }
             | Self::Delete { sequence, .. }
             | Self::DeleteRange { sequence, .. } => *sequence = seq,
         }
@@ -169,10 +216,15 @@ impl WriteIntent {
 ///
 /// Collects read and write intents, validates them, and commits atomically.
 /// Thread-safe; multiple transactions can be in flight simultaneously.
-#[derive(Debug)]
 pub struct Transaction {
+    /// Pointer to the engine (not owned, engine must outlive transaction)
+    engine: *const crate::engine::MidgeEngine,
     /// Unique transaction ID
     id: u64,
+    /// Column family this transaction is bound to
+    cf_id: ColumnFamilyId,
+    /// Transaction mode (ReadOnly or ReadWrite)
+    mode: TransactionMode,
     /// Isolation level
     isolation: IsolationLevel,
     /// Current state
@@ -188,10 +240,20 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// Create a new transaction with the given ID and isolation level
-    pub fn new(id: u64, isolation: IsolationLevel, start_sequence: u64) -> Self {
+    /// Create a new transaction with the given ID, mode, and isolation level
+    pub fn new(
+        engine: *const crate::engine::MidgeEngine,
+        id: u64,
+        cf_id: ColumnFamilyId,
+        mode: TransactionMode,
+        isolation: IsolationLevel,
+        start_sequence: u64,
+    ) -> Self {
         Self {
+            engine,
             id,
+            cf_id,
+            mode,
             isolation,
             state: TransactionState::Active,
             read_set: HashMap::new(),
@@ -200,9 +262,30 @@ impl Transaction {
             commit_sequence: None,
         }
     }
+    
+    /// Get a reference to the engine (unsafe, but lifetime is guaranteed by engine ownership)
+    fn engine(&self) -> &crate::engine::MidgeEngine {
+        unsafe { &*self.engine }
+    }
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+    
+    pub fn cf_id(&self) -> ColumnFamilyId {
+        self.cf_id
+    }
+
+    pub fn mode(&self) -> TransactionMode {
+        self.mode
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        matches!(self.mode, TransactionMode::ReadOnly)
+    }
+
+    pub fn is_read_write(&self) -> bool {
+        matches!(self.mode, TransactionMode::ReadWrite)
     }
 
     pub fn isolation_level(&self) -> IsolationLevel {
@@ -240,46 +323,202 @@ impl Transaction {
         Ok(())
     }
 
-    /// Add a put to the transaction's write set
-    pub fn put(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()> {
+    /// Add a put (upsert) to the transaction's write set
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
-            return Err(crate::common::MidgeError::InvalidArgument(format!(
+            return Err(MidgeError::InvalidArgument(format!(
                 "Cannot write in {:?} state",
                 self.state
             )));
         }
-        self.write_set.push(WriteIntent::put(cf_id, key, value));
+        if self.is_read_only() {
+            return Err(MidgeError::InvalidArgument(
+                "Cannot write in ReadOnly transaction".to_string(),
+            ));
+        }
+        self.write_set.push(WriteIntent::put(self.cf_id, key, value, ttl_seconds));
+        Ok(())
+    }
+
+    /// Add an insert (error if exists) to the transaction's write set
+    pub fn insert(
+        &mut self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_seconds: Option<u64>,
+    ) -> MidgeResult<()> {
+        if self.state != TransactionState::Active {
+            return Err(MidgeError::InvalidArgument(format!(
+                "Cannot write in {:?} state",
+                self.state
+            )));
+        }
+        if self.is_read_only() {
+            return Err(MidgeError::InvalidArgument(
+                "Cannot write in ReadOnly transaction".to_string(),
+            ));
+        }
+        self.write_set.push(WriteIntent::insert(self.cf_id, key, value, ttl_seconds));
         Ok(())
     }
 
     /// Add a delete to the transaction's write set
-    pub fn delete(&mut self, cf_id: ColumnFamilyId, key: Vec<u8>) -> MidgeResult<()> {
+    pub fn delete(&mut self, key: Vec<u8>) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
-            return Err(crate::common::MidgeError::InvalidArgument(format!(
+            return Err(MidgeError::InvalidArgument(format!(
                 "Cannot write in {:?} state",
                 self.state
             )));
         }
-        self.write_set.push(WriteIntent::delete(cf_id, key));
+        if self.is_read_only() {
+            return Err(MidgeError::InvalidArgument(
+                "Cannot write in ReadOnly transaction".to_string(),
+            ));
+        }
+        self.write_set.push(WriteIntent::delete(self.cf_id, key));
         Ok(())
     }
 
     /// Add a delete_range to the transaction's write set
     pub fn delete_range(
         &mut self,
-        cf_id: ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
     ) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
-            return Err(crate::common::MidgeError::InvalidArgument(format!(
+            return Err(MidgeError::InvalidArgument(format!(
                 "Cannot write in {:?} state",
                 self.state
             )));
         }
+        if self.is_read_only() {
+            return Err(MidgeError::InvalidArgument(
+                "Cannot write in ReadOnly transaction".to_string(),
+            ));
+        }
         self.write_set
-            .push(WriteIntent::delete_range(cf_id, start_key, end_key));
+            .push(WriteIntent::delete_range(self.cf_id, start_key, end_key));
         Ok(())
+    }
+
+    /// Get a value within this transaction (read-your-own-writes semantics)
+    ///
+    /// This is the primary way to read data. Checks the transaction's write set first,
+    /// then falls back to the engine state at the transaction's snapshot sequence.
+    pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+        // Check transaction's write set first (read-your-own-writes)
+        if let Some(value_opt) = self.get_from_write_set(self.cf_id, key) {
+            return Ok(value_opt.map(bytes::Bytes::from));
+        }
+
+        // Fall back to engine state at transaction's snapshot sequence
+        self.engine().read_at_sequence(self.cf_id, key, self.start_sequence)
+    }
+
+    /// Range scan within this transaction
+    ///
+    /// Returns all key-value pairs in the range [start, end) visible at this transaction's
+    /// snapshot sequence.
+    pub fn scan(&self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+        self.engine().scan_at_sequence(self.cf_id, start, end, self.start_sequence)
+    }
+
+    /// Range scan with Query parameters within this transaction
+    pub fn scan_range(&self, query: &super::Query) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+        // Use the effective start/end from the query
+        let start_owned;
+        let start = if let Some(s) = query.effective_start() {
+            s
+        } else {
+            start_owned = vec![];
+            &start_owned[..]
+        };
+
+        let end_vec = query.effective_end();
+        let end_sentinel = vec![0xFFu8; 256];
+        let end = if let Some(ref e) = end_vec {
+            &e[..]
+        } else if query.prefix.is_none() && query.end.is_none() {
+            &end_sentinel[..]
+        } else {
+            &[][..]
+        };
+
+        let mut results = self.scan(start, end)?;
+        
+        // Apply limit if specified
+        if let Some(limit) = query.limit {
+            results.truncate(limit);
+        }
+        
+        Ok(results)
+    }
+
+    /// Compare-and-swap operation within this transaction
+    ///
+    /// Atomically checks if the current value matches `expected`, and if so, puts `new_value`.
+    /// Returns whether the swap succeeded.
+    pub fn compare_and_swap(
+        &mut self,
+        key: Vec<u8>,
+        expected: Option<Vec<u8>>,
+        new_value: Vec<u8>,
+        ttl_seconds: Option<u64>,
+    ) -> MidgeResult<bool> {
+        if self.state != TransactionState::Active {
+            return Err(MidgeError::InvalidArgument(format!(
+                "Cannot compare_and_swap in {:?} state",
+                self.state
+            )));
+        }
+        if self.is_read_only() {
+            return Err(MidgeError::InvalidArgument(
+                "Cannot compare_and_swap in ReadOnly transaction".to_string(),
+            ));
+        }
+
+        // Get current value (from write set or engine)
+        let current = self.get(&key)?;
+
+        // Check if current matches expected
+        let matches = match (&current, &expected) {
+            (None, None) => true,
+            (Some(curr), Some(exp)) => curr.as_ref() == exp.as_slice(),
+            _ => false,
+        };
+
+        if matches {
+            // Swap succeeded - add put to write set
+            self.put(key, new_value, ttl_seconds)?;
+            Ok(true)
+        } else {
+            // Swap failed - current value doesn't match expected
+            Ok(false)
+        }
+    }
+
+    /// Merge operation within this transaction
+    ///
+    /// Applies a merge operand to the key. The actual merge semantics are defined
+    /// by the merge operator registered for this transaction's column family.
+    pub fn merge(&mut self, key: Vec<u8>, operand: Vec<u8>) -> MidgeResult<()> {
+        if self.state != TransactionState::Active {
+            return Err(MidgeError::InvalidArgument(format!(
+                "Cannot merge in {:?} state",
+                self.state
+            )));
+        }
+        if self.is_read_only() {
+            return Err(MidgeError::InvalidArgument(
+                "Cannot merge in ReadOnly transaction".to_string(),
+            ));
+        }
+
+        // For transactions, we store merge operations as special write intents
+        // The engine will apply the merge operator during commit
+        // For now, treat as a Put with the operand as value (simplified)
+        // TODO: Add proper WriteIntent::Merge variant
+        self.put(key, operand, None)
     }
 
     /// Read a key from the transaction's write set (read-your-own-writes)
@@ -446,15 +685,19 @@ mod tests {
     #[test]
     fn should_create_transaction_when_given_id() {
         // Arrange
+        let engine_ptr = std::ptr::null();
         let id = 42;
+        let cf_id = ColumnFamilyId::DEFAULT;
+        let mode = TransactionMode::ReadWrite;
         let isolation = IsolationLevel::Serializable;
         let start_seq = 100;
 
         // Act
-        let txn = Transaction::new(id, isolation, start_seq);
+        let txn = Transaction::new(engine_ptr, id, cf_id, mode, isolation, start_seq);
 
         // Assert
         assert_eq!(txn.id(), id);
+        assert_eq!(txn.cf_id(), cf_id);
         assert_eq!(txn.isolation_level(), isolation);
         assert_eq!(txn.start_sequence(), start_seq);
         assert_eq!(txn.state(), TransactionState::Active);
@@ -465,13 +708,19 @@ mod tests {
     #[test]
     fn should_add_puts_to_write_set_when_put_called() {
         // Arrange
-        let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
-        let cf_id = ColumnFamilyId::DEFAULT;
+        let mut txn = Transaction::new(
+            std::ptr::null(),
+            1,
+            ColumnFamilyId::DEFAULT,
+            TransactionMode::ReadWrite,
+            IsolationLevel::Serializable,
+            0,
+        );
         let key = vec![1, 2, 3];
         let value = vec![4, 5, 6];
 
         // Act
-        txn.put(cf_id, key.clone(), value.clone()).unwrap();
+        txn.put(key.clone(), value.clone(), None).unwrap();
 
         // Assert
         assert_eq!(txn.write_count(), 1);
@@ -482,12 +731,18 @@ mod tests {
     #[test]
     fn should_add_deletes_to_write_set_when_delete_called() {
         // Arrange
-        let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
-        let cf_id = ColumnFamilyId::DEFAULT;
+        let mut txn = Transaction::new(
+            std::ptr::null(),
+            1,
+            ColumnFamilyId::DEFAULT,
+            TransactionMode::ReadWrite,
+            IsolationLevel::Serializable,
+            0,
+        );
         let key = vec![1, 2, 3];
 
         // Act
-        txn.delete(cf_id, key.clone()).unwrap();
+        txn.delete(key.clone()).unwrap();
 
         // Assert
         assert_eq!(txn.write_count(), 1);
@@ -498,7 +753,14 @@ mod tests {
     #[test]
     fn should_track_reads_in_read_set_when_read_called() {
         // Arrange
-        let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
+        let mut txn = Transaction::new(
+            std::ptr::null(),
+            1,
+            ColumnFamilyId::DEFAULT,
+            TransactionMode::ReadWrite,
+            IsolationLevel::Serializable,
+            0,
+        );
         let cf_id = ColumnFamilyId::DEFAULT;
         let key = vec![1, 2, 3];
         let value = Some(vec![4, 5, 6]);
@@ -519,8 +781,15 @@ mod tests {
     #[test]
     fn should_transition_through_states_when_commit_sequence_executed() {
         // Arrange
-        let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
-        txn.put(ColumnFamilyId::DEFAULT, vec![1], vec![2]).unwrap();
+        let mut txn = Transaction::new(
+            std::ptr::null(),
+            1,
+            ColumnFamilyId::DEFAULT,
+            TransactionMode::ReadWrite,
+            IsolationLevel::Serializable,
+            0,
+        );
+        txn.put(vec![1], vec![2], None).unwrap();
 
         // Act
         txn.enter_read_phase().unwrap();
@@ -539,14 +808,20 @@ mod tests {
     #[test]
     fn should_support_mixed_operations_when_put_and_delete_called() {
         // Arrange
-        let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
-        let cf_id = ColumnFamilyId::DEFAULT;
+        let mut txn = Transaction::new(
+            std::ptr::null(),
+            1,
+            ColumnFamilyId::DEFAULT,
+            TransactionMode::ReadWrite,
+            IsolationLevel::Serializable,
+            0,
+        );
 
         // Act
-        txn.put(cf_id, vec![1], vec![100]).unwrap();
-        txn.delete(cf_id, vec![2]).unwrap();
-        txn.put(cf_id, vec![3], vec![200]).unwrap();
-        txn.delete(cf_id, vec![4]).unwrap();
+        txn.put(vec![1], vec![100], None).unwrap();
+        txn.delete(vec![2]).unwrap();
+        txn.put(vec![3], vec![200], None).unwrap();
+        txn.delete(vec![4]).unwrap();
 
         // Assert
         assert_eq!(txn.write_count(), 4);
@@ -560,12 +835,19 @@ mod tests {
     #[test]
     fn should_reject_operations_when_not_active() {
         // Arrange
-        let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
+        let mut txn = Transaction::new(
+            std::ptr::null(),
+            1,
+            ColumnFamilyId::DEFAULT,
+            TransactionMode::ReadWrite,
+            IsolationLevel::Serializable,
+            0,
+        );
 
         // Act
         txn.enter_read_phase().unwrap();
-        let put_result = txn.put(ColumnFamilyId::DEFAULT, vec![1], vec![2]);
-        let delete_result = txn.delete(ColumnFamilyId::DEFAULT, vec![3]);
+        let put_result = txn.put(vec![1], vec![2], None);
+        let delete_result = txn.delete(vec![3]);
         let read_result = txn.read(ColumnFamilyId::DEFAULT, &[4], None, 0);
 
         // Assert
@@ -577,9 +859,15 @@ mod tests {
     #[test]
     fn should_clear_state_when_clear_called() {
         // Arrange
-        let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
-        txn.put(ColumnFamilyId::DEFAULT, vec![1], vec![100])
-            .unwrap();
+        let mut txn = Transaction::new(
+            std::ptr::null(),
+            1,
+            ColumnFamilyId::DEFAULT,
+            TransactionMode::ReadWrite,
+            IsolationLevel::Serializable,
+            0,
+        );
+        txn.put(vec![1], vec![100], None).unwrap();
         txn.read(ColumnFamilyId::DEFAULT, &[2], Some(vec![200]), 50)
             .unwrap();
         assert_eq!(txn.write_count(), 1);
@@ -596,9 +884,15 @@ mod tests {
     #[test]
     fn should_rollback_transaction_when_mark_rolled_back_called() {
         // Arrange
-        let mut txn = Transaction::new(1, IsolationLevel::Serializable, 0);
-        txn.put(ColumnFamilyId::DEFAULT, vec![1], vec![100])
-            .unwrap();
+        let mut txn = Transaction::new(
+            std::ptr::null(),
+            1,
+            ColumnFamilyId::DEFAULT,
+            TransactionMode::ReadWrite,
+            IsolationLevel::Serializable,
+            0,
+        );
+        txn.put(vec![1], vec![100], None).unwrap();
 
         // Act
         txn.mark_rolled_back().unwrap();

@@ -9,7 +9,8 @@ use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::{ColumnFamily, MidgeEngine, WriteBatch};
+use crate::engine::api;
+use crate::{ColumnFamily, MidgeEngine};
 
 use super::MidgeOptions;
 
@@ -59,26 +60,38 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> MidgeEngine {
 
 pub fn load_initial_dataset(engine: &MidgeEngine, cf: &ColumnFamily, initial_keys: usize) {
     // Load is not measured; optimize aggressively to keep Tier-4 runs practical.
-    // WriteBatch amortizes WAL and scheduling overhead.
+    // Use transactions with batched commits to amortize WAL overhead.
     const BATCH_OPS: usize = 1024;
 
-    let mut batch = WriteBatch::new();
     let cf_id = cf.id();
+    let mut tx = engine
+        .begin_tx(cf_id, api::TransactionMode::ReadWrite)
+        .expect("begin_tx failed");
+    let mut count = 0;
 
     for i in 0..initial_keys as u64 {
         let k = make_key(i);
         let v = make_value((i as usize % 251) as u8);
 
-        batch.put_owned_cf(cf_id, k.to_vec(), v.to_vec());
+        tx.put(k.to_vec(), v.to_vec(), None)
+            .expect("put failed");
+        count += 1;
 
-        if batch.len() >= BATCH_OPS {
-            engine.write_batch(&batch).expect("load phase write_batch");
-            batch.clear();
+        if count >= BATCH_OPS {
+            engine
+                .commit(tx, api::WriteOptions::default())
+                .expect("commit failed");
+            tx = engine
+                .begin_tx(cf_id, api::TransactionMode::ReadWrite)
+                .expect("begin_tx failed");
+            count = 0;
         }
     }
 
-    if !batch.is_empty() {
-        engine.write_batch(&batch).expect("load phase write_batch");
+    if count > 0 {
+        engine
+            .commit(tx, api::WriteOptions::default())
+            .expect("commit failed");
     }
 
     engine.flush().expect("load phase flush");

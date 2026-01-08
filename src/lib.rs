@@ -60,6 +60,7 @@ pub use engine::api::{
     // Transaction types
     IsolationLevel,
     Transaction,
+    TransactionMode,
     TransactionState,
     
     // Write options
@@ -82,22 +83,23 @@ pub use engine::api::{
     Query,
     Direction,
     
-    // Batch operations
-    WriteBatch,
-    
-    // Results
-    CasResult,
-    InsertResult,
-    
-    // Column families
-    ColumnFamily,
-    
-    // Snapshots
-    Snapshot,
-    
     // Errors
     ApiError,
     ApiResult,
+};
+
+// Merge operators (stable API)
+pub use engine::api::MergeOperator;
+
+// Legacy/Internal APIs (hidden from documentation)
+#[doc(hidden)]
+pub use engine::api::{
+    WriteBatch,   // Internal: not part of public API
+    Snapshot,     // Internal: not part of public API
+    CasResult,    // Internal
+    InsertResult, // Internal
+    ColumnFamily, // Internal
+    WriteIntent,  // Internal
 };
 
 // Observability
@@ -117,13 +119,17 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 /// ```no_run
 /// use cntryl_midge::prelude::*;
 ///
+/// // Open engine
 /// let engine = MidgeEngine::open(OpenOptions::new().path("./db").build())?;
 /// let cf = engine.default_column_family();
 ///
-/// // Explicit transactions
-/// let mut tx = engine.transaction(cf.id())?;
-/// tx.put(cf.id(), b"key".to_vec(), b"value".to_vec())?;
-/// engine.commit_transaction(tx)?;
+/// // All operations require explicit transactions
+/// let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+/// tx.put(cf.id(), b"key".to_vec(), b"value".to_vec(), None)?;
+/// 
+/// // Commit with explicit durability
+/// let opts = WriteOptions::default().with_sync(true);
+/// engine.commit(tx, opts)?;
 /// # Ok::<(), cntryl_midge::MidgeError>(())
 /// ```
 pub mod prelude {
@@ -139,6 +145,7 @@ pub mod prelude {
         
         // Transactions
         Transaction,
+        TransactionMode,
         IsolationLevel,
         
         // Write options
@@ -160,9 +167,6 @@ pub mod prelude {
         // Query
         Query,
         Direction,
-        
-        // Batch
-        WriteBatch,
         
         // API
         ApiError,

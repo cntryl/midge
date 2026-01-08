@@ -16,6 +16,7 @@
 use bytes::Bytes;
 use cntryl_midge::engine::api::WriteBatch;
 use cntryl_midge::testkit::*;
+use cntryl_midge::{TransactionMode, WriteOptions};
 
 // ============================================================================
 // BASIC RECOVERY TESTS
@@ -31,8 +32,12 @@ fn should_recover_from_clean_shutdown_when_reopening() {
             let cf = engine.default_column_family();
 
             // Write and flush data cleanly
-            engine.put(cf, b"key1", b"value1").expect("put");
-            engine.put(cf, b"key2", b"value2").expect("put");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+            tx.put(cf.id(), b"key1".to_vec(), b"value1".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::buffered()).expect("commit");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+            tx.put(cf.id(), b"key2".to_vec(), b"value2".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush().expect("flush");
             // Clean shutdown (engine dropped normally)
         }
@@ -42,14 +47,16 @@ fn should_recover_from_clean_shutdown_when_reopening() {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
 
+            let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
             assert_eq!(
-                engine.get(cf, b"key1").expect("get"),
+                engine.tx_get(&tx, b"key1").expect("get"),
                 Some(Bytes::from_static(b"value1")),
                 "mode: {}",
                 mode
             );
+            let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
             assert_eq!(
-                engine.get(cf, b"key2").expect("get"),
+                engine.tx_get(&tx, b"key2").expect("get"),
                 Some(Bytes::from_static(b"value2")),
                 "mode: {}",
                 mode

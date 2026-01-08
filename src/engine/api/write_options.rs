@@ -76,6 +76,22 @@ impl WriteOptions {
     pub(crate) fn use_wal(&self) -> bool {
         !matches!(self.policy, DurabilityPolicy::NoWAL)
     }
+
+    /// Builder-style: set policy to Sync
+    pub fn with_sync(mut self, sync: bool) -> Self {
+        if sync {
+            self.policy = DurabilityPolicy::Sync;
+        } else {
+            self.policy = DurabilityPolicy::Buffered;
+        }
+        self
+    }
 }
 
-// Deliberately NO Default impl - must be explicit
+/// Default provides Buffered policy for convenience
+/// WARNING: This is NOT fully durable. Use WriteOptions::sync() for full durability.
+impl Default for WriteOptions {
+    fn default() -> Self {
+        Self::buffered()
+    }
+}

@@ -2,8 +2,7 @@
 //!
 //! This demonstrates the core API that library consumers would use.
 
-use bytes::Bytes;
-use cntryl_midge::{MidgeEngine, MidgeResult, Query, WriteBatch};
+use cntryl_midge::{MidgeEngine, MidgeResult, Query, TransactionMode, WriteOptions};
 use std::path::PathBuf;
 
 fn main() -> MidgeResult<()> {
@@ -11,50 +10,42 @@ fn main() -> MidgeResult<()> {
     let db = MidgeEngine::open(PathBuf::from("./example_db"))?;
     let cf = db.default_column_family();
 
-    // Basic put/get operations
-    db.put(cf, b"key1", b"value1")?;
-    db.put(cf, b"key2", b"value2")?;
+    // Basic put/get operations using transactions
+    let mut tx = db.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    tx.put(cf.id(), b"key1".to_vec(), b"value1".to_vec(), None)?;
+    tx.put(cf.id(), b"key2".to_vec(), b"value2".to_vec(), None)?;
+    db.commit(tx, WriteOptions::sync())?;
 
-    let value = db.get(cf, b"key1")?;
+    // Read using transaction
+    let tx = db.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+    let value = db.tx_get(&tx, b"key1")?;
     println!("key1 = {:?}", value);
+    // ReadOnly transactions don't need commit
 
     // Delete operation
-    db.delete(cf, b"key1")?;
+    let mut tx = db.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    tx.delete(cf.id(), b"key1".to_vec())?;
+    db.commit(tx, WriteOptions::buffered())?;
 
-    // Write batch (multiple operations)
-    let mut batch = WriteBatch::new();
-    batch.put(
-        b"batch_key1".to_vec().into(),
-        b"batch_value1".to_vec().into(),
-    );
-    batch.put(
-        b"batch_key2".to_vec().into(),
-        b"batch_value2".to_vec().into(),
-    );
-    batch.delete(b"key2".to_vec().into());
-    db.write_batch(&batch)?;
+    // Multiple operations in one transaction (replaces WriteBatch)
+    let mut tx = db.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    tx.put(cf.id(), b"batch_key1".to_vec(), b"batch_value1".to_vec(), None)?;
+    tx.put(cf.id(), b"batch_key2".to_vec(), b"batch_value2".to_vec(), None)?;
+    tx.delete(cf.id(), b"key2".to_vec())?;
+    db.commit(tx, WriteOptions::buffered())?;
 
-    // Range scan
-    let query = Query::new()
-        .start_key(Bytes::from(&b"batch_"[..]))
-        .end_key(Bytes::from(&b"batch_z"[..]))
-        .limit(10);
-    let results = db.scan(cf, &query)?;
+    // Range scan within transaction
+    let tx = db.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+    let results = db.tx_scan(&tx, b"batch_", b"batch_z")?;
     println!("Found {} keys in range", results.len());
 
-    // Transactions
-    let mut txn = db.transaction();
-    txn.put(cf.id(), b"txn_key".to_vec(), b"txn_value".to_vec())?;
-    txn.put(cf.id(), b"txn_key2".to_vec(), b"txn_value2".to_vec())?;
-    db.commit_transaction(txn)?;
-
-    // Snapshots (for consistent reads)
-    let snapshot = db.snapshot();
-    println!("Created snapshot at sequence {}", snapshot.sequence());
-
-    // Compare-and-swap
-    let result = db.compare_and_swap(cf, b"cas_key", None, b"new_value")?;
-    println!("CAS result: {:?}", result);
+    // Range scan with Query parameters
+    let query = Query::new()
+        .start_key(b"batch_".to_vec().into())
+        .end_key(b"batch_z".to_vec().into())
+        .limit(10);
+    let results = db.tx_scan_range(&tx, &query)?;
+    println!("Query returned {} keys", results.len());
 
     // Flush and sync
     db.sync()?;

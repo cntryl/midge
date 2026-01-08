@@ -14,6 +14,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::{TransactionMode, WriteOptions};
 
 // ============================================================================
 // MANIFEST VISIBILITY AND ATOMICITY TESTS
@@ -28,11 +29,15 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
             let cf = engine.default_column_family();
 
             // Write and flush to create SST file
-            engine.put(cf, b"key1", b"value1").expect("put");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+            tx.put(cf.id(), b"key1".to_vec(), b"value1".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush().expect("flush");
 
             // Write more data (will create another SST)
-            engine.put(cf, b"key2", b"value2").expect("put");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+            tx.put(cf.id(), b"key2".to_vec(), b"value2".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::buffered()).expect("commit");
             // Crash before manifest is updated with new SST (orphan SST file)
         }
 
@@ -42,15 +47,17 @@ fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recoverin
             let cf = engine.default_column_family();
 
             // key1 should be visible (from first SST, manifest entry exists)
+            let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
             assert!(
-                engine.get(cf, b"key1").expect("get").is_some(),
+                engine.tx_get(&tx, b"key1").expect("get").is_some(),
                 "mode: {}",
                 mode
             );
 
             // key2 may or may not be visible depending on whether orphan SST was recovered
             // But engine should not crash or corrupt data
-            let _ = engine.get(cf, b"key2").expect("get");
+            let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+            let _ = engine.tx_get(&tx, b"key2").expect("get");
         }
     });
 }
@@ -66,14 +73,18 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
             // Write and flush (manifest updated)
             for i in 0..10 {
                 let key = format!("flushed_{:02}", i);
-                engine.put(cf, key.as_bytes(), b"value").expect("put");
+                let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
             engine.flush().expect("flush");
 
             // Write more after manifest update (in WAL only)
             for i in 0..10 {
                 let key = format!("unflushed_{:02}", i);
-                engine.put(cf, key.as_bytes(), b"value").expect("put");
+                let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
             // Crash before next flush
         }
@@ -86,16 +97,18 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
             // All data should be recovered (flushed + WAL)
             for i in 0..10 {
                 let key = format!("flushed_{:02}", i);
+                let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
                 assert!(
-                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    engine.tx_get(&tx, key.as_bytes()).expect("get").is_some(),
                     "mode: {}",
                     mode
                 );
             }
             for i in 0..10 {
                 let key = format!("unflushed_{:02}", i);
+                let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
                 assert!(
-                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    engine.tx_get(&tx, key.as_bytes()).expect("get").is_some(),
                     "mode: {}",
                     mode
                 );
@@ -113,10 +126,14 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
             let cf = engine.default_column_family();
 
             // Write, flush, then overwrite
-            engine.put(cf, b"key", b"value_old").expect("put");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+            tx.put(cf.id(), b"key".to_vec(), b"value_old".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush().expect("flush");
 
-            engine.put(cf, b"key", b"value_new").expect("put");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+            tx.put(cf.id(), b"key".to_vec(), b"value_new".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::buffered()).expect("commit");
             // Crash before flush (WAL has new value)
         }
 
@@ -126,8 +143,9 @@ fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
             let cf = engine.default_column_family();
 
             // WAL should take precedence over SST when both exist
+            let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
             assert_eq!(
-                engine.get(cf, b"key").expect("get"),
+                engine.tx_get(&tx, b"key").expect("get"),
                 Some(Bytes::from_static(b"value_new")),
                 "mode: {}",
                 mode
@@ -145,11 +163,15 @@ fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
             let cf = engine.default_column_family();
 
             // Create SST
-            engine.put(cf, b"key", b"value").expect("put");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+            tx.put(cf.id(), b"key".to_vec(), b"value".to_vec(), None).expect("put");
+            engine.commit(tx, WriteOptions::buffered()).expect("commit");
             engine.flush().expect("flush");
 
             // Delete the key (creates tombstone in WAL)
-            engine.delete(cf, b"key").expect("delete");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+            tx.delete(cf.id(), b"key".to_vec()).expect("delete");
+            engine.commit(tx, WriteOptions::buffered()).expect("commit");
             // Crash before tombstone is reflected in manifest
         }
 
@@ -160,7 +182,8 @@ fn should_not_auto_claim_orphan_sst_given_sst_exists_when_manifest_behind() {
 
             // Manifest authority: SST has value, but WAL has delete
             // Recovery should respect WAL ordering
-            let result = engine.get(cf, b"key").expect("get");
+            let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+            let result = engine.tx_get(&tx, b"key").expect("get");
             // Result depends on WAL recovery order - just ensure no crash
             let _ = result;
         }
@@ -182,7 +205,9 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
             // Flush (SST created, manifest update initiated)
             for i in 0..50 {
                 let key = format!("key_{:03}", i);
-                engine.put(cf, key.as_bytes(), b"value").expect("put");
+                let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
             engine.flush().expect("flush");
 
@@ -197,8 +222,9 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
             // Data should still be visible (recovered from WAL or SST)
             for i in 0..50 {
                 let key = format!("key_{:03}", i);
+                let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
                 assert!(
-                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    engine.tx_get(&tx, key.as_bytes()).expect("get").is_some(),
                     "mode: {}",
                     mode
                 );
@@ -222,13 +248,10 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
                 let handle = std::thread::spawn(move || {
                     for i in 0..10 {
                         let key = format!("t_{}_k_{:02}", thread_id, i);
-                        engine_clone
-                            .put(
-                                engine_clone.default_column_family(),
-                                key.as_bytes(),
-                                b"value",
-                            )
-                            .expect("put");
+                        let cf = engine_clone.default_column_family();
+                        let mut tx = engine_clone.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                        tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec(), None).expect("put");
+                        engine_clone.commit(tx, WriteOptions::buffered()).expect("commit");
                     }
                     engine_clone.flush().expect("flush");
                 });
@@ -250,8 +273,9 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
             for thread_id in 0..3 {
                 for i in 0..10 {
                     let key = format!("t_{}_k_{:02}", thread_id, i);
+                    let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
                     assert!(
-                        engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                        engine.tx_get(&tx, key.as_bytes()).expect("get").is_some(),
                         "mode: {}",
                         mode
                     );
@@ -272,9 +296,9 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             // Write to default CF (simpler than multi-CF for now)
             for i in 0..10 {
                 let key = format!("key_{:02}", i);
-                engine
-                    .put(cf_default, key.as_bytes(), b"value")
-                    .expect("put");
+                let mut tx = engine.begin_tx(cf_default.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf_default.id(), key.as_bytes().to_vec(), b"value".to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
 
             // Flush (concurrent manifest updates)
@@ -291,9 +315,10 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             // All data should be recoverable in order
             for i in 0..10 {
                 let key = format!("key_{:02}", i);
+                let tx = engine.begin_tx(cf_default.id(), TransactionMode::ReadOnly).expect("begin_tx");
                 assert!(
                     engine
-                        .get(cf_default, key.as_bytes())
+                        .tx_get(&tx, key.as_bytes())
                         .expect("get")
                         .is_some(),
                     "mode: {}",
@@ -315,9 +340,9 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
             // Create enough data to trigger compaction
             for i in 0..100 {
                 let key = format!("key_{:03}", i);
-                engine
-                    .put(cf, key.as_bytes(), format!("value_{:03}", i).as_bytes())
-                    .expect("put");
+                let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf.id(), key.as_bytes().to_vec(), format!("value_{:03}", i).as_bytes().to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
             engine.flush().expect("flush");
 
@@ -332,8 +357,9 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
             // All data should still be present
             for i in 0..100 {
                 let key = format!("key_{:03}", i);
+                let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
                 assert!(
-                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    engine.tx_get(&tx, key.as_bytes()).expect("get").is_some(),
                     "mode: {}",
                     mode
                 );
@@ -353,7 +379,9 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
             // Create data
             for i in 0..50 {
                 let key = format!("key_{:02}", i);
-                engine.put(cf, key.as_bytes(), b"value").expect("put");
+                let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
             engine.flush().expect("flush");
 
@@ -368,8 +396,9 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
             // All original data should be present
             for i in 0..50 {
                 let key = format!("key_{:02}", i);
+                let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
                 assert!(
-                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    engine.tx_get(&tx, key.as_bytes()).expect("get").is_some(),
                     "mode: {}",
                     mode
                 );
@@ -389,14 +418,18 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
             // Create initial SST
             for i in 0..30 {
                 let key = format!("old_{:02}", i);
-                engine.put(cf, key.as_bytes(), b"value").expect("put");
+                let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
             engine.flush().expect("flush");
 
             // Overwrite (would trigger compaction)
             for i in 0..30 {
                 let key = format!("old_{:02}", i);
-                engine.put(cf, key.as_bytes(), b"new_value").expect("put");
+                let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"new_value".to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
             engine.flush().expect("flush");
 
@@ -411,8 +444,9 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
             // Updated data should be present
             for i in 0..30 {
                 let key = format!("old_{:02}", i);
+                let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
                 assert!(
-                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    engine.tx_get(&tx, key.as_bytes()).expect("get").is_some(),
                     "mode: {}",
                     mode
                 );
@@ -432,7 +466,9 @@ fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopenin
             // Write valid records
             for i in 0..25 {
                 let key = format!("valid_{:02}", i);
-                engine.put(cf, key.as_bytes(), b"value").expect("put");
+                let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+                tx.put(cf.id(), key.as_bytes().to_vec(), b"value".to_vec(), None).expect("put");
+                engine.commit(tx, WriteOptions::buffered()).expect("commit");
             }
 
             // Crash with truncated WAL append
@@ -446,8 +482,9 @@ fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopenin
             // Valid records before truncation should be recovered
             for i in 0..25 {
                 let key = format!("valid_{:02}", i);
+                let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
                 assert!(
-                    engine.get(cf, key.as_bytes()).expect("get").is_some(),
+                    engine.tx_get(&tx, key.as_bytes()).expect("get").is_some(),
                     "mode: {}",
                     mode
                 );
