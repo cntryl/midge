@@ -467,10 +467,10 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
                 let cf = engine_clone.default_column_family();
-                let mut txn = engine_clone.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+                let mut txn = engine_clone.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
                 let key = format!("key{}", i);
                 let value = format!("value{}", i);
-                txn.put(key.as_bytes().to_vec(), value.as_bytes(, None).to_vec())
+                txn.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .unwrap();
                 engine_clone.commit(txn, cntryl_midge::WriteOptions::default())
             });
@@ -483,11 +483,12 @@ fn should_maintain_isolation_under_concurrent_transaction_pressure_when_stressed
         }
 
         let cf = engine.default_column_family();
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
         for i in 0..20 {
             let key = format!("key{}", i);
             let expected = format!("value{}", i);
             assert_eq!(
-                engine.get(cf, key.as_bytes()).unwrap(),
+                read_tx.get(key.as_bytes()).unwrap(),
                 Some(Bytes::copy_from_slice(expected.as_bytes()))
             );
         }
@@ -567,7 +568,8 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
                 // Read random keys
                 for i in 0..5 {
                     let key = format!("key{}", i);
-                    let _value = engine_clone.get(cf, key.as_bytes()).unwrap();
+                    let read_tx = engine_clone.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+                    let _value = read_tx.get(key.as_bytes()).unwrap();
                 }
             });
             reader_handles.push(handle);

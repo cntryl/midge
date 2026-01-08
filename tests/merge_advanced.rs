@@ -1,4 +1,4 @@
-//! Advanced Merge Operator Tests
+﻿//! Advanced Merge Operator Tests
 //!
 //! Tests advanced merge operator scenarios: tombstone interactions, error handling,
 //! and complex merge patterns. Validates that merge operators behave correctly when
@@ -75,16 +75,23 @@ fn should_apply_merge_given_delete_then_merge_when_tombstone_base() {
             .register_merge_operator(cf.id().as_u32(), Box::new(op))
             .expect("register");
 
-        engine.put(cf, b"key", b"initial").expect("put");
-        engine.delete(cf, b"key").expect("delete"); // Creates tombstone
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(b"key".to_vec(), b"initial".to_vec(), None).expect("put");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.delete(b"key".to_vec()).expect("delete"); // Creates tombstone
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
 
         // Act: Merge on tombstone
-        engine
-            .merge_cf(cf, b"key", b"merged")
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.merge(b"key".to_vec(), b"merged".to_vec())
             .expect("merge on tombstone");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
 
         // Assert: Merge applies to tombstone state (treats as empty)
-        let got = engine.get(cf, b"key").expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let got = tx.get(b"key").expect("get");
         assert!(
             got.is_some(),
             "merge did not apply to tombstone in mode: {}",
@@ -106,14 +113,22 @@ fn should_delete_after_merge_given_merge_then_delete_when_sequence() {
             .expect("register");
 
         // Act: Merge creates value, then delete
-        engine.merge_cf(cf, b"key", b"value1").expect("first merge");
-        engine
-            .merge_cf(cf, b"key", b"value2")
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.merge(b"key".to_vec(), b"value1".to_vec()).expect("first merge");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.merge(b"key".to_vec(), b"value2".to_vec())
             .expect("second merge");
-        engine.delete(cf, b"key").expect("delete after merge");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.delete(b"key".to_vec()).expect("delete after merge");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
 
         // Assert: Delete wins
-        let got = engine.get(cf, b"key").expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let got = tx.get(b"key").expect("get");
         assert_eq!(
             got, None,
             "delete did not remove merged value in mode: {}",
@@ -136,17 +151,24 @@ fn should_handle_merge_on_many_tombstones_given_delete_merge_cycles_when_repeate
 
         // Act: Repeat delete/merge cycles
         for i in 0..3 {
-            engine
-                .put(cf, b"key", format!("value_{i}").as_bytes())
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.put(b"key".to_vec(), format!("value_{i}").as_bytes().to_vec(), None)
                 .expect("put");
-            engine.delete(cf, b"key").expect("delete");
-            engine
-                .merge_cf(cf, b"key", format!("merged_{i}").as_bytes())
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+            
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.delete(b"key".to_vec()).expect("delete");
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+            
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.merge(b"key".to_vec(), format!("merged_{i}").as_bytes().to_vec())
                 .expect("merge");
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
         }
 
         // Assert: Final state after last merge
-        let got = engine.get(cf, b"key").expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let got = tx.get(b"key").expect("get");
         assert!(
             got.is_some(),
             "merge state lost after multiple delete/merge cycles in mode: {}",
@@ -167,27 +189,20 @@ fn should_apply_multiple_merges_in_batch_given_write_batch_when_committed() {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        engine.put(cf, b"key", b"base").expect("put base");
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(b"key".to_vec(), b"base".to_vec(), None).expect("put base");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
 
-        // Act: Write batch with multiple puts (merges require custom operator)
-        // For now, test with puts to validate batch ordering
-        let mut batch = WriteBatch::new();
-        batch.put(
-            bytes::Bytes::copy_from_slice(b"key"),
-            bytes::Bytes::copy_from_slice(b"value1"),
-        );
-        batch.put(
-            bytes::Bytes::copy_from_slice(b"key"),
-            bytes::Bytes::copy_from_slice(b"value2"),
-        );
-        batch.put(
-            bytes::Bytes::copy_from_slice(b"key"),
-            bytes::Bytes::copy_from_slice(b"value3"),
-        );
-        engine.write_batch(&batch).expect("commit batch");
+        // Act: Multiple puts in single transaction (batch ordering)
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(b"key".to_vec(), b"value1".to_vec(), None).expect("put 1");
+        tx.put(b"key".to_vec(), b"value2".to_vec(), None).expect("put 2");
+        tx.put(b"key".to_vec(), b"value3".to_vec(), None).expect("put 3");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit batch");
 
         // Assert: Last put in batch wins
-        let got = engine.get(cf, b"key").expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let got = tx.get(b"key").expect("get");
         assert_eq!(
             got,
             Some(Bytes::from_static(b"value3")),
@@ -216,13 +231,15 @@ fn should_accumulate_values_given_10_sequential_merges_when_applying() {
         // Act: Apply 10 sequential merges (no base value)
         for i in 0..10 {
             let operand = format!("_{i}");
-            engine
-                .merge_cf(cf, b"accumulate", operand.as_bytes())
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.merge(b"accumulate".to_vec(), operand.as_bytes().to_vec())
                 .expect("merge");
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
         }
 
         // Assert: Accumulated result exists
-        let got = engine.get(cf, b"accumulate").expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let got = tx.get(b"accumulate").expect("get");
         assert!(
             got.is_some(),
             "10 sequential merges did not produce value in mode: {}",
@@ -243,13 +260,18 @@ fn should_preserve_merge_with_empty_operand_given_empty_bytes_when_merging() {
             .register_merge_operator(cf.id().as_u32(), Box::new(op))
             .expect("register");
 
-        engine.put(cf, b"key", b"base").expect("put base");
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(b"key".to_vec(), b"base".to_vec(), None).expect("put base");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
 
         // Act: Merge with empty operand
-        engine.merge_cf(cf, b"key", b"").expect("merge empty");
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.merge(b"key".to_vec(), b"".to_vec()).expect("merge empty");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
 
         // Assert: Key still exists with some value
-        let got = engine.get(cf, b"key").expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let got = tx.get(b"key").expect("get");
         assert!(
             got.is_some(),
             "merge with empty operand lost value in mode: {}",
@@ -278,15 +300,19 @@ fn should_handle_binary_data_in_merge_given_non_utf8_when_merging() {
         let binary_operand = vec![0x42, 0x43, 0x44, 0x00];
 
         // Act: Put base with binary data
-        engine
-            .put(cf, &binary_key, &[0xAA, 0xBB])
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(binary_key.clone(), vec![0xAA, 0xBB], None)
             .expect("put binary");
-        engine
-            .merge_cf(cf, &binary_key, &binary_operand)
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.merge(binary_key.clone(), binary_operand.clone())
             .expect("merge binary");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
 
         // Assert: Binary data preserved through merge
-        let got = engine.get(cf, &binary_key).expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let got = tx.get(&binary_key).expect("get");
         assert!(got.is_some(), "binary data lost in merge in mode: {}", mode);
     });
 }
@@ -304,19 +330,28 @@ fn should_handle_special_characters_in_string_merge_given_delimiters_when_append
             .expect("register");
 
         // Act: Write base and merge with special characters
-        engine.put(cf, b"key", b"base").expect("put");
-        engine
-            .merge_cf(cf, b"key", "_with_newline_\n".as_bytes())
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(b"key".to_vec(), b"base".to_vec(), None).expect("put");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.merge(b"key".to_vec(), "_with_newline_\n".as_bytes().to_vec())
             .expect("merge newline");
-        engine
-            .merge_cf(cf, b"key", "tab_\t_here".as_bytes())
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.merge(b"key".to_vec(), "tab_\t_here".as_bytes().to_vec())
             .expect("merge tab");
-        engine
-            .merge_cf(cf, b"key", "emoji_ðŸ˜€_unicode".as_bytes())
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
+        
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.merge(b"key".to_vec(), "emoji_Ã°Å¸Ëœâ‚¬_unicode".as_bytes().to_vec())
             .expect("merge emoji");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
 
         // Assert: All special characters handled
-        let got = engine.get(cf, b"key").expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let got = tx.get(b"key").expect("get");
         assert!(
             got.is_some(),
             "special characters lost in merge in mode: {}",
@@ -335,24 +370,28 @@ fn should_accumulate_multiple_merges_on_different_keys_when_batch() {
 
         for i in 0..5 {
             let key = format!("key_{i}");
-            engine.put(cf, key.as_bytes(), b"base").expect("put");
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.put(key.as_bytes().to_vec(), b"base".to_vec(), None).expect("put");
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
         }
 
-        // Act: Batch with operations on different keys
-        let mut batch = WriteBatch::new();
+        // Act: Single transaction with operations on different keys
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
         for i in 0..5 {
             let key = format!("key_{i}");
-            batch.put(
-                key.as_bytes().to_vec().into(),
-                format!("_update{i}").as_bytes().to_vec().into(),
-            );
+            tx.put(
+                key.as_bytes().to_vec(),
+                format!("_update{i}").as_bytes().to_vec(),
+                None
+            ).expect("put");
         }
-        engine.write_batch(&batch).expect("commit batch");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit batch");
 
         // Assert: All updates applied
         for i in 0..5 {
             let key = format!("key_{i}");
-            let got = engine.get(cf, key.as_bytes()).expect("get");
+            let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            let got = tx.get(key.as_bytes()).expect("get");
             assert!(got.is_some(), "update lost on key_{} in mode: {}", i, mode);
         }
     });
