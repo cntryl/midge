@@ -7,10 +7,13 @@ const VALUE_SIZE: usize = 64;
 
 fn write_prefixed_keys(engine: &MidgeEngine, num_keys: usize, prefix: u8) {
     let cf = engine.default_column_family();
+    let cf_id = cf.id();
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_prefix_u64_be(prefix, i as u64);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        engine.put(cf, &k[..], &v).unwrap();
+        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(k.to_vec(), v, None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
     }
 }
 
@@ -27,8 +30,10 @@ fn run_scan_query_case(
     setup(&engine);
 
     // Measure exactly one scan
+    let cf_id = cf.id();
     ctx.measure_ref(&engine, |e| {
-        let results = e.scan(cf, &query).expect("scan failed");
+        let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let results = tx.scan(query.start.as_deref(), query.end.as_deref()).expect("scan failed");
         results.len()
     });
 

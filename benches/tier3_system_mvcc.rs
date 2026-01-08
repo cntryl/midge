@@ -31,18 +31,22 @@ fn run_overwrite_hot_keys_case(
     ctx.set_bytes((total_ops * (KEY_SIZE + VALUE_SIZE)) as u64);
 
     // Measure overwrite pressure
+    let cf_id = cf.id();
     ctx.measure_ref(&engine, |e| {
         for r in 0..rounds {
             let fill = (r % 251) as u8;
             let v = vec![fill; VALUE_SIZE];
             for k in keys.iter() {
-                e.put(cf, &k[..], &v).unwrap();
+                let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                tx.put(k.to_vec(), v.clone(), None).unwrap();
+                e.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
             }
         }
     });
 
     // Not timed
-    assert!(engine.get(cf, &keys[0][..]).unwrap().is_some());
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    assert!(tx.get(&keys[0][..]).unwrap().is_some());
 
     drop(engine);
 }
@@ -53,28 +57,35 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
 
     // Setup (not measured)
     let mut keys = Vec::with_capacity(num_keys);
+    let cf_id = cf.id();
     for i in 0..num_keys {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
-        keys.push(k);
-        engine.put(cf, &k[..], &[1u8; VALUE_SIZE]).unwrap();
+        keys.push(k.clone());
+        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(k.to_vec(), vec![1u8; VALUE_SIZE], None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
     }
     engine.flush().unwrap();
 
-    let snap = engine.snapshot_cf(cf);
+    // Create snapshot via transaction
+    let snap_tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    let snap_seq = snap_tx.start_sequence();
 
     for k in keys.iter() {
-        engine.put(cf, &k[..], &[2u8; VALUE_SIZE]).unwrap();
+        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(k.to_vec(), vec![2u8; VALUE_SIZE], None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
     }
     engine.flush().unwrap();
     engine.compact_all().unwrap();
 
     ctx.set_elements(num_keys as u64);
 
-    // Measure reading old versions via snapshot
-    ctx.measure_ref(&snap, |s| {
+    // Measure reading old versions via snapshot transaction
+    ctx.measure_ref(&snap_tx, |s| {
         let mut ok = 0usize;
         for k in keys.iter() {
-            let v = s.get(cf, &k[..]).unwrap();
+            let v = s.get(&k[..]).unwrap();
             if let Some(bytes) = v {
                 if bytes.as_ref() == vec![1u8; VALUE_SIZE].as_slice() {
                     ok += 1;
@@ -87,7 +98,7 @@ fn run_read_old_versions_case(ctx: &mut StressContext, opts: MidgeOptions, num_k
     // Not timed
     // NOTE: Midge does not guarantee true snapshot isolation (see transaction isolation docs/tests).
     // This check is only to ensure the snapshot read path remains functional.
-    let v0 = snap.get(cf, &keys[0][..]).unwrap().unwrap();
+    let v0 = snap_tx.get(&keys[0][..]).unwrap().unwrap();
     assert_eq!(v0.len(), VALUE_SIZE);
 
     drop(engine);

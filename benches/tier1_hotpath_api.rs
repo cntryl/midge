@@ -109,17 +109,21 @@ fn bench_single_get(c: &mut Criterion) {
 
     // Pre-populate with data (NO flush - keep in memtable for hot path)
     for i in 0..num_keys {
-        engine.put(cf, &keys[i], &vals[i]).unwrap();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(keys[i].to_vec(), vals[i].to_vec(), None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
     }
     // Note: intentionally NOT flushing to keep data in memtable
 
     // Hit rate benchmark - cycle through keys (all in memtable)
     let mut counter = 0;
+    let cf_id = cf.id();
     group.bench_function("single_get_hit_memtable", |b| {
         b.iter(|| {
             let idx = counter % num_keys;
             counter += 1;
-            let result = engine.get(cf, black_box(&keys[idx]));
+            let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            let result = tx.get(black_box(&keys[idx]));
             black_box(result)
         })
     });
@@ -139,7 +143,8 @@ fn bench_single_get(c: &mut Criterion) {
         b.iter(|| {
             let idx = miss_counter % num_keys;
             miss_counter += 1;
-            let result = engine.get(cf, black_box(&miss_keys[idx]));
+            let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            let result = tx.get(black_box(&miss_keys[idx]));
             black_box(result)
         })
     });
@@ -160,12 +165,15 @@ fn bench_single_put(c: &mut Criterion) {
     let num_ops = 10_000;
     let (keys, vals) = make_fixed_kv(num_ops);
     let mut counter = 0;
+    let cf_id = cf.id();
 
     group.bench_function("single_put", |b| {
         b.iter(|| {
             let idx = counter % num_ops;
             counter += 1;
-            engine.put(cf, &keys[idx], &vals[idx]).unwrap();
+            let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.put(keys[idx].to_vec(), vals[idx].to_vec(), None).unwrap();
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
             black_box(());
         })
     });

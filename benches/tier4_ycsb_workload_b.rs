@@ -52,10 +52,13 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
 
                     // Deterministic, stochastic 95/5 mix (avoids periodic scheduling).
                     if (op_r % 100) < 95 {
-                        let _ = e.get(cf, &k[..]).expect("warmup get");
+                        let tx = e.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                        let _ = tx.get(&k[..]).expect("warmup get");
                     } else {
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        e.put(cf, &k[..], &v[..]).expect("warmup put");
+                        let mut tx = e.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                        tx.put(k.to_vec(), v.to_vec(), None).expect("warmup put");
+                        e.commit(tx, cntryl_midge::WriteOptions::default()).expect("warmup commit");
                     }
                 }
             },

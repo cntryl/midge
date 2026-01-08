@@ -26,9 +26,12 @@ fn run_sst_point_lookup_case(
 
     // Setup (not measured): create an SST
     let keys = precompute_keys(num_keys);
+    let cf_id = cf.id();
     for (i, k) in keys.iter().enumerate() {
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        engine.put(cf, &k[..], &v).unwrap();
+        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(k.to_vec(), v, None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -38,8 +41,8 @@ fn run_sst_point_lookup_case(
     ctx.measure_ref(&engine, |e| {
         let mut found = 0usize;
         for i in 0..num_gets {
-            let k = &keys[i % keys.len()];
-            if e.get(cf, &k[..]).unwrap().is_some() {
+            let k = &keys[i % keys.len()];            let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            if tx.get(&k[..]).unwrap().is_some() {
                 found += 1;
             }
         }
@@ -55,9 +58,12 @@ fn run_sst_range_scan_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
 
     // Setup (not measured): create an SST
     let keys = precompute_keys(num_keys);
+    let cf_id = cf.id();
     for (i, k) in keys.iter().enumerate() {
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        engine.put(cf, &k[..], &v).unwrap();
+        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(k.to_vec(), v, None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
     }
     engine.flush().unwrap();
 
@@ -67,7 +73,8 @@ fn run_sst_range_scan_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys
     ctx.set_elements(1);
 
     ctx.measure_ref(&engine, |e| {
-        let results = e.range(cf, &start[..], &end[..]).expect("range failed");
+        let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+        let results = tx.scan(Some(&start[..]), Some(&end[..])).expect("range failed");
         results.len()
     });
 
@@ -80,6 +87,7 @@ fn run_sst_sparse_keyspace_cloud_case(ctx: &mut StressContext, opts: MidgeOption
 
     // Setup (not measured): sparse keys (large gaps)
     let mut keys = Vec::with_capacity(2_000);
+    let cf_id = cf.id();
     for i in 0..2_000usize {
         let mut k = [0u8; KEY_SIZE];
         // Space keys out by 1<<20 in the high bits.
@@ -87,7 +95,9 @@ fn run_sst_sparse_keyspace_cloud_case(ctx: &mut StressContext, opts: MidgeOption
         k[..8].copy_from_slice(&spaced.to_be_bytes());
         keys.push(k);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        engine.put(cf, &k[..], &v).unwrap();
+        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(k.to_vec(), v, None).unwrap();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
     }
     engine.flush().unwrap();
 

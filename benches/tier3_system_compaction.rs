@@ -45,8 +45,11 @@ fn run_flush_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize, 
     let cf = engine.default_column_family();
 
     // Setup (not measured)
+    let cf_id = cf.id();
     for (k, v) in keys.iter().zip(values.iter()) {
-        engine.put(cf, &k[..], v).expect("setup put");
+        let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        tx.put(k.to_vec(), v.clone(), None).expect("setup put");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit");
     }
 
     // Measure exactly one flush
