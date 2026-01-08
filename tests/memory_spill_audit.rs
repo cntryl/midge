@@ -28,7 +28,7 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
             let key = format!("large_key_{:05}", i);
             let value = vec![65u8; 1024]; // 1KB value per key
 
-            tx.put(cf.id(), key.as_bytes().to_vec(), value)
+            tx.put(key.as_bytes().to_vec(), value, None)
                 .expect("put in transaction");
 
             total_bytes += key.len() + 1024;
@@ -94,7 +94,7 @@ fn should_respect_memory_budget_across_transactions() {
         for i in 0..128 {
             let key = format!("batch1_key_{:03}", i);
             let value = vec![65u8; 1024]; // 1KB per key
-            tx1.put(cf.id(), key.as_bytes().to_vec(), value)
+            tx1.put(key.as_bytes().to_vec(), value, None)
                 .expect("put in tx1");
         }
         eprintln!("TX1: Writing 128KB of data");
@@ -107,7 +107,7 @@ fn should_respect_memory_budget_across_transactions() {
         for i in 0..128 {
             let key = format!("batch2_key_{:03}", i);
             let value = vec![66u8; 1024]; // 1KB per key
-            tx2.put(cf.id(), key.as_bytes().to_vec(), value)
+            tx2.put(key.as_bytes().to_vec(), value, None)
                 .expect("put in tx2");
         }
         eprintln!("TX2: Writing another 128KB of data");
@@ -160,7 +160,7 @@ fn should_handle_transaction_spill_to_disk_correctly() {
         for i in 0..200 {
             let key = format!("spilltest_key_{:04}", i);
             let value = vec![88u8; 512]; // 512 bytes per key
-            tx.put(cf.id(), key.as_bytes().to_vec(), value)
+            tx.put(key.as_bytes().to_vec(), value, None)
                 .expect("put");
         }
 

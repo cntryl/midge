@@ -5,6 +5,7 @@
 
 use cntryl_midge::common::MidgeResult;
 use cntryl_midge::testkit::new_engine;
+use cntryl_midge::WriteOptions;
 
 #[test]
 fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
@@ -15,21 +16,26 @@ fn should_expose_read_amp_metrics_through_api() -> MidgeResult<()> {
     // Write data
     for i in 0..20 {
         let key = format!("key{:03}", i);
-        engine.put(cf, key.as_bytes(), b"test_value")?;
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+        tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
+        engine.commit(tx, WriteOptions::default())?;
     }
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(500)); // Wait for flush to complete
 
     // Clear memtable by writing new data and flushing again
     // This ensures reads must come from SSTs
-    engine.put(cf, b"dummy", b"data")?;
+    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+    tx.put(b"dummy".to_vec(), b"data".to_vec(), None)?;
+    engine.commit(tx, WriteOptions::default())?;
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // Act: Perform reads and get metrics
     for i in 0..5 {
         let key = format!("key{:03}", i);
-        let _ = engine.get(cf, key.as_bytes())?;
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+        let _ = read_tx.get(key.as_bytes())?;
     }
 
     let metrics = engine.get_read_amp_metrics()?;
@@ -73,14 +79,17 @@ fn should_track_l0_overlap_in_metrics() -> MidgeResult<()> {
         for i in 0..5 {
             let key = format!("key{:03}", i); // Same key range
             let value = format!("value_batch{}", batch);
-            engine.put(cf, key.as_bytes(), value.as_bytes())?;
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+            tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)?;
+            engine.commit(tx, WriteOptions::default())?;
         }
         engine.flush()?;
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     // Act: Read a key that exists in all L0 files
-    let _ = engine.get(cf, b"key000")?;
+    let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+    let _ = read_tx.get(b"key000")?;
 
     let metrics = engine.get_read_amp_metrics()?;
 
@@ -128,7 +137,9 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
 
     for i in 0..10 {
         let key = format!("key{:03}", i);
-        engine.put(cf, key.as_bytes(), b"value")?;
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+        tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
+        engine.commit(tx, WriteOptions::default())?;
     }
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -136,7 +147,8 @@ fn should_accumulate_metrics_over_multiple_reads() -> MidgeResult<()> {
     // Act: Perform multiple reads
     for i in 0..10 {
         let key = format!("key{:03}", i);
-        let _ = engine.get(cf, key.as_bytes())?;
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+        let _ = read_tx.get(key.as_bytes())?;
     }
 
     let metrics = engine.get_read_amp_metrics()?;
@@ -166,13 +178,16 @@ fn should_report_budget_violations_when_exceeded() -> MidgeResult<()> {
     // Create 10 L0 files all with same key (extreme overlap)
     for batch in 0..10 {
         let value = format!("value{}", batch);
-        engine.put(cf, b"hotkey", value.as_bytes())?;
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+        tx.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None)?;
+        engine.commit(tx, WriteOptions::default())?;
         engine.flush()?;
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
     // Act: Read the hot key (will touch many SSTs)
-    let _ = engine.get(cf, b"hotkey")?;
+    let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+    let _ = read_tx.get(b"hotkey")?;
 
     let metrics = engine.get_read_amp_metrics()?;
 
