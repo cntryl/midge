@@ -93,12 +93,12 @@ fn should_recover_deletes_from_wal() {
     }
 
     // Delete some keys via transaction
-    let mut txn = engine.transaction();
+    let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
     for i in 0..10 {
         let key = format!("del_key_{:04}", i);
-        txn.delete(cf_id, key.into_bytes()).ok();
+        txn.delete(key.into_bytes()).ok();
     }
-    engine.commit_transaction(txn).ok();
+    engine.commit(txn, cntryl_midge::WriteOptions::default()).ok();
 
     eprintln!("Deleted 10 of 30 keys via transaction");
 
@@ -145,10 +145,10 @@ fn should_recover_range_tombstones_from_wal() {
     }
 
     // Range delete
-    let mut txn = engine.transaction();
-    txn.delete_range(cf_id, b"k020".to_vec(), b"k080".to_vec())
+    let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    txn.delete_range(b"k020".to_vec(), b"k080".to_vec())
         .ok();
-    engine.commit_transaction(txn).ok();
+    engine.commit(txn, cntryl_midge::WriteOptions::default()).ok();
 
     eprintln!("Applied range delete [k020, k080)");
 
@@ -228,9 +228,9 @@ fn should_recover_mixed_operations_from_wal() {
     engine.put(cf, b"put_key", b"put_value").ok();
 
     // Delete
-    let mut txn1 = engine.transaction();
-    txn1.delete(cf_id, b"put_key".to_vec()).ok();
-    engine.commit_transaction(txn1).ok();
+    let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    txn1.delete(b"put_key".to_vec()).ok();
+    engine.commit(txn1, cntryl_midge::WriteOptions::default()).ok();
 
     // Put again
     engine.put(cf, b"put_key", b"put_value_v2").ok();
@@ -241,10 +241,10 @@ fn should_recover_mixed_operations_from_wal() {
         engine.put(cf, key.as_bytes(), b"v").ok();
     }
 
-    let mut txn2 = engine.transaction();
-    txn2.delete_range(cf_id, b"dr_05".to_vec(), b"dr_15".to_vec())
+    let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    txn2.delete_range(b"dr_05".to_vec(), b"dr_15".to_vec())
         .ok();
-    engine.commit_transaction(txn2).ok();
+    engine.commit(txn2, cntryl_midge::WriteOptions::default()).ok();
 
     eprintln!("Applied: put, delete, put, delete_range");
 

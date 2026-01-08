@@ -97,7 +97,7 @@ fn should_panic_when_transaction_called_during_ingest() {
 
     // Act: attempt to create a transaction while in ingest mode
     // This should panic with a BUG message
-    let _txn = engine.transaction();
+    let _txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
     // Cleanup (unreachable due to panic)
     let _ = engine.exit_ingest_mode(prev);

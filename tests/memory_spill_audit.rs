@@ -20,7 +20,7 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
         eprintln!("Memory budget set to 128KB (mode: {})", mode);
 
         // Try to write data exceeding memory limit
-        let mut tx = engine.transaction();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         let mut total_bytes = 0;
 
         for i in 0..500 {
@@ -40,7 +40,7 @@ fn should_commit_large_transaction_when_memory_limit_exceeded() {
         eprintln!("Memory budget is 128KB, so spill should trigger at ~128KB");
 
         // Commit the transaction
-        let commit_result = engine.commit_transaction(tx);
+        let commit_result = engine.commit(tx, cntryl_midge::WriteOptions::default());
         eprintln!("Commit result: {:?}", commit_result);
 
         match commit_result {
@@ -89,7 +89,7 @@ fn should_respect_memory_budget_across_transactions() {
         eprintln!("Memory budget: 256KB (mode: {})", mode);
 
         // Write transaction 1: 128KB
-        let mut tx1 = engine.transaction();
+        let mut tx1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         for i in 0..128 {
             let key = format!("batch1_key_{:03}", i);
             let value = vec![65u8; 1024]; // 1KB per key
@@ -98,11 +98,11 @@ fn should_respect_memory_budget_across_transactions() {
         }
         eprintln!("TX1: Writing 128KB of data");
 
-        let result1 = engine.commit_transaction(tx1);
+        let result1 = engine.commit(tx1, cntryl_midge::WriteOptions::default());
         eprintln!("TX1 result: {:?}", result1);
 
         // Write transaction 2: another 128KB (total would be 256KB, within budget)
-        let mut tx2 = engine.transaction();
+        let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         for i in 0..128 {
             let key = format!("batch2_key_{:03}", i);
             let value = vec![66u8; 1024]; // 1KB per key
@@ -111,7 +111,7 @@ fn should_respect_memory_budget_across_transactions() {
         }
         eprintln!("TX2: Writing another 128KB of data");
 
-        let result2 = engine.commit_transaction(tx2);
+        let result2 = engine.commit(tx2, cntryl_midge::WriteOptions::default());
         eprintln!("TX2 result: {:?}", result2);
 
         match (result1, result2) {
@@ -153,7 +153,7 @@ fn should_handle_transaction_spill_to_disk_correctly() {
         eprintln!("Sync writes: enabled");
 
         // Single transaction with data > 64KB
-        let mut tx = engine.transaction();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
 
         eprintln!("Writing 200 keys x 512 bytes = 100KB (exceeds 64KB budget)");
         for i in 0..200 {
@@ -163,7 +163,7 @@ fn should_handle_transaction_spill_to_disk_correctly() {
                 .expect("put");
         }
 
-        let commit_result = engine.commit_transaction(tx);
+        let commit_result = engine.commit(tx, cntryl_midge::WriteOptions::default());
 
         match commit_result {
             Ok(_) => {
