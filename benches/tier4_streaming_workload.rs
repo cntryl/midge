@@ -68,6 +68,7 @@ fn run_streaming_phase(
 
         handles.push(thread::spawn(move || {
             let cf = engine.default_column_family();
+            let cf_id = cf.id();
             barrier.wait();
 
             let mut local_writes: u64 = 0;
@@ -76,7 +77,9 @@ fn run_streaming_phase(
                 let key = ycsb::make_key(seq);
                 let value = make_value((seq & 0xFF) as u8);
 
-                let _ = engine.put(cf, &key[..], &value[..]);
+                let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+                tx.put(key.to_vec(), value.to_vec(), None).ok();
+                let _ = engine.commit(tx, cntryl_midge::WriteOptions::default());
 
                 if count {
                     local_writes = local_writes.wrapping_add(1);

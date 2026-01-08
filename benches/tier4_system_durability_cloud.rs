@@ -17,17 +17,21 @@ fn run_durability_puts_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops
 
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.default_column_family();
+    let cf_id = cf.id();
 
     ctx.measure_ref(&engine, |e| {
         for i in 0..num_ops {
             let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
             let v = vec![(i % 251) as u8; VALUE_SIZE];
-            e.put(cf, &k[..], &v).unwrap();
+            let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.put(k.to_vec(), v, None).unwrap();
+            e.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
         }
     });
 
     // Not timed
-    assert!(engine.get(cf, &[0u8; KEY_SIZE]).is_ok());
+    let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    assert!(tx.get(&[0u8; KEY_SIZE]).is_ok());
 
     drop(engine);
 }

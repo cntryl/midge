@@ -32,13 +32,14 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
     // Phase 2: Warm-up (not measured)
     {
         let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
+        let cf_id = cf.id();
         let _warmup_ops = ycsb::run_multi_client_for_duration(
             Arc::clone(&engine),
             clients,
             WARMUP,
             |client_id| {
                 let zipf = Arc::clone(&zipf);
-                move |e, cf, op_index| {
+                move |e, _cf, op_index| {
                     let mut draw: u64 = 0;
                     let key_idx = zipf.next_from_u64(&mut || {
                         let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
@@ -46,18 +47,20 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                         r
                     }) as u64;
                     let k = ycsb::make_key(key_idx);
-                    let _ = e.get(cf, &k[..]).expect("warmup get");
+                    let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                    let _ = tx.get(&k[..]).expect("warmup get");
                 }
             },
         );
     }
 
     // Phase 3: Measured (duration-based; multi-client)
+    let cf_id = cf.id();
     let measured_ops = ctx.measure_ref(engine.as_ref(), |_e| {
         let zipf = Arc::new(ZipfianGenerator::new(INITIAL_KEYS, ZIPFIAN_THETA));
         ycsb::run_multi_client_for_duration(Arc::clone(&engine), clients, MEASURED, |client_id| {
             let zipf = Arc::clone(&zipf);
-            move |e, cf, op_index| {
+            move |e, _cf, op_index| {
                 let mut draw: u64 = 0;
                 let key_idx = zipf.next_from_u64(&mut || {
                     let r = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, draw);
@@ -65,7 +68,8 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, clients: usize) {
                     r
                 }) as u64;
                 let k = ycsb::make_key(key_idx);
-                let _ = e.get(cf, &k[..]).expect("measured get");
+                let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+                let _ = tx.get(&k[..]).expect("measured get");
             }
         })
     });

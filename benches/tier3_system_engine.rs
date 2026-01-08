@@ -22,15 +22,19 @@ fn run_put_get_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize
 
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
     let cf = engine.default_column_family();
+    let cf_id = cf.id();
 
     ctx.measure_ref(&engine, |e| {
         for (k, v) in keys.iter().zip(values.iter()) {
-            e.put(cf, &k[..], v).unwrap();
+            let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+            tx.put(k.to_vec(), v.clone(), None).unwrap();
+            e.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
         }
 
         let mut found = 0usize;
         for k in keys.iter() {
-            if e.get(cf, &k[..]).unwrap().is_some() {
+            let tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+            if tx.get(&k[..]).unwrap().is_some() {
                 found += 1;
             }
         }
@@ -38,7 +42,8 @@ fn run_put_get_case(ctx: &mut StressContext, opts: MidgeOptions, num_keys: usize
     });
 
     // Quick correctness smoke (not timed)
-    assert!(engine.get(cf, &keys[0][..]).unwrap().is_some());
+    let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).expect("begin");
+    assert!(tx.get(&keys[0][..]).unwrap().is_some());
 
     drop(engine);
 }
@@ -48,18 +53,24 @@ fn run_write_batch_case(ctx: &mut StressContext, opts: MidgeOptions, num_ops: us
     ctx.set_bytes((num_ops * (KEY_SIZE + VALUE_SIZE)) as u64);
 
     let engine = cntryl_midge::testkit::stress::open_engine_no_compaction(opts);
+    let cf = engine.default_column_family();
+    let cf_id = cf.id();
 
-    // Setup (not measured)
-    let mut batch = WriteBatch::new();
+    // Setup (not measured): prepare keys and values
+    let mut keys_vals = Vec::with_capacity(num_ops);
     for i in 0..num_ops {
         let k = cntryl_midge::testkit::stress::key16_u64_be(i as u64);
         let v = vec![(i % 251) as u8; VALUE_SIZE];
-        batch.put(Key::copy_from_slice(&k[..]), Value::from(v));
+        keys_vals.push((k, v));
     }
 
-    // Measure exactly one write_batch
+    // Measure exactly one transaction with multiple puts
     ctx.measure_ref(&engine, |e| {
-        e.write_batch(&batch).expect("write_batch failed")
+        let mut tx = e.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).expect("begin");
+        for (k, v) in &keys_vals {
+            tx.put(k.to_vec(), v.clone(), None).expect("put");
+        }
+        e.commit(tx, cntryl_midge::WriteOptions::default()).expect("commit")
     });
 
     drop(engine);
