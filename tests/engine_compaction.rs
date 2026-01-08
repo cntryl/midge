@@ -21,14 +21,17 @@ fn should_progress_through_lsm_levels_or_document_current_behavior() {
     for batch in 0..5 {
         for i in 0..1000 {
             let key = format!("key_{:03}_{:05}", batch, i);
-            engine.put(cf, key.as_bytes(), b"value").ok();
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None).ok();
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).ok();
         }
         engine.flush().ok();
         eprintln!("Batch {}: flushed L0", batch);
     }
 
     // Act: Check if multiple L0 files exist
-    let scan_result = engine.scan(cf, &cntryl_midge::Query::new()).unwrap();
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let scan_result = tx.scan(b"", b"\xff\xff\xff\xff").unwrap();
     let key_count = scan_result.len();
 
     eprintln!("Total keys in engine: {}", key_count);
@@ -56,17 +59,19 @@ fn should_maintain_read_consistency_during_compaction() {
     // Arrange: Insert initial data
     for i in 0..100 {
         let key = format!("concurrent_key_{:04}", i);
-        engine.put(cf, key.as_bytes(), b"initial_value").ok();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(key.as_bytes().to_vec(), b"initial_value".to_vec(), None).ok();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).ok();
     }
 
     // Create snapshot (reader pinning data)
-    let snapshot = engine.snapshot();
+    let snapshot = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
 
     // Act: Trigger compaction while snapshot exists
     engine.flush().ok();
 
     // Read from snapshot during compaction
-    let snap_val = snapshot.get(cf, b"concurrent_key_0000").unwrap();
+    let snap_val = snapshot.get(b"concurrent_key_0000").unwrap();
 
     eprintln!("Snapshot read during compaction: {:?}", snap_val);
 
@@ -78,7 +83,8 @@ fn should_maintain_read_consistency_during_compaction() {
 
     // Verify engine state after snapshot release
     drop(snapshot);
-    let current_val = engine.get(cf, b"concurrent_key_0000").unwrap();
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let current_val = tx.get(b"concurrent_key_0000").unwrap();
     eprintln!(
         "Current engine read after snapshot release: {:?}",
         current_val
@@ -99,7 +105,9 @@ fn should_handle_concurrent_writes_during_compaction() {
     // Arrange
     for i in 0..500 {
         let key = format!("key_{:04}", i);
-        engine.put(cf, key.as_bytes(), b"v1").ok();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).ok();
     }
 
     // Flush to trigger L0→L1 potential
@@ -109,13 +117,16 @@ fn should_handle_concurrent_writes_during_compaction() {
     // Act: Write more data (goes to memtable)
     for i in 500..1000 {
         let key = format!("key_{:04}", i);
-        engine.put(cf, key.as_bytes(), b"v2").ok();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).ok();
     }
 
     eprintln!("Wrote additional data during/after flush");
 
     // Verify: Both old and new data present
-    let total_keys = engine.scan(cf, &cntryl_midge::Query::new()).unwrap().len();
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let total_keys = tx.scan(b"", b"\xff\xff\xff\xff").unwrap().len();
 
     if total_keys >= 950 {
         eprintln!("✓ All writes persisted through compaction");
@@ -142,22 +153,25 @@ fn should_preserve_range_tombstones_through_multi_level_compaction() {
     // Arrange: Insert data in range [k100, k900]
     for i in 100..900 {
         let key = format!("k{:04}", i);
-        engine.put(cf, key.as_bytes(), b"value").ok();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None).ok();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).ok();
     }
     engine.flush().ok();
 
     // Create a transaction with range delete
-    let mut txn = engine.transaction();
-    txn.delete_range(cf_id, b"k300".to_vec(), b"k700".to_vec())
+    let mut txn = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    txn.delete_range(b"k300".to_vec(), b"k700".to_vec())
         .ok();
-    engine.commit_transaction(txn).ok();
+    engine.commit(txn, cntryl_midge::WriteOptions::default()).ok();
     engine.flush().ok();
 
     eprintln!("Inserted delete_range [k300, k700)");
 
     // Act: Verify deleted range is gone
-    let remaining = engine
-        .scan(cf, &cntryl_midge::Query::new())
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let remaining = tx
+        .scan(b"", b"\xff\xff\xff\xff")
         .unwrap()
         .into_iter()
         .filter(|(k, _)| {
@@ -191,14 +205,17 @@ fn should_handle_large_values_through_compaction() {
     // Insert large values
     for i in 0..10 {
         let key = format!("large_{:02}", i);
-        engine.put(cf, key.as_bytes(), &large_value).ok();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(key.as_bytes().to_vec(), large_value.clone(), None).ok();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).ok();
     }
 
     engine.flush().ok();
     eprintln!("Inserted and flushed 10 × 100KB values");
 
     // Verify values still readable
-    let val = engine.get(cf, b"large_00").unwrap();
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let val = tx.get(b"large_00").unwrap();
 
     match val {
         Some(retrieved) if retrieved.len() == 100_000 => {
@@ -224,14 +241,17 @@ fn should_eliminate_obsolete_versions_through_compaction() {
     // Overwrite same key many times
     for version in 0..100 {
         let value = format!("v{}", version);
-        engine.put(cf, b"hotkey", value.as_bytes()).ok();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(b"hotkey".to_vec(), value.as_bytes().to_vec(), None).ok();
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).ok();
     }
 
     engine.flush().ok();
     eprintln!("Overwrote hotkey 100 times, flushed");
 
     // Verify only latest version visible
-    let current = engine.get(cf, b"hotkey").unwrap();
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let current = tx.get(b"hotkey").unwrap();
     eprintln!(
         "Current value: {:?}",
         current
@@ -289,14 +309,17 @@ fn should_document_lsm_level_progression_strategy_when_tested() {
     for batch in 0..3 {
         for i in 0..500 {
             let key = format!("batch{:02}_key{:04}", batch, i);
-            engine.put(cf, key.as_bytes(), b"value").ok();
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None).ok();
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).ok();
         }
         engine.flush().ok();
         eprintln!("  Batch {}: Flushed memtable to L0", batch);
     }
 
     // Verify all data is still readable (consistency during compaction)
-    let result = engine.scan(cf, &cntryl_midge::Query::new()).ok();
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let result = tx.scan(b"", b"\xff\xff\xff\xff").ok();
     match result {
         Some(results) => {
             eprintln!("\n✓ LSM compaction did not lose data");

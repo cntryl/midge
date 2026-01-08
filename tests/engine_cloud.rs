@@ -36,14 +36,17 @@ fn should_persist_data_to_cloud_storage() {
     let cf = engine.default_column_family();
 
     // Write to cloud
-    let put_result = engine.put(cf, b"cloud_key", b"cloud_value");
+    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let put_result = tx.put(b"cloud_key".to_vec(), b"cloud_value".to_vec(), None);
 
     match put_result {
         Ok(()) => {
+            engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
             eprintln!("✓ Put to cloud succeeded");
 
             // Read from cloud
-            match engine.get(cf, b"cloud_key") {
+            let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+            match tx.get(b"cloud_key") {
                 Ok(Some(val)) if val.as_ref() == b"cloud_value" => {
                     eprintln!("✓ Get from cloud succeeded");
                 }
@@ -81,19 +84,20 @@ fn should_support_transactions_with_cloud_storage() {
     let cf_id = cf.id();
 
     // Transaction on cloud
-    let mut txn = engine.transaction();
-    let put_result = txn.put(cf_id, b"tx_key1".to_vec(), b"tx_value1".to_vec());
+    let mut txn = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let put_result = txn.put(b"tx_key1".to_vec(), b"tx_value1".to_vec(), None);
 
     match put_result {
         Ok(()) => {
             eprintln!("Put in cloud transaction succeeded");
 
-            match engine.commit_transaction(txn) {
+            match engine.commit(txn, cntryl_midge::WriteOptions::default()) {
                 Ok(()) => {
                     eprintln!("✓ Cloud transaction committed");
 
                     // Verify
-                    match engine.get(cf, b"tx_key1") {
+                    let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).unwrap();
+                    match tx.get(b"tx_key1") {
                         Ok(Some(_)) => {
                             eprintln!("✓ Transaction data persisted to cloud");
                         }
@@ -127,18 +131,21 @@ fn should_support_range_scans_on_cloud() {
     // Insert range of keys
     for i in 0..20 {
         let key = format!("cloud_scan_{:02}", i);
-        let result = engine.put(cf, key.as_bytes(), b"value");
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        let result = tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None);
 
         if result.is_err() {
             eprintln!("Cloud put failed, skipping scan test");
             return;
         }
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
     }
 
     eprintln!("Inserted 20 keys to cloud");
 
     // Scan range
-    let scan = engine.scan(cf, &cntryl_midge::Query::new());
+    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let scan = tx.scan(b"", b"\xff\xff\xff\xff");
 
     match scan {
         Ok(results) => {
@@ -168,16 +175,18 @@ fn should_support_snapshots_on_cloud_data() {
     let cf = engine.default_column_family();
 
     // Write initial data
-    if engine.put(cf, b"snap_key", b"snap_v1").is_err() {
+    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    if tx.put(b"snap_key".to_vec(), b"snap_v1".to_vec(), None).is_err() {
         eprintln!("Cloud backend not available, skipping snapshot test");
         return;
     }
+    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
 
     // Snapshot
-    let snapshot = engine.snapshot();
+    let snapshot = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
 
     // Read from snapshot
-    match snapshot.get(cf, b"snap_key") {
+    match snapshot.get(b"snap_key") {
         Ok(Some(val)) => {
             eprintln!(
                 "✓ Snapshot read from cloud: {:?}",
@@ -190,10 +199,12 @@ fn should_support_snapshots_on_cloud_data() {
     }
 
     // Modify
-    engine.put(cf, b"snap_key", b"snap_v2").ok();
+    let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    tx2.put(b"snap_key".to_vec(), b"snap_v2".to_vec(), None).ok();
+    engine.commit(tx2, cntryl_midge::WriteOptions::default()).ok();
 
     // Verify snapshot unchanged
-    match snapshot.get(cf, b"snap_key") {
+    match snapshot.get(b"snap_key") {
         Ok(Some(val)) if val.as_ref() == b"snap_v1" => {
             eprintln!("✓ Snapshot isolation maintained on cloud");
         }
@@ -216,20 +227,23 @@ fn should_support_deletes_on_cloud() {
     let cf_id = cf.id();
 
     // Write
-    if engine.put(cf, b"del_key", b"to_delete").is_err() {
+    let mut tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    if tx.put(b"del_key".to_vec(), b"to_delete".to_vec(), None).is_err() {
         eprintln!("Cloud backend not available, skipping delete test");
         return;
     }
+    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
 
     // Delete via transaction
-    let mut txn = engine.transaction();
-    txn.delete(cf_id, b"del_key".to_vec()).ok();
-    engine.commit_transaction(txn).ok();
+    let mut txn = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    txn.delete(b"del_key".to_vec()).ok();
+    engine.commit(txn, cntryl_midge::WriteOptions::default()).ok();
 
     eprintln!("Deleted key from cloud");
 
     // Verify deletion
-    match engine.get(cf, b"del_key") {
+    let tx = engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    match tx.get(b"del_key") {
         Ok(None) => {
             eprintln!("✓ Deletion persisted to cloud");
         }
@@ -305,7 +319,9 @@ fn should_respect_wal_cloud_separation_given_hybrid_storage_when_cloud_first_ena
     let cf = engine.default_column_family();
 
     // Write data (should go to cloud for SST eventually)
-    engine.put(cf, b"test_key", b"test_value").expect("put");
+    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    tx.put(b"test_key".to_vec(), b"test_value".to_vec(), None).expect("put");
+    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
 
     // Flush to create SST (in real implementation, would verify cloud upload path)
     // For now, verify engine accepts operations without panic
@@ -332,11 +348,16 @@ fn should_preserve_lww_semantics_across_all_storage_modes_when_verified() {
         let cf = engine.default_column_family();
 
         // Write, then overwrite
-        engine.put(cf, b"lww_key", b"v1").expect("put1");
-        engine.put(cf, b"lww_key", b"v2").expect("put2");
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(b"lww_key".to_vec(), b"v1".to_vec(), None).expect("put1");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(b"lww_key".to_vec(), b"v2".to_vec(), None).expect("put2");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Verify we get last write
-        let value = engine.get(cf, b"lww_key").expect("get");
+        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let value = tx.get(b"lww_key").expect("get");
         assert_eq!(
             value,
             Some(Bytes::from_static(b"v2")),
@@ -362,12 +383,14 @@ fn should_isolate_column_family_writes_across_storage_modes_when_cloud_backed() 
         let cf_default = engine.default_column_family();
 
         // Put in default CF
-        engine
-            .put(cf_default, b"shared_key", b"from_default")
+        let mut tx = engine.begin_tx(cf_default.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        tx.put(b"shared_key".to_vec(), b"from_default".to_vec(), None)
             .expect("put_default");
+        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
 
         // Verify isolation in default CF
-        let v_default = engine.get(cf_default, b"shared_key").expect("get_default");
+        let tx = engine.begin_tx(cf_default.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let v_default = tx.get(b"shared_key").expect("get_default");
         assert_eq!(
             v_default,
             Some(Bytes::from_static(b"from_default")),
