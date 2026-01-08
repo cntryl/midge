@@ -4,6 +4,7 @@
 //! large values, rotation, and mixed operation recovery.
 
 use cntryl_midge::testkit::*;
+use cntryl_midge::WriteOptions;
 
 // ============================================================================
 // TEST GROUP 1: Basic WAL Recovery

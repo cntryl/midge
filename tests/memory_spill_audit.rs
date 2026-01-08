@@ -4,6 +4,7 @@
 //! and determine if there are any contradictions in spill behavior documentation
 
 use cntryl_midge::testkit::*;
+use cntryl_midge::WriteOptions;
 
 #[test]
 fn should_commit_large_transaction_when_memory_limit_exceeded() {

@@ -8,6 +8,7 @@
 
 use bytes::Bytes;
 use cntryl_midge::testkit::*;
+use cntryl_midge::WriteOptions;
 use std::sync::Arc;
 
 // ============================================================================
@@ -100,7 +101,7 @@ fn should_read_uncommitted_value_given_put_in_same_transaction_when_reading() {
         let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
         txn.put(b"key".to_vec(), b"value".to_vec(, None))
             .unwrap();
-        let value = engine.get_transactional(cf, b"key", &txn).unwrap();
+        let value = txn.get(b"key").unwrap();
 
         // Assert - should read own uncommitted write
         assert_eq!(value, Some(Bytes::from_static(b"value")));
@@ -121,8 +122,8 @@ fn should_see_own_writes_given_transaction_when_reading() {
         txn.put(b"key2".to_vec(), b"value2".to_vec(, None))
             .unwrap();
 
-        let val1 = engine.get_transactional(cf, b"key1", &txn).unwrap();
-        let val2 = engine.get_transactional(cf, b"key2", &txn).unwrap();
+        let val1 = txn.get(b"key1").unwrap();
+        let val2 = txn.get(b"key2").unwrap();
 
         // Assert - should see both own writes
         assert_eq!(val1, Some(Bytes::from_static(b"value1")));

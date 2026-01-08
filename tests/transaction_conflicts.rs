@@ -471,7 +471,7 @@ fn should_read_values_within_transaction() {
 
         // Act
         let txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        let value = engine.get_transactional(cf, b"key", &txn).unwrap();
+        let value = txn.get(b"key").unwrap();
 
         // Assert - should read committed value at transaction start
         assert_eq!(value, Some(Bytes::from_static(b"value")));
