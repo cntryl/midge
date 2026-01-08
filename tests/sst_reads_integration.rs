@@ -2,6 +2,7 @@
 
 use cntryl_midge::common::MidgeResult;
 use cntryl_midge::testkit::new_engine;
+use cntryl_midge::WriteOptions;
 
 #[test]
 fn should_read_from_sst_after_flush() -> MidgeResult<()> {
@@ -12,7 +13,9 @@ fn should_read_from_sst_after_flush() -> MidgeResult<()> {
     // Write keys that will be flushed to SST
     for i in 0..10 {
         let key = format!("key_{:03}", i);
-        engine.put(cf, key.as_bytes(), b"value_from_sst")?;
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+        tx.put(key.as_bytes().to_vec(), b"value_from_sst".to_vec(), None)?;
+        engine.commit(tx, WriteOptions::default())?;
     }
 
     // Force flush to SST
@@ -20,9 +23,10 @@ fn should_read_from_sst_after_flush() -> MidgeResult<()> {
     std::thread::sleep(std::time::Duration::from_millis(100)); // Give flush time to complete
 
     // Act: Read keys that should be in SST now
-    let value1 = engine.get(cf, b"key_000")?;
-    let value2 = engine.get(cf, b"key_005")?;
-    let value3 = engine.get(cf, b"missing_key")?;
+    let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+    let value1 = read_tx.get(b"key_000")?;
+    let value2 = read_tx.get(b"key_005")?;
+    let value3 = read_tx.get(b"missing_key")?;
 
     // Assert: Verify values
     assert_eq!(value1, Some(b"value_from_sst".to_vec().into()));
@@ -43,7 +47,9 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
     for batch in 0..3 {
         for i in 0..5 {
             let key = format!("batch{}_key{}", batch, i);
-            engine.put(cf, key.as_bytes(), b"value")?;
+            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+            tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
+            engine.commit(tx, WriteOptions::default())?;
         }
         engine.flush()?;
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -52,7 +58,8 @@ fn should_track_l0_sst_reads() -> MidgeResult<()> {
     // Act: Read keys that require checking multiple L0 files
     for batch in 0..3 {
         let key = format!("batch{}_key0", batch);
-        let value = engine.get(cf, key.as_bytes())?;
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+        let value = read_tx.get(key.as_bytes())?;
         assert_eq!(value, Some(b"value".to_vec().into()));
     }
 
@@ -71,17 +78,20 @@ fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
     // Write sorted keys
     for i in 0..20 {
         let key = format!("key_{:03}", i);
-        engine.put(cf, key.as_bytes(), b"test_value")?;
+        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+        tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)?;
+        engine.commit(tx, WriteOptions::default())?;
     }
 
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Act: Read various keys
-    let first = engine.get(cf, b"key_000")?;
-    let middle = engine.get(cf, b"key_010")?;
-    let last = engine.get(cf, b"key_019")?;
-    let missing = engine.get(cf, b"key_999")?;
+    let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+    let first = read_tx.get(b"key_000")?;
+    let middle = read_tx.get(b"key_010")?;
+    let last = read_tx.get(b"key_019")?;
+    let missing = read_tx.get(b"key_999")?;
 
     // Assert
     assert_eq!(first, Some(b"test_value".to_vec().into()));
@@ -100,24 +110,32 @@ fn should_handle_memtable_and_sst_reads() -> MidgeResult<()> {
     let cf = engine.default_column_family();
 
     // Write to SST
-    engine.put(cf, b"sst_key", b"sst_value")?;
+    let mut tx1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+    tx1.put(b"sst_key".to_vec(), b"sst_value".to_vec(), None)?;
+    engine.commit(tx1, WriteOptions::default())?;
     engine.flush()?;
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Write to memtable
-    engine.put(cf, b"mem_key", b"mem_value")?;
+    let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+    tx2.put(b"mem_key".to_vec(), b"mem_value".to_vec(), None)?;
+    engine.commit(tx2, WriteOptions::default())?;
 
     // Act: Read from both
-    let from_sst = engine.get(cf, b"sst_key")?;
-    let from_mem = engine.get(cf, b"mem_key")?;
+    let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+    let from_sst = read_tx.get(b"sst_key")?;
+    let from_mem = read_tx.get(b"mem_key")?;
 
     // Assert
     assert_eq!(from_sst, Some(b"sst_value".to_vec().into()));
     assert_eq!(from_mem, Some(b"mem_value".to_vec().into()));
 
     // Update SST key in memtable (newer version should win)
-    engine.put(cf, b"sst_key", b"updated_value")?;
-    let updated = engine.get(cf, b"sst_key")?;
+    let mut tx3 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
+    tx3.put(b"sst_key".to_vec(), b"updated_value".to_vec(), None)?;
+    engine.commit(tx3, WriteOptions::default())?;
+    let read_tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
+    let updated = read_tx2.get(b"sst_key")?;
     assert_eq!(updated, Some(b"updated_value".to_vec().into()));
 
     println!("Mixed memtable/SST reads completed successfully");
