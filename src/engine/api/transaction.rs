@@ -10,7 +10,6 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::engine::ColumnFamilyId;
 use std::collections::HashMap;
 
-
 /// Read set entry: (value, sequence number)
 type ReadSetEntry = (Option<Vec<u8>>, u64);
 
@@ -91,7 +90,12 @@ pub enum WriteIntent {
 
 impl WriteIntent {
     /// Create a put intent (upsert)
-    pub fn put(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> Self {
+    pub fn put(
+        cf_id: ColumnFamilyId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_seconds: Option<u64>,
+    ) -> Self {
         Self::Put {
             cf_id,
             key,
@@ -102,7 +106,12 @@ impl WriteIntent {
     }
 
     /// Create an insert intent (error if exists)
-    pub fn insert(cf_id: ColumnFamilyId, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> Self {
+    pub fn insert(
+        cf_id: ColumnFamilyId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_seconds: Option<u64>,
+    ) -> Self {
         Self::Insert {
             cf_id,
             key,
@@ -262,7 +271,7 @@ impl Transaction {
             commit_sequence: None,
         }
     }
-    
+
     /// Get a reference to the engine (unsafe, but lifetime is guaranteed by engine ownership)
     fn engine(&self) -> &crate::engine::MidgeEngine {
         unsafe { &*self.engine }
@@ -271,7 +280,7 @@ impl Transaction {
     pub fn id(&self) -> u64 {
         self.id
     }
-    
+
     pub fn cf_id(&self) -> ColumnFamilyId {
         self.cf_id
     }
@@ -324,7 +333,12 @@ impl Transaction {
     }
 
     /// Add a put (upsert) to the transaction's write set
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, ttl_seconds: Option<u64>) -> MidgeResult<()> {
+    pub fn put(
+        &mut self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_seconds: Option<u64>,
+    ) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
             return Err(MidgeError::InvalidArgument(format!(
                 "Cannot write in {:?} state",
@@ -336,7 +350,8 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
-        self.write_set.push(WriteIntent::put(self.cf_id, key, value, ttl_seconds));
+        self.write_set
+            .push(WriteIntent::put(self.cf_id, key, value, ttl_seconds));
         Ok(())
     }
 
@@ -358,7 +373,8 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
-        self.write_set.push(WriteIntent::insert(self.cf_id, key, value, ttl_seconds));
+        self.write_set
+            .push(WriteIntent::insert(self.cf_id, key, value, ttl_seconds));
         Ok(())
     }
 
@@ -380,11 +396,7 @@ impl Transaction {
     }
 
     /// Add a delete_range to the transaction's write set
-    pub fn delete_range(
-        &mut self,
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-    ) -> MidgeResult<()> {
+    pub fn delete_range(&mut self, start_key: Vec<u8>, end_key: Vec<u8>) -> MidgeResult<()> {
         if self.state != TransactionState::Active {
             return Err(MidgeError::InvalidArgument(format!(
                 "Cannot write in {:?} state",
@@ -412,7 +424,8 @@ impl Transaction {
         }
 
         // Fall back to engine state at transaction's snapshot sequence
-        self.engine().read_at_sequence(self.cf_id, key, self.start_sequence)
+        self.engine()
+            .read_at_sequence(self.cf_id, key, self.start_sequence)
     }
 
     /// Range scan within this transaction
@@ -420,11 +433,15 @@ impl Transaction {
     /// Returns all key-value pairs in the range [start, end) visible at this transaction's
     /// snapshot sequence.
     pub fn scan(&self, start: &[u8], end: &[u8]) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        self.engine().scan_at_sequence(self.cf_id, start, end, self.start_sequence)
+        self.engine()
+            .scan_at_sequence(self.cf_id, start, end, self.start_sequence)
     }
 
     /// Range scan with Query parameters within this transaction
-    pub fn scan_range(&self, query: &super::Query) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
+    pub fn scan_range(
+        &self,
+        query: &super::Query,
+    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
         // Use the effective start/end from the query
         let start_owned;
         let start = if let Some(s) = query.effective_start() {
@@ -445,12 +462,12 @@ impl Transaction {
         };
 
         let mut results = self.scan(start, end)?;
-        
+
         // Apply limit if specified
         if let Some(limit) = query.limit {
             results.truncate(limit);
         }
-        
+
         Ok(results)
     }
 

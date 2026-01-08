@@ -1208,7 +1208,7 @@ mod tests {
             source_level: 0,
             target_level: 1,
             cf_id: 0,
-        }; 
+        };
 
         // Assert
         assert_eq!(plan.input_files.len(), 1);

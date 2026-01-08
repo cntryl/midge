@@ -8,8 +8,8 @@ pub mod options;
 pub mod query;
 pub mod results;
 pub mod snapshot;
-pub mod transaction;
 pub mod traits;
+pub mod transaction;
 pub mod types;
 pub mod write_batch;
 pub mod write_options;
@@ -23,12 +23,12 @@ pub use options::{Durability, Goal, MemoryBudget, OpenOptions, WorkloadProfile};
 pub use query::Query;
 pub use results::{CasResult, InsertResult};
 pub use snapshot::Snapshot;
+pub use traits::{Engine as EngineT, KvIterator, Transaction as TransactionT, Ttl, TxMode};
 pub use transaction::{
     IsolationLevel, Transaction, TransactionMode, TransactionState, WriteIntent,
 };
-pub use traits::{Engine as EngineT, KvIterator, Transaction as TransactionT, Ttl, TxMode};
-pub use write_options::{DurabilityPolicy, WriteOptions};
 pub use write_batch::WriteBatch;
+pub use write_options::{DurabilityPolicy, WriteOptions};
 
 // Re-export caller-visible acknowledgment semantics.
 pub use crate::common::AckPolicy;

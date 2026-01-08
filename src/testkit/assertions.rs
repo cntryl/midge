@@ -1,6 +1,6 @@
 //! Small assertion helpers shared across integration tests.
 
-use crate::engine::{ColumnFamilyHandle, api::TransactionMode};
+use crate::engine::{api::TransactionMode, ColumnFamilyHandle};
 
 /// Assert that a key has the expected value.
 pub fn assert_get_equals(

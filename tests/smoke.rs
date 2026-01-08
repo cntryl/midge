@@ -20,11 +20,18 @@ fn should_read_written_value_when_in_memory() {
     let cf = engine.default_column_family();
 
     // Act
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.put(b"key".to_vec(), b"value".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-    
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"key".to_vec(), b"value".to_vec(), None)
+        .expect("put");
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
+
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let result = tx.get(b"key").expect("get");
 
     // Assert
@@ -38,13 +45,20 @@ fn should_read_written_value_after_flush() {
     let cf = engine.default_column_family();
 
     // Act
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.put(b"key".to_vec(), b"value".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-    
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"key".to_vec(), b"value".to_vec(), None)
+        .expect("put");
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
+
     engine.flush().expect("flush");
-    
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let result = tx.get(b"key").expect("get");
 
     // Assert
@@ -58,15 +72,26 @@ fn should_hide_value_when_deleted() {
     let cf = engine.default_column_family();
 
     // Act
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.put(b"key".to_vec(), b"value".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-    
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"key".to_vec(), b"value".to_vec(), None)
+        .expect("put");
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
+
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     tx.delete(b"key".to_vec()).expect("delete");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-    
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
+
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let result = tx.get(b"key").expect("get");
 
     // Assert
@@ -80,17 +105,28 @@ fn should_preserve_tombstone_when_flushed() {
     let cf = engine.default_column_family();
 
     // Act
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.put(b"key".to_vec(), b"value".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-    
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"key".to_vec(), b"value".to_vec(), None)
+        .expect("put");
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
+
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     tx.delete(b"key".to_vec()).expect("delete");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-    
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
+
     engine.flush().expect("flush");
-    
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let result = tx.get(b"key").expect("get");
 
     // Assert
@@ -106,15 +142,26 @@ fn should_persist_data_given_write_when_restarted() {
     {
         let engine = open_with_mode(opts.clone(), "local");
         let cf = engine.default_column_family();
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.put(b"persistent_key".to_vec(), b"persistent_value".to_vec(), None).expect("put");
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(
+            b"persistent_key".to_vec(),
+            b"persistent_value".to_vec(),
+            None,
+        )
+        .expect("put");
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::default())
+            .unwrap();
     }
 
     // Reopen engine
     let engine = open_with_mode(opts, "local");
     let cf = engine.default_column_family();
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let result = tx.get(b"persistent_key").expect("get");
 
     // Assert
@@ -134,19 +181,30 @@ fn should_persist_tombstone_given_delete_when_restarted() {
     {
         let engine = open_with_mode(opts.clone(), "local");
         let cf = engine.default_column_family();
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.put(b"key".to_vec(), b"value".to_vec(), None).expect("put");
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-        
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key".to_vec(), b"value".to_vec(), None)
+            .expect("put");
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::default())
+            .unwrap();
+
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
         tx.delete(b"key".to_vec()).expect("delete");
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::default())
+            .unwrap();
     }
 
     // Reopen engine
     let engine = open_with_mode(opts, "local");
     let cf = engine.default_column_family();
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let result = tx.get(b"key").expect("get");
 
     // Assert
@@ -160,11 +218,17 @@ fn should_maintain_isolation_given_snapshot_when_concurrent_writes() {
     let cf = engine.default_column_family();
 
     // Act - Create a snapshot (ReadOnly transaction) and verify it's usable for reads
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     tx.put(b"key".to_vec(), b"v1".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-    
-    let snapshot = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
+
+    let snapshot = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
 
     // Assert - Snapshot should be able to read existing value
     let snap_value = snapshot.get(b"key").expect("get");
@@ -175,7 +239,9 @@ fn should_maintain_isolation_given_snapshot_when_concurrent_writes() {
     );
 
     // Engine should also see the value
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let current_value = tx.get(b"key").expect("get");
     assert_eq!(
         current_value,
@@ -191,18 +257,28 @@ fn should_preserve_latest_version_when_compacting() {
     let cf = engine.default_column_family();
 
     // Act
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     tx.put(b"key".to_vec(), b"v1".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
     engine.flush().expect("flush");
-    
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     tx.put(b"key".to_vec(), b"v2".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
     engine.flush().expect("flush");
     engine.compact_all().expect("compact");
 
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let result = tx.get(b"key").expect("get");
 
     // Assert
@@ -220,17 +296,27 @@ fn should_respect_visibility_rules_when_range_scanning() {
     let cf = engine.default_column_family();
 
     // Act
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
     tx.put(b"a".to_vec(), b"1".to_vec(), None).expect("put");
     tx.put(b"b".to_vec(), b"2".to_vec(), None).expect("put");
     tx.put(b"c".to_vec(), b"3".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
-    
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.delete(b"b".to_vec()).expect("delete");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
 
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.delete(b"b".to_vec()).expect("delete");
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
+
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let results = tx.scan(b"a", b"d").expect("scan");
 
     // Assert - 'b' should be filtered out by delete
@@ -251,9 +337,14 @@ fn should_maintain_monotonic_sequence_numbers_when_writing() {
 
     // Act
     for i in 0..10 {
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.put(format!("key{}", i).into_bytes(), b"val".to_vec(), None).expect("put");
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(format!("key{}", i).into_bytes(), b"val".to_vec(), None)
+            .expect("put");
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::default())
+            .unwrap();
     }
 
     // Assert - If sequence numbers were corrupt, visibility/ordering would be violated
@@ -268,10 +359,16 @@ fn should_not_corrupt_state_given_unclean_shutdown_when_recovering() {
     {
         let engine = open_with_mode(opts.clone(), "local");
         let cf = engine.default_column_family();
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.put(b"key1".to_vec(), b"value1".to_vec(), None).expect("put");
-        tx.put(b"key2".to_vec(), b"value2".to_vec(), None).expect("put");
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
+            .expect("put");
+        tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
+            .expect("put");
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::default())
+            .unwrap();
         // Intentionally drop without explicit close (simulates unclean shutdown)
     }
 
@@ -280,7 +377,9 @@ fn should_not_corrupt_state_given_unclean_shutdown_when_recovering() {
     let cf = engine.default_column_family();
 
     // Assert
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let v1 = tx.get(b"key1").expect("get");
     let v2 = tx.get(b"key2").expect("get");
     assert!(
@@ -313,9 +412,14 @@ fn should_not_return_unsynced_data_on_read_with_strict_durability() {
     let cf = engine.default_column_family();
 
     // Act
-    let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-    tx.put(b"durable_key".to_vec(), b"durable_value".to_vec(), None).expect("put");
-    engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"durable_key".to_vec(), b"durable_value".to_vec(), None)
+        .expect("put");
+    engine
+        .commit(tx, cntryl_midge::WriteOptions::default())
+        .unwrap();
 
     // Assert
     // With Strict durability, after put() returns Ok, the data MUST be on disk.
@@ -324,7 +428,9 @@ fn should_not_return_unsynced_data_on_read_with_strict_durability() {
     // 1. Crash simulator that kills the process mid-flush
     // 2. Verify that reads never return data that wasn't fsynced
     // 3. Verify that after restart, no data is lost
-    let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+    let tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .unwrap();
     let result = tx.get(b"durable_key").expect("get");
     assert_eq!(result, Some(Bytes::from_static(b"durable_value")));
 }

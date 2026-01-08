@@ -7,9 +7,9 @@
 //! - put/insert support optional TTL
 //! - No batch API (transactions ARE the batch)
 
+use super::WriteOptions;
 use crate::common::{MidgeError, MidgeResult};
 use crate::engine::ColumnFamilyId;
-use super::WriteOptions;
 use std::ops::Range;
 
 pub type Bytes = bytes::Bytes;
@@ -73,7 +73,10 @@ impl MidgeKvIterator {
 
 impl KvIterator for MidgeKvIterator {
     fn next(&mut self) -> MidgeResult<Option<KvPair>> {
-        Ok(self.inner.next().map(|(k, v)| (Bytes::from(k), Bytes::from(v))))
+        Ok(self
+            .inner
+            .next()
+            .map(|(k, v)| (Bytes::from(k), Bytes::from(v))))
     }
 }
 
@@ -87,18 +90,18 @@ pub trait Transaction {
     type Iter: KvIterator;
 
     // === Introspection ===
-    
+
     /// Get the transaction mode
     fn mode(&self) -> TxMode;
-    
+
     /// Get the column family this transaction is bound to
     fn column_family_id(&self) -> ColumnFamilyId;
-    
+
     /// Check if transaction is closed (committed or rolled back)
     fn is_closed(&self) -> bool;
 
     // === Reads (allowed in all modes) ===
-    
+
     /// Get a value for the given key
     ///
     /// Returns None if key doesn't exist or has been deleted.
@@ -116,38 +119,38 @@ pub trait Transaction {
     }
 
     // === Writes (only allowed in ReadWrite mode) ===
-    
+
     /// Put (upsert) a key-value pair with optional TTL
     ///
     /// Overwrites any existing value. TTL is attached at write time and is immutable.
     /// Returns TxReadOnly error if called on ReadOnly transaction.
     fn put(&mut self, key: Bytes, value: Bytes, ttl: Option<Ttl>) -> MidgeResult<()>;
-    
+
     /// Insert a key-value pair (error if key already exists) with optional TTL
     ///
     /// Returns KeyAlreadyExists if key exists.
     /// Returns TxReadOnly error if called on ReadOnly transaction.
     fn insert(&mut self, key: Bytes, value: Bytes, ttl: Option<Ttl>) -> MidgeResult<()>;
-    
+
     /// Delete a key
     ///
     /// Idempotent - no error if key doesn't exist.
     /// Returns TxReadOnly error if called on ReadOnly transaction.
     fn delete(&mut self, key: &[u8]) -> MidgeResult<()>;
-    
+
     /// Delete all keys in range [start, end)
     ///
     /// Returns TxReadOnly error if called on ReadOnly transaction.
     fn delete_range(&mut self, start: &[u8], end: &[u8]) -> MidgeResult<()>;
 
     // === Lifecycle ===
-    
+
     /// Commit the transaction with explicit write options
     ///
     /// WriteOptions MUST always be supplied - no defaults.
     /// For ReadOnly transactions, this is either a no-op or returns TxReadOnly.
     fn commit(self: Box<Self>, opts: WriteOptions) -> MidgeResult<()>;
-    
+
     /// Rollback the transaction
     ///
     /// Discards all pending writes. Safe to call on any transaction state.
@@ -161,24 +164,24 @@ pub trait Engine {
     type Tx: Transaction;
 
     // === Identification ===
-    
+
     /// Get the default column family ID
     fn default_column_family_id(&self) -> ColumnFamilyId;
 
     // === Column Family Management ===
-    
+
     /// Create a new column family
     ///
     /// Returns the ID of the newly created column family.
     fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyId>;
-    
+
     /// Drop a column family
     ///
     /// All data in the column family will be deleted.
     fn drop_column_family(&self, cf: ColumnFamilyId) -> MidgeResult<()>;
 
     // === Transaction Management ===
-    
+
     /// Begin a new transaction bound to the specified column family
     ///
     /// The transaction is permanently bound to this CF and cannot cross CF boundaries.
@@ -186,13 +189,13 @@ pub trait Engine {
     fn begin_tx(&self, cf: ColumnFamilyId, mode: TxMode) -> MidgeResult<Box<Self::Tx>>;
 
     // === Maintenance ===
-    
+
     /// Force flush of memtables to disk
     fn flush(&self) -> MidgeResult<()>;
-    
+
     /// Compact all SSTables
     fn compact_all(&self) -> MidgeResult<()>;
-    
+
     /// Shutdown the engine
     ///
     /// Waits for all background operations to complete.

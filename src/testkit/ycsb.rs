@@ -73,8 +73,7 @@ pub fn load_initial_dataset(engine: &MidgeEngine, cf: &ColumnFamily, initial_key
         let k = make_key(i);
         let v = make_value((i as usize % 251) as u8);
 
-        tx.put(k.to_vec(), v.to_vec(), None)
-            .expect("put failed");
+        tx.put(k.to_vec(), v.to_vec(), None).expect("put failed");
         count += 1;
 
         if count >= BATCH_OPS {

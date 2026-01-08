@@ -28,16 +28,16 @@
 pub mod common;
 
 // Internal modules - implementation details (pub for internal use)
-pub(crate) mod io;
-pub(crate) mod telemetry;
-pub(crate) mod storage;
-pub(crate) mod iterators;
-pub(crate) mod wal;
-pub(crate) mod sst;
-pub(crate) mod metadata;
-pub(crate) mod runtime;
 pub(crate) mod compaction;
+pub(crate) mod io;
+pub(crate) mod iterators;
+pub(crate) mod metadata;
 pub(crate) mod metrics;
+pub(crate) mod runtime;
+pub(crate) mod sst;
+pub(crate) mod storage;
+pub(crate) mod telemetry;
+pub(crate) mod wal;
 
 // Main engine (public)
 pub mod engine;
@@ -57,35 +57,34 @@ pub use engine::{open_engine, ColumnFamilyHandle, ColumnFamilyId, MidgeEngine};
 
 // Transaction API
 pub use engine::api::{
-    // Transaction types
-    IsolationLevel,
-    Transaction,
-    TransactionMode,
-    TransactionState,
-    
-    // Write options
-    DurabilityPolicy,
-    WriteOptions,
-    
-    // Core data types
-    Key,
-    Value,
-    KvPair,
-    
-    // Configuration
-    OpenOptions,
-    Goal,
-    MemoryBudget,
-    WorkloadProfile,
-    Durability,
-    
-    // Query/Scan
-    Query,
-    Direction,
-    
     // Errors
     ApiError,
     ApiResult,
+    Direction,
+
+    Durability,
+
+    // Write options
+    DurabilityPolicy,
+    Goal,
+    // Transaction types
+    IsolationLevel,
+    // Core data types
+    Key,
+    KvPair,
+
+    MemoryBudget,
+    // Configuration
+    OpenOptions,
+    // Query/Scan
+    Query,
+    Transaction,
+    TransactionMode,
+    TransactionState,
+
+    Value,
+    WorkloadProfile,
+    WriteOptions,
 };
 
 // Merge operators (stable API)
@@ -94,11 +93,11 @@ pub use engine::api::MergeOperator;
 // Legacy/Internal APIs (hidden from documentation)
 #[doc(hidden)]
 pub use engine::api::{
-    WriteBatch,   // Internal: not part of public API
-    Snapshot,     // Internal: not part of public API
     CasResult,    // Internal
-    InsertResult, // Internal
     ColumnFamily, // Internal
+    InsertResult, // Internal
+    Snapshot,     // Internal: not part of public API
+    WriteBatch,   // Internal: not part of public API
     WriteIntent,  // Internal
 };
 
@@ -126,7 +125,7 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 /// // All operations require explicit transactions
 /// let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
 /// tx.put(cf.id(), b"key".to_vec(), b"value".to_vec(), None)?;
-/// 
+///
 /// // Commit with explicit durability
 /// let opts = WriteOptions::default().with_sync(true);
 /// engine.commit(tx, opts)?;
@@ -134,42 +133,42 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 /// ```
 pub mod prelude {
     pub use crate::{
+        // API
+        ApiError,
+        ApiResult,
+        // Column families
+        ColumnFamilyHandle,
+        ColumnFamilyId,
+
+        Direction,
+
+        Durability,
+        DurabilityPolicy,
+
+        Goal,
+        IsolationLevel,
+
+        // Data types
+        Key,
+        KvPair,
+
+        MemoryBudget,
+
         // Core types
         MidgeEngine,
         MidgeError,
         MidgeResult,
-        
-        // Column families
-        ColumnFamilyHandle,
-        ColumnFamilyId,
-        
+
+        // Configuration
+        OpenOptions,
+        // Query
+        Query,
         // Transactions
         Transaction,
         TransactionMode,
-        IsolationLevel,
-        
+        Value,
+        WorkloadProfile,
         // Write options
         WriteOptions,
-        DurabilityPolicy,
-        
-        // Data types
-        Key,
-        Value,
-        KvPair,
-        
-        // Configuration
-        OpenOptions,
-        Goal,
-        WorkloadProfile,
-        Durability,
-        MemoryBudget,
-        
-        // Query
-        Query,
-        Direction,
-        
-        // API
-        ApiError,
-        ApiResult,
     };
 }

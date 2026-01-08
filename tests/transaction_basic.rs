@@ -19,24 +19,27 @@ fn should_commit_transaction_given_multiple_operations_when_committed() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut txn = engine.transaction();
-        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
-            .unwrap();
-        txn.delete(cf.id(), b"key3".to_vec()).unwrap();
-        engine.commit_transaction(txn).unwrap();
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+        txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+        txn.delete(b"key3".to_vec()).unwrap();
+        engine.commit(txn, WriteOptions::default()).unwrap();
 
         // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         assert_eq!(
-            engine.get(cf, b"key1").unwrap(),
+            read_tx.get(b"key1").unwrap(),
             Some(Bytes::from_static(b"value1"))
         );
         assert_eq!(
-            engine.get(cf, b"key2").unwrap(),
+            read_tx.get(b"key2").unwrap(),
             Some(Bytes::from_static(b"value2"))
         );
-        assert_eq!(engine.get(cf, b"key3").unwrap(), None);
+        assert_eq!(read_tx.get(b"key3").unwrap(), None);
     });
 }
 
@@ -45,10 +48,13 @@ fn should_succeed_given_empty_transaction_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
+        let cf = engine.default_column_family();
 
         // Act
-        let txn = engine.transaction();
-        let result = engine.commit_transaction(txn);
+        let txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        let result = engine.commit(txn, WriteOptions::default());
 
         // Assert
         assert!(result.is_ok());
@@ -61,14 +67,20 @@ fn should_succeed_given_read_only_transaction_when_committed() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key1", b"value1").unwrap();
+        let mut write_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        write_tx
+            .put(b"key1".to_vec(), b"value1".to_vec(), None)
+            .unwrap();
+        engine.commit(write_tx, WriteOptions::default()).unwrap();
 
         // Act
-        let mut txn = engine.transaction();
-        let _value = engine.get(cf, b"key1").unwrap();
-        txn.read(cf.id(), b"key1", Some(b"value1".to_vec()), 1)
+        let txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let result = engine.commit_transaction(txn);
+        let _value = txn.get(b"key1").unwrap();
+        let result = engine.commit(txn, WriteOptions::default());
 
         // Assert
         assert!(result.is_ok());
@@ -88,14 +100,18 @@ fn should_rollback_transaction_given_uncommitted_when_dropped() {
 
         // Act
         {
-            let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
+            txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             // txn dropped here without commit
         }
 
         // Assert - writes not visible
-        assert_eq!(engine.get(cf, b"key1").unwrap(), None);
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(read_tx.get(b"key1").unwrap(), None);
     });
 }
 
@@ -105,25 +121,34 @@ fn should_rollback_all_writes_given_multiple_operations_when_dropped() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key1", b"original").unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"original".to_vec(), None)
+            .unwrap();
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Act
         {
-            let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key1".to_vec(), b"updated".to_vec())
+            let mut txn = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
-            txn.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
+            txn.put(b"key1".to_vec(), b"updated".to_vec(), None)
                 .unwrap();
-            txn.delete(cf.id(), b"key3".to_vec()).unwrap();
+            txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+            txn.delete(b"key3".to_vec()).unwrap();
             // txn dropped without commit
         }
 
         // Assert - original value preserved, new writes not visible
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         assert_eq!(
-            engine.get(cf, b"key1").unwrap(),
+            read_tx.get(b"key1").unwrap(),
             Some(Bytes::from_static(b"original"))
         );
-        assert_eq!(engine.get(cf, b"key2").unwrap(), None);
+        assert_eq!(read_tx.get(b"key2").unwrap(), None);
     });
 }
 
@@ -136,21 +161,28 @@ fn should_release_locks_given_aborted_transaction_when_cleanup() {
 
         // Act - first txn acquires lock and aborts
         {
-            let mut txn1 = engine.transaction();
-            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+            let mut txn1 = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .unwrap();
+            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
                 .unwrap();
             // Dropped without commit - should release lock
         }
 
         // Second txn should be able to acquire the lock
-        let mut txn2 = engine.transaction();
-        txn2.put(cf.id(), b"key1".to_vec(), b"value2".to_vec())
+        let mut txn2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        engine.commit_transaction(txn2).unwrap();
+        txn2.put(b"key1".to_vec(), b"value2".to_vec(), None)
+            .unwrap();
+        engine.commit(txn2, WriteOptions::default()).unwrap();
 
         // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         assert_eq!(
-            engine.get(cf, b"key1").unwrap(),
+            read_tx.get(b"key1").unwrap(),
             Some(Bytes::from_static(b"value2"))
         );
     });
@@ -166,17 +198,27 @@ fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_acti
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key1", b"v1").unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Act - start transaction (captures snapshot)
-        let txn = engine.transaction();
+        let txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
 
         // Concurrent write happens outside transaction
-        engine.put(cf, b"key1", b"v2").unwrap();
+        let mut tx2 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx2.put(b"key1".to_vec(), b"v2".to_vec(), None).unwrap();
+        engine.commit(tx2, WriteOptions::default()).unwrap();
 
         // Assert - Midge implements Last-Write-Wins (LWW) semantics
         // Transactions see latest committed data (not true snapshot isolation)
-        let value = engine.get(cf, b"key1").unwrap();
+        let value = txn.get(b"key1").unwrap();
         assert!(
             value == Some(Bytes::from_static(b"v1")) || value == Some(Bytes::from_static(b"v2"))
         );
@@ -194,17 +236,18 @@ fn should_read_own_writes_given_transaction_when_reading() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut txn = engine.transaction();
-        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
 
-        // Read within same transaction using get_transactional
-        let value = engine.get_transactional(cf, b"key1", &txn).unwrap();
+        // Read within same transaction
+        let value = txn.get(b"key1").unwrap();
 
         // Assert - should see own uncommitted write
         assert_eq!(value, Some(Bytes::from_static(b"value1")));
 
-        engine.commit_transaction(txn).unwrap();
+        engine.commit(txn, WriteOptions::default()).unwrap();
     });
 }
 
@@ -216,8 +259,11 @@ fn should_read_own_writes_given_kv_transaction_when_getting() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut txn = engine.begin_transaction(&cf).unwrap();
-        txn.put(b"test_key", b"test_value").unwrap();
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"test_key".to_vec(), b"test_value".to_vec(), None)
+            .unwrap();
         let value = txn.get(b"test_key").unwrap();
 
         // Assert
@@ -233,9 +279,11 @@ fn should_hide_deleted_value_given_kv_transaction_when_getting() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut txn = engine.begin_transaction(&cf).unwrap();
-        txn.put(b"k", b"v").unwrap();
-        txn.delete(b"k").unwrap();
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"k".to_vec(), b"v".to_vec(), None).unwrap();
+        txn.delete(b"k".to_vec()).unwrap();
         let value = txn.get(b"k").unwrap();
 
         // Assert
@@ -251,15 +299,19 @@ fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut txn = engine.begin_transaction(&cf).unwrap();
-        txn.put(b"key_commit", b"value_commit").unwrap();
-        engine
-            .commit_transaction_boxed(txn, WriteOptions::default())
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
+        txn.put(b"key_commit".to_vec(), b"value_commit".to_vec(), None)
+            .unwrap();
+        engine.commit(txn, WriteOptions::default()).unwrap();
 
         // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         assert_eq!(
-            engine.get(cf, b"key_commit").unwrap(),
+            read_tx.get(b"key_commit").unwrap(),
             Some(Bytes::from_static(b"value_commit"))
         );
     });
@@ -271,13 +323,16 @@ fn should_fail_given_disable_wal_when_committing_boxed_transaction() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        let mut txn = engine.begin_transaction(&cf).unwrap();
-        txn.put(b"key_commit", b"value_commit").unwrap();
-        let write_opts = WriteOptions::new().disable_wal();
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"key_commit".to_vec(), b"value_commit".to_vec(), None)
+            .unwrap();
+        let write_opts = WriteOptions::no_wal();
 
         // Act
         let err = engine
-            .commit_transaction_boxed(txn, write_opts)
+            .commit(txn, write_opts)
             .expect_err("disable_wal should be rejected");
 
         // Assert
@@ -298,15 +353,18 @@ fn should_insert_value_given_nonexistent_key_when_insert_in_transaction() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut txn = engine.transaction();
-        // txn.insert(b"key1", b"value1").unwrap(); // Need insert API
-        txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        engine.commit_transaction(txn).unwrap();
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+        engine.commit(txn, WriteOptions::default()).unwrap();
 
         // Assert
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         assert_eq!(
-            engine.get(cf, b"key1").unwrap(),
+            read_tx.get(b"key1").unwrap(),
             Some(Bytes::from_static(b"value1"))
         );
     });
@@ -318,20 +376,30 @@ fn should_delete_range_given_committed_transaction_when_delete_range() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key1", b"v1").unwrap();
-        engine.put(cf, b"key2", b"v2").unwrap();
-        engine.put(cf, b"key3", b"v3").unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
+        tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
+        tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Act - delete range in transaction
-        let txn = engine.transaction();
-        engine.delete_range(cf, b"key1", b"key3").unwrap(); // Delete key1, key2 (not key3)
-        engine.commit_transaction(txn).unwrap();
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.delete_range(b"key1".to_vec(), b"key3".to_vec())
+            .unwrap(); // Delete key1, key2 (not key3)
+        engine.commit(txn, WriteOptions::default()).unwrap();
 
         // Assert
-        assert_eq!(engine.get(cf, b"key1").unwrap(), None);
-        assert_eq!(engine.get(cf, b"key2").unwrap(), None);
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(read_tx.get(b"key1").unwrap(), None);
+        assert_eq!(read_tx.get(b"key2").unwrap(), None);
         assert_eq!(
-            engine.get(cf, b"key3").unwrap(),
+            read_tx.get(b"key3").unwrap(),
             Some(Bytes::from_static(b"v3"))
         );
     });
@@ -343,20 +411,26 @@ fn should_hide_deleted_range_given_transaction_scan_when_delete_range() {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
         let cf = engine.default_column_family();
-        engine.put(cf, b"key1", b"v1").unwrap();
-        engine.put(cf, b"key2", b"v2").unwrap();
-        engine.put(cf, b"key3", b"v3").unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"key1".to_vec(), b"v1".to_vec(), None).unwrap();
+        tx.put(b"key2".to_vec(), b"v2".to_vec(), None).unwrap();
+        tx.put(b"key3".to_vec(), b"v3".to_vec(), None).unwrap();
+        engine.commit(tx, WriteOptions::default()).unwrap();
 
         // Act
-        let mut _txn = engine.transaction();
-        engine.delete_range(cf, b"key1", b"key3").unwrap();
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.delete_range(b"key1".to_vec(), b"key3".to_vec())
+            .unwrap();
 
-        // Scan within transaction (need txn.range_scan API)
-        // let results = txn.range_scan(b"key0", b"key9").unwrap();
+        // Scan within transaction
+        let results = txn.scan(b"key0", b"key9").unwrap();
 
-        // Assert
-        // Should only see key3
-        // assert_eq!(results.len(), 1);
+        // Assert - Should only see key3
+        assert_eq!(results.len(), 1);
     });
 }
 
@@ -365,18 +439,20 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(opts, mode));
-        let _cf = engine.default_column_family();
+        let cf = engine.default_column_family();
 
         // Act
-        let mut _txn = engine.transaction();
-        // txn.put(b"key1", b"value1").unwrap();
-        // txn.put(b"key2", b"value2").unwrap();
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+        txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
 
         // Scan within transaction
-        // let results = txn.range_scan(b"key0", b"key9").unwrap();
+        let results = txn.scan(b"key0", b"key9").unwrap();
 
         // Assert - should see uncommitted writes
-        // assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 2);
     });
 }
 
@@ -393,24 +469,19 @@ fn should_allow_operations_given_previous_commit_failed_when_disk_full() {
 
         // Act - first transaction fails (simulated disk full)
         {
-            let mut txn1 = engine.transaction();
-            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
-                .unwrap();
-            // Simulate commit failure
-            // let _result = engine.commit_transaction(txn1); // Would fail
+            let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            // Simulate commit failure by dropping
         }
 
         // Second transaction should work
-        let mut txn2 = engine.transaction();
-        txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
-            .unwrap();
-        engine.commit_transaction(txn2).unwrap();
+        let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        txn2.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+        engine.commit(txn2, WriteOptions::default()).unwrap();
 
         // Assert
-        assert_eq!(
-            engine.get(cf, b"key2").unwrap(),
-            Some(Bytes::from_static(b"value2"))
-        );
+        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        assert_eq!(read_tx.get(b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
     });
 }
 
@@ -425,10 +496,9 @@ fn should_persist_transaction_given_commit_when_crash_after() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
-            let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
-                .unwrap();
-            engine.commit_transaction(txn).unwrap();
+            let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            engine.commit(txn, WriteOptions::default()).unwrap();
             // Engine dropped (simulated crash)
         }
 
@@ -436,7 +506,8 @@ fn should_persist_transaction_given_commit_when_crash_after() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            let value = engine.get(cf, b"key1").unwrap();
+            let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+            let value = tx.get(b"key1").unwrap();
             assert_eq!(value, Some(Bytes::from_static(b"value1")));
         }
     });
@@ -449,9 +520,8 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
         {
             let engine = open_with_mode(opts.clone(), mode);
             let cf = engine.default_column_family();
-            let mut txn = engine.transaction();
-            txn.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
-                .unwrap();
+            let mut txn = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             // Txn dropped without commit
             // Engine dropped (simulated crash)
         }
@@ -460,7 +530,8 @@ fn should_not_persist_transaction_given_abort_when_crash_after() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            let value = engine.get(cf, b"key1").unwrap();
+            let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+            let value = tx.get(b"key1").unwrap();
             assert_eq!(value, None);
         }
     });
@@ -475,15 +546,13 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
             let cf = engine.default_column_family();
 
             // Multiple transactions
-            let mut txn1 = engine.transaction();
-            txn1.put(cf.id(), b"key1".to_vec(), b"value1".to_vec())
-                .unwrap();
-            engine.commit_transaction(txn1).unwrap();
+            let mut txn1 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            engine.commit(txn1, WriteOptions::default()).unwrap();
 
-            let mut txn2 = engine.transaction();
-            txn2.put(cf.id(), b"key2".to_vec(), b"value2".to_vec())
-                .unwrap();
-            engine.commit_transaction(txn2).unwrap();
+            let mut txn2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+            txn2.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
+            engine.commit(txn2, WriteOptions::default()).unwrap();
 
             // Engine dropped
         }
@@ -492,14 +561,9 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
         {
             let engine = open_with_mode(opts, mode);
             let cf = engine.default_column_family();
-            assert_eq!(
-                engine.get(cf, b"key1").unwrap(),
-                Some(Bytes::from_static(b"value1"))
-            );
-            assert_eq!(
-                engine.get(cf, b"key2").unwrap(),
-                Some(Bytes::from_static(b"value2"))
-            );
+            let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+            assert_eq!(tx.get(b"key1").unwrap(), Some(Bytes::from_static(b"value1")));
+            assert_eq!(tx.get(b"key2").unwrap(), Some(Bytes::from_static(b"value2")));
         }
     });
 }

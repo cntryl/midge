@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn should_create_merge_iterator_with_zero_sources() {
         // Arrange
-        
+
         // Act
         let merge = MergeIterator::new(vec![]);
 

@@ -1,4 +1,4 @@
-﻿//! Core KV Engine Integration Tests
+//! Core KV Engine Integration Tests
 //!
 //! Tests the basic put/get/delete operations end-to-end using the public
 //! MidgeEngine API. These tests are **storage-mode invariant**: every supported
@@ -25,12 +25,17 @@ fn should_get_value_given_existing_key_when_put() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
-        tx.put(b"key".to_vec(), b"value".to_vec(), None).expect("put");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        tx.put(b"key".to_vec(), b"value".to_vec(), None)
+            .expect("put");
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Assert
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin_tx");
         let got = tx.get(b"key").expect("get");
         assert_eq!(
             got,
@@ -49,7 +54,9 @@ fn should_return_none_given_nonexistent_key_when_get() {
         let cf = engine.default_column_family();
 
         // Act
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin_tx");
         let got = tx.get(b"nonexistent").expect("get");
 
         // Assert
@@ -63,17 +70,25 @@ fn should_overwrite_value_given_existing_key_when_put() {
         // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
-        tx.put(b"key".to_vec(), b"value1".to_vec(), None).expect("put initial");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        tx.put(b"key".to_vec(), b"value1".to_vec(), None)
+            .expect("put initial");
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Act
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
-        tx.put(b"key".to_vec(), b"value2".to_vec(), None).expect("put overwrite");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        tx.put(b"key".to_vec(), b"value2".to_vec(), None)
+            .expect("put overwrite");
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Assert
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin_tx");
         let got = tx.get(b"key").expect("get");
         assert_eq!(
             got,
@@ -92,12 +107,17 @@ fn should_handle_empty_value_when_put() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
-        tx.put(b"key".to_vec(), b"".to_vec(), None).expect("put empty");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        tx.put(b"key".to_vec(), b"".to_vec(), None)
+            .expect("put empty");
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Assert
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin_tx");
         let got = tx.get(b"key").expect("get empty");
         assert_eq!(got, Some(Bytes::new()), "failed in mode: {}", mode);
     });
@@ -112,12 +132,17 @@ fn should_handle_binary_data_when_put() {
         let data = vec![0, 1, 2, 3, 255, 254, 253];
 
         // Act
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
-        tx.put(b"binary_key".to_vec(), data.clone(), None).expect("put binary");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        tx.put(b"binary_key".to_vec(), data.clone(), None)
+            .expect("put binary");
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Assert
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin_tx");
         let got = tx.get(b"binary_key").expect("get binary");
         assert_eq!(
             got,
@@ -135,17 +160,24 @@ fn should_return_none_given_deleted_key_when_get() {
         let engine = open_with_mode(opts, mode);
         let cf = engine.default_column_family();
 
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
-        tx.put(b"key".to_vec(), b"value".to_vec(), None).expect("put");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        tx.put(b"key".to_vec(), b"value".to_vec(), None)
+            .expect("put");
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Act
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
         tx.delete(b"key".to_vec()).expect("delete");
         engine.commit(tx, WriteOptions::buffered()).expect("commit");
 
         // Assert
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin_tx");
         let got = tx.get(b"key").expect("get");
         assert_eq!(got, None, "expected None after delete in mode: {}", mode);
     });
@@ -159,7 +191,9 @@ fn should_succeed_given_nonexistent_key_when_delete() {
         let cf = engine.default_column_family();
 
         // Act
-        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
         tx.delete(b"nonexistent".to_vec()).expect("delete");
         let result = engine.commit(tx, WriteOptions::buffered());
 
@@ -180,8 +214,11 @@ fn should_handle_many_operations_when_sequential() {
         for i in 0..COUNT {
             let key = format!("key_{i}");
             let val = format!("value_{i}");
-            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
-            tx.put(key.as_bytes().to_vec(), val.as_bytes().to_vec(), None).expect("put");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin_tx");
+            tx.put(key.as_bytes().to_vec(), val.as_bytes().to_vec(), None)
+                .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
         }
 
@@ -189,7 +226,9 @@ fn should_handle_many_operations_when_sequential() {
         for i in 0..COUNT {
             let key = format!("key_{i}");
             let expected = format!("value_{i}");
-            let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+            let tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .expect("begin_tx");
             let got = tx.get(key.as_bytes()).expect("get");
 
             assert_eq!(
@@ -214,13 +253,18 @@ fn should_retrieve_written_data_across_storage_modes() {
         // Act: Perform various operations
         for i in 0..50 {
             let key = format!("artifact_test_{i}");
-            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite).expect("begin_tx");
-            tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None).expect("put");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin_tx");
+            tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)
+                .expect("put");
             engine.commit(tx, WriteOptions::buffered()).expect("commit");
         }
 
         // Assert: All data is readable (operations succeeded)
-        let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).expect("begin_tx");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin_tx");
         let got = tx.get(b"artifact_test_0").expect("get");
         assert!(
             got.is_some(),

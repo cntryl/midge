@@ -16,27 +16,38 @@ fn should_verify_delete_range_works_despite_range_being_stubbed() {
         eprintln!("Testing delete_range in mode: {}", mode);
 
         // Set up test data
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
         for i in 1..=10 {
             let key = format!("key{:02}", i);
             let val = format!("val{:02}", i);
             tx.put(key.into_bytes(), val.into_bytes(), None).unwrap();
         }
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::default())
+            .unwrap();
 
         eprintln!("  Inserted 10 keys: key01..key10");
 
         // Test 1: Delete a range [key02, key08) (should delete key02-key07)
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
-        tx.delete_range(b"key02".to_vec(), b"key08".to_vec()).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        tx.delete_range(b"key02".to_vec(), b"key08".to_vec())
+            .unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::default())
+            .unwrap();
         eprintln!("  Called delete_range(key02, key08)");
 
         // Check what was actually deleted
         let mut deleted_count = 0;
         let mut retained_count = 0;
 
-        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         for i in 1..=10 {
             let key = format!("key{:02}", i);
             let exists = tx.get(key.as_bytes()).unwrap().is_some();
@@ -82,16 +93,22 @@ fn should_test_range_method_directly_if_available() {
         eprintln!("Testing range() method in mode: {}", mode);
 
         // Insert test data
-        let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite).unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
         tx.put(b"a".to_vec(), b"val_a".to_vec(), None).unwrap();
         tx.put(b"b".to_vec(), b"val_b".to_vec(), None).unwrap();
         tx.put(b"c".to_vec(), b"val_c".to_vec(), None).unwrap();
         tx.put(b"d".to_vec(), b"val_d".to_vec(), None).unwrap();
-        engine.commit(tx, cntryl_midge::WriteOptions::default()).unwrap();
+        engine
+            .commit(tx, cntryl_midge::WriteOptions::default())
+            .unwrap();
 
         // Try to call range() - if it exists and is not stubbed, this will return keys
         let query = cntryl_midge::Query::new();
-        let tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly).unwrap();
+        let tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
         let results = tx.scan_range(&query).unwrap();
 
         eprintln!("  scan() returned {} results", results.len());

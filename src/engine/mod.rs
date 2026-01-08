@@ -475,22 +475,6 @@ impl MidgeEngine {
         }
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // ========================================================================
     // Merge Operations
     // ========================================================================
@@ -525,35 +509,9 @@ impl MidgeEngine {
         }
     }
 
-
-
-
-
     // ========================================================================
     // Range Operations
     // ========================================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     /// Sync all pending writes to disk
     pub fn sync(&self) -> MidgeResult<()> {
@@ -592,14 +550,6 @@ impl MidgeEngine {
             )),
         }
     }
-
-
-
-
-
-
-
-
 
     /// Begin a new transaction
     ///
@@ -653,11 +603,7 @@ impl MidgeEngine {
     /// # Arguments
     /// * `txn` - Transaction to commit
     /// * `opts` - Write options specifying durability guarantees
-    pub fn commit(
-        &self,
-        mut txn: api::Transaction,
-        opts: api::WriteOptions,
-    ) -> MidgeResult<()> {
+    pub fn commit(&self, mut txn: api::Transaction, opts: api::WriteOptions) -> MidgeResult<()> {
         // ReadOnly transactions are a no-op for commit
         if txn.is_read_only() {
             let txn_id = txn.id();
@@ -679,7 +625,7 @@ impl MidgeEngine {
             // Read-write transaction with no writes - mark committed with current ID
             let txn_id = txn.id();
             txn.mark_committed(txn_id)?;
-            
+
             // Apply sync if requested
             if opts.is_sync() {
                 self.sync()?;
@@ -695,7 +641,11 @@ impl MidgeEngine {
         for intent in write_intents {
             match &intent {
                 api::WriteIntent::Put {
-                    cf_id, key, value, ttl_seconds, ..
+                    cf_id,
+                    key,
+                    value,
+                    ttl_seconds,
+                    ..
                 } => {
                     let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                         request_id: next_request_id(),
@@ -724,7 +674,11 @@ impl MidgeEngine {
                     }
                 }
                 api::WriteIntent::Insert {
-                    cf_id, key, value, ttl_seconds, ..
+                    cf_id,
+                    key,
+                    value,
+                    ttl_seconds,
+                    ..
                 } => {
                     let response = self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
                         request_id: next_request_id(),
@@ -822,12 +776,12 @@ impl MidgeEngine {
 
         let txn_id = txn.id();
         txn.mark_committed(txn_id)?;
-        
+
         // Apply sync if requested
         if opts.is_sync() {
             self.sync()?;
         }
-        
+
         Ok(())
     }
 
@@ -837,7 +791,7 @@ impl MidgeEngine {
     }
 
     // === Internal Transaction Helpers ===
-    
+
     /// Read a key at a specific sequence (for transaction use)
     pub(crate) fn read_at_sequence(
         &self,
@@ -880,19 +834,16 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::RangeScanResults { results, .. } => {
-                Ok(results
-                    .into_iter()
-                    .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
-                    .collect())
-            }
+            RuntimeResponse::RangeScanResults { results, .. } => Ok(results
+                .into_iter()
+                .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
+                .collect()),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
             _ => Err(MidgeError::Internal(
                 "Unexpected response to scan_at_sequence".to_string(),
             )),
         }
     }
-
 
     pub fn tx_scan(
         &self,
@@ -902,7 +853,7 @@ impl MidgeEngine {
     ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
         // TODO: Get cf_id from transaction when we add CF binding
         let cf_id = ColumnFamilyId::DEFAULT;
-        
+
         let response = self.runtime_handle.send_and_wait(RuntimeMsg::RangeScan {
             request_id: next_request_id(),
             cf_id: cf_id.as_u32(),
@@ -913,12 +864,10 @@ impl MidgeEngine {
         })?;
 
         match response {
-            RuntimeResponse::RangeScanResults { results, .. } => {
-                Ok(results
-                    .into_iter()
-                    .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
-                    .collect())
-            }
+            RuntimeResponse::RangeScanResults { results, .. } => Ok(results
+                .into_iter()
+                .map(|(k, v)| (bytes::Bytes::from(k), bytes::Bytes::from(v)))
+                .collect()),
             RuntimeResponse::Error { message, .. } => Err(MidgeError::Internal(message)),
             _ => Err(MidgeError::Internal(
                 "Unexpected response to transactional scan".to_string(),
@@ -1109,88 +1058,8 @@ impl MidgeEngine {
         }
     }
 
-
-
     // === Internal helpers ===
-
-    // === Compatibility API for Tests ===
-    // These methods provide backwards compatibility for tests during migration
-
-    /// Compatibility: Simple put operation (wraps in transaction)
-    #[doc(hidden)]
-    pub fn put(&self, cf: &ColumnFamilyHandle, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        let mut tx = self.begin_tx(cf.id(), api::TransactionMode::ReadWrite)?;
-        tx.put(key.to_vec(), value.to_vec(), None)?;
-        self.commit(tx, api::WriteOptions::buffered())
-    }
-
-    /// Compatibility: Simple get operation (wraps in transaction)
-    #[doc(hidden)]
-    pub fn get(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
-        let tx = self.begin_tx(cf.id(), api::TransactionMode::ReadOnly)?;
-        tx.get(key)
-    }
-
-    /// Compatibility: Simple delete operation (wraps in transaction)
-    #[doc(hidden)]
-    pub fn delete(&self, cf: &ColumnFamilyHandle, key: &[u8]) -> MidgeResult<()> {
-        let mut tx = self.begin_tx(cf.id(), api::TransactionMode::ReadWrite)?;
-        tx.delete(key.to_vec())?;
-        self.commit(tx, api::WriteOptions::buffered())
-    }
-
-    /// Compatibility: Put with TTL (wraps in transaction)
-    #[doc(hidden)]
-    pub fn put_with_ttl(
-        &self,
-        cf: &ColumnFamilyHandle,
-        key: &[u8],
-        value: &[u8],
-        ttl_seconds: u64,
-    ) -> MidgeResult<()> {
-        let mut tx = self.begin_tx(cf.id(), api::TransactionMode::ReadWrite)?;
-        tx.put(key.to_vec(), value.to_vec(), Some(ttl_seconds))?;
-        self.commit(tx, api::WriteOptions::buffered())
-    }
-
-    /// Compatibility: Delete range operation (wraps in transaction)
-    #[doc(hidden)]
-    pub fn delete_range(&self, cf: &ColumnFamilyHandle, start: &[u8], end: &[u8]) -> MidgeResult<()> {
-        let mut tx = self.begin_tx(cf.id(), api::TransactionMode::ReadWrite)?;
-        tx.delete_range(start.to_vec(), end.to_vec())?;
-        self.commit(tx, api::WriteOptions::buffered())
-    }
-
-    /// Compatibility: Range scan operation (wraps in transaction)
-    #[doc(hidden)]
-    pub fn range(
-        &self,
-        cf: &ColumnFamilyHandle,
-        start: &[u8],
-        end: &[u8],
-    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        let tx = self.begin_tx(cf.id(), api::TransactionMode::ReadOnly)?;
-        self.tx_scan(&tx, start, end)
-    }
-
-    /// Compatibility: Scan with query (wraps in transaction)
-    #[doc(hidden)]
-    pub fn scan(
-        &self,
-        cf: &ColumnFamilyHandle,
-        query: &api::Query,
-    ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-        let tx = self.begin_tx(cf.id(), api::TransactionMode::ReadOnly)?;
-        self.tx_scan_range(&tx, query)
-    }
-
-    /// Compatibility: Create a read-only snapshot transaction
-    #[doc(hidden)]
-    pub fn snapshot(&self) -> MidgeResult<api::Transaction> {
-        self.begin_tx(ColumnFamilyId::DEFAULT, api::TransactionMode::ReadOnly)
-    }
 }
-
 
 #[cfg(test)]
 mod tests {
