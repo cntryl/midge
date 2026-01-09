@@ -706,18 +706,19 @@ impl Runtime {
 
     /// Start the runtime event loop in a background thread.
     ///
-    /// The returned handle can be used from any thread to submit work.
-    pub fn start(self, state: RuntimeState) -> MidgeResult<RuntimeHandle> {
+    /// Returns the Runtime (which owns the thread) and a handle for submitting work.
+    pub fn start(self, state: RuntimeState) -> MidgeResult<(Self, RuntimeHandle)> {
         self.start_with_config(state, RuntimeConfig::default())
     }
 
     /// Start the runtime event loop with explicit configuration.
+    ///
+    /// Returns the Runtime (which owns the thread) and a handle for submitting work.
     pub fn start_with_config(
         mut self,
         state: RuntimeState,
         config: RuntimeConfig,
-    ) -> MidgeResult<RuntimeHandle> {
-        let msg_rx = self.msg_rx;
+    ) -> MidgeResult<(Self, RuntimeHandle)> {
         let trace_enabled = self.trace_enabled;
         let router = self.router.clone();
 
@@ -730,6 +731,9 @@ impl Runtime {
             router: router.clone(),
         };
 
+        let msg_tx_for_loop = self.msg_tx.clone();
+        let msg_rx = std::mem::replace(&mut self.msg_rx, channel::unbounded().1);
+
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
             .spawn(move || {
@@ -738,7 +742,7 @@ impl Runtime {
                     trace_enabled,
                     router,
                     config,
-                    Some(self.msg_tx.clone()),
+                    Some(msg_tx_for_loop),
                 ) {
                     Ok(mut event_loop) => {
                         // Signal successful initialization
@@ -759,7 +763,7 @@ impl Runtime {
 
         // Wait for event loop initialization to complete
         match init_rx.recv() {
-            Ok(Ok(())) => Ok(handle),
+            Ok(Ok(())) => Ok((self, handle)),
             Ok(Err(e)) => Err(MidgeError::Internal(e)),
             Err(_) => Err(MidgeError::Internal(
                 "Runtime initialization channel closed unexpectedly".to_string(),
@@ -770,11 +774,23 @@ impl Runtime {
     /// Shutdown the runtime and wait for completion.
     pub fn shutdown(mut self) {
         if let Some(handle) = self.event_loop_handle.take() {
-            // Event loop will exit when channel is dropped.
-            drop(self.msg_tx);
-            drop(self.msg_rx);
+            // Event loop will exit when channels are closed
+            // Channels will be dropped when self is dropped after this function
             if handle.join().is_err() {
                 tracing::warn!("Runtime thread panicked during shutdown");
+            }
+        }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Ensure the event loop thread is properly terminated
+        if let Some(handle) = self.event_loop_handle.take() {
+            // Signal shutdown by dropping the channels, which will cause the event loop to exit
+            // The channels will be dropped automatically when Runtime is dropped
+            if handle.join().is_err() {
+                tracing::warn!("Runtime thread panicked during drop");
             }
         }
     }

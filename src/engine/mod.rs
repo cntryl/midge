@@ -127,6 +127,8 @@ pub struct IngestModeSnapshot {
 /// This is a thin façade over the runtime. All state and background work
 /// is managed by the runtime actors.
 pub struct MidgeEngine {
+    /// Runtime (owns the event loop thread)
+    _runtime: Option<Runtime>,
     /// Handle to submit work to the runtime
     runtime_handle: RuntimeHandle,
     /// Database path
@@ -145,6 +147,16 @@ pub struct MidgeEngine {
     merge_operators: MergeOperatorRegistry,
     /// Column families registry (CF ID -> Handle)
     column_families: ColumnFamilyRegistry,
+}
+
+impl Drop for MidgeEngine {
+    fn drop(&mut self) {
+        // Gracefully shutdown the runtime when engine is dropped
+        // Send shutdown message first
+        let _ = self.runtime_handle.shutdown();
+        // Then drop the runtime which will wait for the thread to finish
+        self._runtime.take();
+    }
 }
 
 impl OpenParam for PathBuf {
@@ -191,8 +203,8 @@ impl MidgeEngine {
         state.replay_intent_log()?;
 
         // Start runtime
-        let (runtime, _) = Runtime::new()?;
-        let runtime_handle = runtime.start(state)?;
+        let (runtime_inst, _) = Runtime::new()?;
+        let (runtime, runtime_handle) = runtime_inst.start(state)?;
 
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
         let column_families = dashmap::DashMap::new();
@@ -211,6 +223,7 @@ impl MidgeEngine {
         }
 
         Ok(Self {
+            _runtime: Some(runtime),
             runtime_handle,
             db_path,
             default_cf,
@@ -310,8 +323,8 @@ impl MidgeEngine {
 
         // Start runtime
         let start = std::time::Instant::now();
-        let (runtime, _) = Runtime::new()?;
-        let runtime_handle = runtime.start_with_config(state, runtime_config)?;
+        let (runtime_inst, _) = Runtime::new()?;
+        let (runtime, runtime_handle) = runtime_inst.start_with_config(state, runtime_config)?;
 
         let default_cf = ColumnFamilyHandle::new(ColumnFamilyId::DEFAULT, "default".to_string());
         let column_families = dashmap::DashMap::new();
@@ -332,6 +345,7 @@ impl MidgeEngine {
         }
 
         Ok(Self {
+            _runtime: Some(runtime),
             runtime_handle,
             db_path,
             default_cf,

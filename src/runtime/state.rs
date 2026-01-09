@@ -361,6 +361,8 @@ impl RuntimeState {
             fs: fs.clone(),
             wal: WalState {
                 current_segment_id: recovered_next_segment_id,
+                local_durable_seq: recovered_sequence,
+                cloud_durable_seq: recovered_sequence,
                 ..WalState::default()
             },
             compaction: CompactionState::default(),

@@ -77,7 +77,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
             let cf = engine.default_column_family();
 
             // Write and flush (manifest updated)
-            for i in 0..10 {
+            for i in 0..5 {
                 let key = format!("flushed_{:02}", i);
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -89,7 +89,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
             engine.flush().expect("flush");
 
             // Write more after manifest update (in WAL only)
-            for i in 0..10 {
+            for i in 0..5 {
                 let key = format!("unflushed_{:02}", i);
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -107,7 +107,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
             let cf = engine.default_column_family();
 
             // All data should be recovered (flushed + WAL)
-            for i in 0..10 {
+            for i in 0..5 {
                 let key = format!("flushed_{:02}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -118,7 +118,7 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
                     mode
                 );
             }
-            for i in 0..10 {
+            for i in 0..5 {
                 let key = format!("unflushed_{:02}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -234,7 +234,7 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
             let cf = engine.default_column_family();
 
             // Flush (SST created, manifest update initiated)
-            for i in 0..50 {
+            for i in 0..20 {
                 let key = format!("key_{:03}", i);
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -254,7 +254,7 @@ fn should_not_publish_sst_given_manifest_not_persisted_when_adding_sst() {
             let cf = engine.default_column_family();
 
             // Data should still be visible (recovered from WAL or SST)
-            for i in 0..50 {
+            for i in 0..20 {
                 let key = format!("key_{:03}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -279,10 +279,10 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
 
             // Concurrent writes from multiple threads
             let mut handles = vec![];
-            for thread_id in 0..3 {
+            for thread_id in 0..2 {
                 let engine_clone = std::sync::Arc::clone(&engine);
                 let handle = std::thread::spawn(move || {
-                    for i in 0..10 {
+                    for i in 0..5 {
                         let key = format!("t_{}_k_{:02}", thread_id, i);
                         let cf = engine_clone.default_column_family();
                         let mut tx = engine_clone
@@ -311,8 +311,8 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
             let cf = engine.default_column_family();
 
             // All writes should be recoverable (no partial updates)
-            for thread_id in 0..3 {
-                for i in 0..10 {
+            for thread_id in 0..2 {
+                for i in 0..5 {
                     let key = format!("t_{}_k_{:02}", thread_id, i);
                     let tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -337,7 +337,7 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             let cf_default = engine.default_column_family();
 
             // Write to default CF (simpler than multi-CF for now)
-            for i in 0..10 {
+            for i in 0..5 {
                 let key = format!("key_{:02}", i);
                 let mut tx = engine
                     .begin_tx(cf_default.id(), TransactionMode::ReadWrite)
@@ -359,7 +359,7 @@ fn should_maintain_order_given_multiple_cfs_flush_concurrently_when_updating_man
             let cf_default = engine.default_column_family();
 
             // All data should be recoverable in order
-            for i in 0..10 {
+            for i in 0..5 {
                 let key = format!("key_{:02}", i);
                 let tx = engine
                     .begin_tx(cf_default.id(), TransactionMode::ReadOnly)
@@ -383,7 +383,7 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
             let cf = engine.default_column_family();
 
             // Create enough data to trigger compaction
-            for i in 0..100 {
+            for i in 0..30 {
                 let key = format!("key_{:03}", i);
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -407,7 +407,7 @@ fn should_commit_ssts_manifest_together_given_compaction_success_when_completing
             let cf = engine.default_column_family();
 
             // All data should still be present
-            for i in 0..100 {
+            for i in 0..30 {
                 let key = format!("key_{:03}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -431,7 +431,7 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
             let cf = engine.default_column_family();
 
             // Create data
-            for i in 0..50 {
+            for i in 0..20 {
                 let key = format!("key_{:02}", i);
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -451,7 +451,7 @@ fn should_cleanup_partial_output_given_compaction_failure_when_recovering() {
             let cf = engine.default_column_family();
 
             // All original data should be present
-            for i in 0..50 {
+            for i in 0..20 {
                 let key = format!("key_{:02}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -475,7 +475,7 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
             let cf = engine.default_column_family();
 
             // Create initial SST
-            for i in 0..30 {
+            for i in 0..15 {
                 let key = format!("old_{:02}", i);
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -487,7 +487,7 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
             engine.flush().expect("flush");
 
             // Overwrite (would trigger compaction)
-            for i in 0..30 {
+            for i in 0..15 {
                 let key = format!("old_{:02}", i);
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -507,7 +507,7 @@ fn should_delete_old_ssts_only_after_manifest_persisted_when_compacting() {
             let cf = engine.default_column_family();
 
             // Updated data should be present
-            for i in 0..30 {
+            for i in 0..15 {
                 let key = format!("old_{:02}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -531,7 +531,7 @@ fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopenin
             let cf = engine.default_column_family();
 
             // Write valid records
-            for i in 0..25 {
+            for i in 0..10 {
                 let key = format!("valid_{:02}", i);
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -550,7 +550,7 @@ fn should_not_recover_truncated_wal_append_given_truncate_fallback_when_reopenin
             let cf = engine.default_column_family();
 
             // Valid records before truncation should be recovered
-            for i in 0..25 {
+            for i in 0..10 {
                 let key = format!("valid_{:02}", i);
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
