@@ -650,10 +650,117 @@ impl MidgeEngine {
         // Collect write intents to avoid borrow issues
         let write_intents: Vec<_> = txn.iter_writes().cloned().collect();
 
+        // Pre-process merge operations: group merge operands by (cf_id, key) in order
+        // We need to apply all merge operands together with the merge operator
+        use std::collections::HashMap;
+        let mut merge_operands: HashMap<(ColumnFamilyId, Vec<u8>), Vec<Vec<u8>>> = HashMap::new();
+        let mut key_base_values: HashMap<(ColumnFamilyId, Vec<u8>), Option<Vec<u8>>> =
+            HashMap::new();
+        let mut last_non_merge_values: HashMap<(ColumnFamilyId, Vec<u8>), Option<Vec<u8>>> =
+            HashMap::new();
+
+        // First pass: collect merge operands and track prior puts/deletes for those keys
+        for intent in &write_intents {
+            match intent {
+                api::WriteIntent::Merge {
+                    cf_id,
+                    key,
+                    operand,
+                    ..
+                } => {
+                    let key_id = (*cf_id, key.clone());
+                    merge_operands
+                        .entry(key_id.clone())
+                        .or_default()
+                        .push(operand.clone());
+
+                    if !key_base_values.contains_key(&key_id) {
+                        if let Some(base) = last_non_merge_values.get(&key_id) {
+                            key_base_values.insert(key_id.clone(), base.clone());
+                        }
+                    }
+                }
+                api::WriteIntent::Put {
+                    cf_id, key, value, ..
+                } => {
+                    last_non_merge_values.insert((*cf_id, key.clone()), Some(value.clone()));
+                }
+                api::WriteIntent::Delete { cf_id, key, .. } => {
+                    last_non_merge_values.insert((*cf_id, key.clone()), None);
+                }
+                _ => {}
+            }
+        }
+
         // CRITICAL: Use send_and_wait for durability.
         // TODO: Add RuntimeMsg::CommitTransaction for true atomic commit.
         for intent in write_intents {
             match &intent {
+                api::WriteIntent::Merge {
+                    cf_id,
+                    key,
+                    operand: _,
+                    ..
+                } => {
+                    // Only process on the first merge operand for this key
+                    // (subsequent merges for same key are handled together)
+                    let key_id = (*cf_id, key.clone());
+                    if let Some(operands) = merge_operands.remove(&key_id) {
+                        // Get the merge operator for this CF
+                        let merge_op = self.merge_operators.get(&cf_id.as_u32()).ok_or_else(|| {
+                            MidgeError::InvalidArgument(format!(
+                                "No merge operator registered for column family {}",
+                                cf_id.as_u32()
+                            ))
+                        })?;
+
+                        // Get the base value: first check if a put/delete in this tx set it,
+                        // otherwise read from the engine
+                        let base_value = if let Some(base) = key_base_values.get(&key_id) {
+                            base.clone()
+                        } else {
+                            self.read_at_sequence(*cf_id, key, u64::MAX)?
+                                .map(|b| b.to_vec())
+                        };
+
+                        // Apply the merge operator
+                        let merged_value = merge_op.merge(
+                            key,
+                            base_value.as_deref(),
+                            &operands,
+                        )?;
+
+                        // Write the merged value as a put
+                        if let Some(value) = merged_value {
+                            let response =
+                                self.runtime_handle.send_and_wait(RuntimeMsg::WalAppend {
+                                    request_id: next_request_id(),
+                                    cf_id: cf_id.as_u32(),
+                                    key: key.clone(),
+                                    value: Some(value),
+                                    ttl_seconds: None,
+                                    insert_only: false,
+                                })?;
+                            match response {
+                                RuntimeResponse::WalAppended { sequence, .. } => {
+                                    self.sequence
+                                        .store(sequence, std::sync::atomic::Ordering::SeqCst);
+                                }
+                                RuntimeResponse::Error { message, .. } => {
+                                    txn.mark_failed()?;
+                                    return Err(MidgeError::Internal(message));
+                                }
+                                _ => {
+                                    txn.mark_failed()?;
+                                    return Err(MidgeError::Internal(
+                                        "Unexpected response to transaction merge".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    // else: already processed this key's merges, skip
+                }
                 api::WriteIntent::Put {
                     cf_id,
                     key,
