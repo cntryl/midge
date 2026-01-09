@@ -119,12 +119,12 @@ pub use testkit::{MidgeOptions, MockStorage, StorageMode};
 /// use cntryl_midge::prelude::*;
 ///
 /// // Open engine
-/// let engine = MidgeEngine::open(OpenOptions::new().path("./db").build())?;
+/// let engine = MidgeEngine::open("./db")?;
 /// let cf = engine.default_column_family();
 ///
 /// // All operations require explicit transactions
 /// let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-/// tx.put(cf.id(), b"key".to_vec(), b"value".to_vec(), None)?;
+/// tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
 ///
 /// // Commit with explicit durability
 /// let opts = WriteOptions::default().with_sync(true);
